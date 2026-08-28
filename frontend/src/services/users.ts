@@ -1,6 +1,7 @@
 import api from "@/lib/api";
 import { unwrapList } from "@/services/_pagination";
 import type { OpaqueEnrollment } from "@/services/opaque";
+import type { ServiceAccount } from "@/services/serviceAccounts";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -228,4 +229,44 @@ export const groupService = {
     api
       .delete(`/api/v1/groups/${groupId}/members/${userId}`)
       .then(() => undefined),
+
+  // ─── Service-account membership ───────────────────────────────────────────
+  //
+  // A group is a collection of principals whose roles its members inherit, and
+  // a machine identity needs that inheritance for the same reason a person
+  // does: so a fleet of devices is granted and revoked as one thing rather than
+  // one grant per device.
+
+  listServiceAccountMembers: (groupId: string): Promise<ServiceAccount[]> =>
+    api
+      .get<ServiceAccount[] | { items: ServiceAccount[] }>(
+        `/api/v1/groups/${groupId}/service-accounts`
+      )
+      .then((r) => unwrapList(r.data)),
+
+  addServiceAccountMember: (
+    groupId: string,
+    serviceAccountId: string
+  ): Promise<void> =>
+    api
+      .post(`/api/v1/groups/${groupId}/service-accounts`, {
+        service_account_id: serviceAccountId,
+      })
+      .then(() => undefined),
+
+  removeServiceAccountMember: (
+    groupId: string,
+    serviceAccountId: string
+  ): Promise<void> =>
+    api
+      .delete(`/api/v1/groups/${groupId}/service-accounts/${serviceAccountId}`)
+      .then(() => undefined),
+
+  /** The groups a service account belongs to. */
+  listServiceAccountGroups: (serviceAccountId: string): Promise<Group[]> =>
+    api
+      .get<Group[] | { items: Group[] }>(
+        `/api/v1/service-accounts/${serviceAccountId}/groups`
+      )
+      .then((r) => unwrapList(r.data)),
 };

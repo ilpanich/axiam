@@ -44,10 +44,16 @@ const deployRole = { id: "r1", name: "Deploy", description: "Deploy access", is_
  */
 const groupRoles = [{ role: deployRole, resource_id: null }];
 
+const serviceAccounts = [
+  { id: "sa1", name: "ingest-worker", client_id: "sa_abc", status: "Active" },
+];
+
 const URLS = {
   group: "/api/v1/groups/g1",
   members: "/api/v1/groups/g1/members",
   roles: "/api/v1/groups/g1/roles",
+  serviceAccounts: "/api/v1/groups/g1/service-accounts",
+  allServiceAccounts: "/api/v1/service-accounts",
 };
 
 function routeGet(map: Record<string, unknown>) {
@@ -60,7 +66,14 @@ function routeGet(map: Record<string, unknown>) {
 }
 
 function defaults(overrides: Record<string, unknown> = {}) {
-  return { [URLS.group]: group, [URLS.members]: members, [URLS.roles]: groupRoles, ...overrides };
+  return {
+    [URLS.group]: group,
+    [URLS.members]: members,
+    [URLS.roles]: groupRoles,
+    [URLS.serviceAccounts]: serviceAccounts,
+    [URLS.allServiceAccounts]: serviceAccounts,
+    ...overrides,
+  };
 }
 
 function renderPage() {
@@ -231,11 +244,105 @@ describe("GroupDetailPage", () => {
   });
 
   it("shows empty member/role states when nothing is present", async () => {
-    routeGet(defaults({ [URLS.members]: [], [URLS.roles]: [] }));
+    routeGet(
+      defaults({ [URLS.members]: [], [URLS.roles]: [], [URLS.serviceAccounts]: [] })
+    );
     renderPage();
     expect(await screen.findByText("No members in this group yet.")).toBeInTheDocument();
     expect(
+      await screen.findByText(/No service accounts in this group/)
+    ).toBeInTheDocument();
+    expect(
       await screen.findByText("No roles assigned to this group.")
     ).toBeInTheDocument();
+  });
+
+  it("lists the group's service-account members separately from its people", async () => {
+    // Separately, not merged: the two return different shapes, and a page that
+    // says "members" has to say which rows are humans.
+    routeGet(defaults());
+    renderPage();
+    expect(await screen.findByText("ingest-worker")).toBeInTheDocument();
+    expect(screen.getByText("sa_abc")).toBeInTheDocument();
+  });
+
+  it("adds a service account to the group", async () => {
+    // Which is the point of putting machines in a group at all: the fleet
+    // inherits every role assigned to the group, granted and revoked as one
+    // thing rather than one edge per device.
+    routeGet(defaults({ [URLS.serviceAccounts]: [] }));
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Add Service Account/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Service account"),
+      "sa1"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(URLS.serviceAccounts, {
+        service_account_id: "sa1",
+      })
+    );
+  });
+
+  it("refuses to add without a service account selected", async () => {
+    routeGet(defaults({ [URLS.serviceAccounts]: [] }));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Add Service Account/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    expect(
+      await screen.findByText("Please select a service account.")
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the server's refusal when it is already a member", async () => {
+    // A 409 rather than a failure, and worth saying which.
+    routeGet(defaults({ [URLS.serviceAccounts]: [] }));
+    apiMock.post.mockRejectedValue(new Error("already a member"));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Add Service Account/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Service account"),
+      "sa1"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    expect(await screen.findByText("already a member")).toBeInTheDocument();
+  });
+
+  it("removes a service account from the group", async () => {
+    routeGet(defaults());
+    apiMock.delete.mockResolvedValue(res(undefined));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Remove service account ingest-worker from group",
+      })
+    );
+    const confirm = await screen.findByRole("dialog");
+    await userEvent.click(within(confirm).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() =>
+      expect(apiMock.delete).toHaveBeenCalledWith(
+        "/api/v1/groups/g1/service-accounts/sa1"
+      )
+    );
   });
 });

@@ -1,6 +1,5 @@
 import api from "@/lib/api";
 import { fetchAllPages } from "@/services/_pagination";
-import { orgService } from "@/services/organizations";
 
 // ─── Backend enums (PascalCase — serde default, no rename) ──────────────────────
 
@@ -125,22 +124,28 @@ export const certificateService = {
       .then((r) => r.data),
 
   /**
-   * List the Active CA certificates for the caller's organization.
+   * List the Active CA certificates a tenant may issue under.
    *
-   * The CA endpoint is org-scoped (`GET /api/v1/organizations/{org_id}/
-   * ca-certificates`) and the backend rejects any org other than the
-   * caller's own. The auth store only carries the org *slug*, so we resolve
-   * the org UUID from the organizations list (the caller can only see their
-   * own org) and then fetch its CAs. Only `Active` CAs can sign new certs.
+   * These are the **organization's** CAs, inherited by every tenant beneath it:
+   * a CA is an organization-scoped asset (`ca_certificate.organization_id`) and
+   * every tenant in that organization issues under it, directly or through its
+   * own signing CA — that inheritance is what makes one organization CA a usable
+   * trust anchor across the whole estate.
+   *
+   * Addressed by organization id, taken from `/auth/me`. It used to be resolved
+   * by listing `GET /api/v1/organizations` and matching on slug, and that list
+   * is restricted to `super-admin`: for any tenant administrator below that
+   * role, the call 403'd, this function returned nothing, and the certificates
+   * page reported that the organization had no CA — while the organization
+   * plainly had one. Nothing about listing every organization was ever needed
+   * here; only the caller's own id, which the session already carries.
+   *
+   * Only `Active` CAs can sign new certificates.
    */
-  listSigningCas: async (orgSlug?: string): Promise<CaCertificateOption[]> => {
-    const orgs = await orgService.list();
-    const org = orgSlug
-      ? orgs.find((o) => o.slug === orgSlug)
-      : orgs[0];
-    if (!org) return [];
+  listSigningCas: async (orgId?: string): Promise<CaCertificateOption[]> => {
+    if (!orgId) return [];
     const cas = await fetchAllPages<CaCertificateOption>(
-      `/api/v1/organizations/${org.id}/ca-certificates`
+      `/api/v1/organizations/${orgId}/ca-certificates`
     );
     return cas.filter((ca) => ca.status === "Active");
   },

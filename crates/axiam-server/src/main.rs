@@ -1759,7 +1759,20 @@ async fn main() -> std::io::Result<()> {
         });
         tracing::info!("Mail consumer spawned");
     } else {
-        tracing::warn!("Mail consumer NOT spawned — AXIAM__EMAIL_ENCRYPTION_KEY is missing");
+        // Error, not warn, and it names the consequence rather than the cause.
+        //
+        // Without this consumer nothing ever *delivers* a message: every
+        // password reset, activation mail and GDPR export notice is published to
+        // the queue and read by nobody. The API cannot tell the caller — the
+        // reset endpoint answers a uniform `{"sent": true}` for every outcome by
+        // design (D-15), so an operator with no mail has a working-looking API,
+        // a silent inbox, and one line of startup output between them.
+        tracing::error!(
+            "Mail consumer NOT spawned — AXIAM__EMAIL_ENCRYPTION_KEY is missing. \
+             NO transactional mail will be delivered: password-reset links, \
+             email-verification links and GDPR export notices are queued and \
+             never sent. Set the key and restart."
+        );
     }
 
     // X3 (D10): weekly FIDO MDS3 background refresh job. `should_spawn_refresh_job`

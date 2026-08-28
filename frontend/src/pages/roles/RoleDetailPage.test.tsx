@@ -68,11 +68,20 @@ const groups = [{ id: "g1", name: "Admins", created_at: "t" }];
 const assignedUsers = [{ user: users[0], resource_id: null }];
 const assignedGroups = [{ group: groups[0], resource_id: null }];
 
+const serviceAccounts = [
+  { id: "sa1", name: "ingest-worker", client_id: "sa_abc", status: "Active" },
+];
+const assignedServiceAccounts = [
+  { service_account: serviceAccounts[0], resource_id: null },
+];
+
 const URLS = {
   role: "/api/v1/roles/r1",
   perms: "/api/v1/roles/r1/permissions",
   users: "/api/v1/roles/r1/users",
   groups: "/api/v1/roles/r1/groups",
+  serviceAccounts: "/api/v1/roles/r1/service-accounts",
+  allServiceAccounts: "/api/v1/service-accounts",
   allPerms: "/api/v1/permissions",
   allGroups: "/api/v1/groups",
   resources: "/api/v1/resources",
@@ -96,6 +105,8 @@ function defaultData(overrides: Record<string, unknown> = {}) {
     [URLS.groups]: assignedGroups,
     [URLS.allPerms]: allPermissions,
     [URLS.allGroups]: groups,
+    [URLS.serviceAccounts]: assignedServiceAccounts,
+    [URLS.allServiceAccounts]: serviceAccounts,
     [URLS.resources]: resources,
     [URLS.billingScopes]: billingScopes,
     ...overrides,
@@ -667,12 +678,128 @@ describe("RoleDetailPage", () => {
   });
 
   it("shows the empty assignment states when nothing is assigned", async () => {
-    routeGet(defaultData({ [URLS.users]: [], [URLS.groups]: [] }));
+    routeGet(
+      defaultData({
+        [URLS.users]: [],
+        [URLS.groups]: [],
+        [URLS.serviceAccounts]: [],
+      })
+    );
     renderPage();
     expect(
       await screen.findByText(/No users assigned/)
     ).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "groups" }));
     expect(await screen.findByText(/No groups assigned/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "service accounts" }));
+    expect(
+      await screen.findByText(/No service accounts assigned/)
+    ).toBeInTheDocument();
+  });
+
+  it("lists the service accounts holding this role", async () => {
+    // A service account is a principal like any other, and the engine has always
+    // treated it as one — there was simply no way to create or see the grant.
+    routeGet(defaultData());
+    renderPage();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "service accounts" })
+    );
+    expect(await screen.findByText("ingest-worker")).toBeInTheDocument();
+    expect(screen.getByText("sa_abc")).toBeInTheDocument();
+  });
+
+  it("assigns the role to a service account", async () => {
+    routeGet(defaultData());
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "service accounts" })
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Assign Service Account/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Service account"),
+      "sa1"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(URLS.serviceAccounts, {
+        service_account_id: "sa1",
+      })
+    );
+  });
+
+  it("refuses to assign without a service account selected", async () => {
+    routeGet(defaultData());
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "service accounts" })
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Assign Service Account/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+
+    expect(
+      await screen.findByText("Please select a service account.")
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the server's refusal verbatim when the grant already exists", async () => {
+    // The server holds `has_role` unique on (subject, role), so a second
+    // assignment is a 409 whatever scope is asked for. A generic "failed to
+    // assign" would hide which of the two failures it was.
+    routeGet(defaultData());
+    apiMock.post.mockRejectedValue(new Error("already holds this role"));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "service accounts" })
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Assign Service Account/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Service account"),
+      "sa1"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+
+    expect(await screen.findByText("already holds this role")).toBeInTheDocument();
+  });
+
+  it("unassigns a service account, carrying no scope for a global grant", async () => {
+    routeGet(defaultData());
+    apiMock.delete.mockResolvedValue(res(undefined));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "service accounts" })
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Unassign service account ingest-worker",
+      })
+    );
+    const confirm = await screen.findByRole("dialog");
+    await userEvent.click(within(confirm).getByRole("button", { name: "Delete" }));
+
+    // No `resource_id` param: that is what removes the GLOBAL grant. Sending an
+    // empty one matches neither it nor a scoped assignment.
+    await waitFor(() =>
+      expect(apiMock.delete).toHaveBeenCalledWith(
+        "/api/v1/roles/r1/service-accounts/sa1",
+        {}
+      )
+    );
   });
 });

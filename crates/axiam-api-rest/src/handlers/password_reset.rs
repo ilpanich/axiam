@@ -69,6 +69,26 @@ pub struct ConfirmResetBody {
 /// MUST treat `None` as an enumeration-safe no-op (D-05 / Pitfall 4 /
 /// T-23-06-A), funneling into the SAME uniform `{"sent": true}` response
 /// as an unknown account, NEVER a distinct 400/404.
+///
+/// # Naming an organization and no tenant
+///
+/// Resolves the organization's own reserved scope, exactly as `POST /auth/login`
+/// and `POST /auth/opaque/*` do. That parity is the whole fix: bootstrap creates
+/// an **organization-level** administrator, and the "Forgot password?" link on an
+/// organization-level sign-in therefore carries only `?org=<slug>` — there is no
+/// tenant to carry. This function used to give up on that pair and return
+/// `None`, which the enumeration-safe contract above then turned into a silent
+/// success: `{"sent": true}`, no mail, nothing logged above `debug`. The only
+/// administrator of a freshly bootstrapped deployment had no way to recover a
+/// forgotten password, and no way to find out why.
+///
+/// A blank slug is not a slug, for the same reason it is not one on the login
+/// path: the browser posts `tenant_slug: ""` for an organization-level form, and
+/// so may an SDK that serializes an empty field rather than omitting it.
+///
+/// Naming *nothing* stays `None`. With no organization there is nothing to
+/// resolve, and inventing one would make this endpoint an oracle for which
+/// organizations exist — the precise thing the uniform response protects.
 async fn resolve_reset_tenant_id<O, T>(
     org_repo: &O,
     tenant_repo: &T,
@@ -80,20 +100,25 @@ where
     O: OrganizationRepository,
     T: TenantRepository,
 {
-    match (tenant_id, tenant_slug) {
-        (Some(id), _) => Some(id),
-        (None, Some(tenant_slug)) => match org_slug {
-            Some(org_slug) => match org_repo.get_by_slug(org_slug).await {
-                Ok(org) => tenant_repo
-                    .get_by_slug(org.id, tenant_slug)
-                    .await
-                    .ok()
-                    .map(|t| t.id),
-                Err(_) => None,
-            },
-            None => None,
-        },
-        (None, None) => None,
+    if let Some(id) = tenant_id {
+        return Some(id);
+    }
+
+    let org_slug = crate::handlers::auth::blank_is_unnamed(org_slug)?;
+    let tenant_slug = crate::handlers::auth::blank_is_unnamed(tenant_slug);
+    let org = org_repo.get_by_slug(org_slug).await.ok()?;
+
+    match tenant_slug {
+        Some(slug) => tenant_repo
+            .get_by_slug(org.id, slug)
+            .await
+            .ok()
+            .map(|t| t.id),
+        None => tenant_repo
+            .get_organization_tenant(org.id)
+            .await
+            .ok()
+            .map(|t| t.id),
     }
 }
 

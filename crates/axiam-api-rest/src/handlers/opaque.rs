@@ -434,9 +434,9 @@ async fn resolve_workspace<C: Connection + Clone>(
     // form field rather than omitting it.
     let (org_slug, tenant_slug) = (blank_is_unnamed(org_slug), blank_is_unnamed(tenant_slug));
 
-    let org_id = match (org_id, org_slug) {
-        (Some(id), _) => id,
-        (None, Some(slug)) => {
+    let org_id = match (org_id, org_slug, tenant_id) {
+        (Some(id), _, _) => id,
+        (None, Some(slug), _) => {
             state
                 .org_repo
                 .get_by_slug(slug)
@@ -446,9 +446,27 @@ async fn resolve_workspace<C: Connection + Clone>(
                 })?
                 .id
         }
-        (None, None) => {
+        // A tenant row names its own organization, so a caller holding a tenant
+        // id needs nothing else — and some callers hold nothing else. The
+        // emailed password-reset link carries `?token=…&tenant_id=…` and no
+        // organization; the page opening it has no session to learn one from.
+        // Demanding one made enrolment impossible from the one flow that must
+        // work under `opaque_mode = required`, so a reset wrote a password and
+        // no registration record, and the account it "recovered" could not sign
+        // in afterwards.
+        (None, None, Some(tenant_id)) => {
+            state
+                .tenant_repo
+                .get_by_id(tenant_id)
+                .await
+                .map_err(|_| AxiamError::AuthenticationFailed {
+                    reason: "invalid credentials".into(),
+                })?
+                .organization_id
+        }
+        (None, None, None) => {
             return Err(AxiamApiError(AxiamError::Validation {
-                message: "must provide org_id or org_slug".into(),
+                message: "must provide org_id, org_slug or tenant_id".into(),
             }));
         }
     };

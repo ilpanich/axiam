@@ -18,6 +18,10 @@ import { Loader2, Plus, Trash2, Unlink } from "lucide-react";
 import { formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 import { roleService, type RoleAssignment } from "@/services/roles";
+import {
+  serviceAccountService,
+  type ServiceAccount,
+} from "@/services/serviceAccounts";
 import { AssignmentScopeBadge } from "@/components/AssignmentScope";
 import { useResourceNames } from "@/hooks/useResourceNames";
 import { useToast } from "@/hooks/useToast";
@@ -158,6 +162,97 @@ export function GroupDetailPage() {
     invalidateEntity(queryClient, "group-members");
   }
 
+  // ─── Service-account members ──────────────────────────────────────────────────
+  //
+  // A group is a collection of principals whose roles its members inherit, and a
+  // machine identity needs that inheritance for the same reason a person does:
+  // so a fleet of devices is granted and revoked as one thing rather than one
+  // grant per device. Listed separately from the people rather than merged into
+  // one table — a page that says "members" has to say which rows are humans.
+  const {
+    data: serviceAccountMembers = [],
+    isLoading: serviceAccountMembersLoading,
+  } = useQuery({
+    queryKey: ["group-service-accounts", groupId],
+    queryFn: () => groupService.listServiceAccountMembers(groupId!),
+    enabled: !!groupId,
+  });
+
+  const [removeServiceAccount, setRemoveServiceAccount] =
+    useState<ServiceAccount | null>(null);
+  const [addServiceAccountOpen, setAddServiceAccountOpen] = useState(false);
+  const [addServiceAccountId, setAddServiceAccountId] = useState("");
+  const [addServiceAccountError, setAddServiceAccountError] = useState("");
+
+  const { data: allServiceAccounts = [] } = useQuery({
+    queryKey: ["service-accounts"],
+    queryFn: () => serviceAccountService.getAll(),
+    enabled: addServiceAccountOpen,
+  });
+
+  const removeServiceAccountMutation = useMutation({
+    mutationFn: (id: string) =>
+      groupService.removeServiceAccountMember(groupId!, id),
+    onSuccess: () => {
+      invalidateEntity(queryClient, "group-service-accounts");
+      setRemoveServiceAccount(null);
+    },
+  });
+
+  const addServiceAccountMutation = useMutation({
+    mutationFn: (id: string) => groupService.addServiceAccountMember(groupId!, id),
+    onSuccess: () => {
+      invalidateEntity(queryClient, "group-service-accounts");
+      setAddServiceAccountOpen(false);
+      setAddServiceAccountId("");
+    },
+    onError: (err: unknown) => {
+      // Verbatim: a 409 means it is already a member, which is a different
+      // thing from a failure and worth saying so.
+      setAddServiceAccountError(getApiErrorMessage(err));
+    },
+  });
+
+  const serviceAccountColumns: Column<ServiceAccount>[] = [
+    {
+      key: "name",
+      header: "Name",
+      render: (row) => (
+        <span className="font-medium text-foreground/90">{row.name}</span>
+      ),
+    },
+    {
+      key: "client_id",
+      header: "Client ID",
+      render: (row) => (
+        <span className="text-muted-foreground text-sm font-mono">
+          {row.client_id}
+        </span>
+      ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      render: (row) => (
+        <StatusBadge status={row.status === "Active" ? "active" : "inactive"} />
+      ),
+    },
+    {
+      key: "actions",
+      header: "Actions",
+      width: "w-20",
+      render: (row) => (
+        <button
+          aria-label={`Remove service account ${row.name} from group`}
+          onClick={() => setRemoveServiceAccount(row)}
+          className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+        >
+          <Trash2 size={14} />
+        </button>
+      ),
+    },
+  ];
+
   // ─── Group roles (CQ-F18) ─────────────────────────────────────────────────────
   const { data: groupRoles = [], isLoading: rolesLoading } = useQuery({
     queryKey: ["group-roles", groupId],
@@ -276,6 +371,30 @@ export function GroupDetailPage() {
         />
       </SectionCard>
 
+      {/* ── Section 2b: Service-account members ── */}
+      <SectionCard
+        title="Service Accounts"
+        action={
+          <Button
+            size="sm"
+            onClick={() => {
+              setAddServiceAccountError("");
+              setAddServiceAccountOpen(true);
+            }}
+          >
+            <Plus size={14} className="mr-1" />
+            Add Service Account
+          </Button>
+        }
+      >
+        <DataTable
+          columns={serviceAccountColumns}
+          data={serviceAccountMembers}
+          isLoading={serviceAccountMembersLoading}
+          emptyMessage="No service accounts in this group. Adding one gives that machine identity every role assigned to the group."
+        />
+      </SectionCard>
+
       {/* ── Section 3: Roles ── */}
       <SectionCard title="Assigned Roles">
         {rolesLoading ? (
@@ -347,6 +466,64 @@ export function GroupDetailPage() {
         title="Remove Member"
         description={`Remove "${removeUser?.username}" from this group?`}
         isLoading={removeMemberMutation.isPending}
+      />
+
+      {/* Add service account to group */}
+      <FormDialog
+        open={addServiceAccountOpen}
+        onClose={() => {
+          setAddServiceAccountOpen(false);
+          setAddServiceAccountId("");
+          setAddServiceAccountError("");
+        }}
+        title="Add Service Account"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setAddServiceAccountError("");
+          if (!addServiceAccountId) {
+            setAddServiceAccountError("Please select a service account.");
+            return;
+          }
+          addServiceAccountMutation.mutate(addServiceAccountId);
+        }}
+        isLoading={addServiceAccountMutation.isPending}
+        submitLabel="Add"
+        error={addServiceAccountError}
+        errorId="add-service-account-error"
+      >
+        <div className="space-y-2">
+          <Label htmlFor="add-service-account-select">Service account</Label>
+          <select
+            id="add-service-account-select"
+            value={addServiceAccountId}
+            onChange={(e) => setAddServiceAccountId(e.target.value)}
+            className="flex h-9 w-full rounded-md px-3 py-1 text-sm bg-white/5 border border-primary/20 text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary transition-colors duration-200"
+          >
+            <option value="">Select a service account…</option>
+            {allServiceAccounts.map((sa) => (
+              <option key={sa.id} value={sa.id}>
+                {sa.name}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-muted-foreground">
+            It inherits every role assigned to this group, and loses them again
+            when removed.
+          </p>
+        </div>
+      </FormDialog>
+
+      {/* Remove service account confirm */}
+      <ConfirmDialog
+        open={removeServiceAccount !== null}
+        onClose={() => setRemoveServiceAccount(null)}
+        onConfirm={() =>
+          removeServiceAccount &&
+          removeServiceAccountMutation.mutate(removeServiceAccount.id)
+        }
+        title="Remove Service Account"
+        description={`Remove "${removeServiceAccount?.name}" from this group? It loses every role it inherited through the group.`}
+        isLoading={removeServiceAccountMutation.isPending}
       />
 
       {/* Add member dialog */}

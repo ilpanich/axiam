@@ -437,6 +437,45 @@ with an empty tenant field produces:
 Nothing else about §5 changes: `X-Tenant-ID` is still required on every request (rule 2),
 and there is still no default tenant.
 
+#### §5.2.2 Acting tenant vs principal tenant (contract 1.34)
+
+`X-Tenant-ID` says which tenant a request **acts on**. It says nothing about where the
+caller *lives*, and for four things the second tenant is the one that matters. The login
+response and `GET /api/v1/auth/me` therefore carry both:
+
+| Field | Meaning |
+|---|---|
+| `tenant_id` | the tenant being acted on — what the header names |
+| `principal_tenant_id` | the tenant this principal's record lives in |
+| `principal_tenant_slug` | its slug (`"organization"` for an organization-level principal) |
+| `org_id` | the caller's organization, as a UUID |
+
+Three rules:
+
+1. **Absent means equal.** A server older than contract 1.34 omits all four. An SDK MUST
+   read `principal_tenant_id` as defaulting to `tenant_id`, which is exactly true for every
+   ordinary tenant principal — they diverge only once an organization-level principal
+   switches the acting tenant, which such a server cannot do either.
+
+2. **The caller's own credentials belong to the principal tenant.** `POST
+   /auth/password/change` and the OPAQUE registration record that accompanies it are about
+   the account, not about whatever tenant the client is currently pointed at. An SDK that
+   builds a §23 record for its own password change MUST seal it against
+   `principal_tenant_id`; a record sealed against the acting tenant is refused with
+   *"the OPAQUE session was issued for a different tenant"*. When creating **another**
+   account (§27 `users.create`), the record is sealed against the tenant that account is
+   being created in — the acting tenant — for the same reason.
+
+3. **`org_id` removes the detour.** Every organization-scoped route is addressed by id
+   (`/api/v1/organizations/{org_id}/…`). `GET /api/v1/organizations` is restricted to
+   `super-admin` and returns only the caller's own organization, so an SDK MUST NOT use it
+   to turn a slug into an id — it reads `org_id` from the session instead.
+
+`permissions` on `/auth/me` is the caller's effective actions **in the scope it is acting
+on**: across a tenant boundary it carries only the caller's global grants, mirroring the
+authorization engine. It is advisory — the server enforces every action independently —
+and an SDK MUST NOT treat its absence or emptiness as authoritative.
+
 ---
 
 ## §6 TLS Policy
@@ -3205,6 +3244,27 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
+
+- **2026-08 (§5.2.2, §27 `roles`/`groups`/`service_accounts` — acting vs principal tenant,
+  and service accounts as RBAC principals, contract 1.34)** — additive; nothing is removed
+  or renamed.
+
+  - `LoginUserInfo` gains `principal_tenant_id`, `principal_tenant_slug` and `org_id`. All
+    three are optional response fields and absent from an older server, where
+    `principal_tenant_id` equals `tenant_id` by construction. An SDK that models the user
+    object SHOULD expose them; one that does not keeps working unchanged.
+  - An SDK that builds a §23 OPAQUE record for the caller's **own** password change MUST
+    seal it against `principal_tenant_id` rather than the acting tenant. This is a
+    correctness fix, not a new capability: sealing against the acting tenant is refused by
+    the server, and an SDK that never switches the acting tenant cannot tell the
+    difference.
+  - `roles.list_service_accounts` / `assign_to_service_account` /
+    `unassign_from_service_account`, `groups.list_service_accounts` /
+    `add_service_account` / `remove_service_account`, and `service_accounts.list_roles` /
+    `list_groups` are new §27 operations, generated into `management-registry.json` like
+    every other. A service account is a principal like any other and the authorization
+    engine has always treated it as one; nothing could create the grant, so a machine
+    identity could authenticate and then do nothing at all.
 
 - **2026-08 (§27.1, §27.12 — `tenants.export_audit` and the delete precondition,
   contract 1.33)** — **breaking for callers that delete tenants.** Recorded as breaking

@@ -4,6 +4,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import api from "@/lib/api";
+import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
 import { orgService, tenantService } from "@/services/organizations";
 import { usePermissions } from "@/hooks/usePermissions";
 import {
@@ -29,6 +30,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
     activeTenantName,
     clearAuth,
     selectTenant,
+    setUser,
   } = useAuthStore();
   // Whether this principal lives in the organization's own scope. Only such a
   // principal can act on another tenant, because only its grants apply there.
@@ -131,13 +133,27 @@ export function Topbar({ onMenuClick }: TopbarProps) {
    * Leaving one tenant's rows on screen under another tenant's name is worse
    * than a moment of loading.
    */
-  const selectActiveTenant = (
+  const selectActiveTenant = async (
     tenantId: string | null,
     tenantName: string | null,
   ) => {
     selectTenant(tenantId, tenantName);
     queryClientInstance.clear();
     closeAll();
+
+    // Re-read the caller in the scope it has just switched into.
+    //
+    // Several fields of `/auth/me` describe the tenant being ACTED ON rather
+    // than the principal — the effective OPAQUE policy, the tenant slug, and
+    // the permission array, which across a tenant boundary carries only the
+    // caller's *global* grants. Keeping the copy taken at login meant the UI
+    // offered controls the server would refuse, and hid ones it would allow.
+    //
+    // Failure is not fatal and deliberately silent: the previous snapshot stays,
+    // every request is authorized server-side regardless, and an error toast for
+    // a background refresh is noise on an action that visibly succeeded.
+    const refreshed = await fetchCurrentUser();
+    if (refreshed) setUser(refreshed);
   };
 
   /**

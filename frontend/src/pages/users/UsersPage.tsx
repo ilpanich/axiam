@@ -22,7 +22,7 @@ import { cn, formatDate } from "@/lib/utils";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 import { ToggleField } from "@/components/shared";
-import { buildEnrollmentForUser } from "@/services/opaque";
+import { buildEnrollmentForTenant } from "@/services/opaque";
 import { useAuthStore } from "@/stores/auth";
 import { invalidateEntity } from "@/lib/queryInvalidation";
 
@@ -193,6 +193,11 @@ export function UsersPage() {
   // Carries the tenant's OPAQUE policy and the org/tenant slugs the enrolment
   // exchange needs; `/auth/me` puts them there.
   const user = useAuthStore((s) => s.user);
+  // The tenant this page is acting on: an organization-level principal's
+  // selection, or its own tenant when it has not switched. `POST /api/v1/users`
+  // is scoped to exactly this tenant by the `X-Axiam-Tenant` header the API
+  // client attaches, so the new account is created here.
+  const activeTenantId = useAuthStore((s) => s.activeTenantId);
 
   // ─── Pagination + search + filter state ─────────────────────────────────────
   const [page, setPage] = useState(1);
@@ -262,17 +267,42 @@ export function UsersPage() {
 
     // Build the new account's OPAQUE record here, in the browser that holds the
     // password. The server cannot: the envelope is sealed under a key derived
-    // from the password by way of the OPRF, which is the whole point. This
-    // dialog was the last password-setting form in the admin UI that did not do
-    // it — change-password and reset-completion already did — so under
-    // `optional` every operator-created account stayed password-only forever,
-    // and under `required` creation failed outright with a message about a
-    // missing record the UI gave no way to supply.
+    // from the password by way of the OPRF, which is the whole point.
     //
-    // `buildEnrollmentForUser` returns null when the tenant has OPAQUE off or
-    // this browser cannot do it, and the field is then simply absent — which is
-    // exactly what the server accepts under `disabled` and `optional`.
-    const opaque = await buildEnrollmentForUser(user, createPassword);
+    // Sealed against the tenant the account is being created IN, which is not
+    // necessarily the caller's own. This used to build it from the signed-in
+    // administrator's identity, so an organization administrator creating a user
+    // inside a child tenant produced a session minted for the organization scope
+    // and redeemed against the child — and the server refused it, correctly,
+    // with "the OPAQUE session was issued for a different tenant". Creating a
+    // user in any tenant but your own was impossible while OPAQUE was on.
+    //
+    // Returns null when this tenant has OPAQUE off or this browser cannot do it,
+    // and the field is then simply absent — exactly what the server accepts
+    // under `disabled` and `optional`. Anything else throws, and is reported:
+    // silently omitting the record would create an account that cannot
+    // authenticate under `required`, or one that never enrols under `optional`.
+    const targetTenantId = activeTenantId ?? user?.tenant_id;
+    if (!targetTenantId) {
+      setCreateError("No tenant is selected. Reload the page and try again.");
+      return;
+    }
+
+    let opaque;
+    try {
+      opaque = await buildEnrollmentForTenant({
+        tenantId: targetTenantId,
+        password: createPassword,
+      });
+    } catch (err) {
+      const msg = getApiErrorMessage(
+        err,
+        "Could not prepare secure login for this account. Please try again."
+      );
+      setCreateError(msg);
+      toast({ description: msg, variant: "destructive" });
+      return;
+    }
 
     createMutation.mutate({
       username: createUsername.trim(),

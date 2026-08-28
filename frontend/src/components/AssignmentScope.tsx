@@ -58,7 +58,7 @@ export interface ResourceScopePickerProps {
   value: string;
   onChange: (resourceId: string) => void;
   /** What the empty option means for this dialog. */
-  subject: "user" | "group";
+  subject: "user" | "group" | "service account";
   disabled?: boolean;
 }
 

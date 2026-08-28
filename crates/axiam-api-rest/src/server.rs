@@ -846,6 +846,37 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 web::resource("/roles/{role_id}/groups/{group_id}")
                     .route(web::delete().to(handlers::roles::unassign_from_group::<C>)),
             )
+            // A service account is a principal like any other: the engine has
+            // always applied RBAC to it identically, and `has_role` has always
+            // been declared `User/ServiceAccount/Group -> Role`. These are the
+            // routes that were missing, without which a machine identity could
+            // authenticate and then do nothing at all.
+            .service(
+                web::resource("/roles/{role_id}/service-accounts")
+                    .route(web::get().to(handlers::roles::list_service_accounts::<C>))
+                    .route(web::post().to(handlers::roles::assign_to_service_account::<C>)),
+            )
+            .service(
+                web::resource("/roles/{role_id}/service-accounts/{service_account_id}")
+                    .route(web::delete().to(handlers::roles::unassign_from_service_account::<C>)),
+            )
+            .service(
+                web::resource("/service-accounts/{service_account_id}/roles")
+                    .route(web::get().to(handlers::roles::list_service_account_roles::<C>)),
+            )
+            .service(
+                web::resource("/groups/{group_id}/service-accounts")
+                    .route(web::get().to(handlers::groups::list_service_account_members::<C>))
+                    .route(web::post().to(handlers::groups::add_service_account_member::<C>)),
+            )
+            .service(
+                web::resource("/groups/{group_id}/service-accounts/{service_account_id}")
+                    .route(web::delete().to(handlers::groups::remove_service_account_member::<C>)),
+            )
+            .service(
+                web::resource("/service-accounts/{service_account_id}/groups")
+                    .route(web::get().to(handlers::groups::list_service_account_groups::<C>)),
+            )
             // --- Permissions ---
             .service(
                 web::resource("/permissions")

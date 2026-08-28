@@ -548,6 +548,30 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/groups/{group_id}/members/{user_id}",
         "groups:remove_member",
     ),
+    // Service accounts are members on the same terms as users, so they are
+    // gated by the same three permissions: a group is a collection of
+    // principals, and which table a principal's record lives in is not a
+    // different kind of administrative act.
+    (
+        "GET",
+        "/api/v1/groups/{group_id}/service-accounts",
+        "groups:list_members",
+    ),
+    (
+        "POST",
+        "/api/v1/groups/{group_id}/service-accounts",
+        "groups:add_member",
+    ),
+    (
+        "DELETE",
+        "/api/v1/groups/{group_id}/service-accounts/{service_account_id}",
+        "groups:remove_member",
+    ),
+    (
+        "GET",
+        "/api/v1/service-accounts/{service_account_id}/groups",
+        "groups:list_members",
+    ),
     // Roles
     ("GET", "/api/v1/roles", "roles:list"),
     ("POST", "/api/v1/roles", "roles:create"),
@@ -571,6 +595,30 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "DELETE",
         "/api/v1/roles/{role_id}/groups/{group_id}",
         "roles:unassign",
+    ),
+    // Granting a machine identity a role is the same administrative act as
+    // granting one to a person, and takes the same permission. Splitting it out
+    // would let a deployment hand out `roles:assign` while believing machine
+    // grants were separately gated.
+    (
+        "GET",
+        "/api/v1/roles/{role_id}/service-accounts",
+        "roles:get",
+    ),
+    (
+        "POST",
+        "/api/v1/roles/{role_id}/service-accounts",
+        "roles:assign",
+    ),
+    (
+        "DELETE",
+        "/api/v1/roles/{role_id}/service-accounts/{service_account_id}",
+        "roles:unassign",
+    ),
+    (
+        "GET",
+        "/api/v1/service-accounts/{service_account_id}/roles",
+        "roles:get",
     ),
     // Permissions
     ("GET", "/api/v1/permissions", "permissions:list"),

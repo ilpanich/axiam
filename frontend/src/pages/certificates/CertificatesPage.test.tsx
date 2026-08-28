@@ -96,7 +96,19 @@ function mockGetRoutes({
 beforeEach(() => {
   vi.clearAllMocks();
   useAuthStore.setState({
-    user: { id: "u1", username: "admin", email: "a@x.io", permissions: ["*"], tenant_id: "t1" },
+    user: {
+      id: "u1",
+      username: "admin",
+      email: "a@x.io",
+      permissions: ["*"],
+      tenant_id: "t1",
+      principal_tenant_id: "t1",
+      // The page addresses the organization's CA endpoint by id, taken straight
+      // from `/auth/me`. It used to resolve the id by listing every
+      // organization, which only a `super-admin` may do — so a tenant
+      // administrator saw no CAs and no way to reach the page that creates one.
+      org_id: "org1",
+    },
     tenantSlug: "acme-tenant",
     orgSlug: "acme",
     isAuthenticated: true,

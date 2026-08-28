@@ -166,6 +166,113 @@ server registers one at startup (`axiam-server`'s composition root, alongside
 the session validator); without it the extractor refuses every switch, so an
 organization administrator would be unable to act on any tenant at all.
 
+## What an organization principal's own account does
+
+`X-Axiam-Tenant` says which tenant a request **acts on**. It says nothing about
+where the caller *lives*, and for the caller's own account that second tenant is
+the one that matters:
+
+| Operation | Tenant used |
+|---|---|
+| `POST /auth/password/change` | the principal's own — its password, and its OPAQUE record, live there |
+| `GET /auth/me` (the account, and the permission array) | the principal's own — grants live in the organization tenant |
+| Everything else | the tenant named by the header |
+
+Reading the acting tenant for the first two is a bug with a distinctive
+symptom: an organization administrator selects a child tenant and is
+immediately unable to change its own password (404) or stay signed in (401),
+with nothing on screen having changed but the tenant switcher.
+
+`GET /auth/me` therefore returns both, and a client that switches tenants should
+use them accordingly:
+
+```jsonc
+{
+  "user": {
+    "tenant_id": "…",             // the tenant being acted on
+    "principal_tenant_id": "…",   // the tenant this principal lives in
+    "principal_tenant_slug": "organization",
+    "org_id": "…",                // the caller's organization, addressable directly
+    "organization_level": true
+  },
+  "permissions": ["*"]
+}
+```
+
+`permissions` is the caller's effective actions in the scope it is acting on.
+Across a tenant boundary it carries only **global** grants, mirroring what the
+authorization engine does — a resource-scoped grant names a resource in the
+organization tenant, and a resource with that id does not exist in the target.
+It is a UI hint; the server enforces every action independently.
+
+`org_id` is there so a client never has to reach `GET /api/v1/organizations` to
+turn a slug into an id. That endpoint is restricted to `super-admin` and returns
+only the caller's own organization.
+
+## What tenants inherit from the organization
+
+Three things flow downwards, and each keeps flowing after the fact — a change to
+the organization reaches the tenants that **already exist**, not only the ones
+created afterwards.
+
+### Security settings
+
+Tenant settings are stored as a sparse override mask, so any field a tenant has
+not overridden tracks the organization's value for it, permanently.
+
+A tenant may only ever **tighten**. That rule is enforced when an override is
+written *and* when the baseline moves: an override the organization has since
+overtaken is dropped, so the tenant returns to tracking the baseline. An
+override that is still stricter is left exactly as it is.
+
+```
+org  min_length 8  → 16
+tenant override 12          ⇒ cleared; the tenant is now 16 and tracks further changes
+tenant override 24          ⇒ kept;    the tenant chose to go further
+```
+
+The same applies to `opaque_mode`: switching the organization from `disabled` to
+`optional` or `required` reaches every tenant beneath it, including tenants that
+had explicitly recorded `disabled`. Each tenant's OPAQUE key material is
+provisioned at the moment of the change rather than lazily on first use, so
+"did enabling it do anything?" is answerable immediately.
+
+The overtaken field is **cleared**, not rewritten to the new value. An absent
+override keeps tracking; a value written in would freeze at today's level and
+need the same repair after the next change.
+
+### The OPAQUE `required` gate
+
+`required` refuses password login for a whole tenant before any credential is
+examined, and **nobody can be enrolled retroactively** — a registration record
+is built by a client holding the plaintext password, which the server never has.
+
+So switching to `required` is refused while any active user in scope has no
+record, and the error names the tenants and the counts:
+
+```
+opaque_mode `required` would lock out active users who have no OPAQUE
+registration record… Uncovered users by tenant: production (14), staging (2).
+```
+
+The way through is the migration `OpaqueMode::Required`'s own documentation
+describes: run `optional` until coverage is complete — user creation,
+change-password and reset completion each enrol one — then switch.
+
+### Certificate authorities
+
+A CA is an organization-scoped asset (`ca_certificate.organization_id`), and
+every tenant in the organization issues under it. A tenant adds its own layer
+with a **tenant signing CA** — an intermediate created beneath an organization
+CA, constrained to a path length of zero, which is what
+`POST /api/v1/certificates` names as `issuer_ca_id` for that tenant. Revoking it
+revokes exactly one tenant's issuance.
+
+The admin UI reaches the organization's CAs by `org_id` from `/auth/me`. It used
+to resolve that id by listing organizations, which only a `super-admin` may do —
+so for any tenant administrator below that role the list came back empty and the
+certificates page reported that the organization had no CA at all.
+
 ## Upgrading an existing deployment
 
 Migration 50 adds `kind`, defaulting to `standard`. Every tenant you have is an

@@ -196,6 +196,34 @@ describe("groupService", () => {
     await groupService.removeMember("g1", "u1");
     expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/groups/g1/members/u1");
   });
+
+  it("service accounts are members too, on their own endpoints", async () => {
+    // A group is a collection of principals whose roles its members inherit, and
+    // a fleet of devices is exactly what you want to grant and revoke as one
+    // thing. Listed on their own route rather than merged into `members`: the
+    // two return different shapes, and a page saying "members" has to say which
+    // rows are people.
+    apiMock.get.mockResolvedValue(res({ items: [{ id: "sa1", name: "worker" }] }));
+    expect(await groupService.listServiceAccountMembers("g1")).toEqual([
+      { id: "sa1", name: "worker" },
+    ]);
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/groups/g1/service-accounts");
+
+    await groupService.listServiceAccountGroups("sa1");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/service-accounts/sa1/groups");
+
+    apiMock.post.mockResolvedValue(res(undefined));
+    await groupService.addServiceAccountMember("g1", "sa1");
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/groups/g1/service-accounts", {
+      service_account_id: "sa1",
+    });
+
+    apiMock.delete.mockResolvedValue(res(undefined));
+    await groupService.removeServiceAccountMember("g1", "sa1");
+    expect(apiMock.delete).toHaveBeenCalledWith(
+      "/api/v1/groups/g1/service-accounts/sa1"
+    );
+  });
 });
 
 // ─── organizations / tenants / CA / settings ───────────────────────────────
@@ -420,32 +448,41 @@ describe("certificateService", () => {
     expect(apiMock.post).toHaveBeenCalledWith("/api/v1/certificates/c1/revoke");
   });
 
-  it("listSigningCas resolves org by slug then filters Active CAs", async () => {
-    apiMock.get
-      .mockResolvedValueOnce(res([{ id: "o1", slug: "acme" }, { id: "o2", slug: "other" }]))
-      .mockResolvedValueOnce(
-        res([
-          { id: "ca1", status: "Active" },
-          { id: "ca2", status: "Revoked" },
-        ])
-      );
-    const cas = await certificateService.listSigningCas("acme");
-    expect(apiMock.get).toHaveBeenNthCalledWith(2, "/api/v1/organizations/o1/ca-certificates", { params: { offset: 0, limit: 200 } });
+  it("lists the organization's CAs by id and keeps only the Active ones", async () => {
+    // The organization's CAs are what every tenant beneath it issues under —
+    // that inheritance is what makes one organization CA a usable trust anchor
+    // across the estate — so this is the tenant-facing view of them.
+    apiMock.get.mockResolvedValueOnce(
+      res([
+        { id: "ca1", status: "Active" },
+        { id: "ca2", status: "Revoked" },
+      ])
+    );
+    const cas = await certificateService.listSigningCas("o1");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/organizations/o1/ca-certificates", {
+      params: { offset: 0, limit: 200 },
+    });
     expect(cas).toEqual([{ id: "ca1", status: "Active" }]);
   });
 
-  it("listSigningCas falls back to the first org when no slug given", async () => {
-    apiMock.get
-      .mockResolvedValueOnce(res([{ id: "o1", slug: "acme" }]))
-      .mockResolvedValueOnce(res({ items: [] }));
-    await certificateService.listSigningCas();
-    expect(apiMock.get).toHaveBeenNthCalledWith(2, "/api/v1/organizations/o1/ca-certificates", { params: { offset: 0, limit: 200 } });
+  it("never calls the super-admin-only organizations list", async () => {
+    // The regression. This used to resolve the org id by listing every
+    // organization and matching on slug, and `GET /api/v1/organizations` is
+    // restricted to `super-admin`. For any tenant administrator below that role
+    // the call 403'd, no CA was ever returned, and the certificates page
+    // reported that the organization had none — while it plainly had one.
+    apiMock.get.mockResolvedValueOnce(res([{ id: "ca1", status: "Active" }]));
+    await certificateService.listSigningCas("o1");
+    expect(apiMock.get).toHaveBeenCalledTimes(1);
+    expect(apiMock.get).not.toHaveBeenCalledWith(
+      "/api/v1/organizations",
+      expect.anything()
+    );
   });
 
-  it("listSigningCas returns [] when the org slug is unknown", async () => {
-    apiMock.get.mockResolvedValueOnce(res([{ id: "o1", slug: "acme" }]));
-    expect(await certificateService.listSigningCas("nope")).toEqual([]);
-    expect(apiMock.get).toHaveBeenCalledTimes(1);
+  it("returns [] without a request when the session carries no organization", async () => {
+    expect(await certificateService.listSigningCas(undefined)).toEqual([]);
+    expect(apiMock.get).not.toHaveBeenCalled();
   });
 });
 
@@ -679,6 +716,55 @@ describe("roleService", () => {
     expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/groups", { group_id: "g1" });
     await roleService.unassignFromGroup("r1", "g1");
     expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1", {});
+  });
+
+  it("service-account assignment, in both directions", async () => {
+    // A service account is a principal like any other — the engine has always
+    // applied RBAC to it identically — but nothing could create the grant, so a
+    // machine identity could authenticate and then do nothing at all.
+    apiMock.get.mockResolvedValue(res({ items: [{ service_account: { id: "sa1" }, resource_id: null }] }));
+    await roleService.listServiceAccounts("r1");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/roles/r1/service-accounts", {
+      params: { offset: 0, limit: 200 },
+    });
+
+    await roleService.listByServiceAccount("sa1");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/service-accounts/sa1/roles", {
+      params: { offset: 0, limit: 200 },
+    });
+
+    apiMock.post.mockResolvedValue(res(undefined));
+    await roleService.assignToServiceAccount("r1", "sa1");
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/service-accounts", {
+      service_account_id: "sa1",
+    });
+
+    apiMock.delete.mockResolvedValue(res(undefined));
+    await roleService.unassignFromServiceAccount("r1", "sa1");
+    expect(apiMock.delete).toHaveBeenCalledWith(
+      "/api/v1/roles/r1/service-accounts/sa1",
+      {}
+    );
+  });
+
+  it("sends the resource scope for a service-account grant, and only when scoped", async () => {
+    // Omitting the param is what removes the GLOBAL grant. Sending an empty one
+    // would match neither it nor a scoped assignment, so a revoke button next to
+    // a scoped grant would answer 204 having removed nothing.
+    apiMock.post.mockResolvedValue(res(undefined));
+    apiMock.delete.mockResolvedValue(res(undefined));
+
+    await roleService.assignToServiceAccount("r1", "sa1", "res1");
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/service-accounts", {
+      service_account_id: "sa1",
+      resource_id: "res1",
+    });
+
+    await roleService.unassignFromServiceAccount("r1", "sa1", "res1");
+    expect(apiMock.delete).toHaveBeenCalledWith(
+      "/api/v1/roles/r1/service-accounts/sa1",
+      { params: { resource_id: "res1" } }
+    );
   });
 
   it("carries the resource scope on assign and unassign", async () => {

@@ -3,6 +3,7 @@ import { fetchAllPages } from "@/services/_pagination";
 import type { PermissionEffect, PermissionGrant } from "@/services/permissions";
 import type { User } from "@/services/users";
 import type { Group } from "@/services/users";
+import type { ServiceAccount } from "@/services/serviceAccounts";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -50,6 +51,12 @@ export interface RoleUserAssignment {
 /** A member row of `GET /roles/{id}/groups`: the group plus the assignment scope. */
 export interface RoleGroupAssignment {
   group: Group;
+  resource_id: string | null;
+}
+
+/** A service account holding this role, with the scope of the grant. */
+export interface RoleServiceAccountAssignment {
+  service_account: ServiceAccount;
   resource_id: string | null;
 }
 
@@ -181,6 +188,51 @@ export const roleService = {
     api
       .delete(
         `/api/v1/roles/${roleId}/groups/${groupId}`,
+        resourceId ? { params: { resource_id: resourceId } } : {}
+      )
+      .then(() => undefined),
+
+  // ─── Service-account assignment ───────────────────────────────────────────
+  //
+  // A service account is a principal like any other: the authorization engine
+  // applies RBAC to a machine identity exactly as it does to a person. Until
+  // these endpoints existed there was no way to grant one anything, and the only
+  // way to give a machine permissions was to hand it a human's account.
+
+  listServiceAccounts: (roleId: string): Promise<RoleServiceAccountAssignment[]> =>
+    fetchAllPages<RoleServiceAccountAssignment>(
+      `/api/v1/roles/${roleId}/service-accounts`
+    ),
+
+  /**
+   * List a service account's role assignments, including roles reaching it
+   * through a group.
+   */
+  listByServiceAccount: (serviceAccountId: string): Promise<RoleAssignment[]> =>
+    fetchAllPages<RoleAssignment>(
+      `/api/v1/service-accounts/${serviceAccountId}/roles`
+    ),
+
+  assignToServiceAccount: (
+    roleId: string,
+    serviceAccountId: string,
+    resourceId?: string | null
+  ): Promise<void> =>
+    api
+      .post(`/api/v1/roles/${roleId}/service-accounts`, {
+        service_account_id: serviceAccountId,
+        ...(resourceId ? { resource_id: resourceId } : {}),
+      })
+      .then(() => undefined),
+
+  unassignFromServiceAccount: (
+    roleId: string,
+    serviceAccountId: string,
+    resourceId?: string | null
+  ): Promise<void> =>
+    api
+      .delete(
+        `/api/v1/roles/${roleId}/service-accounts/${serviceAccountId}`,
         resourceId ? { params: { resource_id: resourceId } } : {}
       )
       .then(() => undefined),

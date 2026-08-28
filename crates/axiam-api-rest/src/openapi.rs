@@ -73,6 +73,10 @@ use crate::handlers;
         handlers::groups::add_member,
         handlers::groups::list_members,
         handlers::groups::remove_member,
+        handlers::groups::add_service_account_member,
+        handlers::groups::list_service_account_members,
+        handlers::groups::remove_service_account_member,
+        handlers::groups::list_service_account_groups,
         // Roles
         handlers::roles::create,
         handlers::roles::list,
@@ -87,6 +91,10 @@ use crate::handlers;
         handlers::roles::list_groups,
         handlers::roles::list_user_roles,
         handlers::roles::list_group_roles,
+        handlers::roles::assign_to_service_account,
+        handlers::roles::unassign_from_service_account,
+        handlers::roles::list_service_accounts,
+        handlers::roles::list_service_account_roles,
         // Permissions
         handlers::permissions::create,
         handlers::permissions::list,
@@ -318,6 +326,7 @@ use crate::handlers;
         axiam_core::models::group::UpdateGroup,
         handlers::groups::CreateGroupRequest,
         handlers::groups::AddMemberRequest,
+        handlers::groups::AddServiceAccountMemberRequest,
         // Roles
         axiam_core::models::role::Role,
         axiam_core::models::role::CreateRole,
@@ -326,6 +335,8 @@ use crate::handlers;
         handlers::roles::CreateRoleRequest,
         handlers::roles::AssignRoleToUserRequest,
         handlers::roles::AssignRoleToGroupRequest,
+        handlers::roles::AssignRoleToServiceAccountRequest,
+        handlers::roles::RoleServiceAccountAssignment,
         handlers::roles::RoleUserAssignment,
         handlers::roles::RoleGroupAssignment,
         // Permissions

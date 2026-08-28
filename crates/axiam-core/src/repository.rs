@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
-use crate::error::AxiamResult;
+use crate::error::{AxiamError, AxiamResult};
 use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
@@ -371,6 +371,80 @@ pub trait RoleRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RoleAssignment>>> + Send;
+
+    /// Assign a role to a **service account**, optionally scoped to a resource.
+    ///
+    /// A service account is a principal like any other. The `has_role` relation
+    /// has always been documented as `User/ServiceAccount/Group -> Role`, and
+    /// the authorization engine applies RBAC identically to both kinds of
+    /// subject — `RequirePermission::check_subject` says so in as many words —
+    /// but there was no way to create the edge, so a machine identity could hold
+    /// no permissions at all. The only thing a service account could do was
+    /// authenticate.
+    /// Default implementation refuses, so the pre-existing test doubles of this
+    /// trait keep compiling without silently *accepting* a grant they never
+    /// wrote — a double that returned `Ok(())` here would let a test assert a
+    /// permission was granted when nothing was. The SurrealDB-backed repository
+    /// overrides it.
+    fn assign_to_service_account(
+        &self,
+        _tenant_id: Uuid,
+        _service_account_id: Uuid,
+        _role_id: Uuid,
+        _resource_id: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "assign_to_service_account is not implemented by this repository".into(),
+            ))
+        }
+    }
+
+    /// Remove a role assignment from a service account.
+    ///
+    /// Defaulted on the same terms as [`Self::assign_to_service_account`].
+    fn unassign_from_service_account(
+        &self,
+        _tenant_id: Uuid,
+        _service_account_id: Uuid,
+        _role_id: Uuid,
+        _resource_id: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "unassign_from_service_account is not implemented by this repository".into(),
+            ))
+        }
+    }
+
+    /// Get all roles assigned to a service account (direct + via group
+    /// membership).
+    ///
+    /// Defaults to empty for test doubles that never exercise machine
+    /// principals. Reading "no roles" from a double is honest; the real
+    /// repository overrides it.
+    fn get_service_account_roles(
+        &self,
+        _tenant_id: Uuid,
+        _service_account_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Role>>> + Send {
+        async { Ok(Vec::new()) }
+    }
+
+    /// The service accounts holding `role_id`, with the scope of each grant.
+    ///
+    /// The machine half of [`Self::get_role_user_assignments`], and what a
+    /// role's detail view needs in order to show who actually holds it.
+    ///
+    /// Defaults to empty, on the same terms as
+    /// [`Self::get_service_account_roles`].
+    fn get_role_service_account_assignments(
+        &self,
+        _tenant_id: Uuid,
+        _role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RoleSubjectAssignment>>> + Send {
+        async { Ok(Vec::new()) }
+    }
 
     /// Assign a role to a group, optionally scoped to a resource.
     fn assign_to_group(
@@ -891,6 +965,85 @@ pub trait GroupRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Group>>> + Send;
+
+    /// Add a **service account** to a group (creates a `member_of` edge from
+    /// the `service_account` record).
+    ///
+    /// A group is a named collection of principals whose roles its members
+    /// inherit, and a machine identity needs that inheritance for the same
+    /// reason a person does: so a fleet of devices can be granted and revoked as
+    /// one thing rather than one edge at a time. The edge table has always been
+    /// untyped at the `in` end; only the write path was user-only.
+    ///
+    /// Defaulted to a refusal rather than a no-op, for the same reason
+    /// [`RoleRepository::assign_to_service_account`] is: a double that accepted
+    /// a membership it never wrote would let a test assert inherited access that
+    /// does not exist.
+    fn add_service_account_member(
+        &self,
+        _tenant_id: Uuid,
+        _service_account_id: Uuid,
+        _group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "add_service_account_member is not implemented by this repository".into(),
+            ))
+        }
+    }
+
+    /// Remove a service account from a group.
+    ///
+    /// Defaulted on the same terms as [`Self::add_service_account_member`].
+    fn remove_service_account_member(
+        &self,
+        _tenant_id: Uuid,
+        _service_account_id: Uuid,
+        _group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "remove_service_account_member is not implemented by this repository".into(),
+            ))
+        }
+    }
+
+    /// Get the service accounts in a group.
+    ///
+    /// Separate from [`Self::get_members`] rather than a union with it: the two
+    /// return different domain types, and a caller that wants both wants them
+    /// distinguishable — a page listing "members" has to say which rows are
+    /// people.
+    ///
+    /// Defaults to an empty page for test doubles that never exercise machine
+    /// membership.
+    fn get_service_account_members(
+        &self,
+        _tenant_id: Uuid,
+        _group_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<ServiceAccount>>> + Send {
+        async move {
+            Ok(PaginatedResult {
+                items: Vec::new(),
+                total: 0,
+                offset: pagination.offset,
+                limit: pagination.limit,
+            })
+        }
+    }
+
+    /// Get all groups a service account belongs to.
+    ///
+    /// Defaults to empty, on the same terms as
+    /// [`Self::get_service_account_members`].
+    fn get_service_account_groups(
+        &self,
+        _tenant_id: Uuid,
+        _service_account_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Group>>> + Send {
+        async { Ok(Vec::new()) }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1958,6 +2111,32 @@ pub trait OpaqueCredentialRepository: Send + Sync {
     ///
     /// [`OpaqueMode::Required`]: crate::models::opaque::OpaqueMode::Required
     fn count_for_tenant(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Count the tenant's **active** users that have no registration record.
+    ///
+    /// The number of people [`OpaqueMode::Required`] would lock out if it were
+    /// switched on right now, and the reason it is refused while any remain.
+    /// Nobody can be enrolled retroactively — a record can only be built by a
+    /// client that holds the plaintext password — so the mode is a one-way door
+    /// for every account on the wrong side of it, up to and including the only
+    /// administrator.
+    ///
+    /// Counted rather than derived from [`Self::count_for_tenant`] against a
+    /// user total: a record belonging to a since-deactivated user would make the
+    /// two totals agree while an active user was still stranded, which is
+    /// precisely the case that matters.
+    ///
+    /// [`OpaqueMode::Required`]: crate::models::opaque::OpaqueMode::Required
+    ///
+    /// Defaults to zero — "nobody is stranded" — for test doubles that never
+    /// exercise the coverage gate. The gate itself only ever runs against the
+    /// real repository, where the count is computed.
+    fn count_active_users_without_credential(
+        &self,
+        _tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send {
+        async { Ok(0) }
+    }
 }
 
 // ---------------------------------------------------------------------------

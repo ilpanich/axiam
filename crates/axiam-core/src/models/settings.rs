@@ -515,6 +515,192 @@ pub fn effective_settings(
     }
 }
 
+/// Drop every tenant override that the org baseline has since overtaken.
+///
+/// Returns the names of the fields cleared, in declaration order — empty when
+/// the override was already compliant.
+///
+/// # Why this exists
+///
+/// [`validate_tenant_override`] enforces "a tenant may only tighten" at the
+/// moment a tenant writes one. Nothing enforced it afterwards, and an
+/// organization baseline is not a constant: raise `min_length` to 16, or switch
+/// `opaque_mode` from `disabled` to `required`, and every tenant that had
+/// written an override for that field kept the old, weaker value forever. The
+/// setting appeared to apply — the organization row said so, and tenants with no
+/// override did inherit it — while the tenants that had ever visited their own
+/// settings page silently did not. Which tenants those were was not visible
+/// anywhere.
+///
+/// Clearing the field rather than rewriting it to the org value is deliberate:
+/// an absent override *tracks* the baseline, so the tenant also picks up the
+/// next change. Writing the value in would freeze it again at the new level and
+/// reproduce the same defect one baseline later.
+///
+/// Overrides that are still **stricter** than the baseline are left exactly as
+/// they are. A tenant that chose a 24-character minimum does not lose it because
+/// the organization moved from 12 to 16.
+pub fn clamp_overrides_to_org(
+    org: &SecuritySettings,
+    overrides: &mut TenantSettingsOverride,
+) -> Vec<&'static str> {
+    let mut cleared = Vec::new();
+
+    // `tenant >= org`: a higher minimum is the more restrictive one.
+    macro_rules! clamp_min {
+        ($field:ident, $org_path:expr, $label:expr) => {
+            if overrides.$field.is_some_and(|val| val < $org_path) {
+                overrides.$field = None;
+                cleared.push($label);
+            }
+        };
+    }
+    clamp_min!(min_length, org.password.min_length, "min_length");
+    clamp_min!(
+        password_history_count,
+        org.password.password_history_count,
+        "password_history_count"
+    );
+    clamp_min!(
+        lockout_duration_secs,
+        org.lockout.lockout_duration_secs,
+        "lockout_duration_secs"
+    );
+    clamp_min!(
+        max_lockout_duration_secs,
+        org.lockout.max_lockout_duration_secs,
+        "max_lockout_duration_secs"
+    );
+    if overrides
+        .lockout_backoff_multiplier
+        .is_some_and(|val| val < org.lockout.lockout_backoff_multiplier)
+    {
+        overrides.lockout_backoff_multiplier = None;
+        cleared.push("lockout_backoff_multiplier");
+    }
+
+    // `tenant <= org`: a lower cap or shorter lifetime is the more restrictive one.
+    macro_rules! clamp_max {
+        ($field:ident, $org_path:expr, $label:expr) => {
+            if overrides.$field.is_some_and(|val| val > $org_path) {
+                overrides.$field = None;
+                cleared.push($label);
+            }
+        };
+    }
+    clamp_max!(
+        max_failed_login_attempts,
+        org.lockout.max_failed_login_attempts,
+        "max_failed_login_attempts"
+    );
+    clamp_max!(
+        access_token_lifetime_secs,
+        org.token.access_token_lifetime_secs,
+        "access_token_lifetime_secs"
+    );
+    clamp_max!(
+        refresh_token_lifetime_secs,
+        org.token.refresh_token_lifetime_secs,
+        "refresh_token_lifetime_secs"
+    );
+    clamp_max!(
+        mfa_challenge_lifetime_secs,
+        org.mfa.mfa_challenge_lifetime_secs,
+        "mfa_challenge_lifetime_secs"
+    );
+    clamp_max!(
+        default_cert_validity_days,
+        org.certificate.default_cert_validity_days,
+        "default_cert_validity_days"
+    );
+    clamp_max!(
+        max_cert_validity_days,
+        org.certificate.max_cert_validity_days,
+        "max_cert_validity_days"
+    );
+    clamp_max!(
+        email_verification_grace_period_hours,
+        org.email.email_verification_grace_period_hours,
+        "email_verification_grace_period_hours"
+    );
+    clamp_max!(
+        deletion_grace_period_days,
+        org.privacy.deletion_grace_period_days,
+        "deletion_grace_period_days"
+    );
+
+    // Enable-only: a tenant may turn a control on, never off.
+    macro_rules! clamp_enable_only {
+        ($field:ident, $org_val:expr, $label:expr) => {
+            if $org_val && overrides.$field == Some(false) {
+                overrides.$field = None;
+                cleared.push($label);
+            }
+        };
+    }
+    clamp_enable_only!(
+        require_uppercase,
+        org.password.require_uppercase,
+        "require_uppercase"
+    );
+    clamp_enable_only!(
+        require_lowercase,
+        org.password.require_lowercase,
+        "require_lowercase"
+    );
+    clamp_enable_only!(
+        require_digits,
+        org.password.require_digits,
+        "require_digits"
+    );
+    clamp_enable_only!(
+        require_symbols,
+        org.password.require_symbols,
+        "require_symbols"
+    );
+    clamp_enable_only!(mfa_enforced, org.mfa.mfa_enforced, "mfa_enforced");
+    clamp_enable_only!(
+        hibp_check_enabled,
+        org.password.hibp_check_enabled,
+        "hibp_check_enabled"
+    );
+    clamp_enable_only!(
+        email_verification_required,
+        org.email.email_verification_required,
+        "email_verification_required"
+    );
+    clamp_enable_only!(
+        admin_notifications_enabled,
+        org.notification.admin_notifications_enabled,
+        "admin_notifications_enabled"
+    );
+
+    // OPAQUE, on the same ordering `validate_tenant_override` uses.
+    if overrides
+        .opaque_mode
+        .is_some_and(|mode| mode < org.opaque.opaque_mode)
+    {
+        overrides.opaque_mode = None;
+        cleared.push("opaque_mode");
+    }
+    if overrides
+        .opaque_suite
+        .is_some_and(|suite| !opaque_suite_is_at_least(suite, org.opaque.opaque_suite))
+    {
+        overrides.opaque_suite = None;
+        cleared.push("opaque_suite");
+    }
+    if overrides
+        .opaque_ksf
+        .is_some_and(|ksf| !opaque_ksf_is_at_least(ksf, org.opaque.opaque_ksf))
+    {
+        overrides.opaque_ksf = None;
+        cleared.push("opaque_ksf");
+    }
+
+    cleared
+}
+
 /// Validate that a tenant override is only **more restrictive** than
 /// the org baseline. Collects all violations into one error message.
 ///

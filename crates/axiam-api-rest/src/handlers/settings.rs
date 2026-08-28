@@ -4,8 +4,8 @@ use actix_web::{HttpResponse, web};
 use axiam_core::error::AxiamError;
 use axiam_core::models::opaque::{OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
-    SecuritySettings, SetOrgSettings, TenantSettingsOverride, effective_settings,
-    validate_org_settings, validate_tenant_override,
+    SecuritySettings, SetOrgSettings, TenantSettingsOverride, clamp_overrides_to_org,
+    effective_settings, validate_org_settings, validate_tenant_override,
 };
 use axiam_core::repository::{Pagination, SettingsRepository, TenantRepository};
 use surrealdb::Connection;
@@ -74,6 +74,145 @@ async fn provision_opaque_setup<C: Connection + Clone>(
             error = %e.0,
             "could not provision OPAQUE server setup; it will be minted on first use"
         ),
+    }
+}
+
+/// Every tenant of an organization, including its own reserved scope.
+///
+/// Paged to the end rather than taking the default first page: a partial sweep
+/// would leave later tenants un-provisioned, unreconciled or unchecked for no
+/// reason anybody could see.
+async fn all_tenants_of<C: Connection + Clone>(
+    state: &AppState<C>,
+    org_id: Uuid,
+) -> Result<Vec<axiam_core::models::tenant::Tenant>, AxiamApiError> {
+    let mut tenants = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let page = state
+            .tenant_repo
+            .list_by_organization(
+                org_id,
+                Pagination {
+                    offset,
+                    limit: 200,
+                    search: None,
+                },
+            )
+            .await?;
+        let count = page.items.len() as u64;
+        tenants.extend(page.items);
+        offset += count;
+        if count == 0 || offset >= page.total {
+            break;
+        }
+    }
+    Ok(tenants)
+}
+
+/// Refuse `opaque_mode = required` while it would strand anybody.
+///
+/// [`OpaqueMode::Required`] refuses password login for the whole tenant, before
+/// any credential is examined — deliberately, because refusing only the enrolled
+/// users would turn `/auth/login` into an oracle for who is enrolled. The cost
+/// is that every account without a registration record becomes unable to
+/// authenticate at all, and **nobody can be enrolled retroactively**: a record
+/// can only be built by a client holding the plaintext password, which the
+/// server never has.
+///
+/// So the switch is a one-way door for everyone on the wrong side of it,
+/// including the only administrator of the deployment — which is exactly what
+/// happened in practice: OPAQUE was turned on, no record had ever been written
+/// because the enrolment path was silently omitting them, and the next sign-in
+/// simply failed with nothing to say why.
+///
+/// Refusing here turns that into an error at the moment of the change, naming
+/// the tenants and the number of people in each. The way through is the
+/// migration the mode's documentation describes: run `optional` until coverage
+/// is complete, then switch.
+async fn refuse_incomplete_opaque_coverage<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenants: &[axiam_core::models::tenant::Tenant],
+) -> Result<(), AxiamApiError> {
+    use axiam_core::repository::OpaqueCredentialRepository as _;
+
+    let mut stranded = Vec::new();
+    for tenant in tenants {
+        let count = state
+            .opaque_credential_repo
+            .count_active_users_without_credential(tenant.id)
+            .await?;
+        if count > 0 {
+            stranded.push(format!("{} ({count})", tenant.slug));
+        }
+    }
+
+    if !stranded.is_empty() {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: format!(
+                "opaque_mode `required` would lock out active users who have no \
+                 OPAQUE registration record, and no record can be created for them \
+                 retroactively. Uncovered users by tenant: {}. Run `optional` until \
+                 every active user has set a password — creation, change-password \
+                 and reset completion each enrol one — then switch to `required`.",
+                stranded.join(", "),
+            ),
+        }));
+    }
+    Ok(())
+}
+
+/// Re-apply the tighten-only rule to every tenant after the baseline moves.
+///
+/// A tenant override may only ever be *more* restrictive than the organization's
+/// baseline, and `validate_tenant_override` enforces that when the override is
+/// written. Nothing re-checked it when the **baseline** changed, so raising the
+/// organization's floor left every tenant that had written an override for that
+/// field sitting below the new one — for good, and invisibly.
+///
+/// Overrides that are still stricter are untouched: a tenant that chose a
+/// 24-character minimum keeps it when the organization moves from 12 to 16.
+/// Fields that are now weaker are **cleared** rather than rewritten to the new
+/// value, so the tenant tracks the baseline from here on instead of freezing at
+/// today's level and needing the same repair after the next change.
+///
+/// Best-effort per tenant: the read path clamps identically
+/// (`clamp_overrides_to_org` in the settings repository), so a tenant this fails
+/// to rewrite still *behaves* correctly — only its stored row stays untidy.
+/// Failing the operator's settings change over that would be the wrong trade.
+async fn reconcile_tenant_overrides<C: Connection + Clone>(
+    state: &AppState<C>,
+    org: &SecuritySettings,
+    tenants: &[axiam_core::models::tenant::Tenant],
+) {
+    for tenant in tenants {
+        let Ok(Some(mut overrides)) = state.settings_repo.get_tenant_override(tenant.id).await
+        else {
+            continue;
+        };
+        let cleared = clamp_overrides_to_org(org, &mut overrides);
+        if cleared.is_empty() {
+            continue;
+        }
+        match state
+            .settings_repo
+            .set_tenant_override(tenant.id, overrides)
+            .await
+        {
+            Ok(_) => tracing::info!(
+                tenant_id = %tenant.id,
+                tenant = %tenant.slug,
+                fields = ?cleared,
+                "cleared tenant overrides that the new org baseline overtook"
+            ),
+            Err(e) => tracing::warn!(
+                tenant_id = %tenant.id,
+                tenant = %tenant.slug,
+                fields = ?cleared,
+                error = %e,
+                "could not rewrite tenant overrides; the read path still clamps them"
+            ),
+        }
     }
 }
 
@@ -172,37 +311,34 @@ pub async fn set_org_settings<C: Connection + Clone>(
     reject_opaque_without_keys(input.opaque_mode, &state)?;
     let opaque_mode = input.opaque_mode;
     let opaque_suite = input.opaque_suite;
+
+    // An organization baseline reaches every tenant, so everything below is
+    // organization-wide. Read once and reuse: the coverage gate, the key-material
+    // provisioning and the override reconciliation all walk the same list.
+    let tenants = all_tenants_of(&state, org_id).await?;
+
+    // Checked BEFORE the write, so a refusal leaves the deployment exactly as it
+    // was. `required` at the organization makes every tenant `required` — the
+    // tighten-only rule means no tenant can hold itself below the baseline — so
+    // every tenant is in scope, the organization's own reserved scope included.
+    if opaque_mode == OpaqueMode::Required {
+        refuse_incomplete_opaque_coverage(&state, &tenants).await?;
+    }
+
     let settings = state.settings_repo.set_org_settings(org_id, input).await?;
 
     // Switching OPAQUE on at the organization switches it on for every tenant
     // that has not tightened past it, so every one of them needs key material.
-    // Paged to the end rather than taking the default first page: a partial
-    // sweep would leave later tenants looking un-provisioned for no reason
-    // anybody could see.
     if opaque_mode != OpaqueMode::Disabled {
-        let mut offset = 0u64;
-        loop {
-            let page = state
-                .tenant_repo
-                .list_by_organization(
-                    org_id,
-                    Pagination {
-                        offset,
-                        limit: 200,
-                        search: None,
-                    },
-                )
-                .await?;
-            let count = page.items.len() as u64;
-            for tenant in page.items {
-                provision_opaque_setup(&state, tenant.id, opaque_suite).await;
-            }
-            offset += count;
-            if count == 0 || offset >= page.total {
-                break;
-            }
+        for tenant in &tenants {
+            provision_opaque_setup(&state, tenant.id, opaque_suite).await;
         }
     }
+
+    // And every tenant override the new baseline has overtaken is cleared, so
+    // the change actually reaches the tenants that had one — which is what
+    // "propagated to all the already existing ones" has to mean.
+    reconcile_tenant_overrides(&state, &settings, &tenants).await;
 
     Ok(HttpResponse::Ok().json(settings))
 }
@@ -399,6 +535,19 @@ pub async fn set_tenant_override<C: Connection + Clone>(
     validate_tenant_override(&org, &overrides)?;
     if let Some(mode) = overrides.opaque_mode {
         reject_opaque_without_keys(mode, &state)?;
+    }
+
+    // Same one-way door as at the organization, checked against this tenant
+    // alone. Read from the *effective* mode rather than the override so that a
+    // tenant inheriting `required` from a baseline it is only now writing an
+    // unrelated override against is not gated twice — the organization write
+    // already established coverage for it.
+    let would_be = effective_settings(&org, &overrides, tenant_id, Uuid::nil());
+    if would_be.opaque.opaque_mode == OpaqueMode::Required
+        && overrides.opaque_mode == Some(OpaqueMode::Required)
+    {
+        let tenant = state.tenant_repo.get_by_id(tenant_id).await?;
+        refuse_incomplete_opaque_coverage(&state, std::slice::from_ref(&tenant)).await?;
     }
 
     let stored = state

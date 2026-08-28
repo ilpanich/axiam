@@ -7,8 +7,9 @@ use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
     CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
     OpaquePolicy, PasswordPolicy, PrivacyPolicy, SecuritySettings, SetOrgSettings,
-    SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy, diff_against_org,
-    effective_settings, settings_from_org_input, system_defaults,
+    SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy,
+    clamp_overrides_to_org, diff_against_org, effective_settings, settings_from_org_input,
+    system_defaults,
 };
 use axiam_core::repository::SettingsRepository;
 use chrono::{DateTime, Utc};
@@ -716,7 +717,7 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
             .fetch_row_with_overrides("tenant", &tenant_id.to_string())
             .await?
         {
-            let overrides: TenantSettingsOverride = if let Some(ref json) = overrides_json_opt {
+            let mut overrides: TenantSettingsOverride = if let Some(ref json) = overrides_json_opt {
                 // V16+ row: use the stored sparse override mask directly so
                 // that fields the tenant did NOT override pick up the current
                 // org baseline (CQ-B03).
@@ -727,6 +728,34 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
                 // `set_tenant_override` or `store_effective_tenant_settings`.
                 diff_against_org(&org, &tenant_row)
             };
+
+            // A tenant may only ever tighten. `validate_tenant_override`
+            // enforces that when an override is written; this enforces it when
+            // one is READ, which is the half that was missing.
+            //
+            // An organization baseline is not a constant. Raising `min_length`,
+            // or moving `opaque_mode` from `disabled` to `required`, left every
+            // tenant that had ever written an override for that field sitting
+            // below the new floor — indefinitely, and invisibly: the
+            // organization row said the control was on, tenants without an
+            // override did inherit it, and only the ones that had visited their
+            // own settings page quietly did not.
+            //
+            // Clamping here rather than only at write time also covers the rows
+            // no write path will revisit: pre-V16 rows resolved by
+            // `diff_against_org`, and anything a migration or bulk import wrote
+            // directly. The effective policy cannot be weaker than the
+            // organization's, whatever is stored.
+            let cleared = clamp_overrides_to_org(&org, &mut overrides);
+            if !cleared.is_empty() {
+                tracing::debug!(
+                    target: "axiam::settings",
+                    tenant_id = %tenant_id,
+                    fields = ?cleared,
+                    "tenant overrides weaker than the org baseline were ignored"
+                );
+            }
+
             let mut merged = effective_settings(&org, &overrides, tenant_id, tenant_row.id);
             // Preserve the persisted timestamps rather than using
             // Utc::now() from the merge function.

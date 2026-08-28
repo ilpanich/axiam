@@ -53,22 +53,22 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.7.0",
+ "version": "2.8.0",
  "diagramCount": 9,
- "total": 186,
+ "total": 199,
  "open": 16,
- "mitigated": 170,
+ "mitigated": 183,
  "areas": [
   {
    "id": 0,
    "title": "System diagram",
-   "total": 27,
+   "total": 28,
    "open": 2
   },
   {
    "id": 1,
    "title": "Authentication & session management",
-   "total": 27,
+   "total": 29,
    "open": 1
   },
   {
@@ -86,13 +86,13 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 4,
    "title": "Authorization engine — RBAC, hierarchy & scopes",
-   "total": 15,
+   "total": 19,
    "open": 0
   },
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "total": 18,
+   "total": 23,
    "open": 1
   },
   {
@@ -110,19 +110,19 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
-   "total": 21,
+   "total": 22,
    "open": 4
   }
  ],
  "categories": [
   {
    "name": "Spoofing",
-   "total": 47,
+   "total": 49,
    "open": 3
   },
   {
    "name": "Tampering",
-   "total": 37,
+   "total": 39,
    "open": 2
   },
   {
@@ -132,34 +132,34 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 50,
+   "total": 52,
    "open": 7
   },
   {
    "name": "Denial of service",
-   "total": 18,
+   "total": 19,
    "open": 2
   },
   {
    "name": "Elevation of privilege",
-   "total": 29,
+   "total": 35,
    "open": 2
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 25,
+   "total": 26,
    "open": 1
   },
   {
    "name": "High",
-   "total": 84,
+   "total": 91,
    "open": 7
   },
   {
    "name": "Medium",
-   "total": 70,
+   "total": 75,
    "open": 7
   },
   {

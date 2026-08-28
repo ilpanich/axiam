@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.7.0",
+ "version": "2.8.0",
  "diagramCount": 9,
- "total": 186,
+ "total": 199,
  "open": 16,
- "mitigated": 170,
+ "mitigated": 183,
  "diagrams": [
   {
    "id": 0,
@@ -313,6 +313,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "SCIM provisioning tokens exist because Okta and Entra can present only one static bearer string, so the credential is deliberately long-lived — pasted once into the IdP and forgotten. Whoever obtains it can drive user provisioning and deprovisioning for the tenant for as long as it lives.",
        "mitigation": "Containment is the design (#330): a provisioning token is accepted on /scim/v2/* and nowhere else — not /api/v1/*, not /oauth2/*, not gRPC — and carries no permissions of its own: it resolves to an existing tenant user whose RBAC must still pass the same require_scim_provision check as a session would. It is stored SHA-256-hashed with the plaintext returned exactly once, carries an expiry, is revocable independently of every other credential, stamps last_used_at on use, and minting and revocation are audited. SCIM has its own rate-limit bucket (R5.2), and deprovisioning a user through SCIM revokes their live sessions and refresh tokens (SEC-098)."
+      },
+      {
+       "number": 187,
+       "title": "Deleted user's tombstone retains personal data and discloses the account existed",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Administrator deletion tombstoned the user row but kept username, email and metadata on it indefinitely — retention with the UI hidden, not erasure. Because the per-tenant uniqueness indexes are enforced by the database, the retained identifiers also blocked the person from ever registering again, and the duplicate-account refusal itself disclosed that the deleted account had existed.",
+       "mitigation": "Fixed in 1.0.0-beta01: deletion overwrites username, email and metadata with values derived from the row's own id and erases what lives outside the row — WebAuthn credentials, federation identity links, password history — the same residue the GDPR Art. 17 purge clears, so an administrator's Delete and a data subject's erasure request do not leave different residue. The freed identifiers make a later registration a genuinely new account (pinned by a delete-then-recreate test). The row survives holding only its id, because append-only audit entries name their actor by id; only the Art. 17 pipeline additionally pseudonymises audit references and produces an erasure proof — a distinction docs/compliance/gdpr-compliance.md now states."
       }
      ],
      "open": 0
@@ -934,11 +943,11 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 27,
+   "total": 28,
    "open": 2,
    "bySeverity": {
     "High": 14,
-    "Medium": 10,
+    "Medium": 11,
     "Critical": 3
    }
   },
@@ -1192,6 +1201,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A failed OPAQUE authentication is a wrong password, but it surfaces as a failed KE3 inside the AKE rather than a failed hash verify. A path that did not accrue toward lockout would mean enabling OPAQUE silently removed brute-force protection from every account that adopted it — the same unmetered-path defect SEC-026b closed for gRPC (T-31), reopened by a new protocol.",
        "mitigation": "A failed KE3 accrues toward the shared exponential-backoff lockout exactly as a failed Argon2id verify does. OpaqueRejection deliberately has two variants rather than one so the caller can attribute an attempt before accruing it: a malformed client message (AuthError::OpaqueMalformed, 400) is distinguished from a wrong password, and only the latter counts against the account — and from corrupt stored state (500), so junk from a client is never read as a server fault."
+      },
+      {
+       "number": 188,
+       "title": "Brute force metered against the deployment default, not the configured threshold",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Every credential path accrued failed attempts against the process-wide AuthConfig defaults. A tenant or organization that lowered max_failed_login_attempts saw the setting stored, merged and returned by the settings API — and never read by the code that locks accounts, so the configured threshold was decoration and an attacker was metered against the more permissive deployment number on every transport.",
+       "mitigation": "Fixed in 1.0.0-beta01: the REST login handler, OPAQUE login-finish and gRPC ValidateCredentials all resolve the org→tenant effective LockoutPolicy before accruing, so an account locks after the same number of failures whichever transport the attacker uses. record_failed_login now takes a LockoutPolicy rather than an AuthConfig — there is no longer a type that fits the parameter and carries the wrong numbers. A settings-resolution failure falls back to the deployment default rather than to no threshold, so a settings outage cannot open a brute-force window."
       }
      ],
      "open": 0
@@ -1591,6 +1609,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Bearer values placed in query strings end up in access logs, browser history and Referer headers sent to third parties.",
        "mitigation": "Tokens are delivered in the response body and in Secure/HttpOnly cookies, never as URL parameters; secret-bearing types carry manual Debug implementations that redact them from logs (SEC-067 / SECHRD-09)."
+      },
+      {
+       "number": 189,
+       "title": "Logout's removal cookies were weaker than the cookies they cleared",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A removal is a Set-Cookie in its own right: the browser parses it and keeps the empty-valued cookie it describes until it expires. The logout paths emitted removals carrying only Path, dropping the HttpOnly, Secure and SameSite=Strict the matching setters emit — a replacement that was JS-readable, cross-site-sendable and cleartext-transmissible, and whose effectiveness rested on transport the setters explicitly do not trust, since a browser refuses to let a non-Secure cookie from an insecure origin overwrite a Secure one (“Leave Secure Cookies Alone”).",
+       "mitigation": "Fixed in 1.0.0-beta03 (CodeQL rust/insecure-cookie): each removal cookie is built by calling the cookie's own setter and expiring the result, so HttpOnly, Secure, SameSite and Path are mirrored by construction rather than by repetition — there is exactly one place per cookie where those attributes are written, the deliberately JS-readable CSRF cookie included (D-07). Tests assert the attributes on the wire for all three cookies, across both logout paths and both cookie_secure values."
       }
      ],
      "open": 0
@@ -1759,11 +1786,11 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 27,
+   "total": 29,
    "open": 1,
    "bySeverity": {
     "High": 12,
-    "Medium": 10,
+    "Medium": 12,
     "Critical": 3,
     "Low": 2
    }
@@ -3259,7 +3286,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 4,
    "title": "Authorization engine — RBAC, hierarchy & scopes",
-   "description": "The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the default-deny RBAC engine with explicit deny-override with resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them.",
+   "description": "The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the default-deny RBAC engine with explicit deny-override with resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them. Organization-level principals are evaluated under an explicit SubjectScope claim: only global grants carry across a tenant boundary, and an ordinary tenant principal cannot express cross-tenant reach at all.",
    "width": 1438,
    "height": 808,
    "boundaries": [
@@ -3392,6 +3419,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A handler registered outside the guarded scope — or a new route added without its permission annotation — is reachable by any authenticated caller.",
        "mitigation": "Required permissions are declared centrally in the REST permissions table rather than ad hoc per handler, and the middleware default is deny; a route with no declared permission is refused rather than allowed."
+      },
+      {
+       "number": 193,
+       "title": "Active-tenant header reaches across organization boundaries",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "An organization-level principal selects the tenant it is acting in with the X-Axiam-Tenant header. Accepted unverified, that header would let organization scope cross organization boundaries too — which is the one isolation an organization is.",
+       "mitigation": "The header is verified to name a tenant inside the caller's own organization before any scope is derived, and the check fails closed: no tenant resolver registered means the header is refused (1.0.0-beta02). For an ordinary tenant principal the same header change is a 403 — CONTRACT §5.2 states the SDK-visible half: organization_level is derived server-side and response-only, and a tenant-switch helper may exist only where it is true."
       }
      ],
      "open": 0
@@ -3506,6 +3542,24 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The engine is allow-wins with default deny and no explicit deny. A role granted on a parent resource cascades to every child and cannot be revoked on one child alone.",
        "mitigation": "SEC-040 — closed (B1). The engine now supports explicit deny: a grant carries effect: \"allow\" | \"deny\", and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity (deny-override, not most-specific-wins). Adding a deny rule can never widen access and can never be undone by adding allows — asserted by an exhaustive property test. Modelling exclusions by granting lower in the hierarchy remains valid but is no longer the only option. See claude_dev/deny-override-design.md for the precedence table and the scope-interaction rules."
+      },
+      {
+       "number": 190,
+       "title": "Cross-tenant reach granted by inference rather than by claim",
+       "type": "Elevation of privilege",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "AccessRequest carried subject_tenant_id: Option<Uuid>, and the engine treated two tenant ids differing as authority to read a subject's grants across the tenant boundary. Any caller that built a request for a subject in tenant A about tenant B got cross-tenant reach for free, so an ordinary global admin role applied in every tenant of the deployment — the exact opposite of what a tenant is.",
+       "mitigation": "Fixed in 1.0.0-beta02: SubjectScope names the claim. Tenant is every ordinary principal and pins the assignment tenant to the target, so a tenant principal cannot express cross-tenant reach at all, whatever tenant it names. Organization is a statement a caller has to make deliberately — no combination of ordinary values produces it — and its sole production producer is the REST extractor, which resolves the tenant record and checks it is the organization's reserved scope before setting the flag. organization_scope_test asserts both properties directly, plus the case the fix must not break: an organization-level principal acting on the organization tenant still gets resource-scoped evaluation there."
+      },
+      {
+       "number": 191,
+       "title": "Organization-scoped resource grant honoured against a look-alike resource in another tenant",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "An organization-level principal's resource-scoped assignment names a resource in the organization's reserved tenant. A same-named resource in a member tenant is a different thing, and honouring the assignment against it would be a silent escalation between isolated tenants.",
+       "mitigation": "One rule, stated once in AuthorizationEngine::evaluate (1.0.0-beta02): when a subject's grants are read across a tenant boundary, only global grants carry. check_access_batch applies the identical rule through the same helper, so a batched decision stays byte-identical to a per-item one. Deny override, scope narrowing and group inheritance are unchanged. Access is derived at check time rather than fanned out at tenant creation, so a tenant created later is governed by the same rule with no backfill, and revoking the organization role revokes everywhere because there is only one copy."
       }
      ],
      "open": 0
@@ -3542,6 +3596,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A key that omits tenant, subject, action, resource or scope would return one subject's decision to another.",
        "mitigation": "The cache key includes every input to the decision — tenant, subject, action, resource and scopes — so distinct questions cannot collide."
+      },
+      {
+       "number": 192,
+       "title": "Revoked organization-level role survives in other tenants' decision caches",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The decision cache shards by the tenant a decision was about, while an organization-level principal's roles live in exactly one tenant. Invalidating only the shard of the tenant the mutation happened in would leave a freshly revoked administrator holding cached allows in every other tenant until the TTL expired.",
+       "mitigation": "invalidate_subject sweeps every shard (1.0.0-beta02); a subject id is unique across the deployment, so the sweep removes exactly that subject's entries and nothing else. SubKey carries subject_tenant_id, so cache-key correctness does not depend on a subject's home tenant being fixed."
       }
      ],
      "open": 0
@@ -3829,18 +3892,18 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 15,
+   "total": 19,
    "open": 0,
    "bySeverity": {
-    "Critical": 4,
-    "High": 4,
+    "Critical": 5,
+    "High": 7,
     "Medium": 7
    }
   },
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "description": "Organization CA lifecycle, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine.",
+   "description": "Organization and tenant CA lifecycle with per-CA key custody (sealed database row or Vault), tenant signing CAs beneath the organization CA, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification against hot-reloadable trust anchors, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine.",
    "width": 1438,
    "height": 828,
    "boundaries": [
@@ -3955,7 +4018,7 @@ export const THREAT_MODEL: ThreatModel = {
       "upload /",
       "rotate)"
      ],
-     "description": "",
+     "description": "Organization and tenant CA lifecycle: generate, upload, rotate and revoke; tenant signing CAs created beneath the organization CA or signed from a PKCS#10 CSR; per-CA key custody with migrate-custody between database and Vault; organization CAs flagged as mTLS trust anchors.",
      "outOfScope": false,
      "threats": [
       {
@@ -3965,7 +4028,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Critical",
        "status": "Mitigated",
        "description": "The signing CA key allows forging any tenant, user, service or device identity in the organization.",
-       "mitigation": "User-generated CAs are returned once and never stored. Only signing CAs whose key AXIAM must hold are persisted, and those are AES-256-GCM encrypted at rest in a separate, access-controlled table with the key held outside the datastore."
+       "mitigation": "User-generated CAs are returned once and never stored. Only signing CAs whose key AXIAM must hold are persisted, and those are AES-256-GCM encrypted at rest in a separate, access-controlled table with the key held outside the datastore. Since 1.0.0-beta01 custody is recorded per CA and may instead be Vault — vault holds the sealed key, vault_pki has Vault hold a key it never hands over — the configured Vault is inherited for new keys, and an explicit database choice beside a working Vault is a startup warning naming the exposure (see T-196, T-197)."
       },
       {
        "number": 96,
@@ -3974,7 +4037,25 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "A CA or leaf key generated from a weak source is factorable or predictable, silently invalidating the whole hierarchy.",
-       "mitigation": "Key generation uses the platform CSPRNG through rcgen with RSA-4096 or Ed25519; no custom or seeded RNG is used anywhere in the PKI path."
+       "mitigation": "Key generation uses the platform CSPRNG — Ed25519 through rcgen/ring, RSA-4096 through the rsa crate's OS-seeded generator handed to rcgen as PKCS#8, since ring deliberately implements no RSA key generation (1.0.0-beta01). No custom or seeded RNG is used anywhere in the PKI path."
+      },
+      {
+       "number": 194,
+       "title": "Tenant CSR signed into an unconstrained CA, or onto a key the requester does not hold",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The tenant signing-CA endpoint signs a PKCS#10 request whose key was generated elsewhere. Honouring the request's own extensions would let a caller mint an unconstrained CA; skipping verification of the request's self-signature would mint a CA certificate for somebody else's public key.",
+       "mitigation": "The CSR's subject is honoured; its requested extensions are not — AXIAM states CA:TRUE, path length zero and keyCertSign/cRLSign itself, so a request that asked to be an unconstrained CA does not become one (1.0.0-alpha44). from_pem verifies the request's self-signature as proof of possession. The parent must be unexpired, unrevoked, key-holding and not itself tenant-scoped — refused up front rather than downstream — the intermediate's validity is capped to the parent's expiry, and the row records custody External because AXIAM never held the key."
+      },
+      {
+       "number": 197,
+       "title": "Custody migration destroys the only copy of a CA signing key",
+       "type": "Denial of service",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Migrating a CA's key from Vault into database custody wrote custody = database beside an emptied key column, then released the Vault copy — and returned Ok. The CA row claimed to hold a key it did not have, the key it named was gone, and no backup of the row helps, because the row never contained the key. That CA could no longer sign anything.",
+       "mitigation": "Fixed in 1.0.0-beta02: the repository writes the ciphertext it is given in the same single statement that records the custodian, so the Vault→database direction carries the key and the database→Vault direction still clears the column — clearing is now the caller's decision, not the repository's assumption. The operation orders copy, record, then release, so a failure before the record leaves the CA exactly as it was. Five integration tests drive the real Vault key store against a mock HTTP server, including that a migrated-back key still decrypts and equals the one Vault handed over."
       }
      ],
      "open": 0
@@ -4004,7 +4085,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "An over-long certificate outlives the review cycle and cannot be retired without an explicit revocation.",
-       "mitigation": "max_certificate_validity_days is an org/tenant setting, and the hierarchical settings rule means a tenant can only make it stricter, never longer, than the organization baseline."
+       "mitigation": "max_certificate_validity_days is an org/tenant setting, and the hierarchical settings rule means a tenant can only make it stricter, never longer, than the organization baseline. Since 1.0.0-beta01 issuance also refuses a validity that would outlive the issuing CA and quotes the achievable number, rather than silently truncating to the issuer's notAfter — a truncation that left renewal calendars built on a date the certificate does not carry."
       },
       {
        "number": 98,
@@ -4013,7 +4094,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Critical",
        "status": "Mitigated",
        "description": "Issuing under a subject belonging to a different tenant would produce a credential that authenticates across the isolation boundary.",
-       "mitigation": "Issuance is tenant-scoped from the authenticated context, and the signing CA is resolved from the requesting tenant's organization — a cross-tenant subject cannot be signed."
+       "mitigation": "Issuance is tenant-scoped from the authenticated context, and the signing CA is resolved from the requesting tenant's organization — a cross-tenant subject cannot be signed. Tenant signing CAs (1.0.0-alpha44) narrow the blast radius further: issuance for a tenant is anchored at that tenant's path-length-zero intermediate, so a compromised or misused issuer is revocable without touching any other tenant."
       },
       {
        "number": 99,
@@ -4023,6 +4104,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The generated private key is returned once in the API response; if it reaches a log line or an audit payload it becomes durably stored in the clear.",
        "mitigation": "Key material is excluded from audit payloads, and secret-bearing types carry manual Debug implementations so they cannot reach a trace or error line (SEC-067 / SECHRD-09)."
+      },
+      {
+       "number": 195,
+       "title": "One tenant's compromised issuance burns the organization trust anchor",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "When every tenant's user, service and device certificates issue straight from the organization CA, a compromised issuance path in one tenant is the whole estate's problem: the anchor is long-lived, widely distributed and painful to replace, and rotating it is a coordinated change at every relying party.",
+       "mitigation": "Tenant signing CAs (1.0.0-alpha44): an intermediate created beneath the organization CA, constrained to a path length of zero, named as issuer_ca_id when issuing for that tenant, its key held by the configured custodian — Vault where configured, even when the parent's key predates Vault adoption. Revoking it revokes exactly one tenant's issuance. Under vault_pki the signing chain deliberately reaches past the path-length-zero issuing intermediate to the root, because signing from the issuing intermediate would produce certificates Vault accepts and every chain validator rejects."
       }
      ],
      "open": 0
@@ -4063,6 +4153,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Skipping validity-period checks lets a retired device certificate keep working indefinitely.",
        "mitigation": "not_before and not_after are enforced at authentication time against the current clock, in addition to the stored status."
+      },
+      {
+       "number": 198,
+       "title": "Revoked or unflagged CA lingers in the mTLS trust-anchor bundle",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Flagging an organization CA as an mTLS trust anchor exports its public certificate into the bundle rustls verifies client certificates against. A bundle that is not rewritten when a CA is unflagged or revoked leaves an anchor on disk that the live verifier — and every later restart — would still trust, so certificates chaining to a withdrawn CA keep authenticating.",
+       "mitigation": "The trust-anchor reload rewrites the entire flagged set every time (1.0.0-beta01/beta02): unflagging removes an anchor, emptying the set empties the bundle rather than leaving stale anchors a reboot would trust, and the hot reload swaps the live verifier without a restart. Only public certificates are exported — the signing key is never copied. Client verification stays optional, so flagging a CA cannot lock every browser out of the admin UI, and an operator's own CLIENT_AUTH / CLIENT_CA_PATH configuration is never overridden by the convenience."
       }
      ],
      "open": 0
@@ -4132,14 +4231,25 @@ export const THREAT_MODEL: ThreatModel = {
      "y": 144,
      "w": 170,
      "h": 80,
-     "name": "ca_certificate (AES-256-GCM key)",
+     "name": "ca_certificate (sealed row or Vault custody)",
      "lines": [
       "ca_certificate",
-      "(AES-256-GCM key)"
+      "(sealed row or",
+      "Vault custody)"
      ],
-     "description": "",
+     "description": "Organization and tenant CA rows with per-CA key custody: AES-256-GCM sealed into the row, held in Vault, held by Vault's PKI engine (never exported), or External (no key stored).",
      "outOfScope": false,
-     "threats": [],
+     "threats": [
+      {
+       "number": 196,
+       "title": "Vault configured, CA keys silently sealed into database rows",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "CA key custody read its own PKI-specific Vault variable pair. A deployment that configured the secret provider's pair saw 'secret provider ready provider=vault' at startup and reasonably concluded its CA signing keys were in Vault — while custody fell through to database, sealing every organization and tenant CA private key into a ca_certificate row. A database dump plus one process's AXIAM__PKI__ENCRYPTION_KEY then yields every CA private key in the deployment, and nothing records the read.",
+       "mitigation": "Fixed in 1.0.0-beta02: no PKI-specific pair now means the Vault the deployment already configured, not no Vault at all, and the startup custody line carries vault_inherited so an operator who never set a PKI variable can read why their keys are in Vault. The PKI pair still wins outright when set. Database custody beside a working Vault is reachable only by writing AXIAM__PKI__CA_KEY_STORE=database explicitly, and is reported at startup as a warning naming what is at stake. Custody is recorded per CA, and the migrate-custody endpoint moves existing keys into Vault without re-issuing anything."
+      }
+     ],
      "open": 0
     },
     {
@@ -4541,12 +4651,12 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 18,
+   "total": 23,
    "open": 1,
    "bySeverity": {
     "Critical": 6,
-    "High": 9,
-    "Medium": 3
+    "High": 13,
+    "Medium": 4
    }
   },
   {
@@ -6075,6 +6185,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The contract is where SDK security behaviour is actually specified — TLS policy, secret redaction, AMQP HMAC, CSRF. Relaxing a clause silently relaxes it across eleven implementations at once.",
        "mitigation": "The contract lives in this repository under normal review, and the drift and buf gates make any change to the generated artifacts visible in CI rather than in a downstream repository."
+      },
+      {
+       "number": 199,
+       "title": "Two OpenAPI exports cannot be told apart, so vendored spec drift goes unseen",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Eleven SDK repositories vendor openapi.json and the §27 management registry, and generate client surface from them. Without a content identity, a stale or altered copy is indistinguishable from a faithful one — and the failure mode is real: 1.0.0-beta02 itself shipped a spec whose digest described beta01, because the release flow rewrote info.version under an assumption the digest field had deliberately inverted.",
+       "mitigation": "Every OpenAPI export carries info.x-axiam-spec-digest, a SHA-256 over the document with that field absent, so two exports can be told apart and a vendored copy can be checked against the spec it claims to be (1.0.0-beta02). check-spec-digest.py recomputes the digest on every commit with no toolchain and no build, the SDK drift gate watches sdks/openapi.json itself, and the release script re-stamps the digest and regenerates the registry immediately after its version substitution — verified by replaying the release that broke (1.0.0-beta03)."
       }
      ],
      "open": 0
@@ -6356,11 +6475,11 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 21,
+   "total": 22,
    "open": 4,
    "bySeverity": {
     "High": 13,
-    "Medium": 6,
+    "Medium": 7,
     "Critical": 2
    }
   }

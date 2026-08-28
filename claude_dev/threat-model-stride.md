@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 186 |
-| **Mitigated / Open** | 170 / 16 |
+| **Threats identified** | 199 |
+| **Mitigated / Open** | 183 / 16 |
 | **Owner** | ilpanich |
 
 ---
@@ -81,7 +81,7 @@ Five trust boundaries recur across the diagrams. A flow that crosses one is wher
 |---|---|---|
 | **Public Internet ↔ AXIAM** | Browsers, SDK callers, IoT devices, external IdPs | TLS 1.3, authentication, rate limiting, CSRF on cookie-borne requests, input validation |
 | **AXIAM ↔ data tier** | Application pods ↔ SurrealDB, RabbitMQ, Vault / Secrets | Private network, credentialed connections, TLS-only AMQP, parameterised queries, tenant scoping at the repository layer |
-| **Tenant ↔ tenant** | Every tenant's data from every other tenant's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal |
+| **Tenant ↔ tenant** | Every tenant's data from every other tenant's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal; cross-tenant reach exists only as an explicit organization-scope claim (`SubjectScope`), and the `X-Axiam-Tenant` header is verified to stay inside the caller's organization |
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, https enforcement, response size caps, HMAC signatures on webhook deliveries |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | `sdks/CONTRACT.md` clauses — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and buf gates |
 
@@ -90,7 +90,8 @@ Five trust boundaries recur across the diagrams. A flow that crosses one is wher
 | Asset | Where | Compromise means |
 |---|---|---|
 | JWT signing key (Ed25519) | Secret provider — Vault in production, Kubernetes Secrets otherwise | Any identity in any tenant can be forged |
-| Organization CA private key | `ca_certificate`, AES-256-GCM encrypted | Any user, service or device certificate can be minted |
+| Organization CA private key | `ca_certificate` row (AES-256-GCM) or Vault — custody recorded per CA | Any user, service or device certificate can be minted |
+| Tenant signing CA private key | Same per-CA custody; path-length-zero intermediate | One tenant's certificates can be minted; revocation is scoped to that tenant |
 | Password hashes (Argon2id) | `user` | Offline cracking of every credential |
 | OPAQUE setup key + per-tenant OPRF seeds | Secret provider; `opaque_server_setup`, AES-256-GCM encrypted | Stolen OPAQUE records become dictionary-attackable at KSF cost |
 | MFA secrets | `mfa` records, AES-256-GCM encrypted | Second factor defeated indefinitely |
@@ -107,7 +108,7 @@ Each subsection corresponds to one diagram in the Threat Dragon model. Threat nu
 
 Level-0 context data-flow diagram: external actors, the three AXIAM API surfaces, the shared middleware pipeline, the core service layer and the private data tier. Trust boundaries separate the public Internet, the Kubernetes runtime and the data tier.
 
-*27 threats — 3 critical, 14 high, 10 medium; 2 open.*
+*28 threats — 3 critical, 14 high, 11 medium; 2 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -138,6 +139,7 @@ Level-0 context data-flow diagram: external actors, the three AXIAM API surfaces
 | T-25 | Discovery, JWKS, token exchange <br/>*Flow* | I | SSRF via admin-supplied IdP metadata URL | High | Mitigated |
 | T-26 | Event delivery <br/>*Flow* | I | Webhook registration used to probe internal services | Medium | Mitigated |
 | T-181 | REST API (Actix-Web) <br/>*Process* | S | Leaked SCIM provisioning token replayed as the IdP | High | Mitigated |
+| T-187 | REST API (Actix-Web) <br/>*Process* | I | Deleted user's tombstone retains personal data and discloses the account existed | Medium | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -339,13 +341,20 @@ SCIM provisioning tokens exist because Okta and Entra can present only one stati
 
 > Containment is the design (#330): a provisioning token is accepted on `/scim/v2/*` and nowhere else — not `/api/v1/*`, not `/oauth2/*`, not gRPC — and carries no permissions of its own: it resolves to an existing tenant user whose RBAC must still pass the same `require_scim_provision` check as a session would. It is stored SHA-256-hashed with the plaintext returned exactly once, carries an expiry, is revocable independently of every other credential, stamps `last_used_at` on use, and minting and revocation are audited. SCIM has its own rate-limit bucket (R5.2), and deprovisioning a user through SCIM revokes their live sessions and refresh tokens (SEC-098).
 
+**T-187 — Deleted user's tombstone retains personal data and discloses the account existed**  
+`REST API (Actix-Web)` (Process) · Information disclosure · Medium · Mitigated
+
+Administrator deletion tombstoned the user row but kept username, email and metadata on it indefinitely — retention with the UI hidden, not erasure. Because the per-tenant uniqueness indexes are enforced by the database, the retained identifiers also blocked the person from ever registering again, and the duplicate-account refusal itself disclosed that the deleted account had existed.
+
+> Fixed in 1.0.0-beta01: deletion overwrites username, email and metadata with values derived from the row's own id and erases what lives outside the row — WebAuthn credentials, federation identity links, password history — the same residue the GDPR Art. 17 purge clears, so an administrator's Delete and a data subject's erasure request do not leave different residue. The freed identifiers make a later registration a genuinely new account (pinned by a delete-then-recreate test). The row survives holding only its id, because append-only audit entries name their actor by id; only the Art. 17 pipeline additionally pseudonymises audit references and produces an erasure proof — a distinction docs/compliance/gdpr-compliance.md now states.
+
 </details>
 
 ### 5.2 Authentication & session management
 
 Password and OPAQUE (RFC 9807) login, MFA (TOTP and WebAuthn, including usernameless passkey sign-in), lockout and rate limiting, JWT and refresh-token issuance, password reset and email verification, and the credential stores behind them.
 
-*27 threats — 3 critical, 12 high, 10 medium, 2 low; 1 open.*
+*29 threats — 3 critical, 12 high, 12 medium, 2 low; 1 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -376,6 +385,8 @@ Password and OPAQUE (RFC 9807) login, MFA (TOTP and WebAuthn, including username
 | T-178 | Lockout & rate limiting <br/>*Process* | E | OPAQUE login path sits outside the lockout counter | High | Mitigated |
 | T-179 | user credentials (Argon2id hashes, OPAQUE records) <br/>*Store* | I | Stolen OPAQUE records opened offline with the tenant OPRF seed | High | Mitigated |
 | T-182 | MFA verification TOTP / WebAuthn <br/>*Process* | E | Usernameless passkey sign-in skips the gates of the ordinary login path | High | Mitigated |
+| T-188 | Lockout & rate limiting <br/>*Process* | S | Brute force metered against the deployment default, not the configured threshold | Medium | Mitigated |
+| T-189 | access + refresh cookies <br/>*Flow* | T | Logout's removal cookies were weaker than the cookies they cleared | Medium | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -586,6 +597,20 @@ authenticate/discoverable/{start,finish} is a one-round-trip, first-class sign-i
 > endpoint with no limiter is invisible to the check that audits limiters. Finding
 > the next one means reading the route table against `RateLimitConfig` — which
 > nothing does today.
+
+**T-188 — Brute force metered against the deployment default, not the configured threshold**  
+`Lockout & rate limiting` (Process) · Spoofing · Medium · Mitigated
+
+Every credential path accrued failed attempts against the process-wide AuthConfig defaults. A tenant or organization that lowered max_failed_login_attempts saw the setting stored, merged and returned by the settings API — and never read by the code that locks accounts, so the configured threshold was decoration and an attacker was metered against the more permissive deployment number on every transport.
+
+> Fixed in 1.0.0-beta01: the REST login handler, OPAQUE login-finish and gRPC ValidateCredentials all resolve the org→tenant effective LockoutPolicy before accruing, so an account locks after the same number of failures whichever transport the attacker uses. record_failed_login now takes a LockoutPolicy rather than an AuthConfig — there is no longer a type that fits the parameter and carries the wrong numbers. A settings-resolution failure falls back to the deployment default rather than to no threshold, so a settings outage cannot open a brute-force window.
+
+**T-189 — Logout's removal cookies were weaker than the cookies they cleared**  
+`access + refresh cookies` (Flow) · Tampering · Medium · Mitigated
+
+A removal is a Set-Cookie in its own right: the browser parses it and keeps the empty-valued cookie it describes until it expires. The logout paths emitted removals carrying only Path, dropping the HttpOnly, Secure and SameSite=Strict the matching setters emit — a replacement that was JS-readable, cross-site-sendable and cleartext-transmissible, and whose effectiveness rested on transport the setters explicitly do not trust, since a browser refuses to let a non-Secure cookie from an insecure origin overwrite a Secure one (“Leave Secure Cookies Alone”).
+
+> Fixed in 1.0.0-beta03 (CodeQL rust/insecure-cookie): each removal cookie is built by calling the cookie's own setter and expiring the result, so HttpOnly, Secure, SameSite and Path are mirrored by construction rather than by repetition — there is exactly one place per cookie where those attributes are written, the deliberately JS-readable CSRF cookie included (D-07). Tests assert the attributes on the wire for all three cookies, across both logout paths and both cookie_secure values.
 
 </details>
 
@@ -995,9 +1020,9 @@ A scope_map entry mapping to no scopes, an out-of-range token age, or an unknown
 
 ### 5.5 Authorization engine — RBAC, hierarchy & scopes
 
-The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the default-deny RBAC engine with explicit deny-override and resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them.
+The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the default-deny RBAC engine with explicit deny-override and resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them. Organization-level principals are evaluated under an explicit SubjectScope claim: only global grants carry across a tenant boundary, and an ordinary tenant principal cannot express cross-tenant reach at all.
 
-*15 threats — 4 critical, 4 high, 7 medium; 0 open.*
+*19 threats — 5 critical, 7 high, 7 medium; 0 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1016,6 +1041,10 @@ The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP as
 | T-90 | role / permission / resource graph <br/>*Store* | T | Direct edge insertion grants privilege silently | Critical | Mitigated |
 | T-91 | audit_log (decisions & changes) <br/>*Store* | R | Denied decisions not recorded | Medium | Mitigated |
 | T-92 | authz.request <br/>*Flow* | T | Request tampered in flight on the broker | High | Mitigated |
+| T-190 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | Cross-tenant reach granted by inference rather than by claim | Critical | Mitigated |
+| T-191 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | Organization-scoped resource grant honoured against a look-alike resource in another tenant | High | Mitigated |
+| T-192 | Decision cache <br/>*Process* | E | Revoked organization-level role survives in other tenants' decision caches | High | Mitigated |
+| T-193 | REST authz middleware <br/>*Process* | E | Active-tenant header reaches across organization boundaries | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1128,13 +1157,41 @@ A party with broker access modifies subject, action or resource between publish 
 
 > Messages carry an HMAC signature over the payload that the consumer verifies before evaluating; the broker connection is TLS-only — `AXIAM__AMQP__URL` must be `amqps://` and every other scheme is refused before a socket is opened, in a debug build exactly as in a release one, with the `AXIAM__AMQP__ALLOW_PLAINTEXT` escape hatch removed.
 
+**T-190 — Cross-tenant reach granted by inference rather than by claim**  
+`RBAC engine (graph traversal, hierarchy, scopes)` (Process) · Elevation of privilege · Critical · Mitigated
+
+AccessRequest carried subject_tenant_id: Option<Uuid>, and the engine treated two tenant ids differing as authority to read a subject's grants across the tenant boundary. Any caller that built a request for a subject in tenant A about tenant B got cross-tenant reach for free, so an ordinary global admin role applied in every tenant of the deployment — the exact opposite of what a tenant is.
+
+> Fixed in 1.0.0-beta02: SubjectScope names the claim. Tenant is every ordinary principal and pins the assignment tenant to the target, so a tenant principal cannot express cross-tenant reach at all, whatever tenant it names. Organization is a statement a caller has to make deliberately — no combination of ordinary values produces it — and its sole production producer is the REST extractor, which resolves the tenant record and checks it is the organization's reserved scope before setting the flag. organization_scope_test asserts both properties directly, plus the case the fix must not break: an organization-level principal acting on the organization tenant still gets resource-scoped evaluation there.
+
+**T-191 — Organization-scoped resource grant honoured against a look-alike resource in another tenant**  
+`RBAC engine (graph traversal, hierarchy, scopes)` (Process) · Elevation of privilege · High · Mitigated
+
+An organization-level principal's resource-scoped assignment names a resource in the organization's reserved tenant. A same-named resource in a member tenant is a different thing, and honouring the assignment against it would be a silent escalation between isolated tenants.
+
+> One rule, stated once in AuthorizationEngine::evaluate (1.0.0-beta02): when a subject's grants are read across a tenant boundary, only global grants carry. check_access_batch applies the identical rule through the same helper, so a batched decision stays byte-identical to a per-item one. Deny override, scope narrowing and group inheritance are unchanged. Access is derived at check time rather than fanned out at tenant creation, so a tenant created later is governed by the same rule with no backfill, and revoking the organization role revokes everywhere because there is only one copy.
+
+**T-192 — Revoked organization-level role survives in other tenants' decision caches**  
+`Decision cache` (Process) · Elevation of privilege · High · Mitigated
+
+The decision cache shards by the tenant a decision was about, while an organization-level principal's roles live in exactly one tenant. Invalidating only the shard of the tenant the mutation happened in would leave a freshly revoked administrator holding cached allows in every other tenant until the TTL expired.
+
+> invalidate_subject sweeps every shard (1.0.0-beta02); a subject id is unique across the deployment, so the sweep removes exactly that subject's entries and nothing else. SubKey carries subject_tenant_id, so cache-key correctness does not depend on a subject's home tenant being fixed.
+
+**T-193 — Active-tenant header reaches across organization boundaries**  
+`REST authz middleware` (Process) · Elevation of privilege · High · Mitigated
+
+An organization-level principal selects the tenant it is acting in with the X-Axiam-Tenant header. Accepted unverified, that header would let organization scope cross organization boundaries too — which is the one isolation an organization is.
+
+> The header is verified to name a tenant inside the caller's own organization before any scope is derived, and the check fails closed: no tenant resolver registered means the header is refused (1.0.0-beta02). For an ordinary tenant principal the same header change is a 403 — CONTRACT §5.2 states the SDK-visible half: organization_level is derived server-side and response-only, and a tenant-switch helper may exist only where it is true.
+
 </details>
 
 ### 5.6 PKI, certificates & IoT device identity
 
-Organization CA lifecycle, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine.
+Organization and tenant CA lifecycle with per-CA key custody (sealed database row or Vault), tenant signing CAs beneath the organization CA, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification against hot-reloadable trust anchors, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine.
 
-*18 threats — 6 critical, 9 high, 3 medium; 2 open.*
+*23 threats — 6 critical, 13 high, 4 medium; 1 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1156,6 +1213,11 @@ Organization CA lifecycle, tenant certificate issuance with policy enforcement, 
 | T-152 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | T | Older MDS BLOB replayed to reintroduce a since-revoked authenticator | High | Mitigated |
 | T-153 | FIDO MDS3 ingestion (BLOB verify, X3) <br/>*Process* | E | Stale MDS metadata leaves a newly-revoked authenticator treated as compliant | Medium | Mitigated |
 | T-154 | mds_entry / mds_blob_meta (global, X3) <br/>*Store* | T | MDS entry status edited directly in the datastore to hide a revocation | High | Mitigated |
+| T-194 | CA management (generate / upload / rotate) <br/>*Process* | E | Tenant CSR signed into an unconstrained CA, or onto a key the requester does not hold | High | Mitigated |
+| T-195 | Certificate issuance (rcgen, policy enforcement) <br/>*Process* | E | One tenant's compromised issuance burns the organization trust anchor | High | Mitigated |
+| T-196 | ca_certificate (sealed row or Vault custody) <br/>*Store* | I | Vault configured, CA keys silently sealed into database rows | High | Mitigated |
+| T-197 | CA management (generate / upload / rotate) <br/>*Process* | D | Custody migration destroys the only copy of a CA signing key | High | Mitigated |
+| T-198 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | S | Revoked or unflagged CA lingers in the mTLS trust-anchor bundle | Medium | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1179,28 +1241,28 @@ A physically accessible device may yield its private key from unprotected flash,
 
 The signing CA key allows forging any tenant, user, service or device identity in the organization.
 
-> User-generated CAs are returned once and never stored. Only signing CAs whose key AXIAM must hold are persisted, and those are AES-256-GCM encrypted at rest in a separate, access-controlled table with the key held outside the datastore.
+> User-generated CAs are returned once and never stored. Only signing CAs whose key AXIAM must hold are persisted, and those are AES-256-GCM encrypted at rest in a separate, access-controlled table with the key held outside the datastore. Since 1.0.0-beta01 custody is recorded per CA and may instead be Vault — vault holds the sealed key, vault_pki has Vault hold a key it never hands over — the configured Vault is inherited for new keys, and an explicit database choice beside a working Vault is a startup warning naming the exposure (see T-196, T-197).
 
 **T-96 — Weak key material from poor entropy**  
 `CA management (generate / upload / rotate)` (Process) · Tampering · High · Mitigated
 
 A CA or leaf key generated from a weak source is factorable or predictable, silently invalidating the whole hierarchy.
 
-> Key generation uses the platform CSPRNG through rcgen with RSA-4096 or Ed25519; no custom or seeded RNG is used anywhere in the PKI path.
+> Key generation uses the platform CSPRNG — Ed25519 through rcgen/ring, RSA-4096 through the rsa crate's OS-seeded generator handed to rcgen as PKCS#8, since ring deliberately implements no RSA key generation (1.0.0-beta01). No custom or seeded RNG is used anywhere in the PKI path.
 
 **T-97 — Certificate issued beyond the tenant's validity policy**  
 `Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · Medium · Mitigated
 
 An over-long certificate outlives the review cycle and cannot be retired without an explicit revocation.
 
-> max_certificate_validity_days is an org/tenant setting, and the hierarchical settings rule means a tenant can only make it stricter, never longer, than the organization baseline.
+> max_certificate_validity_days is an org/tenant setting, and the hierarchical settings rule means a tenant can only make it stricter, never longer, than the organization baseline. Since 1.0.0-beta01 issuance also refuses a validity that would outlive the issuing CA and quotes the achievable number, rather than silently truncating to the issuer's notAfter — a truncation that left renewal calendars built on a date the certificate does not carry.
 
 **T-98 — Certificate issued for another tenant's subject**  
 `Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · Critical · Mitigated
 
 Issuing under a subject belonging to a different tenant would produce a credential that authenticates across the isolation boundary.
 
-> Issuance is tenant-scoped from the authenticated context, and the signing CA is resolved from the requesting tenant's organization — a cross-tenant subject cannot be signed.
+> Issuance is tenant-scoped from the authenticated context, and the signing CA is resolved from the requesting tenant's organization — a cross-tenant subject cannot be signed. Tenant signing CAs (1.0.0-alpha44) narrow the blast radius further: issuance for a tenant is anchored at that tenant's path-length-zero intermediate, so a compromised or misused issuer is revocable without touching any other tenant.
 
 **T-99 — Returned private key persisted in logs or audit records**  
 `Certificate issuance (rcgen, policy enforcement)` (Process) · Information disclosure · High · Mitigated
@@ -1308,6 +1370,41 @@ A BLOB past its own `nextUpdate` date is deliberately not treated as a hard fail
 Flipping a stored entry's status reports directly in the datastore would let an authenticator model FIDO has revoked keep passing `block_revoked_status` / `require_fido_certified` indefinitely, bypassing the policy engine entirely.
 
 > Same posture as the certificate store (T-104): these tables are written only by the verified ingestion path (weekly refresh job or the admin-triggered refresh endpoint), which always re-derives entries from a BLOB that passed the full digest-pinned trust-chain verification. Direct datastore write access is restricted to the service credentials on the private data tier and is treated as full administrative compromise.
+
+**T-194 — Tenant CSR signed into an unconstrained CA, or onto a key the requester does not hold**  
+`CA management (generate / upload / rotate)` (Process) · Elevation of privilege · High · Mitigated
+
+The tenant signing-CA endpoint signs a PKCS#10 request whose key was generated elsewhere. Honouring the request's own extensions would let a caller mint an unconstrained CA; skipping verification of the request's self-signature would mint a CA certificate for somebody else's public key.
+
+> The CSR's subject is honoured; its requested extensions are not — AXIAM states CA:TRUE, path length zero and keyCertSign/cRLSign itself, so a request that asked to be an unconstrained CA does not become one (1.0.0-alpha44). from_pem verifies the request's self-signature as proof of possession. The parent must be unexpired, unrevoked, key-holding and not itself tenant-scoped — refused up front rather than downstream — the intermediate's validity is capped to the parent's expiry, and the row records custody External because AXIAM never held the key.
+
+**T-195 — One tenant's compromised issuance burns the organization trust anchor**  
+`Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · High · Mitigated
+
+When every tenant's user, service and device certificates issue straight from the organization CA, a compromised issuance path in one tenant is the whole estate's problem: the anchor is long-lived, widely distributed and painful to replace, and rotating it is a coordinated change at every relying party.
+
+> Tenant signing CAs (1.0.0-alpha44): an intermediate created beneath the organization CA, constrained to a path length of zero, named as issuer_ca_id when issuing for that tenant, its key held by the configured custodian — Vault where configured, even when the parent's key predates Vault adoption. Revoking it revokes exactly one tenant's issuance. Under vault_pki the signing chain deliberately reaches past the path-length-zero issuing intermediate to the root, because signing from the issuing intermediate would produce certificates Vault accepts and every chain validator rejects.
+
+**T-196 — Vault configured, CA keys silently sealed into database rows**  
+`ca_certificate (sealed row or Vault custody)` (Store) · Information disclosure · High · Mitigated
+
+CA key custody read its own PKI-specific Vault variable pair. A deployment that configured the secret provider's pair saw 'secret provider ready provider=vault' at startup and reasonably concluded its CA signing keys were in Vault — while custody fell through to database, sealing every organization and tenant CA private key into a ca_certificate row. A database dump plus one process's AXIAM__PKI__ENCRYPTION_KEY then yields every CA private key in the deployment, and nothing records the read.
+
+> Fixed in 1.0.0-beta02: no PKI-specific pair now means the Vault the deployment already configured, not no Vault at all, and the startup custody line carries vault_inherited so an operator who never set a PKI variable can read why their keys are in Vault. The PKI pair still wins outright when set. Database custody beside a working Vault is reachable only by writing AXIAM__PKI__CA_KEY_STORE=database explicitly, and is reported at startup as a warning naming what is at stake. Custody is recorded per CA, and the migrate-custody endpoint moves existing keys into Vault without re-issuing anything.
+
+**T-197 — Custody migration destroys the only copy of a CA signing key**  
+`CA management (generate / upload / rotate)` (Process) · Denial of service · High · Mitigated
+
+Migrating a CA's key from Vault into database custody wrote custody = database beside an emptied key column, then released the Vault copy — and returned Ok. The CA row claimed to hold a key it did not have, the key it named was gone, and no backup of the row helps, because the row never contained the key. That CA could no longer sign anything.
+
+> Fixed in 1.0.0-beta02: the repository writes the ciphertext it is given in the same single statement that records the custodian, so the Vault→database direction carries the key and the database→Vault direction still clears the column — clearing is now the caller's decision, not the repository's assumption. The operation orders copy, record, then release, so a failure before the record leaves the CA exactly as it was. Five integration tests drive the real Vault key store against a mock HTTP server, including that a migrated-back key still decrypts and equals the one Vault handed over.
+
+**T-198 — Revoked or unflagged CA lingers in the mTLS trust-anchor bundle**  
+`mTLS device auth (fingerprint + chain verify)` (Process) · Spoofing · Medium · Mitigated
+
+Flagging an organization CA as an mTLS trust anchor exports its public certificate into the bundle rustls verifies client certificates against. A bundle that is not rewritten when a CA is unflagged or revoked leaves an anchor on disk that the live verifier — and every later restart — would still trust, so certificates chaining to a withdrawn CA keep authenticating.
+
+> The trust-anchor reload rewrites the entire flagged set every time (1.0.0-beta01/beta02): unflagging removes an anchor, emptying the set empties the bundle rather than leaving stale anchors a reboot would trust, and the hot reload swaps the live verifier without a restart. Only public certificates are exported — the signing key is never copied. Client verification stays optional, so flagging a CA cannot lock every browser out of the admin UI, and an operator's own CLIENT_AUTH / CLIENT_CA_PATH configuration is never overridden by the convenience.
 
 </details>
 
@@ -1473,7 +1570,7 @@ AXIAM enforces TLS to the provider, but the provider-to-recipient hop is outside
 
 Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Threats here are largely deployment responsibilities rather than application code.
 
-*13 threats — 1 critical, 9 high, 3 medium; 8 open.*
+*13 threats — 1 critical, 9 high, 3 medium; 4 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1685,7 +1782,7 @@ With `AXIAM__AUTH__SECRET_PROVIDER=vault` the production default, all ten long-l
 
 The React admin UI and the eleven client SDKs (Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++), which live in separate repositories and vendor CONTRACT.md, openapi.json and proto/ from here. Covers SDK transport and credential handling, token verification, the WebAuthn relying-party layer, account lifecycle and PAR operations (contract 1.28, §24–§26), AMQP HMAC consumption and the reactor protocol core, webhook verification and package-distribution supply chain.
 
-*21 threats — 2 critical, 13 high, 6 medium; 4 open.*
+*22 threats — 2 critical, 13 high, 7 medium; 4 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1710,6 +1807,7 @@ The React admin UI and the eleven client SDKs (Rust, TypeScript, Python, Java, K
 | T-184 | SDK HTTP core (11 languages) <br/>*Process* | I | TOTP secret or setup token leaks through account-lifecycle serialization | High | Mitigated |
 | T-185 | SDK HTTP core (11 languages) <br/>*Process* | I | Lifecycle helpers turned into an account-enumeration oracle | Medium | Mitigated |
 | T-186 | SDK AMQP consumer (HMAC verify, nonce) <br/>*Process* | I | Caller-supplied reactor transport connects without TLS | High | Mitigated |
+| T-199 | sdks/CONTRACT.md, openapi.json, proto/ <br/>*Store* | T | Two OpenAPI exports cannot be told apart, so vendored spec drift goes unseen | Medium | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1863,6 +1961,13 @@ Contract 1.28 (§22.11) brings the reactor protocol core — v2 HMAC over the ca
 
 > §8b rule 7's second clause is the whole of their obligation and it is discharged in code, not documentation: each of the three ships the rule 1–5 guard as a public, tested function (`amqpsEndpoint`, `axiam_amqps_endpoint`, `axiam::amqps_endpoint`) — scheme refusal with no loopback exception, no plaintext fallback, no verification-skip switch, fail-closed on an unparseable URL — and calls it in its own example transport before anything opens a socket. The transport seam is deliberately no wider than deliver-inbound and publish-reply, so it cannot hand the integrator the topology tools §22.1 forbids; the protocol core itself is now library code, ending the hand-rolled-HMAC divergence. HMAC signing (§8/§22.2) remains mandatory on every message regardless of transport.
 
+**T-199 — Two OpenAPI exports cannot be told apart, so vendored spec drift goes unseen**  
+`sdks/CONTRACT.md, openapi.json, proto/` (Store) · Tampering · Medium · Mitigated
+
+Eleven SDK repositories vendor openapi.json and the §27 management registry, and generate client surface from them. Without a content identity, a stale or altered copy is indistinguishable from a faithful one — and the failure mode is real: 1.0.0-beta02 itself shipped a spec whose digest described beta01, because the release flow rewrote info.version under an assumption the digest field had deliberately inverted.
+
+> Every OpenAPI export carries info.x-axiam-spec-digest, a SHA-256 over the document with that field absent, so two exports can be told apart and a vendored copy can be checked against the spec it claims to be (1.0.0-beta02). check-spec-digest.py recomputes the digest on every commit with no toolchain and no build, the SDK drift gate watches sdks/openapi.json itself, and the release script re-stamps the digest and regenerates the registry immediately after its version substitution — verified by replaying the release that broke (1.0.0-beta03).
+
 </details>
 
 ## 6. Open risk register
@@ -1932,35 +2037,35 @@ Contract 1.28 (§22.11) brings the reactor protocol core — v2 HMAC over the ca
 
 | Category | Threats |
 |---|---|
-| Spoofing | 47 |
-| Tampering | 37 |
+| Spoofing | 49 |
+| Tampering | 39 |
 | Repudiation | 5 |
-| Information disclosure | 50 |
-| Denial of service | 18 |
-| Elevation of privilege | 29 |
+| Information disclosure | 52 |
+| Denial of service | 19 |
+| Elevation of privilege | 35 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
-| Critical | 25 | 1 |
-| High | 84 | 7 |
-| Medium | 70 | 7 |
+| Critical | 26 | 1 |
+| High | 91 | 7 |
+| Medium | 75 | 7 |
 | Low | 7 | 1 |
 
 **By diagram**
 
 | Diagram | Threats | Open |
 |---|---|---|
-| System diagram | 27 | 2 |
-| Authentication & session management | 27 | 1 |
+| System diagram | 28 | 2 |
+| Authentication & session management | 29 | 1 |
 | OAuth2 / OIDC authorization server | 24 | 0 |
 | Federation — SAML SP & OIDC relying party | 23 | 1 |
-| Authorization engine — RBAC, hierarchy & scopes | 15 | 0 |
-| PKI, certificates & IoT device identity | 18 | 1 |
+| Authorization engine — RBAC, hierarchy & scopes | 19 | 0 |
+| PKI, certificates & IoT device identity | 23 | 1 |
 | Audit, webhooks, email & notifications | 18 | 3 |
 | Deployment & platform (Kubernetes) | 13 | 4 |
-| Client SDKs & admin UI integration surface | 21 | 4 |
+| Client SDKs & admin UI integration surface | 22 | 4 |
 
 ## 8. Assumptions
 
@@ -1968,18 +2073,18 @@ The analysis holds only while these hold. If one stops being true, revisit the d
 
 1. TLS 1.3 terminates at the ingress and the hop to the pods stays inside the cluster network.
 2. The data tier has no route from the public Internet.
-3. Kubernetes Secrets are the only source of key material; nothing sensitive is baked into an image.
+3. The configured secret provider — Vault in the production stacks, Kubernetes Secrets otherwise — is the only source of key material, and CA signing-key custody is recorded per CA on its own row; nothing sensitive is baked into an image.
 4. Cluster-admin is equivalent to full AXIAM compromise and is governed outside this model.
 5. A federated IdP is trusted by the tenant that configures it — federation delegates authentication deliberately.
 6. Integrators verify webhook signatures and AMQP HMACs as `sdks/CONTRACT.md` requires.
-7. Tenant administrators are trusted within their own tenant and only there.
+7. Tenant administrators are trusted within their own tenant and only there. Organization-level principals are trusted across their organization's tenants — and only their organization's; the reserved organization scope is a tenant, so every tenant-isolation control applies to it too.
 
 ## 9. Maintaining this model
 
 Revisit the model when any of the following happens, and re-run the generator so this document tracks the JSON:
 
 - A new API surface, protocol or external integration is added (the OPAQUE endpoints, the SCIM provisioning tokens and the Vault secret provider are the 2026-08 examples — each added or changed threats here)
-- A trust boundary moves — a new component, a change in deployment topology
+- A trust boundary moves — a new component, a change in deployment topology (organization-level principals moved the tenant ↔ tenant boundary in 1.0.0-beta02, and tenant signing CAs with per-CA Vault custody re-shaped the PKI diagram — T-187…T-199 record the 1.0.0-beta01…beta03 wave)
 - A security review raises a finding with no corresponding threat here
 - A deferred item lands (SEC-040 deny-override did, closing T-16/T-87)
 - The SDK contract gains or relaxes a security clause (contract 1.28's WebAuthn, account-lifecycle and PAR sections and the Swift/C/C++ reactor protocol core are the 2026-08-22 examples — T-183…T-186 record them)

@@ -14,10 +14,32 @@
 >
 > ## Handoff — the website section is in step with this document
 >
-> **Status: published, source and section both current as of 2026-08-22
-> (`1.0.0-alpha38`).**
+> **Status: published, source and section both current as of 2026-08-28
+> (`1.0.0-beta03`).**
 >
-> The most recent change to the section is presentational and adds no claim: the
+> The 1.0.0-beta03 pass records the beta01…beta03 wave as thirteen new mitigated
+> threats, T-187…T-199, bringing the model to **199 threats, 183 mitigated / 16
+> open** (model 2.8.0): organization-level principals and the explicit
+> `SubjectScope` cross-tenant claim on the authorization diagram (T-190…T-193);
+> tenant signing CAs, per-CA Vault key custody with inheritance, the
+> custody-migration key-destruction fix, CSR constraint enforcement and the mTLS
+> trust-anchor bundle with hot reload on the PKI diagram (T-194…T-198); the
+> organization-threshold lockout fix and the logout removal-cookie fix on the
+> authentication diagram (T-188, T-189); the user-deletion erasure/identifier-release
+> fix on the system diagram (T-187); and the OpenAPI content digest that keeps the
+> eleven vendored SDK specs honest (T-199). T-95…T-98 gained the matching custody,
+> RSA-keygen, issuer-bound-validity and tenant-CA clauses, and the tenant ↔ tenant
+> trust-boundary row now names the organization-scope claim. `npm run
+> gen:threat-model` has been re-run, `src/version.ts` stamps `1.0.0-beta03` /
+> 2026-08-28, and the prose changes are mirrored in `src/security.ts` in the same
+> change: the cross-tenant-claim bullet and decision-cache sweep under
+> *Authorization & tenant isolation*, the tenant-signing-CA / custody /
+> mTLS-anchor bullets under *PKI*, the lockout-threshold and removal-cookie
+> clauses under *Authentication & sessions*, and the boundary and asset-table
+> rows. The Docs section (not Security) has its own pending pass, planned in
+> [`website-docs-beta03-improvement-plan.md`](website-docs-beta03-improvement-plan.md).
+>
+> Before that: the alpha38 change to the section was presentational and added no claim: the
 > threat-model explorer now renders each threat's `T-nnn` identifier as a
 > copyable anchor and keeps the diagram, element and threat selection in the URL
 > (`#/security/diagram/8/T-186`), so a threat cited in a commit message, the
@@ -138,7 +160,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 186 threats** and a
+The system is verified against a **STRIDE threat model of 199 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices.
@@ -159,8 +181,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 186 |
-| Mitigated / Open | 170 / 16 |
+| Threats identified | 199 |
+| Mitigated / Open | 183 / 16 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -173,15 +195,15 @@ optimistic closed one.
 
 | Area | Threats | Open |
 |---|---|---|
-| System context | 27 | 2 |
-| Authentication & session management | 27 | 1 |
+| System context | 28 | 2 |
+| Authentication & session management | 29 | 1 |
 | OAuth2 / OIDC authorization server | 24 | 0 |
 | Federation (SAML SP & OIDC RP) | 23 | 1 |
-| Authorization engine (RBAC, hierarchy, scopes) | 15 | 0 |
-| PKI, certificates & IoT device identity | 18 | 1 |
+| Authorization engine (RBAC, hierarchy, scopes) | 19 | 0 |
+| PKI, certificates & IoT device identity | 23 | 1 |
 | Audit, webhooks, email & notifications | 18 | 3 |
 | Deployment & platform (Kubernetes) | 13 | 4 |
-| Client SDKs & admin-UI integration surface | 21 | 4 |
+| Client SDKs & admin-UI integration surface | 22 | 4 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
@@ -199,20 +221,20 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 47 | 3 |
-| Tampering | 37 | 2 |
+| Spoofing | 49 | 3 |
+| Tampering | 39 | 2 |
 | Repudiation | 5 | 0 |
-| Information disclosure | 50 | 7 |
-| Denial of service | 18 | 2 |
-| Elevation of privilege | 29 | 2 |
+| Information disclosure | 52 | 7 |
+| Denial of service | 19 | 2 |
+| Elevation of privilege | 35 | 2 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
-| Critical | 25 | 1 |
-| High | 84 | 7 |
-| Medium | 70 | 7 |
+| Critical | 26 | 1 |
+| High | 91 | 7 |
+| Medium | 75 | 7 |
 | Low | 7 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
@@ -233,7 +255,7 @@ have to be re-established — nothing is assumed across a boundary.
 |---|---|---|
 | **Public Internet ↔ AXIAM** | Browsers, SDK callers, IoT devices, external IdPs | TLS 1.3, authentication, rate limiting, CSRF on cookie requests, input validation |
 | **AXIAM ↔ data tier** | Application pods ↔ SurrealDB, RabbitMQ, Vault / Secrets | Private network, credentialed connections, TLS-only AMQP, parameterised queries, tenant scoping at the repository layer |
-| **Tenant ↔ tenant** | Every tenant's data from every other's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal |
+| **Tenant ↔ tenant** | Every tenant's data from every other's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal; cross-tenant reach only as an explicit organization-scope claim, verified to stay inside the caller's organization |
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, HTTPS enforcement, response-size caps, HMAC signatures on deliveries |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates |
 
@@ -242,7 +264,8 @@ have to be re-established — nothing is assumed across a boundary.
 | Asset | Protection | Compromise would mean |
 |---|---|---|
 | JWT signing key (Ed25519) | Secret provider — Vault in production — never in the image | Any identity in any tenant forged |
-| Organization CA private key | AES-256-GCM encrypted at rest | Any user/service/device certificate minted |
+| Organization CA private key | Per-CA custody: AES-256-GCM at rest, or held in Vault | Any user/service/device certificate minted |
+| Tenant signing CA private key | Same per-CA custody; path-length-zero intermediate | One tenant's certificates minted; revocation scoped to that tenant |
 | Password hashes | Argon2id, per-user salt, pepper | Offline cracking of credentials |
 | OPAQUE setup key & per-tenant OPRF seeds | Secret provider; seeds AES-256-GCM encrypted at rest | Stolen OPAQUE records become dictionary-attackable |
 | MFA secrets | AES-256-GCM encrypted at rest | Second factor defeated |
@@ -264,7 +287,10 @@ have to be re-established — nothing is assumed across a boundary.
   bad-password return the same uniform failure, password verification runs on a
   dummy hash when the user does not exist so timing does not distinguish the two,
   and failed attempts drive an atomic, exponential-backoff lockout that is shared
-  by every credential-checking path (REST and gRPC alike).
+  by every credential-checking path — REST, OPAQUE and gRPC alike — and metered
+  against the organization's own effective threshold (org baseline, tenant
+  override), with the deployment default only as a fail-safe floor when settings
+  cannot be resolved.
 - **Rate limits are sized by what an operation costs, not by one global number.**
   A password verification is thousands of times more expensive than a permission
   check, so it gets its own much tighter ceiling — and that ceiling is deliberately
@@ -293,7 +319,9 @@ have to be re-established — nothing is assumed across a boundary.
   are opaque, server-stored and **single-use with rotation**, consumed through an
   atomic delete-gate so a race cannot fork the session or hide a stolen-token
   reuse. In the browser, tokens live only in `Secure` / `HttpOnly` /
-  `SameSite=Strict` cookies — never in `localStorage`, never in a URL.
+  `SameSite=Strict` cookies — never in `localStorage`, never in a URL — and
+  logout's removal cookies are built from the same setters they clear, so the
+  protective attributes are mirrored by construction rather than restated.
 - **Password reset** uses CSPRNG-generated, single-use, short-lived tokens
   (never time-ordered UUIDs), delivered over an authenticated POST, and consuming a
   reset invalidates every existing session. An optional **Have I Been Pwned**
@@ -327,6 +355,19 @@ redundantly rather than at one chokepoint:
   input.** A caller cannot name a tenant it does not belong to. The organization
   claim in a token is derived server-side from the tenant record on both login and
   refresh — it is never accepted from the client.
+- **Cross-tenant reach is an explicit claim, never an inference.** Organizations
+  hold their estate-wide principals in one reserved organization scope — itself a
+  tenant, so every isolation control applies to it. The engine reads a subject's
+  grants across a tenant boundary only under an explicit organization-scope claim
+  (`SubjectScope`), which an ordinary tenant principal cannot express at all, and
+  only *global* grants carry across: a resource-scoped grant names a resource in
+  the organization scope, and a same-named resource in another tenant is a
+  different thing. The claim is produced in exactly one place, after resolving the
+  tenant record and checking it is the organization's reserved scope, and the
+  `X-Axiam-Tenant` header an organization-level principal switches tenants with is
+  verified to stay inside its own organization — failing closed when it cannot be
+  verified. Revoking an organization-level role sweeps the decision cache in every
+  tenant, not just the one the revocation happened in.
 - **Repository queries are tenant-scoped and parameterised.** Every SurrealQL
   statement uses bind parameters — no query is assembled by string concatenation of
   user input — and carries a `tenant_id` predicate. Cross-tenant graph edges are
@@ -426,15 +467,36 @@ against the classic federation attacks:
 
 ### PKI, certificates & device identity
 
-- Certificates are **per-tenant, signed by the organization CA**, using RSA-4096 or
-  Ed25519 from the platform CSPRNG. **Private keys are never stored server-side** —
-  they are returned exactly once at issuance and delivered only over TLS 1.3.
-- **CA signing keys are AES-256-GCM encrypted at rest** in a separate,
-  access-controlled table, with the key held outside the datastore.
+- Certificates are **per-tenant, issued beneath the organization CA** — optionally
+  through a **tenant signing CA**, a path-length-zero intermediate signed by the
+  organization CA whose revocation is scoped to exactly that tenant, so one
+  tenant's compromised issuance no longer burns the estate-wide trust anchor.
+  Keys are RSA-4096 or Ed25519 from the platform CSPRNG. **Private keys are never
+  stored server-side** — returned exactly once at issuance, delivered only over
+  TLS 1.3 — and issuance **refuses a certificate that would outlive its issuer**,
+  quoting the achievable validity instead of silently truncating. A tenant CA
+  minted from a customer's own CSR keeps only the CSR's subject: the constraints
+  (CA:TRUE, path length zero, certificate-signing key usage) are stated by AXIAM,
+  and the request's self-signature is verified as proof of possession.
+- **CA signing keys live where you choose, and the choice is recorded per CA**:
+  sealed AES-256-GCM into a separate, access-controlled table with the key held
+  outside the datastore, held in HashiCorp Vault, or generated inside Vault's PKI
+  engine and never exported at all. A deployment that configured Vault inherits it
+  for CA custody rather than silently falling back to database rows; an explicit
+  database choice beside a working Vault is called out at startup; and an existing
+  key can be moved between custodians without re-issuing anything beneath it, in a
+  copy-record-release order that can never leave the CA without its key.
 - **mTLS device authentication verifies the full chain** to the tenant/org CA after
   the fingerprint lookup, checks the issuing CA is active and within its validity
   window, and enforces the certificate's own validity period and live revocation
   status on every connection — a fingerprint match alone is never enough.
+- **An organization CA can anchor mTLS directly.** Flagging it exports only the
+  public certificate into the client-verification bundle — the signing key is never
+  copied — and the bundle is rewritten as the whole flagged set on every change and
+  hot-reloaded into the live verifier, so unflagging or revoking a CA removes its
+  anchor instead of leaving one a restart would still trust. Client verification
+  stays optional, and an operator's own explicitly configured bundle is never
+  overridden.
 - **OpenPGP keys** sign the audit trail and encrypt GDPR data exports, so both are
   independently verifiable and confidential.
 - **WebAuthn attestation policy (X3)** verifies the FIDO Alliance's MDS3 metadata
@@ -727,7 +789,7 @@ list read as a checklist — what to do about each, grouped by who does it.
   instead. Retention defaults to a 730-day pruning window applied by the
   background sweep; tune it (or disable with `0`) to match your lawful basis.
 
-> **Caution — this is alpha software.** AXIAM is in active development and has not
+> **Caution — this is beta software.** AXIAM is in active development and has not
 > reached a stable release. It has not undergone an independent third-party
 > penetration test or security certification. Do not use it to protect production
 > systems until it reaches a stable, audited release. The controls described here

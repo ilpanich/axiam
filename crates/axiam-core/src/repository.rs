@@ -372,6 +372,50 @@ pub trait RoleRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RoleAssignment>>> + Send;
 
+    /// Assign a role to a **service account**, optionally scoped to a resource.
+    ///
+    /// A service account is a principal like any other. The `has_role` relation
+    /// has always been documented as `User/ServiceAccount/Group -> Role`, and
+    /// the authorization engine applies RBAC identically to both kinds of
+    /// subject — `RequirePermission::check_subject` says so in as many words —
+    /// but there was no way to create the edge, so a machine identity could hold
+    /// no permissions at all. The only thing a service account could do was
+    /// authenticate.
+    fn assign_to_service_account(
+        &self,
+        tenant_id: Uuid,
+        service_account_id: Uuid,
+        role_id: Uuid,
+        resource_id: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Remove a role assignment from a service account.
+    fn unassign_from_service_account(
+        &self,
+        tenant_id: Uuid,
+        service_account_id: Uuid,
+        role_id: Uuid,
+        resource_id: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Get all roles assigned to a service account (direct + via group
+    /// membership).
+    fn get_service_account_roles(
+        &self,
+        tenant_id: Uuid,
+        service_account_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Role>>> + Send;
+
+    /// The service accounts holding `role_id`, with the scope of each grant.
+    ///
+    /// The machine half of [`Self::get_role_user_assignments`], and what a
+    /// role's detail view needs in order to show who actually holds it.
+    fn get_role_service_account_assignments(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RoleSubjectAssignment>>> + Send;
+
     /// Assign a role to a group, optionally scoped to a resource.
     fn assign_to_group(
         &self,
@@ -890,6 +934,49 @@ pub trait GroupRepository: Send + Sync {
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Group>>> + Send;
+
+    /// Add a **service account** to a group (creates a `member_of` edge from
+    /// the `service_account` record).
+    ///
+    /// A group is a named collection of principals whose roles its members
+    /// inherit, and a machine identity needs that inheritance for the same
+    /// reason a person does: so a fleet of devices can be granted and revoked as
+    /// one thing rather than one edge at a time. The edge table has always been
+    /// untyped at the `in` end; only the write path was user-only.
+    fn add_service_account_member(
+        &self,
+        tenant_id: Uuid,
+        service_account_id: Uuid,
+        group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Remove a service account from a group.
+    fn remove_service_account_member(
+        &self,
+        tenant_id: Uuid,
+        service_account_id: Uuid,
+        group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Get the service accounts in a group.
+    ///
+    /// Separate from [`Self::get_members`] rather than a union with it: the two
+    /// return different domain types, and a caller that wants both wants them
+    /// distinguishable — a page listing "members" has to say which rows are
+    /// people.
+    fn get_service_account_members(
+        &self,
+        tenant_id: Uuid,
+        group_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<ServiceAccount>>> + Send;
+
+    /// Get all groups a service account belongs to.
+    fn get_service_account_groups(
+        &self,
+        tenant_id: Uuid,
+        service_account_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Group>>> + Send;
 }
 
@@ -1958,6 +2045,26 @@ pub trait OpaqueCredentialRepository: Send + Sync {
     ///
     /// [`OpaqueMode::Required`]: crate::models::opaque::OpaqueMode::Required
     fn count_for_tenant(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Count the tenant's **active** users that have no registration record.
+    ///
+    /// The number of people [`OpaqueMode::Required`] would lock out if it were
+    /// switched on right now, and the reason it is refused while any remain.
+    /// Nobody can be enrolled retroactively — a record can only be built by a
+    /// client that holds the plaintext password — so the mode is a one-way door
+    /// for every account on the wrong side of it, up to and including the only
+    /// administrator.
+    ///
+    /// Counted rather than derived from [`Self::count_for_tenant`] against a
+    /// user total: a record belonging to a since-deactivated user would make the
+    /// two totals agree while an active user was still stranded, which is
+    /// precisely the case that matters.
+    ///
+    /// [`OpaqueMode::Required`]: crate::models::opaque::OpaqueMode::Required
+    fn count_active_users_without_credential(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 // ---------------------------------------------------------------------------

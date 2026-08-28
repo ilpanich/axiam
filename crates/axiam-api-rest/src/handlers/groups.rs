@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::handlers::service_accounts::ServiceAccountResponse;
 use crate::handlers::users::UserResponse;
 use crate::state::AppState;
 
@@ -29,6 +30,11 @@ pub struct AddMemberRequest {
     pub user_id: Uuid,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct AddServiceAccountMemberRequest {
+    pub service_account_id: Uuid,
+}
+
 // -----------------------------------------------------------------------
 // Path extractors
 // -----------------------------------------------------------------------
@@ -37,6 +43,12 @@ pub struct AddMemberRequest {
 pub struct MemberPath {
     pub group_id: Uuid,
     pub user_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServiceAccountMemberPath {
+    pub group_id: Uuid,
+    pub service_account_id: Uuid,
 }
 
 // -----------------------------------------------------------------------
@@ -308,4 +320,159 @@ pub async fn remove_member<C: Connection + Clone>(
         .invalidate_subject(user.tenant_id, p.user_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+// -----------------------------------------------------------------------
+// Handlers — Service-account membership
+//
+// A group is a named collection of principals whose roles its members inherit.
+// A machine identity needs that inheritance for the same reason a person does:
+// so a fleet of devices is granted and revoked as one thing rather than one edge
+// per device. The `member_of` edge has always been untyped at its `in` end —
+// only the write path was user-only.
+// -----------------------------------------------------------------------
+
+/// `POST /api/v1/groups/{group_id}/service-accounts`
+#[utoipa::path(
+    post,
+    path = "/api/v1/groups/{group_id}/service-accounts",
+    tag = "groups",
+    params(("group_id" = Uuid, Path, description = "Group ID")),
+    request_body = AddServiceAccountMemberRequest,
+    responses(
+        (status = 204, description = "Service account added to the group"),
+        (status = 404, description = "Group or service account not found in this tenant"),
+        (status = 409, description = "Already a member"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn add_service_account_member<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+    body: web::Json<AddServiceAccountMemberRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:add_member", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let new_member = body.service_account_id;
+    state
+        .group_repo
+        .add_service_account_member(user.tenant_id, new_member, path.into_inner())
+        .await?;
+    // D7: adding a member widens that one subject's inherited access (the safe
+    // direction) — targeted flush so it takes effect immediately.
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_subject(user.tenant_id, new_member)
+        .await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `DELETE /api/v1/groups/{group_id}/service-accounts/{service_account_id}`
+#[utoipa::path(
+    delete,
+    path = "/api/v1/groups/{group_id}/service-accounts/{service_account_id}",
+    tag = "groups",
+    params(
+        ("group_id" = Uuid, Path, description = "Group ID"),
+        ("service_account_id" = Uuid, Path, description = "Service account ID"),
+    ),
+    responses(
+        (status = 204, description = "Service account removed from the group"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn remove_service_account_member<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<ServiceAccountMemberPath>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:remove_member", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let p = path.into_inner();
+    state
+        .group_repo
+        .remove_service_account_member(user.tenant_id, p.service_account_id, p.group_id)
+        .await?;
+    // D7 (REVOCATION): removing a member narrows access, so a cached allow must
+    // not outlive it.
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_subject(user.tenant_id, p.service_account_id)
+        .await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `GET /api/v1/groups/{group_id}/service-accounts`
+#[utoipa::path(
+    get,
+    path = "/api/v1/groups/{group_id}/service-accounts",
+    tag = "groups",
+    params(
+        ("group_id" = Uuid, Path, description = "Group ID"),
+        Pagination,
+    ),
+    responses(
+        (status = 200, description = "Service accounts in this group",
+         body = inline(PaginatedResult<ServiceAccountResponse>)),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_service_account_members<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+    query: web::Query<Pagination>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:list_members", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let page = state
+        .group_repo
+        .get_service_account_members(user.tenant_id, path.into_inner(), query.into_inner())
+        .await?;
+    Ok(HttpResponse::Ok().json(PaginatedResult {
+        items: page
+            .items
+            .into_iter()
+            .map(ServiceAccountResponse::from)
+            .collect::<Vec<_>>(),
+        total: page.total,
+        offset: page.offset,
+        limit: page.limit,
+    }))
+}
+
+/// `GET /api/v1/service-accounts/{service_account_id}/groups`
+#[utoipa::path(
+    get,
+    path = "/api/v1/service-accounts/{service_account_id}/groups",
+    tag = "groups",
+    params(("service_account_id" = Uuid, Path, description = "Service account ID")),
+    responses(
+        (status = 200, description = "Groups this service account belongs to", body = [Group]),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_service_account_groups<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new("groups:list_members", Uuid::nil())
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let groups = state
+        .group_repo
+        .get_service_account_groups(user.tenant_id, path.into_inner())
+        .await?;
+    Ok(HttpResponse::Ok().json(groups))
 }

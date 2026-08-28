@@ -3,6 +3,7 @@
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::group::{CreateGroup, Group, UpdateGroup};
+use axiam_core::models::service_account::ServiceAccount;
 use axiam_core::models::user::{User, UserStatus};
 use axiam_core::repository::{GroupRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -11,6 +12,7 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
+use crate::repository::service_account::ServiceAccountRowWithId;
 use crate::handle::DbHandle;
 use crate::helpers::{
     CountRow, classify_write_error, paginate, search_bind, search_filter, take_first_or_not_found,
@@ -472,13 +474,19 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         let tenant_id_str = tenant_id.to_string();
         let group_id_str = group_id.to_string();
 
-        // Count total members.
+        // Count the group's USER members.
+        //
+        // `member_of` now also carries service accounts, so counting every edge
+        // into the group would report a total this page cannot show — the rows
+        // below are `user` records — and the pagination built from it would
+        // promise pages that come back empty.
         let mut count_result = self
             .db
             .current()
             .query(
                 "SELECT count() AS total FROM member_of \
-                 WHERE out = type::record('group', $group_id) GROUP ALL",
+                 WHERE out = type::record('group', $group_id) \
+                 AND record::tb(in) = 'user' GROUP ALL",
             )
             .bind(("group_id", group_id_str.clone()))
             .await
@@ -544,5 +552,170 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         Ok(groups)
+    }
+
+    async fn add_service_account_member(
+        &self,
+        tenant_id: Uuid,
+        service_account_id: Uuid,
+        group_id: Uuid,
+    ) -> AxiamResult<()> {
+        let sa_id_str = service_account_id.to_string();
+        let group_id_str = group_id.to_string();
+        let tenant_id_str = tenant_id.to_string();
+
+        // Verify both endpoints belong to the same tenant, exactly as the user
+        // path does. `member_of` carries no flat tenant column, so the guard has
+        // to be on the nodes.
+        let mut check = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM service_account \
+                 WHERE id = type::record('service_account', $sa_id) \
+                 AND tenant_id = $tenant_id GROUP ALL; \
+                 SELECT count() AS total FROM group \
+                 WHERE id = type::record('group', $group_id) \
+                 AND tenant_id = $tenant_id GROUP ALL;",
+            )
+            .bind(("sa_id", sa_id_str.clone()))
+            .bind(("group_id", group_id_str.clone()))
+            .bind(("tenant_id", tenant_id_str))
+            .await
+            .map_err(DbError::from)?;
+
+        let sa_count: Vec<CountRow> = check.take(0).map_err(DbError::from)?;
+        if sa_count.first().map(|r| r.total).unwrap_or(0) == 0 {
+            return Err(DbError::NotFound {
+                entity: "service_account".into(),
+                id: sa_id_str,
+            }
+            .into());
+        }
+        let group_count: Vec<CountRow> = check.take(1).map_err(DbError::from)?;
+        if group_count.first().map(|r| r.total).unwrap_or(0) == 0 {
+            return Err(DbError::NotFound {
+                entity: "group".into(),
+                id: group_id_str,
+            }
+            .into());
+        }
+
+        let query = format!(
+            "RELATE service_account:`{sa_id_str}` -> member_of -> group:`{group_id_str}`;"
+        );
+        let result = self
+            .db
+            .current()
+            .query(query)
+            .await
+            .map_err(DbError::from)?;
+        if let Err(e) = result.check() {
+            return Err(classify_write_error(e.to_string(), "group_membership").into());
+        }
+        Ok(())
+    }
+
+    async fn remove_service_account_member(
+        &self,
+        tenant_id: Uuid,
+        service_account_id: Uuid,
+        group_id: Uuid,
+    ) -> AxiamResult<()> {
+        self.db
+            .current()
+            .query(
+                "DELETE member_of WHERE \
+                 in = type::record('service_account', $sa_id) AND \
+                 out = type::record('group', $group_id) AND \
+                 in.tenant_id = $tenant_id AND out.tenant_id = $tenant_id",
+            )
+            .bind(("sa_id", service_account_id.to_string()))
+            .bind(("group_id", group_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_service_account_members(
+        &self,
+        tenant_id: Uuid,
+        group_id: Uuid,
+        pagination: Pagination,
+    ) -> AxiamResult<PaginatedResult<ServiceAccount>> {
+        let tenant_id_str = tenant_id.to_string();
+        let group_id_str = group_id.to_string();
+
+        let mut count_result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM member_of \
+                 WHERE out = type::record('group', $group_id) \
+                 AND record::tb(in) = 'service_account' GROUP ALL",
+            )
+            .bind(("group_id", group_id_str.clone()))
+            .await
+            .map_err(DbError::from)?;
+        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
+
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM service_account \
+                 WHERE tenant_id = $tenant_id \
+                 AND id IN (\
+                     SELECT VALUE in FROM member_of \
+                     WHERE out = type::record('group', $group_id)\
+                 ) \
+                 ORDER BY created_at ASC \
+                 LIMIT $limit START $offset",
+            )
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("group_id", group_id_str))
+            .bind(("limit", pagination.limit))
+            .bind(("offset", pagination.offset))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<ServiceAccountRowWithId> = result.take(0).map_err(DbError::from)?;
+        let items = rows
+            .into_iter()
+            .map(|row| row.try_into_service_account())
+            .collect::<Result<Vec<_>, DbError>>()?;
+
+        Ok(paginate(items, count_rows, &pagination))
+    }
+
+    async fn get_service_account_groups(
+        &self,
+        tenant_id: Uuid,
+        service_account_id: Uuid,
+    ) -> AxiamResult<Vec<Group>> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM group \
+                 WHERE tenant_id = $tenant_id \
+                 AND id IN (\
+                     SELECT VALUE out FROM member_of \
+                     WHERE in = type::record('service_account', $sa_id)\
+                 )",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("sa_id", service_account_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<GroupRowWithId> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.try_into_group())
+            .collect::<Result<Vec<_>, DbError>>()?)
     }
 }

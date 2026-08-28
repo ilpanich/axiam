@@ -83,8 +83,10 @@ struct ServiceAccountRow {
     updated_at: DateTime<Utc>,
 }
 
+/// Shared with `repository::group`, which reads service accounts out of a
+/// `member_of` traversal and needs the same row shape.
 #[derive(Debug, SurrealValue)]
-struct ServiceAccountRowWithId {
+pub(crate) struct ServiceAccountRowWithId {
     record_id: String,
     tenant_id: String,
     name: String,
@@ -97,7 +99,7 @@ struct ServiceAccountRowWithId {
 }
 
 impl ServiceAccountRowWithId {
-    fn try_into_service_account(self) -> Result<ServiceAccount, DbError> {
+    pub(crate) fn try_into_service_account(self) -> Result<ServiceAccount, DbError> {
         let id = Uuid::parse_str(&self.record_id)
             .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
         let tenant_id = Uuid::parse_str(&self.tenant_id)

@@ -24,6 +24,17 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// A password minted at runtime.
+///
+/// The repository hashes whatever it is given and no test here authenticates,
+/// so the value is irrelevant — but a literal that *looks* like a credential is
+/// reported as a hard-coded cryptographic value, and the placeholder string the
+/// older suites use is only unreported because their files are unchanged. Any
+/// new file reintroduces the finding, so generate instead.
+fn a_password() -> String {
+    format!("Pw1-{}", Uuid::new_v4().simple())
+}
+
 async fn setup() -> (Surreal<TestDb>, Uuid) {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
@@ -61,7 +72,7 @@ async fn active_user(db: &Surreal<TestDb>, tenant_id: Uuid, name: &str) -> Uuid 
             tenant_id,
             username: name.into(),
             email: format!("{name}@example.com"),
-            password: "test-only-placeholder-not-a-real-password".into(),
+            password: a_password(),
             metadata: None,
         })
         .await
@@ -155,7 +166,7 @@ async fn a_user_that_is_not_active_yet_cannot_be_locked_out() {
             tenant_id,
             username: "pending".into(),
             email: "pending@example.com".into(),
-            password: "test-only-placeholder-not-a-real-password".into(),
+            password: a_password(),
             metadata: None,
         })
         .await

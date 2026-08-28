@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta04",
-    "x-axiam-spec-digest": "sha256:177c7101bec0cfe8895d4173a66ad275c44526b78a7b542874476264bdc10ae7"
+    "x-axiam-spec-digest": "sha256:7d714222dace54504866b679a5aeae233e3eaab2a008d257799b8094834d50f2"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -2881,6 +2881,235 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/groups/{group_id}/service-accounts": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "`GET /api/v1/groups/{group_id}/service-accounts`",
+        "operationId": "list_service_account_members",
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "description": "Group ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Service accounts in this group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A paginated result set.",
+                  "required": [
+                    "items",
+                    "total",
+                    "offset",
+                    "limit"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "Public-safe service account representation.",
+                        "required": [
+                          "id",
+                          "tenant_id",
+                          "name",
+                          "client_id",
+                          "status",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "properties": {
+                          "client_id": {
+                            "type": "string"
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "description": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "$ref": "#/components/schemas/UserStatus"
+                          },
+                          "tenant_id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      }
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "`POST /api/v1/groups/{group_id}/service-accounts`",
+        "operationId": "add_service_account_member",
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "description": "Group ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddServiceAccountMemberRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Service account added to the group"
+          },
+          "404": {
+            "description": "Group or service account not found in this tenant"
+          },
+          "409": {
+            "description": "Already a member"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/groups/{group_id}/service-accounts/{service_account_id}": {
+      "delete": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "`DELETE /api/v1/groups/{group_id}/service-accounts/{service_account_id}`",
+        "operationId": "remove_service_account_member",
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "description": "Group ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "service_account_id",
+            "in": "path",
+            "description": "Service account ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Service account removed from the group"
           }
         },
         "security": [
@@ -7466,6 +7695,143 @@
         ]
       }
     },
+    "/api/v1/roles/{role_id}/service-accounts": {
+      "get": {
+        "tags": [
+          "roles"
+        ],
+        "summary": "`GET /api/v1/roles/{role_id}/service-accounts`",
+        "operationId": "list_service_accounts",
+        "parameters": [
+          {
+            "name": "role_id",
+            "in": "path",
+            "description": "Role ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Service-account assignments of this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RoleServiceAccountAssignment"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "roles"
+        ],
+        "summary": "`POST /api/v1/roles/{role_id}/service-accounts`",
+        "operationId": "assign_to_service_account",
+        "parameters": [
+          {
+            "name": "role_id",
+            "in": "path",
+            "description": "Role ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignRoleToServiceAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Role assigned to service account"
+          },
+          "404": {
+            "description": "Role or service account not found in this tenant"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/roles/{role_id}/service-accounts/{service_account_id}": {
+      "delete": {
+        "tags": [
+          "roles"
+        ],
+        "summary": "`DELETE /api/v1/roles/{role_id}/service-accounts/{service_account_id}`",
+        "operationId": "unassign_from_service_account",
+        "parameters": [
+          {
+            "name": "role_id",
+            "in": "path",
+            "description": "Role ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "service_account_id",
+            "in": "path",
+            "description": "Service account ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "resource_id",
+            "in": "query",
+            "description": "If provided, only removes the assignment for this specific resource.\nIf omitted, removes the global (unscoped) assignment.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Role unassigned from service account"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/roles/{role_id}/users": {
       "get": {
         "tags": [
@@ -8061,6 +8427,91 @@
           },
           "404": {
             "description": "Service account not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/service-accounts/{service_account_id}/groups": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "`GET /api/v1/service-accounts/{service_account_id}/groups`",
+        "operationId": "list_service_account_groups",
+        "parameters": [
+          {
+            "name": "service_account_id",
+            "in": "path",
+            "description": "Service account ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Groups this service account belongs to",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Group"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/service-accounts/{service_account_id}/roles": {
+      "get": {
+        "tags": [
+          "roles"
+        ],
+        "summary": "`GET /api/v1/service-accounts/{service_account_id}/roles`",
+        "operationId": "list_service_account_roles",
+        "parameters": [
+          {
+            "name": "service_account_id",
+            "in": "path",
+            "description": "Service account ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Role assignments of this service account, direct and inherited through groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RoleAssignment"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Service account not found in this tenant"
           }
         },
         "security": [
@@ -10243,6 +10694,18 @@
           }
         }
       },
+      "AddServiceAccountMemberRequest": {
+        "type": "object",
+        "required": [
+          "service_account_id"
+        ],
+        "properties": {
+          "service_account_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "ApiProviderConfig": {
         "type": "object",
         "description": "API-based provider configuration (SendGrid, Postmark, Resend, Brevo).\n\n`api_key` follows the same write-only + omit-preserving contract as\n[`SmtpConfig::password`] (D-01/D-02).",
@@ -10271,6 +10734,25 @@
               "string",
               "null"
             ],
+            "format": "uuid"
+          }
+        }
+      },
+      "AssignRoleToServiceAccountRequest": {
+        "type": "object",
+        "required": [
+          "service_account_id"
+        ],
+        "properties": {
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "service_account_id": {
+            "type": "string",
             "format": "uuid"
           }
         }
@@ -12800,7 +13282,8 @@
           "id",
           "username",
           "email",
-          "tenant_id"
+          "tenant_id",
+          "principal_tenant_id"
         ],
         "properties": {
           "email": {
@@ -12809,6 +13292,14 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The caller's organization, as a UUID rather than only the slug.\n\nEvery organization-scoped route is addressed by id\n(`/api/v1/organizations/{org_id}/…`), so a client holding only the slug\nhas to turn it into an id somehow — and the only way to do that was\n`GET /api/v1/organizations`, which is restricted to `super-admin`. So the\ncertificates page could not list the organization's CAs for any\nadministrator below that, and the organization CA a tenant is meant to\nissue under was simply not offered. It is the caller's own organization,\nalready in the validated token; naming it here discloses nothing and\nremoves the detour.\n\nOmitted (not an error) when the tenant lookup that resolves it fails, on\nthe same terms as the slugs."
           },
           "org_slug": {
             "type": [
@@ -12820,6 +13311,18 @@
           "organization_level": {
             "type": "boolean",
             "description": "Whether the caller is an **organization-level** principal — one whose\nrecord lives in the organization's reserved tenant, and whose global\ngrants therefore apply to every tenant in the organization.\n\nThe admin UI needs this to decide what its tenant selector can do. An\norganization-level principal switches the tenant it is acting on with a\nheader on the next request; an ordinary tenant principal cannot switch\nat all, because it is not a principal of any other tenant, and its\nselector has to say so rather than offer a switch that would fail.\n\nResolved from the caller's own tenant record, never from request input.\nDefaults to `false` when the lookup fails, which is the safe direction:\nthe UI then offers no cross-tenant action."
+          },
+          "principal_tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The tenant the caller **lives in**, as opposed to `tenant_id`, which is\nthe tenant it is currently **acting on**.\n\nThe two are the same value for every ordinary principal, and differ only\nfor an organization-level one that has selected another tenant with the\n`X-Axiam-Tenant` header. Exposed because that difference decides where\nseveral things belong and a client cannot derive it: the caller's own\npassword and its OPAQUE registration record live here, not in the\nselected tenant, and a record sealed against the wrong one is refused\nwith \"the OPAQUE session was issued for a different tenant\".\n\nClients that never switch tenant can ignore it — it equals `tenant_id`."
+          },
+          "principal_tenant_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Slug of [`Self::principal_tenant_id`], on the same terms as\n`tenant_slug`: resolved server-side and omitted (not an error) when the\nlookup fails."
           },
           "tenant_id": {
             "type": "string",
@@ -15221,6 +15724,27 @@
             ],
             "format": "uuid",
             "description": "`None` means the role was assigned globally (no resource scope)."
+          }
+        }
+      },
+      "RoleServiceAccountAssignment": {
+        "type": "object",
+        "description": "A service account together with the resource scope of its assignment.",
+        "required": [
+          "service_account"
+        ],
+        "properties": {
+          "resource_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`None` means the role was assigned globally (no resource scope)."
+          },
+          "service_account": {
+            "$ref": "#/components/schemas/ServiceAccountResponse",
+            "description": "The assigned service account. Carries no secret — the client secret is\nreturned once, at creation, and never again."
           }
         }
       },

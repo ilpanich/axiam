@@ -26,8 +26,12 @@
 > stay Open with narrower residuals — `just vault-status` now reports the token's
 > real capabilities rather than only which secrets exist, and every release
 > workflow in the fleet pins its actions by digest and attests the artifacts it
-> publishes. The model is **199 threats, 184 mitigated / 15 open**; `npm run
-> gen:threat-model` has been re-run.
+> publishes. T-148's residual narrowed once more when the two Maven Central
+> pipelines — the only two of eleven that still hold a stored registry
+> credential — began publishing keyless Sigstore bundles alongside their PGP
+> signatures, so the artifact set Central itself serves carries a statement of
+> build origin the Portal token cannot forge. The model is **199 threats, 184
+> mitigated / 15 open**; `npm run gen:threat-model` has been re-run.
 >
 > The 1.0.0-beta03 pass records the beta01…beta03 wave as thirteen new mitigated
 > threats, T-187…T-199, bringing the model to **199 threats, 183 mitigated / 16

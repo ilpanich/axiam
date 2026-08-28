@@ -131,17 +131,43 @@ Recorded here rather than left to be inferred from eleven pull requests:
 | Control | Java | Kotlin | Where |
 |---|---|---|---|
 | 1. Protected environment | **owner action** | **owner action** | repository settings; the requirement is written into each repo's `RELEASING.md` and into the publish job as a comment |
-| 2. Sigstore bundles | **not done** | **not done** | needs a build-file change on the release path; see below |
+| 2. Sigstore bundles | done | done | `sigstore-maven-plugin` on both POMs / the `dev.sigstore.sign` Gradle plugin on the publication, plus a PR gate in each repo; see below |
 | 3. `attest-build-provenance` | done | done | the publish job, before the Portal forwarding step on Kotlin (which stages first) and after `mvn deploy` on Java (which deploys in one lifecycle pass) |
 | 4. Rotation cadence | done (documented) | done (documented) | `RELEASING.md`, with a table to record each rotation in |
 | 5. Digest-pinned actions | already true | done — fourteen references | the workflows |
 
-**Sigstore is the one that did not ship, and deliberately.** Both plugins configure on the
-*release* path, so a misconfiguration is invisible until the next tag and then breaks it.
-The plan's own rule applies — "workflow changes get a validation run before they meet a
-real tag" — and no throwaway-version validation run was possible in the session that did
-this work. It stays the remaining half of H-1 rather than being shipped untested; both
-`RELEASING.md` files name it as open so it is not quietly forgotten.
+**Sigstore was the one that did not ship, and deliberately — it has since shipped.** Both
+plugins configure on the *release* path, so a misconfiguration is invisible until the next
+tag and then breaks it. The plan's own rule applies — "workflow changes get a validation
+run before they meet a real tag" — and no throwaway-version validation run was possible in
+the session that did the rest of this work, so it was held back rather than shipped
+untested.
+
+What unblocked it was noticing that the throwaway version was the wrong instrument. A
+one-off run proves the release path worked *once*; what the risk actually calls for is a
+run that repeats. Both repositories now carry a pull-request gate — `verify-sigstore`
+(Java), `sigstore-sign-gate` (Kotlin) — that performs a **real** keyless signing of the
+real artifact set on every same-repository pull request: Actions OIDC, a Fulcio
+certificate, a Rekor entry, a `.sigstore.json` per file. Each then asserts the property the
+deployment depends on — every publishable file has both a `.asc` and a `.sigstore.json`,
+and neither signer signed the other's output. Nothing is published: Maven stops at
+`verify`, Gradle publishes to the runner's own `~/.m2`, and neither job holds a
+`CENTRAL_TOKEN_*` secret. Fork pull requests skip the gate, because a fork's token cannot
+mint an OIDC token whatever the job's `permissions:` say.
+
+Two details worth carrying forward. First, the signing is free and adds no credential:
+Fulcio and Rekor are the Sigstore public good instance, the certificate is issued against
+the workflow's OIDC claim and expires ten minutes later, and the only repository-side
+requirement is `id-token: write` — which both publish jobs already had for
+`attest-build-provenance`. There is nothing for the owner to configure. Second, the two
+signers must not sign each other: maven-gpg-plugin and sigstore-maven-plugin share gpg's
+`FilesCollector`, whose default excludes cover `**/*.asc` and `**/*.sigstore.json` (hence
+the maven-gpg-plugin >= 3.2.5 floor), and the Gradle plugin strips the
+`.sigstore.json.asc` files Gradle's `signing` plugin would otherwise add. Both gates assert
+this rather than trusting it.
+
+Both `RELEASING.md` files lose their "Still open" section and gain the `cosign verify-blob`
+command an integrator runs against an artifact pulled from Central.
 
 **A second thing the H-1 pass turned up, in the release process rather than the
 pipelines.** `sdks/openapi.json` and `sdks/management-registry.json` are

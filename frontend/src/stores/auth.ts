@@ -13,6 +13,27 @@ export interface AuthUser {
    * `resendVerification` (ResendVerificationRequest.tenant_id: Uuid).
    */
   tenant_id: string;
+  /**
+   * The tenant this principal **lives in**, where `tenant_id` is the one it is
+   * currently **acting on**.
+   *
+   * Equal for every ordinary principal. They diverge only for an
+   * organization-level one that has selected a child tenant, and the difference
+   * decides where the caller's own credentials belong: a password change, and
+   * the OPAQUE registration record that goes with it, are written to the tenant
+   * the account lives in. Building a record against the selected tenant instead
+   * is refused with "the OPAQUE session was issued for a different tenant".
+   */
+  principal_tenant_id?: string;
+  /**
+   * The caller's organization id, from `/auth/me`.
+   *
+   * Every organization-scoped route is addressed by id, and the only other way
+   * to learn one was `GET /api/v1/organizations`, which is restricted to
+   * `super-admin` — so any administrator below that role could not reach the
+   * organization's CA certificates at all.
+   */
+  org_id?: string;
   /** Restored from /auth/me for slug-based tenant context (CQ-F29). */
   tenantSlug?: string;
   orgSlug?: string;

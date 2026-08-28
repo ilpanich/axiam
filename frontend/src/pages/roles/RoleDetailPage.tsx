@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   roleService,
   type RoleGroupAssignment,
+  type RoleServiceAccountAssignment,
   type RoleUserAssignment,
   type UpdateRolePayload,
 } from "@/services/roles";
@@ -15,6 +16,10 @@ import {
   type PermissionEffect,
 } from "@/services/permissions";
 import { groupService, type Group } from "@/services/users";
+import {
+  serviceAccountService,
+  type ServiceAccount,
+} from "@/services/serviceAccounts";
 import { resourceService } from "@/services/resources";
 import { scopeService } from "@/services/scopes";
 import { useToast } from "@/hooks/useToast";
@@ -536,6 +541,121 @@ function AssignGroupDialog({
   );
 }
 
+interface AssignServiceAccountDialogProps {
+  open: boolean;
+  onClose: () => void;
+  roleId: string;
+  onAssigned: () => void;
+}
+
+/**
+ * Grant this role to a machine identity.
+ *
+ * The engine has always applied RBAC to a service account exactly as it does to
+ * a person — it takes no flag to branch on — but nothing could create the grant,
+ * so the only way to give a machine permissions was to hand it a human's
+ * account. This dialog is the missing half.
+ */
+function AssignServiceAccountDialog({
+  open,
+  onClose,
+  roleId,
+  onAssigned,
+}: AssignServiceAccountDialogProps) {
+  const [selectedId, setSelectedId] = useState("");
+  // "" is a global assignment, the same default the user and group dialogs use.
+  const [scopeResourceId, setScopeResourceId] = useState("");
+  const [assigning, setAssigning] = useState(false);
+  const [error, setError] = useState("");
+
+  const { data: serviceAccounts = [], isLoading } = useQuery({
+    queryKey: ["service-accounts"],
+    queryFn: () => serviceAccountService.getAll(),
+    enabled: open,
+  });
+
+  async function handleAssign(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!selectedId) {
+      setError("Please select a service account.");
+      return;
+    }
+    setAssigning(true);
+    setError("");
+    try {
+      await roleService.assignToServiceAccount(roleId, selectedId, scopeResourceId);
+      onAssigned();
+      setSelectedId("");
+      setScopeResourceId("");
+      onClose();
+    } catch (err) {
+      // Verbatim, for the same reason the group dialog is: a 409 means this
+      // account already holds the role, whichever scope was asked for, and a
+      // generic message would hide which of the two failures it was.
+      setError(getApiErrorMessage(err));
+    } finally {
+      setAssigning(false);
+    }
+  }
+
+  function handleClose() {
+    setSelectedId("");
+    setScopeResourceId("");
+    setError("");
+    onClose();
+  }
+
+  return (
+    <FormDialog
+      open={open}
+      onClose={handleClose}
+      title="Assign Service Account"
+      onSubmit={handleAssign}
+      isLoading={assigning}
+      submitLabel="Assign"
+      error={error}
+      errorId="assign-service-account-error"
+    >
+      <div className="space-y-2">
+        <Label htmlFor="assign-service-account-select">Service account</Label>
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
+            <Loader2 size={14} className="animate-spin" />
+            Loading service accounts…
+          </div>
+        ) : (
+          <select
+            id="assign-service-account-select"
+            value={selectedId}
+            onChange={(e) => setSelectedId(e.target.value)}
+            className={cn(
+              "flex h-9 w-full rounded-md px-3 py-1 text-sm",
+              "bg-white/5 border border-primary/20 text-foreground",
+              "focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary",
+              "transition-colors duration-200"
+            )}
+          >
+            <option value="">Select a service account…</option>
+            {serviceAccounts.map((sa: ServiceAccount) => (
+              <option key={sa.id} value={sa.id}>
+                {sa.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+      <div className="mt-4">
+        <ResourceScopePicker
+          id="assign-service-account-scope"
+          value={scopeResourceId}
+          onChange={setScopeResourceId}
+          subject="service account"
+        />
+      </div>
+    </FormDialog>
+  );
+}
+
 // ─── Edit Role form ───────────────────────────────────────────────────────────
 
 interface EditRoleFormProps {
@@ -593,7 +713,7 @@ function EditRoleForm({
 
 // ─── Assignments tabs ─────────────────────────────────────────────────────────
 
-type AssignmentTab = "users" | "groups";
+type AssignmentTab = "users" | "groups" | "service accounts";
 
 // ─── Main page ─────────────────────────────────────────────────────────────────
 
@@ -724,6 +844,7 @@ export function RoleDetailPage() {
   const [assignmentTab, setAssignmentTab] = useState<AssignmentTab>("users");
   const [assignUserOpen, setAssignUserOpen] = useState(false);
   const [assignGroupOpen, setAssignGroupOpen] = useState(false);
+  const [assignServiceAccountOpen, setAssignServiceAccountOpen] = useState(false);
 
   // ─── Assigned users/groups ─────────────────────────────────────────────────
   const { data: assignedUsers = [], isLoading: usersLoading } = useQuery({
@@ -738,6 +859,18 @@ export function RoleDetailPage() {
     enabled: !!roleId,
   });
 
+  // A service account is a principal like any other, and the engine has always
+  // treated it as one — there was simply no way to create the grant, so a
+  // machine identity could authenticate and then do nothing.
+  const {
+    data: assignedServiceAccounts = [],
+    isLoading: serviceAccountsLoading,
+  } = useQuery({
+    queryKey: ["role-service-accounts", roleId],
+    queryFn: () => roleService.listServiceAccounts(roleId!),
+    enabled: !!roleId,
+  });
+
   // The unassign targets are *assignments*, not subjects: the scope has to
   // travel with the confirm dialog, because an unassign that drops it removes
   // the global grant instead — and against a scoped assignment removes nothing
@@ -746,6 +879,8 @@ export function RoleDetailPage() {
     useState<RoleUserAssignment | null>(null);
   const [unassignGroup, setUnassignGroup] =
     useState<RoleGroupAssignment | null>(null);
+  const [unassignServiceAccount, setUnassignServiceAccount] =
+    useState<RoleServiceAccountAssignment | null>(null);
 
   // Resource names for the scope badges on both member lists.
   const { nameFor } = useResourceNames();
@@ -768,6 +903,22 @@ export function RoleDetailPage() {
     onSuccess: () => {
       invalidateEntity(queryClient, "role-groups");
       setUnassignGroup(null);
+    },
+    onError: (err: unknown) => {
+      toast({ description: getApiErrorMessage(err), variant: "destructive" });
+    },
+  });
+
+  const unassignServiceAccountMutation = useMutation({
+    mutationFn: (a: RoleServiceAccountAssignment) =>
+      roleService.unassignFromServiceAccount(
+        roleId!,
+        a.service_account.id,
+        a.resource_id
+      ),
+    onSuccess: () => {
+      invalidateEntity(queryClient, "role-service-accounts");
+      setUnassignServiceAccount(null);
     },
     onError: (err: unknown) => {
       toast({ description: getApiErrorMessage(err), variant: "destructive" });
@@ -916,17 +1067,22 @@ export function RoleDetailPage() {
               <Plus size={14} className="mr-1" />
               Assign User
             </Button>
-          ) : (
+          ) : assignmentTab === "groups" ? (
             <Button size="sm" onClick={() => setAssignGroupOpen(true)}>
               <Plus size={14} className="mr-1" />
               Assign Group
+            </Button>
+          ) : (
+            <Button size="sm" onClick={() => setAssignServiceAccountOpen(true)}>
+              <Plus size={14} className="mr-1" />
+              Assign Service Account
             </Button>
           )
         }
       >
         {/* Tabs */}
         <div className="flex gap-1 mb-4 border-b border-white/10">
-          {(["users", "groups"] as AssignmentTab[]).map((tab) => (
+          {(["users", "groups", "service accounts"] as AssignmentTab[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setAssignmentTab(tab)}
@@ -1007,6 +1163,52 @@ export function RoleDetailPage() {
                   <button
                     aria-label={`Unassign group ${a.group.name}`}
                     onClick={() => setUnassignGroup(a)}
+                    className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <Unlink size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )
+        )}
+
+        {assignmentTab === "service accounts" && (
+          serviceAccountsLoading ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader2 size={20} className="animate-spin text-primary/60" />
+            </div>
+          ) : assignedServiceAccounts.length === 0 ? (
+            <div className="py-4 text-sm text-muted-foreground text-center">
+              <p>
+                No service accounts assigned. Use &quot;Assign Service
+                Account&quot; to grant this role to a machine identity.
+              </p>
+            </div>
+          ) : (
+            <ul className="divide-y divide-white/5">
+              {assignedServiceAccounts.map((a) => (
+                <li
+                  key={`${a.service_account.id}:${a.resource_id ?? "global"}`}
+                  className="flex items-center justify-between py-2.5 px-1"
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-foreground/90">
+                        {a.service_account.name}
+                      </p>
+                      <AssignmentScopeBadge
+                        resourceId={a.resource_id}
+                        nameFor={nameFor}
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground font-mono">
+                      {a.service_account.client_id}
+                    </p>
+                  </div>
+                  <button
+                    aria-label={`Unassign service account ${a.service_account.name}`}
+                    onClick={() => setUnassignServiceAccount(a)}
                     className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
                   >
                     <Unlink size={14} />
@@ -1127,6 +1329,34 @@ export function RoleDetailPage() {
             : `Remove this role from group "${unassignGroup?.group.name}"?`
         }
         isLoading={unassignGroupMutation.isPending}
+      />
+
+      {/* Assign service account dialog */}
+      <AssignServiceAccountDialog
+        open={assignServiceAccountOpen}
+        onClose={() => setAssignServiceAccountOpen(false)}
+        roleId={roleId!}
+        onAssigned={() => {
+          invalidateEntity(queryClient, "role-service-accounts");
+          setAssignServiceAccountOpen(false);
+        }}
+      />
+
+      {/* Unassign service account confirm */}
+      <ConfirmDialog
+        open={unassignServiceAccount !== null}
+        onClose={() => setUnassignServiceAccount(null)}
+        onConfirm={() =>
+          unassignServiceAccount &&
+          unassignServiceAccountMutation.mutate(unassignServiceAccount)
+        }
+        title="Unassign Service Account"
+        description={
+          unassignServiceAccount?.resource_id
+            ? `Remove this role from service account "${unassignServiceAccount.service_account.name}" under "${nameFor(unassignServiceAccount.resource_id)}"? Any global assignment of the same role is left alone.`
+            : `Remove this role from service account "${unassignServiceAccount?.service_account.name}"?`
+        }
+        isLoading={unassignServiceAccountMutation.isPending}
       />
     </div>
   );

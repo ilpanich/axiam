@@ -89,11 +89,57 @@ function listResponse(items: unknown[], total = items.length, limit = 20) {
   return res({ items, total, offset: 0, limit });
 }
 
+/** An axios-shaped rejection carrying an HTTP status. */
+function httpError(status: number) {
+  return Object.assign(new Error(`HTTP ${status}`), { response: { status } });
+}
+
+/**
+ * A signed-in administrator of the tenant this page acts on.
+ *
+ * Every test here reaches the create dialog through an authenticated session,
+ * so the store has to hold one: the dialog seals the new account's OPAQUE record
+ * against the tenant it is creating the account IN, and reads that tenant id
+ * from the active-tenant selection or, absent one, the caller's own tenant.
+ */
+function signedInAdmin() {
+  useAuthStore.setState({
+    user: {
+      id: "u1",
+      username: "admin",
+      email: "admin@example.com",
+      permissions: [],
+      tenant_id: "t1",
+      principal_tenant_id: "t1",
+      orgSlug: "acme",
+      tenantSlug: "default",
+    },
+    activeTenantId: null,
+    isAuthenticated: true,
+    isInitializing: false,
+  });
+}
+
+/**
+ * Route `register/start` to a 404 and everything else to `resolved`.
+ *
+ * 404 is how the server says this tenant has OPAQUE disabled, which is the
+ * default and what most tests here are about. The dialog now always asks rather
+ * than consulting a cached policy — that cache is what made switching a tenant
+ * to `optional` appear to do nothing — so the question has to be answered.
+ */
+function opaqueDisabledExcept(resolved: unknown) {
+  apiMock.post.mockImplementation((url: string) => {
+    if (url === "/api/v1/auth/opaque/register/start") {
+      return Promise.reject(httpError(404));
+    }
+    return Promise.resolve(resolved);
+  });
+}
+
 beforeEach(async () => {
   vi.clearAllMocks();
-  // Most tests here never reach OPAQUE: with no signed-in user carrying a
-  // policy, `buildEnrollmentForUser` returns null and the field is absent.
-  useAuthStore.setState({ user: null });
+  signedInAdmin();
   const { __setOpaqueModuleForTests } = await import("@/lib/opaque");
   __setOpaqueModuleForTests(opaqueModuleMock);
 });
@@ -220,7 +266,7 @@ describe("UsersPage", () => {
 
   it("creates a user with a display name and refetches", async () => {
     apiMock.get.mockResolvedValue(listResponse([alice, bob]));
-    apiMock.post.mockResolvedValue(res(rawUser({ id: "u3", username: "carol" })));
+    opaqueDisabledExcept(res(rawUser({ id: "u3", username: "carol" })));
     renderWithProviders(<UsersPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New User/ }));
     const dialog = screen.getByRole("dialog");
@@ -242,7 +288,7 @@ describe("UsersPage", () => {
 
   it("creates a user without a display name (no metadata sent)", async () => {
     apiMock.get.mockResolvedValue(listResponse([alice, bob]));
-    apiMock.post.mockResolvedValue(res(rawUser({ id: "u3", username: "carol" })));
+    opaqueDisabledExcept(res(rawUser({ id: "u3", username: "carol" })));
     renderWithProviders(<UsersPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New User/ }));
     const dialog = screen.getByRole("dialog");
@@ -322,10 +368,102 @@ describe("UsersPage", () => {
     );
   });
 
+  it("seals the record against the tenant the account is created in", async () => {
+    // The reported 400: "Validation error: the OPAQUE session was issued for a
+    // different tenant". An organization administrator selects a child tenant,
+    // `POST /api/v1/users` is scoped to it by the `X-Axiam-Tenant` header the
+    // API client attaches, and the record has to be sealed against THAT tenant's
+    // key material. The dialog built it from the signed-in administrator's own
+    // identity instead, so the session was minted for the organization scope and
+    // redeemed against the child — and creating a user anywhere but your own
+    // tenant was impossible for as long as OPAQUE was on.
+    useAuthStore.setState({
+      user: {
+        id: "u1",
+        username: "super-admin",
+        email: "super-admin@example.com",
+        permissions: ["*"],
+        tenant_id: "org-tenant",
+        principal_tenant_id: "org-tenant",
+        organization_level: true,
+        orgSlug: "acme",
+        tenantSlug: "organization",
+      },
+      activeTenantId: "child-tenant",
+      activeTenantName: "Child",
+      isAuthenticated: true,
+      isInitializing: false,
+    });
+
+    apiMock.get.mockResolvedValue(listResponse([alice, bob]));
+    apiMock.post.mockImplementation((url: string) => {
+      if (url === "/api/v1/auth/opaque/register/start") {
+        return Promise.resolve(
+          res({
+            opaque_session: "sealed",
+            registration_response: "aa".repeat(32),
+            suite: "ristretto255_sha512",
+            ksf: "argon2id",
+            memory_kib: 19456,
+            iterations: 2,
+            parallelism: 1,
+          })
+        );
+      }
+      return Promise.resolve(res(rawUser({ id: "u3", username: "carol" })));
+    });
+
+    renderWithProviders(<UsersPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New User/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Username *"), "carol");
+    await userEvent.type(within(dialog).getByLabelText("Email *"), "carol@x.io");
+    await userEvent.type(within(dialog).getByLabelText("Password *"), "Str0ng!Passw0rd");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/auth/opaque/register/start",
+        expect.objectContaining({ tenant_id: "child-tenant" })
+      )
+    );
+  });
+
+  it("reports a failed enrolment instead of creating an unenrollable account", async () => {
+    // Swallowing this is what let an account be created with no record under
+    // `optional` — silently unenrolled — or refused by the server under
+    // `required` with a message about a missing record the operator had no way
+    // to act on. Anything but a 404 is now surfaced, and no user is created.
+    setToastDispatch(vi.fn());
+    apiMock.get.mockResolvedValue(listResponse([alice, bob]));
+    apiMock.post.mockImplementation((url: string) =>
+      url === "/api/v1/auth/opaque/register/start"
+        ? Promise.reject(httpError(500))
+        : Promise.resolve(res(rawUser({ id: "u3", username: "carol" })))
+    );
+
+    renderWithProviders(<UsersPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New User/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Username *"), "carol");
+    await userEvent.type(within(dialog).getByLabelText("Email *"), "carol@x.io");
+    await userEvent.type(within(dialog).getByLabelText("Password *"), "Str0ng!Passw0rd");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    expect(
+      await screen.findByText(/Could not prepare secure login/)
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalledWith("/api/v1/users", expect.anything());
+  });
+
   it("surfaces a create error via toast and inline message", async () => {
     setToastDispatch(vi.fn());
     apiMock.get.mockResolvedValue(listResponse([alice, bob]));
-    apiMock.post.mockRejectedValue(new Error("Username taken"));
+    apiMock.post.mockImplementation((url: string) =>
+      url === "/api/v1/auth/opaque/register/start"
+        ? Promise.reject(httpError(404))
+        : Promise.reject(new Error("Username taken"))
+    );
     renderWithProviders(<UsersPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New User/ }));
     const dialog = screen.getByRole("dialog");

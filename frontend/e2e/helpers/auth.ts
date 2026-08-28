@@ -92,3 +92,44 @@ export async function loginAsAdmin(page: Page): Promise<void> {
   // intermittent `waitForURL` timeouts across the suite.
   await page.waitForURL(/\/dashboard|\/$/, { timeout: 45_000 });
 }
+
+/**
+ * loginAsOrgAdmin — signs in as the ORGANIZATION-level super-admin.
+ *
+ * The principal `POST /api/v1/admin/bootstrap` creates, and the one every
+ * organization-scope defect in this suite is about. It signs in naming **no
+ * tenant**: the login form's tenant field is left blank, and the server resolves
+ * the organization's own reserved scope. Almost everything else in the suite
+ * signs in as the tenant administrator instead (see `loginAsAdmin`), because
+ * that is the principal that owns tenant-scoped data.
+ *
+ * Always drives the full login UI rather than reusing `storageState`: the shared
+ * session belongs to the tenant admin, and silently inheriting it would make
+ * every assertion here about the wrong principal. Specs using this helper opt
+ * out of the shared session with `test.use({ storageState: { cookies: [],
+ * origins: [] } })`.
+ */
+export async function loginAsOrgAdmin(page: Page): Promise<void> {
+  const orgSlug = process.env["E2E_ORG_SLUG"] ?? "test-org";
+  const adminUsername = process.env["E2E_ADMIN_USERNAME"] ?? "admin";
+  const adminPassword = process.env["E2E_ADMIN_PASSWORD"] ?? "Test@Admin123!";
+
+  await page.goto("/login", { waitUntil: "networkidle", timeout: 45_000 });
+  await page
+    .getByLabel("Organization slug")
+    .waitFor({ state: "visible", timeout: 15_000 });
+
+  await page.getByLabel("Organization slug").fill(orgSlug);
+  // Deliberately blank. An organization-level principal names no tenant, and
+  // the empty string must be read as "none" rather than as a slug that cannot
+  // match — the bug that once made this sign-in impossible whatever the OPAQUE
+  // mode, because the tenant is resolved before the policy is ever read.
+  await page.getByLabel("Tenant slug").fill("");
+  await page.getByRole("button", { name: "Continue" }).click();
+
+  await page.getByLabel("Username or email").fill(adminUsername);
+  await page.getByLabel("Password").fill(adminPassword);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+
+  await page.waitForURL(/\/dashboard|\/$/, { timeout: 45_000 });
+}

@@ -265,6 +265,50 @@ Groups themselves are created via `POST /api/v1/groups` and populated via
 recommended pattern for managing access for a team rather than granting
 roles to individual users one at a time.
 
+### Service accounts hold roles too
+
+A service account is a principal like any other: the authorization engine
+applies RBAC to a machine identity exactly as it does to a person, and takes no
+"is this a machine" flag to branch on. The permissions carried by a
+client-credentials access token are the ones assigned here.
+
+```
+POST   /api/v1/roles/{role_id}/service-accounts
+{ "service_account_id": "<uuid>", "resource_id": null }
+
+DELETE /api/v1/roles/{role_id}/service-accounts/{service_account_id}[?resource_id=<uuid>]
+GET    /api/v1/roles/{role_id}/service-accounts
+GET    /api/v1/service-accounts/{service_account_id}/roles
+```
+
+Group membership works the same way, and is the right shape for a fleet: put
+every device's service account in one group, assign the role to the group, and
+the fleet is granted and revoked as one thing rather than one edge per device.
+
+```
+POST   /api/v1/groups/{group_id}/service-accounts
+{ "service_account_id": "<uuid>" }
+
+DELETE /api/v1/groups/{group_id}/service-accounts/{service_account_id}
+GET    /api/v1/groups/{group_id}/service-accounts
+GET    /api/v1/service-accounts/{service_account_id}/groups
+```
+
+Both are gated by the same permissions as their user equivalents —
+`roles:assign` / `roles:unassign` / `roles:get` and `groups:add_member` /
+`groups:remove_member` / `groups:list_members`. Which table a principal's record
+lives in is not a different administrative act, and a separate permission would
+let a deployment hand out `roles:assign` believing machine grants were gated
+apart from it.
+
+`GET /api/v1/service-accounts/{id}/roles` returns direct **and**
+group-inherited assignments, each with the resource scope of the grant, which is
+what the revoke call needs: omitting `resource_id` removes the *global*
+assignment specifically, not every assignment of that role.
+
+In the admin UI: **Roles → (a role) → Assignments → Service accounts**, and
+**Groups → (a group) → Service Accounts**.
+
 ## Authorization decision cache (optional, D7)
 
 AXIAM can cache effective-permission decisions per tenant to cut the 3–4

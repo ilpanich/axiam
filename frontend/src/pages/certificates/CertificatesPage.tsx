@@ -10,7 +10,6 @@ import {
   type GenerateCertificatePayload,
 } from "@/services/certificates";
 import { useAuthStore } from "@/stores/auth";
-import { orgService } from "@/services/organizations";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -272,17 +271,23 @@ function GenerateFields({
 export function CertificatesPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const orgSlug = useAuthStore((s) => s.orgSlug);
+  // The caller's own organization, straight from `/auth/me`. Both queries below
+  // used to reach it by listing every organization and matching on slug, which
+  // only a `super-admin` may do — so an ordinary tenant administrator saw no CAs
+  // at all and no link to where one is created.
+  const orgId = useAuthStore((s) => s.user?.org_id);
 
   const { data: certificates = [], isLoading } = useQuery({
     queryKey: ["certificates"],
     queryFn: () => certificateService.list(),
   });
 
-  // Active CA certificates available to sign new certs (hard prerequisite).
+  // The organization's Active CAs — inherited by every tenant under it, and a
+  // hard prerequisite for issuing anything.
   const { data: caCertificates = [], isLoading: caLoading } = useQuery({
-    queryKey: ["ca-certificates", orgSlug],
-    queryFn: () => certificateService.listSigningCas(orgSlug ?? undefined),
+    queryKey: ["ca-certificates", orgId],
+    queryFn: () => certificateService.listSigningCas(orgId ?? undefined),
+    enabled: Boolean(orgId),
   });
   const caOptions: CaOption[] = caCertificates.map((ca) => ({
     id: ca.id,
@@ -290,18 +295,9 @@ export function CertificatesPage() {
     not_after: ca.not_after,
   }));
 
-  // Where CAs are issued. The org detail page's CA section is the only place
-  // in the UI that generates one, and nothing on this page pointed at it. The
-  // org id is resolved the same way `listSigningCas` resolves it — from the
-  // caller's own organization, the only one that endpoint returns.
-  const { data: caSetupHref = null } = useQuery({
-    queryKey: ["ca-setup-href", orgSlug],
-    queryFn: async () => {
-      const orgs = await orgService.list();
-      const org = orgSlug ? orgs.find((o) => o.slug === orgSlug) : orgs[0];
-      return org ? `/organizations/${org.id}` : null;
-    },
-  });
+  // Where CAs are issued. The org detail page's CA section is the only place in
+  // the UI that generates one, and nothing on this page pointed at it.
+  const caSetupHref = orgId ? `/organizations/${orgId}` : null;
 
   // ─── Generate state ────────────────────────────────────────────────────────
   const [generateOpen, setGenerateOpen] = useState(false);

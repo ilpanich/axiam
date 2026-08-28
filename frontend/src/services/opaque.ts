@@ -186,33 +186,66 @@ export async function loginOpaque(args: {
 }
 
 /**
- * Build an enrolment for `password`, or `null` when the tenant does not use
- * OPAQUE or this browser cannot.
+ * Identifies the workspace an enrolment is being built for.
  *
- * `null` means "omit the `opaque` field", which is the correct fallback in both
- * cases: the server rejects a record outright under `disabled`, and under
- * `optional` a password change without one simply leaves the account
- * unenrolled rather than failing.
- *
- * There is no `identity` argument, where the SRP equivalent required one. The
- * record binds to a credential identifier the server chooses, so nothing here
- * depends on the account's username — which is also why a rename no longer
- * invalidates a credential.
+ * `tenantId` alone is enough and is the preferred form: a tenant identifies its
+ * organization on its own, and a UUID cannot be ambiguous the way a pair of
+ * slugs can. The slug fields remain for callers that genuinely only hold slugs.
  */
-export async function buildEnrollment(args: {
-  password: string;
+export interface EnrollmentWorkspace {
   orgSlug?: string;
   tenantSlug?: string;
   orgId?: string;
   tenantId?: string;
-}): Promise<OpaqueEnrollment | null> {
+}
+
+/**
+ * Build an enrolment for `password` in a named workspace.
+ *
+ * Returns `null` — meaning "omit the `opaque` field" — for exactly two reasons,
+ * and **throws** for everything else:
+ *
+ * * this browser cannot do OPAQUE at all (no WebAssembly artifact), or
+ * * the server answered `404`, which is how it says the tenant has OPAQUE
+ *   disabled. Omitting the field is then not a fallback but the correct
+ *   request: the server *rejects* a record under `disabled`.
+ *
+ * # Why the tenant's policy is not consulted first
+ *
+ * It used to be, from the copy of it the auth store cached at login, and that
+ * cache is what made enabling OPAQUE look like it did nothing. An operator
+ * switched the organization from `disabled` to `optional` and then changed a
+ * password in the same session; the store still said `disabled`, so this
+ * function returned `null` without asking, the `opaque` field was omitted, and
+ * no record was ever written. The tenant then accumulated no coverage at all,
+ * and switching to `required` locked everybody out — including the only
+ * administrator.
+ *
+ * `register/start` already answers the question authoritatively and costs one
+ * round trip, which is a round trip this function was making anyway whenever
+ * the cached policy happened to be right. So it asks.
+ *
+ * # Why a transient failure is no longer swallowed
+ *
+ * Returning `null` for a network blip meant an account could be created, or a
+ * password set, with no record under `optional` — silently unenrolled — or
+ * refused by the server under `required` with a message about a missing record
+ * the operator had no way to act on. A thrown error surfaces on the form, where
+ * "try again" is a thing the person in front of it can actually do.
+ */
+export async function buildEnrollment(
+  args: EnrollmentWorkspace & { password: string }
+): Promise<OpaqueEnrollment | null> {
   let exchange;
   try {
     exchange = await startRegistration(args.password);
   } catch {
+    // No OPAQUE implementation in this browser. Nothing to enrol with, and
+    // nothing a retry would fix.
     return null;
   }
 
+  let started: RegisterStartResponse;
   try {
     const response = await api.post<RegisterStartResponse>(
       "/api/v1/auth/opaque/register/start",
@@ -224,90 +257,82 @@ export async function buildEnrollment(args: {
         registration_request: exchange.request,
       }
     );
-    const started = response.data;
-    return {
-      opaque_session: started.opaque_session,
-      registration_record: exchange.finish(started.registration_response, started),
-    };
-  } catch {
-    // A failure here must not block the password change or reset it belongs
-    // to: the account keeps working on the password path, and the user can
-    // enrol on their next password change. Failing loudly would turn a
-    // transient error into a user who cannot recover their account.
-    return null;
+    started = response.data;
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
   }
+
+  return {
+    opaque_session: started.opaque_session,
+    registration_record: exchange.finish(started.registration_response, started),
+  };
 }
 
 /**
- * Build an enrolment for an authenticated user changing their own password.
+ * Build an enrolment for the authenticated caller's **own** new password.
  *
- * Returns `null` when the user's tenant does not use OPAQUE.
+ * Scoped to the tenant the caller *lives in*, never the one it is acting on. An
+ * organization-level administrator with a child tenant selected is still
+ * changing a password that belongs to the organization's own scope, and the
+ * server stores the record there; building it against the selected tenant would
+ * produce a session the server refuses with "the OPAQUE session was issued for
+ * a different tenant".
+ *
+ * `principal_tenant_id` is the field that says which one that is. It comes from
+ * `/auth/me` and is stable across tenant switches, where `tenant_id` follows
+ * whichever tenant the request acts on.
  */
 export async function buildEnrollmentForUser(
   user: {
-    /** As the auth store spells them (`AuthUser`, restored from `/auth/me`). */
-    tenantSlug?: string;
-    orgSlug?: string;
-    /** As `/auth/me` spells them on the wire, in case a caller passes that. */
-    tenant_slug?: string;
-    org_slug?: string;
-    opaque?: { opaque_mode: string; opaque_suite: string; opaque_ksf: string };
+    /** The tenant the caller lives in — stable across tenant switches. */
+    principal_tenant_id?: string;
+    /** The tenant the caller is acting on; equal to the above until it switches. */
+    tenant_id?: string;
   } | null,
   password: string
 ): Promise<OpaqueEnrollment | null> {
-  const policy = user?.opaque;
-  if (!user || !policy || policy.opaque_mode === "disabled") return null;
-
-  // Both spellings, because this used to read only the snake_case ones while
-  // every caller passed the auth store's `AuthUser`, which spells them
-  // `orgSlug`/`tenantSlug`. Both came out `undefined`, `register/start` was
-  // posted with no workspace identity, the server answered `400`, and
-  // `buildEnrollment` swallowed it and returned `null` — so the `opaque` field
-  // was quietly omitted from every password change. A tenant could run
-  // `optional` indefinitely and never accumulate a single registration record,
-  // with nothing anywhere reporting a failure. The structural parameter type
-  // is why the compiler had nothing to say: an `AuthUser` satisfies a type
-  // whose every field is optional.
-  const orgSlug = user.orgSlug ?? user.org_slug;
-  const tenantSlug = user.tenantSlug ?? user.tenant_slug;
-  if (!orgSlug || !tenantSlug) return null;
-
-  return buildEnrollment({ password, orgSlug, tenantSlug });
+  const tenantId = user?.principal_tenant_id ?? user?.tenant_id;
+  if (!tenantId) return null;
+  return buildEnrollment({ password, tenantId });
 }
 
 /**
- * What the unauthenticated reset page needs in order to enrol.
+ * Build an enrolment for an account being created in `tenantId`.
  *
- * The SRP version of this also carried the account's `identity`, because SRP
- * derived its key over the username and the reset page had no other way to
- * learn it. OPAQUE does not, so the endpoint no longer discloses it.
+ * The distinction from {@link buildEnrollmentForUser} is the entire bug behind
+ * "Validation error: the OPAQUE session was issued for a different tenant".
+ * Creating a user is the one password-setting flow whose subject is somebody
+ * else, in a tenant that need not be the caller's: an organization
+ * administrator selects a child tenant, `POST /api/v1/users` is scoped to it by
+ * the `X-Axiam-Tenant` header, and the record has to be sealed against *that*
+ * tenant's key material. Building it from the caller's own identity sealed it
+ * against the organization scope, and every such creation failed with a 400.
  */
-export interface ResetContext {
-  opaque?: { opaque_mode: string; opaque_suite: string; opaque_ksf: string };
+export async function buildEnrollmentForTenant(args: {
+  tenantId: string;
+  password: string;
+}): Promise<OpaqueEnrollment | null> {
+  return buildEnrollment({ password: args.password, tenantId: args.tenantId });
 }
 
 /**
  * Build the enrolment for a password reset.
  *
- * Returns `null` when the tenant does not use OPAQUE or the context lookup
- * fails. A lookup failure must not block the reset: the confirm call is the
- * authoritative check on the token.
+ * The emailed link carries `?token=…&tenant_id=…` and nothing else — there is no
+ * session to learn an organization from, which is why this passes only the
+ * tenant. The server resolves the organization from the tenant record.
+ *
+ * This used to ask `/auth/reset/context` for the tenant's OPAQUE policy first
+ * and skip enrolment when it could not be read. That made reset the hole in
+ * OPAQUE coverage: under `required`, a user who forgot their password could
+ * complete the reset and still be unable to sign in, because the reset wrote a
+ * password and no record. `register/start` answers the same question and is the
+ * request that has to succeed anyway.
  */
 export async function buildEnrollmentForReset(args: {
   tenantId: string;
-  token: string;
   password: string;
 }): Promise<OpaqueEnrollment | null> {
-  let context: ResetContext;
-  try {
-    const response = await api.get<ResetContext>("/api/v1/auth/reset/context", {
-      params: { tenant_id: args.tenantId, token: args.token },
-    });
-    context = response.data;
-  } catch {
-    return null;
-  }
-
-  if (!context.opaque || context.opaque.opaque_mode === "disabled") return null;
   return buildEnrollment({ password: args.password, tenantId: args.tenantId });
 }

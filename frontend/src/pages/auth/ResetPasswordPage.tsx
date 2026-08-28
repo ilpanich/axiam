@@ -68,7 +68,7 @@ export function ResetPasswordPage() {
         // Without this, reset would be the hole in OPAQUE coverage: the account
         // would keep a verifier for the password it just stopped using, and
         // under `opaque_mode: required` would be unable to log in at all.
-        const opaque = await buildEnrollmentForReset({ tenantId, token, password: newPw });
+        const opaque = await buildEnrollmentForReset({ tenantId, password: newPw });
         await authService.confirmPasswordReset(tenantId, token, newPw, opaque);
         window.history.replaceState({}, document.title, window.location.pathname);
         return { error: null, success: true };

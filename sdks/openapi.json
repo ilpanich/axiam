@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta02",
-    "x-axiam-spec-digest": "sha256:5ecae76c44138df731753ae7babea5c3fa5c9e5c6669ce8e606a8ffa79ce1c69"
+    "x-axiam-spec-digest": "sha256:3550b9fc6fa75770ff90d3c6f620facd369658acffdbbbbc2dad77eac59d1b2f"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -1039,7 +1039,7 @@
             }
           },
           "400": {
-            "description": "Malformed KE1 or missing workspace identity"
+            "description": "Malformed KE1 or no organization named"
           },
           "404": {
             "description": "OPAQUE is not enabled for this tenant"
@@ -1079,7 +1079,7 @@
             }
           },
           "400": {
-            "description": "Malformed registration request or missing workspace identity"
+            "description": "Malformed registration request or no organization named"
           },
           "404": {
             "description": "OPAQUE is not enabled for this tenant"
@@ -1341,7 +1341,7 @@
             }
           },
           "400": {
-            "description": "Neither slug nor id given for org or tenant"
+            "description": "Neither slug nor id given for the organization"
           },
           "401": {
             "description": "Unknown organization or tenant"
@@ -12707,13 +12707,15 @@
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Tenant UUID. See `tenant_slug` for what naming neither means."
           },
           "tenant_slug": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Tenant slug. Naming no tenant — neither this nor `tenant_id` — signs in\nat organization level, against the organization's own reserved scope.\nAn empty string is read as naming none."
           },
           "username_or_email": {
             "type": "string"
@@ -13887,14 +13889,14 @@
               "null"
             ],
             "format": "uuid",
-            "description": "Tenant UUID. Either this or `tenant_slug` is required."
+            "description": "Tenant UUID. See `tenant_slug` for what naming neither means."
           },
           "tenant_slug": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Tenant slug. Either this or `tenant_id` is required."
+            "description": "Tenant slug. Naming no tenant — neither this nor `tenant_id` —\nresolves the organization's own reserved scope, which is where\norganization-level principals live, exactly as `POST /auth/login` does.\nAn empty string is read as naming none."
           },
           "username_or_email": {
             "type": "string",
@@ -14049,14 +14051,14 @@
               "null"
             ],
             "format": "uuid",
-            "description": "Tenant UUID. Either this or `tenant_slug` is required."
+            "description": "Tenant UUID. See `tenant_slug` for what naming neither means."
           },
           "tenant_slug": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Tenant slug. Either this or `tenant_id` is required."
+            "description": "Tenant slug. Naming no tenant — neither this nor `tenant_id` —\nresolves the organization's own reserved scope, which is where\norganization-level principals live, exactly as `POST /auth/login` does.\nAn empty string is read as naming none."
           }
         }
       },
@@ -15941,7 +15943,7 @@
       },
       "StartDiscoverableAuthenticationRequest": {
         "type": "object",
-        "description": "Body of `POST /api/v1/auth/webauthn/authenticate/discoverable/start`.\n\nThere is no `challenge_token` here, and that is the whole point: a\nusernameless ceremony has no prior login step to carry one. What it does\nneed is the workspace, because a discoverable credential still has to be\nresolved inside one tenant's isolation boundary. Slugs and UUIDs are both\naccepted, matching `POST /api/v1/auth/login`.",
+        "description": "Body of `POST /api/v1/auth/webauthn/authenticate/discoverable/start`.\n\nThere is no `challenge_token` here, and that is the whole point: a\nusernameless ceremony has no prior login step to carry one. What it does\nneed is the workspace, because a discoverable credential still has to be\nresolved inside one tenant's isolation boundary. Slugs and UUIDs are both\naccepted, matching `POST /api/v1/auth/login` — including what naming no\ntenant means: the organization's own reserved scope, where\norganization-level principals live.",
         "properties": {
           "org_id": {
             "type": [
@@ -15961,7 +15963,8 @@
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Omit both tenant fields — or send an empty slug — for the\norganization's own scope."
           },
           "tenant_slug": {
             "type": [

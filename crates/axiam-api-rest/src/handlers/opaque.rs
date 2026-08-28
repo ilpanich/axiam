@@ -54,7 +54,7 @@ use uuid::Uuid;
 use crate::error::AxiamApiError;
 use crate::extractors::client_info::{client_ip, user_agent};
 use crate::handlers::auth::{
-    MfaRequiredResponse, MfaSetupRequiredResponse, cookie_response_from_output,
+    MfaRequiredResponse, MfaSetupRequiredResponse, blank_is_unnamed, cookie_response_from_output,
 };
 use crate::state::AppState;
 
@@ -70,7 +70,7 @@ use crate::state::AppState;
     request_body = OpaqueRegisterStartRequest,
     responses(
         (status = 200, description = "OPRF evaluation and the KSF parameters to stretch with", body = axiam_core::models::opaque::OpaqueRegisterStartResponse),
-        (status = 400, description = "Malformed registration request or missing workspace identity"),
+        (status = 400, description = "Malformed registration request or no organization named"),
         (status = 404, description = "OPAQUE is not enabled for this tenant"),
         (status = 503, description = "OPAQUE is enabled but the server has no keys configured"),
     )
@@ -124,7 +124,7 @@ pub async fn opaque_register_start<C: Connection + Clone>(
     request_body = OpaqueLoginStartRequest,
     responses(
         (status = 200, description = "KE2 (identical shape for unknown identities)", body = axiam_core::models::opaque::OpaqueLoginStartResponse),
-        (status = 400, description = "Malformed KE1 or missing workspace identity"),
+        (status = 400, description = "Malformed KE1 or no organization named"),
         (status = 404, description = "OPAQUE is not enabled for this tenant"),
         (status = 503, description = "OPAQUE is enabled but the server has no keys configured"),
     )
@@ -411,6 +411,17 @@ pub(crate) async fn server_setup<C: Connection + Clone>(
 /// `org_id` and get a token scoped to that organization. Every failure maps to
 /// an enumeration-safe `Validation`/`NotFound` that says nothing about which
 /// part was wrong.
+///
+/// Naming no tenant resolves the organization's own scope, exactly as
+/// `POST /auth/login` does. That parity is not a nicety: bootstrap creates an
+/// **organization-level** administrator and sends the browser to
+/// `/login?org=<slug>` with no tenant, and the browser probes OPAQUE before it
+/// tries the password endpoint. While this function demanded a tenant, that
+/// probe answered `401` instead of the `404` that means "OPAQUE is not offered
+/// here", the client had no fallback to take, and the only administrator of a
+/// freshly bootstrapped deployment could not sign in — whatever OPAQUE mode
+/// had been chosen, `disabled` included, because the tenant is resolved before
+/// the policy is ever read.
 async fn resolve_workspace<C: Connection + Clone>(
     state: &AppState<C>,
     org_id: Option<Uuid>,
@@ -418,6 +429,11 @@ async fn resolve_workspace<C: Connection + Clone>(
     tenant_id: Option<Uuid>,
     tenant_slug: Option<&str>,
 ) -> Result<(Uuid, Uuid), AxiamApiError> {
+    // A blank slug is not a slug. The browser posts `tenant_slug: ""` for an
+    // organization-level sign-in, and so may an SDK that serializes an empty
+    // form field rather than omitting it.
+    let (org_slug, tenant_slug) = (blank_is_unnamed(org_slug), blank_is_unnamed(tenant_slug));
+
     let org_id = match (org_id, org_slug) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
@@ -449,10 +465,20 @@ async fn resolve_workspace<C: Connection + Clone>(
                 })?
                 .id
         }
+        // No tenant named: the organization's own scope, which is where
+        // organization-level principals live. Same rule, same helper and the
+        // same enumeration-safe failure as `POST /auth/login` — the two login
+        // paths must resolve a workspace identically or a client that can
+        // reach one cannot reach the other.
         (None, None) => {
-            return Err(AxiamApiError(AxiamError::Validation {
-                message: "must provide tenant_id or tenant_slug".into(),
-            }));
+            state
+                .tenant_repo
+                .get_organization_tenant(org_id)
+                .await
+                .map_err(|_| AxiamError::AuthenticationFailed {
+                    reason: "invalid credentials".into(),
+                })?
+                .id
         }
     };
 

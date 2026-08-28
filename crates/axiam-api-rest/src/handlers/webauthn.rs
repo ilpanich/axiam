@@ -59,13 +59,17 @@ pub struct StartAuthenticationRequest {
 /// usernameless ceremony has no prior login step to carry one. What it does
 /// need is the workspace, because a discoverable credential still has to be
 /// resolved inside one tenant's isolation boundary. Slugs and UUIDs are both
-/// accepted, matching `POST /api/v1/auth/login`.
+/// accepted, matching `POST /api/v1/auth/login` — including what naming no
+/// tenant means: the organization's own reserved scope, where
+/// organization-level principals live.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct StartDiscoverableAuthenticationRequest {
     #[serde(default)]
     pub org_id: Option<Uuid>,
     #[serde(default)]
     pub org_slug: Option<String>,
+    /// Omit both tenant fields — or send an empty slug — for the
+    /// organization's own scope.
     #[serde(default)]
     pub tenant_id: Option<Uuid>,
     #[serde(default)]
@@ -446,7 +450,7 @@ pub async fn start_authentication<C: Connection + Clone>(
     responses(
         (status = 200, description = "Discoverable authentication challenge",
          body = StartAuthenticationResponse),
-        (status = 400, description = "Neither slug nor id given for org or tenant"),
+        (status = 400, description = "Neither slug nor id given for the organization"),
         (status = 401, description = "Unknown organization or tenant"),
     )
 )]
@@ -492,7 +496,14 @@ async fn resolve_workspace<C: Connection + Clone>(
         reason: "invalid credentials".into(),
     };
 
-    let org_id = match (b.org_id, b.org_slug.as_deref()) {
+    // A blank slug is not a slug — see `handlers::auth::blank_is_unnamed`. The
+    // login page collects the workspace in one step and hands both fields to
+    // this ceremony, so an organization-level sign-in arrives here with an
+    // empty tenant.
+    let org_slug = crate::handlers::auth::blank_is_unnamed(b.org_slug.as_deref());
+    let tenant_slug = crate::handlers::auth::blank_is_unnamed(b.tenant_slug.as_deref());
+
+    let org_id = match (b.org_id, org_slug) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
             state
@@ -509,7 +520,7 @@ async fn resolve_workspace<C: Connection + Clone>(
         }
     };
 
-    let tenant_id = match (b.tenant_id, b.tenant_slug.as_deref()) {
+    let tenant_id = match (b.tenant_id, tenant_slug) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
             state
@@ -519,10 +530,17 @@ async fn resolve_workspace<C: Connection + Clone>(
                 .map_err(|_| unauthenticated())?
                 .id
         }
+        // No tenant named: the organization's own scope, as `login` does. An
+        // organization-level principal holds passkeys like any other, and
+        // demanding a tenant here made the one credential it could sign in with
+        // unusable to it.
         (None, None) => {
-            return Err(AxiamApiError(AxiamError::Validation {
-                message: "must provide tenant_id or tenant_slug".into(),
-            }));
+            state
+                .tenant_repo
+                .get_organization_tenant(org_id)
+                .await
+                .map_err(|_| unauthenticated())?
+                .id
         }
     };
 

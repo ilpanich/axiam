@@ -228,6 +228,23 @@ describe("discoverable (usernameless) authentication", () => {
     );
   });
 
+  it("omits tenant_slug when signing in at organization level", async () => {
+    // The administrator a first-run bootstrap creates is organization-level and
+    // has no tenant to name. Sent as `""` the server resolves a slug that
+    // cannot match and refuses the ceremony; absent, it reads the request as
+    // the organization's own scope. The conditional variant swallows its own
+    // errors, so getting this wrong fails silently.
+    mockDiscoverableEndpoints();
+    startAuthenticationMock.mockResolvedValue({ id: "assertion" });
+
+    await webauthnService.authenticateDiscoverable("acme", "");
+
+    expect(apiMock.post).toHaveBeenCalledWith(
+      "/api/v1/auth/webauthn/authenticate/discoverable/start",
+      { org_slug: "acme" },
+    );
+  });
+
   it("passes the server's options through untouched", async () => {
     mockDiscoverableEndpoints();
     startAuthenticationMock.mockResolvedValue({ id: "assertion" });

@@ -27,16 +27,32 @@ use crate::middleware::csrf::{
 };
 use crate::state::AppState;
 
+/// Read a blank slug as "not named".
+///
+/// Shared with the OPAQUE login path so both ways of signing in agree on what
+/// naming a workspace means. Nothing can have an empty slug, so the literal
+/// reading only ever produced a `401`; for `tenant_slug` it also hid the
+/// organization-level branch from any client that posts an empty form field
+/// rather than omitting the key — which is what every browser sign-in after a
+/// first-run bootstrap does, that administrator being organization-level.
+pub(crate) fn blank_is_unnamed(slug: Option<&str>) -> Option<&str> {
+    slug.map(str::trim).filter(|s| !s.is_empty())
+}
+
 // -----------------------------------------------------------------------
 // Request / response types
 // -----------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LoginRequest {
+    /// Tenant UUID. See `tenant_slug` for what naming neither means.
     #[serde(default)]
     pub tenant_id: Option<Uuid>,
     #[serde(default)]
     pub org_id: Option<Uuid>,
+    /// Tenant slug. Naming no tenant — neither this nor `tenant_id` — signs in
+    /// at organization level, against the organization's own reserved scope.
+    /// An empty string is read as naming none.
     #[serde(default)]
     pub tenant_slug: Option<String>,
     #[serde(default)]
@@ -353,7 +369,15 @@ pub async fn login<C: Connection + Clone>(
     // Resolve workspace identity — accept either UUIDs or slugs. Slug-resolution
     // failures are deliberately mapped to AuthenticationFailed (401) to avoid
     // disclosing whether an organization or tenant with a given slug exists.
-    let org_id = match (b.org_id, b.org_slug.as_deref()) {
+    //
+    // A blank slug is read as "not named" rather than as a slug that happens to
+    // be empty. No row can carry one, so the only thing the literal reading
+    // ever produced was a 401 — and for `tenant_slug` it took the
+    // organization-level branch below away from any client that sends its form
+    // fields verbatim instead of omitting the empty one.
+    let org_slug = blank_is_unnamed(b.org_slug.as_deref());
+    let tenant_slug = blank_is_unnamed(b.tenant_slug.as_deref());
+    let org_id = match (b.org_id, org_slug) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
             state
@@ -371,7 +395,7 @@ pub async fn login<C: Connection + Clone>(
             }));
         }
     };
-    let tenant_id = match (b.tenant_id, b.tenant_slug.as_deref()) {
+    let tenant_id = match (b.tenant_id, tenant_slug) {
         (Some(id), _) => id,
         (None, Some(slug)) => {
             state

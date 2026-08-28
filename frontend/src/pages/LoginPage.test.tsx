@@ -848,6 +848,36 @@ describe("LoginPage — OPAQUE", () => {
     );
   });
 
+  it("omits tenant_slug from the probe when signing in at organization level", async () => {
+    // The administrator bootstrap creates is organization-level, and the login
+    // page reaches this endpoint before the password one. Sent as `""` the
+    // server resolves a slug that cannot match and answers 401 — raised before
+    // the tenant's OPAQUE mode is even read, so the 404 the fallback keys on
+    // never arrives and the sign-in dies on the probe.
+    apiMock.post.mockImplementation((url: string) =>
+      url === OPAQUE_LOGIN_START ? opaqueDisabled() : res({ user: { id: "u1" } })
+    );
+
+    renderWithProviders(<LoginPage />);
+    await userEvent.type(screen.getByLabelText("Organization slug"), "acme");
+    await userEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByRole("heading", { name: "Sign in" });
+    await submitCredentials();
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/auth/login",
+        expect.anything()
+      )
+    );
+    const probe = apiMock.post.mock.calls.find(
+      (c) => c[0] === OPAQUE_LOGIN_START
+    )?.[1] as Record<string, unknown> | undefined;
+    expect(probe).toBeDefined();
+    expect(probe).not.toHaveProperty("tenant_slug");
+    expect(probe?.org_slug).toBe("acme");
+  });
+
   it("falls back to password login when the tenant has OPAQUE disabled", async () => {
     apiMock.post.mockImplementation((url: string) =>
       url === OPAQUE_LOGIN_START ? opaqueDisabled() : res({ user: { id: "u1" } })

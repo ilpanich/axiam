@@ -872,3 +872,164 @@ async fn the_reported_mode_is_the_same_for_an_unknown_identity() {
     assert_eq!(known["mode"], unknown["mode"]);
     assert_eq!(known["mode"], "optional");
 }
+
+// ---------------------------------------------------------------------------
+// Signing in by slug, the way a browser does
+// ---------------------------------------------------------------------------
+//
+// Every test above names the workspace with raw UUIDs, which no human ever
+// types. The login form collects slugs, and the two login paths must resolve
+// them identically — `/auth/opaque/login/start` failing on a workspace that
+// `/auth/login` accepts is invisible to a UUID-driven test and fatal to a
+// browser, because the probe then answers `401` instead of the `404` the
+// client falls back from.
+
+/// A tenant user signs in by naming the organization and the tenant, through
+/// the whole probe-then-fall-back sequence the login page performs.
+#[actix_rt::test]
+async fn a_tenant_user_signs_in_by_slug_under_both_modes() {
+    let (db, org_id, tenant_id, _user_id) = setup_db("slugin").await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let peer: SocketAddr = TEST_PEER.parse().unwrap();
+
+    // --- `disabled`: the probe must report the policy, not fail on the
+    // workspace, or the password login that follows it never happens.
+    let (_state, ke1) = ClientLoginState::start(password()).unwrap();
+    let req = test::TestRequest::post()
+        .peer_addr(peer)
+        .uri("/api/v1/auth/opaque/login/start")
+        .set_json(serde_json::json!({
+            "org_slug": "slugin-org",
+            "tenant_slug": "slugin-tenant",
+            "username_or_email": USERNAME,
+            "ke1": ke1,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "OPAQUE disabled must read as disabled when the workspace is named by slug"
+    );
+
+    let req = test::TestRequest::post()
+        .peer_addr(peer)
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "org_slug": "slugin-org",
+            "tenant_slug": "slugin-tenant",
+            "username_or_email": USERNAME,
+            "password": password(),
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "a tenant user must sign in with password after the probe falls back"
+    );
+
+    // --- `required`: the same slugs must carry a full exchange.
+    set_opaque_mode(&db, org_id, OpaqueMode::Optional).await;
+    let (access, csrf) = password_login(&app, org_id, tenant_id, password())
+        .await
+        .expect("password login while enrolling");
+    assert_eq!(
+        enroll_via_password_change(
+            &app,
+            org_id,
+            tenant_id,
+            &access,
+            &csrf,
+            password(),
+            new_password(),
+        )
+        .await,
+        204,
+        "enrolment must succeed"
+    );
+    set_opaque_mode(&db, org_id, OpaqueMode::Required).await;
+
+    let (state, ke1) = ClientLoginState::start(new_password()).unwrap();
+    let req = test::TestRequest::post()
+        .peer_addr(peer)
+        .uri("/api/v1/auth/opaque/login/start")
+        .set_json(serde_json::json!({
+            "org_slug": "slugin-org",
+            "tenant_slug": "slugin-tenant",
+            "username_or_email": USERNAME,
+            "ke1": ke1,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let start_status = resp.status().as_u16();
+    let started: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(start_status, 200, "started = {started}");
+
+    let ksf = ksf_from_response(&started);
+    let finished = state
+        .finish(new_password(), started["ke2"].as_str().unwrap(), &ksf)
+        .expect("the record enrolled by slug must open by slug");
+
+    let req = test::TestRequest::post()
+        .peer_addr(peer)
+        .uri("/api/v1/auth/opaque/login/finish")
+        .set_json(serde_json::json!({
+            "opaque_session": started["opaque_session"].as_str().unwrap(),
+            "ke3": finished.ke3,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "a tenant user must authenticate through OPAQUE naming slugs"
+    );
+}
+
+/// A tenant user who omits the tenant is refused, and refused the same way on
+/// both paths.
+///
+/// Omitting it means "sign in at organization level", and this organization has
+/// no organization scope at all — but even where one exists, a tenant user is
+/// simply not in it. Either way the answer must be the ordinary
+/// enumeration-safe `401`, identical to a wrong password: a tenant user must
+/// name their tenant, and learns nothing by failing to.
+#[actix_rt::test]
+async fn a_tenant_user_omitting_the_tenant_is_refused_identically_on_both_paths() {
+    let (db, org_id, _tenant_id, _user_id) = setup_db("notenant").await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let peer: SocketAddr = TEST_PEER.parse().unwrap();
+    set_opaque_mode(&db, org_id, OpaqueMode::Required).await;
+
+    let (_state, ke1) = ClientLoginState::start(password()).unwrap();
+    let req = test::TestRequest::post()
+        .peer_addr(peer)
+        .uri("/api/v1/auth/opaque/login/start")
+        .set_json(serde_json::json!({
+            "org_slug": "notenant-org",
+            "username_or_email": USERNAME,
+            "ke1": ke1,
+        }))
+        .to_request();
+    let opaque_status = test::call_service(&app, req).await.status().as_u16();
+
+    let req = test::TestRequest::post()
+        .peer_addr(peer)
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "org_slug": "notenant-org",
+            "username_or_email": USERNAME,
+            "password": password(),
+        }))
+        .to_request();
+    let password_status = test::call_service(&app, req).await.status().as_u16();
+
+    assert_eq!(opaque_status, 401);
+    assert_eq!(
+        opaque_status, password_status,
+        "the two login paths must refuse an unreachable workspace alike"
+    );
+}

@@ -252,7 +252,14 @@ export const webauthnService = {
   ): Promise<WebauthnLoginResult> {
     const { data } = await api.post<StartAuthenticationDto>(
       "/api/v1/auth/webauthn/authenticate/discoverable/start",
-      { org_slug: orgSlug, tenant_slug: tenantSlug },
+      {
+        org_slug: orgSlug,
+        // Omitted when blank, exactly as the two password paths omit it: the
+        // server reads "no tenant named" as the organization's own scope,
+        // which is where the administrator bootstrap creates lives. An empty
+        // string is a slug lookup that cannot match.
+        ...(tenantSlug.trim() ? { tenant_slug: tenantSlug.trim() } : {}),
+      },
     );
 
     const response: AuthenticationResponseJSON = await startAuthentication({

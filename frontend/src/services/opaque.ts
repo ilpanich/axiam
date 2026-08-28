@@ -139,7 +139,14 @@ export async function loginOpaque(args: {
       "/api/v1/auth/opaque/login/start",
       {
         org_slug: args.orgSlug,
-        tenant_slug: args.tenantSlug,
+        // Omitted entirely when blank, exactly as the password path omits it.
+        // The server reads "no tenant named" as "sign in at organization
+        // level", which is where the administrator bootstrap creates lives;
+        // an empty string is a slug lookup that cannot match, and the 401 it
+        // produced was raised *before* the tenant's OPAQUE mode was read — so
+        // this probe never reached the 404 that tells the caller to fall back,
+        // and organization-level sign-in failed even with OPAQUE disabled.
+        ...(args.tenantSlug.trim() ? { tenant_slug: args.tenantSlug.trim() } : {}),
         username_or_email: args.usernameOrEmail,
         ke1: exchange.ke1,
       }

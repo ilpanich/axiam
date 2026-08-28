@@ -100,6 +100,40 @@ pub struct LoginUserInfo {
     /// the UI then offers no cross-tenant action.
     #[serde(default)]
     pub organization_level: bool,
+    /// The tenant the caller **lives in**, as opposed to `tenant_id`, which is
+    /// the tenant it is currently **acting on**.
+    ///
+    /// The two are the same value for every ordinary principal, and differ only
+    /// for an organization-level one that has selected another tenant with the
+    /// `X-Axiam-Tenant` header. Exposed because that difference decides where
+    /// several things belong and a client cannot derive it: the caller's own
+    /// password and its OPAQUE registration record live here, not in the
+    /// selected tenant, and a record sealed against the wrong one is refused
+    /// with "the OPAQUE session was issued for a different tenant".
+    ///
+    /// Clients that never switch tenant can ignore it — it equals `tenant_id`.
+    pub principal_tenant_id: Uuid,
+    /// Slug of [`Self::principal_tenant_id`], on the same terms as
+    /// `tenant_slug`: resolved server-side and omitted (not an error) when the
+    /// lookup fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal_tenant_slug: Option<String>,
+    /// The caller's organization, as a UUID rather than only the slug.
+    ///
+    /// Every organization-scoped route is addressed by id
+    /// (`/api/v1/organizations/{org_id}/…`), so a client holding only the slug
+    /// has to turn it into an id somehow — and the only way to do that was
+    /// `GET /api/v1/organizations`, which is restricted to `super-admin`. So the
+    /// certificates page could not list the organization's CAs for any
+    /// administrator below that, and the organization CA a tenant is meant to
+    /// issue under was simply not offered. It is the caller's own organization,
+    /// already in the validated token; naming it here discloses nothing and
+    /// removes the detour.
+    ///
+    /// Omitted (not an error) when the tenant lookup that resolves it fails, on
+    /// the same terms as the slugs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<Uuid>,
 }
 
 /// Login success response body.
@@ -268,6 +302,7 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
     let organization_level = tenant
         .as_ref()
         .is_some_and(axiam_core::models::tenant::Tenant::is_organization_scope);
+    let org_id = tenant.as_ref().map(|t| t.organization_id);
     let org_slug = match tenant.as_ref() {
         Some(t) => org_repo
             .get_by_id(t.organization_id)
@@ -332,9 +367,17 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
                 username: user.username,
                 email: user.email,
                 tenant_id,
-                tenant_slug,
+                tenant_slug: tenant_slug.clone(),
                 org_slug,
                 organization_level,
+                // A login carries no `X-Axiam-Tenant`: the credentials were
+                // presented against exactly one tenant, so the tenant the
+                // caller lives in and the one it is acting on are the same
+                // here by construction. They diverge only once a client
+                // switches, which it can only do afterwards.
+                principal_tenant_id: tenant_id,
+                principal_tenant_slug: tenant_slug,
+                org_id,
             },
             session_id: out.session_id,
             expires_in: out.expires_in,
@@ -890,31 +933,55 @@ pub async fn me<C: Connection + Clone>(
     user: AuthenticatedUser,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    // The caller's own record lives in the tenant it INHABITS, never the one it
+    // is acting on. For an organization-level principal with a child tenant
+    // selected these differ, and looking the account up in the selected tenant
+    // found nothing — so `/auth/me` answered 401 and the admin UI logged the
+    // administrator out the moment they switched tenant.
+    let principal_tenant_id = user.principal_tenant_id;
     let u = state
         .user_repo
-        .get_by_id(user.tenant_id, user.user_id)
+        .get_by_id(principal_tenant_id, user.user_id)
         .await
         .map_err(|_| AxiamError::AuthenticationFailed {
             reason: "user not found".into(),
         })?;
 
-    // Effective permissions = union of action strings across every role
-    // assigned to the user (direct + via group membership). `get_user_roles`
-    // handles both sources, so we don't need a separate group lookup here.
-    let roles = state
+    // Effective permissions = union of action strings across every role assigned
+    // to the caller (direct + via group membership), read from the tenant whose
+    // grants apply — which `AccessRequest::assignment_tenant_id` defines as the
+    // tenant the caller inhabits, not the one being acted upon.
+    //
+    // Across a tenant boundary only *global* assignments carry, mirroring
+    // `axiam_authz::engine::global_role_ids` exactly. This array is only a UI
+    // hint — the server enforces every action independently — but a hint that
+    // disagrees with the enforcement is worse than none: reading grants from the
+    // selected tenant returned an empty set for every organization-level
+    // administrator that switched tenant, so the UI hid every control for
+    // actions the server would in fact have allowed.
+    let crosses_tenant_boundary = user.tenant_id != principal_tenant_id;
+    let assignments = state
         .role_repo
-        .get_user_roles(user.tenant_id, user.user_id)
+        .get_user_role_assignments(principal_tenant_id, user.user_id)
         .await?;
 
     let mut actions: BTreeSet<String> = BTreeSet::new();
     let mut is_super_admin = false;
-    for role in &roles {
-        if role.name == "super-admin" {
+    let mut seen_roles: BTreeSet<Uuid> = BTreeSet::new();
+    for assignment in &assignments {
+        if crosses_tenant_boundary && !(assignment.role.is_global && assignment.resource_id.is_none())
+        {
+            continue;
+        }
+        if !seen_roles.insert(assignment.role.id) {
+            continue;
+        }
+        if assignment.role.name == "super-admin" {
             is_super_admin = true;
         }
         let perms = state
             .permission_repo
-            .get_role_permissions(user.tenant_id, role.id)
+            .get_role_permissions(principal_tenant_id, assignment.role.id)
             .await?;
         for p in perms {
             actions.insert(p.action);
@@ -953,6 +1020,12 @@ pub async fn me<C: Connection + Clone>(
         None => None,
     };
 
+    // From the tenant the caller *lives in*, not the one it is acting on. An
+    // organization-level principal acting on `tenant-a` is still
+    // organization-level, and a UI told otherwise would hide the selector that
+    // got it there.
+    let principal_tenant = state.tenant_repo.get_by_id(principal_tenant_id).await.ok();
+
     Ok(HttpResponse::Ok().json(MeResponse {
         user: LoginUserInfo {
             id: user.user_id,
@@ -961,16 +1034,12 @@ pub async fn me<C: Connection + Clone>(
             tenant_id: user.tenant_id,
             tenant_slug,
             org_slug,
-            // From the tenant the caller *lives in*, not the one it is acting
-            // on. An organization-level principal acting on `tenant-a` is still
-            // organization-level, and a UI told otherwise would hide the
-            // selector that got it there.
-            organization_level: state
-                .tenant_repo
-                .get_by_id(user.principal_tenant_id)
-                .await
-                .ok()
-                .is_some_and(|t| t.is_organization_scope()),
+            organization_level: principal_tenant
+                .as_ref()
+                .is_some_and(axiam_core::models::tenant::Tenant::is_organization_scope),
+            principal_tenant_id,
+            principal_tenant_slug: principal_tenant.as_ref().map(|t| t.slug.clone()),
+            org_id: tenant.as_ref().map(|t| t.organization_id),
         },
         permissions,
         opaque,
@@ -1053,11 +1122,23 @@ pub async fn change_password<C: Connection + Clone>(
         .into());
     }
 
-    // Resolve tenant to look up org_id for effective settings.
-    let tenant = state.tenant_repo.get_by_id(user.tenant_id).await?;
+    // The caller's OWN account, so every tenant below is the one the caller
+    // lives in — never the one it is acting on.
+    //
+    // They are the same value for every ordinary principal and differ only for
+    // an organization-level one that has selected a child tenant in the admin
+    // UI, which sends `X-Axiam-Tenant` on every subsequent request. Reading the
+    // acting tenant here looked the account up in the selected tenant, found
+    // nothing, and failed the password change — with no visible cause, because
+    // the only thing that had changed was which row of the tenant switcher was
+    // highlighted. It would also have written the OPAQUE record into the wrong
+    // tenant had the lookup succeeded, which is the same defect the record's own
+    // tenant check catches at user creation.
+    let tenant_id = user.principal_tenant_id;
+    let tenant = state.tenant_repo.get_by_id(tenant_id).await?;
     let settings = state
         .settings_repo
-        .get_effective_settings(tenant.organization_id, user.tenant_id)
+        .get_effective_settings(tenant.organization_id, tenant_id)
         .await?;
 
     // Validate the record BEFORE the password is changed. Doing it after would
@@ -1068,14 +1149,14 @@ pub async fn change_password<C: Connection + Clone>(
     let enrolled = crate::handlers::opaque_enrollment::validate_enrollment(
         &state,
         &settings.opaque,
-        user.tenant_id,
+        tenant_id,
         body.opaque.as_ref(),
     )?;
 
     state
         .auth_service
         .change_password(
-            user.tenant_id,
+            tenant_id,
             user.user_id,
             user.session_id,
             &body.current_password,
@@ -1086,13 +1167,8 @@ pub async fn change_password<C: Connection + Clone>(
         )
         .await?;
 
-    crate::handlers::opaque_enrollment::store_credential(
-        &state,
-        user.tenant_id,
-        user.user_id,
-        enrolled,
-    )
-    .await?;
+    crate::handlers::opaque_enrollment::store_credential(&state, tenant_id, user.user_id, enrolled)
+        .await?;
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -1107,9 +1183,12 @@ mod tests {
             username: "alice".into(),
             email: "alice@example.com".into(),
             tenant_id: Uuid::nil(),
-            tenant_slug,
+            tenant_slug: tenant_slug.clone(),
             org_slug,
             organization_level: false,
+            principal_tenant_id: Uuid::nil(),
+            principal_tenant_slug: tenant_slug,
+            org_id: Some(Uuid::nil()),
         }
     }
 

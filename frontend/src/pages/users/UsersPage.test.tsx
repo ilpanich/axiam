@@ -456,6 +456,30 @@ describe("UsersPage", () => {
     expect(apiMock.post).not.toHaveBeenCalledWith("/api/v1/users", expect.anything());
   });
 
+  it("refuses to create when no tenant can be determined", async () => {
+    // The record has to be sealed against a specific tenant, and the dialog
+    // cannot invent one. Reaching here means the auth store was never hydrated
+    // — a different problem, and not one an enrolment round-trip diagnoses.
+    useAuthStore.setState({
+      user: null,
+      activeTenantId: null,
+      isAuthenticated: true,
+      isInitializing: false,
+    });
+    apiMock.get.mockResolvedValue(listResponse([alice, bob]));
+    renderWithProviders(<UsersPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /New User/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Username *"), "carol");
+    await userEvent.type(within(dialog).getByLabelText("Email *"), "carol@x.io");
+    await userEvent.type(within(dialog).getByLabelText("Password *"), "Str0ng!Passw0rd");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText(/No tenant is selected/)).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
   it("surfaces a create error via toast and inline message", async () => {
     setToastDispatch(vi.fn());
     apiMock.get.mockResolvedValue(listResponse([alice, bob]));

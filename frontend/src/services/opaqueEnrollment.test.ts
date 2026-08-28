@@ -158,6 +158,20 @@ describe("buildEnrollmentForUser — the caller's own password", () => {
     expect(apiMock.post).not.toHaveBeenCalled();
   });
 
+  it("returns null without a request when this browser cannot do OPAQUE", async () => {
+    // A checkout with no WebAssembly artifact, or a browser that cannot load
+    // it. Nothing to enrol with and nothing a retry would fix — distinct from
+    // the server saying the tenant has OPAQUE off, which is the 404 above, and
+    // from a transient failure, which throws.
+    const { __setOpaqueModuleForTests } = await import("@/lib/opaque");
+    __setOpaqueModuleForTests(null);
+
+    expect(
+      await buildEnrollmentForUser({ principal_tenant_id: ORG_TENANT }, "pw")
+    ).toBeNull();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
   it("never sends the plaintext password to register/start", async () => {
     apiMock.post.mockResolvedValue(registerStarted());
     await buildEnrollmentForUser({ principal_tenant_id: ORG_TENANT }, "Str0ng!Passw0rd");

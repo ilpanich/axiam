@@ -734,6 +734,49 @@ describe("RoleDetailPage", () => {
     );
   });
 
+  it("refuses to assign without a service account selected", async () => {
+    routeGet(defaultData());
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "service accounts" })
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Assign Service Account/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+
+    expect(
+      await screen.findByText("Please select a service account.")
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the server's refusal verbatim when the grant already exists", async () => {
+    // The server holds `has_role` unique on (subject, role), so a second
+    // assignment is a 409 whatever scope is asked for. A generic "failed to
+    // assign" would hide which of the two failures it was.
+    routeGet(defaultData());
+    apiMock.post.mockRejectedValue(new Error("already holds this role"));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "service accounts" })
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Assign Service Account/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Service account"),
+      "sa1"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+
+    expect(await screen.findByText("already holds this role")).toBeInTheDocument();
+  });
+
   it("unassigns a service account, carrying no scope for a global grant", async () => {
     routeGet(defaultData());
     apiMock.delete.mockResolvedValue(res(undefined));

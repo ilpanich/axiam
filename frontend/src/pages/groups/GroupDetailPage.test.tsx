@@ -291,6 +291,41 @@ describe("GroupDetailPage", () => {
     );
   });
 
+  it("refuses to add without a service account selected", async () => {
+    routeGet(defaults({ [URLS.serviceAccounts]: [] }));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Add Service Account/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    expect(
+      await screen.findByText("Please select a service account.")
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the server's refusal when it is already a member", async () => {
+    // A 409 rather than a failure, and worth saying which.
+    routeGet(defaults({ [URLS.serviceAccounts]: [] }));
+    apiMock.post.mockRejectedValue(new Error("already a member"));
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Add Service Account/ })
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Service account"),
+      "sa1"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    expect(await screen.findByText("already a member")).toBeInTheDocument();
+  });
+
   it("removes a service account from the group", async () => {
     routeGet(defaults());
     apiMock.delete.mockResolvedValue(res(undefined));

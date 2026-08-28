@@ -7,12 +7,16 @@ use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
+use axiam_core::models::opaque::{CreateOpaqueCredential, OpaqueKsf, OpaqueKsfParams, OpaqueSuite};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
-use axiam_core::models::user::CreateUser;
-use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
+use axiam_core::repository::{
+    OpaqueCredentialRepository, OrganizationRepository, TenantRepository, UserRepository,
+};
 use axiam_db::repository::{
-    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealOpaqueCredentialRepository, SurrealOrganizationRepository, SurrealTenantRepository,
+    SurrealUserRepository,
 };
 use std::sync::Arc;
 use surrealdb::Surreal;
@@ -90,6 +94,47 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
         .unwrap();
 
     (db, org.id, tenant.id, user.id)
+}
+
+/// Give a user an OPAQUE registration record.
+///
+/// Switching an organization to `required` is refused while any active user
+/// lacks one, because no record can be minted for them retroactively and the
+/// switch would lock them out. A test that wants the switch to *succeed* has to
+/// satisfy that, and this is the cheapest way to: the gate counts records, and
+/// never inspects their contents.
+async fn enrol_in_opaque(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) {
+    SurrealOpaqueCredentialRepository::new(db.clone())
+        .upsert(CreateOpaqueCredential {
+            tenant_id,
+            user_id,
+            credential_identifier: "00".repeat(32),
+            suite: OpaqueSuite::default(),
+            ksf_params: OpaqueKsfParams::defaults_for(OpaqueKsf::Argon2id),
+            record: "11".repeat(192),
+        })
+        .await
+        .unwrap();
+}
+
+/// Move a user to `Active`.
+///
+/// `create` leaves a user `PendingVerification`, and the `required` gate counts
+/// only *active* users: somebody who has never signed in enrols the first time
+/// they set a password, so they are not who the switch would strand. A test
+/// about the refusal therefore has to activate its user, or it measures nothing.
+async fn activate(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) {
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
@@ -469,9 +514,18 @@ async fn set_org_settings_refuses_opaque_optional_without_the_server_keys() {
 
 /// The guard is about the keys, not about OPAQUE: with both configured, the
 /// same write goes through.
+///
+/// `required` additionally needs every active user to already hold a
+/// registration record — the switch is refused otherwise, since none can be
+/// minted for them afterwards — so the fixture's one user is enrolled first.
+/// That makes this the success path of the coverage gate as well as of the key
+/// guard: the refusal path is covered by
+/// `set_org_settings_refuses_required_while_a_user_has_no_record`.
 #[actix_rt::test]
 async fn set_org_settings_accepts_opaque_when_the_server_keys_are_configured() {
     let (db, org_id, tenant_id, user_id) = setup_db().await;
+    activate(&db, tenant_id, user_id).await;
+    enrol_in_opaque(&db, tenant_id, user_id).await;
     let auth = test_auth_config_with_opaque_keys();
     let token = mint_token(&auth, user_id, tenant_id, org_id);
     let app = test_app!(db, auth);
@@ -489,6 +543,42 @@ async fn set_org_settings_accepts_opaque_when_the_server_keys_are_configured() {
 
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["opaque"]["opaque_mode"], "required");
+}
+
+/// `required` is refused while any active user still has no registration
+/// record, even with the server keys in place.
+///
+/// This is the lockout the reporter hit from the other side: a record cannot be
+/// minted for a user retroactively — only that user setting a password produces
+/// one — so a switch made before everybody is covered strands exactly the
+/// accounts that cannot fix themselves. The refusal names the tenants and how
+/// many users each one strands, because "run `optional` for a while" is not
+/// actionable without knowing who is still missing.
+#[actix_rt::test]
+async fn set_org_settings_refuses_required_while_a_user_has_no_record() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    activate(&db, tenant_id, user_id).await;
+    let auth = test_auth_config_with_opaque_keys();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/organizations/{org_id}/settings"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(org_settings_body(Some("required")))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let message = body.to_string();
+    assert!(
+        message.contains("test-tenant"),
+        "the refusal must name the tenant that is short: {message}"
+    );
 }
 
 /// The `disabled` path is untouched: a deployment with no OPAQUE keys — which

@@ -277,7 +277,7 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
 
     async fn count_active_users_without_credential(&self, tenant_id: Uuid) -> AxiamResult<u64> {
         // `LET` first so the planner sees a constant on the right-hand side of
-        // the `NOT INSIDE`, the same reason `get_user_role_assignments` hoists
+        // the `NOT IN`, the same reason `get_user_role_assignments` hoists
         // its membership sub-select: written inline it walks every
         // `opaque_credential` row in the database per user.
         let result = self
@@ -291,7 +291,7 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  SELECT count() AS total FROM user \
                  WHERE tenant_id = $tenant_id \
                  AND status = 'Active' \
-                 AND meta::id(id) NOT INSIDE $enrolled \
+                 AND meta::id(id) NOT IN $enrolled \
                  GROUP ALL",
             )
             .bind(("tenant_id", tenant_id.to_string()))

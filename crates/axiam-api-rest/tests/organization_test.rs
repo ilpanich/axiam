@@ -9,6 +9,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
@@ -100,6 +101,29 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid) {
     (db, org.id, tenant.id)
 }
 
+/// Create (and seed) the organization's own reserved tenant, and return its id.
+///
+/// The five organization *lifecycle* tests below need one.
+/// `handlers::org_scope::require_organization_principal` refuses an
+/// organization-level action to any caller whose own record does not live in
+/// this tenant — whatever permissions it holds — so a `super-admin` of an
+/// ordinary tenant gets a `403` from `POST /organizations` and always should.
+/// `setup_db` deliberately builds an ordinary tenant, because that is what
+/// every other test in this file is about.
+async fn organization_scope_tenant(db: &Surreal<TestDb>, org_id: Uuid) -> Uuid {
+    let tenant = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant::organization_scope(org_id))
+        .await
+        .unwrap();
+    seed_permissions(db, tenant.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    seed_default_roles(db, tenant.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    tenant.id
+}
+
 /// Create a user and optionally assign a named role. Returns user_id.
 async fn create_user_with_role(
     db: &Surreal<TestDb>,
@@ -139,7 +163,7 @@ async fn create_user_with_role(
             .find(|r| r.name == name)
             .unwrap_or_else(|| panic!("role `{name}` not seeded"));
         role_repo
-            .assign_to_user(tenant_id, user.id, role.id, None)
+            .assign_to_user(tenant_id, user.id, role.id, AssignmentScope::global())
             .await
             .unwrap();
     }
@@ -186,18 +210,22 @@ macro_rules! test_app {
 
 #[actix_rt::test]
 async fn create_organization_returns_201() {
-    let (db, org_id, tenant_id) = setup_db().await;
+    let (db, org_id, _tenant_id) = setup_db().await;
     let auth = test_auth_config();
+    // Organization *lifecycle* is an organization-level action: the caller must
+    // live in the organization's own reserved tenant, not merely hold the
+    // permission. See `handlers::org_scope`.
+    let org_tenant = organization_scope_tenant(&db, org_id).await;
     // create/list requires super-admin
     let user_id = create_user_with_role(
         &db,
-        tenant_id,
+        org_tenant,
         "admin",
         "admin@example.com",
         Some("super-admin"),
     )
     .await;
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
@@ -291,7 +319,11 @@ async fn get_nonexistent_organization_returns_404() {
 
 #[actix_rt::test]
 async fn update_organization_returns_200() {
-    let (db, org_id, tenant_id) = setup_db().await;
+    let (db, org_id, _tenant_id) = setup_db().await;
+    // Organization *lifecycle* is an organization-level action: the caller must
+    // live in the organization's own reserved tenant, not merely hold the
+    // permission. See `handlers::org_scope`.
+    let tenant_id = organization_scope_tenant(&db, org_id).await;
     let auth = test_auth_config();
     let user_id = create_user_with_role(&db, tenant_id, "admin", "admin@example.com", None).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
@@ -314,7 +346,11 @@ async fn update_organization_returns_200() {
 
 #[actix_rt::test]
 async fn delete_organization_returns_204() {
-    let (db, _org_id, tenant_id) = setup_db().await;
+    let (db, org_id, _tenant_id) = setup_db().await;
+    // Organization *lifecycle* is an organization-level action: the caller must
+    // live in the organization's own reserved tenant, not merely hold the
+    // permission. See `handlers::org_scope`.
+    let tenant_id = organization_scope_tenant(&db, org_id).await;
     let auth = test_auth_config();
     let user_id = create_user_with_role(&db, tenant_id, "admin", "admin@example.com", None).await;
 
@@ -349,7 +385,11 @@ async fn delete_organization_returns_204() {
 /// silently 204.
 #[actix_rt::test]
 async fn delete_nonexistent_organization_returns_404() {
-    let (db, _org_id, tenant_id) = setup_db().await;
+    let (db, org_id, _tenant_id) = setup_db().await;
+    // Organization *lifecycle* is an organization-level action: the caller must
+    // live in the organization's own reserved tenant, not merely hold the
+    // permission. See `handlers::org_scope`.
+    let tenant_id = organization_scope_tenant(&db, org_id).await;
     let auth = test_auth_config();
     let user_id = create_user_with_role(&db, tenant_id, "admin", "admin@example.com", None).await;
     let fake_id = Uuid::new_v4();
@@ -542,7 +582,11 @@ async fn non_super_admin_list_organizations_returns_403() {
 /// A super-admin caller gets 2xx on POST /organizations.
 #[actix_rt::test]
 async fn super_admin_create_organization_returns_2xx() {
-    let (db, org_id, tenant_id) = setup_db().await;
+    let (db, org_id, _tenant_id) = setup_db().await;
+    // Organization *lifecycle* is an organization-level action: the caller must
+    // live in the organization's own reserved tenant, not merely hold the
+    // permission. See `handlers::org_scope`.
+    let tenant_id = organization_scope_tenant(&db, org_id).await;
     let auth = test_auth_config();
     let user_id = create_user_with_role(
         &db,

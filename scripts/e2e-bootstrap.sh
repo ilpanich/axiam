@@ -26,8 +26,21 @@
 # needed. Both steps are idempotent, so re-running against an already-seeded
 # stack is a no-op.
 #
-# The bootstrap gate is satisfied by AXIAM_BOOTSTRAP_ADMIN_EMAIL (set in
-# docker-compose.e2e.yml to E2E_ADMIN_EMAIL); no setup token is required.
+# The bootstrap gate is satisfied one of two ways, and which one depends on the
+# stack:
+#
+#   * The E2E compose stack sets AXIAM_BOOTSTRAP_ADMIN_EMAIL to E2E_ADMIN_EMAIL,
+#     and the gate is then a plain email match — no token needed.
+#   * A production-shaped stack (docker-compose.prod.yml) sets no such variable,
+#     because a deployment should not have to name its first administrator in an
+#     environment file. There the server mints a one-time setup token on its
+#     first boot and logs it once:
+#
+#         AXIAM first-run bootstrap setup token minted ... "setup_token":"..."
+#
+#     Pass it as E2E_SETUP_TOKEN and this script forwards it. It is single-use;
+#     a second bootstrap against the same stack answers 409 and skips, which is
+#     the idempotent path, so a re-run needs no new token.
 #
 # Environment variables (with E2E defaults):
 #   E2E_ORG_NAME      — organization name  (default: E2E Test Org)
@@ -44,6 +57,8 @@
 #                                          (default: tenant-admin)
 #   E2E_TENANT_ADMIN_PASSWORD — tenant-level admin password
 #                                          (default: E2E_ADMIN_PASSWORD)
+#   E2E_SETUP_TOKEN   — one-time bootstrap setup token, for a stack that does
+#                       not set AXIAM_BOOTSTRAP_ADMIN_EMAIL (default: unset)
 #   AXIAM_URL         — backend base URL   (default: http://localhost:8090)
 
 set -euo pipefail
@@ -61,6 +76,7 @@ TENANT_ADMIN_USERNAME="${E2E_TENANT_ADMIN_USERNAME:-tenant-admin}"
 # tree. A fixture password that only ever guards a throwaway compose stack is
 # still a finding wherever the file gets copied.
 TENANT_ADMIN_PASSWORD="${E2E_TENANT_ADMIN_PASSWORD:-${ADMIN_PASSWORD}}"
+SETUP_TOKEN="${E2E_SETUP_TOKEN:-}"
 AXIAM_URL="${AXIAM_URL:-http://localhost:8090}"
 
 command -v jq >/dev/null 2>&1 || { echo "[e2e-bootstrap] ERROR: 'jq' is required on PATH"; exit 1; }
@@ -97,18 +113,28 @@ fi
 # ---------------------------------------------------------------------------
 echo "[e2e-bootstrap] Calling /api/v1/admin/bootstrap ..."
 
-BOOTSTRAP_BODY=$(cat <<EOF
-{
-  "organization_name": "${ORG_NAME}",
-  "organization_slug": "${ORG_SLUG}",
-  "tenant_name": "${TENANT_NAME}",
-  "tenant_slug": "${TENANT_SLUG}",
-  "email": "${ADMIN_EMAIL}",
-  "username": "admin",
-  "password": "${ADMIN_PASSWORD}"
-}
-EOF
-)
+# `setup_token` is emitted only when one was supplied: the handler ignores the
+# field when AXIAM_BOOTSTRAP_ADMIN_EMAIL is set, but an empty string would be a
+# confusing thing to send, and jq keeps the quoting correct for a token that
+# happens to contain a JSON metacharacter.
+BOOTSTRAP_BODY=$(jq -nc \
+  --arg org_name "${ORG_NAME}" \
+  --arg org_slug "${ORG_SLUG}" \
+  --arg tenant_name "${TENANT_NAME}" \
+  --arg tenant_slug "${TENANT_SLUG}" \
+  --arg email "${ADMIN_EMAIL}" \
+  --arg password "${ADMIN_PASSWORD}" \
+  --arg setup_token "${SETUP_TOKEN}" \
+  '{
+     organization_name: $org_name,
+     organization_slug: $org_slug,
+     tenant_name: $tenant_name,
+     tenant_slug: $tenant_slug,
+     email: $email,
+     username: "admin",
+     password: $password
+   }
+   + (if $setup_token == "" then {} else {setup_token: $setup_token} end)')
 
 # Retry bootstrap up to 5 times in case the server is still initializing
 for i in $(seq 1 5); do

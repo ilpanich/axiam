@@ -27,8 +27,10 @@
 #      verification to the issuing CA, and the service-account binding.
 #
 # This script drives path 2 — the one this stack actually exposes — and says so
-# for each result. Where an assertion can only be settled by a TLS handshake it
-# is reported as **UNVERIFIED**, never as a pass.
+# for each result. Assertions that can only be settled by a TLS handshake are
+# not made here at all: they live in `scripts/e2e-mtls-native-check.sh`, which
+# starts a TLS-terminating server from the same image and measures them. Running
+# both is what covers §4; running only this one leaves the handshake untested.
 #
 # Requires: an org super-admin, and `jq`. Issues its own certificates, because a
 # private key is returned exactly once, at generation, and never stored.
@@ -272,14 +274,15 @@ if [ "$TLS_ON" = "true" ]; then
   [ "$CODE" = "200" ] && pass "a client certificate authenticates over a real TLS handshake" \
                       || fail "native mTLS returned HTTP $CODE: $(head -c 200 "$WORK/mtls.json")"
 else
-  skip "the server does not terminate TLS (AXIAM__SERVER__TLS__ENABLED is not true),
-       so the handshake half of §4 is not measured. It needs
-       AXIAM__SERVER__TLS__ENABLED=true, CERT_PATH, KEY_PATH and
-       CLIENT_AUTH=optional|required, plus a published TLS port. The server logs
-       exactly this at boot: 'CA certificates are flagged as mTLS trust anchors
+  info "this server does not terminate TLS (AXIAM__SERVER__TLS__ENABLED is not
+       true), which is correct for this stack — Caddy/nginx does. It logs
+       exactly that at boot: 'CA certificates are flagged as mTLS trust anchors
        but there is nowhere to write the bundle'."
-  skip "and with it: whether a certificate under an unflagged CA is refused AT THE
-       HANDSHAKE, which is where the mtls_trust_anchor flag actually takes effect."
+  info "the handshake half of §4 is therefore not measurable HERE, and is no
+       longer unverified: scripts/e2e-mtls-native-check.sh measures it against a
+       TLS-terminating sidecar started from this same image, including whether a
+       certificate under an unflagged CA is refused AT THE HANDSHAKE. Run it
+       after this script."
 fi
 
 echo

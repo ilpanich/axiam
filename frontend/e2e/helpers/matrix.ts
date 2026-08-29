@@ -34,6 +34,19 @@ export interface NavDestination {
   label: string;
   navPermission: string | null;
   routePermission: string | null;
+  /**
+   * Whether the sidebar offers this destination at all. Defaults to `true`.
+   *
+   * A page reachable only from inside another page has no sidebar entry, so
+   * there is no nav gate for the route gate to agree with — and recording it as
+   * `navPermission: null` would claim there *is* one, declared ungated, which
+   * is the exact shape of the `/audit-logs` finding. `false` says "not offered",
+   * which is a different statement from "offered to everyone".
+   *
+   * The route gate is still asserted in both directions: a page nobody links to
+   * is still reachable by typing its URL.
+   */
+  inNav?: boolean;
 }
 
 export const NAV_DESTINATIONS: NavDestination[] = [
@@ -63,6 +76,35 @@ export const NAV_DESTINATIONS: NavDestination[] = [
   { path: "/profile", label: "Profile", navPermission: null, routePermission: null },
   { path: "/privacy", label: "Privacy & Data", navPermission: null, routePermission: null },
   { path: "/settings", label: "Settings", navPermission: "settings:get", routePermission: "settings:get" },
+  // Reached from the Settings page, not the sidebar — and gated by a permission
+  // no other destination uses, so before this entry existed the whole
+  // `webauthn_policy:read` boundary went unmeasured in both directions.
+  // Self-service, reachable from the profile page rather than the sidebar, and
+  // gated by nothing but a session — the same class as `/profile` itself. Listed
+  // rather than exempted so the matrix actually opens them: a regression that
+  // accidentally put a permission in front of "change your own password" would
+  // otherwise be invisible here.
+  {
+    path: "/profile/change-password",
+    label: "Change Password",
+    navPermission: null,
+    routePermission: null,
+    inNav: false,
+  },
+  {
+    path: "/profile/mfa",
+    label: "Multi-factor Authentication",
+    navPermission: null,
+    routePermission: null,
+    inNav: false,
+  },
+  {
+    path: "/settings/webauthn-attestation-policy",
+    label: "WebAuthn Attestation Policy",
+    navPermission: null,
+    routePermission: "webauthn_policy:read",
+    inNav: false,
+  },
 ];
 
 // ---------------------------------------------------------------------------

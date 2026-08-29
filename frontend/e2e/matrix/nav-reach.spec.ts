@@ -1,4 +1,5 @@
 import { test, expect, Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import {
   MATRIX_PRINCIPALS,
   NAV_DESTINATIONS,
@@ -63,6 +64,9 @@ for (const principal of MATRIX_PRINCIPALS) {
       const nav = page.getByRole("complementary", { name: "Main navigation" });
 
       for (const dest of NAV_DESTINATIONS) {
+        // A destination the sidebar does not offer has nothing to assert here;
+        // its route gate is still checked in direction 2 below.
+        if (dest.inNav === false) continue;
         const allowed = dest.navPermission === null || holds(perms, dest.navPermission);
         const link = nav.getByRole("link", { name: dest.label, exact: true });
 
@@ -114,7 +118,10 @@ for (const principal of MATRIX_PRINCIPALS) {
       // sidebar gate is weaker than its route gate offers a live link into a
       // page that will refuse. `/audit-logs` is the case this caught.
       const mismatched = NAV_DESTINATIONS.filter(
-        (d) => d.routePermission !== null && d.navPermission !== d.routePermission,
+        (d) =>
+          d.inNav !== false &&
+          d.routePermission !== null &&
+          d.navPermission !== d.routePermission,
       );
       expect
         .soft(
@@ -126,6 +133,58 @@ for (const principal of MATRIX_PRINCIPALS) {
       // Keep the browser fixture honest: this test asserts on static data, but
       // running it inside the project ties the finding to the wave it was found in.
       expect(fixture.problems.length >= 0).toBe(true);
+    });
+
+    test("every route the application declares is in the matrix", async () => {
+      // `NAV_DESTINATIONS` is a hand-maintained table, and a hand-maintained
+      // table of what to measure goes stale in the one direction that is
+      // invisible: a route added to `router.tsx` and not added here is simply
+      // never visited, and the matrix reports a clean wave over a surface it
+      // never touched. `/settings/webauthn-attestation-policy` was exactly
+      // that — gated by a permission no other destination uses, and unmeasured
+      // in both directions for as long as the table has existed.
+      //
+      // Read as text rather than imported: `router.tsx` pulls in every page
+      // component, and a Playwright worker is not a place to evaluate React
+      // modules that expect a DOM. What is needed here is only the set of
+      // declared paths, and that is a lexical fact about the file.
+      const source = readFileSync(
+        new URL("../../src/router.tsx", import.meta.url),
+        "utf8",
+      );
+      const declared = [...source.matchAll(/^\s*path:\s*"([^"]+)",/gm)].map((m) => m[1]);
+      expect(
+        declared.length,
+        "no `path:` entries were found in router.tsx — this guard is reading the wrong file " +
+          "or the route table has changed shape, and it is measuring nothing",
+      ).toBeGreaterThan(10);
+
+      // Not matrix destinations, and why:
+      //   - the public/auth routes are reached signed OUT, so a principal's
+      //     permissions say nothing about them (`login.spec.ts` covers them);
+      //   - a parameterised path has no single URL to visit;
+      //   - `*` is the not-found fallback.
+      const exempt = (path: string) =>
+        path.includes(":") ||
+        path === "*" ||
+        path === "/" ||
+        path.startsWith("/login") ||
+        path.startsWith("/bootstrap") ||
+        path.startsWith("/auth/");
+
+      const known = new Set(NAV_DESTINATIONS.map((d) => d.path.replace(/^\//, "")));
+      const missing = declared
+        .filter((path) => !exempt(path))
+        .filter((path) => !known.has(path.replace(/^\//, "")));
+
+      expect
+        .soft(
+          missing,
+          "routes declared in frontend/src/router.tsx that no matrix destination covers — " +
+            "each is a page whose permission boundary this suite never measures, in either " +
+            "direction. Add them to NAV_DESTINATIONS (or to the exemptions above, with a reason).",
+        )
+        .toEqual([]);
     });
   });
 }

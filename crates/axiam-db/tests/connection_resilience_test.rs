@@ -425,8 +425,7 @@ async fn a_redefined_root_user_classifies_as_unhealthy_on_the_http_engine() {
     let err = db
         .query("RETURN 1")
         .await
-        .err()
-        .expect("the first handle's token must now be rejected");
+        .expect_err("the first handle's token must now be rejected");
 
     let classified = DbManager::classify_query_error(err);
     assert!(

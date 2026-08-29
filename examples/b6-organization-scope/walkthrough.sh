@@ -226,8 +226,9 @@ api_expect PUT "${ORG_JAR}" "${ORG_CSRF}" "/api/v1/users/${SA_USER}" \
 # assignment names the tenants it reaches.
 ORG_ROLES=$(api_expect GET "${ORG_JAR}" "" '/api/v1/roles?search=super-admin' '' 200)
 ORG_ROLE=$(printf '%s' "${ORG_ROLES}" | jq -r '.items[] | select(.name == "super-admin") | .id')
-[ -n "${ORG_ROLE}" ] && [ "${ORG_ROLE}" != "null" ] \
-  || fail "the organization scope has no super-admin role: ${ORG_ROLES}"
+if [ -z "${ORG_ROLE}" ] || [ "${ORG_ROLE}" = "null" ]; then
+  fail "the organization scope has no super-admin role: ${ORG_ROLES}"
+fi
 
 api_expect POST "${ORG_JAR}" "${ORG_CSRF}" "/api/v1/roles/${ORG_ROLE}/users" \
   "{\"user_id\":\"${SA_USER}\",\"tenant_scope\":[\"${TENANT_A}\"]}" 204 >/dev/null

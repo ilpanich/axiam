@@ -185,8 +185,11 @@ export function TenantScopeBadge({ tenantIds }: { tenantIds: string[] }) {
  * act on, so this list is already the right set to offer: an operator cannot
  * scope a grant to a tenant they cannot themselves reach, and the server would
  * refuse it anyway.
+ *
+ * Local to this module: both consumers are the badge and the picker below, and
+ * a non-component export here would break Fast Refresh for the whole file.
  */
-export function useReachableTenants() {
+function useReachableTenants() {
   const orgId = useAuthStore((s) => s.user?.org_id);
   const { data: tenants = [], isLoading } = useQuery({
     queryKey: ["assignment-scope-tenants", orgId],

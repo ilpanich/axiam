@@ -113,7 +113,7 @@ for (const principal of MATRIX_PRINCIPALS) {
       }
     });
 
-    test("the sidebar gate and the route gate agree", async ({ page }) => {
+    test("the sidebar gate and the route gate agree", async () => {
       // A structural check that needs no permissions at all: an entry whose
       // sidebar gate is weaker than its route gate offers a live link into a
       // page that will refuse. `/audit-logs` is the case this caught.

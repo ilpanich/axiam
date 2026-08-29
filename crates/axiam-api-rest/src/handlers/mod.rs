@@ -17,6 +17,7 @@ pub mod oauth2;
 pub mod oauth2_clients;
 pub mod opaque;
 pub mod opaque_enrollment;
+pub mod org_scope;
 pub mod organizations;
 pub mod password_reset;
 pub mod permissions;

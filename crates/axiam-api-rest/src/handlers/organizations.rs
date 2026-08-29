@@ -51,6 +51,9 @@ pub async fn create<C: Connection + Clone>(
     RequirePermission::new("organizations:create", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
 
     // Restrict organization creation to system-wide super-admin only.
     if !caller_is_super_admin(&state, &user).await? {
@@ -213,6 +216,10 @@ pub async fn update<C: Connection + Clone>(
     RequirePermission::new("organizations:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let org_id = path.into_inner();
 
     // Authorization: only allow updates on the caller's own organization.
@@ -257,6 +264,10 @@ pub async fn delete<C: Connection + Clone>(
     RequirePermission::new("organizations:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let org_id = path.into_inner();
 
     // Authorization: only allow deletion of the caller's own organization.

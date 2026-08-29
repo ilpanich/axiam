@@ -80,6 +80,10 @@ pub async fn generate<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:generate", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let org_id = path.into_inner();
 
     // Authorization: only allow access to certificates in the caller's own org.
@@ -191,6 +195,10 @@ pub async fn import<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:generate", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let org_id = path.into_inner();
 
     if org_id != user.org_id {
@@ -329,6 +337,10 @@ pub async fn revoke<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:revoke", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let (org_id, id) = path.into_inner();
 
     // Authorization: only allow revoking certificates in the caller's own org.
@@ -405,6 +417,10 @@ pub async fn migrate_custody<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:manage", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let (org_id, id) = path.into_inner();
 
     if org_id != user.org_id {
@@ -512,6 +528,10 @@ pub async fn set_mtls_trust_anchor<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:manage", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let (org_id, id) = path.into_inner();
 
     if org_id != user.org_id {
@@ -692,6 +712,10 @@ pub async fn generate_intermediate<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:generate", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let (org_id, tenant_id) = path.into_inner();
     require_own_org(&user, org_id)?;
 
@@ -743,6 +767,10 @@ pub async fn sign_intermediate_csr<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:generate", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let (org_id, tenant_id) = path.into_inner();
     require_own_org(&user, org_id)?;
 

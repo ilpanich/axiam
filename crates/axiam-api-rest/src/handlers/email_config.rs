@@ -171,6 +171,10 @@ pub async fn set_org_email_config<C: Connection + Clone>(
     RequirePermission::new("email_config:write", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let org_id = path.into_inner();
 
     if org_id != user.org_id {
@@ -210,6 +214,10 @@ pub async fn delete_org_email_config<C: Connection + Clone>(
     RequirePermission::new("email_config:write", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let org_id = path.into_inner();
 
     if org_id != user.org_id {
@@ -454,6 +462,10 @@ pub async fn test_org_email_config<C: Connection + Clone>(
     RequirePermission::new("email_config:write", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let org_id = path.into_inner();
 
     if org_id != user.org_id {

@@ -190,6 +190,9 @@ pub async fn create<C: Connection + Clone>(
     RequirePermission::new("tenants:create", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
 
     // Authorization: only allow creating tenants under the caller's own org.
     if path.org_id != user.org_id {
@@ -397,6 +400,9 @@ pub async fn update<C: Connection + Clone>(
     RequirePermission::new("tenants:update", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
 
     // Authorization: reject cross-org probing before touching the DB.
     if path.org_id != user.org_id {
@@ -448,6 +454,9 @@ pub async fn delete<C: Connection + Clone>(
     RequirePermission::new("tenants:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
 
     // Authorization: reject cross-org probing before touching the DB.
     if path.org_id != user.org_id {

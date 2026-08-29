@@ -507,3 +507,99 @@ only a bug fix, and should be called out in release notes.
 - **Not touched:** nothing was changed in the component, and no other test was
   audited for the same pattern. Worth a sweep for hard-coded
   locale-formatted literals as a follow-up.
+
+## Wave 2 — result
+
+`E2E_BASE_URL=https://localhost npx playwright test --project=matrix`
+
+**40 passed, 0 failing, 0 unverified.** Every wave-1 fix confirmed against the
+rebuilt working-tree images: the escalation probe now answers 403 on all four
+paths, `/oauth2-clients` serves `200 text/html`, a service account's own token
+makes an authorization check, and the Audit Logs entry is gated.
+`scripts/e2e-mail-check.sh`: **11 passed, 0 failed**.
+
+Two failures in that run were bugs in the tests, not the product, and are fixed:
+
+- `NAV_DESTINATIONS` still recorded `/audit-logs` as `navPermission: null` —
+  the state it was *found* in. After F-01 the app was right and the table was
+  stale, so the matrix reported "a control the server would allow, hidden".
+- The tenancy spec read `body.username` from `/auth/me`, which answers
+  `{ user: {...}, opaque: {...} }`. `undefined !== "admin"` looked exactly like
+  the defect it was asserting against.
+
+One harness gap also fixed: `Api.login` bypassed the 429 retry, so running
+`--project=matrix-setup` and `--project=matrix` back to back (the latter re-runs
+the former as a dependency) put two rounds of sign-ins inside one
+`login_per_min` window and took the whole wave with it.
+
+---
+
+## Wave 2 — new finding
+
+### B-06 — `mtls_trust_anchor` had no effect on the proxy-terminated path
+**Layer:** backend (PKI)
+**Severity:** medium-high — the documented control for "what may authenticate"
+was decorative on the path the shipped deployments actually use.
+
+- **Did:** issued a certificate under an organization CA that was **never**
+  flagged as an mTLS trust anchor (`anchor=false`, confirmed against
+  `GET /organizations/{id}/ca-certificates`), bound it to a service account, and
+  presented it to `POST /api/v1/auth/device` via `X-Client-Certificate`.
+- **Expected:** refused. Un-flagging a CA is the documented way to stop trusting
+  it.
+- **Happened:** authenticated, HTTP 200, and the token's `sub` was the bound
+  service account.
+- **Root cause:** `crates/axiam-pki/src/mtls.rs` checked the leaf's status and
+  validity, verified its signature against the **immediate** issuer, and
+  resolved the binding — but never consulted `mtls_trust_anchor`. On the native
+  path rustls enforces it, because the client-CA bundle is built from exactly
+  the flagged anchors; on the proxy-terminated path — what
+  `docker-compose.prod.yml` and the Kubernetes manifests use — nothing did. Any
+  CA in the organization was as good as any other.
+
+  The code names the assumption it outgrew: *"Full chain-walk beyond the
+  immediate issuer is out of scope (D-02 — flat org/tenant-CA -> device
+  hierarchy)."* That was true before tenant **signing CAs** existed. They are
+  intermediates, so the hierarchy is no longer flat.
+- **How it was nearly missed:** the first version of this assertion used an
+  *unbound* certificate under the unflagged CA, and it was refused — for the
+  missing binding. It read as a pass. Binding the certificate removed the other
+  explanation and the gap appeared immediately. An assertion with two possible
+  reasons to succeed tests neither.
+- **Fix:** `require_trust_anchor` — a walk from the issuing CA up `parent_ca_id`
+  until a CA flagged `mtls_trust_anchor` is reached. A **walk**, not a test of
+  the immediate issuer, because a tenant signing CA is an intermediate and is
+  deliberately not itself an anchor; requiring the immediate issuer to be
+  flagged would refuse every legitimately intermediate-issued certificate. Each
+  CA on the way must be `Active` and in date — an anchor reached through a
+  revoked intermediate is not reached. The walk is bounded (depth 8):
+  `parent_ca_id` is data, and data can describe a cycle.
+- **Regression tests:**
+  `mtls_chain_reject_leaf_from_ca_that_is_not_a_trust_anchor` — everything valid
+  except the flag, and the certificate is **bound**, so the refusal can only be
+  about trust. Two existing fixtures now enable the flag explicitly, which is
+  the behaviour change stated in test form. `axiam-pki`: 10/10 mTLS tests pass.
+- **Deployment note:** like B-04, this tightens a boundary. A deployment
+  authenticating devices through a proxy with CAs that were never flagged will
+  start being refused, with a message naming the reason. Flag the CA.
+
+### mTLS — what §4 measured, and what it did not
+
+`scripts/e2e-mtls-check.sh`, proxy-terminated path:
+
+| assertion | result |
+|---|---|
+| a bound certificate authenticates as the account it is bound to (token `sub`) | pass |
+| ...and the token carries `aud=axiam:m2m`, not a user audience | pass |
+| a certificate bound to no service account is refused | pass |
+| a revoked certificate is refused | pass |
+| a certificate under a CA that is not a trust anchor is refused | **was the finding; passes after the fix** |
+| deleting the service account stops its certificate authenticating | pass |
+
+**Unverified, and stated as such:** the TLS-handshake half. The stack terminates
+TLS at Caddy/nginx, so `AXIAM__SERVER__TLS__ENABLED` is not set and rustls never
+sees a client certificate. The server says so at boot: *"CA certificates are
+flagged as mTLS trust anchors but there is nowhere to write the bundle … Client-
+certificate authentication is NOT enabled."* Measuring it needs
+`AXIAM__SERVER__TLS__ENABLED=true` with `CERT_PATH`, `KEY_PATH`,
+`CLIENT_AUTH=optional|required` and a published TLS port.

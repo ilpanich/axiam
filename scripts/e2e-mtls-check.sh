@@ -123,7 +123,9 @@ issue() {
     fail "issuing $name returned HTTP $code: $(head -c 200 "$WORK/resp.json")"
     return 1
   fi
-  jq -r '.certificate_pem // .pem // empty' "$WORK/resp.json" > "$WORK/$name.crt"
+  # `public_cert_pem` is the field name on `Certificate` (sdks/openapi.json);
+  # the alternatives are kept as a fallback for a response shape that nests it.
+  jq -r '.public_cert_pem // .certificate.public_cert_pem // empty' "$WORK/resp.json" > "$WORK/$name.crt"
   jq -r '.private_key_pem // empty'        "$WORK/resp.json" > "$WORK/$name.key"
   jq -r '.id'                              "$WORK/resp.json" > "$WORK/$name.id"
   [ -s "$WORK/$name.crt" ] || { fail "$name: no certificate PEM in the response"; return 1; }
@@ -145,6 +147,17 @@ issue "unbound-$STAMP"   "$ANCHOR_ID"    && pass "issued unbound-$STAMP (bound t
 issue "revoked-$STAMP"   "$ANCHOR_ID"    && pass "issued revoked-$STAMP"
 [ -n "$UNTRUSTED_ID" ] && issue "untrusted-$STAMP" "$UNTRUSTED_ID" \
   && pass "issued untrusted-$STAMP under the CA that is not an anchor"
+
+# The untrusted certificate is bound to its OWN service account on purpose.
+# Unbound, it would be refused — but for the wrong reason, and the assertion
+# "a certificate under an untrusted CA is refused" would pass without testing
+# trust at all. Binding it removes the other explanation.
+if [ -s "$WORK/untrusted-$STAMP.id" ]; then
+  SA_UNTRUSTED=$(create_sa "mx-mtls-sa-untrusted-$STAMP")
+  [ -n "$SA_UNTRUSTED" ] && api POST "/api/v1/service-accounts/$SA_UNTRUSTED/bind-certificate" \
+    "{\"certificate_id\":\"$(cat "$WORK/untrusted-$STAMP.id")\"}" >/dev/null \
+    && pass "untrusted-$STAMP is bound, so a refusal can only be about trust"
+fi
 
 # Bind one, revoke another.
 if [ -n "$SA_ID" ] && [ -s "$WORK/bound-$STAMP.id" ]; then
@@ -182,12 +195,24 @@ info "its own fingerprint, revocation, validity, chain and binding checks."
 if [ -s "$WORK/bound-$STAMP.crt" ]; then
   CODE=$(device_auth "$WORK/bound-$STAMP.crt")
   if [ "$CODE" = "200" ]; then
-    RESOLVED=$(jq -r '.service_account_id // .subject_id // empty' "$WORK/dev.json")
+    # `DeviceAuthResponse` carries an access token, not the principal — so the
+    # question "which account did it resolve to?" is answered by the token's
+    # own `sub` claim, which is what every downstream authorization decision
+    # will key on. Decoding the payload is enough; its signature is the
+    # server's own and is not what this asserts.
+    RESOLVED=$(jq -r '.access_token' "$WORK/dev.json" \
+      | cut -d. -f2 \
+      | python3 -c 'import sys,base64,json; p=sys.stdin.read().strip(); p+="="*(-len(p)%4); print(json.loads(base64.urlsafe_b64decode(p)).get("sub",""))' 2>/dev/null)
     if [ "$RESOLVED" = "$SA_ID" ]; then
-      pass "a bound certificate authenticates AS THE ACCOUNT IT IS BOUND TO"
+      pass "a bound certificate authenticates AS THE ACCOUNT IT IS BOUND TO (token sub = $RESOLVED)"
     else
-      fail "a bound certificate authenticated, but resolved to '$RESOLVED', not $SA_ID"
+      fail "a bound certificate authenticated, but its token's sub is '$RESOLVED', not $SA_ID"
     fi
+    AUD=$(jq -r '.access_token' "$WORK/dev.json" | cut -d. -f2 \
+      | python3 -c 'import sys,base64,json; p=sys.stdin.read().strip(); p+="="*(-len(p)%4); print(json.loads(base64.urlsafe_b64decode(p)).get("aud",""))' 2>/dev/null)
+    [ "$AUD" = "axiam:m2m" ] \
+      && pass "and the token carries the machine audience ($AUD), not a user one" \
+      || fail "the device token's audience is '$AUD'; a certificate identifies a machine, so it must be axiam:m2m"
   else
     fail "a bound certificate was refused: HTTP $CODE $(head -c 200 "$WORK/dev.json")"
   fi

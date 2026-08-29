@@ -202,9 +202,13 @@ test.describe("organization-level reach", () => {
           JSON.stringify(me.body).slice(0, 300),
       )
       .toBe(200);
+    // `/auth/me` answers `{ user: {...}, opaque: {...} }` — the username is
+    // nested. Reading it off the top level yielded `undefined`, which compared
+    // unequal to "admin" and looked exactly like the defect this asserts
+    // against.
     expect
       .soft(
-        (me.body as { username?: string })?.username,
+        (me.body as { user?: { username?: string } })?.user?.username,
         "the answer must still describe the organization super-admin, not a principal " +
           "resolved inside the selected tenant",
       )

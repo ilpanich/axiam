@@ -53,10 +53,11 @@ export const NAV_DESTINATIONS: NavDestination[] = [
   { path: "/webhooks", label: "Webhooks", navPermission: "webhooks:list", routePermission: "webhooks:list" },
   { path: "/reactors", label: "Reactors", navPermission: "reactors:list", routePermission: "reactors:list" },
   { path: "/oauth2-clients", label: "OAuth2 Clients", navPermission: "oauth2_clients:list", routePermission: "oauth2_clients:list" },
-  // The sidebar declares no permission for this one while the route requires
-  // `audit_logs:list` — recorded as found, so the matrix measures the drift
-  // rather than encoding it away.
-  { path: "/audit-logs", label: "Audit Logs", navPermission: null, routePermission: "audit_logs:list" },
+  // This one was the finding: the sidebar declared no permission while the route
+  // required `audit_logs:list`, so the entry stayed enabled for a principal the
+  // route would refuse. Both sides now declare it, and the pair is recorded here
+  // so the "nav gate and route gate agree" assertion has something to compare.
+  { path: "/audit-logs", label: "Audit Logs", navPermission: "audit_logs:list", routePermission: "audit_logs:list" },
   { path: "/notification-rules", label: "Notification Rules", navPermission: "notification_rules:list", routePermission: "notification_rules:list" },
   { path: "/device", label: "Connect a Device", navPermission: null, routePermission: null },
   { path: "/profile", label: "Profile", navPermission: null, routePermission: null },

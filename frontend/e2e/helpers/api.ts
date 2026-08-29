@@ -91,7 +91,16 @@ export class Api {
     };
     if (tenantSlug) body["tenant_slug"] = tenantSlug;
 
-    const res = await this.ctx.post("/api/v1/auth/login", { data: body });
+    // Through `send`, so a 429 is waited out rather than reported as a failed
+    // sign-in. `login_per_min` is 10 per IP and every principal in this suite
+    // shares one — and `--project=matrix` re-runs `matrix-setup` as its
+    // dependency, so running setup and the matrix back to back puts two full
+    // rounds of sign-ins inside one window. Left unhandled that surfaces as
+    // "organization-level sign-in failed: rate_limit_exceeded" and takes the
+    // whole wave with it, since every spec depends on the fixture.
+    const res = await this.sendRaw(() =>
+      this.ctx.post("/api/v1/auth/login", { data: body }),
+    );
     const headers = res.headers();
     // Header name is compared lowercase: Node lowercases response header keys,
     // but relying on that silently is how this breaks behind a proxy that does
@@ -151,6 +160,12 @@ export class Api {
   private async send<T>(
     issue: () => Promise<APIResponse>,
   ): Promise<ApiResult<T>> {
+    const res = await this.sendRaw(issue);
+    return { status: res.status(), body: (await safeJson(res)) as T, headers: res.headers() };
+  }
+
+  /** {@link send} without the body parsing, for callers that need the raw response. */
+  private async sendRaw(issue: () => Promise<APIResponse>): Promise<APIResponse> {
     let res = await issue();
     for (let attempt = 0; attempt < RATE_LIMIT_RETRIES && res.status() === 429; attempt++) {
       const retryAfter = Number(res.headers()["retry-after"]);
@@ -160,7 +175,7 @@ export class Api {
       await new Promise((r) => setTimeout(r, waitMs));
       res = await issue();
     }
-    return { status: res.status(), body: (await safeJson(res)) as T, headers: res.headers() };
+    return res;
   }
 }
 

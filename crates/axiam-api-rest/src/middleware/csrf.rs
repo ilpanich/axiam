@@ -114,6 +114,25 @@ fn is_csrf_exempt(path: &str) -> bool {
 // Middleware factory
 // ---------------------------------------------------------------------------
 
+/// Whether a request authenticates by bearer token ALONE.
+///
+/// Split out as a pure function so the condition can be pinned by tests: it is
+/// the exemption that decides whether CSRF validation runs at all, and the case
+/// that matters is the one where BOTH are present.
+///
+/// * bearer + no session cookie → exempt. There is no ambient credential to
+///   abuse and no double-submit cookie the caller could echo.
+/// * bearer + a session cookie → **not** exempt. That is precisely the shape a
+///   cross-site attacker would craft to escape the exemption: the browser
+///   supplies the cookie, the attacker supplies the header.
+/// * no bearer → not exempt, whatever the cookies say.
+fn is_bearer_only(authorization: Option<&str>, has_session_cookie: bool) -> bool {
+    if has_session_cookie {
+        return false;
+    }
+    authorization.is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("bearer "))
+}
+
 /// CSRF double-submit cookie middleware.
 ///
 /// Safe methods (GET, HEAD, OPTIONS) pass through unconditionally.
@@ -171,6 +190,40 @@ where
         // Exempt paths (login, MFA flows, OAuth2).
         let path = req.path().to_owned();
         if is_csrf_exempt(&path) {
+            let fut = self.inner.call(req);
+            return Box::pin(async move {
+                let res = fut.await?;
+                Ok(res.map_into_left_body())
+            });
+        }
+
+        // Bearer-only callers carry no ambient credential, so there is nothing
+        // for CSRF to protect and nothing they could echo back.
+        //
+        // CSRF is an attack on credentials the browser attaches BY ITSELF — the
+        // session cookie. A request authenticated solely by an `Authorization`
+        // header has no such credential: a cross-site page cannot set that
+        // header on a victim's behalf, and the double-submit cookie it would
+        // have to echo does not exist. Demanding one is unsatisfiable rather
+        // than protective, and it made the machine-facing surface unreachable
+        // for exactly the callers it was built for — a service account's
+        // `client_credentials` token could not `POST /api/v1/authz/check`,
+        // whose `AuthenticatedPrincipal` extractor exists to accept the
+        // `axiam:m2m` audience.
+        //
+        // The condition is deliberately narrow: the session cookie must be
+        // ABSENT as well. A request that carries both a session cookie and a
+        // bearer header is exactly the shape a cross-site attacker would craft
+        // to escape this exemption — the browser supplies the cookie, the
+        // attacker supplies the header — so it stays subject to validation.
+        let has_session_cookie = req.cookie(COOKIE_ACCESS).is_some()
+            || req.cookie(COOKIE_REFRESH).is_some()
+            || req.cookie(COOKIE_CSRF).is_some();
+        let auth_header = req
+            .headers()
+            .get(actix_web::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        if is_bearer_only(auth_header, has_session_cookie) {
             let fut = self.inner.call(req);
             return Box::pin(async move {
                 let res = fut.await?;
@@ -329,6 +382,35 @@ pub fn clear_csrf_cookie(cookie_secure: bool) -> Cookie<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The bearer exemption (B-05). Before it, a service account's
+    // `client_credentials` token could not POST to /api/v1/authz/check — the
+    // one REST surface `AuthenticatedPrincipal` was widened to accept the
+    // `axiam:m2m` audience for — because it has no cookie to echo and never
+    // could have one.
+    #[test]
+    fn bearer_without_a_session_cookie_is_exempt() {
+        assert!(is_bearer_only(Some("Bearer eyJhbGciOi..."), false));
+        // Header names are case-insensitive and so is the scheme.
+        assert!(is_bearer_only(Some("bearer eyJhbGciOi..."), false));
+        assert!(is_bearer_only(Some("  Bearer eyJhbGciOi..."), false));
+    }
+
+    #[test]
+    fn bearer_alongside_a_session_cookie_is_not_exempt() {
+        // The load-bearing case. A cross-site page cannot set the header on a
+        // victim's behalf, but it can cause a request that carries the victim's
+        // cookie — so a request with both must still prove it has the token.
+        assert!(!is_bearer_only(Some("Bearer eyJhbGciOi..."), true));
+    }
+
+    #[test]
+    fn a_request_with_no_bearer_is_never_exempt() {
+        assert!(!is_bearer_only(None, false));
+        assert!(!is_bearer_only(None, true));
+        // Neither is some other scheme: only bearer tokens are non-ambient.
+        assert!(!is_bearer_only(Some("Basic dXNlcjpwYXNz"), false));
+    }
 
     // The exempt list and `permissions::PUBLIC_PATHS` are separate registries
     // and a route needs both. These pin the half that was missing, and the one

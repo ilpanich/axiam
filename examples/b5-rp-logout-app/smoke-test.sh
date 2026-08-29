@@ -109,13 +109,24 @@ done
 # ---------------------------------------------------------------------------
 log "logging in as ${ADMIN_EMAIL} (admin)"
 HEADERS="$(mktemp)"
-LOGIN_BODY=$(curl -sS -D "${HEADERS}" -c "${JAR}" \
+LOGIN_OUT="$(mktemp)"
+# Status captured alongside the body: a refused login has to be reportable as
+# the status it was, not guessed at from a missing header.
+LOGIN_STATUS=$(curl -sS -D "${HEADERS}" -o "${LOGIN_OUT}" -c "${JAR}" -w '%{http_code}' \
   -H "Content-Type: application/json" \
   -d "{\"org_slug\":\"${ORG_SLUG}\",\"tenant_slug\":\"${TENANT_SLUG}\",\"username_or_email\":\"${ADMIN_EMAIL}\",\"password\":\"${ADMIN_PASSWORD}\"}" \
   "${AXIAM_URL}/api/v1/auth/login")
-ADMIN_CSRF=$(grep -i '^x-csrf-token:' "${HEADERS}" | tail -1 | tr -d '\r' | cut -d' ' -f2-)
+LOGIN_BODY=$(<"${LOGIN_OUT}")
+rm -f "${LOGIN_OUT}"
+# `|| true` is load-bearing. `grep` exits 1 when it matches nothing, and under
+# this script's `set -euo pipefail` that killed the run HERE — one line before
+# the guard written to explain it. A login that is refused, or answered with a
+# challenge rather than a session, carries no `X-CSRF-Token`, so the whole
+# failure reached CI as a bare `exit 1` with no message, no status and no body:
+# the one shape that cannot be diagnosed from a log.
+ADMIN_CSRF=$(grep -i '^x-csrf-token:' "${HEADERS}" | tail -1 | tr -d '\r' | cut -d' ' -f2- || true)
 rm -f "${HEADERS}"
-[ -n "${ADMIN_CSRF}" ] || fail "no X-CSRF-Token on the admin login response"
+[ -n "${ADMIN_CSRF}" ] || fail "no X-CSRF-Token on the admin login response (HTTP ${LOGIN_STATUS}): ${LOGIN_BODY}"
 TENANT_ID=$(printf '%s' "${LOGIN_BODY}" | jq -r '.user.tenant_id')
 [ "${TENANT_ID}" != "null" ] || fail "login did not return a tenant_id"
 

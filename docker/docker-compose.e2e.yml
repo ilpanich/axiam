@@ -187,6 +187,32 @@ services:
       # (OIDC Core §2) — and the stack publishes the server on localhost:8090,
       # which is also what the examples use as AXIAM_URL.
       AXIAM__AUTH__OAUTH2_ISSUER_URL: "${AXIAM__AUTH__OAUTH2_ISSUER_URL:-http://localhost:8090}"
+
+      # Login budget for a TEST stack, and only for a test stack.
+      #
+      # `login_per_min` ships as 10 (`config/rate_limit.rs`) and the shared
+      # limiter buckets on `"{endpoint}:{ip}"` in the default `ip` mode. Every
+      # example and every Playwright spec dials `/api/v1/auth/login` from the
+      # single CI runner IP, and the examples job runs all of them inside about
+      # fifteen seconds — so the whole suite shares ONE bucket and one 60s
+      # window.
+      #
+      # That put the suite at its ceiling with no headroom: `main` makes eleven
+      # login calls against a budget of ten plus the governor's ~1-per-6s
+      # replenishment, which is the only reason it is green. This branch adds
+      # two — the bootstrap's new "already bootstrapped?" probe and one in the
+      # expanded b6 walkthrough — and `b5-rp-logout-app` runs last, so b5 is
+      # what got the 429. The same bucket is why `org-scope.spec.ts` shows up
+      # flaky: its login times out in `beforeEach` and passes on retry, once the
+      # window has rolled.
+      #
+      # Raised here rather than by trimming logins, because the arithmetic is
+      # the defect: at 10/10 any example that ever adds a single sign-in turns
+      # the job red, for a reason that has nothing to do with what it changed.
+      # This is the E2E compose file — the shipped default is untouched, and no
+      # test asserts a login 429 (the helpers wait them out, they never expect
+      # them), so nothing is being hidden.
+      AXIAM__RATE_LIMIT__LOGIN_PER_MIN: "120"
     volumes:
       # A6: read-only CA bundle for verifying the broker certificate.
       - ./.secrets/broker-tls/ca.pem:/etc/axiam/broker-tls/ca.pem:ro

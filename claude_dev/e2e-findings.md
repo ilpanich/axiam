@@ -10,9 +10,21 @@ Playwright `E2E_BASE_URL=https://localhost`.
 
 ## Status
 
-| Wave | Started | Findings | Fixed | Re-run result |
-|------|---------|----------|-------|---------------|
-| 1    | 2026-08-29 | (in progress) | — | — |
+| Wave | Findings | Fixed | Re-run result |
+|------|----------|-------|---------------|
+| 1 | 5 defects (F-01, F-02, F-03, B-01…B-05) + 4 observations | all 5 defects + 3 tooling gaps | see "Wave 2" |
+
+Severity at a glance:
+
+| id | layer | severity | what |
+|----|-------|----------|------|
+| B-04 | backend | **high** | a tenant admin could install an organization-wide mTLS trust anchor |
+| F-02 | frontend | **high** | `/oauth2-clients` was a blank 404 for everyone in the shipped image |
+| B-05 | backend | high (functional) | the machine-facing REST surface was unreachable by a machine |
+| B-02 | backend | medium | duplicate tenant answered 500, not 409 |
+| F-03 | frontend | medium | the selected tenant did not survive a reload |
+| B-01 | backend | medium | an empty env gate made the setup-token path unreachable |
+| B-03 | tooling | low-medium | a bootstrap script that claimed an idempotence it lacked |
 
 ---
 
@@ -474,3 +486,24 @@ will start receiving 403 with a message naming the reason. That is the intent �
 `scripts/e2e-bootstrap.sh` has always described a tenant admin as administering
 "all of `default` and nothing outside it" — but it is a behaviour change, not
 only a bug fix, and should be called out in release notes.
+
+### T-01 — a unit test that only passes in an en-US locale
+**Layer:** frontend tests
+**Severity:** low, but it breaks `npm test` for a whole class of developers.
+
+- **Did:** ran the frontend unit suite while validating the wave-1 fixes.
+  1150 of 1151 passed.
+- **Happened:** `AttestationPolicyPage.test.tsx` asserted
+  `screen.getByText("1,200")`, while the component renders
+  `status.entry_count.toLocaleString()` — a bare call, which follows the **host**
+  locale. On this machine (it-IT) it renders `1.200`, and the test fails. The
+  same run shows the effect elsewhere in the UI: dates render as `29 ago 2026`.
+- **Assessment:** the component is right — a number in an admin UI should follow
+  the operator's locale. The test is what was wrong, hard-coding one locale's
+  grouping separator. CI runs somewhere the literal happens to hold, so this
+  only ever broke locally, for anyone outside en-US.
+- **Fix:** the expectation is now `(1200).toLocaleString()` — formatted by the
+  same rule the component uses, so it holds in every locale.
+- **Not touched:** nothing was changed in the component, and no other test was
+  audited for the same pattern. Worth a sweep for hard-coded
+  locale-formatted literals as a follow-up.

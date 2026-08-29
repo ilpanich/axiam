@@ -213,6 +213,23 @@ services:
       # test asserts a login 429 (the helpers wait them out, they never expect
       # them), so nothing is being hidden.
       AXIAM__RATE_LIMIT__LOGIN_PER_MIN: "120"
+
+      # And the same for user creation, which is the next ceiling the suite
+      # hits — `POST /api/v1/users` is guarded by `register_per_min`, shipped
+      # at 5 (tighter than login's 10), bucketed the same way.
+      #
+      # The examples create roughly seven users between them — the bootstrap's
+      # tenant admin, b1's subject, b3's fixture user, b6's tenant admin and its
+      # tenant-scoped organization account, b5's end user — all from the one
+      # runner IP inside the same window. b5 runs last and got the refusal:
+      # `POST /api/v1/users -> 429 (wanted 201)`.
+      #
+      # Raised only here. `password_reset_per_min` and `mfa_per_min` are left at
+      # their shipped values deliberately: no example touches them, and
+      # `scripts/e2e-mail-check.sh` exercises the over-cap reset path ON PURPOSE
+      # — moving that ceiling would change what it measures rather than let it
+      # measure it.
+      AXIAM__RATE_LIMIT__REGISTER_PER_MIN: "120"
     volumes:
       # A6: read-only CA bundle for verifying the broker certificate.
       - ./.secrets/broker-tls/ca.pem:/etc/axiam/broker-tls/ca.pem:ro

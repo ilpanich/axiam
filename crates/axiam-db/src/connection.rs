@@ -206,6 +206,93 @@ fn root_token_duration_surql_literal(ttl: Duration) -> String {
     format!("{}s", ttl.as_secs())
 }
 
+/// Parse a SurrealQL duration literal (`4w`, `1h30m`, `2419200s`) into a
+/// [`Duration`].
+///
+/// `root_token_duration_surql_literal` deliberately only ever *emits* `<n>s`,
+/// and its doc note that "no duration-string parser is needed" was true while
+/// nothing read the value back. [`DbManager::extend_root_token_duration`] now
+/// does — it asks what the TTL already is before overwriting the user — and
+/// SurrealDB does not answer in the units it was given: a TTL written as
+/// `2419200s` comes back from `INFO FOR ROOT` as `4w`.
+///
+/// Returns `None` for anything it does not fully understand, and the one caller
+/// treats `None` as "redefine", so an unparsed literal costs a redefine rather
+/// than a silently-wrong TTL.
+fn parse_surql_duration(literal: &str) -> Option<Duration> {
+    const UNITS: &[(&str, u64)] = &[
+        // Longest first: `ms` must not be read as `m` followed by junk.
+        ("ns", 0),
+        ("us", 0),
+        ("ms", 0),
+        ("w", 7 * 24 * 3600),
+        ("d", 24 * 3600),
+        ("h", 3600),
+        ("m", 60),
+        ("s", 1),
+    ];
+
+    let mut rest = literal.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let mut total = Duration::ZERO;
+
+    while !rest.is_empty() {
+        let digits_end = rest.find(|c: char| !c.is_ascii_digit())?;
+        if digits_end == 0 {
+            return None;
+        }
+        let value: u64 = rest[..digits_end].parse().ok()?;
+        rest = &rest[digits_end..];
+
+        let (unit, secs) = UNITS.iter().find(|(u, _)| rest.starts_with(u))?;
+        rest = &rest[unit.len()..];
+        // Sub-second units contribute nothing to a token TTL measured in
+        // seconds, and rounding them up would overstate it. They are accepted
+        // (so `1h500ms` still parses) and ignored.
+        total += Duration::from_secs(value.saturating_mul(*secs));
+    }
+
+    Some(total)
+}
+
+/// The `DURATION FOR TOKEN` currently defined for `username` on ROOT, or
+/// `None` if it cannot be established.
+///
+/// `INFO FOR ROOT` answers with the *statements* that would recreate the root
+/// definitions — `{ users: { axiam: "DEFINE USER axiam ON ROOT PASSHASH '...'
+/// ROLES OWNER DURATION FOR TOKEN 4w, FOR SESSION NONE" } }` — so the value is
+/// read back out of that text. Debug-formatted because `Value` does not
+/// implement `Display`.
+///
+/// Every failure path returns `None`, and the caller reads `None` as "go ahead
+/// and redefine". This function must never be the reason a TTL is left short.
+async fn current_root_token_duration<C: surrealdb::Connection>(
+    db: &Surreal<C>,
+    username: &str,
+) -> Option<Duration> {
+    let mut resp = db.query("INFO FOR ROOT").await.ok()?;
+    let info: surrealdb::types::Value = resp.take(0).ok()?;
+    let rendered = format!("{info:?}");
+
+    // Narrow to this user's statement before looking for the clause: a root
+    // with several users would otherwise hand back whichever duration happened
+    // to appear first.
+    let start = rendered.find(&format!("DEFINE USER {username} ON ROOT"))?;
+    let stmt = &rendered[start..];
+    let stmt = &stmt[..stmt.find("FOR SESSION").unwrap_or(stmt.len())];
+
+    let clause = "DURATION FOR TOKEN ";
+    let at = stmt.find(clause)? + clause.len();
+    let literal: String = stmt[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+
+    parse_surql_duration(&literal)
+}
+
 /// Interval between proactive re-signin attempts, computed against the
 /// given TTL: `ttl * fraction`, with `fraction` clamped to a safe
 /// `0.05..=0.95` band (D-04) regardless of what a misconfigured env var
@@ -344,6 +431,39 @@ impl DbManager {
             warn!(error = %e, "token-duration setup: signin failed (continuing)");
             return;
         }
+        // Ask before overwriting.
+        //
+        // `DEFINE USER OVERWRITE ... PASSWORD '...'` re-hashes the password with
+        // a FRESH SALT, and SurrealDB signs root tokens against that hash — so
+        // the statement invalidates every token already issued for this user.
+        // Run unconditionally at every boot (which the doc comment above used to
+        // call "idempotent"), it logs out every AXIAM process already connected
+        // to the same datastore: start a second replica, or roll a deployment,
+        // and the running ones 401 on every query from that moment.
+        //
+        // Measured, not theorised: a second server container against this
+        // datastore took the first one from healthy to a 401 on every request
+        // within five seconds, and it never recovered on its own.
+        //
+        // So do it only when it would actually change something. Anything this
+        // cannot read — a query that fails, a shape it does not recognise, a
+        // duration literal it cannot parse — falls through to the redefine,
+        // which is the previous behaviour. Being wrong in that direction costs
+        // a redefine; being wrong in the other direction would leave the TTL at
+        // SurrealDB's ~1h default while the re-signin task waits weeks, which is
+        // the original expiry bug.
+        if let Some(existing) = current_root_token_duration(&setup, &config.username).await
+            && existing >= ttl
+        {
+            info!(
+                duration_secs = existing.as_secs(),
+                "SurrealDB root token duration is already at least the configured TTL — \
+                 not redefining the user (a redefine would invalidate every other \
+                 replica's token)"
+            );
+            return;
+        }
+
         // SurrealQL string-escape the password (single-quoted literal).
         let escaped_pass = config.password.replace('\\', "\\\\").replace('\'', "\\'");
         let define_user = format!(
@@ -603,6 +723,9 @@ impl DbManager {
         if matches!(err.not_allowed_details(), Some(NotAllowedError::Auth(_))) {
             return DbError::Unhealthy(err.to_string());
         }
+        if is_transport_auth_rejection(&err) {
+            return DbError::Unhealthy(err.to_string());
+        }
         DbError::Surreal(err)
     }
 
@@ -614,6 +737,54 @@ impl DbManager {
     pub fn re_signin_interval(fraction: f64) -> Duration {
         re_signin_interval_for(ROOT_TOKEN_DURATION, fraction)
     }
+}
+
+/// Whether a SurrealDB error is the HTTP engine's way of saying "this handle's
+/// credentials are no longer accepted".
+///
+/// The statement-level `NotAllowed(Auth(..))` shape that
+/// [`DbManager::classify_query_error`] checks first is what the **WebSocket**
+/// engine produces. AXIAM runs the **HTTP** engine (Phase 13), and there the
+/// server answers `401` at the transport, before any SurrealQL response exists.
+/// So on the engine actually deployed, the one error that must reach the
+/// reconnect loop arrived looking like an ordinary query failure. The loop never
+/// ran, and a process whose root token had been invalidated served 401s until
+/// somebody restarted it. That is not hypothetical: **every AXIAM boot used to
+/// run `DEFINE USER OVERWRITE … ON ROOT`** (see
+/// [`DbManager::extend_root_token_duration`], which now asks first), which
+/// re-salts the password hash and invalidates every token already issued for
+/// that user — so starting a second replica, or a rolling deploy, wedged the
+/// replicas already running.
+///
+/// **Matched on the message, and only on the message.** The obvious structured
+/// predicate is wrong: the SDK's `From<reqwest::Error>` builds
+/// `ErrorDetails::Connection(ConnectionFailed)`, but the error that actually
+/// arrives here does not come through it. Reproduced against a live server
+/// (`a_redefined_root_user_classifies_as_unhealthy_on_the_http_engine`), it is:
+///
+/// ```text
+/// Error { code: -32000,
+///         message: "HTTP status client error (401 Unauthorized) for url (…/rpc)",
+///         details: Internal, cause: None }
+/// ```
+///
+/// `Internal` is the enum's forward-compatibility catch-all, so it says nothing
+/// and `connection_details()` returns `None`. A first version of this fix keyed
+/// on `Connection`, passed a unit test built from that assumption, and changed
+/// nothing at all on the running stack. The status code is genuinely
+/// unreachable through this conversion; the message is the only signal there is.
+///
+/// The full reqwest phrase is matched rather than a bare `"401"`, so a query
+/// error that happens to mention the number cannot be mistaken for one — and
+/// only `401`/`403`, because those mean this handle's bearer token will never be
+/// accepted again, which a reconnect fixes. A timeout or a refused connection
+/// says nothing about the handle's credentials and is left to ordinary retry,
+/// so that a network blip does not tear down and rebuild every pooled
+/// connection.
+fn is_transport_auth_rejection(err: &surrealdb::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("HTTP status client error (401 Unauthorized)")
+        || msg.contains("HTTP status client error (403 Forbidden)")
 }
 
 impl Drop for DbManager {
@@ -748,5 +919,64 @@ mod tests {
             vec!["new-fresh".to_string()],
             "the old (poisoned) handle must never be observed after the swap (D-12)"
         );
+    }
+
+    // -- parse_surql_duration -------------------------------------------------
+    //
+    // The reason this parser exists: the TTL is WRITTEN as `2419200s` and
+    // SurrealDB reads it back as `4w`. A check that compared literals would
+    // never match, and `extend_root_token_duration` would redefine the user on
+    // every boot exactly as before — logging out every other replica while
+    // reporting that it had avoided doing so.
+
+    #[test]
+    fn a_duration_survives_the_round_trip_surrealdb_actually_performs() {
+        // Verbatim from `INFO FOR ROOT` against a live datastore seeded by this
+        // very code path.
+        assert_eq!(
+            parse_surql_duration("4w"),
+            Some(ROOT_TOKEN_DURATION),
+            "`4w` is what SurrealDB returns for the TTL this module writes as \
+             `2419200s`; if these stop agreeing the pre-check silently stops working"
+        );
+        assert_eq!(
+            parse_surql_duration(&root_token_duration_surql_literal(ROOT_TOKEN_DURATION)),
+            Some(ROOT_TOKEN_DURATION),
+        );
+    }
+
+    #[test]
+    fn compound_and_single_unit_literals_both_parse() {
+        assert_eq!(parse_surql_duration("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_surql_duration("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(
+            parse_surql_duration("1h30m"),
+            Some(Duration::from_secs(5400))
+        );
+        assert_eq!(
+            parse_surql_duration("2d12h"),
+            Some(Duration::from_secs(2 * 86400 + 12 * 3600))
+        );
+        // Sub-second units contribute nothing to a TTL in seconds, but must not
+        // make the whole literal unparseable.
+        assert_eq!(
+            parse_surql_duration("1h500ms"),
+            Some(Duration::from_secs(3600))
+        );
+    }
+
+    #[test]
+    fn anything_unrecognised_is_none_so_the_caller_redefines() {
+        // Every one of these must return None rather than a plausible-looking
+        // number. `None` costs a redefine; a wrong number would leave the token
+        // duration at SurrealDB's ~1h default while the re-signin task waits
+        // weeks — the expiry bug this whole mechanism exists to prevent.
+        for literal in ["", "4", "w", "4x", "abc", "-1h", "4 w", "1h30"] {
+            assert_eq!(
+                parse_surql_duration(literal),
+                None,
+                "`{literal}` must not parse to a duration"
+            );
+        }
     }
 }

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import {
   MATRIX_PRINCIPALS,
   NAV_DESTINATIONS,
+  canActOnOrganization,
   effectivePermissions,
   holds,
   readFixture,
@@ -43,7 +44,9 @@ for (const principal of MATRIX_PRINCIPALS) {
   test.describe(`nav reach — ${principal.username}`, () => {
     test.use({ storageState: principal.storageState });
 
-    test(`sees exactly the destinations its permissions allow`, async ({ page }) => {
+    test(`sees exactly the destinations its permissions allow`, async ({
+      page,
+    }) => {
       test.setTimeout(180_000);
 
       const perms = await effectivePermissions(page);
@@ -53,6 +56,9 @@ for (const principal of MATRIX_PRINCIPALS) {
           `every assertion below would be measuring nothing`,
       ).not.toBeNull();
       if (!perms) return;
+
+      // One sidebar gate is not a permission: see `NavDestination.organizationOnly`.
+      const actsOnOrganization = await canActOnOrganization(page);
 
       // ---- direction 1: the sidebar offers exactly what is permitted -----
       await page.goto("/dashboard", { waitUntil: "networkidle" });
@@ -67,14 +73,22 @@ for (const principal of MATRIX_PRINCIPALS) {
         // A destination the sidebar does not offer has nothing to assert here;
         // its route gate is still checked in direction 2 below.
         if (dest.inNav === false) continue;
-        const allowed = dest.navPermission === null || holds(perms, dest.navPermission);
+        const permitted =
+          dest.navPermission === null || holds(perms, dest.navPermission);
+        // The permission is necessary; for an organization-level entry it is
+        // not sufficient, and the sidebar says so.
+        const allowed =
+          permitted && (!dest.organizationOnly || actsOnOrganization);
         const link = nav.getByRole("link", { name: dest.label, exact: true });
 
         // Presence: every entry is rendered for every principal; what changes
         // is whether it is enabled. Asserting presence separately keeps a
         // missing entry from reading as "correctly hidden".
         await expect
-          .soft(link, `${principal.username}: nav entry "${dest.label}" is missing entirely`)
+          .soft(
+            link,
+            `${principal.username}: nav entry "${dest.label}" is missing entirely`,
+          )
           .toHaveCount(1);
         if ((await link.count()) !== 1) continue;
 
@@ -84,9 +98,13 @@ for (const principal of MATRIX_PRINCIPALS) {
             disabled,
             allowed
               ? `${principal.username} holds ${dest.navPermission ?? "(no permission required)"} ` +
-                `but the "${dest.label}" nav entry is disabled — a control the server would allow, hidden`
-              : `${principal.username} does NOT hold ${dest.navPermission} ` +
-                `but the "${dest.label}" nav entry is enabled — a control the server would refuse, offered`,
+                  `but the "${dest.label}" nav entry is disabled — a control the server would allow, hidden`
+              : dest.organizationOnly && permitted
+                ? `${principal.username} holds ${dest.navPermission} but does not act on the ` +
+                  `organization, and the "${dest.label}" nav entry is enabled — every action behind ` +
+                  `it is refused by require_organization_principal`
+                : `${principal.username} does NOT hold ${dest.navPermission} ` +
+                  `but the "${dest.label}" nav entry is enabled — a control the server would refuse, offered`,
           )
           .toBe(!allowed);
       }
@@ -106,7 +124,7 @@ for (const principal of MATRIX_PRINCIPALS) {
             denied,
             allowed
               ? `${principal.username} holds ${gate ?? "(no permission required)"} but ` +
-                `${dest.path} rendered Access Denied`
+                  `${dest.path} rendered Access Denied`
               : `${principal.username} does NOT hold ${gate} but ${dest.path} rendered its page`,
           )
           .toBe(!allowed);
@@ -125,7 +143,10 @@ for (const principal of MATRIX_PRINCIPALS) {
       );
       expect
         .soft(
-          mismatched.map((d) => `${d.path}: nav=${d.navPermission} route=${d.routePermission}`),
+          mismatched.map(
+            (d) =>
+              `${d.path}: nav=${d.navPermission} route=${d.routePermission}`,
+          ),
           "sidebar entries whose declared permission differs from the permission " +
             "guarding the route they link to — each offers a destination the route refuses",
         )
@@ -152,7 +173,9 @@ for (const principal of MATRIX_PRINCIPALS) {
         new URL("../../src/router.tsx", import.meta.url),
         "utf8",
       );
-      const declared = [...source.matchAll(/^\s*path:\s*"([^"]+)",/gm)].map((m) => m[1]);
+      const declared = [...source.matchAll(/^\s*path:\s*"([^"]+)",/gm)].map(
+        (m) => m[1],
+      );
       expect(
         declared.length,
         "no `path:` entries were found in router.tsx — this guard is reading the wrong file " +
@@ -172,7 +195,9 @@ for (const principal of MATRIX_PRINCIPALS) {
         path.startsWith("/bootstrap") ||
         path.startsWith("/auth/");
 
-      const known = new Set(NAV_DESTINATIONS.map((d) => d.path.replace(/^\//, "")));
+      const known = new Set(
+        NAV_DESTINATIONS.map((d) => d.path.replace(/^\//, "")),
+      );
       const missing = declared
         .filter((path) => !exempt(path))
         .filter((path) => !known.has(path.replace(/^\//, "")));

@@ -47,35 +47,163 @@ export interface NavDestination {
    * is still reachable by typing its URL.
    */
   inNav?: boolean;
+  /**
+   * Whether the sidebar entry is gated on organization **standing** rather than
+   * on a permission alone (`navSections.tsx`'s `organizationOnly`).
+   *
+   * No permission expresses this. `organizations:list` is seeded into every
+   * tenant's own `super-admin` role, so a tenant administrator holds it and is
+   * still refused every organization-level action by
+   * `handlers::org_scope::require_organization_principal`, which keys on where
+   * the caller's record lives. Gating the entry on the permission alone is what
+   * produced a live link into a page whose every button answered 403.
+   *
+   * Recorded here so this matrix asserts the gate the UI actually applies. A
+   * model that knew only about permissions would read the fix as a regression —
+   * "holds `organizations:list` but the entry is disabled" — and demand the bug
+   * back.
+   */
+  organizationOnly?: boolean;
 }
 
 export const NAV_DESTINATIONS: NavDestination[] = [
-  { path: "/dashboard", label: "Dashboard", navPermission: null, routePermission: null },
-  { path: "/users", label: "Users", navPermission: "users:list", routePermission: "users:list" },
-  { path: "/groups", label: "Groups", navPermission: "groups:list", routePermission: "groups:list" },
-  { path: "/roles", label: "Roles", navPermission: "roles:list", routePermission: "roles:list" },
-  { path: "/permissions", label: "Permissions", navPermission: "permissions:list", routePermission: "permissions:list" },
-  { path: "/resources", label: "Resources", navPermission: "resources:list", routePermission: "resources:list" },
-  { path: "/scim-tokens", label: "SCIM Provisioning", navPermission: "scim_tokens:list", routePermission: "scim_tokens:list" },
-  { path: "/service-accounts", label: "Service Accounts", navPermission: "service_accounts:list", routePermission: "service_accounts:list" },
-  { path: "/federation", label: "Federation", navPermission: "federation:list", routePermission: "federation:list" },
-  { path: "/organizations", label: "Organizations", navPermission: "organizations:list", routePermission: "organizations:list" },
-  { path: "/tenants", label: "Tenants", navPermission: "tenants:list", routePermission: "tenants:list" },
-  { path: "/certificates", label: "Certificates", navPermission: "certificates:list", routePermission: "certificates:list" },
-  { path: "/pgp-keys", label: "PGP Keys", navPermission: "pgp_keys:list", routePermission: "pgp_keys:list" },
-  { path: "/webhooks", label: "Webhooks", navPermission: "webhooks:list", routePermission: "webhooks:list" },
-  { path: "/reactors", label: "Reactors", navPermission: "reactors:list", routePermission: "reactors:list" },
-  { path: "/oauth2-clients", label: "OAuth2 Clients", navPermission: "oauth2_clients:list", routePermission: "oauth2_clients:list" },
+  {
+    path: "/dashboard",
+    label: "Dashboard",
+    navPermission: null,
+    routePermission: null,
+  },
+  {
+    path: "/users",
+    label: "Users",
+    navPermission: "users:list",
+    routePermission: "users:list",
+  },
+  {
+    path: "/groups",
+    label: "Groups",
+    navPermission: "groups:list",
+    routePermission: "groups:list",
+  },
+  {
+    path: "/roles",
+    label: "Roles",
+    navPermission: "roles:list",
+    routePermission: "roles:list",
+  },
+  {
+    path: "/permissions",
+    label: "Permissions",
+    navPermission: "permissions:list",
+    routePermission: "permissions:list",
+  },
+  {
+    path: "/resources",
+    label: "Resources",
+    navPermission: "resources:list",
+    routePermission: "resources:list",
+  },
+  {
+    path: "/scim-tokens",
+    label: "SCIM Provisioning",
+    navPermission: "scim_tokens:list",
+    routePermission: "scim_tokens:list",
+  },
+  {
+    path: "/service-accounts",
+    label: "Service Accounts",
+    navPermission: "service_accounts:list",
+    routePermission: "service_accounts:list",
+  },
+  {
+    path: "/federation",
+    label: "Federation",
+    navPermission: "federation:list",
+    routePermission: "federation:list",
+  },
+  {
+    path: "/organizations",
+    label: "Organizations",
+    navPermission: "organizations:list",
+    routePermission: "organizations:list",
+    organizationOnly: true,
+  },
+  {
+    path: "/tenants",
+    label: "Tenants",
+    navPermission: "tenants:list",
+    routePermission: "tenants:list",
+  },
+  {
+    path: "/certificates",
+    label: "Certificates",
+    navPermission: "certificates:list",
+    routePermission: "certificates:list",
+  },
+  {
+    path: "/pgp-keys",
+    label: "PGP Keys",
+    navPermission: "pgp_keys:list",
+    routePermission: "pgp_keys:list",
+  },
+  {
+    path: "/webhooks",
+    label: "Webhooks",
+    navPermission: "webhooks:list",
+    routePermission: "webhooks:list",
+  },
+  {
+    path: "/reactors",
+    label: "Reactors",
+    navPermission: "reactors:list",
+    routePermission: "reactors:list",
+  },
+  {
+    path: "/oauth2-clients",
+    label: "OAuth2 Clients",
+    navPermission: "oauth2_clients:list",
+    routePermission: "oauth2_clients:list",
+  },
   // This one was the finding: the sidebar declared no permission while the route
   // required `audit_logs:list`, so the entry stayed enabled for a principal the
   // route would refuse. Both sides now declare it, and the pair is recorded here
   // so the "nav gate and route gate agree" assertion has something to compare.
-  { path: "/audit-logs", label: "Audit Logs", navPermission: "audit_logs:list", routePermission: "audit_logs:list" },
-  { path: "/notification-rules", label: "Notification Rules", navPermission: "notification_rules:list", routePermission: "notification_rules:list" },
-  { path: "/device", label: "Connect a Device", navPermission: null, routePermission: null },
-  { path: "/profile", label: "Profile", navPermission: null, routePermission: null },
-  { path: "/privacy", label: "Privacy & Data", navPermission: null, routePermission: null },
-  { path: "/settings", label: "Settings", navPermission: "settings:get", routePermission: "settings:get" },
+  {
+    path: "/audit-logs",
+    label: "Audit Logs",
+    navPermission: "audit_logs:list",
+    routePermission: "audit_logs:list",
+  },
+  {
+    path: "/notification-rules",
+    label: "Notification Rules",
+    navPermission: "notification_rules:list",
+    routePermission: "notification_rules:list",
+  },
+  {
+    path: "/device",
+    label: "Connect a Device",
+    navPermission: null,
+    routePermission: null,
+  },
+  {
+    path: "/profile",
+    label: "Profile",
+    navPermission: null,
+    routePermission: null,
+  },
+  {
+    path: "/privacy",
+    label: "Privacy & Data",
+    navPermission: null,
+    routePermission: null,
+  },
+  {
+    path: "/settings",
+    label: "Settings",
+    navPermission: "settings:get",
+    routePermission: "settings:get",
+  },
   // Reached from the Settings page, not the sidebar — and gated by a permission
   // no other destination uses, so before this entry existed the whole
   // `webauthn_policy:read` boundary went unmeasured in both directions.
@@ -156,7 +284,8 @@ export const MATRIX_PRINCIPALS: MatrixPrincipal[] = [
     username: "mx-editor",
     tenantSlug: TENANT_A_SLUG,
     storageState: storageStateFor("editor"),
-    purpose: "write, but only beneath resource mx-b — inheritance and its limit",
+    purpose:
+      "write, but only beneath resource mx-b — inheritance and its limit",
   },
   {
     key: "denied",
@@ -213,7 +342,9 @@ export function readFixture(): MatrixFixture {
       serviceAccounts: {},
       caCertificates: {},
       certificates: {},
-      problems: [`${FIXTURE_STATE} does not exist — the matrix setup project did not run`],
+      problems: [
+        `${FIXTURE_STATE} does not exist — the matrix setup project did not run`,
+      ],
     };
   }
   return JSON.parse(readFileSync(FIXTURE_STATE, "utf8")) as MatrixFixture;
@@ -253,7 +384,29 @@ export async function ensureOnApp(page: Page): Promise<void> {
  * cookie and any acting-tenant state the app has set both apply — the same
  * answer the UI gates on, rather than a second opinion computed differently.
  */
-export async function effectivePermissions(page: Page): Promise<string[] | null> {
+export async function canActOnOrganization(page: Page): Promise<boolean> {
+  await page.goto("/dashboard", { waitUntil: "networkidle" });
+  return page.evaluate(async () => {
+    const res = await fetch("/api/v1/auth/me", { credentials: "include" });
+    if (!res.ok) return false;
+    const body = (await res.json()) as {
+      organization_level?: boolean;
+      reachable_tenant_ids?: unknown;
+    };
+    // Deliberately the same two fields, in the same order, as
+    // `useCanActOnOrganization` in `src/lib/grantReach.ts`: organization-level,
+    // and not narrowed to particular tenants. An organization-level account
+    // restricted to some of the organization's tenants was created precisely so
+    // it would administer those and not the organization, and the server
+    // refuses it organization-level actions for that reason.
+    if (body.organization_level !== true) return false;
+    return !Array.isArray(body.reachable_tenant_ids);
+  });
+}
+
+export async function effectivePermissions(
+  page: Page,
+): Promise<string[] | null> {
   await page.goto("/dashboard", { waitUntil: "networkidle" });
   return page.evaluate(async () => {
     const res = await fetch("/api/v1/auth/me", { credentials: "include" });

@@ -126,6 +126,58 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
     user.id
 }
 
+/// A token for an administrator living in the organization's own reserved
+/// tenant — for the one step in these tests that needs one.
+///
+/// Minting a CA is an organization-level action (B-04): a CA is the
+/// organization's, and whoever holds its private key can sign certificates that
+/// authenticate as principals in any tenant under it. So
+/// `require_organization_principal` refuses `POST
+/// /organizations/{id}/ca-certificates` to a tenant principal, whatever
+/// permissions it holds, and the CA these tests need as a fixture cannot be
+/// minted with the tenant token.
+///
+/// The leaf certificates this file is actually about stay tenant-level and keep
+/// using the tenant token, which is the point: only the fixture step changes
+/// principal, not the behaviour under test.
+async fn organization_ca_token(db: &Surreal<TestDb>, auth: &AuthConfig, org_id: Uuid) -> String {
+    let org_tenant = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant::organization_scope(org_id))
+        .await
+        .unwrap();
+    let user = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id: org_tenant.id,
+            username: "org-admin".into(),
+            email: "org-admin@example.com".into(),
+            password: TEST_PASSWORD.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    mint_token(auth, user.id, org_tenant.id, org_id)
+}
+
+/// Flag a CA as an organization-wide mTLS trust anchor.
+///
+/// B-06: `/auth/device` no longer accepts a client certificate merely because
+/// it chains to some CA of the organization. `mtls::require_trust_anchor` walks
+/// `parent_ca_id` until it reaches a CA an operator has flagged, and refuses if
+/// it reaches none — a certificate under a never-flagged CA authenticating a
+/// device was the defect the walk closed.
+///
+/// So the fixture now does what an operator has to do for a device to get in.
+/// Applied to the refusal cases too, not only the happy path: without it they
+/// would be refused for the missing anchor rather than for the revoked or
+/// unbound certificate they are named after, and would pass without testing it.
+async fn flag_trust_anchor(db: &Surreal<TestDb>, org_id: Uuid, ca_id: &str) {
+    use axiam_core::repository::CaCertificateRepository as _;
+    SurrealCaCertificateRepository::new(db.clone())
+        .set_mtls_trust_anchor(org_id, ca_id.parse().unwrap(), true)
+        .await
+        .unwrap();
+}
+
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
     issue_access_token(
         user_id,
@@ -271,10 +323,12 @@ async fn device_auth_full_flow() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
     // 1. Generate CA
-    let ca_id = generate_ca!(app, org_id, token);
+    let ca_id = generate_ca!(app, org_id, ca_token);
+    flag_trust_anchor(&db, org_id, &ca_id).await;
 
     // 2. Generate device certificate
     let (cert_id, public_cert_pem) = generate_device_cert!(app, ca_id, token);
@@ -322,9 +376,11 @@ async fn device_auth_mints_service_account_sub_kind() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth.clone());
 
-    let ca_id = generate_ca!(app, org_id, token);
+    let ca_id = generate_ca!(app, org_id, ca_token);
+    flag_trust_anchor(&db, org_id, &ca_id).await;
     let (cert_id, public_cert_pem) = generate_device_cert!(app, ca_id, token);
     let sa_id = create_service_account!(app, token);
 
@@ -388,9 +444,11 @@ async fn device_auth_unbound_cert_returns_error() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    let ca_id = generate_ca!(app, org_id, token);
+    let ca_id = generate_ca!(app, org_id, ca_token);
+    flag_trust_anchor(&db, org_id, &ca_id).await;
     let (_cert_id, public_cert_pem) = generate_device_cert!(app, ca_id, token);
 
     // Try to authenticate without binding
@@ -487,9 +545,11 @@ async fn device_auth_revoked_cert_returns_error() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    let ca_id = generate_ca!(app, org_id, token);
+    let ca_id = generate_ca!(app, org_id, ca_token);
+    flag_trust_anchor(&db, org_id, &ca_id).await;
     let (cert_id, public_cert_pem) = generate_device_cert!(app, ca_id, token);
     let sa_id = create_service_account!(app, token);
 

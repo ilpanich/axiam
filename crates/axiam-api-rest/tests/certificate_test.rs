@@ -125,6 +125,38 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
     user.id
 }
 
+/// A token for an administrator living in the organization's own reserved
+/// tenant — for the one step in these tests that needs one.
+///
+/// Minting a CA is an organization-level action (B-04): a CA is the
+/// organization's, and whoever holds its private key can sign certificates that
+/// authenticate as principals in any tenant under it. So
+/// `require_organization_principal` refuses `POST
+/// /organizations/{id}/ca-certificates` to a tenant principal, whatever
+/// permissions it holds, and the CA these tests need as a fixture cannot be
+/// minted with the tenant token.
+///
+/// The leaf certificates this file is actually about stay tenant-level and keep
+/// using the tenant token, which is the point: only the fixture step changes
+/// principal, not the behaviour under test.
+async fn organization_ca_token(db: &Surreal<TestDb>, auth: &AuthConfig, org_id: Uuid) -> String {
+    let org_tenant = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant::organization_scope(org_id))
+        .await
+        .unwrap();
+    let user = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id: org_tenant.id,
+            username: "org-admin".into(),
+            email: "org-admin@example.com".into(),
+            password: TEST_PASSWORD.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    mint_token(auth, user.id, org_tenant.id, org_id)
+}
+
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
     issue_access_token(
         user_id,
@@ -205,9 +237,10 @@ async fn generate_certificate_signed_by_ca() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    let ca_id = generate_ca!(app, org_id, token);
+    let ca_id = generate_ca!(app, org_id, ca_token);
 
     let req = test::TestRequest::post()
         .uri("/api/v1/certificates")
@@ -251,9 +284,10 @@ async fn list_certificates_returns_paginated() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    let ca_id = generate_ca!(app, org_id, token);
+    let ca_id = generate_ca!(app, org_id, ca_token);
 
     for subject in ["svc-a", "svc-b"] {
         let req = test::TestRequest::post()
@@ -292,9 +326,10 @@ async fn get_certificate_by_id() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    let ca_id = generate_ca!(app, org_id, token);
+    let ca_id = generate_ca!(app, org_id, ca_token);
 
     let req = test::TestRequest::post()
         .uri("/api/v1/certificates")
@@ -336,9 +371,10 @@ async fn revoke_certificate() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    let ca_id = generate_ca!(app, org_id, token);
+    let ca_id = generate_ca!(app, org_id, ca_token);
 
     let req = test::TestRequest::post()
         .uri("/api/v1/certificates")
@@ -393,10 +429,11 @@ async fn a_leaf_outliving_its_issuer_is_refused_with_the_real_maximum() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
     // The CA is issued for 365 days a moment ago, so it has 364 WHOLE days left.
-    let ca_id = generate_ca!(app, org_id, token);
+    let ca_id = generate_ca!(app, org_id, ca_token);
 
     let req = test::TestRequest::post()
         .uri("/api/v1/certificates")

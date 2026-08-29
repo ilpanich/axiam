@@ -62,7 +62,22 @@ fn test_auth_config() -> AuthConfig {
     }
 }
 
-async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
+/// A fresh organization, its reserved scope tenant, one ordinary tenant, and an
+/// administrator **in the reserved tenant**.
+///
+/// Returns `(db, org_id, tenant_id, user_id, org_tenant_id)`, where `tenant_id`
+/// is the ordinary tenant these tests act *on* and `org_tenant_id` is where the
+/// caller lives.
+///
+/// The split is the point. Tenant create, update and delete are
+/// organization-level actions, and `require_organization_principal` refuses
+/// them to any caller whose own record does not live in the organization's
+/// reserved tenant, whatever permissions it holds (B-04) — a tenant
+/// administrator creating sibling tenants is exactly what that guard exists to
+/// stop. So the caller moves into the reserved tenant, and the subject stays an
+/// ordinary tenant, because acting on the organization's own scope tenant is a
+/// different thing from acting on one of its tenants.
+async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid, Uuid) {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
     axiam_db::run_migrations(&db).await.unwrap();
@@ -78,6 +93,10 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
         .unwrap();
 
     let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let org_tenant = tenant_repo
+        .create(CreateTenant::organization_scope(org.id))
+        .await
+        .unwrap();
     let tenant = tenant_repo
         .create(CreateTenant {
             organization_id: org.id,
@@ -92,7 +111,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
     let user_repo = SurrealUserRepository::new(db.clone());
     let user = user_repo
         .create(CreateUser {
-            tenant_id: tenant.id,
+            tenant_id: org_tenant.id,
             username: "admin".into(),
             email: "admin@example.com".into(),
             password: "password12345".into(),
@@ -101,7 +120,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
         .await
         .unwrap();
 
-    (db, org.id, tenant.id, user.id)
+    (db, org.id, tenant.id, user.id, org_tenant.id)
 }
 
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
@@ -171,9 +190,9 @@ fn manifest_of(body: &str) -> serde_json::Value {
 
 #[actix_rt::test]
 async fn create_tenant_returns_201() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
@@ -198,9 +217,9 @@ async fn create_tenant_returns_201() {
 
 #[actix_rt::test]
 async fn list_tenants_returns_200() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
@@ -212,15 +231,38 @@ async fn list_tenants_returns_200() {
     assert_eq!(resp.status().as_u16(), 200);
 
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["total"], 1); // setup_db created one
-    assert!(body["items"].is_array());
+    // Two: the ordinary tenant and the organization's own reserved scope, which
+    // `setup_db` creates because the caller has to live somewhere.
+    //
+    // The reserved tenant is deliberately *in* the roster rather than filtered
+    // out of it. It is a real tenant of the organization and an organization
+    // administrator acts on it, so hiding it server-side would make it
+    // unreachable through the API; the admin console filters it where offering
+    // it would be wrong instead (`useReachableTenants` drops `kind ==
+    // "organization"` from the tenant-scope picker, because scoping a grant to
+    // the organization scope is the unrestricted grant).
+    assert_eq!(body["total"], 2);
+    let items = body["items"].as_array().expect("items must be an array");
+    assert_eq!(items.len(), 2);
+    let kinds: Vec<&str> = items
+        .iter()
+        .map(|t| t["kind"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        kinds.contains(&"organization"),
+        "the organization's own scope is a tenant of it and must be listed: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"standard"),
+        "the ordinary tenant must be listed: {kinds:?}"
+    );
 }
 
 #[actix_rt::test]
 async fn get_tenant_returns_200() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
@@ -239,9 +281,9 @@ async fn get_tenant_returns_200() {
 
 #[actix_rt::test]
 async fn update_tenant_returns_200() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::put()
@@ -263,9 +305,9 @@ async fn update_tenant_returns_200() {
 
 #[actix_rt::test]
 async fn delete_tenant_returns_204() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
     let app = test_app!(db, auth);
 
     // Create a second tenant to delete
@@ -322,9 +364,9 @@ async fn delete_tenant_returns_204() {
 /// The export writes a receipt, and that receipt is what unblocks DELETE.
 #[actix_rt::test]
 async fn audit_export_emits_a_manifest_and_unblocks_delete() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
     let app = test_app!(db, auth);
 
     let tenant_repo = SurrealTenantRepository::new(db.clone());
@@ -367,9 +409,9 @@ async fn audit_export_emits_a_manifest_and_unblocks_delete() {
 /// digest in the manifest is over exactly those lines.
 #[actix_rt::test]
 async fn audit_export_streams_every_entry_and_digests_them() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
 
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     for i in 0..3 {
@@ -433,9 +475,9 @@ async fn audit_export_streams_every_entry_and_digests_them() {
 /// through the endpoint and waiting six hours is not a test.
 #[actix_rt::test]
 async fn a_stale_export_receipt_does_not_unblock_delete() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
 
     let tenant_repo = SurrealTenantRepository::new(db.clone());
     let doomed = tenant_repo
@@ -499,9 +541,9 @@ async fn a_stale_export_receipt_does_not_unblock_delete() {
 /// An export of a DIFFERENT tenant must not unblock this one.
 #[actix_rt::test]
 async fn an_export_of_another_tenant_does_not_unblock_delete() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
 
     let tenant_repo = SurrealTenantRepository::new(db.clone());
     let doomed = tenant_repo
@@ -539,9 +581,9 @@ async fn an_export_of_another_tenant_does_not_unblock_delete() {
 /// are gone, so this is the only record that survives it.
 #[actix_rt::test]
 async fn deleting_a_tenant_records_it_in_the_system_audit_log() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
 
     let tenant_repo = SurrealTenantRepository::new(db.clone());
     let doomed = tenant_repo
@@ -601,7 +643,7 @@ async fn deleting_a_tenant_records_it_in_the_system_audit_log() {
 /// would be a read of another organization's audit trail.
 #[actix_rt::test]
 async fn cross_org_audit_export_returns_403() {
-    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_a_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
 
     let org_repo = SurrealOrganizationRepository::new(db.clone());
@@ -614,7 +656,7 @@ async fn cross_org_audit_export_returns_403() {
         .await
         .unwrap();
 
-    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_a_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
@@ -638,7 +680,7 @@ async fn cross_org_audit_export_returns_403() {
 /// Regression guard: same-org caller gets 200.
 #[actix_rt::test]
 async fn cross_org_list_tenants_returns_403() {
-    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_a_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
 
     // Create org B with a distinct id.
@@ -654,7 +696,7 @@ async fn cross_org_list_tenants_returns_403() {
     let org_b_id = org_b.id;
 
     // Token claims org A.
-    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_a_id);
     let app = test_app!(db, auth);
 
     // Cross-org list: path org_id = org_B, JWT org_id = org_A -> 403.
@@ -685,7 +727,7 @@ async fn cross_org_list_tenants_returns_403() {
 /// A caller authenticated for org A gets 403 on POST /organizations/{org_B_id}/tenants.
 #[actix_rt::test]
 async fn cross_org_create_tenant_returns_403() {
-    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_a_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
 
     let org_repo = SurrealOrganizationRepository::new(db.clone());
@@ -698,7 +740,7 @@ async fn cross_org_create_tenant_returns_403() {
         .await
         .unwrap();
 
-    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_a_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::post()
@@ -723,7 +765,7 @@ async fn cross_org_create_tenant_returns_403() {
 /// The ownership guard must reject before any DB read.
 #[actix_rt::test]
 async fn cross_org_get_tenant_returns_403() {
-    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_a_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
 
     let org_repo = SurrealOrganizationRepository::new(db.clone());
@@ -736,7 +778,7 @@ async fn cross_org_get_tenant_returns_403() {
         .await
         .unwrap();
 
-    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_a_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
@@ -759,7 +801,7 @@ async fn cross_org_get_tenant_returns_403() {
 /// (the same top-of-handler ownership guard as GET, exercised for `update`).
 #[actix_rt::test]
 async fn cross_org_update_tenant_returns_403() {
-    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_a_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
 
     let org_repo = SurrealOrganizationRepository::new(db.clone());
@@ -772,7 +814,7 @@ async fn cross_org_update_tenant_returns_403() {
         .await
         .unwrap();
 
-    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_a_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::put()
@@ -798,7 +840,7 @@ async fn cross_org_update_tenant_returns_403() {
 /// org B (same top-of-handler ownership guard, exercised for `delete`).
 #[actix_rt::test]
 async fn cross_org_delete_tenant_returns_403() {
-    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_a_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
 
     let org_repo = SurrealOrganizationRepository::new(db.clone());
@@ -811,7 +853,7 @@ async fn cross_org_delete_tenant_returns_403() {
         .await
         .unwrap();
 
-    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_a_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::delete()
@@ -844,7 +886,7 @@ async fn cross_org_delete_tenant_returns_403() {
 /// org_id -> 404 (not 200), even though the ownership guard itself passes.
 #[actix_rt::test]
 async fn get_tenant_wrong_org_returns_404() {
-    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_a_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
 
     let org_repo = SurrealOrganizationRepository::new(db.clone());
@@ -870,7 +912,7 @@ async fn get_tenant_wrong_org_returns_404() {
 
     // Token's org_id is org A, and the URL's org_id is also org A (guard
     // passes), but the tenant_id in the path belongs to org B.
-    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_a_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
@@ -891,7 +933,7 @@ async fn get_tenant_wrong_org_returns_404() {
 /// PUT a tenant that exists but under a different org -> 404.
 #[actix_rt::test]
 async fn update_tenant_wrong_org_returns_404() {
-    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_a_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
 
     let org_repo = SurrealOrganizationRepository::new(db.clone());
@@ -915,7 +957,7 @@ async fn update_tenant_wrong_org_returns_404() {
         .await
         .unwrap();
 
-    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_a_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::put()
@@ -940,7 +982,7 @@ async fn update_tenant_wrong_org_returns_404() {
 /// NOT actually be deleted).
 #[actix_rt::test]
 async fn delete_tenant_wrong_org_returns_404() {
-    let (db, org_a_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_a_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
 
     let org_repo = SurrealOrganizationRepository::new(db.clone());
@@ -964,7 +1006,7 @@ async fn delete_tenant_wrong_org_returns_404() {
         .await
         .unwrap();
 
-    let token = mint_token(&auth, user_id, tenant_id, org_a_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_a_id);
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::delete()
@@ -996,9 +1038,9 @@ async fn delete_tenant_wrong_org_returns_404() {
 /// injection ahead of the request.
 #[actix_rt::test]
 async fn create_tenant_seed_permissions_failure_returns_500() {
-    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
 
     // Force every subsequent `permission` UPSERT (including the one
     // `seed_permissions` issues for the newly-created tenant) to fail.

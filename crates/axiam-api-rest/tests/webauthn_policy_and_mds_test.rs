@@ -62,6 +62,25 @@ fn test_auth_config() -> AuthConfig {
 }
 
 async fn setup_tenant(db: &Surreal<TestDb>, slug_suffix: &str) -> (Uuid, Uuid, Uuid) {
+    setup_scope(db, slug_suffix, TenantKind::Standard).await
+}
+
+/// A fresh organization with one tenant of the given kind, and an active user
+/// in it.
+///
+/// The kind is a parameter because one endpoint here is not like the others:
+/// the WebAuthn policy is per-tenant, but `POST /mds/refresh` is
+/// organization-level (B-08) — the MDS tables are server-**global**, so a
+/// tenant super-admin refreshing them would rewrite the FIDO attestation trust
+/// store for the whole deployment. `require_organization_principal` refuses a
+/// caller whose own record does not live in the organization's reserved tenant,
+/// and it does so before the handler gets as far as asking whether ingestion is
+/// enabled.
+async fn setup_scope(
+    db: &Surreal<TestDb>,
+    slug_suffix: &str,
+    kind: TenantKind,
+) -> (Uuid, Uuid, Uuid) {
     let org = SurrealOrganizationRepository::new(db.clone())
         .create(CreateOrganization {
             name: format!("Org {slug_suffix}"),
@@ -70,14 +89,18 @@ async fn setup_tenant(db: &Surreal<TestDb>, slug_suffix: &str) -> (Uuid, Uuid, U
         })
         .await
         .unwrap();
-    let tenant = SurrealTenantRepository::new(db.clone())
-        .create(CreateTenant {
+    let create = match kind {
+        TenantKind::Organization => CreateTenant::organization_scope(org.id),
+        _ => CreateTenant {
             organization_id: org.id,
             kind: TenantKind::Standard,
             name: format!("Tenant {slug_suffix}"),
             slug: format!("tenant-wp-{slug_suffix}"),
             metadata: None,
-        })
+        },
+    };
+    let tenant = SurrealTenantRepository::new(db.clone())
+        .create(create)
         .await
         .unwrap();
     let user_repo = SurrealUserRepository::new(db.clone());
@@ -358,7 +381,10 @@ async fn mds_refresh_refuses_when_disabled_by_default() {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
     axiam_db::run_migrations(&db).await.unwrap();
-    let (org_id, tenant_id, user_id) = setup_tenant(&db, "mdsrefresh").await;
+    // Organization-level (B-08): the caller must live in the organization's own
+    // reserved tenant, or it is refused before the disabled-ingestion check.
+    let (org_id, tenant_id, user_id) =
+        setup_scope(&db, "mdsrefresh", TenantKind::Organization).await;
 
     let auth = test_auth_config();
     let token = mint_token(&auth, user_id, tenant_id, org_id);

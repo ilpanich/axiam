@@ -991,11 +991,27 @@ pub async fn me<C: Connection + Clone>(
     let mut seen_roles: BTreeSet<Uuid> = BTreeSet::new();
     for assignment in &assignments {
         // An assignment naming the tenants it reaches contributes only in
-        // those. Filtered against the tenant being ACTED ON, exactly as
-        // `axiam_authz::engine` does — this list is a UI hint and a hint that
-        // disagrees with the enforcement is worse than none, which is the rule
-        // the block below already turns on.
-        if !assignment.reaches_tenant(user.tenant_id) {
+        // those — when a tenant is actually named. Filtered against the tenant
+        // being ACTED ON, exactly as `axiam_authz::engine` does, because this
+        // list is a UI hint and a hint that disagrees with the enforcement is
+        // worse than none, which is the rule the block below already turns on.
+        //
+        // With no tenant selected there is nothing to disagree with, and this
+        // question changes. `user.tenant_id` is then the organization's own
+        // reserved tenant, which a scope of `[alpha]` does not name, so
+        // filtering here answered with an EMPTY permission set: an account that
+        // is a super-admin of two tenants was told it may do nothing anywhere,
+        // and the admin console drew nothing at all for it.
+        //
+        // What this array documents at organization scope is the account's
+        // reach — every action that applies somewhere it can act — which is
+        // what `tenant-scoped-reach.spec.ts` asserts in those words. An
+        // unrestricted assignment applies here; a restricted one applies in the
+        // tenants it names. Both belong in the answer, and neither claims the
+        // account may act on the organization: `require_organization_principal`
+        // refuses that on standing, and the wildcard below is withheld from a
+        // restricted account for exactly this reason.
+        if crosses_tenant_boundary && !assignment.reaches_tenant(user.tenant_id) {
             continue;
         }
         if crosses_tenant_boundary

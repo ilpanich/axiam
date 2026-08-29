@@ -61,6 +61,7 @@ use crate::extractors::auth::AuthenticatedUser;
 use crate::handlers::gdpr::write_erasure_audit_with_dlq;
 use crate::permissions::PERMISSION_REGISTRY;
 use crate::state::AppState;
+use axiam_authz::types::SubjectScope;
 
 // ---------------------------------------------------------------------------
 // T-118: the audit-export gate on tenant deletion
@@ -305,11 +306,11 @@ pub async fn list<C: Connection + Clone>(
     path: web::Path<OrgPath>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    RequirePermission::new("tenants:list", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
-        .await?;
-
     // Authorization: only allow listing tenants under the caller's own org.
+    //
+    // Ahead of the permission check now, so a cross-organization caller still
+    // gets "cannot access a different organization" rather than a reach message
+    // about an organization that is not its own.
     if path.org_id != user.org_id {
         return Err(AxiamApiError(
             axiam_core::error::AxiamError::AuthorizationDenied {
@@ -318,6 +319,59 @@ pub async fn list<C: Connection + Clone>(
                 resource_id: None,
             },
         ));
+    }
+
+    // Reach first, because for a restricted principal it decides *where* the
+    // permission question can be answered.
+    //
+    // `RequirePermission::check` asks in `user.tenant_id`, which with no tenant
+    // selected is the organization's own reserved tenant. An organization-level
+    // account restricted to particular tenants holds nothing there —
+    // deliberately, and `axiam_authz`'s
+    // `a_tenant_scoped_assignment_does_not_apply_in_the_organization_scope`
+    // pins it — so the roster answered 403 and the filtering below, written for
+    // exactly this principal, was unreachable. The account could not read the
+    // one list that tells it which tenants it administers.
+    //
+    // Asked instead in a tenant it does reach, which is where it genuinely
+    // holds `tenants:list`. One tenant is enough: a `tenant_scope` applies to a
+    // whole assignment, so the same roles apply in every tenant it names and
+    // each returns the same answer.
+    let reachable = reachable_tenants(&user, state.get_ref(), path.org_id).await?;
+    let home = state
+        .tenant_repo
+        .get_by_id(user.principal_tenant_id)
+        .await?;
+    let gate = RequirePermission::new("tenants:list", Uuid::nil());
+    match reachable.as_deref() {
+        // The restricted organization principal, and only it. The subject scope
+        // is spelled out rather than taken from `user.subject_scope()`, which
+        // reports `Tenant` unless the request named another tenant with
+        // `X-Axiam-Tenant` — and this request names none. Taking it from there
+        // would look for the caller's grants in `first`, where they do not
+        // live, and deny for a second wrong reason.
+        Some([first, ..]) if home.is_organization_scope() => {
+            gate.check_subject_from(
+                *first,
+                SubjectScope::Organization { tenant_id: home.id },
+                user.user_id,
+                authz.get_ref().as_ref(),
+            )
+            .await?;
+        }
+        // Reaching nothing is nothing to list.
+        Some([]) if home.is_organization_scope() => {
+            return Err(AxiamApiError(
+                axiam_core::error::AxiamError::AuthorizationDenied {
+                    reason: "no roles assigned that reach any tenant of this organization".into(),
+                    action: Some("tenants:list".into()),
+                    resource_id: None,
+                },
+            ));
+        }
+        // Every other caller — an ordinary tenant principal, or an unrestricted
+        // organization one — keeps the check exactly where it has always been.
+        _ => gate.check(&user, authz.get_ref().as_ref()).await?,
     }
 
     // Only the tenants this caller can actually act on.
@@ -339,7 +393,6 @@ pub async fn list<C: Connection + Clone>(
     // fact about the *caller*, not about the query — `list_by_organization` is
     // also what the organization's own administrator uses, unfiltered.
     let pagination = query.into_inner();
-    let reachable = reachable_tenants(&user, state.get_ref(), path.org_id).await?;
     let result = match reachable {
         None => {
             state

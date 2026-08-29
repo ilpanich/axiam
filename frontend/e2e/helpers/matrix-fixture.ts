@@ -497,8 +497,28 @@ async function buildServiceAccounts(api: Api, fx: MatrixFixture): Promise<void> 
         sa = await findBy(api, "/api/v1/service-accounts", "name", name);
       }
       if (!sa) throw new Error("created but not findable");
+      const id = String(sa["id"]);
+
+      // A client secret is returned exactly once, at creation, so a second wave
+      // against a stack that already has the account could never authenticate
+      // as it. Rotating gives every wave a usable credential without needing a
+      // wiped database — and rotation is itself part of the surface under test.
+      if (!clientSecret) {
+        const rot = await api.post<Rec>(`/api/v1/service-accounts/${id}/rotate-secret`, {});
+        if (rot.status >= 200 && rot.status < 300) {
+          clientSecret =
+            (rot.body?.["client_secret"] as string | undefined) ??
+            (rot.body?.["secret"] as string | undefined);
+        } else {
+          fx.problems.push(
+            `service account ${name}: rotate-secret -> HTTP ${rot.status}: ` +
+              JSON.stringify(rot.body).slice(0, 200),
+          );
+        }
+      }
+
       fx.serviceAccounts[name] = {
-        id: String(sa["id"]),
+        id,
         clientId: sa["client_id"] ? String(sa["client_id"]) : undefined,
         ...(clientSecret ? { clientSecret } : {}),
       };

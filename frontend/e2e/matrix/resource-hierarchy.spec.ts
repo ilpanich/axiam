@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { authzCheck, readFixture } from "../helpers/matrix";
+import { authzCheck, ensureOnApp, readFixture } from "../helpers/matrix";
 import { storageStateFor } from "../helpers/matrix-fixture";
 
 /**
@@ -164,6 +164,10 @@ test.describe("resource hierarchy and deny-override", () => {
     // assertion whose subject must NOT already hold the deny when the other
     // specs run, and scoping the mutation here keeps the principals in the nav
     // matrix stable.
+    //
+    // On the app's origin first: a fresh page is on `about:blank`, where
+    // `document.cookie` throws SecurityError and a relative fetch has no origin.
+    await ensureOnApp(page);
     const assign = await page.evaluate(
       async ([role, user, resource]) => {
         const csrf = document.cookie

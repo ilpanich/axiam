@@ -155,6 +155,17 @@ pub async fn refresh<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:generate", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // B-08: `mds_entry`/`mds_blob_meta` are server-global — the schema says so
+    // in as many words — so this route mutates the attestation trust picture of
+    // every tenant in the deployment. Reachable from inside one tenant it is
+    // the same shape as B-04: a deployment-wide trust store writable by a
+    // tenant administrator. The module docs above already argue that MDS
+    // ingestion "is the same class of privilege as CA certificate management";
+    // that class became organization-level, so this follows it.
+    //
+    // `GET /status` is deliberately left alone: it is a read, and reads are
+    // outside this guard everywhere else too.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
 
     if !state.webauthn.pki_config.mds_enabled {
         return Err(AxiamApiError(AxiamError::Validation {

@@ -10,7 +10,8 @@
 //! skipped entirely, eliminating the O(n×95) boot storm on unchanged systems.
 
 use axiam_core::models::role::CreateRole;
-use axiam_core::repository::{Pagination, PermissionRepository, RoleRepository};
+use axiam_core::permission_scope::is_organization_level_action;
+use axiam_core::repository::{Pagination, PermissionRepository, RoleRepository, TenantRepository};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
@@ -20,7 +21,9 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::helpers::{CountRow, classify_write_error};
-use crate::repository::{SurrealPermissionRepository, SurrealRoleRepository};
+use crate::repository::{
+    SurrealPermissionRepository, SurrealRoleRepository, SurrealTenantRepository,
+};
 
 /// Row struct for reading a seeder_state record.
 #[derive(SurrealValue)]
@@ -192,6 +195,24 @@ pub async fn mint_bootstrap_setup_token_if_needed<C: Connection>(
     Ok(Some(token))
 }
 
+/// Whether the seeded roles of `tenant_id` may hold organization-level
+/// actions — true only for the organization's own scope.
+///
+/// Fails **closed**: a tenant that cannot be resolved is treated as ordinary,
+/// so the organization-level actions are withheld. Being wrong in that
+/// direction costs an operator a grant they can add back by hand; being wrong
+/// in the other seeds the escalation this filter exists to prevent.
+async fn tenant_may_hold_organization_actions<C: Connection>(
+    db: &Surreal<C>,
+    tenant_id: Uuid,
+) -> bool {
+    SurrealTenantRepository::new(db.clone())
+        .get_by_id(tenant_id)
+        .await
+        .map(|t| t.is_organization_scope())
+        .unwrap_or(false)
+}
+
 /// Seed the three default roles — super-admin, admin, and viewer — for the
 /// given tenant, assigning permissions according to D-12.
 ///
@@ -205,6 +226,23 @@ pub async fn mint_bootstrap_setup_token_if_needed<C: Connection>(
 /// - **super-admin**: every permission in the tenant.
 /// - **admin**: every permission except `admin:bootstrap`.
 /// - **viewer**: permissions whose action ends with `:list` or `:get`.
+///
+/// # Organization-level actions
+///
+/// In an ordinary (`TenantKind::Standard`) tenant, the actions listed in
+/// [`ORGANIZATION_LEVEL_ACTIONS`](axiam_core::permission_scope::ORGANIZATION_LEVEL_ACTIONS)
+/// are withheld from super-admin and admin. A tenant administrator holding
+/// `ca_certificates:manage` could flag an organization-wide mTLS trust anchor
+/// and then mint certificates authenticating as principals in sibling tenants
+/// (B-04) — so the grant is not made in the first place. The organization's
+/// own scope is seeded with everything.
+///
+/// This is the second of two layers. `require_organization_principal` in
+/// `axiam-api-rest` is the load-bearing one and refuses such a caller whatever
+/// grants it holds; withholding the grant means the two layers agree instead of
+/// one quietly contradicting the other. The `viewer` role is untouched — every
+/// organization-level action is a mutation and viewer is seeded only with
+/// `:list` and `:get`.
 pub async fn seed_default_roles<C: Connection>(
     db: &Surreal<C>,
     tenant_id: Uuid,
@@ -303,7 +341,16 @@ pub async fn seed_default_roles<C: Connection>(
     let admin_have = granted_permission_ids(&perm_repo, tenant_id, admin_id).await?;
     let viewer_have = granted_permission_ids(&perm_repo, tenant_id, viewer_id).await?;
 
+    // B-04 defence in depth: an ordinary tenant's roles are not seeded with
+    // organization-level actions. See this function's doc comment.
+    let may_hold_org_actions = tenant_may_hold_organization_actions(db, tenant_id).await;
+    let withheld = |action: &str| !may_hold_org_actions && is_organization_level_action(action);
+
     for perm in &permissions.items {
+        if withheld(&perm.action) {
+            continue;
+        }
+
         // super-admin gets ALL permissions.
         if !super_admin_have.contains(&perm.id) {
             grant_to_role_idempotent(&perm_repo, tenant_id, super_admin_id, perm.id)
@@ -461,8 +508,33 @@ async fn grant_to_role_idempotent<C: Connection>(
     }
 }
 
+/// What [`reconcile_default_role_grants`] changed for one tenant.
+///
+/// Two counters rather than one, because they mean opposite things to an
+/// operator reading the boot log: `granted` is a back-fill catching a role up
+/// with a registry that grew, while `revoked` is a **capability being taken
+/// away** from a role that already had it. The second deserves its own line in
+/// the log and its own number.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReconcileOutcome {
+    /// Grants created because a role was missing a permission it should hold.
+    pub granted: usize,
+    /// Grants removed because an ordinary tenant's role held an
+    /// organization-level action.
+    pub revoked: usize,
+}
+
+impl ReconcileOutcome {
+    /// Whether anything changed — the condition for logging at all.
+    pub const fn is_empty(&self) -> bool {
+        self.granted == 0 && self.revoked == 0
+    }
+}
+
 /// Reconcile the default roles' permission grants with the current permission
-/// set for a tenant, granting only the permissions each role is MISSING.
+/// set for a tenant: granting the permissions each role is MISSING, and
+/// revoking organization-level actions an ordinary tenant's roles should never
+/// have held.
 ///
 /// [`seed_default_roles`] runs only at `/bootstrap`, which self-disables after
 /// the first admin is created. Server startup, by contrast, runs
@@ -472,14 +544,38 @@ async fn grant_to_role_idempotent<C: Connection>(
 /// to perform (e.g. a newly-added `oauth2_clients:create`). Calling this on
 /// startup back-fills those grants.
 ///
-/// Idempotent: existing `grants` edges are left untouched and only missing
-/// grants are created, so no duplicate edges accumulate across restarts.
-/// Returns the number of grants created. Tenants without the default roles
+/// # Why this also revokes
+///
+/// Until B-04's follow-up, every tenant's `super-admin` was seeded with the
+/// *entire* permission registry, organization-level actions included. Those
+/// grants exist in every deployment bootstrapped before that change, and
+/// `seed_default_roles` no longer runs for them. A reconcile that could only
+/// ever grant would therefore leave the old, wrong state in place forever and
+/// the fix would apply to new tenants only.
+///
+/// Revocation is deliberately narrow. It touches **only**:
+///
+/// * the three seeded default roles, found by name — a role an operator
+///   created is theirs, and this function has no business editing it;
+/// * actions in
+///   [`ORGANIZATION_LEVEL_ACTIONS`](axiam_core::permission_scope::ORGANIZATION_LEVEL_ACTIONS);
+/// * tenants that are **not** the organization's own scope.
+///
+/// It is not a general "make the grants match the seeding rules" pass: an
+/// operator who deliberately granted `users:delete` to `viewer` keeps it. Only
+/// the specific escalation is undone.
+///
+/// # Idempotency
+///
+/// Existing correct `grants` edges are left untouched and only missing grants
+/// are created, so no duplicate edges accumulate across restarts. Once the
+/// organization-level grants are gone the revoke half finds nothing and returns
+/// zero, so a steady-state boot is a no-op. Tenants without the default roles
 /// (never bootstrapped) are skipped.
 pub async fn reconcile_default_role_grants<C: Connection>(
     db: &Surreal<C>,
     tenant_id: Uuid,
-) -> Result<usize, DbError> {
+) -> Result<ReconcileOutcome, DbError> {
     let role_repo = SurrealRoleRepository::new(db.clone());
     let perm_repo = SurrealPermissionRepository::new(db.clone());
 
@@ -508,7 +604,7 @@ pub async fn reconcile_default_role_grants<C: Connection>(
         find_role("admin"),
         find_role("viewer"),
     ) else {
-        return Ok(0);
+        return Ok(ReconcileOutcome::default());
     };
 
     let permissions = perm_repo
@@ -527,8 +623,38 @@ pub async fn reconcile_default_role_grants<C: Connection>(
     let admin_have = granted_permission_ids(&perm_repo, tenant_id, admin_id).await?;
     let viewer_have = granted_permission_ids(&perm_repo, tenant_id, viewer_id).await?;
 
-    let mut created = 0usize;
+    // B-04 defence in depth — see this function's doc comment. In an ordinary
+    // tenant the organization-level actions are neither granted below nor left
+    // in place if a previous version granted them.
+    let may_hold_org_actions = tenant_may_hold_organization_actions(db, tenant_id).await;
+
+    let mut outcome = ReconcileOutcome::default();
     for perm in &permissions.items {
+        if !may_hold_org_actions && is_organization_level_action(&perm.action) {
+            // Withhold, and undo the grant if an earlier version made it.
+            // Only super-admin and admin are considered: viewer is seeded
+            // solely with `:list`/`:get` and no organization-level action is
+            // one, so a viewer holding one was not put there by this seeder.
+            for (role_id, have, role) in [
+                (super_admin_id, &sa_have, "super-admin"),
+                (admin_id, &admin_have, "admin"),
+            ] {
+                if have.contains(&perm.id) {
+                    perm_repo
+                        .revoke_from_role(tenant_id, role_id, perm.id)
+                        .await
+                        .map_err(|e| {
+                            DbError::Migration(format!(
+                                "reconcile revoke organization-level {} from {role} failed: {e}",
+                                perm.action
+                            ))
+                        })?;
+                    outcome.revoked += 1;
+                }
+            }
+            continue;
+        }
+
         // super-admin gets every permission.
         if !sa_have.contains(&perm.id) {
             perm_repo
@@ -537,7 +663,7 @@ pub async fn reconcile_default_role_grants<C: Connection>(
                 .map_err(|e| {
                     DbError::Migration(format!("reconcile grant super-admin failed: {e}"))
                 })?;
-            created += 1;
+            outcome.granted += 1;
         }
         // admin gets every permission except admin:bootstrap.
         if perm.action != "admin:bootstrap" && !admin_have.contains(&perm.id) {
@@ -545,7 +671,7 @@ pub async fn reconcile_default_role_grants<C: Connection>(
                 .grant_to_role(tenant_id, admin_id, perm.id)
                 .await
                 .map_err(|e| DbError::Migration(format!("reconcile grant admin failed: {e}")))?;
-            created += 1;
+            outcome.granted += 1;
         }
         // viewer gets only :list and :get permissions.
         if (perm.action.ends_with(":list") || perm.action.ends_with(":get"))
@@ -555,11 +681,11 @@ pub async fn reconcile_default_role_grants<C: Connection>(
                 .grant_to_role(tenant_id, viewer_id, perm.id)
                 .await
                 .map_err(|e| DbError::Migration(format!("reconcile grant viewer failed: {e}")))?;
-            created += 1;
+            outcome.granted += 1;
         }
     }
 
-    Ok(created)
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------

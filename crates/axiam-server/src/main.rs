@@ -546,17 +546,33 @@ async fn main() -> std::io::Result<()> {
                 // Back-fill default-role grants for any permissions added to the
                 // registry since this tenant was bootstrapped (bootstrap, which
                 // grants permissions to roles, self-disables after first admin).
-                let backfilled = axiam_db::reconcile_default_role_grants(
+                let reconciled = axiam_db::reconcile_default_role_grants(
                     &pool.handle_for_repo().current(),
                     tenant.id,
                 )
                 .await
                 .expect("Failed to reconcile default role grants for tenant");
-                if backfilled > 0 {
+                if reconciled.granted > 0 {
                     tracing::info!(
                         tenant = %tenant.id,
-                        grants = backfilled,
-                        "Back-filled {backfilled} missing default-role permission grants"
+                        grants = reconciled.granted,
+                        "Back-filled {} missing default-role permission grants",
+                        reconciled.granted
+                    );
+                }
+                // Logged separately and at WARN: this REMOVES a capability a
+                // role currently has. An operator whose tenant administrator
+                // has been minting CA material since before B-04 was fixed
+                // will start seeing 403s, and this line is where they find out
+                // why (see `ReconcileOutcome`).
+                if reconciled.revoked > 0 {
+                    tracing::warn!(
+                        tenant = %tenant.id,
+                        revoked = reconciled.revoked,
+                        "Revoked {} organization-level permission grant(s) from this tenant's \
+                         default roles — organization-level actions (CA material, tenant and \
+                         organization lifecycle) belong to the organization scope only",
+                        reconciled.revoked
                     );
                 }
                 seeded_count += 1;

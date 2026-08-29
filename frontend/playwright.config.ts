@@ -54,7 +54,7 @@ export default defineConfig({
       },
       dependencies: ["setup"],
     },
-    // The RBAC / PKI permission matrix (E2E-TESTS.md). Split from `chromium`
+    // The RBAC / PKI permission matrix (claude_dev/E2E-TESTS.md). Split from `chromium`
     // because it needs its own fixture and its own eight sessions, and because
     // it must be runnable on its own while a wave is being iterated on:
     //   npx playwright test --project=matrix

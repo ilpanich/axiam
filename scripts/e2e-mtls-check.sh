@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # e2e-mtls-check.sh — certificate-based authentication, from outside the browser.
 #
-# `E2E-TESTS.md` §4: "This is the one area where a green browser suite proves
+# `claude_dev/E2E-TESTS.md` §4: "This is the one area where a green browser suite proves
 # nothing." A Playwright run never presents a client certificate, so every
 # assertion about what a certificate authenticates *as* has to be made by a
 # client that holds one.

@@ -7,7 +7,7 @@ import {
 } from "../helpers/matrix";
 
 /**
- * The half of `E2E-TESTS.md` §2 that page-level reach does not measure.
+ * The half of `claude_dev/E2E-TESTS.md` §2 that page-level reach does not measure.
  *
  * `nav-reach.spec.ts` asserts which *pages* a principal may open. But a page a
  * principal may open still renders controls gated one level down, by

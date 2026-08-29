@@ -605,7 +605,7 @@ async fn every_key_the_templates_use_is_always_present() {
 // Template coverage — the half a local SMTP catcher would have measured
 // ---------------------------------------------------------------------------
 //
-// `E2E-TESTS.md` §3 wanted rendered subjects and bodies read out of a catcher,
+// `claude_dev/E2E-TESTS.md` §3 wanted rendered subjects and bodies read out of a catcher,
 // to find "a template that renders `{{tenant_name}}` literally". That could not
 // be done against the running stack: `SmtpProvider` enforces TLS on both code
 // paths and verifies against compiled-in roots, so a local Mailpit is refused

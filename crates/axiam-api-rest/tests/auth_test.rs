@@ -1789,7 +1789,7 @@ async fn change_password_rejects_oversized_new_password() {
 // A `*` for a tenant super-admin therefore made the UI offer "New Organization",
 // the CA-management actions and the tenant lifecycle controls to somebody the
 // server answers 403 to — the "renders a control the server would refuse" half
-// of `E2E-TESTS.md` §2. The handler's own comment states the rule this pins:
+// of `claude_dev/E2E-TESTS.md` §2. The handler's own comment states the rule this pins:
 // "a hint that disagrees with the enforcement is worse than none".
 
 /// Sign `username` in and return the `permissions` array from `/auth/me`.

@@ -25,7 +25,7 @@ import {
  * Nothing in this file uses a hard `expect` on a fixture step. A wave that
  * aborts because one CA failed to generate measures nothing behind it, and the
  * backend image is too slow to rebuild for that to be an acceptable trade — see
- * `E2E-TESTS.md` §5. Fixture failures are collected in `fixture.problems` and
+ * `claude_dev/E2E-TESTS.md` §5. Fixture failures are collected in `fixture.problems` and
  * the specs report the areas they block as *unverified*, never as green.
  */
 

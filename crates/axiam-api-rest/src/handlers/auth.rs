@@ -1030,7 +1030,7 @@ pub async fn me<C: Connection + Clone>(
         // not even granted. Emitting `*` for such a principal makes the admin
         // UI render "New Organization", the CA-management actions and the
         // tenant lifecycle controls to somebody the server will answer 403 —
-        // which is the first half of `E2E-TESTS.md` §2's defect pair, and
+        // which is the first half of `claude_dev/E2E-TESTS.md` §2's defect pair, and
         // exactly what the comment above this block warns against: "a hint that
         // disagrees with the enforcement is worse than none".
         //

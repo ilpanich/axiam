@@ -32,7 +32,7 @@ import {
  * Every assertion is `expect.soft`. A principal that fails one destination must
  * keep walking the other twenty-one: the backend image is Rust and rebuilds
  * slowly, so a wave that stops at the first failure buys one finding per image
- * build (`E2E-TESTS.md` §5).
+ * build (`claude_dev/E2E-TESTS.md` §5).
  */
 
 const fixture = readFixture();

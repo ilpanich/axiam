@@ -3,7 +3,7 @@ import { Api, items } from "./api";
 /**
  * The RBAC / PKI fixture the permission matrix is measured against.
  *
- * Shape (see `E2E-TESTS.md` §1). Everything is prefixed `mx-` so a run can be
+ * Shape (see `claude_dev/E2E-TESTS.md` §1). Everything is prefixed `mx-` so a run can be
  * told apart from the `default` tenant's own seed data, and so a re-run can
  * find what a previous run left behind.
  *
@@ -65,7 +65,7 @@ export const FIXTURE_STATE = "e2e/.auth/matrix-fixture.json";
 /**
  * Where one principal's captured browser session lives. One file per
  * principal, so a principal whose sign-in is broken costs only its own block —
- * the isolation `E2E-TESTS.md` §5 asks for, at the session layer.
+ * the isolation `claude_dev/E2E-TESTS.md` §5 asks for, at the session layer.
  */
 export function storageStateFor(principalKey: string): string {
   return `e2e/.auth/mx-${principalKey}.json`;

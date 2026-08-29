@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { Api, items } from "../helpers/api";
 import { readFixture } from "../helpers/matrix";
-import { ORG_SLUG, PASSWORD, storageStateFor } from "../helpers/matrix-fixture";
+import { storageStateFor } from "../helpers/matrix-fixture";
 
 /**
  * The PKI chain the fixture builds, and the rules it is supposed to enforce.
@@ -245,11 +245,14 @@ test.describe("PKI — chain, trust anchor, bindings and revocation", () => {
 
 /** An organization-level API session, or `null` if signing in failed. */
 async function signedInApi(): Promise<Api | null> {
-  const api = await Api.open();
-  const login = await api.login(ORG_SLUG, "admin", PASSWORD);
-  if (login.status !== 200) {
-    await api.dispose();
+  // The organization super-admin's session was already captured by
+  // `matrix-setup`; this reuses it rather than spending one of the ten logins a
+  // minute the whole suite shares. Signing in here made these tests fail with a
+  // bare 30-second timeout whenever they happened to be scheduled after the
+  // window was full — see `Api.fromStorageState`.
+  try {
+    return await Api.fromStorageState(storageStateFor("org-admin"));
+  } catch {
     return null;
   }
-  return api;
 }

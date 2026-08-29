@@ -1,7 +1,7 @@
 import { test, expect, APIRequestContext } from "@playwright/test";
 import { Api } from "../helpers/api";
 import { readFixture } from "../helpers/matrix";
-import { ORG_SLUG, PASSWORD } from "../helpers/matrix-fixture";
+import { storageStateFor } from "../helpers/matrix-fixture";
 
 /**
  * A machine identity's own token carries its own authority.
@@ -141,13 +141,18 @@ test.describe("service-account authorization", () => {
       return;
     }
 
-    const admin = await Api.open();
+    // Reuses the session `matrix-setup` already captured rather than spending
+    // one of the ten logins a minute the whole suite shares — signing in here
+    // made this test time out whenever it was scheduled after the window
+    // filled. See `Api.fromStorageState`.
+    let admin: Api;
     try {
-      const login = await admin.login(ORG_SLUG, "admin", PASSWORD);
-      if (login.status !== 200) {
-        test.skip(true, `unverified — blocked: org-level sign-in returned ${login.status}`);
-        return;
-      }
+      admin = await Api.fromStorageState(storageStateFor("org-admin"));
+    } catch (e) {
+      test.skip(true, `unverified — blocked: no captured org-admin session (${e})`);
+      return;
+    }
+    try {
       admin.actingTenant(fx.tenantA);
 
       const previous = sa.clientSecret;

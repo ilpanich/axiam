@@ -3,6 +3,7 @@ import {
   APIResponse,
   request as playwrightRequest,
 } from "@playwright/test";
+import { readFileSync } from "node:fs";
 
 /**
  * A thin REST client for the AXIAM API, used by the matrix fixture and by the
@@ -56,6 +57,48 @@ export class Api {
       ignoreHTTPSErrors: true,
     });
     return new Api(ctx, url);
+  }
+
+  /**
+   * Opens a request context on a principal's **already captured** session,
+   * instead of signing in again.
+   *
+   * `login_per_min` is 10 per IP and every principal in this suite shares one.
+   * `matrix-setup` spends eight of those on the sessions it captures, so a spec
+   * that then signs in again for an API client competes with itself for the
+   * remaining two — and `Api.login` waits a 429 out by backing off to the top of
+   * the next window, which is longer than a 30-second test timeout. The result
+   * is a permission matrix that goes intermittently red at whichever tests
+   * happened to be scheduled last, with a bare "Test timeout" and no assertion
+   * to explain it. A flaky permission suite is worse than a slow one: people
+   * learn to re-run it rather than read it.
+   *
+   * The session is already on disk. Reusing it costs no login at all, so the
+   * whole class of failure disappears rather than being retried around.
+   *
+   * The CSRF token comes from the captured `axiam_csrf` cookie: the middleware
+   * is double-submit, so the header must echo the cookie the session carries.
+   * Without it every mutating request through this client would 403.
+   */
+  static async fromStorageState(
+    storageStatePath: string,
+    baseURL?: string,
+  ): Promise<Api> {
+    const url =
+      baseURL ?? process.env["E2E_BASE_URL"] ?? "http://localhost:5173";
+    const ctx = await playwrightRequest.newContext({
+      baseURL: url,
+      ignoreHTTPSErrors: true,
+      storageState: storageStatePath,
+    });
+    const api = new Api(ctx, url);
+
+    const saved = JSON.parse(readFileSync(storageStatePath, "utf8")) as {
+      cookies?: { name: string; value: string }[];
+    };
+    const csrf = saved.cookies?.find((c) => c.name === "axiam_csrf")?.value;
+    if (csrf) api.csrf = csrf;
+    return api;
   }
 
   async dispose(): Promise<void> {

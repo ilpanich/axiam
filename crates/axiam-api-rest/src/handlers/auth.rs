@@ -991,19 +991,11 @@ pub async fn me<C: Connection + Clone>(
     let mut seen_roles: BTreeSet<Uuid> = BTreeSet::new();
     for assignment in &assignments {
         // An assignment naming the tenants it reaches contributes only in
-        // those. Filtered against the tenant being ACTED ON, and only when the
-        // request crosses a boundary — exactly as `axiam_authz::engine` does,
-        // because this list is a UI hint and a hint that disagrees with the
-        // enforcement is worse than none, which is the rule the block below
-        // already turns on.
-        //
-        // The boundary condition is what keeps a restricted account usable. Its
-        // `tenant_scope` names the tenants its grants carry *into*; with no
-        // tenant selected `user.tenant_id` is the organization's own scope
-        // tenant, which that list does not name, and filtering there
-        // unconditionally answered with an empty permission set — an account
-        // told it may do nothing anywhere, whose admin UI then drew nothing.
-        if crosses_tenant_boundary && !assignment.reaches_tenant(user.tenant_id) {
+        // those. Filtered against the tenant being ACTED ON, exactly as
+        // `axiam_authz::engine` does — this list is a UI hint and a hint that
+        // disagrees with the enforcement is worse than none, which is the rule
+        // the block below already turns on.
+        if !assignment.reaches_tenant(user.tenant_id) {
             continue;
         }
         if crosses_tenant_boundary

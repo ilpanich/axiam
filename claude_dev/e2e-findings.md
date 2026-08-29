@@ -603,3 +603,463 @@ flagged as mTLS trust anchors but there is nowhere to write the bundle … Clien
 certificate authentication is NOT enabled."* Measuring it needs
 `AXIAM__SERVER__TLS__ENABLED=true` with `CERT_PATH`, `KEY_PATH`,
 `CLIENT_AUTH=optional|required` and a published TLS port.
+
+---
+
+# Wave 3 — closing the unverified half, and what it turned up
+
+Wave 2 ended with two areas recorded **unverified** rather than passed: the
+TLS-handshake half of mTLS, and rendered mail templates. Both are now measured.
+Closing the first one is what surfaced B-07, which is the most serious defect
+found in the whole exercise and was invisible to every wave before it, because
+no wave had ever run two AXIAM processes at once.
+
+## Precondition — the running image was older than the fix it was meant to carry
+
+Before anything else: the `axiam-server` image in the running stack was built at
+12:08 and the B-06 mTLS trust-anchor fix was committed at 12:39. Wave 2's
+green mTLS result for "a certificate under a CA that is not a trust anchor is
+refused" was therefore taken from `cargo test`, not from the stack. The image
+was rebuilt and the container recreated before any assertion below was made.
+
+Worth stating plainly because it is a cheap mistake to repeat: `docker compose
+up -d` does not rebuild, and a container that is already running is not
+restarted by a build. Compare `docker image inspect --format '{{.Created}}'`
+against `git log -1 --format=%cI -- crates/` before trusting a wave.
+
+## B-07 — a second AXIAM process logs out every one already running, permanently
+
+**Layer:** backend (`axiam-db`)
+**Severity:** high. Two replicas cannot coexist, a rolling deployment wedges
+every old pod, and nothing recovers without a restart.
+
+- **Did:** started a second server container from the same image against the
+  same SurrealDB — which is all a second replica, or the overlap window of a
+  rolling deploy, is. Polled `POST /api/v1/auth/login` every five seconds for
+  350 seconds.
+- **Expected:** no effect on the first server; two replicas against one
+  datastore is the deployment `k8s/` describes.
+- **Happened:** the first server went from `200` to `401` **five seconds** after
+  the second one booted, stayed `401` for the entire 350-second window, and was
+  **still** `401` after the second container was removed. Its own log carried
+  one line per second:
+
+  ```
+  Failed to write audit log entry
+    error: Database error: SurrealDB error: HTTP status client error
+           (401 Unauthorized) for url (http://surrealdb:8000/rpc)
+  ```
+
+  Only a restart fixed it. Meanwhile the container reported **healthy** and
+  `docker ps` showed nothing wrong — the healthcheck subcommand does not touch
+  the datastore, so it measures liveness, not usefulness.
+
+- **Root cause, first half — the trigger.** `DbManager::extend_root_token_duration`
+  runs at every boot:
+
+  ```sql
+  DEFINE USER OVERWRITE axiam ON ROOT PASSWORD '…' ROLES OWNER
+    DURATION FOR TOKEN 2419200s, FOR SESSION NONE
+  ```
+
+  Its doc comment called this "**Idempotent** — safe to run on every startup".
+  It is idempotent in the state it leaves behind and emphatically not in its
+  effect: `PASSWORD` re-hashes with a fresh salt, and SurrealDB signs root
+  tokens against that hash, so the statement invalidates every token already
+  issued for that user. The comment states exactly the belief that caused the
+  bug.
+
+  Note the asymmetry that made this so hard to see: SurrealDB **basic** auth
+  keeps working throughout, because the password *string* is unchanged. A
+  `curl -u axiam:… /sql` probe answers `200` and returns real rows from a
+  datastore the server can no longer read a single row from. Any diagnosis that
+  reaches for that probe concludes the database is fine.
+
+- **Root cause, second half — why it never recovered.** There *is* machinery for
+  this: `health_check` classifies auth failures as `DbError::Unhealthy`, and a
+  reconnect loop polls every 5 seconds and rebuilds the handle. It never ran.
+  `classify_query_error` recognised only
+
+  ```rust
+  matches!(err.not_allowed_details(), Some(NotAllowedError::Auth(_)))
+  ```
+
+  which is the shape the **WebSocket** engine produces. AXIAM has run the
+  **HTTP** engine since Phase 13. There, the server answers `401` at the
+  transport, before any SurrealQL response exists — and the SDK maps *every*
+  `reqwest::Error` to `ErrorDetails::Connection(ConnectionFailed)`, flattening
+  the status into the message and discarding `reqwest::Error::status()`
+  (`surrealdb-types-3.2.4/src/error.rs:1080`). So the one error that had to
+  reach the reconnect loop arrived looking like an ordinary query failure. Zero
+  `Unhealthy` and zero reconnect attempts appear in five minutes of logs.
+
+  The engine switch and the classifier were each correct when written. The
+  classifier was simply never revisited for the engine that replaced the one it
+  was written against.
+
+- **Fix, both halves:**
+  1. `is_transport_auth_rejection` — an error carrying reqwest's
+     `HTTP status client error (401 Unauthorized)` (or `403 Forbidden`) now
+     classifies as `Unhealthy`, so the reconnect loop fires and the handle is
+     rebuilt. Deliberately narrow: a timeout or a refused connection says
+     nothing about whether *this handle's* credentials are still accepted, and
+     treating those as `Unhealthy` would rebuild every pooled connection on any
+     network blip — the thundering herd the backoff exists to prevent.
+
+     **The first version of this fix did not work, and its unit test passed.**
+     The SDK's `From<reqwest::Error>` builds
+     `ErrorDetails::Connection(ConnectionFailed)`, so the predicate keyed on
+     `connection_details().is_some()` — reasonable, unit-tested against an
+     error constructed that way, green. It changed nothing on the running
+     stack. The error that actually arrives does not come through that
+     conversion:
+
+     ```text
+     Error { code: -32000,
+             message: "HTTP status client error (401 Unauthorized) for url (…/rpc)",
+             details: Internal, cause: None }
+     ```
+
+     `Internal` is the enum's forward-compatibility catch-all, so
+     `connection_details()` returns `None` and the predicate was false for
+     exactly the error it was written for. The match is now on the message
+     alone — the full reqwest phrase, not a bare `401`, so a query error that
+     happens to mention the number cannot be mistaken for one.
+
+     This was caught by *making a live server produce the error* rather than
+     writing down what it was assumed to be:
+     `a_redefined_root_user_classifies_as_unhealthy_on_the_http_engine`
+     connects over the HTTP engine, redefines the root user from a second
+     connection, and asserts the classification of whatever comes back. It is
+     `#[ignore]`d like the other live tests and runs against any SurrealDB:
+     `AXIAM_TEST_DB_URL=127.0.0.1:8001 cargo test -p axiam-db --test
+     connection_resilience_test -- --ignored`.
+
+     The general lesson, since it cost a full image rebuild: a unit test that
+     constructs the error it is testing tests the construction, not the system.
+     Where the shape of a third-party error is load-bearing, one live test that
+     provokes it is worth more than any number of hand-built ones.
+  2. `extend_root_token_duration` now **asks before overwriting**: it reads the
+     user's current `DURATION FOR TOKEN` from `INFO FOR ROOT` and skips the
+     redefine when it is already at least the configured TTL. Every unreadable
+     case — failed query, unrecognised shape, unparseable literal — falls
+     through to the redefine, i.e. the previous behaviour. Being wrong in that
+     direction costs a redefine; being wrong in the other direction would leave
+     the TTL at SurrealDB's ~1h default while the re-signin task waits weeks,
+     which is the original Phase-14 expiry bug.
+
+     This needed a duration parser, which the module had deliberately avoided
+     ("no duration-string parser is needed — the literal is derived FROM the
+     `Duration`, never the reverse"). That held while nothing read the value
+     back. It does now, and SurrealDB does not answer in the units it was
+     given: a TTL written as `2419200s` comes back as `4w`.
+
+- **Regression tests** (`axiam-db`, 8 + 3 passing):
+  `health_classification_maps_the_http_engines_401_to_unhealthy` uses the error
+  string verbatim from the wedged server;
+  `health_classification_leaves_an_ordinary_connection_failure_alone` pins the
+  narrowness; `a_duration_survives_the_round_trip_surrealdb_actually_performs`
+  asserts `4w` parses to the TTL written as `2419200s` — if those stop agreeing
+  the pre-check silently stops working and the redefine returns on every boot.
+  `anything_unrecognised_is_none_so_the_caller_redefines` covers eight
+  malformed literals, because a plausible-looking wrong number is the dangerous
+  failure here, not a `None`.
+
+- **How it was found:** entirely by accident. The native-mTLS sidecar (below) is
+  a second server process, and it knocked the main one over. No wave before this
+  one had ever run two AXIAM processes against one datastore, which is why four
+  waves of a deliberately exhaustive matrix never came near it.
+
+## mTLS §4 — the handshake half, now measured
+
+`scripts/e2e-mtls-native-check.sh` is new. It starts a **second server container
+from the same image**, on the same network and database, with
+`AXIAM__SERVER__TLS__ENABLED=true` and a self-signed listener certificate, and
+lets the server derive client trust the way an operator would: from the
+organization CAs flagged `mtls_trust_anchor`, which it collects at boot, writes
+as a PEM bundle, and — since `client_auth` is left `off` — points a
+`WebPkiClientVerifier` at in `optional` mode. The running stack is not disturbed.
+
+**22 passed, 0 failed, 0 unverified.**
+
+| assertion | result |
+|---|---|
+| the server logs `Direct TLS enabled — negotiating TLS 1.3 only` | pass |
+| a TLS 1.2 handshake is refused, and a 1.3 handshake succeeds | pass |
+| the client-CA bundle is built from the flagged anchors (`anchors: 7`) and client auth turns itself on | pass |
+| a certificate under a flagged anchor authenticates **with no `X-Client-Certificate` header sent at all** | pass |
+| ...as the service account it is bound to, with `aud=axiam:m2m` | pass |
+| a certificate under a CA that was never flagged is refused **by rustls**, before any HTTP status exists | pass |
+| a revoked, bound, chain-valid certificate completes the handshake and is refused by `axiam-pki` (401) | pass |
+| an `X-Client-Certificate` header **cannot** override the rustls-verified peer certificate | pass |
+| un-flagging an anchor stops the certificate authenticating; re-flagging restores it | pass |
+
+`scripts/e2e-mtls-check.sh` no longer reports those two as UNVERIFIED. They are
+not unverified any more — they are simply not measurable on the proxy path, and
+it now says so and names the script that does measure them. Running only one of
+the two leaves half of §4 untested, which is exactly the state wave 2 ended in.
+
+The header-precedence assertion is the one worth keeping. `cert_auth.rs` claims
+the verified certificate "cannot be spoofed by a header", and its own tests note
+that path is "unreachable" from a unit test — there is no TLS connection in one.
+The probe presents a valid bound certificate over TLS *and* a different, equally
+valid, equally bound certificate in the header, so "the header was ignored" and
+"the header's certificate was unusable" cannot be confused.
+
+Two things about the harness, both of which cost a run before they were right:
+
+- **Not port 8443, and not 8080.** A SAGE node holds both on this host. The
+  sidecar failed to bind and `docker run` reported it as a container failure,
+  which reads like an image problem. The script defaults to `9443` and the
+  failure path now prints the `docker run` error rather than only container logs.
+- **Not `%{ssl_version}`.** Not every `curl` build exposes that write-out
+  variable, and one that does not returns an empty string — which reads as
+  "negotiated nothing", a failure report about the probe. "TLS 1.3 only" is now
+  asserted by showing a TLS 1.2 offer is refused *and* a 1.3 offer is accepted,
+  which every curl can do.
+
+## §3 mail templates — closed at the source, not through a catcher
+
+Wave 2 recorded rendered subjects and bodies as unverified because a local SMTP
+catcher cannot receive from this stack: `SmtpProvider` enforces TLS on both code
+paths and verifies against compiled-in roots, so Mailpit is refused at the TLS
+layer. That is the product behaving as designed.
+
+The transport was never the interesting part. "A template that renders
+`{{tenant_name}}` literally" is a property of a *(template, context)* pair, and
+both halves are in this repository: the identity keys the consumer always
+inserts, and the keys each publisher puts in `template_context`. So the pair is
+asserted directly, in `crates/axiam-amqp/tests/mail_consumer_test.rs`:
+
+`every_mail_type_renders_with_no_placeholder_left_standing` walks
+`MailType::ALL` (a new const, so a sixth mail type cannot be added without the
+test noticing), builds the identity context from the real `identity_context`
+against a database where **nothing resolves** — the worst case, which proves the
+four keys are unconditional rather than incidental to a seeded fixture — overlays
+the publisher's declared keys, and renders subject, text body and HTML body of
+that type's built-in template. Nothing may contain `{{`.
+
+This is stronger than one observation through a catcher: it holds for all six
+templates, runs in CI, and fails the moment a template grows a placeholder
+nobody supplies. **Verified by mutation** — injecting `{{support_email}}` into
+the `ExportReady` subject fails it with the offending text quoted; reverting
+passes.
+
+The `match` in `publisher_context_keys` is exhaustive on `MailType`, so a new
+variant does not compile until someone says what its publisher supplies. What it
+does not cover, stated rather than implied: that each publisher still *sends*
+those keys. The table is a declaration quoted from the five call sites, not a
+reading of them. It closes the direction the bug actually travels — a template
+asking for more than it is given.
+
+## The matrix was not measuring everything it appeared to
+
+Two gaps in the harness itself, found by comparing it against the application
+rather than against its own last run.
+
+### `/settings/webauthn-attestation-policy` was never visited
+
+`NAV_DESTINATIONS` had 22 entries and the application declares 23 permission-
+gated pages. The missing one is gated by `webauthn_policy:read`, a permission no
+other destination uses — so that boundary was unmeasured in **both** directions
+for as long as the table has existed, and every wave reported clean over it.
+
+It is reached from the Settings page rather than the sidebar, which is why it
+was missed. Recording it as `navPermission: null` would have claimed there *is*
+a sidebar gate, declared ungated — the exact shape of the F-01 finding — so
+`NavDestination` gained an `inNav` flag: "not offered" is a different statement
+from "offered to everyone". The route gate is still asserted both ways, because
+a page nobody links to is still reachable by typing its URL.
+
+A hand-maintained table of what to measure goes stale in the one direction that
+is invisible, so `nav-reach.spec.ts` now also carries
+**`every route the application declares is in the matrix`**: it reads
+`router.tsx` and fails on any declared path no destination covers. Public/auth
+routes, parameterised paths and the not-found fallback are exempt, each with a
+reason. It reads the file as text rather than importing it — `router.tsx` pulls
+in every page component, and a Playwright worker is not a place to evaluate
+React modules that expect a DOM — and asserts it found more than ten paths, so
+a rename that made it read nothing fails loudly instead of passing vacuously.
+
+### In-page controls were not checked in either direction
+
+Twelve pages gate controls one level below the route, with
+`usePermissions().can(...)`: the "New Token" button on SCIM provisioning, the
+tenant/system switch on audit logs, the act-on-behalf-of fields on the privacy
+page, and more. §2 is explicit that both directions of such a gate are defects,
+and **none of it was being measured**. A `can("scim_tokens:create")` that
+inverted, or that named a permission the registry does not issue, would surface
+as an operator who "just cannot find the button" while every page-level
+assertion stayed green.
+
+`frontend/e2e/matrix/in-page-controls.spec.ts` is new. For each principal it
+asserts each gated control is rendered exactly when its permission allows it,
+skipping controls on pages that principal cannot open — that refusal is
+`nav-reach`'s to make — and failing loudly if a page did not render, so "the
+control is absent" can never pass as a measurement of an error page.
+
+It also carries a typo guard: every permission named by a gate must be one the
+super-admin actually holds. A misspelt permission string is invisible from
+inside the UI — it simply never matches, so the control is hidden from everyone
+and the page still works for the people who were going to be refused anyway. The
+guard skips itself, loudly, if the super-admin turns out to hold `*`, since a
+wildcard matches typos too.
+
+Gates that only appear after selecting a row (`ScopesPanel`,
+`EffectiveAccessPanel`, the per-row bind-certificate action on service accounts)
+are **not** covered: reaching them needs fixture data whose absence would read as
+"the control is correctly hidden", which is the one answer that file must never
+produce by accident. Named here as still unmeasured rather than quietly dropped.
+
+## T-01 follow-up — the locale sweep is clean
+
+Wave 2 fixed one test that asserted en-US number grouping and recommended a
+sweep for others. Done: three components use locale-sensitive formatting
+(`lib/utils.ts`'s `formatDate`/`formatDateTime`, `MfaManagementPage`'s
+`toLocaleDateString`, `AttestationPolicyPage`'s `toLocaleString`), and no test
+asserts a literal against any of them — `utils.test.ts` matches on `/2026/` and
+on relative lengths. Nothing further to fix.
+
+## B-07 — verified fixed on the running stack
+
+Both halves, against the rebuilt image:
+
+**The trigger is gone.** The server now logs at boot:
+
+```
+SurrealDB root token duration is already at least the configured TTL — not
+redefining the user (a redefine would invalidate every other replica's token)
+  duration_secs: 2419200
+```
+
+Re-running the replica probe — the same experiment that produced 60 consecutive
+`401`s — with a second server container up for the whole window:
+
+```
+T+0   baseline login=200
+      second replica started
+T+5   login=200      T+31  login=200      T+56  login=200
+...   (200 throughout)              T+66  login=200
+replica removed; login=200
+```
+
+The one non-200 in that run was a `429` at T+61: the probe logs in every five
+seconds and `login_per_min` is 10, so the probe outran the rate limiter. It
+recovered on the next sample.
+
+**The safety net works too.** The pre-check means AXIAM no longer triggers this
+itself, but an operator rotating credentials, or an older replica during an
+upgrade, still can — so the reconnect path was tested directly by issuing
+`DEFINE USER OVERWRITE` against SurrealDB from outside AXIAM entirely:
+
+```
+WARN  DbManager: connection detected Unhealthy — entering bounded
+      full-jitter reconnect retry loop
+INFO  DbManager reconnect succeeded — handle swapped   attempt=1
+```
+
+62 milliseconds apart, and no caller saw a failure — `login` never left `200` at
+an 8-second sampling interval. On the previous image the identical provocation
+produced `401` for as long as it was watched, with **zero** `Unhealthy` or
+reconnect lines in the log.
+
+## H-01 — the matrix was flaky against its own parallelism
+
+**Layer:** harness
+**Severity:** low for the product, high for the suite. A permission matrix that
+goes intermittently red teaches people to re-run it instead of reading it.
+
+- **Did:** ran the full matrix (56 tests after this wave's additions, up from
+  40) rather than a single spec.
+- **Happened:** two or three tests failed per run — never the same set — each
+  with a bare `Test timeout of 30000ms exceeded` and no assertion. All of them
+  passed when their spec file was run alone.
+- **Root cause:** `pki.spec.ts` and `service-account-authz.spec.ts` built their
+  API client by **signing in again**, inside the test, as a principal whose
+  session `matrix-setup` had already captured. `login_per_min` is 10 per IP and
+  the whole suite shares one: setup spends eight of those on the sessions it
+  captures, so the specs were competing for the remaining two. `Api.login`
+  handles a 429 by waiting it out "to the top of the next minute-ish window" —
+  correct, and longer than a 30-second test timeout. Whichever tests happened to
+  be scheduled once the window filled sat in that backoff and died there.
+
+  Wave 2 saw the same mechanism from the other side and treated the symptom:
+  `Api.login` gained the 429 retry precisely because running `matrix-setup` and
+  `matrix` back to back put two rounds of sign-ins in one window. The retry made
+  the fixture survive; it could not make a test that *waits* finish inside its
+  timeout.
+
+- **Fix:** `Api.fromStorageState(path)` builds the request context on a
+  principal's already-captured session, so the two specs spend **no** logins at
+  all. The CSRF token is read out of the captured `axiam_csrf` cookie, because
+  the middleware is double-submit and a client without it would 403 on every
+  mutating request.
+
+  This removes the failure rather than retrying around it — there is no window
+  to exhaust if nothing signs in.
+
+- **Verified:** three consecutive full runs, **56 passed / 0 failed** each
+  (47.5s, 47.6s, 2.4m). The third is slow because `matrix-setup`'s own eight
+  sign-ins — which genuinely must happen — waited out the limiter, which is the
+  429 retry doing its job. Before the fix, back-to-back runs produced two or
+  three timeouts every time.
+
+- **Worth keeping in mind:** the first two green runs after the fix looked like
+  proof, and were not. A flake needs to be re-provoked under the conditions that
+  produced it — here, consecutive runs — before it can be called fixed.
+
+## Wave 3 — results
+
+| suite | result |
+|---|---|
+| `scripts/e2e-mtls-native-check.sh` (new — §4 handshake) | **22 passed, 0 failed, 0 unverified** |
+| `scripts/e2e-mtls-check.sh` (§4 proxy path) | **17 passed, 0 failed** |
+| `scripts/e2e-mail-check.sh` (§3) | **11 passed, 0 failed** |
+| `axiam-db` classification + duration parser | 6 + 3 passed, incl. one live-server reproduction |
+| `axiam-amqp` mail consumer | 11 passed |
+| frontend unit suite | 84 files, 1153 tests, **lines 92.44%** against a 92.4% floor |
+| `--project=matrix` (RBAC / PKI matrix) | **56 passed, 0 failed, 0 unverified**, three runs in a row |
+
+A note on the frontend number, because a first attempt at it was misleading:
+running `vitest run --coverage` while a Rust image build had the machine gave
+**11 failures**, all `userEvent`/`findByRole` timeouts (test time 814s against
+243s unloaded). None reproduced on a quiet machine. They were contention, not
+defects — but a run in that state should be discarded and repeated, not reported
+either way.
+
+
+## Still open after wave 3
+
+Nothing here is a wave-3 failure. These are the things this exercise has
+deliberately not done, listed so they are decisions rather than omissions.
+
+1. **`seeder.rs` still grants a tenant's `super-admin` role the entire
+   permission registry**, organization-level actions included. B-04's scope
+   guard makes those grants unusable at organization level, so this is defence
+   in depth rather than an open hole — but the two layers would then agree. It
+   is a data change to every existing tenant and the `reconcile` path only ever
+   grants, so it would need to learn to revoke. Deliberately not bundled into a
+   fix that was already an authorization-boundary change.
+
+2. **In-page gates that only appear after a selection are unmeasured**:
+   `ScopesPanel` (`scopes:create`), `EffectiveAccessPanel` (`authz:check_as`),
+   and the per-row bind-certificate action on service accounts
+   (`certificates:bind`). Reaching them needs fixture data whose absence would
+   read as "the control is correctly hidden" — the one answer that file must
+   never produce by accident. Covering them means extending the fixture first.
+
+3. **Publisher-side mail context is asserted by declaration, not by reading.**
+   The table in `every_mail_type_renders_with_no_placeholder_left_standing` is
+   quoted from the five call sites. A publisher that stops sending a key it
+   promised is left to its own crate's tests.
+
+4. **`frontend/e2e/auth-contract.spec.ts` has nine pre-existing TypeScript
+   errors** (`Property 'email' does not exist on type 'never'`). Playwright
+   transpiles without typechecking so the specs run, but
+   `tsc -p frontend/e2e/tsconfig.json` is not clean and cannot be used as a
+   gate until they are fixed. Untouched here: unrelated to this wave, and
+   fixing it properly means typing the captured request bodies.
+
+5. **The native-mTLS sidecar is a script, not CI.** It needs Docker and a
+   running stack, so it is a local verification tool. Wiring it into CI would
+   mean giving the workflow a stack to point at.

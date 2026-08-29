@@ -209,6 +209,35 @@ export async function buildMatrixFixture(api: Api): Promise<MatrixFixture> {
     fx.tenantB = String(t["id"]);
   });
 
+  // --- an organization principal restricted to tenant A -------------------
+  //
+  // Built here, while the client is still in the ORGANIZATION scope, because
+  // that is where the account lives and where its role assignment is written.
+  // It exists to prove the half of organization scope that has no other
+  // witness: an organization-level account whose roles name particular tenants
+  // reaches those and nothing else — not tenant B, and not the organization
+  // itself.
+  await step(fx, "tenant-scoped organization admin", async () => {
+    if (!fx.tenantA) throw new Error("tenant A is unknown");
+    const u = await ensureUser(api, fx, "org-a-admin", "mx-org-a-admin");
+    if (!u) return;
+    const role = await findBy(api, "/api/v1/roles", "name", "super-admin");
+    if (!role) throw new Error("the organization scope has no seeded super-admin role");
+    const res = await api.post(`/api/v1/roles/${role["id"]}/users`, {
+      user_id: u.id,
+      // The whole point of the principal. Without it this is just a second
+      // organization administrator and every assertion below would pass for
+      // the wrong reason.
+      tenant_scope: [fx.tenantA],
+    });
+    if (res.status >= 300 && res.status !== 409) {
+      throw new Error(
+        `assign tenant-scoped super-admin -> HTTP ${res.status}: ` +
+          JSON.stringify(res.body).slice(0, 200),
+      );
+    }
+  });
+
   // --- everything below is tenant A --------------------------------------
   api.actingTenant(fx.tenantA);
 

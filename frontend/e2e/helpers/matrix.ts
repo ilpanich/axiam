@@ -130,6 +130,14 @@ export const MATRIX_PRINCIPALS: MatrixPrincipal[] = [
     purpose: "organization super-admin — must reach every tenant",
   },
   {
+    key: "org-a-admin",
+    username: "mx-org-a-admin",
+    tenantSlug: null,
+    purpose:
+      "organization-level but restricted to tenant A — reaches A, not B, not the organization",
+    storageState: storageStateFor("org-a-admin"),
+  },
+  {
     key: "tenant-admin",
     username: "tenant-admin",
     tenantSlug: TENANT_A_SLUG,

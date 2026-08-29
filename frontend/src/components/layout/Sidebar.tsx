@@ -6,6 +6,7 @@
 import { Link, useLocation } from "react-router";
 import { cn } from "@/lib/utils";
 import { usePermissions } from "@/hooks/usePermissions";
+import { useCanActOnOrganization } from "@/lib/grantReach";
 import { X, ChevronRight } from "lucide-react";
 import { activeNavPath, navSections } from "@/components/layout/navSections";
 
@@ -17,6 +18,7 @@ interface SidebarProps {
 export function Sidebar({ onClose, mobile = false }: SidebarProps) {
   const location = useLocation();
   const { can } = usePermissions();
+  const canActOnOrganization = useCanActOnOrganization();
 
   // Exactly one entry is active, chosen by longest matching prefix — see
   // `activeNavPath`. Computing it once per render also means two entries can
@@ -65,8 +67,14 @@ export function Sidebar({ onClose, mobile = false }: SidebarProps) {
               {section.items.map((item) => {
                 const isActive = activePath === item.to;
                 const isDisabled =
-                  item.requiredPermission !== null &&
-                  !can(item.requiredPermission);
+                  (item.requiredPermission !== null &&
+                    !can(item.requiredPermission)) ||
+                  // A permission the principal holds is not enough for an
+                  // organization-level section — see `navSections`'
+                  // `organizationOnly`. Disabled rather than removed, the same
+                  // way a missing permission is: the nav then reads the same
+                  // for both reasons a section can be out of reach.
+                  (item.organizationOnly === true && !canActOnOrganization);
                 return (
                   <li key={item.to}>
                     <Link

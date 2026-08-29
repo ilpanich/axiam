@@ -17,6 +17,7 @@ use axiam_auth::token::{
     AUD_M2M, AUD_USER, CachedUserIdentity, ValidatedClaims, validate_access_token,
 };
 use axiam_core::error::AxiamError;
+use axiam_core::models::role::{TenantReach, tenant_reach_of};
 use axiam_db::SurrealSessionRepository;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -112,6 +113,57 @@ impl<C: Connection> TenantScopeResolver for axiam_db::SurrealTenantRepository<C>
     }
 }
 
+/// Object-safe lookup of how far a principal's roles reach across the tenants
+/// of its organization.
+///
+/// The same boxed-future seam as [`TenantScopeResolver`], for the same reason:
+/// the extractor is not generic over the DB `Connection`.
+///
+/// # Why the extractor asks at all
+///
+/// `axiam_authz` is the authority here — it drops every assignment that does
+/// not reach the tenant being acted on, so a principal that names a tenant
+/// outside its reach is refused every single action inside it. That is correct
+/// and it is unusable: the operator switches tenant, the switch appears to
+/// work, and every page then fails one request at a time with a different
+/// message.
+///
+/// Refusing the header itself turns that into one answer, at the moment the
+/// caller asked for something it may not have.
+///
+/// # Why an absent resolver means "unrestricted"
+///
+/// [`TenantScopeResolver`] fails closed when unregistered, because it is the
+/// only check that keeps organization scope inside an organization — nothing
+/// else would catch it. This one is not that: the engine still enforces the
+/// same restriction on every action, so an unregistered resolver costs the
+/// clear early refusal and nothing else. Failing closed here would instead
+/// break every organization-level tenant switch in any harness that did not
+/// register it, which is a real outage in exchange for no security.
+pub trait PrincipalReachResolver: Send + Sync {
+    fn reach<'a>(
+        &'a self,
+        principal_tenant_id: Uuid,
+        subject_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Option<TenantReach>> + Send + 'a>>;
+}
+
+impl<C: Connection> PrincipalReachResolver for axiam_db::SurrealRoleRepository<C> {
+    fn reach<'a>(
+        &'a self,
+        principal_tenant_id: Uuid,
+        subject_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Option<TenantReach>> + Send + 'a>> {
+        Box::pin(async move {
+            use axiam_core::repository::RoleRepository as _;
+            self.get_user_role_assignments(principal_tenant_id, subject_id)
+                .await
+                .ok()
+                .map(|assignments| tenant_reach_of(&assignments))
+        })
+    }
+}
+
 /// Authenticated user context extracted from a valid JWT.
 ///
 /// Use this as a handler parameter to require authentication.
@@ -195,6 +247,9 @@ impl actix_web::FromRequest for AuthenticatedUser {
         let tenants = req
             .app_data::<web::Data<Arc<dyn TenantScopeResolver>>>()
             .map(|d| d.get_ref().clone());
+        let reach = req
+            .app_data::<web::Data<Arc<dyn PrincipalReachResolver>>>()
+            .map(|d| d.get_ref().clone());
         // Read the header here, while `req` is still borrowed. A malformed
         // value is dropped rather than refused: it names a tenant that cannot
         // exist, so the request falls back to the caller's own tenant and is
@@ -231,6 +286,21 @@ impl actix_web::FromRequest for AuthenticatedUser {
 
             if let Some(target) = requested_tenant.filter(|t| *t != user.principal_tenant_id) {
                 user.tenant_id = resolve_active_tenant(&user, target, tenants.as_ref()).await?;
+                // ...and, for a principal whose roles name the tenants they
+                // reach, that the tenant named is one of them. See
+                // [`PrincipalReachResolver`] for why this is a courtesy refusal
+                // rather than the enforcement.
+                if let Some(reach) = reach
+                    && let Some(reach) = reach.reach(user.principal_tenant_id, user.user_id).await
+                    && !reach.includes(target)
+                {
+                    return Err(AxiamError::AuthorizationDenied {
+                        reason: "this account's roles do not reach the requested tenant".into(),
+                        action: None,
+                        resource_id: None,
+                    }
+                    .into());
+                }
                 // Reached only when the resolution above confirmed the caller's
                 // own tenant is the organization scope — it refuses otherwise.
                 user.organization_level = true;

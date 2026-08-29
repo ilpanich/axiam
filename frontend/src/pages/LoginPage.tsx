@@ -14,7 +14,10 @@ import { Label } from "@/components/ui/label";
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import { cn } from "@/lib/utils";
 import api from "@/lib/api";
-import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
+import {
+  fetchCurrentUser,
+  withReachableTenantSelected,
+} from "@/lib/fetchCurrentUser";
 import { KeyRound, ChevronRight, Loader2, AlertCircle, Fingerprint } from "lucide-react";
 import { getApiErrorCode, getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
 import {
@@ -119,7 +122,10 @@ export function LoginPage() {
       navigate("/login");
       return;
     }
-    setUser(hydrated);
+    // A tenant-restricted organization principal holds nothing in the
+    // organization's own scope, so it is placed in one of the tenants it does
+    // reach before the store is populated. No-op for everyone else.
+    setUser(await withReachableTenantSelected(hydrated));
     setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
     navigate("/dashboard");
   };

@@ -39,6 +39,7 @@ use axiam_api_grpc::proto::{
     ListReactorsRequest, UpdateReactorRequest,
 };
 use axiam_api_grpc::services::ReactorAdminServiceImpl;
+use axiam_core::models::role::AssignmentScope;
 
 type TestDb = surrealdb::engine::local::Db;
 type TestEngine = AuthorizationEngine<
@@ -170,7 +171,7 @@ async fn grant_all_reactor_permissions(db: &Surreal<TestDb>, tenant_id: Uuid, us
     }
 
     role_repo
-        .assign_to_user(tenant_id, user_id, role.id, None)
+        .assign_to_user(tenant_id, user_id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 }

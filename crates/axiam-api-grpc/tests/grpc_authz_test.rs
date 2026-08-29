@@ -245,7 +245,7 @@ async fn grant_user_role_permission(
         .unwrap();
 
     role_repo
-        .assign_to_user(tenant_id, user_id, role.id, resource_id)
+        .assign_to_user(tenant_id, user_id, role.id, resource_id.into())
         .await
         .unwrap();
 }

@@ -25,6 +25,7 @@ use axiam_authz::{AccessDecision, AccessRequest, AuthorizationEngine, types::Sub
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
@@ -137,7 +138,7 @@ async fn seed(n: usize) -> (Surreal<TestDb>, Vec<AccessRequest>) {
         .await
         .unwrap();
     role_repo
-        .assign_to_user(tenant.id, user.id, role.id, None)
+        .assign_to_user(tenant.id, user.id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 

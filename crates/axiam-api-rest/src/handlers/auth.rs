@@ -100,6 +100,21 @@ pub struct LoginUserInfo {
     /// the UI then offers no cross-tenant action.
     #[serde(default)]
     pub organization_level: bool,
+    /// The tenants this caller's roles reach, when they are restricted to
+    /// particular ones; omitted when they are not.
+    ///
+    /// Omitted is the common case and means "wherever this principal's roles
+    /// reach" — every tenant of the organization for an organization-level
+    /// principal, its own tenant for anybody else. A present list is a
+    /// deliberately narrowed organization-level account, and it is what the
+    /// admin UI filters its tenant switcher and tenant list by.
+    ///
+    /// The UI is not where this is enforced — `axiam_authz` drops the
+    /// out-of-reach assignments and `resolve_active_tenant` refuses the header
+    /// outright. Sending it means the UI can stop offering a switch that ends
+    /// in a 403, rather than discovering the restriction one refusal at a time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reachable_tenant_ids: Option<Vec<Uuid>>,
     /// The tenant the caller **lives in**, as opposed to `tenant_id`, which is
     /// the tenant it is currently **acting on**.
     ///
@@ -378,6 +393,12 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
                 principal_tenant_id: tenant_id,
                 principal_tenant_slug: tenant_slug,
                 org_id,
+                // Not resolved here. A login reads no role assignments, and
+                // the client calls `/auth/me` immediately afterwards — which
+                // does, and which is where the admin UI reads it from. Sending
+                // `None` from a path that never looked would claim
+                // "unrestricted" on no evidence.
+                reachable_tenant_ids: None,
             },
             session_id: out.session_id,
             expires_in: out.expires_in,
@@ -969,6 +990,14 @@ pub async fn me<C: Connection + Clone>(
     let mut is_super_admin = false;
     let mut seen_roles: BTreeSet<Uuid> = BTreeSet::new();
     for assignment in &assignments {
+        // An assignment naming the tenants it reaches contributes only in
+        // those. Filtered against the tenant being ACTED ON, exactly as
+        // `axiam_authz::engine` does — this list is a UI hint and a hint that
+        // disagrees with the enforcement is worse than none, which is the rule
+        // the block below already turns on.
+        if !assignment.reaches_tenant(user.tenant_id) {
+            continue;
+        }
         if crosses_tenant_boundary
             && !(assignment.role.is_global && assignment.resource_id.is_none())
         {
@@ -1020,7 +1049,15 @@ pub async fn me<C: Connection + Clone>(
             .await
             .map(|t| t.is_organization_scope())
             .unwrap_or(false);
-        if organization_level {
+        // ...and only for one whose roles are not confined to particular
+        // tenants of it. A restricted account is refused every
+        // organization-level action by `require_organization_principal`, so
+        // `*` would put us straight back in the B-09 shape this block exists to
+        // avoid: a UI rendering the organization's controls to somebody the
+        // server answers 403. Its explicit action list is the honest answer,
+        // and it is complete for the tenants the account can actually reach.
+        let unrestricted = !axiam_core::models::role::tenant_reach_of(&assignments).is_restricted();
+        if organization_level && unrestricted {
             permissions.insert(0, "*".to_string());
         }
     }
@@ -1071,6 +1108,12 @@ pub async fn me<C: Connection + Clone>(
             principal_tenant_id,
             principal_tenant_slug: principal_tenant.as_ref().map(|t| t.slug.clone()),
             org_id: tenant.as_ref().map(|t| t.organization_id),
+            reachable_tenant_ids: match axiam_core::models::role::tenant_reach_of(&assignments) {
+                axiam_core::models::role::TenantReach::Unrestricted => None,
+                axiam_core::models::role::TenantReach::Restricted(tenants) => {
+                    Some(tenants.into_iter().collect())
+                }
+            },
         },
         permissions,
         opaque,
@@ -1220,6 +1263,7 @@ mod tests {
             principal_tenant_id: Uuid::nil(),
             principal_tenant_slug: tenant_slug,
             org_id: Some(Uuid::nil()),
+            reachable_tenant_ids: None,
         }
     }
 

@@ -15,6 +15,7 @@ use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::scope::CreateScope;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
@@ -381,7 +382,12 @@ async fn authorized_request_returns_200() {
         .unwrap();
 
     role_repo
-        .assign_to_user(tenant_id, user_id, role.id, Some(resource.id))
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            role.id,
+            AssignmentScope::resource(resource.id),
+        )
         .await
         .unwrap();
 
@@ -516,7 +522,12 @@ async fn scope_authorization_check() {
         .unwrap();
 
     role_repo
-        .assign_to_user(tenant_id, user_id, role.id, Some(resource.id))
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            role.id,
+            AssignmentScope::resource(resource.id),
+        )
         .await
         .unwrap();
 

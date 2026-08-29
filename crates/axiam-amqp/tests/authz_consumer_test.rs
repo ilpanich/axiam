@@ -15,6 +15,7 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
@@ -135,7 +136,12 @@ async fn grant(db: &Surreal<Db>, tenant_id: Uuid, user_id: Uuid, action: &str) -
         .await
         .unwrap();
     role_repo
-        .assign_to_user(tenant_id, user_id, role.id, Some(resource.id))
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            role.id,
+            AssignmentScope::resource(resource.id),
+        )
         .await
         .unwrap();
     resource.id

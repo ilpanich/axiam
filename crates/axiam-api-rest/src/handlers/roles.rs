@@ -1,11 +1,12 @@
 //! Role management and role-assignment endpoints (tenant-scoped via JWT).
 
 use actix_web::{HttpResponse, web};
+use axiam_core::error::AxiamError;
 use axiam_core::models::group::Group;
-use axiam_core::models::role::{CreateRole, Role, RoleAssignment, UpdateRole};
+use axiam_core::models::role::{AssignmentScope, CreateRole, Role, RoleAssignment, UpdateRole};
 use axiam_core::repository::{
     GroupRepository, PaginatedResult, Pagination, RoleRepository, ServiceAccountRepository,
-    UserRepository,
+    TenantRepository, UserRepository,
 };
 
 use super::service_accounts::ServiceAccountResponse;
@@ -34,18 +35,57 @@ pub struct CreateRoleRequest {
 pub struct AssignRoleToUserRequest {
     pub user_id: Uuid,
     pub resource_id: Option<Uuid>,
+    /// The tenants this assignment reaches.
+    ///
+    /// Only meaningful for an assignment made in an organization's scope,
+    /// whose global roles otherwise reach every tenant of the organization;
+    /// naming tenants here confines the assignment to those and to nothing
+    /// else, the organization's own scope included. Omitted — the default —
+    /// reaches wherever the role does.
+    ///
+    /// Refused with 400 outside an organization scope, when empty, and when it
+    /// names a tenant of another organization or the organization's own scope
+    /// tenant.
+    #[serde(default)]
+    pub tenant_scope: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AssignRoleToGroupRequest {
     pub group_id: Uuid,
     pub resource_id: Option<Uuid>,
+    /// The tenants this assignment reaches.
+    ///
+    /// Only meaningful for an assignment made in an organization's scope,
+    /// whose global roles otherwise reach every tenant of the organization;
+    /// naming tenants here confines the assignment to those and to nothing
+    /// else, the organization's own scope included. Omitted — the default —
+    /// reaches wherever the role does.
+    ///
+    /// Refused with 400 outside an organization scope, when empty, and when it
+    /// names a tenant of another organization or the organization's own scope
+    /// tenant.
+    #[serde(default)]
+    pub tenant_scope: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AssignRoleToServiceAccountRequest {
     pub service_account_id: Uuid,
     pub resource_id: Option<Uuid>,
+    /// The tenants this assignment reaches.
+    ///
+    /// Only meaningful for an assignment made in an organization's scope,
+    /// whose global roles otherwise reach every tenant of the organization;
+    /// naming tenants here confines the assignment to those and to nothing
+    /// else, the organization's own scope included. Omitted — the default —
+    /// reaches wherever the role does.
+    ///
+    /// Refused with 400 outside an organization scope, when empty, and when it
+    /// names a tenant of another organization or the organization's own scope
+    /// tenant.
+    #[serde(default)]
+    pub tenant_scope: Option<Vec<Uuid>>,
 }
 
 // -----------------------------------------------------------------------
@@ -66,6 +106,11 @@ pub struct RoleUserAssignment {
     pub user: UserResponse,
     /// `None` means the role was assigned globally (no resource scope).
     pub resource_id: Option<Uuid>,
+    /// The tenants this assignment reaches, or omitted for "wherever the role
+    /// does". Shown next to the assignment so an operator can tell a
+    /// deliberately narrowed grant from an organization-wide one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_scope: Option<Vec<Uuid>>,
 }
 
 /// A group together with the resource scope of its assignment of this role.
@@ -75,6 +120,11 @@ pub struct RoleGroupAssignment {
     pub group: Group,
     /// `None` means the role was assigned globally (no resource scope).
     pub resource_id: Option<Uuid>,
+    /// The tenants this assignment reaches, or omitted for "wherever the role
+    /// does". Shown next to the assignment so an operator can tell a
+    /// deliberately narrowed grant from an organization-wide one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_scope: Option<Vec<Uuid>>,
 }
 
 /// A service account together with the resource scope of its assignment.
@@ -85,6 +135,11 @@ pub struct RoleServiceAccountAssignment {
     pub service_account: ServiceAccountResponse,
     /// `None` means the role was assigned globally (no resource scope).
     pub resource_id: Option<Uuid>,
+    /// The tenants this assignment reaches, or omitted for "wherever the role
+    /// does". Shown next to the assignment so an operator can tell a
+    /// deliberately narrowed grant from an organization-wide one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_scope: Option<Vec<Uuid>>,
 }
 
 // -----------------------------------------------------------------------
@@ -280,6 +335,100 @@ pub async fn delete<C: Connection + Clone>(
     Ok(HttpResponse::NoContent().finish())
 }
 
+/// Check a requested `tenant_scope` and turn it into an [`AssignmentScope`].
+///
+/// # What a tenant scope means, and where it is legal
+///
+/// It answers "which of this organization's tenants does this assignment
+/// reach", and that is only a question worth asking where the answer could be
+/// more than one — an assignment made in an **organization scope** tenant,
+/// whose global roles otherwise carry into every tenant of the organization.
+///
+/// In an ordinary tenant the only tenant an assignment could name is that
+/// tenant itself, so a scope there is either a no-op or a contradiction. Both
+/// are refused rather than accepted and quietly ignored: an operator who wrote
+/// a restriction and got a 204 would reasonably believe one was applied.
+///
+/// # The three refusals
+///
+/// * **Not an organization scope.** As above.
+/// * **Empty list.** An assignment that reaches no tenant contributes nothing
+///   anywhere. It is not a restriction, it is a grant that does not exist, and
+///   writing one produces a role that appears on the user's page and does
+///   nothing — the least debuggable outcome available.
+/// * **A tenant outside the organization, or the organization's own scope
+///   tenant.** The first would cross the boundary an organization *is*. The
+///   second would hand back the organization-wide reach the restriction exists
+///   to remove, in the one place `require_organization_principal` looks for
+///   it.
+async fn validate_tenant_scope<C: Connection + Clone>(
+    state: &AppState<C>,
+    assignment_tenant_id: Uuid,
+    resource_id: Option<Uuid>,
+    tenant_scope: Option<Vec<Uuid>>,
+) -> Result<AssignmentScope, AxiamApiError> {
+    let Some(tenants) = tenant_scope else {
+        return Ok(AssignmentScope {
+            resource_id,
+            tenant_scope: None,
+        });
+    };
+
+    let invalid = |reason: &str| -> AxiamApiError {
+        AxiamApiError(AxiamError::Validation {
+            message: format!("tenant_scope: {reason}"),
+        })
+    };
+
+    let home = state
+        .tenant_repo
+        .get_by_id(assignment_tenant_id)
+        .await
+        .map_err(|_| invalid("the tenant this assignment is made in could not be resolved"))?;
+    if !home.is_organization_scope() {
+        return Err(invalid(
+            "a tenant scope only applies to an assignment made in an organization's \
+             scope; a role in an ordinary tenant already reaches that tenant and \
+             no other",
+        ));
+    }
+    if tenants.is_empty() {
+        return Err(invalid(
+            "an empty tenant scope reaches no tenant at all — omit the field to \
+             reach every tenant of the organization",
+        ));
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    for tenant_id in &tenants {
+        if tenant_id == &assignment_tenant_id {
+            return Err(invalid(
+                "the organization's own scope tenant cannot be named: an \
+                 assignment restricted to particular tenants is deliberately not \
+                 an organization-wide one",
+            ));
+        }
+        let target = state
+            .tenant_repo
+            .get_by_id(*tenant_id)
+            .await
+            .map_err(|_| invalid("a tenant named in the scope does not exist"))?;
+        if target.organization_id != home.organization_id {
+            return Err(invalid(
+                "a tenant named in the scope belongs to a different organization",
+            ));
+        }
+        seen.insert(*tenant_id);
+    }
+
+    Ok(AssignmentScope {
+        resource_id,
+        // Deduplicated and ordered, so two requests naming the same tenants in
+        // different orders produce the same stored edge.
+        tenant_scope: Some(seen.into_iter().collect()),
+    })
+}
+
 // -----------------------------------------------------------------------
 // Handlers — Role ↔ User assignment
 // -----------------------------------------------------------------------
@@ -321,6 +470,10 @@ pub async fn assign_to_user<C: Connection + Clone>(
             "user_id": target_user,
             "role_id": role_id,
             "resource_id": req.resource_id,
+            // How far the grant reaches, not just what it covers: a four-eyes
+            // rule that cannot see whether a grant spans every tenant of the
+            // organization or two of them is reviewing half of it.
+            "tenant_scope": req.tenant_scope,
             "tenant_id": user.tenant_id,
             // Who is asking — the half a four-eyes rule is actually about.
             "actor_id": user.user_id,
@@ -328,9 +481,16 @@ pub async fn assign_to_user<C: Connection + Clone>(
     )
     .await?;
 
+    let scope = validate_tenant_scope(
+        state.get_ref(),
+        user.tenant_id,
+        req.resource_id,
+        req.tenant_scope,
+    )
+    .await?;
     state
         .role_repo
-        .assign_to_user(user.tenant_id, req.user_id, role_id, req.resource_id)
+        .assign_to_user(user.tenant_id, req.user_id, role_id, scope)
         .await?;
     // D7: only this subject's effective permissions change — targeted flush.
     // (Assignment widens access, the safe direction, but we invalidate anyway
@@ -438,20 +598,26 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
             "service_account_id": req.service_account_id,
             "role_id": role_id,
             "resource_id": req.resource_id,
+            // How far the grant reaches, not just what it covers: a four-eyes
+            // rule that cannot see whether a grant spans every tenant of the
+            // organization or two of them is reviewing half of it.
+            "tenant_scope": req.tenant_scope,
             "tenant_id": user.tenant_id,
             "actor_id": user.user_id,
         }),
     )
     .await?;
 
+    let scope = validate_tenant_scope(
+        state.get_ref(),
+        user.tenant_id,
+        req.resource_id,
+        req.tenant_scope,
+    )
+    .await?;
     state
         .role_repo
-        .assign_to_service_account(
-            user.tenant_id,
-            req.service_account_id,
-            role_id,
-            req.resource_id,
-        )
+        .assign_to_service_account(user.tenant_id, req.service_account_id, role_id, scope)
         .await?;
     // D7: the machine's own effective permissions changed — targeted flush, on
     // the same terms as the user path. The engine caches by `(tenant, subject)`
@@ -546,6 +712,7 @@ pub async fn list_service_accounts<C: Connection + Clone>(
                     .await?,
             ),
             resource_id: a.resource_id,
+            tenant_scope: a.tenant_scope.clone(),
         });
     }
     Ok(HttpResponse::Ok().json(rows))
@@ -630,15 +797,26 @@ pub async fn assign_to_group<C: Connection + Clone>(
             "group_id": req.group_id,
             "role_id": role_id,
             "resource_id": req.resource_id,
+            // How far the grant reaches, not just what it covers: a four-eyes
+            // rule that cannot see whether a grant spans every tenant of the
+            // organization or two of them is reviewing half of it.
+            "tenant_scope": req.tenant_scope,
             "tenant_id": user.tenant_id,
             "actor_id": user.user_id,
         }),
     )
     .await?;
 
+    let scope = validate_tenant_scope(
+        state.get_ref(),
+        user.tenant_id,
+        req.resource_id,
+        req.tenant_scope,
+    )
+    .await?;
     state
         .role_repo
-        .assign_to_group(user.tenant_id, req.group_id, role_id, req.resource_id)
+        .assign_to_group(user.tenant_id, req.group_id, role_id, scope)
         .await?;
     // D7: the affected subjects are every member of the group (set unknown
     // without a query) — conservative per-tenant flush.
@@ -735,6 +913,7 @@ pub async fn list_users<C: Connection + Clone>(
                     .await?,
             ),
             resource_id: a.resource_id,
+            tenant_scope: a.tenant_scope.clone(),
         });
     }
     Ok(HttpResponse::Ok().json(rows))
@@ -778,6 +957,7 @@ pub async fn list_groups<C: Connection + Clone>(
                 .get_by_id(user.tenant_id, a.subject_id)
                 .await?,
             resource_id: a.resource_id,
+            tenant_scope: a.tenant_scope.clone(),
         });
     }
     Ok(HttpResponse::Ok().json(rows))

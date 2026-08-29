@@ -16,6 +16,7 @@ use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::settings::system_defaults;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
@@ -1853,7 +1854,7 @@ async fn assign_super_admin(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid
         .await
         .expect("super-admin role create failed");
     role_repo
-        .assign_to_user(tenant_id, user_id, role.id, None)
+        .assign_to_user(tenant_id, user_id, role.id, AssignmentScope::global())
         .await
         .expect("super-admin assignment failed");
 }

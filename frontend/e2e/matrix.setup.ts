@@ -72,6 +72,9 @@ const PRINCIPALS: Array<{
   tenantSlug: string | null;
 }> = [
   { key: "org-admin", username: "admin", tenantSlug: null },
+  // Organization level, like `org-admin`, so it signs in naming no tenant —
+  // the restriction lives on its role assignment, not on where it signs in.
+  { key: "org-a-admin", username: "mx-org-a-admin", tenantSlug: null },
   { key: "tenant-admin", username: "tenant-admin", tenantSlug: TENANT_A_SLUG },
   { key: "viewer", username: "mx-viewer", tenantSlug: TENANT_A_SLUG },
   { key: "editor", username: "mx-editor", tenantSlug: TENANT_A_SLUG },

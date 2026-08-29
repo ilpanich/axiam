@@ -26,6 +26,7 @@ import { downloadTextFile } from "@/lib/download";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 import { invalidateEntity } from "@/lib/queryInvalidation";
+import { useCanActOnOrganization } from "@/lib/grantReach";
 
 // ─── Enriched tenant type (includes org name for display) ─────────────────────
 
@@ -188,6 +189,7 @@ function EditTenantFields({
 
 export function TenantsPage() {
   const navigate = useNavigate();
+  const canActOnOrganization = useCanActOnOrganization();
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -450,13 +452,15 @@ export function TenantsPage() {
       width: "w-28",
       render: (row) => (
         <div className="flex items-center gap-1">
-          <button
-            aria-label={`Edit ${row.name}`}
-            onClick={() => openEdit(row)}
-            className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <Pencil size={14} />
-          </button>
+          {canActOnOrganization && (
+            <button
+              aria-label={`Edit ${row.name}`}
+              onClick={() => openEdit(row)}
+              className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <Pencil size={14} />
+            </button>
+          )}
           <button
             aria-label={`View ${row.name}`}
             onClick={() =>
@@ -466,13 +470,15 @@ export function TenantsPage() {
           >
             <Eye size={14} />
           </button>
-          <button
-            aria-label={`Delete ${row.name}`}
-            onClick={() => setDeleteTenant(row)}
-            className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
-          >
-            <Trash2 size={14} />
-          </button>
+          {canActOnOrganization && (
+            <button
+              aria-label={`Delete ${row.name}`}
+              onClick={() => setDeleteTenant(row)}
+              className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
         </div>
       ),
     },
@@ -482,17 +488,27 @@ export function TenantsPage() {
     <div>
       <PageHeader
         title="Tenants"
-        description="Manage tenants across all organizations. Tenants provide full data isolation."
+        description={
+          canActOnOrganization
+            ? "Manage the tenants of your organization. Tenants provide full data isolation."
+            : "The tenants you administer. Tenants provide full data isolation."
+        }
         action={
-          <Button
-            onClick={() => {
-              resetCreateForm();
-              setCreateOpen(true);
-            }}
-          >
-            <Plus size={16} />
-            New Tenant
-          </Button>
+          // The tenant roster belongs to the organization: creating one, like
+          // renaming or deleting one, is refused to any principal that does not
+          // live in the organization scope. Rendering the button anyway was the
+          // reported defect — it opened a dialog whose submit answered 403.
+          canActOnOrganization ? (
+            <Button
+              onClick={() => {
+                resetCreateForm();
+                setCreateOpen(true);
+              }}
+            >
+              <Plus size={16} />
+              New Tenant
+            </Button>
+          ) : undefined
         }
       />
 

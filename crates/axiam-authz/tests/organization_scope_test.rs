@@ -16,7 +16,7 @@ use axiam_authz::{AccessDecision, AccessRequest, AuthorizationEngine};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;
-use axiam_core::models::role::CreateRole;
+use axiam_core::models::role::{AssignmentScope, CreateRole};
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
@@ -171,7 +171,7 @@ async fn grant(
         .unwrap();
     perms.grant_to_role(tenant, role.id, perm.id).await.unwrap();
     roles
-        .assign_to_user(tenant, subject, role.id, resource_id)
+        .assign_to_user(tenant, subject, role.id, resource_id.into())
         .await
         .unwrap();
 }
@@ -536,4 +536,368 @@ async fn batched_decisions_match_per_item_decisions_across_scopes() {
     assert!(batched[2].is_allowed(), "tenant user in its own tenant");
     assert!(!batched[3].is_allowed(), "tenant user must not reach B");
     assert!(batched[4].is_allowed(), "org admin in the org tenant");
+}
+
+// ---------------------------------------------------------------------------
+// Tenant-scoped assignments: an organization-level principal narrowed to some
+// of its organization's tenants.
+// ---------------------------------------------------------------------------
+
+/// Like [`grant`], but the assignment names the tenants it reaches.
+async fn grant_scoped_to_tenants(
+    db: &Surreal<TestDb>,
+    tenant: Uuid,
+    subject: Uuid,
+    role_name: &str,
+    action: &str,
+    tenant_scope: Vec<Uuid>,
+) {
+    let roles = SurrealRoleRepository::new(db.clone());
+    let perms = SurrealPermissionRepository::new(db.clone());
+
+    let role = roles
+        .create(CreateRole {
+            tenant_id: tenant,
+            name: role_name.into(),
+            description: format!("Role: {role_name}"),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+    let perm = perms
+        .create(CreatePermission {
+            tenant_id: tenant,
+            action: action.into(),
+            description: format!("Can {action}"),
+        })
+        .await
+        .unwrap();
+    perms.grant_to_role(tenant, role.id, perm.id).await.unwrap();
+    roles
+        .assign_to_user(
+            tenant,
+            subject,
+            role.id,
+            AssignmentScope {
+                resource_id: None,
+                tenant_scope: Some(tenant_scope),
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_tenant_scoped_assignment_reaches_the_tenants_it_names() {
+    let f = fixture().await;
+    grant_scoped_to_tenants(
+        &f.db,
+        f.org_tenant,
+        f.org_admin,
+        "tenant-a-admin",
+        "users:list",
+        vec![f.tenant_a],
+    )
+    .await;
+
+    let e = engine(&f.db);
+    let allowed = e
+        .check_access(&org_request(
+            f.tenant_a,
+            f.org_tenant,
+            f.org_admin,
+            "users:list",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        allowed.is_allowed(),
+        "the assignment names tenant A, so it applies there: {allowed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_tenant_scoped_assignment_reaches_no_other_tenant() {
+    // The point of the whole feature: an organization-level principal's global
+    // assignments otherwise carry into EVERY tenant of the organization, and
+    // this is the only thing that stops one.
+    let f = fixture().await;
+    grant_scoped_to_tenants(
+        &f.db,
+        f.org_tenant,
+        f.org_admin,
+        "tenant-a-admin",
+        "users:list",
+        vec![f.tenant_a],
+    )
+    .await;
+
+    let e = engine(&f.db);
+    let denied = e
+        .check_access(&org_request(
+            f.tenant_b,
+            f.org_tenant,
+            f.org_admin,
+            "users:list",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        !denied.is_allowed(),
+        "tenant B was not named and must not be reached: {denied:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_tenant_scoped_assignment_does_not_apply_in_the_organization_scope() {
+    // The half that is easy to get wrong. Acting on the organization's own
+    // tenant crosses no boundary, so an unfiltered engine would apply the
+    // assignment in full — handing an account restricted to two tenants the
+    // organization-wide reach the restriction exists to remove.
+    let f = fixture().await;
+    grant_scoped_to_tenants(
+        &f.db,
+        f.org_tenant,
+        f.org_admin,
+        "tenant-a-admin",
+        "users:list",
+        vec![f.tenant_a],
+    )
+    .await;
+
+    let e = engine(&f.db);
+    let denied = e
+        .check_access(&org_request(
+            f.org_tenant,
+            f.org_tenant,
+            f.org_admin,
+            "users:list",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        !denied.is_allowed(),
+        "the organization scope is not one of the named tenants: {denied:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unrestricted_assignment_beside_a_restricted_one_still_reaches_everywhere() {
+    // Reach is a property of the SET of a principal's assignments: a
+    // tenant-scoped one adds tenants, it cannot take any away from an
+    // unrestricted one sitting beside it. Two roles, two actions, so the
+    // decisions cannot be confused for each other.
+    let f = fixture().await;
+    grant(
+        &f.db,
+        f.org_tenant,
+        f.org_admin,
+        "org-admin",
+        true,
+        "users:list",
+        None,
+    )
+    .await;
+    grant_scoped_to_tenants(
+        &f.db,
+        f.org_tenant,
+        f.org_admin,
+        "tenant-a-only",
+        "users:delete",
+        vec![f.tenant_a],
+    )
+    .await;
+
+    let e = engine(&f.db);
+    assert!(
+        e.check_access(&org_request(
+            f.tenant_b,
+            f.org_tenant,
+            f.org_admin,
+            "users:list"
+        ))
+        .await
+        .unwrap()
+        .is_allowed(),
+        "the unrestricted assignment still reaches tenant B"
+    );
+    assert!(
+        !e.check_access(&org_request(
+            f.tenant_b,
+            f.org_tenant,
+            f.org_admin,
+            "users:delete"
+        ))
+        .await
+        .unwrap()
+        .is_allowed(),
+        "the restricted one does not"
+    );
+}
+
+#[tokio::test]
+async fn naming_several_tenants_reaches_all_of_them_and_nothing_else() {
+    let f = fixture().await;
+    grant_scoped_to_tenants(
+        &f.db,
+        f.org_tenant,
+        f.org_admin,
+        "a-and-b",
+        "users:list",
+        vec![f.tenant_a, f.tenant_b],
+    )
+    .await;
+
+    let e = engine(&f.db);
+    assert!(
+        e.check_access(&org_request(
+            f.tenant_a,
+            f.org_tenant,
+            f.org_admin,
+            "users:list"
+        ))
+        .await
+        .unwrap()
+        .is_allowed()
+    );
+    assert!(
+        e.check_access(&org_request(
+            f.tenant_b,
+            f.org_tenant,
+            f.org_admin,
+            "users:list"
+        ))
+        .await
+        .unwrap()
+        .is_allowed()
+    );
+    assert!(
+        !e.check_access(&org_request(
+            f.org_tenant,
+            f.org_tenant,
+            f.org_admin,
+            "users:list"
+        ))
+        .await
+        .unwrap()
+        .is_allowed(),
+        "still not the organization scope"
+    );
+}
+
+#[tokio::test]
+async fn the_batch_path_applies_the_tenant_scope_per_item() {
+    // The batch path caches assignments per (assignment tenant, subject), and
+    // one cache entry is shared by requests naming DIFFERENT tenants. Filtering
+    // the cached vector instead of each item would apply the first item's
+    // tenant to all of them — so the two tenants below must come back with
+    // different answers from a single batch, and each must match the per-item
+    // decision.
+    let f = fixture().await;
+    grant_scoped_to_tenants(
+        &f.db,
+        f.org_tenant,
+        f.org_admin,
+        "tenant-a-admin",
+        "users:list",
+        vec![f.tenant_a],
+    )
+    .await;
+
+    let requests = vec![
+        org_request(f.tenant_a, f.org_tenant, f.org_admin, "users:list"),
+        org_request(f.tenant_b, f.org_tenant, f.org_admin, "users:list"),
+        org_request(f.org_tenant, f.org_tenant, f.org_admin, "users:list"),
+    ];
+
+    let e = engine(&f.db);
+    let batched = e.check_access_batch(&requests).await.unwrap();
+
+    assert!(batched[0].is_allowed(), "tenant A is named");
+    assert!(!batched[1].is_allowed(), "tenant B is not");
+    assert!(!batched[2].is_allowed(), "nor is the organization scope");
+
+    for (i, req) in requests.iter().enumerate() {
+        assert_eq!(
+            batched[i].is_allowed(),
+            e.check_access(req).await.unwrap().is_allowed(),
+            "batch item {i} disagreed with the per-item decision"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_assignment_without_a_tenant_scope_is_unchanged() {
+    // The compatibility claim the migration rests on, asserted rather than
+    // assumed: every assignment written before the field existed reads back
+    // with `tenant_scope: None` and reaches exactly what it always did.
+    let f = fixture().await;
+    grant(
+        &f.db,
+        f.org_tenant,
+        f.org_admin,
+        "org-admin",
+        true,
+        "users:list",
+        None,
+    )
+    .await;
+
+    let assignments = SurrealRoleRepository::new(f.db.clone())
+        .get_user_role_assignments(f.org_tenant, f.org_admin)
+        .await
+        .unwrap();
+    assert_eq!(assignments.len(), 1);
+    assert!(
+        assignments[0].tenant_scope.is_none(),
+        "an unscoped assignment must not read back as a restriction"
+    );
+
+    let e = engine(&f.db);
+    for tenant in [f.tenant_a, f.tenant_b, f.org_tenant] {
+        assert!(
+            e.check_access(&org_request(
+                tenant,
+                f.org_tenant,
+                f.org_admin,
+                "users:list"
+            ))
+            .await
+            .unwrap()
+            .is_allowed(),
+            "unscoped assignments reach every tenant of the organization"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_tenant_scope_survives_the_round_trip_to_the_database() {
+    let f = fixture().await;
+    grant_scoped_to_tenants(
+        &f.db,
+        f.org_tenant,
+        f.org_admin,
+        "a-and-b",
+        "users:list",
+        vec![f.tenant_a, f.tenant_b],
+    )
+    .await;
+
+    let assignments = SurrealRoleRepository::new(f.db.clone())
+        .get_user_role_assignments(f.org_tenant, f.org_admin)
+        .await
+        .unwrap();
+    assert_eq!(assignments.len(), 1);
+    let mut stored = assignments[0].tenant_scope.clone().expect("a scope");
+    stored.sort();
+    let mut expected = vec![f.tenant_a, f.tenant_b];
+    expected.sort();
+    assert_eq!(stored, expected);
+
+    // And the reach derived from it agrees.
+    let reach = axiam_core::models::role::tenant_reach_of(&assignments);
+    assert!(reach.is_restricted());
+    assert!(reach.includes(f.tenant_a));
+    assert!(reach.includes(f.tenant_b));
+    assert!(!reach.includes(f.org_tenant));
 }

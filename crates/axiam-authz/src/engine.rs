@@ -414,6 +414,40 @@ where
             return Ok(AccessDecision::Deny("no roles assigned".into()));
         }
 
+        // 1b. Drop assignments that do not reach the tenant being acted on.
+        //
+        //     An assignment carrying a `tenant_scope` names the tenants it
+        //     applies to and applies nowhere else. This is the only axis on
+        //     which an organization-level principal can be given less than the
+        //     whole organization: its roles live in the organization's own
+        //     tenant and its global assignments otherwise carry into every
+        //     tenant of it.
+        //
+        //     Filtered against `request.tenant_id` — the tenant being acted
+        //     upon — and NOT against `assignment_tenant_id`. Those differ for
+        //     exactly the principal this exists to restrict, and using the
+        //     latter would compare the scope against the tenant the grants live
+        //     in, which is the organization tenant every time and would make
+        //     every restriction vacuous.
+        //
+        //     The filter is applied before the boundary split below rather than
+        //     inside one of its branches, because it holds on both sides: a
+        //     restricted assignment does not apply in the organization's own
+        //     scope either. An account restricted to two tenants is not an
+        //     organization-wide administrator, and letting its grants apply
+        //     with no tenant selected would hand back the reach the restriction
+        //     removed.
+        let assignments: Vec<RoleAssignment> = assignments
+            .into_iter()
+            .filter(|a| a.reaches_tenant(request.tenant_id))
+            .collect();
+
+        if assignments.is_empty() {
+            return Ok(AccessDecision::Deny(
+                "no roles assigned that reach this tenant".into(),
+            ));
+        }
+
         // 2. Build the set of ancestor resource IDs for hierarchy inheritance.
         //    Always from the *target* tenant: the resource being reached for
         //    lives there, and so does its hierarchy.
@@ -738,6 +772,27 @@ where
                 )));
                 continue;
             }
+
+            // Tenant-scope filter, per ITEM rather than on the shared vector.
+            //
+            // `assignments_by_subject` is keyed by the tenant the grants live
+            // in, so one entry is shared by every request in the batch — and
+            // for an organization-level principal those requests may name
+            // different tenants. Filtering the cached vector would apply the
+            // first item's tenant to all of them. The same reason the single
+            // path filters on `request.tenant_id`.
+            let reaching: Vec<RoleAssignment> = assignments
+                .iter()
+                .filter(|a| a.reaches_tenant(req.tenant_id))
+                .cloned()
+                .collect();
+            if reaching.is_empty() {
+                pre.push(PreDecision::Decided(AccessDecision::Deny(
+                    "no roles assigned that reach this tenant".into(),
+                )));
+                continue;
+            }
+            let assignments = reaching.as_slice();
 
             // WIDENING fallback: a miss here silently yields "no ancestors",
             // which can only ever *shrink* `applicable_role_ids` below —

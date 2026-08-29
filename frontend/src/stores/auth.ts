@@ -56,6 +56,23 @@ export interface AuthUser {
    * than offer a switch the server would refuse.
    */
   organization_level?: boolean;
+  /**
+   * The tenants this principal's roles reach, when they are restricted to
+   * particular ones; absent when they are not.
+   *
+   * Absent is the ordinary case and means "wherever this principal's roles
+   * reach" — every tenant of the organization for an organization-level
+   * principal, its own tenant for anybody else. A present list is a
+   * deliberately narrowed organization-level account: the tenant switcher and
+   * the tenant list are filtered to it, and the organization's own controls are
+   * not offered at all, because the server refuses that account every
+   * organization-level action.
+   *
+   * Not a security boundary — `axiam_authz` drops the out-of-reach grants and
+   * the `X-Axiam-Tenant` header is refused outright. This only lets the UI stop
+   * offering what would be refused.
+   */
+  reachable_tenant_ids?: string[];
 }
 
 interface AuthState {

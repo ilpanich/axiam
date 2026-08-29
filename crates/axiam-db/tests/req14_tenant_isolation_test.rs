@@ -9,6 +9,7 @@ use axiam_core::error::AxiamError;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::{CreateResource, UpdateResource};
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::scope::CreateScope;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
@@ -113,7 +114,7 @@ async fn role_assign_cross_tenant_rejected() {
 
     // Cross-tenant assign: user in A, role in B — must be rejected.
     let result = role_repo
-        .assign_to_user(tenant_a, user_a.id, role_b.id, None)
+        .assign_to_user(tenant_a, user_a.id, role_b.id, AssignmentScope::global())
         .await;
 
     assert!(result.is_err(), "cross-tenant assign must fail");
@@ -155,7 +156,7 @@ async fn role_assign_same_tenant_ok() {
 
     // Same-tenant assign must succeed.
     role_repo
-        .assign_to_user(tenant_a, user_a.id, role_a.id, None)
+        .assign_to_user(tenant_a, user_a.id, role_a.id, AssignmentScope::global())
         .await
         .expect("same-tenant assign must succeed");
 }

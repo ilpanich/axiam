@@ -23,6 +23,7 @@ vi.mock("react-router", async (importOriginal) => {
 
 import { TenantsPage } from "./TenantsPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
+import { useAuthStore } from "@/stores/auth";
 
 const orgs = [
   { id: "o1", name: "Acme Corp", slug: "acme-corp", created_at: "2026-01-01T00:00:00Z" },
@@ -67,8 +68,40 @@ function mockDefaultGets() {
   });
 }
 
+
+/**
+ * Sign in as the organization's own administrator.
+ *
+ * The tenant roster belongs to the organization: creating a tenant, renaming
+ * one and deleting one are all refused by the server to a principal that does
+ * not live in the organization's reserved tenant, so the page no longer renders
+ * those controls to one. A test that did not say who it was would be exercising
+ * a tenant administrator, for whom the buttons correctly do not exist.
+ *
+ * `organization_level` alone is what makes it one; the absent
+ * `reachable_tenant_ids` is what makes it an unrestricted one. See
+ * `lib/grantReach`'s `useCanActOnOrganization`.
+ */
+function signInAsOrganizationAdmin() {
+  useAuthStore.setState({
+    user: {
+      id: "u1",
+      username: "org-admin",
+      email: "org-admin@acme.test",
+      permissions: ["*"],
+      tenant_id: "org-tenant",
+      principal_tenant_id: "org-tenant",
+      org_id: "o1",
+      organization_level: true,
+    },
+    isAuthenticated: true,
+    isInitializing: false,
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  signInAsOrganizationAdmin();
 });
 
 describe("TenantsPage", () => {
@@ -293,5 +326,44 @@ describe("TenantsPage", () => {
     apiMock.get.mockResolvedValue(res([]));
     renderWithProviders(<TenantsPage />);
     expect(await screen.findByText("No tenants found.")).toBeInTheDocument();
+  });
+
+  it("offers no tenant lifecycle controls to a tenant administrator", async () => {
+    // The tenant roster belongs to the organization. A tenant administrator can
+    // see the one tenant the server returns for it and open the detail page —
+    // what it cannot do is create, rename or delete, and those buttons are
+    // therefore not drawn.
+    useAuthStore.setState({
+      user: {
+        id: "u2",
+        username: "tenant-admin",
+        email: "tenant-admin@acme.test",
+        permissions: ["*"],
+        tenant_id: "t1",
+        principal_tenant_id: "t1",
+        org_id: "o1",
+        organization_level: false,
+      },
+      isAuthenticated: true,
+      isInitializing: false,
+    });
+
+    mockDefaultGets();
+    renderWithProviders(<TenantsPage />);
+
+    expect(await screen.findByText("Production")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /new tenant/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^edit production$/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^delete production$/i }),
+    ).not.toBeInTheDocument();
+    // ...but the way into the tenant it administers is still there.
+    expect(
+      screen.getByRole("button", { name: /view production/i }),
+    ).toBeInTheDocument();
   });
 });

@@ -696,6 +696,14 @@ async fn main() -> std::io::Result<()> {
     // close. See `claude_dev/organization-scope-design.md`.
     let tenant_scope_resolver: std::sync::Arc<dyn axiam_api_rest::TenantScopeResolver> =
         std::sync::Arc::new(SurrealTenantRepository::new(pool.handle_for_repo()));
+    // How far an organization-level principal's roles reach across the tenants
+    // of its organization, so a switch to a tenant outside that reach is
+    // refused once, at the header, instead of as a 403 on every page that
+    // follows. Registered the same way and for the same reason as the resolver
+    // above — see `axiam_api_rest::PrincipalReachResolver`, which also explains
+    // why its absence degrades to "unrestricted" rather than failing closed.
+    let principal_reach_resolver: std::sync::Arc<dyn axiam_api_rest::PrincipalReachResolver> =
+        std::sync::Arc::new(axiam_db::SurrealRoleRepository::new(pool.handle_for_repo()));
     // SCIM provisioning tokens: resolves the long-lived handle an IdP presents
     // on /scim/v2 into the tenant user it is bound to. Registered as its own
     // app_data (rather than reached through AppState) for the same reason
@@ -2328,6 +2336,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(session_validator.clone()))
             .app_data(web::Data::new(tenant_scope_resolver.clone()))
+            .app_data(web::Data::new(principal_reach_resolver.clone()))
             .app_data(web::Data::new(scim_token_resolver.clone()))
             // QUAL-01: single composition root — every other REST handler
             // dependency (repos, services, the 4 hoisted QUAL-07 singletons)

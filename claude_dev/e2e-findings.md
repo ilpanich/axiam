@@ -1265,3 +1265,107 @@ deliberately not done, listed so they are decisions rather than omissions.
 5. **The native-mTLS sidecar is a script, not CI.** It needs Docker and a
    running stack, so it is a local verification tool. Wiring it into CI would
    mean giving the workflow a stack to point at.
+
+---
+
+## Wave 5 — the pre-beta walkthrough
+
+Four things the user found by driving the admin UI of the prod stack. Two are
+bugs, one is a boundary that was never enforced, and one is a feature that did
+not exist. All four are closed here.
+
+### W5-01 (HIGH, auth) — a passkey did not make MFA required
+
+Adding a TOTP authenticator made the next sign-in ask for a second factor.
+Adding a **passkey or a security key** did not: the credential appeared on the
+profile page, `/auth/webauthn/authenticate` accepted it, and a password on its
+own still let the account straight in.
+
+`AuthService::login` gates its MFA challenge on `user.mfa_enabled`, and the only
+writer of that flag was `confirm_mfa`. The flag began life meaning "a confirmed
+TOTP secret exists" and was later reused to mean "challenge this account"; the
+two readings agree only while TOTP is the sole factor.
+
+Fixed by giving `MfaMethodService` the counterpart of the disable it already
+had: `delete_method` turns the flag off when the last method goes,
+`enable_after_enrollment` turns it on when the first one arrives, and
+`handlers::webauthn::finish_registration` calls it.
+
+**The trap in flipping it.** Every downstream reader tests the *pair*
+`mfa_enabled && mfa_secret.is_some()` — there is no separate "confirmed" bit —
+so turning the flag on for a passkey would promote an abandoned, unconfirmed
+TOTP enrollment into a live second factor in the same write. The pending secret
+is therefore dropped rather than adopted, and
+`available_method_types` now requires the flag too, matching `list_methods`.
+
+### W5-02 (MED, frontend) — organization-level controls shown to a tenant admin
+
+`tenant-admin@axiam.dev` was offered "New Organization", the tenant lifecycle
+buttons and the CA controls, every one of which answers 403.
+
+No permission check could have hidden them: a tenant's seeded `super-admin` is
+granted the whole permission registry, `organizations:create` included, and what
+it lacks is not the permission but the **standing** —
+`require_organization_principal` refuses on the basis of where the account
+lives. The UI now gates on the same thing, through
+`lib/grantReach::useCanActOnOrganization`.
+
+Deliberately *not* built on `useIsOrganizationScope`: that predicate answers
+"which scope am I editing" and goes false the moment an organization
+administrator selects a child tenant, which would hide the organization's own
+controls from its own administrator mid-task.
+
+### W5-03 (MED, backend) — the tenant roster was not filtered
+
+`GET /organizations/{org}/tenants` returned every tenant of the organization to
+any principal holding `tenants:list`. A tenant administrator could read the
+names, slugs and creation dates of every sibling workspace — a small disclosure,
+but one the isolation boundary is supposed to prevent and one nothing needed.
+
+Filtered by the caller's reach: its own tenant for an ordinary principal, the
+scoped set for a restricted organization principal, everything for an
+unrestricted one. The topbar switcher inherits the filter from the same
+endpoint.
+
+### W5-04 (FEATURE) — organization roles could not be confined to tenants
+
+An organization-level principal's global grants reach *every* tenant of the
+organization. There was no way to express "administers two of these twelve",
+which is the arrangement operators actually ask for.
+
+A role **assignment** now carries an optional `tenant_scope` (schema 51,
+`option<array<string>>` on the `has_role` edge, no backfill). It applies only
+while acting on a tenant it names — the organization's own scope included in
+"nowhere else", because an account confined to two tenants is not an
+organization-wide administrator.
+
+Enforced in four places, and the split between them is the design:
+
+| Where | What it can decide |
+|---|---|
+| `axiam_authz::engine` | every action that **names a tenant** — the assignment is dropped outside its scope, in both the single and batch paths |
+| `handlers::org_scope::require_organization_principal` | organization-level actions, which name **no** tenant for a scope to be compared against |
+| `…_for_tenant` (tenant signing CAs) | organization-level, but naming one tenant — allowed when the reach covers it |
+| `extractors::auth::resolve_active_tenant` | `X-Axiam-Tenant`, so an unreachable tenant is one refusal rather than a 403 per page |
+
+The engine is the authority; the other three exist because it structurally
+cannot see those cases. `/auth/me` applies the same filter and withholds the `*`
+wildcard from a restricted principal, for the reason B-09 established.
+
+**Coverage.** `crates/axiam-authz/tests/organization_scope_test.rs` (+8),
+`crates/axiam-api-rest/tests/tenant_scoped_roles_test.rs` (14, new),
+`crates/axiam-auth/tests/mfa_methods_test.rs` (+6),
+`frontend/e2e/matrix/tenant-scoped-reach.spec.ts` (8, new, with a new
+`mx-org-a-admin` fixture principal), plus 15 new vitest cases across
+`grantReach`, `Sidebar`, `useAuthInit`, `OrganizationsPage` and `TenantsPage`.
+`examples/b6-organization-scope/walkthrough.sh` gained a step 7 asserting all
+five consequences at the wire level.
+
+### Found while closing W5-04
+
+**`npx tsc -b` was already red on this branch.**
+`frontend/src/lib/permissionStrings.test.ts` (added in wave 3) imports
+`node:fs`, and `tsconfig.app.json` narrows `types` to `["vite/client"]`. `vitest`
+resolves node types itself and passed; the typecheck CI runs over `src` did not.
+Closed with a file-scoped `/// <reference types="node" />` rather than by
+widening the whole `src` tree — app code has no business reaching for `process`.

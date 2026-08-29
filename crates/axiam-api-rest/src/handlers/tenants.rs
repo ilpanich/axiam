@@ -320,11 +320,133 @@ pub async fn list<C: Connection + Clone>(
         ));
     }
 
-    let result = state
-        .tenant_repo
-        .list_by_organization(path.org_id, query.into_inner())
-        .await?;
+    // Only the tenants this caller can actually act on.
+    //
+    // `tenants:list` says the caller may see a tenant roster; it does not say
+    // *which* roster. Before this, every principal holding it saw every tenant
+    // of the organization — including a tenant administrator, whose reach is
+    // one tenant, and a deliberately narrowed organization-level account, whose
+    // reach is the few tenants it was given. Both were shown the whole list and
+    // then refused when they touched anything in it.
+    //
+    // That is worse than a usability problem. The roster names every workspace
+    // in the organization, their slugs and their creation dates; an
+    // administrator of one tenant learning the shape of its siblings is a small
+    // disclosure, but it is one the isolation boundary is supposed to prevent
+    // and one nothing needed.
+    //
+    // The filter is applied here rather than in the repository because it is a
+    // fact about the *caller*, not about the query — `list_by_organization` is
+    // also what the organization's own administrator uses, unfiltered.
+    let pagination = query.into_inner();
+    let reachable = reachable_tenants(&user, state.get_ref(), path.org_id).await?;
+    let result = match reachable {
+        None => {
+            state
+                .tenant_repo
+                .list_by_organization(path.org_id, pagination)
+                .await?
+        }
+        Some(ids) => page_of(collect_tenants(state.get_ref(), &ids).await?, &pagination),
+    };
     Ok(HttpResponse::Ok().json(result))
+}
+
+/// The tenants `user` may act on within `org_id`, or `None` for "all of them".
+///
+/// Three answers, in the order they are decided:
+///
+/// * An **ordinary tenant principal** reaches exactly the tenant it lives in.
+///   `resolve_active_tenant` refuses it any other, so a longer list would be a
+///   list of tenants it cannot open.
+/// * An **organization-level principal with tenant-scoped roles** reaches the
+///   tenants those roles name.
+/// * An **organization-level principal with unrestricted roles** reaches every
+///   tenant of the organization — `None`, so the repository's own paginated
+///   query is used unchanged.
+async fn reachable_tenants<C: Connection + Clone>(
+    user: &AuthenticatedUser,
+    state: &AppState<C>,
+    org_id: Uuid,
+) -> Result<Option<Vec<Uuid>>, AxiamApiError> {
+    let home = state
+        .tenant_repo
+        .get_by_id(user.principal_tenant_id)
+        .await?;
+    if !home.is_organization_scope() {
+        // Its own tenant, and only if it is in the organization being listed —
+        // which `list`'s own `org_id` check already established, but repeating
+        // it here keeps this function correct on its own terms.
+        return Ok(Some(
+            (home.organization_id == org_id)
+                .then_some(vec![home.id])
+                .unwrap_or_default(),
+        ));
+    }
+
+    match crate::handlers::org_scope::principal_tenant_reach(user, state).await? {
+        axiam_core::models::role::TenantReach::Unrestricted => Ok(None),
+        axiam_core::models::role::TenantReach::Restricted(tenants) => {
+            Ok(Some(tenants.into_iter().collect()))
+        }
+    }
+}
+
+/// Load the named tenants, dropping any that no longer exist.
+///
+/// A tenant scope is a list of ids written when the assignment was made, and a
+/// tenant can be deleted afterwards. A dangling id is not an error to report to
+/// the caller — there is nothing they can do about it and the assignment is
+/// still valid for the rest — so it is simply not listed.
+async fn collect_tenants<C: Connection + Clone>(
+    state: &AppState<C>,
+    ids: &[Uuid],
+) -> Result<Vec<Tenant>, AxiamApiError> {
+    let mut tenants = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Ok(tenant) = state.tenant_repo.get_by_id(*id).await {
+            tenants.push(tenant);
+        }
+    }
+    // The repository lists by name; a filtered list that ordered differently
+    // would make the same tenants appear to move when a restriction is applied.
+    tenants.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tenants)
+}
+
+/// Apply `pagination` to an already-materialised list.
+///
+/// `total` counts the whole reachable set rather than the page, so the pager
+/// belongs to the result set it is paging — the same contract
+/// [`Pagination`](axiam_core::repository::Pagination) states for the
+/// repository-side queries.
+fn page_of(tenants: Vec<Tenant>, pagination: &Pagination) -> PaginatedResult<Tenant> {
+    let filtered: Vec<Tenant> = match pagination.search.as_deref() {
+        Some(term) if !term.trim().is_empty() => {
+            let needle = term.trim().to_lowercase();
+            tenants
+                .into_iter()
+                .filter(|t| {
+                    t.name.to_lowercase().contains(&needle)
+                        || t.slug.to_lowercase().contains(&needle)
+                        || t.id.to_string().contains(&needle)
+                })
+                .collect()
+        }
+        _ => tenants,
+    };
+    let total = filtered.len() as u64;
+    let items = filtered
+        .into_iter()
+        .skip(pagination.offset as usize)
+        .take(pagination.limit as usize)
+        .collect();
+    PaginatedResult {
+        items,
+        total,
+        offset: pagination.offset,
+        limit: pagination.limit,
+    }
 }
 
 /// `GET /api/v1/organizations/{org_id}/tenants/{tenant_id}`

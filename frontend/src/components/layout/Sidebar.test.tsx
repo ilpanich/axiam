@@ -169,6 +169,60 @@ describe("Sidebar", () => {
   });
 });
 
+describe("Sidebar — organization-level sections", () => {
+  /**
+   * `superUser` above holds `"*"`, which satisfies every permission check —
+   * including `organizations:list` — and is exactly the principal that
+   * exposed the defect: a tenant's own `super-admin` is granted the entire
+   * permission registry and is still refused every organization-level action
+   * by `handlers::org_scope`. So a wildcard is not enough to enable the
+   * Organizations entry, and these say which principals are.
+   */
+  it("disables Organizations for a tenant principal holding the wildcard", () => {
+    useAuthStore.setState({ user: { ...superUser, organization_level: false } });
+    renderSidebar();
+    expect(screen.getByRole("link", { name: /organizations/i })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  });
+
+  it("enables Organizations for the organization's own administrator", () => {
+    useAuthStore.setState({ user: { ...superUser, organization_level: true } });
+    renderSidebar();
+    expect(
+      screen.getByRole("link", { name: /organizations/i }),
+    ).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("disables Organizations for an organization principal confined to tenants", () => {
+    useAuthStore.setState({
+      user: {
+        ...superUser,
+        organization_level: true,
+        reachable_tenant_ids: ["t-a"],
+      },
+    });
+    renderSidebar();
+    expect(screen.getByRole("link", { name: /organizations/i })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  });
+
+  it("leaves Tenants enabled for a tenant administrator", () => {
+    // Deliberately NOT organization-gated: the roster the server returns is
+    // filtered to the tenants the caller can act on, so a tenant administrator
+    // sees its own tenant and can open it. Hiding the section would take away
+    // a page that works.
+    useAuthStore.setState({ user: { ...superUser, organization_level: false } });
+    renderSidebar();
+    expect(screen.getByRole("link", { name: /tenants/i })).not.toHaveAttribute(
+      "aria-disabled",
+    );
+  });
+});
+
 describe("activeNavPath", () => {
   it("matches on path segments, not string prefixes", () => {
     // `startsWith` would have let `/tenants` claim this.

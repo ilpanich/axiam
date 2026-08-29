@@ -130,6 +130,26 @@ impl<CR: CertificateRepository, CCR: CaCertificateRepository> DeviceAuthService<
                 )
             })?;
 
+        // The certificate must chain to a CA an operator flagged as an mTLS
+        // trust anchor.
+        //
+        // Without this, every CA in the organization was equally good: proving
+        // the leaf was signed by *some* CA that exists says nothing about
+        // whether that CA was ever meant to authenticate anyone. On the native
+        // path rustls enforces it, because the client-CA bundle is built from
+        // exactly the flagged anchors — but this function is also the
+        // proxy-terminated path (`X-Client-Certificate`), which is what the
+        // shipped Compose and Kubernetes deployments use, and there nothing
+        // consulted the flag at all. Un-flagging a CA — the documented way to
+        // stop trusting it — left every certificate under it authenticating.
+        //
+        // The check is a walk, not a test of the immediate issuer, because a
+        // tenant signing CA is an intermediate and is deliberately NOT itself
+        // an anchor: trust flows from the organization root it hangs beneath.
+        // Requiring the immediate issuer to be flagged would refuse every
+        // legitimately intermediate-issued certificate.
+        self.require_trust_anchor(&ca_cert).await?;
+
         // Resolve bound service account
         let sa_id = self
             .cert_repo
@@ -145,5 +165,58 @@ impl<CR: CertificateRepository, CCR: CaCertificateRepository> DeviceAuthService<
             org_id: Uuid::nil(), // Resolved by the caller via TenantRepository
             certificate_id: cert.id,
         })
+    }
+
+    /// Walks up from `issuer` until a CA flagged `mtls_trust_anchor` is found.
+    ///
+    /// Every CA on the way must itself be usable — `Active` and inside its
+    /// validity window — because an anchor reached through a revoked
+    /// intermediate is not reached at all.
+    ///
+    /// The walk is bounded. `parent_ca_id` is data, and data can describe a
+    /// cycle; an unbounded loop over it would hang the request handler rather
+    /// than refuse it. The bound is generous next to any real hierarchy
+    /// (root -> tenant signing CA -> leaf is two hops) and small enough that a
+    /// malformed chain fails fast.
+    async fn require_trust_anchor(
+        &self,
+        issuer: &axiam_core::models::certificate::CaCertificate,
+    ) -> AxiamResult<()> {
+        const MAX_CHAIN_DEPTH: usize = 8;
+        let now = Utc::now();
+        let mut node = issuer.clone();
+
+        for _ in 0..MAX_CHAIN_DEPTH {
+            if node.mtls_trust_anchor {
+                return Ok(());
+            }
+            let Some(parent_id) = node.parent_ca_id else {
+                return Err(AxiamError::Certificate(
+                    "certificate does not chain to any CA enabled as an mTLS trust anchor".into(),
+                ));
+            };
+            node = self
+                .ca_cert_repo
+                .get_by_id(node.organization_id, parent_id)
+                .await
+                .map_err(|_| {
+                    AxiamError::Certificate(
+                        "issuing CA names a parent that does not exist — chain verify failed"
+                            .into(),
+                    )
+                })?;
+            if node.status != CertificateStatus::Active
+                || now < node.not_before
+                || now > node.not_after
+            {
+                return Err(AxiamError::Certificate(
+                    "a CA in the issuing chain is revoked or outside its validity window".into(),
+                ));
+            }
+        }
+
+        Err(AxiamError::Certificate(
+            "issuing CA chain is longer than the supported depth — chain verify failed".into(),
+        ))
     }
 }

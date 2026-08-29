@@ -7,7 +7,7 @@ use axiam_core::models::certificate::{
     CertificateType, CreateCaCertificate, CreateCertificate, KeyAlgorithm, StoreCertificate,
 };
 use axiam_core::models::service_account::CreateServiceAccount;
-use axiam_core::repository::CertificateRepository;
+use axiam_core::repository::{CaCertificateRepository, CertificateRepository};
 use axiam_db::repository::{
     SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealServiceAccountRepository,
 };
@@ -81,6 +81,15 @@ async fn mtls_authenticate_valid_cert_returns_device_identity() {
         })
         .await
         .expect("CA generation must succeed");
+
+    // Enabled as an mTLS trust anchor: a certificate authenticates only if it
+    // chains to a CA an operator actually turned on for mTLS. Being signed by
+    // a CA that merely exists has not been sufficient since the flag was
+    // introduced — see `mtls_chain_reject_leaf_from_ca_that_is_not_a_trust_anchor`.
+    ca_repo
+        .set_mtls_trust_anchor(org_id, ca.certificate.id, true)
+        .await
+        .expect("enabling the CA as an mTLS trust anchor must succeed");
 
     // 2. Issue a leaf cert
     let cert_repo = SurrealCertificateRepository::new(db.clone());

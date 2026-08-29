@@ -600,3 +600,96 @@ async fn every_key_the_templates_use_is_always_present() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Template coverage — the half a local SMTP catcher would have measured
+// ---------------------------------------------------------------------------
+//
+// `E2E-TESTS.md` §3 wanted rendered subjects and bodies read out of a catcher,
+// to find "a template that renders `{{tenant_name}}` literally". That could not
+// be done against the running stack: `SmtpProvider` enforces TLS on both code
+// paths and verifies against compiled-in roots, so a local Mailpit is refused
+// at the TLS layer. Recorded as unverified in `claude_dev/e2e-findings.md`.
+//
+// The transport was never the interesting part. An unrendered placeholder is a
+// property of a (template, context) pair, and both halves are in this
+// repository: the identity keys the consumer always inserts, and the keys each
+// publisher puts in `template_context`. Asserting on the pair is stronger than
+// one observation through a catcher — it holds for every mail type, in CI, and
+// fails the moment a template grows a placeholder nobody supplies.
+//
+// What it does not cover: that each publisher still sends the keys named below.
+// That table is a declaration quoted from the call sites, not a reading of
+// them. It closes the direction the bug actually travels — a template asking
+// for more than it is given — and a publisher that drops a key is left to its
+// own crate's tests.
+
+/// The keys each publisher puts in `OutboundMailMessage::template_context`,
+/// quoted from its call site.
+///
+/// The `match` is exhaustive on purpose: a sixth `MailType` does not compile
+/// until somebody says what its publisher supplies.
+fn publisher_context_keys(mail_type: &MailType) -> &'static [&'static str] {
+    match mail_type {
+        // crates/axiam-api-rest/src/handlers/password_reset.rs
+        MailType::PasswordReset => &["token", "action_url", "expiry_time"],
+        // crates/axiam-api-rest/src/handlers/email_verification.rs
+        MailType::EmailVerification => &["token", "action_url", "expiry_time"],
+        // crates/axiam-audit/src/notification.rs
+        MailType::Notification => &["details", "action", "outcome", "event"],
+        // crates/axiam-api-rest/src/handlers/gdpr.rs
+        MailType::DeletionCancel => &["action_url", "expiry_time"],
+        // crates/axiam-server/src/cleanup.rs
+        MailType::ExportReady => &["action_url", "expiry_time"],
+    }
+}
+
+/// Every built-in template renders with nothing left standing, for every mail
+/// type, using only what that mail type's message actually carries.
+///
+/// The identity half comes from the real `identity_context` against a database
+/// where nothing resolves — the worst case, and the one that proves the four
+/// keys are unconditional rather than incidental to a seeded fixture.
+#[tokio::test]
+async fn every_mail_type_renders_with_no_placeholder_left_standing() {
+    use axiam_amqp::mail_consumer::{identity_context, template_kind_for};
+    use axiam_email::template::{builtin_template, render, render_html};
+
+    let db = setup_db().await;
+
+    for mail_type in MailType::ALL {
+        let mut msg = make_msg(mail_type.clone(), Uuid::new_v4(), Uuid::new_v4(), 0);
+        msg.user_id = Uuid::new_v4();
+
+        // Nothing is seeded, so every lookup misses and the context is exactly
+        // the unconditional floor.
+        let mut ctx = identity_context(
+            &msg,
+            &SurrealUserRepository::new(db.clone()),
+            &SurrealTenantRepository::new(db.clone()),
+            &SurrealOrganizationRepository::new(db.clone()),
+        )
+        .await;
+
+        for key in publisher_context_keys(mail_type) {
+            ctx.insert((*key).to_string(), format!("<{key}>"));
+        }
+
+        let kind = template_kind_for(mail_type);
+        let template = builtin_template(kind);
+
+        for (part, rendered) in [
+            ("subject", render(&template.subject, &ctx)),
+            ("text_body", render(&template.text_body, &ctx)),
+            ("html_body", render_html(&template.html_body, &ctx)),
+        ] {
+            assert!(
+                !rendered.contains("{{"),
+                "{mail_type:?} → {kind:?} {part} still contains an unrendered \
+                 placeholder: {rendered}\n\
+                 Either the template names a key no publisher supplies, or the \
+                 publisher stopped supplying it."
+            );
+        }
+    }
+}

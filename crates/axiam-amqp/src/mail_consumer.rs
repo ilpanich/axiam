@@ -73,7 +73,13 @@ fn backoff_delay_secs(attempt_count: u32) -> f64 {
 // MailType → TemplateKind mapping
 // ---------------------------------------------------------------------------
 
-fn template_kind_for(mail_type: &MailType) -> TemplateKind {
+/// The template a given [`MailType`] renders with.
+///
+/// Public so a test can assert the *whole* pipeline for each mail type —
+/// which template a publisher's message will reach, and therefore which
+/// placeholders that publisher has to supply. A test carrying its own copy of
+/// this mapping would keep passing after the mapping changed.
+pub fn template_kind_for(mail_type: &MailType) -> TemplateKind {
     match mail_type {
         MailType::PasswordReset => TemplateKind::PasswordReset,
         MailType::EmailVerification => TemplateKind::Activation,

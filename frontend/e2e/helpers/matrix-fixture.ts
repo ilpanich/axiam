@@ -243,6 +243,26 @@ export async function buildMatrixFixture(api: Api): Promise<MatrixFixture> {
         (await findBy(api, "/api/v1/resources", "name", "mx-b-only"))?.["id"];
       if (found) fx.resources["b-only"] = String(found);
     });
+    // A service account in tenant B, so `mx-b-admin` has a ROW on
+    // `/service-accounts`. Without one the per-row bind-certificate gate is
+    // unmeasurable for the only principal that could exercise it in tenant B —
+    // and "no rows" renders identically to "the action is correctly hidden",
+    // which is the confusion `in-page-controls.spec.ts` exists to avoid.
+    // Bound to nothing: the row is the point, not the certificate.
+    await step(fx, "tenant B service account", async () => {
+      const name = "mx-b-sa";
+      let sa = await findBy(api, "/api/v1/service-accounts", "name", name);
+      if (!sa) {
+        const res = await api.post("/api/v1/service-accounts", {
+          name,
+          description: "matrix fixture service account in tenant B",
+        });
+        created(res, `POST /service-accounts ${name} (tenant B)`);
+        sa = await findBy(api, "/api/v1/service-accounts", "name", name);
+      }
+      if (!sa) throw new Error("created but not findable");
+      fx.serviceAccounts["mx-b-sa"] = { id: String(sa["id"]) };
+    });
   }
 
   // --- PKI (organization level, so no acting tenant for the CA calls) -----

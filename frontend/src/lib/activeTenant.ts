@@ -22,7 +22,63 @@
  * naming the principal's own tenant as a no-op anyway, and omitting it keeps
  * ordinary requests byte-identical to what they were.
  */
-let activeTenantId: string | null = null;
+/**
+ * Where the selection is persisted, and why `sessionStorage`.
+ *
+ * Per TAB, not per browser: an operator administering two tenants side by side
+ * is a normal thing to do, and `localStorage` would have the two tabs fighting
+ * over one value. Per tab also means closing the tab ends the selection, which
+ * is the right default for something that changes what every subsequent write
+ * applies to.
+ *
+ * Not security state: the server decides whether the caller may act on the
+ * named tenant, and refuses with a 403 rather than falling back silently. This
+ * only remembers the operator's choice.
+ */
+const STORAGE_KEY = "axiam.activeTenant";
+
+/**
+ * Reads the stored selection.
+ *
+ * Wrapped because `sessionStorage` *throws* — not returns null — in a private
+ * window, with site data blocked, or inside a sandboxed frame. An unreadable
+ * store means "no selection", which is the safe answer: the caller's own scope.
+ */
+function readStored(): { id: string; name: string | null } | null {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { id?: unknown; name?: unknown };
+    return typeof parsed.id === "string"
+      ? { id: parsed.id, name: typeof parsed.name === "string" ? parsed.name : null }
+      : null;
+  } catch {
+    // Unreadable, or written by an older version in a different shape. Either
+    // way: no selection, which is the caller's own scope — the safe answer.
+    return null;
+  }
+}
+
+const restored = readStored();
+let activeTenantId: string | null = restored?.id ?? null;
+let activeTenantName: string | null = restored?.name ?? null;
+
+/**
+ * The selection restored from this tab's storage at load, for the auth store to
+ * hydrate from. `null` when there is none.
+ *
+ * Exposed as a snapshot rather than as live state: the store owns what the UI
+ * renders, this module owns what the HTTP client sends, and this is the one
+ * point where the second seeds the first.
+ */
+export function restoredActiveTenant(): { id: string; name: string | null } | null {
+  return restored;
+}
+
+/** The display name of the tenant being acted on, if one was remembered. */
+export function getActiveTenantName(): string | null {
+  return activeTenantName;
+}
 
 /** Header the server reads to decide which tenant a request acts on. */
 export const ACTIVE_TENANT_HEADER = "X-Axiam-Tenant";
@@ -35,8 +91,29 @@ export const ACTIVE_TENANT_HEADER = "X-Axiam-Tenant";
  * than a silent fallback. So sending it wrongly fails loudly instead of
  * returning another tenant's data.
  */
-export function setActiveTenant(tenantId: string | null): void {
+export function setActiveTenant(
+  tenantId: string | null,
+  tenantName: string | null = null,
+): void {
   activeTenantId = tenantId;
+  activeTenantName = tenantName;
+  // Persisted so the choice survives a reload. Without this the selection lived
+  // only in module state: pressing F5, following a bookmark, or opening a
+  // deep link put an organization-level principal silently back in the
+  // organization scope mid-task.
+  try {
+    if (tenantId === null) {
+      globalThis.sessionStorage?.removeItem(STORAGE_KEY);
+    } else {
+      globalThis.sessionStorage?.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ id: tenantId, name: tenantName }),
+      );
+    }
+  } catch {
+    // Unavailable storage costs persistence, not correctness — the in-memory
+    // value above is still authoritative for this page's lifetime.
+  }
 }
 
 /** The tenant currently being acted on, or `null` for the caller's own. */

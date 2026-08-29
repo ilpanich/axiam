@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import { setActiveTenant } from "@/lib/activeTenant";
+import { restoredActiveTenant, setActiveTenant } from "@/lib/activeTenant";
 
 export interface AuthUser {
   id: string;
@@ -98,8 +98,11 @@ const initialState: AuthState = {
   user: null,
   tenantSlug: null,
   orgSlug: null,
-  activeTenantId: null,
-  activeTenantName: null,
+  // Hydrated from this tab's storage rather than hard-null, so the topbar
+  // label agrees with the tenant the HTTP client is actually acting on after a
+  // reload. Both come from the same place — see `lib/activeTenant`.
+  activeTenantId: restoredActiveTenant()?.id ?? null,
+  activeTenantName: restoredActiveTenant()?.name ?? null,
   isAuthenticated: false,
   isInitializing: true,
 };
@@ -127,7 +130,7 @@ export const useAuthStore = create<AuthState & AuthActions>()((set) => ({
   setInitializing: (value) => set({ isInitializing: value }),
 
   selectTenant: (tenantId, tenantName = null) => {
-    setActiveTenant(tenantId);
+    setActiveTenant(tenantId, tenantName);
     set({ activeTenantId: tenantId, activeTenantName: tenantName });
   },
 }));

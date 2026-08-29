@@ -253,7 +253,12 @@ export const navSections: NavSection[] = [
         to: "/audit-logs",
         label: "Audit Logs",
         icon: <ScrollText size={18} />,
-        requiredPermission: null,
+        // The route is wrapped in `<ProtectedRoute permission="audit_logs:list">`.
+        // Declaring `null` here left the entry enabled for a principal the
+        // route would refuse — a live link into an Access Denied page, which is
+        // the "renders a control the server would refuse" class. Every other
+        // entry already agreed with its route; this one did not.
+        requiredPermission: "audit_logs:list",
       },
       {
         to: "/notification-rules",

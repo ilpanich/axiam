@@ -181,9 +181,28 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .await
             .map_err(DbError::from)?;
 
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let mut result = result.check().map_err(|e| {
+            // A duplicate (organization_id, slug) trips the `idx_tenant_org_slug`
+            // unique index, and the raw error reads
+            //   "Database index `idx_tenant_org_slug` already contains [...]".
+            // Left alone it becomes `DbError::Migration`, which the API layer
+            // maps to a bare 500 `{"error":"internal_error"}` — so re-running
+            // any provisioning script answers "something broke" for a system
+            // that is in fact perfectly fine, and the documented 409 branch of
+            // `scripts/e2e-bootstrap.sh` was dead code.
+            //
+            // Matched on the message because that is the only signal the SDK
+            // surfaces for a constraint violation; the index name is pinned so
+            // an unrelated index failing still reads as the error it is.
+            let msg = e.to_string();
+            if msg.contains("idx_tenant_org_slug") && msg.contains("already contains") {
+                DbError::AlreadyExists {
+                    entity: "tenant".into(),
+                }
+            } else {
+                DbError::Migration(msg)
+            }
+        })?;
 
         // Statement 0 is the CREATE, statement 1 is the RELATE.
         let rows: Vec<TenantRow> = result.take(0).map_err(DbError::from)?;

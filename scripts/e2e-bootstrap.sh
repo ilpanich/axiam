@@ -136,8 +136,32 @@ BOOTSTRAP_BODY=$(jq -nc \
    }
    + (if $setup_token == "" then {} else {setup_token: $setup_token} end)')
 
+# Is the system already bootstrapped? Probe, rather than infer it from a status
+# code.
+#
+# The 409 branch below is only reachable when the gate is
+# AXIAM_BOOTSTRAP_ADMIN_EMAIL: with a setup token, the token is consumed by the
+# first successful bootstrap, so a second call is refused by the GATE (403
+# "bootstrap gate not satisfied") before anything looks at whether the system is
+# already initialised. That ordering is defensible — /admin/bootstrap is public,
+# and answering 409 tells an unauthenticated caller the deployment is
+# initialised — but it made this script's documented idempotence false for every
+# production-shaped stack.
+#
+# Signing in is the honest question: if the super-admin can authenticate, the
+# bootstrap that created it has already happened, and there is nothing to do.
+PROBE=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H "Content-Type: application/json" \
+  -d "{\"org_slug\":\"${ORG_SLUG}\",\"username_or_email\":\"${ADMIN_EMAIL}\",\"password\":\"${ADMIN_PASSWORD}\"}" \
+  "${AXIAM_URL}/api/v1/auth/login" || echo "000")
+if [ "${PROBE}" = "200" ]; then
+  echo "[e2e-bootstrap] Already bootstrapped (${ADMIN_EMAIL} signs in) — skipping bootstrap."
+  HTTP_STATUS=409
+fi
+
 # Retry bootstrap up to 5 times in case the server is still initializing
 for i in $(seq 1 5); do
+  [ "${HTTP_STATUS:-}" = "409" ] && break
   HTTP_STATUS=$(curl -s -o /tmp/bootstrap_resp.json -w "%{http_code}" \
     -X POST "${AXIAM_URL}/api/v1/admin/bootstrap" \
     -H "Content-Type: application/json" \

@@ -266,7 +266,19 @@ pub async fn bootstrap<C: Connection + Clone>(
     //    consumed. Both unset/invalid => refuse. An unset gate never
     //    allows bootstrap.
     let mut consumed_token_hash: Option<String> = None;
-    match std::env::var("AXIAM_BOOTSTRAP_ADMIN_EMAIL") {
+    // `.ok().filter(|s| !s.trim().is_empty())`, not a bare `var()`: Docker
+    // Compose sets a variable to the EMPTY STRING for
+    // `FOO: "${FOO:-}"`, and `Ok("")` taken as "gate set" compares the request
+    // email against nothing, answers 403 "email does not match
+    // AXIAM_BOOTSTRAP_ADMIN_EMAIL", and makes the setup-token path
+    // unreachable — so a deployment with a perfectly valid one-time token
+    // cannot bootstrap at all. An empty gate is not a gate; fall through to the
+    // token, which still has to be valid and unconsumed.
+    match std::env::var("AXIAM_BOOTSTRAP_ADMIN_EMAIL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(())
+    {
         Ok(expected) => {
             // Env gate IS set — preserve the existing email-match behavior.
             if req.email != expected {

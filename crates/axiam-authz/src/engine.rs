@@ -430,17 +430,37 @@ where
         //     in, which is the organization tenant every time and would make
         //     every restriction vacuous.
         //
-        //     The filter is applied before the boundary split below rather than
-        //     inside one of its branches, because it holds on both sides: a
-        //     restricted assignment does not apply in the organization's own
-        //     scope either. An account restricted to two tenants is not an
-        //     organization-wide administrator, and letting its grants apply
-        //     with no tenant selected would hand back the reach the restriction
-        //     removed.
-        let assignments: Vec<RoleAssignment> = assignments
-            .into_iter()
-            .filter(|a| a.reaches_tenant(request.tenant_id))
-            .collect();
+        //     Applied only when the request CROSSES a tenant boundary, because
+        //     that is the only thing a `tenant_scope` has to say. It names the
+        //     tenants an assignment carries *into*; inside the tenant the
+        //     assignment already lives in there is nothing for it to narrow.
+        //
+        //     Filtering unconditionally was the first shape of this, and it
+        //     left a restricted principal with no grants at all whenever it
+        //     named no tenant: `request.tenant_id` is then the organization's
+        //     own scope tenant, which a `tenant_scope` of `[alpha]` does not
+        //     name, so every assignment was dropped. The account could not read
+        //     the tenant roster that tells it which tenants it administers —
+        //     `handlers::tenants::list`'s own filter for exactly this principal
+        //     became unreachable — and `/auth/me` answered with an empty
+        //     permission set, so the admin UI drew nothing.
+        //
+        //     What keeps that from handing back the reach the restriction
+        //     removed is that it is not this filter's job. An organization-wide
+        //     *act* — creating a tenant, minting the organization CA, flagging
+        //     a trust anchor — names no tenant for any comparison here to be
+        //     made against, and is refused to a restricted account by
+        //     `handlers::org_scope::require_organization_principal`, which
+        //     tests the reach directly. This filter answers the question it can
+        //     answer: may these grants reach the tenant being acted upon.
+        let assignments: Vec<RoleAssignment> = if request.crosses_tenant_boundary() {
+            assignments
+                .into_iter()
+                .filter(|a| a.reaches_tenant(request.tenant_id))
+                .collect()
+        } else {
+            assignments
+        };
 
         if assignments.is_empty() {
             return Ok(AccessDecision::Deny(
@@ -781,11 +801,19 @@ where
             // different tenants. Filtering the cached vector would apply the
             // first item's tenant to all of them. The same reason the single
             // path filters on `request.tenant_id`.
-            let reaching: Vec<RoleAssignment> = assignments
-                .iter()
-                .filter(|a| a.reaches_tenant(req.tenant_id))
-                .cloned()
-                .collect();
+            //
+            // Boundary-conditional for the same reason as the single path: a
+            // `tenant_scope` names the tenants an assignment carries into, so
+            // inside the tenant it already lives in there is nothing to narrow.
+            let reaching: Vec<RoleAssignment> = if req.crosses_tenant_boundary() {
+                assignments
+                    .iter()
+                    .filter(|a| a.reaches_tenant(req.tenant_id))
+                    .cloned()
+                    .collect()
+            } else {
+                assignments.to_vec()
+            };
             if reaching.is_empty() {
                 pre.push(PreDecision::Decided(AccessDecision::Deny(
                     "no roles assigned that reach this tenant".into(),

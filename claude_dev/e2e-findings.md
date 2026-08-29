@@ -37,7 +37,13 @@ principal).
 - **Impact:** a principal without `audit_logs:list` gets a live, clickable
   "Audit Logs" link that dead-ends in the route guard. This is the
   "renders a control the server would refuse" class from E2E-TESTS.md §2.
-- **Fix:** _pending_
+- **Fix:** `frontend/src/components/layout/navSections.tsx` — the entry now
+  declares `requiredPermission: "audit_logs:list"`, matching its route guard.
+  All 22 entries now agree with their routes.
+- **Regression test:** `frontend/e2e/matrix/nav-reach.spec.ts` asserts, per
+  principal, that a nav entry is enabled exactly when the permission is held —
+  and, structurally, that no entry's declared permission differs from the one
+  guarding the route it links to.
 
 ### B-01 — empty `AXIAM_BOOTSTRAP_ADMIN_EMAIL` closes the bootstrap gate entirely
 **Layer:** backend
@@ -53,7 +59,9 @@ while preparing the stack.
   match AXIAM_BOOTSTRAP_ADMIN_EMAIL"* — with the setup-token path unreachable.
   A valid one-time setup token cannot bootstrap the system.
 - **Root cause:** `match std::env::var(...)` treats `Ok("")` as "gate set".
-- **Fix:** _pending_
+- **Fix:** `.ok().filter(|s| !s.trim().is_empty()).ok_or(())` — an empty gate is
+  no gate, and the request falls through to the setup token, which still has to
+  be valid and unconsumed.
 
 ### B-02 — re-creating an existing tenant answers 500, not 409
 **Layer:** backend
@@ -75,7 +83,11 @@ while preparing the stack.
 - **Impact:** the documented idempotent branch of `e2e-bootstrap.sh` is dead
   code, and an operator re-running a provisioning script sees an opaque 500
   where the system is in fact fine.
-- **Fix:** _pending_
+- **Fix:** the tenant repository translates the `idx_tenant_org_slug` unique-index
+  violation into `DbError::AlreadyExists`, which the API layer already maps to
+  `409 {"error":"already_exists"}`. Done in the repository rather than the
+  handler so every caller benefits and the race a pre-check cannot close is
+  covered too.
 
 ### B-03 — bootstrap on an already-bootstrapped system answers 403, not 409, whenever the gate is a setup token
 **Layer:** backend (behaviour) / tooling (the claim that depends on it)
@@ -101,9 +113,11 @@ while preparing the stack.
   are idempotent, so re-running against an already-seeded stack is a no-op":
   that is false for every stack whose gate is a token, i.e. every
   production-shaped one.
-- **Fix:** _pending_ — make the script establish idempotence by probing
-  (org-level sign-in succeeds ⇒ already bootstrapped ⇒ skip), rather than by
-  depending on a status code the server only produces on one of two gate paths.
+- **Fix:** the script now establishes idempotence by probing — if the
+  super-admin can sign in, the bootstrap that created it has already happened
+  and the call is skipped — rather than by depending on a status code the server
+  produces on only one of two gate paths. The handler's ordering is left alone:
+  gate-before-lock is a defensible posture for a public endpoint.
 
 ### O-01 — `POST /api/v1/users` is capped at 5/min per IP (observation, not a defect)
 **Layer:** backend, by design
@@ -234,11 +248,13 @@ organization endpoint *should* refuse a caller from a different organization.
 The gap is the case neither addresses — a caller from the *same* organization
 but the *wrong scope within it*.
 
-**Fix:** _pending_ — the shape wanted is a scope predicate on the
-organization-level handlers ("the caller's own record lives in the organization
-scope"), not a new permission, since a permission can be granted to a tenant
-role again by the same route. The seeded tenant `super-admin` role should also
-stop carrying organization-level actions, so the two layers agree.
+**Fix:** `crates/axiam-api-rest/src/handlers/org_scope.rs` —
+`require_organization_principal`, applied to all sixteen organization-level
+handlers. A scope predicate rather than a new permission, because a permission
+can be granted to a tenant role again by the very route that created this gap,
+whereas where a principal *lives* is a row it cannot edit. See "On B-04,
+precisely what was and was not changed" at the end of this document, including
+the half deliberately left as a follow-up.
 
 **Probe artifacts left in the test stack** (throwaway, but named so they can be
 found): CA `CN=mx-escalation-probe`, CA `CN=mx-escalation-probe-2` (its trust
@@ -292,12 +308,15 @@ identities cannot be called by one.
   future machine-facing POST — are dead to machine tokens. The audience
   widening that `AuthenticatedPrincipal` exists to provide is entirely defeated
   by a middleware that runs before it.
-- **Fix:** _pending_ — skip CSRF validation when the request carries no session
-  cookie **and** authenticates via `Authorization: Bearer`. The precise
-  condition matters: a request that has *both* a session cookie and a bearer
-  header must still be validated, or the exemption becomes the bypass.
-- **Regression test:** to be added alongside the fix — a service account gets a
-  token and makes an authorization check with it.
+- **Fix:** CSRF validation is skipped when the request carries **no** session
+  cookie **and** authenticates via `Authorization: Bearer`. The condition is
+  extracted as the pure `is_bearer_only(...)` precisely because the case that
+  matters is the one where BOTH are present: the browser supplies the cookie,
+  an attacker supplies the header, and that request stays subject to validation.
+- **Regression tests:** three unit tests on `is_bearer_only` pinning all three
+  cases, plus `matrix/service-account-authz.spec.ts`, where a service account
+  obtains a `client_credentials` token and makes a real authorization check
+  with it.
 
 ### O-03 — `/oauth2/token` requires `tenant_id` as a query parameter (observation)
 Not a defect: it is declared `required` in `sdks/openapi.json` and the server
@@ -330,9 +349,13 @@ the error text at least names the field.
   What breaks is continuity: an operator who reloads mid-task, or who opens a
   bookmark or a shared deep link to a child tenant's page, silently lands in the
   organization scope instead.
-- **Fix:** _pending_ — persist to `sessionStorage` (per tab, so two tabs can
-  administer two tenants), restore it in the same place the auth store hydrates,
-  and keep the existing `logout` clear.
+- **Fix:** persisted to `sessionStorage` — per tab, so two tabs can administer
+  two tenants without fighting over one value — and restored both into the HTTP
+  client's module state and into the auth store, so the topbar label and the
+  header it sends cannot disagree. Every access is wrapped: `sessionStorage`
+  *throws* in a private window or with site data blocked, and an unreadable
+  store must mean "no selection", which is the caller's own scope. The existing
+  clear on logout is kept.
 
 **Correction to an earlier reading of this run.** A first probe navigated with
 `page.goto()` — a full document load — and reported the switcher as entirely
@@ -404,3 +427,50 @@ compose network was reached and refused the connection at the TLS layer
 being parsed as SMTP). That is the product behaving as designed, not a defect,
 so template rendering is recorded as **unverified**, needing either a
 publicly-trusted catcher or a trust-store change in the server image.
+
+## Fixes applied in this wave
+
+| # | fix | layer | verified by |
+|---|---|---|---|
+| F-01 | `navSections.tsx` declares `audit_logs:list` for the Audit Logs entry | frontend | `matrix/nav-reach.spec.ts` |
+| F-02 | `location /oauth2/` in `docker/nginx.conf` — trailing slash | frontend | `matrix/spa-routing.spec.ts` |
+| F-03 | the selected tenant persists in `sessionStorage`, per tab | frontend | manual reload probe; `matrix/tenancy.spec.ts` |
+| B-01 | an empty `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is treated as unset | backend | reasoning + the bootstrap path itself |
+| B-02 | duplicate `(org, slug)` on tenant create answers 409, not 500 | backend | `scripts/e2e-bootstrap.sh` re-run |
+| B-03 | `e2e-bootstrap.sh` establishes idempotence by probing sign-in | tooling | re-run against a bootstrapped stack |
+| B-04 | organization-level handlers require an organization-scoped principal | backend | `matrix/pki.spec.ts` |
+| B-05 | CSRF is not demanded of a bearer-only caller | backend | `middleware::csrf` unit tests + `matrix/service-account-authz.spec.ts` |
+
+### On B-04, precisely what was and was not changed
+
+**Changed:** a new guard, `crates/axiam-api-rest/src/handlers/org_scope.rs`,
+refuses a caller whose own record does not live in the organization's reserved
+scope. It is applied to the sixteen organization-level handlers — every CA
+certificate operation (generate, import, revoke, migrate custody, set mTLS
+trust anchor, generate/sign intermediates), organization create/update/delete,
+tenant create/update/delete, and the organization's email configuration.
+
+The predicate is `principal_tenant_id` → `Tenant::is_organization_scope()`,
+which comes from a row the caller cannot edit. Deliberately **not**
+`AuthenticatedUser::organization_level`: that flag is set only when a request
+names *another* tenant via `X-Axiam-Tenant`, so it is `false` for exactly the
+calls that needed guarding. Reads (`GET /organizations`, `GET .../tenants`) are
+left alone — the tenant switcher needs them, and they leak nothing across the
+boundary.
+
+**Not changed, and why:** an ordinary tenant's seeded `super-admin` role is
+still granted the *entire* permission registry, organization-level actions
+included (`crates/axiam-db/src/seeder.rs`: "super-admin gets ALL permissions").
+Withholding them would be defence in depth, and the two layers would then agree
+— but it is a data change to every existing tenant, the `reconcile` path only
+ever grants and would need to learn to revoke, and the scope guard already makes
+those grants unusable at organization level. **Recommended as a follow-up**,
+deliberately not bundled into a fix that is already an authorization-boundary
+change.
+
+**Deployment note:** this tightens a boundary. A deployment where a
+tenant-level administrator currently creates tenants, or manages CA material,
+will start receiving 403 with a message naming the reason. That is the intent —
+`scripts/e2e-bootstrap.sh` has always described a tenant admin as administering
+"all of `default` and nothing outside it" — but it is a behaviour change, not
+only a bug fix, and should be called out in release notes.

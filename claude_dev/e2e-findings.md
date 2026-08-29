@@ -1028,37 +1028,239 @@ defects — but a run in that state should be discarded and repeated, not report
 either way.
 
 
-## Still open after wave 3
+## Wave 4 — closing the four open items, and the two defects that surfaced
 
-Nothing here is a wave-3 failure. These are the things this exercise has
+Wave 3 ended with five items listed as decisions rather than omissions. Four
+are now closed; the fifth (wiring the native-mTLS sidecar into CI) is out of
+scope for this pass and is restated at the end.
+
+Closing the first one turned up **two live authorization defects** that four
+waves of the matrix had not, both for the same reason: the matrix measured
+what the system *does* and these were disagreements between two layers that
+each, on its own, behaved correctly.
+
+---
+
+### Item 1 — `seeder.rs` no longer grants organization-level actions to a tenant
+
+B-04's scope guard makes an organization-level action unusable by a tenant
+principal whatever its role carries. What it left standing was the reason the
+guard was needed: every tenant's seeded `super-admin` still *held*
+`ca_certificates:manage`, `organizations:create`, `tenants:delete` and the
+rest. Two layers, one of them saying no.
+
+`ORGANIZATION_LEVEL_ACTIONS` (`crates/axiam-core/src/permission_scope.rs`) is
+now the single list both read. `seed_default_roles` withholds those actions
+from an ordinary tenant's super-admin and admin; the organization's own scope
+keeps them. `viewer` is unaffected by construction — every entry is a mutation
+and viewer is seeded only with `:list`/`:get`, which a test pins rather than a
+comment.
+
+**`reconcile_default_role_grants` learned to revoke**, which the wave-3 note
+said it would need. Withholding alone fixes new tenants only:
+`seed_default_roles` runs once at bootstrap and never again, so every existing
+deployment would have kept the old grants forever. The revocation is narrow on
+purpose — only the three seeded default roles (a role an operator created is
+theirs), only the listed actions, only outside the organization scope. It is
+not a "make grants match the seeding rules" pass: an operator who granted
+`users:delete` to `viewer` keeps it. The function now returns
+`ReconcileOutcome { granted, revoked }`, and `revoked` gets its own WARN line
+naming the tenant, because it means a capability is being taken away.
+
+**The rule that decides membership, and why it is not a comment.** An action
+can only be withheld if *every* handler requiring it carries the scope guard.
+`email_config:write` guards both `/organizations/{id}/email-config` and
+`/tenants/{id}/email-config`, so withholding it would take a tenant
+administrator's own mail configuration with it; it stays granted and the
+organization half rests on the guard alone.
+`crates/axiam-api-rest/tests/organization_scope_consistency_test.rs` reads the
+handler sources and fails in both directions:
+
+- a guarded action **missing** from the list — a hole that stays silent
+  precisely because the guard covers it, so nobody notices the second layer
+  stopped covering that action;
+- a listed action some **unguarded** handler still needs — which would quietly
+  strip a capability from every deployment on the next boot.
+
+Mutation-verified both ways; each failure names the offending call sites.
+
+### B-08 — `POST /api/v1/mds/refresh` was reachable from inside a tenant
+
+**Layer:** backend (authorization). **Severity:** medium-high.
+Found while establishing that rule, not by a probe.
+
+The route was guarded by `ca_certificates:generate` alone — which every tenant
+super-admin held. `mds_entry` and `mds_blob_meta` are, in the schema's own
+words, *"FIDO MDS3 metadata (server-global, NOT tenant-scoped)"*. So a tenant
+administrator could refresh or roll back the FIDO attestation trust picture for
+**every tenant in the deployment** — the same shape as B-04's mTLS trust
+anchor, one layer over.
+
+The module's own docs already contained the argument: MDS ingestion *"is the
+same class of privilege as CA certificate management"*. That class is now
+organization-level, so this followed it. `GET /status` is left alone; it is a
+read, as is everything else this change does not touch.
+
+### B-09 — `/auth/me` told a tenant super-admin it could do everything
+
+**Layer:** backend (authorization hint) / frontend (what it renders).
+**Severity:** medium — no privilege is gained, but the UI offers controls the
+server refuses, which is §2's first defect class.
+
+Found by a mutation that **should have failed and did not**. A probe pointed a
+matrix control at a misspelt permission and every principal still passed. The
+reason was not the gate: `holds()` honours `*`, and three principals had it —
+including tenant-level ones. The mutation was measuring the wildcard.
+
+`GET /auth/me` prefixes `"*"` to the permissions array for any principal
+holding a role *named* `super-admin`, and `usePermissions().can()` reads that as
+yes to everything. True for the organization's own super-admin. Not true for an
+ordinary tenant's, and not since B-04. So the admin UI was rendering "New
+Organization", the CA-management actions and the tenant lifecycle controls to a
+principal the server answers 403 to.
+
+The comment directly above the wildcard already stated the rule it was
+breaking: *"a hint that disagrees with the enforcement is worse than none"*.
+The wildcard is now emitted only for a principal whose own record lives in the
+organization scope — the same predicate the scope guard uses. For everyone else
+the explicit action list is the honest answer *and* a complete one, since a
+tenant super-admin still holds every permission that applies to its tenant. An
+unresolvable tenant drops the wildcard: a control hidden from someone who could
+have used it is the cheaper mistake.
+
+Both directions are pinned and they check each other — without the fix the
+withhold test fails; had it over-applied, the keep test would.
+
+### Item 2 — the selection-gated in-page controls are measured
+
+`ScopesPanel`'s "New Scope" (`scopes:create`), `EffectiveAccessPanel`'s act-as
+subject picker (`authz:check_as`) and the per-row bind-certificate action on
+service accounts (`certificates:bind`) are now in
+`frontend/e2e/matrix/in-page-controls.spec.ts`.
+
+The wave-3 reason for leaving them out was sound and is what shaped the fix:
+"the control is absent" is also what you see when there was no row to select,
+when the selection did not take, and when the panel half-rendered. So every
+selection-gated entry carries a **landmark** — an element the panel renders
+regardless of the permission (`Scopes — <name>`, `Previewing access to`, the
+ungated `Rotate secret for …` beside the bind action). Nothing is selected
+without first asserting there was something to select; no gate is asserted
+before the landmark proves the panel is on screen. Each failure is its own
+sentence, so "a control the server would allow, hidden" can never be printed
+about a page that never rendered. `EffectiveAccessPanel` substitutes an
+explanation when the permission is absent, so that is asserted too — "replaced
+by a refusal" rules out a half-rendered panel in a way "absent" cannot.
+
+Two gaps surfaced by that design, both reported as themselves rather than as
+hidden controls:
+
+- **the fixture had no service account in tenant B**, so `mx-b-admin` — the
+  only principal that could exercise `certificates:bind` there — had no row.
+  Fixed in `matrix-fixture.ts`.
+- **an organization-level principal has no rows in its own scope**, correctly.
+  `admin` saw nothing on either page, which would have left the whole
+  "allowed" side unmeasured for the principal holding every permission. It is
+  now put into tenant A first by seeding the selection `lib/activeTenant.ts`
+  itself persists — the state a reload restores since F-03. Driving the
+  switcher through the UI is `tenancy.spec.ts`'s assertion; this file only
+  needs to arrive.
+
+Mutation-verified in both directions: a locator that cannot find a rendered
+control fails with "a control the server would allow, hidden"; a landmark that
+cannot be found fails with "the selection did not take, so its absence proves
+nothing".
+
+### Item 3 — the mail publishers are read, not quoted
+
+`every_mail_type_renders_with_no_placeholder_left_standing` builds its context
+from a table of what each publisher supplies, and that table was a quote from
+the five call sites. A publisher that stopped sending `action_url` would have
+left the render test green while every real message rendered `{{action_url}}`
+to a user — the test asserted a property of a context nobody had checked was
+the context.
+
+`every_publisher_still_sends_the_keys_it_is_credited_with` reads the call
+sites. The publishers live in `axiam-api-rest`, `axiam-audit` and
+`axiam-server`, all above `axiam-amqp` in the layering, so the crate cannot
+call them — it reads their source, the same technique the org-scope
+consistency test uses on the handlers.
+
+Both context shapes are covered, because the two that matter are written
+differently: four build a `serde_json::json!` literal inline, while
+`axiam-audit`'s dispatcher assembles a map first (the event name is only known
+per rule). Mutation-verified on one of each.
+
+Two guards on the crude parts. `production_source` strips `#[cfg(test)]`
+first — necessary, not tidy: `password_reset.rs` builds a message in its own
+tests with a deliberately partial context, and a scan that read it would report
+the production publisher as having dropped a key.
+`each_mail_type_has_exactly_one_production_publisher` pins the assumption the
+reader rests on.
+
+Subset rather than equality, deliberately: a publisher may supply more than it
+is credited with (`axiam-audit` adds `username` only for an unauthenticated
+actor). The other direction was already closed — a key the template uses and
+the table omits leaves a `{{…}}` standing.
+
+### Item 4 — the e2e specs typecheck, and now they have to
+
+The nine `Property 'email' does not exist on type 'never'` errors in
+`auth-contract.spec.ts` are fixed, and the cause is worth naming because the
+obvious fix reproduces it. TypeScript does not track assignments made inside a
+callback, so `let body: T | null = null` is still narrowed to `null` at the
+assertion; `expect(body).not.toBeNull()` does not widen it back (it is not a
+type predicate); and handing the narrowed variable to a generic helper infers
+`T = never` all over again. `Capture<T>` holds the value in an object, so the
+type comes from the `captured<T>()` call rather than from flow analysis of a
+variable.
+
+The bodies are typed against the backend structs they pin, restated locally
+rather than imported from `src/services/auth.ts`: a contract test that reuses
+the application's own idea of the payload agrees with the application even when
+the application is wrong.
+
+**The real defect was that nothing typechecked that directory.** CI's
+`npx tsc -b` builds only `tsconfig.app.json` and `tsconfig.node.json`, and
+Playwright transpiles without typechecking — which is how nine errors
+accumulated unseen. `npm run typecheck:e2e` now runs in the same CI step, so
+there is no tenth.
+
+---
+
+## Still open after wave 4
+
+Nothing here is a wave-4 failure. These are the things this exercise has
 deliberately not done, listed so they are decisions rather than omissions.
 
-1. **`seeder.rs` still grants a tenant's `super-admin` role the entire
-   permission registry**, organization-level actions included. B-04's scope
-   guard makes those grants unusable at organization level, so this is defence
-   in depth rather than an open hole — but the two layers would then agree. It
-   is a data change to every existing tenant and the `reconcile` path only ever
-   grants, so it would need to learn to revoke. Deliberately not bundled into a
-   fix that was already an authorization-boundary change.
+1. **Publisher-side mail context is read, but the *identity* half still is
+   not.** `every_publisher_still_sends_the_keys_it_is_credited_with` reads the
+   five publishers. The four identity keys the consumer inserts come from
+   `identity_context`, which the render test exercises directly against a
+   database where nothing resolves — so that half is measured by execution
+   rather than by reading, which is stronger. Nothing outstanding; recorded so
+   the asymmetry is not mistaken for a gap.
 
-2. **In-page gates that only appear after a selection are unmeasured**:
-   `ScopesPanel` (`scopes:create`), `EffectiveAccessPanel` (`authz:check_as`),
-   and the per-row bind-certificate action on service accounts
-   (`certificates:bind`). Reaching them needs fixture data whose absence would
-   read as "the control is correctly hidden" — the one answer that file must
-   never produce by accident. Covering them means extending the fixture first.
+2. **`nav-reach.spec.ts` has one oxlint error** (an unused `page` parameter).
+   Pre-existing and untouched here. `npm run lint` also reports several
+   hundred errors from `frontend/ds-bundle/`, an untracked local
+   design-system artifact directory that CI never sees — worth either
+   gitignoring or excluding from the lint glob, because it currently makes
+   the local lint output useless for spotting a real one.
 
-3. **Publisher-side mail context is asserted by declaration, not by reading.**
-   The table in `every_mail_type_renders_with_no_placeholder_left_standing` is
-   quoted from the five call sites. A publisher that stops sending a key it
-   promised is left to its own crate's tests.
+3. **The wildcard's blind spot is closed for tenant principals but remains for
+   the organization's.** B-09 stops `*` reaching a tenant super-admin, so the
+   matrix can now measure permission strings for those principals. The
+   organization super-admin still holds `*` legitimately, so a misspelt
+   permission is still invisible from inside the UI for it — which is why the
+   typo guard lives in `frontend/src/lib/permissionStrings.test.ts`, comparing
+   the UI's strings against `crates/axiam-api-rest/src/permissions.rs` with no
+   server involved.
 
-4. **`frontend/e2e/auth-contract.spec.ts` has nine pre-existing TypeScript
-   errors** (`Property 'email' does not exist on type 'never'`). Playwright
-   transpiles without typechecking so the specs run, but
-   `tsc -p frontend/e2e/tsconfig.json` is not clean and cannot be used as a
-   gate until they are fixed. Untouched here: unrelated to this wave, and
-   fixing it properly means typing the captured request bodies.
+4. **B-08 and B-09 tighten boundaries and are behaviour changes, not only bug
+   fixes.** A tenant administrator that currently refreshes the FIDO MDS blob
+   will start getting 403, and a tenant super-admin's UI will stop showing
+   organization-level controls it was showing (and being refused on). Both
+   belong in release notes alongside B-04 and B-06.
 
 5. **The native-mTLS sidecar is a script, not CI.** It needs Docker and a
    running stack, so it is a local verification tool. Wiring it into CI would

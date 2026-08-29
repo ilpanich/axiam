@@ -991,8 +991,38 @@ pub async fn me<C: Connection + Clone>(
 
     let mut permissions: Vec<String> = actions.into_iter().collect();
     if is_super_admin {
-        // Wildcard short-circuits client-side `can()` checks (per UI-SPEC).
-        permissions.insert(0, "*".to_string());
+        // B-09: the wildcard short-circuits client-side `can()` checks (per
+        // UI-SPEC), and it is only TRUE for a super-admin whose own record
+        // lives in the organization scope.
+        //
+        // A tenant's `super-admin` role is named the same but does not reach
+        // organization-level actions: `require_organization_principal` refuses
+        // them whatever the role carries, and since the B-04 follow-up they are
+        // not even granted. Emitting `*` for such a principal makes the admin
+        // UI render "New Organization", the CA-management actions and the
+        // tenant lifecycle controls to somebody the server will answer 403 —
+        // which is the first half of `E2E-TESTS.md` §2's defect pair, and
+        // exactly what the comment above this block warns against: "a hint that
+        // disagrees with the enforcement is worse than none".
+        //
+        // Without the wildcard the explicit `actions` list is the honest
+        // answer, and it is now a complete one: a tenant super-admin is granted
+        // every permission that applies to its tenant, so `can()` keeps
+        // answering yes to everything it should.
+        //
+        // An unresolvable tenant drops the wildcard rather than keeping it. The
+        // cost of being wrong that way is a control hidden from someone who
+        // could have used it; the other way is a control offered to someone the
+        // server refuses, which is the defect being closed.
+        let organization_level = state
+            .tenant_repo
+            .get_by_id(principal_tenant_id)
+            .await
+            .map(|t| t.is_organization_scope())
+            .unwrap_or(false);
+        if organization_level {
+            permissions.insert(0, "*".to_string());
+        }
     }
 
     // D-14/D-15: resolve tenant_slug/org_slug strictly from the authenticated

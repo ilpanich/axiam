@@ -1,3 +1,12 @@
+/// <reference types="node" />
+//
+// This suite reads the repository from disk, so it needs Node's own types.
+// `tsconfig.app.json` deliberately narrows `types` to `["vite/client"]` — app
+// code has no business reaching for `process` or `node:fs` — and a
+// file-scoped reference is how one test opts in without widening that for the
+// whole `src` tree. Without it `npx tsc -b`, which CI runs over `src`, fails
+// here with TS2591 while `vitest` (which resolves node types itself) passes:
+// exactly the split that lets a red typecheck land unnoticed.
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";

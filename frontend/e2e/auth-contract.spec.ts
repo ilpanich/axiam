@@ -23,6 +23,82 @@ test.use({ storageState: { cookies: [], origins: [] } });
 
 import type { Page } from "@playwright/test";
 
+// ---------------------------------------------------------------------------
+// Capturing a request body, with a type
+// ---------------------------------------------------------------------------
+
+/**
+ * A slot a `page.route` handler writes the intercepted request into.
+ *
+ * A plain `let body: T | null = null` does not survive typechecking here, and
+ * the reason is worth stating because the obvious fix does not work either.
+ * TypeScript's control-flow analysis does not track assignments made inside a
+ * callback, so at the assertion the variable is still narrowed to its
+ * initialiser — `null`. `expect(body).not.toBeNull()` does not widen it back
+ * (it is not a type predicate), so `body?.email` is a property access on
+ * `never`, which is exactly the nine errors this file used to carry. Passing
+ * the narrowed variable to a generic helper does not help: `T` infers from the
+ * narrowed type and collapses to `never` again.
+ *
+ * Holding the value in an object fixes it at the root. The slot's type comes
+ * from the `captured<T>()` call that created it, not from flow analysis of a
+ * variable, so it cannot be narrowed away by a callback TypeScript declines to
+ * follow.
+ */
+interface Capture<T> {
+  value: T | null;
+}
+
+/** Create an empty slot for a request body of type `T`. */
+function captured<T>(): Capture<T> {
+  return { value: null };
+}
+
+/**
+ * Read a slot, failing with a legible message if nothing was ever captured.
+ *
+ * Throwing rather than asserting is deliberate: "the page never made the
+ * request" and "the request carried the wrong field" are different failures,
+ * and only this one can say the first out loud. The old
+ * `expect(body).not.toBeNull()` reported the second even when the first had
+ * happened.
+ */
+function requireCaptured<T>(slot: Capture<T>, what: string): T {
+  if (slot.value === null) {
+    throw new Error(
+      `expected ${what} to have been captured, but no matching request was made`
+    );
+  }
+  return slot.value;
+}
+
+// The request bodies under test, restated from the backend structs they pin.
+//
+// Deliberately declared here rather than imported from `src/services/auth.ts`:
+// these are *contract* assertions, and a test that reuses the application's own
+// idea of the payload agrees with the application even when the application is
+// wrong. Each shape is quoted from the handler named beside it.
+
+/** Backend `RequestResetBody` — `handlers/password_reset.rs`. */
+interface RequestResetBody {
+  email?: string;
+  org_slug?: string;
+  tenant_slug?: string;
+}
+
+/** Backend `ConfirmResetBody` — `handlers/password_reset.rs`. */
+interface ConfirmResetBody {
+  tenant_id?: string;
+  token?: string;
+  new_password?: string;
+}
+
+/** Backend `VerifyEmailRequest` — `handlers/email_verification.rs`. */
+interface VerifyEmailBody {
+  tenant_id?: string;
+  token?: string;
+}
+
 /**
  * Answer the OPAQUE registration preflight with 404, which is how the server
  * says the tenant has OPAQUE off.
@@ -127,12 +203,12 @@ test.describe("Auth endpoint contract", () => {
   test.describe("ForgotPasswordPage", () => {
     test("POST /api/v1/auth/reset — not /auth/forgot-password", async ({ page }) => {
       let capturedUrl: string | undefined;
-      let capturedBody: Record<string, unknown> | null = null;
+      const body = captured<RequestResetBody>();
 
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
           capturedUrl = route.request().url();
-          capturedBody = route.request().postDataJSON();
+          body.value = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
           route.fallback();
@@ -152,18 +228,19 @@ test.describe("Auth endpoint contract", () => {
 
       // 23-06: RequestResetBody requires `email`; the SECFIX-06 defining
       // signal is that the body actually carries it (not just the path).
-      expect(capturedBody).not.toBeNull();
-      expect(capturedBody?.email).toBe("test@example.com");
+      expect(requireCaptured(body, "the POST /auth/reset body").email).toBe(
+        "test@example.com"
+      );
     });
 
     test("POST /api/v1/auth/reset carries org_slug/tenant_slug from the page URL (D-04 / Open Question 1)", async ({
       page,
     }) => {
-      let capturedBody: Record<string, unknown> | null = null;
+      const body = captured<RequestResetBody>();
 
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
-          capturedBody = route.request().postDataJSON();
+          body.value = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
           route.fallback();
@@ -178,23 +255,23 @@ test.describe("Auth endpoint contract", () => {
 
       await expect(page.getByText(/If an account with that email exists/i)).toBeVisible();
 
-      expect(capturedBody).not.toBeNull();
-      expect(capturedBody?.email).toBe("test@example.com");
-      expect(capturedBody?.org_slug).toBe("acme-corp");
-      expect(capturedBody?.tenant_slug).toBe("production");
+      const reset = requireCaptured(body, "the POST /auth/reset body");
+      expect(reset.email).toBe("test@example.com");
+      expect(reset.org_slug).toBe("acme-corp");
+      expect(reset.tenant_slug).toBe("production");
     });
   });
 
   test.describe("ResetPasswordPage", () => {
     test("POST /api/v1/auth/reset/confirm — not /auth/reset-password", async ({ page }) => {
       let capturedUrl: string | undefined;
-      let capturedBody: Record<string, unknown> | null = null;
+      const body = captured<ConfirmResetBody>();
       const tenantId = "22222222-2222-2222-2222-222222222222";
 
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
           capturedUrl = route.request().url();
-          capturedBody = route.request().postDataJSON();
+          body.value = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
           route.fallback();
@@ -230,17 +307,17 @@ test.describe("Auth endpoint contract", () => {
 
       // 23-06: ConfirmResetBody requires tenant_id/token/new_password — the
       // SECFIX-06 defining signal is that the body actually carries them.
-      expect(capturedBody).not.toBeNull();
-      expect(capturedBody?.tenant_id).toBe(tenantId);
-      expect(capturedBody?.token).toBe("contract-test-token");
-      expect(capturedBody?.new_password).toBe(newPassword);
+      const confirm = requireCaptured(body, "the POST /auth/reset/confirm body");
+      expect(confirm.tenant_id).toBe(tenantId);
+      expect(confirm.token).toBe("contract-test-token");
+      expect(confirm.new_password).toBe(newPassword);
     });
   });
 
   test.describe("VerifyEmailPage", () => {
     test("POST /api/v1/auth/verify-email — not /auth/verify-email", async ({ page }) => {
       let capturedUrl: string | undefined;
-      let capturedBody: Record<string, unknown> | null = null;
+      const body = captured<VerifyEmailBody>();
       const tenantId = "33333333-3333-3333-3333-333333333333";
 
       // `verifyEmail` is a POST (VerifyEmailRequest {tenant_id, token} in the
@@ -248,7 +325,7 @@ test.describe("Auth endpoint contract", () => {
       await page.route("**/auth/**", (route) => {
         if (route.request().method() === "POST") {
           capturedUrl = route.request().url();
-          capturedBody = route.request().postDataJSON();
+          body.value = route.request().postDataJSON();
           route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
         } else {
           route.fallback();
@@ -271,9 +348,9 @@ test.describe("Auth endpoint contract", () => {
 
       // 23-06: VerifyEmailRequest requires BOTH tenant_id and token in the
       // body — the SECFIX-06 defining signal.
-      expect(capturedBody).not.toBeNull();
-      expect(capturedBody?.tenant_id).toBe(tenantId);
-      expect(capturedBody?.token).toBe("contract-verify-token");
+      const verify = requireCaptured(body, "the POST /auth/verify-email body");
+      expect(verify.tenant_id).toBe(tenantId);
+      expect(verify.token).toBe("contract-verify-token");
     });
   });
 

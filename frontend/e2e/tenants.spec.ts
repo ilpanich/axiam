@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { loginAsAdmin } from "./helpers/auth";
+import { loginAsAdmin, loginAsOrgAdmin } from "./helpers/auth";
 
 // ---------------------------------------------------------------------------
 // Tenants list page tests — live backend (D-13).
@@ -37,25 +37,6 @@ test.describe("Tenants list page", () => {
     await page.goto("/tenants");
     await expect(page).not.toHaveURL(/\/login/);
     await expect(page.getByText("E2E Test Org").first()).toBeVisible();
-  });
-
-  test('"New Tenant" button opens the create modal', async ({ page }) => {
-    await page.goto("/tenants");
-    await page.getByRole("button", { name: /New Tenant/i }).click();
-    await expect(page.getByRole("dialog")).toBeVisible();
-    await expect(
-      page.getByRole("heading", { name: "New Tenant" })
-    ).toBeVisible();
-  });
-
-  test("create form has Organization, Name, Slug, and Description fields", async ({
-    page,
-  }) => {
-    await page.goto("/tenants");
-    await page.getByRole("button", { name: /New Tenant/i }).click();
-    await expect(page.getByLabel(/Name/)).toBeVisible();
-    await expect(page.getByLabel(/Slug/)).toBeVisible();
-    await expect(page.getByLabel(/Description/)).toBeVisible();
   });
 
   test("shows the bootstrapped tenant row with its slug and Active status", async ({
@@ -97,5 +78,47 @@ test.describe("Tenants list page", () => {
     } else {
       await expect(page.getByRole("navigation").first()).toBeVisible();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Creating a tenant needs an organization principal.
+//
+// Tenant lifecycle is an organization-level action:
+// `require_organization_principal` refuses it to a caller whose own record
+// lives in a tenant, whatever permissions that caller holds — a tenant
+// administrator creating sibling tenants is precisely what that guard exists to
+// stop. So the admin UI no longer draws "New Tenant" for the tenant admin, and
+// these two cases were asserting the button that used to be there and answer
+// 403 when pressed.
+//
+// The roster cases above keep the tenant admin: listing the tenants it can
+// reach is a different question from creating one, and it is one that principal
+// is entitled to ask.
+// ---------------------------------------------------------------------------
+test.describe("Tenants create — as the organization principal", () => {
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test.beforeEach(async ({ page }) => {
+    await loginAsOrgAdmin(page);
+  });
+
+  test('"New Tenant" button opens the create modal', async ({ page }) => {
+    await page.goto("/tenants");
+    await page.getByRole("button", { name: /New Tenant/i }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "New Tenant" })
+    ).toBeVisible();
+  });
+
+  test("create form has Organization, Name, Slug, and Description fields", async ({
+    page,
+  }) => {
+    await page.goto("/tenants");
+    await page.getByRole("button", { name: /New Tenant/i }).click();
+    await expect(page.getByLabel(/Name/)).toBeVisible();
+    await expect(page.getByLabel(/Slug/)).toBeVisible();
+    await expect(page.getByLabel(/Description/)).toBeVisible();
   });
 });

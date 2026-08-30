@@ -77,3 +77,4 @@ stories/
 # vendored copy — see frontend/vite.config.ts.
 frontend/vendor/opaque-wasm/
 crates/axiam-opaque-wasm/pkg/
+gsd-planning.tar.xz

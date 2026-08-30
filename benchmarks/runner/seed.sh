@@ -304,6 +304,52 @@ seed_axiam() {
   [ -z "${ORG_ID:-}" ] && {
     echo "[seed/axiam] could not determine org_id (no organization_id from bootstrap and no org_id claim in the access token)"; exit 1; }
 
+  # --- Account lockout: neutralize the POLICY, not just the deployment default -
+  # The bench compose sets AXIAM__AUTH__MAX_FAILED_LOGIN_ATTEMPTS=1000000, and
+  # that used to be the whole story. It no longer is: the lockout threshold is a
+  # per-organization / per-tenant POLICY resolved through
+  # `axiam_core::models::settings::effective_settings`, and the login and gRPC
+  # credential paths take a `LockoutPolicy` rather than an `AuthConfig`
+  # (crates/axiam-auth/src/lockout.rs). The deployment-wide config value is only
+  # the FALLBACK for a check that cannot resolve a tenant — the bench org's own
+  # settings row still carries the shipped default of 5, so the env var never
+  # reached the code that locks the account and the neutralization was a no-op.
+  #
+  # What that costs, concretely: `scenarios/grpc_admin_validate.js` drives
+  # ValidateCredentials with a deliberately WRONG password thousands of times,
+  # so the seeded user locks ~5 iterations in, and every cell after it that logs
+  # in as the user (loginSession / mintUserToken) fails 401 "invalid
+  # credentials" in ~3ms — the lockout short-circuit, ahead of Argon2id. In the
+  # beta06 dry run that was five FAIL cells (oauth2_password_login,
+  # token_refresh, uma_ticket_grant, userinfo, userinfo_grpc) with a healthy
+  # server and a correct password, which reads as a broken seed.
+  #
+  # PUT /organizations/{id}/settings is a FULL replacement (`SetOrgSettings`,
+  # every field required) while the GET answers the grouped `SecuritySettings`
+  # shape (lockout/password/mfa/token/email/certificate/notification/opaque/
+  # privacy). So read the current settings and flatten every object-valued group
+  # into the flat body rather than hand-writing one: that preserves the fields
+  # this seed already set (notably `opaque_mode`, without which both opaque_*
+  # cells 404) and keeps working when a new settings group is added upstream.
+  #
+  # Accrual itself is untouched — the D-06 counter still increments on every
+  # failed check, it simply never reaches a ceiling within a run. An operator who
+  # exports BENCH_MAX_FAILED_LOGIN_ATTEMPTS can put a real threshold back for a
+  # deliberate `rl=prod`-style sensitivity pass.
+  local max_failed="${BENCH_MAX_FAILED_LOGIN_ATTEMPTS:-1000000}"
+  echo "[seed/axiam] neutralizing the org lockout policy (max_failed_login_attempts=$max_failed)"
+  local org_settings put_body new_max
+  org_settings=$(api GET "/api/v1/organizations/$ORG_ID/settings")
+  put_body=$(printf '%s' "$org_settings" | jq -c --argjson n "$max_failed" \
+    '([to_entries[] | select(.value | type == "object") | .value] | add)
+     | .max_failed_login_attempts = $n' 2>/dev/null || true)
+  [ -n "$put_body" ] && [ "$put_body" != "null" ] || {
+    echo "[seed/axiam] could not read org security settings: $org_settings"; exit 1; }
+  new_max=$(api_checked PUT "/api/v1/organizations/$ORG_ID/settings" "$put_body" \
+    | jq -r '.lockout.max_failed_login_attempts // empty')
+  [ "$new_max" = "$max_failed" ] || {
+    echo "[seed/axiam] org lockout policy is max_failed_login_attempts='$new_max', expected '$max_failed'"; exit 1; }
+
   echo "[seed/axiam] creating benchmark user"
   USER_ID=$(create_or_find /api/v1/users \
     "{\"username\":\"$BENCH_USERNAME\",\"email\":\"bench@bench.dev\",\"password\":\"$BENCH_PASSWORD\"}" \
@@ -340,9 +386,10 @@ seed_axiam() {
   # server and a correct password. `POST /users/<id>/unlock` is the only way
   # out, and it is idempotent on an unlocked user.
   #
-  # With AXIAM__AUTH__MAX_FAILED_LOGIN_ATTEMPTS neutralized in the bench
-  # compose no new lock should form, but this also recovers volumes created
-  # BEFORE that neutralization — which is exactly how this was found.
+  # With the org lockout policy neutralized just above no new lock should form,
+  # but this also recovers a volume that was locked BEFORE that step existed —
+  # which is exactly how this was found. It must stay AFTER the policy PUT:
+  # unlocking first and then leaving the threshold at 5 just re-locks.
   echo "[seed/axiam] clearing any inherited lockout on the bench user"
   local locked
   locked=$(api_checked POST "/api/v1/users/$USER_ID/unlock" '{}' | jq -r '.is_locked // empty')

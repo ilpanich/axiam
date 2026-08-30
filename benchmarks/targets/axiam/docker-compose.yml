@@ -130,6 +130,17 @@ services:
       #
       # An operator who exports the real name wins, so `rl=prod`-style sensitivity
       # passes can still put the shipped lockout back deliberately.
+      #
+      # NOT SUFFICIENT ON ITS OWN. The threshold became a per-organization /
+      # per-tenant policy resolved through `effective_settings`, and both
+      # credential paths now take a `LockoutPolicy` rather than an `AuthConfig`
+      # (crates/axiam-auth/src/lockout.rs) — this value is only the FALLBACK for
+      # a check that cannot resolve a tenant. The bench org's own settings row
+      # still carries the shipped 5, so on its own this variable neutralizes
+      # nothing and cell 1 above happens anyway (it did, in the beta06 dry run:
+      # five FAIL cells). `runner/seed.sh` therefore PUTs the same value onto
+      # /api/v1/organizations/{id}/settings after bootstrap; that is the step
+      # that actually holds, and this one is its deployment-wide backstop.
       AXIAM__AUTH__MAX_FAILED_LOGIN_ATTEMPTS: "${AXIAM__AUTH__MAX_FAILED_LOGIN_ATTEMPTS:-1000000}"
       # --- Authz decision cache (D7) ----------------------------------------------
       # Default OFF (today's behavior). Flip ENABLED=true only for the labeled

@@ -343,6 +343,47 @@ describe("TenantScopePicker", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("points an organization administrator inside a tenant at the switcher", async () => {
+    // The control still cannot be offered — roles edited from inside `t1` live
+    // in `t1` and reach it alone — but disappearing without a word left the
+    // scope selector as an unmarked prerequisite for the whole feature.
+    switchToTenant("t1");
+    renderWithProviders(
+      <TenantScopePicker value={[]} onChange={vi.fn()} subject="user" />,
+    );
+    expect(
+      screen.getByText(/to confine this assignment to particular tenants/),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole("checkbox")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("says nothing to a principal that cannot reach the organization scope", () => {
+    // An organization account already confined to particular tenants is never
+    // offered the organization scope by the switcher, and cannot set a tenant
+    // scope at all. Telling it to switch would describe a door that is not
+    // there.
+    useAuthStore.setState({
+      user: {
+        id: "u3",
+        username: "two-tenant-admin",
+        email: "two-tenant-admin@acme.test",
+        permissions: ["*"],
+        tenant_id: "org-tenant",
+        principal_tenant_id: "org-tenant",
+        org_id: "o1",
+        organization_level: true,
+        reachable_tenant_ids: ["t1", "t2"],
+      },
+      activeTenantId: "t1",
+    });
+    const { container } = renderWithProviders(
+      <TenantScopePicker value={[]} onChange={vi.fn()} subject="user" />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it("offers every standard tenant, and not the organization scope itself", async () => {
     renderWithProviders(
       <TenantScopePicker value={[]} onChange={vi.fn()} subject="user" />,

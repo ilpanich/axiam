@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Globe, Layers, Target } from "lucide-react";
-import { useIsOrganizationScope } from "@/lib/grantReach";
+import { useCanActOnOrganization, useIsOrganizationScope } from "@/lib/grantReach";
 import { useResourceNames } from "@/hooks/useResourceNames";
 import { useAuthStore } from "@/stores/auth";
 import { tenantService, type Tenant } from "@/services/organizations";
@@ -222,12 +222,23 @@ export interface TenantScopePickerProps {
  * billing service, in tenants A and B" is a sentence with both. Folding them
  * into one picker would force a choice between them.
  *
- * # Why it renders nothing outside an organization scope
+ * # What it shows outside an organization scope
  *
  * In an ordinary tenant the only tenant an assignment could name is that tenant
  * itself, so the control would offer a single option that changes nothing —
  * and the server refuses the field there outright. A picker that can only be
  * wrong is worse than no picker.
+ *
+ * But "worse than no picker" is not the same as "worse than no words". An
+ * organization administrator who has switched into a tenant is in exactly the
+ * standing this feature was built for, and saw the control disappear with
+ * nothing said — leaving the scope selector in the top right as an unmarked
+ * prerequisite. So that one case gets a note naming it, and only that case:
+ * a principal that cannot reach the organization scope at all (an ordinary
+ * tenant administrator, or an organization account already confined to
+ * particular tenants, which the switcher never offers the organization scope)
+ * still gets nothing, because for them the note would describe a door that is
+ * not there.
  *
  * The empty selection is the default and means "every tenant of the
  * organization", which is what every assignment made here meant before this
@@ -240,9 +251,26 @@ export function TenantScopePicker({
   disabled,
 }: TenantScopePickerProps) {
   const organizationScope = useIsOrganizationScope();
+  const canActOnOrganization = useCanActOnOrganization();
   const { tenants, isLoading } = useReachableTenants();
 
-  if (!organizationScope) return null;
+  if (!organizationScope) {
+    if (!canActOnOrganization) return null;
+    return (
+      <div className="flex flex-col gap-1.5">
+        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Tenants
+        </p>
+        <p className="text-xs text-muted-foreground rounded-md border border-primary/20 bg-white/5 px-3 py-2">
+          Switch to{" "}
+          <span className="text-foreground/80 font-medium">Organization</span>{" "}
+          scope, with the selector at the top right, to confine this assignment
+          to particular tenants. A role assigned from inside a tenant lives in
+          that tenant and reaches it alone.
+        </p>
+      </div>
+    );
+  }
 
   const toggle = (id: string) => {
     onChange(

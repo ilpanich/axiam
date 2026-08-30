@@ -6,7 +6,7 @@ import {
   type MfaMethod,
   type UpdateUserPayload,
 } from "@/services/users";
-import { roleService, type Role } from "@/services/roles";
+import { roleService } from "@/services/roles";
 import {
   federationService,
   federationLinkService,
@@ -14,6 +14,7 @@ import {
 } from "@/services/federation";
 import { usePermissions } from "@/hooks/usePermissions";
 import { FormDialog } from "@/components/FormDialog";
+import { AssignRoleDialog } from "@/components/AssignRoleDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DataTable, type Column } from "@/components/DataTable";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -23,6 +24,7 @@ import { Label } from "@/components/ui/label";
 import { Loader2, Trash2, ShieldX, Unlink } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { SectionCard, ToggleField } from "@/components/shared";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 
 // ─── Info row ─────────────────────────────────────────────────────────────────
 // NOTE: kept as a local copy — this InfoRow differs from components/shared.tsx's
@@ -136,12 +138,6 @@ export function UserDetailPage() {
     enabled: !!userId,
   });
 
-  // ─── Roles query ──────────────────────────────────────────────────────────────
-  const { data: allRoles = [] } = useQuery({
-    queryKey: ["roles"],
-    queryFn: roleService.list,
-  });
-
   // ─── Federation links ─────────────────────────────────────────────────────────
   const canListFederation = can("federation:list");
   const canUnlinkFederation = can("federation:delete");
@@ -248,33 +244,10 @@ export function UserDetailPage() {
   });
 
   // ─── Role assignment state ────────────────────────────────────────────────────
+  //
+  // The dialog owns the role list, both scope pickers and the error; this page
+  // only says who is being granted the role and what to refresh afterwards.
   const [assignRoleOpen, setAssignRoleOpen] = useState(false);
-  const [selectedRoleId, setSelectedRoleId] = useState("");
-  const [assignError, setAssignError] = useState("");
-
-  const assignRoleMutation = useMutation({
-    mutationFn: (roleId: string) => roleService.assignToUser(roleId, userId!),
-    onSuccess: () => {
-      setAssignRoleOpen(false);
-      setSelectedRoleId("");
-      setAssignError("");
-    },
-    onError: (err: unknown) => {
-      setAssignError(
-        err instanceof Error ? err.message : "Failed to assign role."
-      );
-    },
-  });
-
-  function handleAssignRoleSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setAssignError("");
-    if (!selectedRoleId) {
-      setAssignError("Please select a role.");
-      return;
-    }
-    assignRoleMutation.mutate(selectedRoleId);
-  }
 
   // ─── MFA table columns ────────────────────────────────────────────────────────
   const mfaColumns: Column<MfaMethod>[] = [
@@ -482,9 +455,10 @@ export function UserDetailPage() {
         }
       >
         <p className="text-sm text-muted-foreground">
-          Role assignments are managed via the{" "}
-          <span className="text-primary">Roles</span> page. Use "Assign Role"
-          above to link a role to this user.
+          Use "Assign Role" above to grant this user a role, optionally confined
+          to one resource or to particular tenants. The assignments a role
+          already carries are listed on the{" "}
+          <span className="text-primary">Roles</span> page.
         </p>
       </SectionCard>
 
@@ -545,50 +519,16 @@ export function UserDetailPage() {
       />
 
       {/* Assign role dialog */}
-      <FormDialog
+      <AssignRoleDialog
         open={assignRoleOpen}
-        onClose={() => {
-          setAssignRoleOpen(false);
-          setSelectedRoleId("");
-          setAssignError("");
-        }}
-        title="Assign Role"
-        onSubmit={handleAssignRoleSubmit}
-        isLoading={assignRoleMutation.isPending}
-        submitLabel="Assign"
-        error={assignError}
+        onClose={() => setAssignRoleOpen(false)}
+        subject="user"
         errorId="user-assign-role-error"
-      >
-        <div className="space-y-2">
-          <Label htmlFor="assign-role-select">Role</Label>
-          {allRoles.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No roles available. Create roles in the Roles page first.
-            </p>
-          ) : (
-            <select
-              id="assign-role-select"
-              value={selectedRoleId}
-              onChange={(e) => setSelectedRoleId(e.target.value)}
-              className={cn(
-                "flex h-9 w-full rounded-md px-3 py-1 text-sm",
-                "bg-white/5 border border-primary/20 text-foreground",
-                "focus:outline-hidden focus:ring-2 focus:ring-primary/40 focus:border-primary",
-                "transition-colors duration-200"
-              )}
-            >
-              <option value="" disabled>
-                Select a role…
-              </option>
-              {allRoles.map((role: Role) => (
-                <option key={role.id} value={role.id}>
-                  {role.name}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-      </FormDialog>
+        onAssign={(roleId, resourceId, tenantScope) =>
+          roleService.assignToUser(roleId, userId!, resourceId, tenantScope)
+        }
+        onAssigned={() => invalidateEntity(queryClient, "role-users")}
+      />
     </div>
   );
 }

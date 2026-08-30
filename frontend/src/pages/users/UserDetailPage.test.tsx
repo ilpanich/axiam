@@ -62,6 +62,34 @@ const URLS = {
   federationConfigs: "/api/v1/federation-configs",
 };
 
+const TENANTS = [
+  { id: "t1", name: "Production", slug: "production", status: "Active", kind: "standard", organization_id: "o1", created_at: "t" },
+  { id: "t2", name: "Staging", slug: "staging", status: "Active", kind: "standard", organization_id: "o1", created_at: "t" },
+];
+
+/**
+ * An organization-level administrator that has not switched into a tenant —
+ * the one standing in which an assignment may name the tenants it reaches.
+ */
+function asOrganizationAdmin() {
+  const u: AuthUser = {
+    id: "admin",
+    username: "org-admin",
+    email: "org-admin@x.io",
+    permissions: ["*"],
+    tenant_id: "org-tenant",
+    principal_tenant_id: "org-tenant",
+    org_id: "o1",
+    organization_level: true,
+  };
+  useAuthStore.setState({
+    user: u,
+    activeTenantId: null,
+    isAuthenticated: true,
+    isInitializing: false,
+  });
+}
+
 /** The federation panel is gated; give the operator the permissions it needs. */
 function asFederationAdmin(permissions = ["federation:list", "federation:delete"]) {
   const u: AuthUser = {
@@ -102,6 +130,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   useAuthStore.setState({
     user: null,
+    // Reset alongside `user`: the assignment dialog reads both to decide
+    // whether a grant may name tenants, so a leaked selection would change
+    // what a later test renders.
+    activeTenantId: null,
     isAuthenticated: false,
     isInitializing: false,
   });
@@ -225,15 +257,85 @@ describe("UserDetailPage", () => {
     );
   });
 
-  it("surfaces a role-assignment error from the service", async () => {
+  it("surfaces the server's own sentence when an assignment is refused", async () => {
+    // The failure that actually happens here is a 409: `has_role` is unique on
+    // (subject, role), so re-assigning a role the user already holds is
+    // refused whichever scope was asked for — and "already assigned" is a
+    // different thing from a failure, worth saying in the server's words.
     routeGet(defaults());
-    apiMock.post.mockRejectedValue(new Error("Assign failed"));
+    apiMock.post.mockRejectedValue({
+      response: {
+        status: 409,
+        data: { error: "already_exists", message: "User already has this role" },
+      },
+    });
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Assign Role" }));
     const dialog = screen.getByRole("dialog");
     await userEvent.selectOptions(within(dialog).getByLabelText("Role"), "r2");
     await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
-    expect(await screen.findByText("Assign failed")).toBeInTheDocument();
+    expect(await screen.findByText("User already has this role")).toBeInTheDocument();
+  });
+
+  it("falls back to a written sentence when the request never landed", async () => {
+    // No response body to read, so `err.message` is all there is — and it is a
+    // developer string ("Network Error", "timeout of 0ms exceeded"). The
+    // dialog's own fallback says more to an operator than any of them.
+    routeGet(defaults());
+    apiMock.post.mockRejectedValue(new Error("Network Error"));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Assign Role" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Role"), "r2");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+    expect(await screen.findByText("Failed to assign role.")).toBeInTheDocument();
+  });
+
+  it("confines an assignment to the tenants the operator picks", async () => {
+    // The gap this closes: assigning from the user's own page posted a bare
+    // `{ user_id }`, which at organization scope is a grant over every tenant
+    // in the organization — and the page offered no way to see that, let alone
+    // narrow it.
+    asOrganizationAdmin();
+    routeGet(
+      defaults({
+        "/api/v1/organizations/o1/tenants": { items: TENANTS, total: 2 },
+      })
+    );
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Assign Role" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Role"), "r1");
+    await userEvent.click(await within(dialog).findByRole("checkbox", { name: "Production" }));
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Staging" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/users", {
+        user_id: "u1",
+        tenant_scope: ["t1", "t2"],
+      })
+    );
+  });
+
+  it("scopes an assignment to a resource", async () => {
+    routeGet(defaults({ "/api/v1/resources": { items: [{ id: "res1", name: "billing-service", tenant_id: "t1" }], total: 1 } }));
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Assign Role" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Role"), "r2");
+    await userEvent.selectOptions(
+      await within(dialog).findByLabelText("Scope"),
+      "res1"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r2/users", {
+        user_id: "u1",
+        resource_id: "res1",
+      })
+    );
   });
 
   it("shows a message when no roles are available to assign", async () => {

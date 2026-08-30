@@ -70,8 +70,9 @@ const DOMAINS = [
   },
   {
     label: "Organizations & tenants",
-    blurb: "The tenancy boundary itself, and the settings and mail configuration that hang off it.",
-    tags: ["organizations", "tenants", "settings", "email-config"],
+    blurb:
+      "The tenancy boundary itself, the first-run bootstrap that creates it, and the settings and mail configuration that hang off it.",
+    tags: ["admin", "organizations", "tenants", "settings", "email-config"],
   },
   {
     label: "PKI & certificates",

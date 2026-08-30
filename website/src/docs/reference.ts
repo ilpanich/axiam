@@ -8,7 +8,7 @@ import { DOCS_VERIFIED_RELEASE } from "../version";
  * Conformance, as each SDK's own README states it.
  *
  * Transcribed from the eleven `## Contract conformance` statements and scope
- * tables at `1.0.0-alpha38` / contract 1.28, in `sdks/CONTRACT.md` section
+ * tables at `1.0.0-beta07` / contract 1.36, in `sdks/CONTRACT.md` section
  * order. It is a snapshot for orientation: each SDK's README is the source, and
  * the contract itself is what any of them is measured against.
  *
@@ -32,17 +32,17 @@ const API_DOCS = `${GH_BLOB}/docs/api`;
 const ADMIN_DOCS = `${GH_BLOB}/docs/admin`;
 
 const CONFORMANCE: { id: string; cells: string[] }[] = [
-  { id: "rust", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
-  { id: "typescript", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
-  { id: "python", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
-  { id: "java", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
-  { id: "csharp", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
-  { id: "php", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
-  { id: "go", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES] },
-  { id: "kotlin", cells: [YES, NO, "reactor exchange only", YES, YES, YES, YES, YES, YES] },
-  { id: "swift", cells: [YES, NO, NO, YES, YES, YES, "transport yours", YES, YES] },
-  { id: "c", cells: [YES, NO, NO, YES, YES, YES, "transport yours", YES, YES] },
-  { id: "cpp", cells: [YES, NO, NO, YES, YES, YES, "transport yours", YES, YES] },
+  { id: "rust", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "typescript", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "python", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "java", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "csharp", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "php", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "go", cells: [YES, YES, YES, YES, YES, YES, YES, YES, YES, YES] },
+  { id: "kotlin", cells: [YES, NO, "reactor exchange only", YES, YES, YES, YES, YES, YES, YES] },
+  { id: "swift", cells: [YES, NO, NO, YES, YES, YES, "transport yours", YES, YES, YES] },
+  { id: "c", cells: [YES, NO, NO, YES, YES, YES, "transport yours", YES, YES, YES] },
+  { id: "cpp", cells: [YES, NO, NO, YES, YES, YES, "transport yours", YES, YES, YES] },
 ];
 
 const byId = (id: string): Sdk | undefined => SDKS.find((s) => s.id === id);
@@ -267,6 +267,7 @@ export const REFERENCE_PAGES: DocPage[] = [
           "Reactors §22",
           "OPAQUE §23",
           "WebAuthn, lifecycle, PAR §24–§26",
+          "Management API §27",
         ],
         rows: CONFORMANCE.map((row) => [byId(row.id)?.name ?? row.id, ...row.cells]),
       },
@@ -280,7 +281,7 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "This table is transcribed from the eleven SDK READMEs at `1.0.0-alpha38` and is a snapshot for orientation. Each README's conformance statement is the SDK's own claim and the thing to check before you depend on a section.",
+        text: "This table is transcribed from the eleven SDK READMEs at `1.0.0-beta07` and is a snapshot for orientation. Each README's conformance statement is the SDK's own claim and the thing to check before you depend on a section.",
       },
       { type: "h", id: "packages", text: "Canonical package names" },
       {

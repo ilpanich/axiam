@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.28";
+export const CONTRACT_VERSION = "1.36";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -36,9 +36,14 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "24": "#§24-webauthn-and-passkeys-w1",
  "25": "#§25-account-lifecycle-and-mfa-enrolment-w2",
  "26": "#§26-pushed-authorization-requests-rfc-9126",
+ "27": "#§27-management-api-m1",
  "1.1": "#§11-grpc-only-operations",
  "3a": "#§3a-resource-server-middleware-csrf-inbound",
  "5.1": "#§51-organization-context-required-for-login-and-refresh",
+ "5.2": "#§52-organization-level-principals-contract-131",
+ "5.2.1": "#§521-signing-one-in-contract-132",
+ "5.2.2": "#§522-acting-tenant-vs-principal-tenant-contract-134",
+ "5.2.3": "#§523-tenant-scoped-role-assignments-contract-135",
  "6.1": "#§61-client-certificate-authentication-mtls",
  "8b": "#§8b-amqp-transport-security-a6",
  "10.1": "#§101-minimum-local-verification-set-normative",
@@ -148,12 +153,26 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "25.4": "#§254-password-reset-and-what-password_reset_context-is-actually-for",
  "25.5": "#§255-per-language-naming-map",
  "25.6": "#§256-required-tests",
+ "25.7": "#§257-resend_own_verification-and-why-it-is-not-resend_verification",
  "26.1": "#§261-canonical-operation-set-and-endpoint-map",
  "26.2": "#§262-semantics-normative",
  "26.3": "#§263-error-mapping",
  "26.4": "#§264-per-language-naming-map",
  "26.5": "#§265-sensitivet-applicability",
- "26.6": "#§266-required-tests"
+ "26.6": "#§266-required-tests",
+ "27.0": "#§270-the-boundary",
+ "27.1": "#§271-namespaces-and-the-canonical-operation-set",
+ "27.2": "#§272-the-surface-is-namespaced-not-flat",
+ "27.3": "#§273-per-language-naming-map",
+ "27.4": "#§274-semantics-normative-identical-in-all-sdks",
+ "27.5": "#§275-sensitivet-applicability",
+ "27.6": "#§276-declarative-management--the-manifest",
+ "27.7": "#§277-per-language-declarative-form",
+ "27.8": "#§278-how-an-sdk-builds-this",
+ "27.9": "#§279-required-tests",
+ "27.10": "#§2710-per-sdk-posture",
+ "27.12": "#§2712-tenantsdelete-requires-a-fresh-audit-export-contract-133",
+ "27.11": "#§2711-model-additions-contract-131"
 };
 
 /**

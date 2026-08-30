@@ -23,9 +23,9 @@ export interface ApiGroup {
 }
 
 /** The API version the document was exported from. */
-export const API_VERSION = "1.0.0-alpha38";
-export const API_OPERATION_COUNT = 181;
-export const API_PATH_COUNT = 121;
+export const API_VERSION = "1.0.0-beta07";
+export const API_OPERATION_COUNT = 207;
+export const API_PATH_COUNT = 142;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -49,6 +49,11 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/api/v1/auth/logout",
     "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/auth/me",
+    "summary": "Returns the authenticated user's profile."
    },
    {
     "method": "POST",
@@ -95,6 +100,11 @@ export const API_INDEX: ApiGroup[] = [
     "path": "/api/v1/auth/opaque/register/start",
     "summary": "",
     "public": true
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/auth/password/change",
+    "summary": "Change the authenticated user's password."
    },
    {
     "method": "POST",
@@ -404,6 +414,21 @@ export const API_INDEX: ApiGroup[] = [
    },
    {
     "method": "GET",
+    "path": "/api/v1/groups/{group_id}/service-accounts",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/groups/{group_id}/service-accounts",
+    "summary": ""
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/groups/{group_id}/service-accounts/{service_account_id}",
+    "summary": ""
+   },
+   {
+    "method": "GET",
     "path": "/api/v1/service-accounts",
     "summary": ""
    },
@@ -430,6 +455,11 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "POST",
     "path": "/api/v1/service-accounts/{sa_id}/rotate-secret",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/service-accounts/{service_account_id}/groups",
     "summary": ""
    },
    {
@@ -476,6 +506,11 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/api/v1/users/{user_id}/unlock",
     "summary": "Resets a locked user account: clears `locked_until`, resets `failed_login_attempts` to 0, and sets status back to `Active`."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/users/me/resend-verification",
+    "summary": "Resend the caller's **own** verification email, and say what happened."
    }
   ]
  },
@@ -527,6 +562,11 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/api/v1/authz/check/batch",
     "summary": "Evaluate an ordered list of authorization checks."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/groups/{group_id}/roles",
+    "summary": "Lists a group's role assignments with the resource each is scoped to."
    },
    {
     "method": "GET",
@@ -641,7 +681,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "GET",
     "path": "/api/v1/roles/{role_id}/groups",
-    "summary": "Lists the groups directly assigned this role."
+    "summary": "Lists this role's group assignments (the inverse of `GET /groups/{group_id}/roles`), each with the resource it is scoped to — see [`list_users`] for why that field is here."
    },
    {
     "method": "POST",
@@ -670,8 +710,23 @@ export const API_INDEX: ApiGroup[] = [
    },
    {
     "method": "GET",
+    "path": "/api/v1/roles/{role_id}/service-accounts",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/roles/{role_id}/service-accounts",
+    "summary": ""
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/roles/{role_id}/service-accounts/{service_account_id}",
+    "summary": ""
+   },
+   {
+    "method": "GET",
     "path": "/api/v1/roles/{role_id}/users",
-    "summary": "Lists the users directly assigned this role (the inverse of `GET /users/{id}/roles`)."
+    "summary": "Lists this role's user assignments (the inverse of `GET /users/{user_id}/roles`)."
    },
    {
     "method": "POST",
@@ -682,6 +737,16 @@ export const API_INDEX: ApiGroup[] = [
     "method": "DELETE",
     "path": "/api/v1/roles/{role_id}/users/{user_id}",
     "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/service-accounts/{service_account_id}/roles",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/users/{user_id}/roles",
+    "summary": "Lists a user's role assignments with the resource each is scoped to."
    },
    {
     "method": "POST",
@@ -718,9 +783,15 @@ export const API_INDEX: ApiGroup[] = [
  {
   "id": "api-organizations-tenants",
   "label": "Organizations & tenants",
-  "blurb": "The tenancy boundary itself, and the settings and mail configuration that hang off it.",
+  "blurb": "The tenancy boundary itself, the first-run bootstrap that creates it, and the settings and mail configuration that hang off it.",
   "operations": [
    {
+    "method": "POST",
+    "path": "/api/v1/admin/bootstrap",
+    "summary": "Creates the initial admin user with the super-admin role and seeds the default permission set.",
+    "public": true
+   },
+   {
     "method": "GET",
     "path": "/api/v1/organizations",
     "summary": ""
@@ -761,6 +832,11 @@ export const API_INDEX: ApiGroup[] = [
     "summary": ""
    },
    {
+    "method": "POST",
+    "path": "/api/v1/organizations/{org_id}/email-config/test",
+    "summary": ""
+   },
+   {
     "method": "GET",
     "path": "/api/v1/organizations/{org_id}/settings",
     "summary": ""
@@ -794,6 +870,11 @@ export const API_INDEX: ApiGroup[] = [
     "method": "DELETE",
     "path": "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
     "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export",
+    "summary": "Streams the tenant's complete audit trail as newline-delimited JSON, one [`axiam_core::models::audit::AuditLogEntry`] per line, newest first, and records the export in that tenant's audit log — which is what [`delete`] then requires (T-118)."
    },
    {
     "method": "GET",
@@ -818,6 +899,26 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "DELETE",
     "path": "/api/v1/tenants/{tenant_id}/email-config",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/tenants/{tenant_id}/email-config/test",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/tenants/{tenant_id}/settings",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/tenants/{tenant_id}/settings",
+    "summary": ""
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/tenants/{tenant_id}/settings",
     "summary": ""
    }
   ]
@@ -855,7 +956,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "POST",
     "path": "/api/v1/organizations/{org_id}/ca-certificates",
-    "summary": ""
+    "summary": "Generate a CA."
    },
    {
     "method": "GET",
@@ -864,8 +965,38 @@ export const API_INDEX: ApiGroup[] = [
    },
    {
     "method": "POST",
+    "path": "/api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody",
+    "summary": "Move this CA's signing key to the custodian the deployment is configured for."
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor",
+    "summary": "Offer this CA — or stop offering it — as a trust anchor for mutual TLS."
+   },
+   {
+    "method": "POST",
     "path": "/api/v1/organizations/{org_id}/ca-certificates/{id}/revoke",
     "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/organizations/{org_id}/ca-certificates/import",
+    "summary": "Register a CA an organization already has, instead of generating one."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas",
+    "summary": "Create a tenant signing CA beneath one of the organization's CAs, with the key generated by whoever the deployment's custodian is."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr",
+    "summary": "Sign a certificate signing request the tenant produced elsewhere."
    },
    {
     "method": "GET",

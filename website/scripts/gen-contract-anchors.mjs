@@ -97,7 +97,26 @@ for (const s of sections) {
   seen.set(s.number, s.heading);
 }
 
-const version = /^\*Contract version: ([^\s—]+)/m.exec(source)?.[1] ?? "";
+/**
+ * The contract version, read from the footer line.
+ *
+ * That line opens with the version the section list was last renumbered at and
+ * then narrates every amendment since, each closing `(contract X.Y)`. Reading
+ * only the leading number therefore reports a version several amendments stale
+ * — it said 1.29 while §5.2.3 (1.35) and the `X-Axiam-Tenant` erratum (1.36)
+ * were already in the document. So take the highest version the line mentions,
+ * which is the one an SDK is actually being held to. Fixing this here rather
+ * than renumbering the footer is deliberate: `CONTRACT.md` is vendored by all
+ * eleven SDK repositories and editing it is a fan-out, while this generator is
+ * website-local.
+ */
+const versionLine = /^\*Contract version:.*$/m.exec(source)?.[0] ?? "";
+const version = [
+  ...versionLine.matchAll(/(?:^\*Contract version:\s*|\bcontract\s+)(\d+)\.(\d+)/g),
+]
+  .map(([, major, minor]) => [Number(major), Number(minor)])
+  .sort((a, b) => b[0] - a[0] || b[1] - a[1])
+  .map(([major, minor]) => `${major}.${minor}`)[0] ?? "";
 
 const table = Object.fromEntries(sections.map((s) => [s.number, s.anchor]));
 

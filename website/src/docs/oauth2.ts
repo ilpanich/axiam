@@ -361,6 +361,16 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "warn",
         text: "Because exchange only narrows, it is not a privilege-escalation mechanism — and it is also not a way to *grant* a service access to something the user cannot reach. If a downstream call needs authority the user does not have, that is a role-model problem, not an exchange problem.",
       },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Federated token exchange",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/api/federated-token-exchange.md",
+            note: "Accepting a partner IdP's token — Entra, Okta or Keycloak — and turning it into an AXIAM one.",
+          },
+        ],
+      },
     ],
   },
 

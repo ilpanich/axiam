@@ -307,6 +307,16 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "note",
         text: "The Kotlin, Swift, C and C++ SDKs cover the REST surface. gRPC is deferred rather than scheduled for them — the contract sets no §-level gRPC requirement for those four — so use the REST transport, or generate stubs straight from `proto/` if you need this surface. The one thing REST cannot substitute for is `GetUserInfo`, which has no REST form in the SDK vocabulary.",
       },
+      {
+        type: "links",
+        links: [
+          {
+            label: "gRPC API reference",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/api/grpc.md",
+            note: "The service definitions, the metadata each RPC expects, and the error mapping.",
+          },
+        ],
+      },
     ],
   },
 
@@ -650,6 +660,17 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "note",
         text: "The Okta and Entra contract fixtures are hand-constructed from each vendor's published SCIM notes and RFC 7644's examples, not captured from live traffic. Read them as the request shapes those vendors are documented to send, rather than as a captured-traffic compatibility guarantee.",
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Federation (SAML & OIDC) →",
+            body: "The other half: federation authenticates, provisioning creates. They are not substitutes.",
+            to: "docs",
+            doc: "federation",
+          },
+        ],
       },
     ],
   },
@@ -1227,6 +1248,16 @@ try await reactorServe(config: config, transport: yourTransport, handler: router
       {
         type: "note",
         text: "The wire protocol — message shape, signing, the reply schema and the timeout semantics — is normative in [CONTRACT.md §22](https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md). The admin console's Reactors page is the same surface with a form on top.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Reactors — the admin guide",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/admin/reactors.md",
+            note: "Choosing hook events and a failure policy, the mutation allow-lists, and what a reactor may and may not change.",
+          },
+        ],
       },
     ],
   },

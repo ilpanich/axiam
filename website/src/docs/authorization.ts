@@ -202,6 +202,28 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
         type: "note",
         text: "Enabling the decision cache changes performance only, never the decision returned. Every access-narrowing mutation invalidates the affected entries immediately, so a revocation cannot leave a stale allow behind; the TTL is a bounded-staleness backstop, not the invalidation mechanism.",
       },
+      { type: "h", id: "transports", text: "The same engine, three transports" },
+      {
+        type: "p",
+        text: "A decision does not depend on how it was asked for. REST middleware, the gRPC `CheckAccess` service and the asynchronous AMQP path all evaluate the same policy over the same graph, and the gRPC interceptor derives the tenant from the caller's verified identity, so a service account cannot ask about a subject outside its own tenant. Pick a transport for its latency and shape, not for what it will answer.",
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "gRPC API →",
+            body: "The low-latency check path for a service mesh, and the one operation REST has no form for.",
+            to: "docs",
+            doc: "grpc",
+          },
+          {
+            title: "AMQP messaging →",
+            body: "Asynchronous authorization, audit ingestion and mail, over one signed message envelope.",
+            to: "docs",
+            doc: "amqp",
+          },
+        ],
+      },
     ],
   },
 

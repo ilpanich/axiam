@@ -230,6 +230,23 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
           },
         ],
       },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Work through the tutorial →",
+            body: "The same ground at walking pace: a tenant, a role model, a working authorization check.",
+            to: "docs",
+            doc: "tutorial",
+          },
+          {
+            title: "Other ways to install →",
+            body: "Docker, Kubernetes, or building from source — and what each one expects of you.",
+            to: "docs",
+            doc: "installation",
+          },
+        ],
+      },
     ],
   },
 
@@ -659,6 +676,23 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
             title: "The security model →",
             body: "Threat model, cryptography and shared responsibility.",
             to: "security",
+          },
+        ],
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Roles, permissions & resources →",
+            body: "The entities the engine evaluates over, and the API for each.",
+            to: "docs",
+            doc: "rbac",
+          },
+          {
+            title: "Passwords, sessions & tokens →",
+            body: "How a credential is verified, what comes back, and how a session ends.",
+            to: "docs",
+            doc: "auth",
           },
         ],
       },

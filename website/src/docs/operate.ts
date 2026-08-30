@@ -139,6 +139,23 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "warn",
         text: "AXIAM is pre-1.0. Treat these manifests as a solid starting point for a staging environment, and work through [Production hardening](#/docs/hardening) before anything real depends on them.",
       },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Troubleshooting →",
+            body: "The failures a first deployment actually hits, and what each message means.",
+            to: "docs",
+            doc: "troubleshooting",
+          },
+          {
+            title: "Health & observability →",
+            body: "The probes to wire up, and the scheduled-job liveness endpoint to alert on.",
+            to: "docs",
+            doc: "observability",
+          },
+        ],
+      },
     ],
   },
 
@@ -389,6 +406,16 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "warn",
         text: "`opaque_mode: required` is the one setting that can lock every user out of a tenant. Nobody can be enrolled retroactively, so it is only safe once every user already has a registration record. Run `optional` until enrolment is complete.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Email delivery",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/admin/email-delivery.md",
+            note: "How a mail configuration is resolved, how to test one before relying on it, and what each provider requires of the sender address.",
+          },
+        ],
       },
     ],
   },
@@ -761,6 +788,23 @@ export const OPERATE_PAGES: DocPage[] = [
           ],
         ],
       },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "The audit trail →",
+            body: "Append-only, signed, and the first place to look when a decision needs explaining.",
+            to: "docs",
+            doc: "audit",
+          },
+          {
+            title: "Troubleshooting →",
+            body: "Symptom-first, for when a probe is telling you something and you cannot tell what.",
+            to: "docs",
+            doc: "troubleshooting",
+          },
+        ],
+      },
     ],
   },
 
@@ -979,6 +1023,16 @@ export const OPERATE_PAGES: DocPage[] = [
             body: "Every variable, its default, and a worked example value.",
             to: "docs",
             doc: "configuration",
+          },
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "TLS & security profiles",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/security-profiles.md",
+            note: "The security-relevant decisions behind the native TLS listener, and how the benchmark profiles p0–p3 map onto them.",
           },
         ],
       },

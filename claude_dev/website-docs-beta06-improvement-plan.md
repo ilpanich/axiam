@@ -1,5 +1,58 @@
 # Website docs section — the 1.0.0-beta06 cumulative catch-up pass
 
+> **EXECUTED 2026-08-30, at `1.0.0-beta07`.** This plan and the beta03 plan it
+> incorporates have both been worked. `DOCS_VERIFIED_RELEASE` is
+> `1.0.0-beta07`, stamped on 29 of 41 pages; `grep -rn "beta" website/src/docs/`
+> is no longer empty, which was this plan's own tripwire. What landed, in the
+> order of §8:
+>
+> - **Wave 0.** `apiIndex` regenerated at 207 operations / 142 paths (the
+>   `admin` tag needed placing — bootstrap now reaches the generated document);
+>   `contractAnchors` at contract 1.36 with the §27 anchors. The contract-version
+>   derivation was itself the bug: the generator read the number the footer line
+>   *opens* with (1.29), not the highest amendment it names. Java, Kotlin and
+>   Swift install snippets re-pinned to `1.0.0-beta07`, verified against each
+>   repository's tags. SDK conformance matrix re-derived from all eleven READMEs
+>   and given a §27 column.
+> - **Wave 1.** A lead news post, "AXIAM reaches beta", naming SAML, OIDC and
+>   SCIM as implemented-but-unproven; the `seven-sdks` post given a dated
+>   addendum rather than rewritten; phase 19 closed at beta01 and a phase 20
+>   opened for the beta line, with the three hand-maintained copies of the
+>   headline numbers moved together; `NewsIndex.tsx`'s `content/news/` claim
+>   removed.
+> - **Wave 2.** New `organization-scope` page (Authorization, after `rbac`) with
+>   its five touch-ups; the bootstrap page corrected; management API / §27 and
+>   the REST conventions (bearer-only CSRF, acting tenant, `search`, the spec
+>   digest, GDPR deletion semantics); the PKI wave (tenant signing CAs, per-CA
+>   custody and Vault inheritance, the chain-walk requirement, and the stale
+>   "next server start" claim replaced with the hot-reload story); passkey-as-
+>   factor, lockout from effective settings, `resend-verification`, logout
+>   removal cookies; replica resilience on `deploy`.
+> - **Wave 3.** Five orphaned `docs/` files linked from the pages that need
+>   them; six of the eleven un-cross-linked pages given inbound links.
+>   `docs/admin/README.md` and `docs/compliance/sc4-coverage.md` deliberately
+>   left unlinked — see that commit.
+> - **Wave 4.** The sweep and the stamp. It caught four real errors: the
+>   tutorial and quickstart bootstrapped a tenant that is no longer created and
+>   then signed in to it; the permission registry is 115 actions, not 113; the
+>   audit page said the system does not prune when it prunes at 730 days by
+>   default; and OPAQUE `optional` had no client guidance for contract 1.29's
+>   `mode` retry.
+>
+> **Left for someone else, deliberately.** `GET /health/jobs` is served and
+> annotated but missing from `sdks/openapi.json` — its handler was never listed
+> in the generated document's `paths(…)`, the same class of omission contract
+> 1.36 records for `/auth/me`, `/auth/password/change` and `/admin/bootstrap`.
+> That is a server fix, not a website one. Separately,
+> `docs/compliance/gdpr-compliance.md` carries two links into
+> `.planning/phases/25-…`, which `5d454f1` archived; `scripts/check-doc-links.sh`
+> reports them as the repository's only two broken links.
+>
+> The Security section was not touched, as §9 required, and
+> `SECURITY_VERIFIED_RELEASE` stays at `1.0.0-beta06`: beta07 changed nothing
+> security-relevant, and the constant records when someone last re-derived the
+> claims, not the newest tag.
+
 > **Who this is for.** A fresh Claude session (Opus 5) tasked with bringing the
 > website's **Docs**, **News** and **Roadmap** content up to the beta line. It is
 > the entry point: read this, then work the waves in §8.

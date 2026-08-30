@@ -46,6 +46,17 @@
 > trust-anchor chain-walk clause under *PKI*, and the tenant ↔ tenant boundary
 > row.
 >
+> **Not affected by the beta07 docs pass (2026-08-30).** The Docs, News and
+> Roadmap sections were brought to `1.0.0-beta07` in a separate pass
+> ([`website-docs-beta06-improvement-plan.md`](website-docs-beta06-improvement-plan.md),
+> which carries its execution record). That pass did not touch `security.ts`,
+> `threatModel.ts`, `threatModelSummary.ts` or the Threat Dragon model, and
+> `SECURITY_VERIFIED_RELEASE` deliberately stays at `1.0.0-beta06`: beta07
+> changed nothing security-relevant, and the constant records when someone last
+> re-derived these claims rather than the newest tag. `npm run
+> gen:threat-model` was re-run to confirm the generated files are in sync with
+> the model; it produced no diff.
+>
 > **Beta03 hardening pass (model 2.9.0).** Three mitigations changed after the
 > wave below, and one threat closed. T-118 (audit trail deleted along with the
 > tenant) is **Mitigated**: deleting a tenant now requires its audit trail to

@@ -1,11 +1,12 @@
 # Website docs section — the 1.0.0-beta03 catch-up pass
 
-> **Superseded as the entry point (2026-08-30).** A 2026-08-30 audit found that
-> **nothing in this plan was executed** — zero items landed on the website. The
-> plan itself remains valid and is incorporated by reference into
-> [`website-docs-beta06-improvement-plan.md`](website-docs-beta06-improvement-plan.md),
-> which carries the corrections that re-base it to the current release (contract
-> ≥ 1.36, three further releases, News and Roadmap surfaces) — **start there**.
+> **Executed 2026-08-30, at `1.0.0-beta07`, as part of the beta06 pass.** This
+> plan was written on 2026-08-30 after an audit found none of it had landed. It
+> has now been worked in full, incorporated by reference into
+> [`website-docs-beta06-improvement-plan.md`](website-docs-beta06-improvement-plan.md)
+> and re-based by that plan's §3 corrections (contract 1.36, four further
+> releases, News and Roadmap). The execution record is at the top of that
+> document; this one is kept for the reasoning behind each item.
 
 > **Who this is for.** A fresh Claude session tasked with bringing the website's
 > **Docs** section up to `1.0.0-beta03`. It is self-contained: read this, then

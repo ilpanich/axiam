@@ -1039,12 +1039,13 @@ containers_json() {
 # Two scenarios are graded differently, and the exception is narrow on
 # purpose — see EXPECTED_THROTTLE below.
 dry_verdict() {
-  local summary="$1" k6rc="$2" rescsv="$3" scenario="${4:-}"
-  python3 - "$summary" "$k6rc" "$rescsv" "$scenario" <<'PY' 2>/dev/null || echo -e "FAIL\tcould not evaluate the k6 summary (python3 missing or summary unreadable)"
-import json, os, sys
+  local summary="$1" k6rc="$2" rescsv="$3" scenario="${4:-}" dry_log="${5:-}"
+  python3 - "$summary" "$k6rc" "$rescsv" "$scenario" "$dry_log" <<'PY' 2>/dev/null || echo -e "FAIL\tcould not evaluate the k6 summary (python3 missing or summary unreadable)"
+import json, os, re, sys
 
 summary, k6rc, rescsv = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 scenario = sys.argv[4] if len(sys.argv) > 4 else ""
+dry_log = sys.argv[5] if len(sys.argv) > 5 else ""
 
 # Scenarios whose limiter family has a ceiling `rl=neutralized` CANNOT lift, so
 # a closed-loop `ramping-vus` probe is throttled at every posture by
@@ -1076,13 +1077,54 @@ scenario = sys.argv[4] if len(sys.argv) > 4 else ""
 # scenario measure the endpoint".
 EXPECTED_THROTTLE = {"grpc_infra", "device_verify"}
 
+# The one thing that actually names a dead cell, and it was being thrown away.
+# When a scenario's setup() throws, k6 exits 107 and writes ONE line naming the
+# cause — `msg="Error: auth.loginSession: login failed (status 401) …"` with
+# `hint="script exception"` — into the .dryrun.log this run already tees. The
+# verdict, meanwhile, only knew `ok == 0` and guessed "the client could not
+# reach the target", which is the one thing it was not: the client reached the
+# target and got a clean 401. That guess cost a long detour during the beta06
+# lockout bug (see targets/axiam/docker-compose.yml's D-06 block), so lift the
+# message the log already has instead of speculating about it.
+#
+# The msg value is Go-quoted, so unescape by hand rather than with
+# `unicode_escape` — the messages contain UTF-8 (an em dash, in the line above)
+# and unicode_escape decodes it as Latin-1 mojibake. Everything after the first
+# escaped newline is k6's `\tat …` JS stack; the first line is the message.
+THRESHOLD_NOISE = re.compile(r"^thresholds on metrics .* have been crossed$")
+
+def k6_error(path):
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        with open(path, errors="replace") as fh:
+            # Bounded: a cell that fails per-iteration can log thousands of
+            # these, and only the first (setup, init) explains a dead cell.
+            blob = fh.read(512 * 1024)
+    except Exception:
+        return ""
+    unescape = lambda m: {"n": "\n", "t": "\t", "r": "\r"}.get(m.group(1), m.group(1))
+    for raw in re.findall(r'level=error msg="((?:[^"\\]|\\.)*)"', blob):
+        # One pass, so a literal backslash cannot be re-read as an escape.
+        first = re.sub(r"\\(.)", unescape, raw).split("\n", 1)[0].strip()
+        if not first or THRESHOLD_NOISE.match(first):
+            continue  # says only "a threshold failed", which the verdict knows
+        # record_dry writes TSV and the justfile renders it as a markdown table,
+        # so neither a tab/newline nor a bare pipe may survive.
+        first = " ".join(first.split()).replace("|", "\\|")
+        return (first[:197] + "…") if len(first) > 198 else first
+    return ""
+
 def out(verdict, detail):
     print("%s\t%s" % (verdict, detail))
     sys.exit(0)
 
 if not os.path.exists(summary) or os.path.getsize(summary) == 0:
-    out("FAIL", "k6 wrote no summary (exit %d) — it died before/at init: bad "
-                "scenario options, unreadable certs, or a setup() that threw" % k6rc)
+    err = k6_error(dry_log)
+    out("FAIL", "k6 wrote no summary (exit %d) — it died before/at init: %s"
+                % (k6rc, err or "bad scenario options, unreadable certs, or a "
+                                "setup() that threw (nothing in the .dryrun.log "
+                                "names it)"))
 try:
     with open(summary) as fh:
         metrics = (json.load(fh) or {}).get("metrics", {}) or {}
@@ -1112,9 +1154,14 @@ if scenario in EXPECTED_THROTTLE and throttled:
                      "family has no env knob to neutralize)" % (throttled, scenario))
 
 if ok == 0 and passes == 0:
+    nfail = failed + throttled if scenario in EXPECTED_THROTTLE else failed
+    err = k6_error(dry_log)
+    if err:
+        out("FAIL", "no operation completed at all (exit %d, %d failed) — k6: %s"
+                    % (k6rc, nfail, err))
     out("FAIL", "no operation completed at all (exit %d, %d failed) — the k6 "
                 "client could not reach the target or every response was rejected"
-                % (k6rc, failed + throttled if scenario in EXPECTED_THROTTLE else failed))
+                % (k6rc, nfail))
 if failed or fails:
     detail = "%d/%d operations failed" % (failed or fails, (failed or fails) + ok)
     if throttled and scenario not in EXPECTED_THROTTLE:
@@ -1268,7 +1315,7 @@ EOF
 
   if [ "$DRY_RUN" = "1" ]; then
     local verdict detail line
-    line="$(dry_verdict "$k6sum" "$k6rc" "$rescsv" "$name")"
+    line="$(dry_verdict "$k6sum" "$k6rc" "$rescsv" "$name" "$dry_log")"
     verdict="${line%%$'\t'*}"; detail="${line#*$'\t'}"
     echo "[dry] $name: $verdict — $detail"
     record_dry "$name" "$verdict" "$detail"

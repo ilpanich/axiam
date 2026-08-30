@@ -38,9 +38,24 @@ The two cells that were silently mis-measuring now show real Argon2id cost:
 | `userinfo` | 11072/11072 fail | ok=10663, p95 1ms |
 | `userinfo_grpc` | 13105/13105 fail | ok=31547, p95 1ms |
 
-## Note for a follow-up (not done here)
+## Follow-up, done in the same task
 
-The runner grades a k6 `setup()` exception (exit 107) as "the k6 client could not
-reach the target or every response was rejected". The k6 `GoError`/`Error` line is
-already in the `.dryrun.log`; surfacing it in the verdict would have named the
-401 immediately instead of pointing at connectivity.
+The runner graded a k6 `setup()` exception (exit 107) as "the k6 client could not
+reach the target or every response was rejected" — the one thing it was not: the
+client reached the target and got a clean 401. The `GoError`/`Error` line was
+already sitting in the `.dryrun.log` this run tees. `dry_verdict()` now lifts it:
+
+    FAIL  uma_ticket_grant  no operation completed at all (exit 107, 0 failed)
+                            — k6: Error: auth.loginSession: login failed
+                              (status 401) — check seeding + profile
+
+Applies to both dead-cell branches (summary present with `ok == 0`, and k6 dying
+before it wrote a summary). A `thresholds ... have been crossed` line is skipped
+as noise — it says only that a threshold failed, which the verdict already knows,
+so those cells keep the accurate generic wording. The message is flattened and
+`|`-escaped before it reaches `record_dry`, which writes TSV that the justfile
+renders as a markdown table.
+
+Verified live, not just unit-tested: a cell run against a deliberately wrong
+`BENCH_PASSWORD` produced the verdict above from a real k6 exit 107, and
+`jwks_fetch` still graded `PASS — ok=42873, p95=0ms`.

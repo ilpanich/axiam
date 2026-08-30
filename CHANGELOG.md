@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta07] - 2026-08-30
+
+### Changed
+
+- Archive phase directories from completed milestones
+
+- Updated .gitignore
+
+- Quick task — bench lockout policy neutralization
+
+- Plan the cumulative beta06 docs catch-up pass
+
+- Record the beta05…beta06 wave — T-200…T-211, model 2.10.0
+
+### Fixed
+
+- Name the k6 setup() exception in the dry-run verdict
+
+- Neutralize the lockout POLICY, not just the deployment default
+
 ## [1.0.0-beta06] - 2026-08-30
 
 ### Added

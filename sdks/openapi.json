@@ -9,8 +9,8 @@
     "license": {
       "name": "Apache-2.0"
     },
-    "version": "1.0.0-beta06",
-    "x-axiam-spec-digest": "sha256:b6e248a49ce42497132d6b9751b42fd289709e238c8a0eded7b6ef931f41cf5d"
+    "version": "1.0.0-beta07",
+    "x-axiam-spec-digest": "sha256:84c956102d62dcd5ba9a4a0cb5d8a28206e2dfa7ee51563643effdb8af82640d"
   },
   "paths": {
     "/.well-known/openid-configuration": {

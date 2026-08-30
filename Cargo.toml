@@ -57,7 +57,7 @@ resolver = "3"
 missing_docs = "warn"
 
 [workspace.package]
-version = "1.0.0-beta06"
+version = "1.0.0-beta07"
 edition = "2024"
 authors = ["AXIAM Contributors"]
 license = "Apache-2.0"

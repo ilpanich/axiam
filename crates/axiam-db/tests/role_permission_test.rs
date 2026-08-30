@@ -4,6 +4,7 @@ use axiam_core::models::group::CreateGroup;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::resource::CreateResource;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::{CreateRole, UpdateRole};
 use axiam_core::models::scope::CreateScope;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
@@ -234,7 +235,7 @@ async fn delete_role_does_not_strip_foreign_tenant_edge() {
         })
         .await
         .unwrap();
-    repo.assign_to_user(tenant_b.id, user_b.id, role_b.id, None)
+    repo.assign_to_user(tenant_b.id, user_b.id, role_b.id, AssignmentScope::global())
         .await
         .unwrap();
 
@@ -290,7 +291,7 @@ async fn delete_role_removes_own_tenant_edges() {
         })
         .await
         .unwrap();
-    repo.assign_to_user(tenant_id, user_a, role.id, None)
+    repo.assign_to_user(tenant_id, user_a, role.id, AssignmentScope::global())
         .await
         .unwrap();
 
@@ -392,7 +393,7 @@ async fn assign_and_get_user_roles() {
         .await
         .unwrap();
 
-    repo.assign_to_user(tenant_id, user_a, role.id, None)
+    repo.assign_to_user(tenant_id, user_a, role.id, AssignmentScope::global())
         .await
         .unwrap();
 
@@ -424,7 +425,7 @@ async fn assign_and_get_group_roles() {
         .await
         .unwrap();
 
-    repo.assign_to_group(tenant_id, group_id, role.id, None)
+    repo.assign_to_group(tenant_id, group_id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 
@@ -467,12 +468,17 @@ async fn get_user_roles_includes_group_roles() {
         .await
         .unwrap();
 
-    repo.assign_to_user(tenant_id, user_a, direct_role.id, None)
+    repo.assign_to_user(tenant_id, user_a, direct_role.id, AssignmentScope::global())
         .await
         .unwrap();
-    repo.assign_to_group(tenant_id, group_id, group_role.id, None)
-        .await
-        .unwrap();
+    repo.assign_to_group(
+        tenant_id,
+        group_id,
+        group_role.id,
+        AssignmentScope::global(),
+    )
+    .await
+    .unwrap();
 
     // user_a is a member of the group (set up in setup()), so should get both roles.
     let roles = repo.get_user_roles(tenant_id, user_a).await.unwrap();
@@ -499,9 +505,14 @@ async fn resource_scoped_role_assignment() {
     let resource_id = uuid::Uuid::new_v4();
 
     // Assign with resource scope.
-    repo.assign_to_user(tenant_id, user_a, role.id, Some(resource_id))
-        .await
-        .unwrap();
+    repo.assign_to_user(
+        tenant_id,
+        user_a,
+        role.id,
+        AssignmentScope::resource(resource_id),
+    )
+    .await
+    .unwrap();
 
     let roles = repo.get_user_roles(tenant_id, user_a).await.unwrap();
     assert_eq!(roles.len(), 1);

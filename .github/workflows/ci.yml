@@ -474,7 +474,11 @@ jobs:
         run: npm ci
       - name: Frontend lint and type-check
         working-directory: frontend
-        run: npm run lint && npx tsc -b
+        # `tsc -b` builds only tsconfig.app.json and tsconfig.node.json, so the
+        # Playwright specs under e2e/ were never typechecked here. Playwright
+        # transpiles without typechecking, so they ran green while carrying
+        # nine type errors nobody could see. `typecheck:e2e` is that gate.
+        run: npm run lint && npx tsc -b && npm run typecheck:e2e
       # C3: axe-core smoke run over the main pages and the design-system
       # components the accessibility audit fixed. It lives HERE rather than
       # only inside the e2e job's `npm test` (which also runs it) because this

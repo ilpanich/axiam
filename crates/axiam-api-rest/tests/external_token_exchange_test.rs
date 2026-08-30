@@ -297,7 +297,7 @@ async fn setup(spec: TrustSpec) -> Fixture {
             .await
             .unwrap();
         role_repo
-            .assign_to_user(tenant.id, user.id, role.id, None)
+            .assign_to_user(tenant.id, user.id, role.id, AssignmentScope::global())
             .await
             .unwrap();
         for (action, deny) in &spec.grants {
@@ -377,6 +377,7 @@ async fn setup(spec: TrustSpec) -> Fixture {
     }
 }
 
+use axiam_core::models::role::AssignmentScope;
 use axiam_db::repository::SurrealFederationLinkRepository;
 
 /// Build the app with X4 switched on, exactly as production does.

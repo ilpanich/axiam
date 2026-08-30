@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
 import { useAuthStore } from "@/stores/auth";
-import { fetchCurrentUser } from "@/lib/fetchCurrentUser";
+import {
+  fetchCurrentUser,
+  withReachableTenantSelected,
+} from "@/lib/fetchCurrentUser";
 import api from "@/lib/api";
 
 /**
@@ -53,12 +56,17 @@ export function useAuthInit() {
       }
 
       if (user) {
-        setUser(user);
+        // A tenant-restricted organization principal is placed in a tenant it
+        // can work in before the store is populated, so the UI never renders
+        // the empty organization-scope permission set it would otherwise start
+        // with. No-op for everyone else.
+        const scoped = await withReachableTenantSelected(user);
+        setUser(scoped);
         // CQ-F29: Restore tenantSlug/orgSlug from /auth/me response so the
         // tenant context survives a hard reload. Slugs come from the backend,
         // not fabricated client-side (ASVS V4 / T-11-05-CTX).
-        if (user.tenantSlug && user.orgSlug) {
-          setTenantContext(user.tenantSlug, user.orgSlug);
+        if (scoped.tenantSlug && scoped.orgSlug) {
+          setTenantContext(scoped.tenantSlug, scoped.orgSlug);
         }
       } else {
         clearAuth();

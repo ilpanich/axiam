@@ -45,10 +45,24 @@ const backendProxy = {
   "/api": "http://localhost:8090",
   // Proxy only actual backend auth endpoints; exclude frontend-only SPA pages
   // (/auth/forgot-password, /auth/reset-password, /auth/verify-email are SPA routes)
-  "^/auth/(login|logout|refresh|register|change-password|resend-verification|mfa)": {
-    target: "http://localhost:8090",
-    rewrite: (path: string) => path,
-  },
+  //
+  // The `(/|\?|$)` boundary is load-bearing, and for the same reason it is on
+  // the `/oauth2` rule below: without it each alternative matches as a bare
+  // PREFIX, and `mfa` then also captured `/auth/mfa-setup` — an SPA route
+  // (`router.tsx`) — forwarding it to a backend that has no such endpoint. The
+  // page came back as a non-200 API response instead of the application
+  // document, which is a blank page for anyone sent there after login.
+  //
+  // Every backend MFA endpoint lives under `/auth/mfa/` (`enroll`, `confirm`,
+  // `verify`, `setup/enroll`, `setup/confirm` — see `server.rs`), so requiring
+  // a delimiter loses none of them. This is F-02 again, in the proxy the E2E
+  // job actually runs against rather than in `docker/nginx.conf`.
+  // Regression test: `frontend/e2e/matrix/spa-routing.spec.ts`.
+  "^/auth/(login|logout|refresh|register|change-password|resend-verification|mfa)(/|\\?|$)":
+    {
+      target: "http://localhost:8090",
+      rewrite: (path: string) => path,
+    },
   // Use regex to match /oauth2/ and /oauth2? but NOT /oauth2-clients (frontend route)
   "^/oauth2(/|\\?|$)": {
     target: "http://localhost:8090",

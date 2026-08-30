@@ -418,6 +418,7 @@ export function GroupDetailPage() {
                     <AssignmentScopeBadge
                       resourceId={a.resource_id}
                       nameFor={nameFor}
+                      tenantScope={a.tenant_scope}
                     />
                   </div>
                   {a.role.description && (

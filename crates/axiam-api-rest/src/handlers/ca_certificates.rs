@@ -80,6 +80,10 @@ pub async fn generate<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:generate", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let org_id = path.into_inner();
 
     // Authorization: only allow access to certificates in the caller's own org.
@@ -191,6 +195,10 @@ pub async fn import<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:generate", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let org_id = path.into_inner();
 
     if org_id != user.org_id {
@@ -329,6 +337,10 @@ pub async fn revoke<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:revoke", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let (org_id, id) = path.into_inner();
 
     // Authorization: only allow revoking certificates in the caller's own org.
@@ -405,6 +417,10 @@ pub async fn migrate_custody<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:manage", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let (org_id, id) = path.into_inner();
 
     if org_id != user.org_id {
@@ -512,6 +528,10 @@ pub async fn set_mtls_trust_anchor<C: Connection + Clone>(
     RequirePermission::new("ca_certificates:manage", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+
     let (org_id, id) = path.into_inner();
 
     if org_id != user.org_id {
@@ -694,6 +714,20 @@ pub async fn generate_intermediate<C: Connection + Clone>(
         .await?;
     let (org_id, tenant_id) = path.into_inner();
     require_own_org(&user, org_id)?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    //
+    // The per-TENANT form, because this one names a tenant. The organization's
+    // CA does the signing, but what comes out belongs to `tenant_id` alone — so
+    // an organization-level account restricted to that tenant is exactly who
+    // should be able to do it, and the unrestricted form would refuse the
+    // administrator the tenant was given one for.
+    crate::handlers::org_scope::require_organization_principal_for_tenant(
+        &user,
+        state.get_ref(),
+        tenant_id,
+    )
+    .await?;
 
     let req = body.into_inner();
     let result = state
@@ -745,6 +779,20 @@ pub async fn sign_intermediate_csr<C: Connection + Clone>(
         .await?;
     let (org_id, tenant_id) = path.into_inner();
     require_own_org(&user, org_id)?;
+    // Organization-level action: the caller must live in the organization
+    // scope, not merely belong to the organization. See `handlers::org_scope`.
+    //
+    // The per-TENANT form, because this one names a tenant. The organization's
+    // CA does the signing, but what comes out belongs to `tenant_id` alone — so
+    // an organization-level account restricted to that tenant is exactly who
+    // should be able to do it, and the unrestricted form would refuse the
+    // administrator the tenant was given one for.
+    crate::handlers::org_scope::require_organization_principal_for_tenant(
+        &user,
+        state.get_ref(),
+        tenant_id,
+    )
+    .await?;
 
     let req = body.into_inner();
     let certificate = state

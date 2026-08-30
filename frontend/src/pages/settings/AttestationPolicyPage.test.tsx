@@ -290,7 +290,13 @@ describe("AttestationPolicyPage — MDS status panel", () => {
 
     expect(await screen.findByText("42")).toBeInTheDocument();
     expect(screen.getByText("2026-09-01")).toBeInTheDocument();
-    expect(screen.getByText("1,200")).toBeInTheDocument();
+    // Formatted the same way the component formats it. `entry_count` is
+    // rendered with a bare `toLocaleString()`, which follows the HOST locale —
+    // so a hard-coded "1,200" asserts en-US grouping and fails for every
+    // developer whose machine is set to anything else (it-IT renders "1.200").
+    // CI happened to run in a locale where the literal held, which is why this
+    // only ever broke locally.
+    expect(screen.getByText((1200).toLocaleString())).toBeInTheDocument();
     expect(screen.getByText("Fresh")).toBeInTheDocument();
   });
 

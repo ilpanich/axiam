@@ -17,6 +17,7 @@ import { Label } from "@/components/ui/label";
 import { Pencil, Trash2, Plus } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { formatDate, slugify } from "@/lib/utils";
+import { useCanActOnOrganization } from "@/lib/grantReach";
 
 // ─── Org form (shared between create/edit) ────────────────────────────────────
 
@@ -83,6 +84,7 @@ function OrgFormFields({
 export function OrganizationsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const canActOnOrganization = useCanActOnOrganization();
 
   // ─── Query ───────────────────────────────────────────────────────────────────
   const { data: orgs = [], isLoading } = useQuery({
@@ -252,20 +254,24 @@ export function OrganizationsPage() {
       width: "w-24",
       render: (row) => (
         <div className="flex items-center gap-1">
-          <button
-            aria-label={`Edit ${row.name}`}
-            onClick={() => openEdit(row)}
-            className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <Pencil size={14} />
-          </button>
-          <button
-            aria-label={`Delete ${row.name}`}
-            onClick={() => setDeleteOrg(row)}
-            className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
-          >
-            <Trash2 size={14} />
-          </button>
+          {canActOnOrganization && (
+            <>
+              <button
+                aria-label={`Edit ${row.name}`}
+                onClick={() => openEdit(row)}
+                className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <Pencil size={14} />
+              </button>
+              <button
+                aria-label={`Delete ${row.name}`}
+                onClick={() => setDeleteOrg(row)}
+                className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+              >
+                <Trash2 size={14} />
+              </button>
+            </>
+          )}
         </div>
       ),
     },
@@ -277,15 +283,22 @@ export function OrganizationsPage() {
         title="Organizations"
         description="Manage top-level organizations and their CA certificates."
         action={
-          <Button
-            onClick={() => {
-              resetCreateForm();
-              setCreateOpen(true);
-            }}
-          >
-            <Plus size={16} />
-            New Organization
-          </Button>
+          // `organizations:create` is granted to a tenant's own `super-admin`
+          // role, so the permission check this used to have (none at all, and
+          // none would have helped) said yes to a principal
+          // `require_organization_principal` refuses. The standing is what
+          // decides, and `useCanActOnOrganization` is that standing.
+          canActOnOrganization ? (
+            <Button
+              onClick={() => {
+                resetCreateForm();
+                setCreateOpen(true);
+              }}
+            >
+              <Plus size={16} />
+              New Organization
+            </Button>
+          ) : undefined
         }
       />
 

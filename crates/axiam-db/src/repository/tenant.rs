@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, paginate, take_first_or_not_found};
+use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 
 fn parse_status(s: &str) -> Result<TenantStatus, DbError> {
     match s {
@@ -181,9 +181,19 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .await
             .map_err(DbError::from)?;
 
+        // A duplicate (organization_id, slug) trips the `idx_tenant_org_slug`
+        // unique index. Left unclassified it becomes `DbError::Migration`, which
+        // the API layer maps to a bare 500 `{"error":"internal_error"}` — so
+        // re-running any provisioning script answers "something broke" for a
+        // system that is in fact perfectly fine, and the documented 409 branch
+        // of `scripts/e2e-bootstrap.sh` was dead code.
+        //
+        // Per D-09 the marker matching lives in `helpers::classify_write_error`
+        // and nowhere else, so that a marker added there reaches every call
+        // site at once.
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e, "tenant"))?;
 
         // Statement 0 is the CREATE, statement 1 is the RELATE.
         let rows: Vec<TenantRow> = result.take(0).map_err(DbError::from)?;

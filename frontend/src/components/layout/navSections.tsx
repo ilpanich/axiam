@@ -53,6 +53,24 @@ interface NavItem {
    * looking at.
    */
   alsoMatches?: string[];
+  /**
+   * Whether this entry is only for a principal that may act on the
+   * organization as a whole.
+   *
+   * A permission string cannot express this. `organizations:list` is granted to
+   * a tenant's own `super-admin` role and always was — what a tenant
+   * administrator lacks is not the permission but the *standing*: its record
+   * lives in a tenant, and `handlers::org_scope::require_organization_principal`
+   * refuses every organization-level action on that basis whatever the role
+   * carries. So the entry was enabled, the page loaded, and every button on it
+   * answered 403.
+   *
+   * Gated on `useCanActOnOrganization`, which mirrors that server-side check
+   * exactly — including its second half, that an organization-level account
+   * restricted to particular tenants is not an organization administrator
+   * either.
+   */
+  organizationOnly?: boolean;
 }
 
 /**
@@ -205,6 +223,11 @@ export const navSections: NavSection[] = [
         label: "Organizations",
         icon: <Building2 size={18} />,
         requiredPermission: "organizations:list",
+        // Everything reachable from here — creating an organization, editing
+        // one, and the CA management on the detail page — is refused to a
+        // principal that does not live in the organization scope. See
+        // `organizationOnly`.
+        organizationOnly: true,
       },
       {
         to: "/tenants",
@@ -253,7 +276,12 @@ export const navSections: NavSection[] = [
         to: "/audit-logs",
         label: "Audit Logs",
         icon: <ScrollText size={18} />,
-        requiredPermission: null,
+        // The route is wrapped in `<ProtectedRoute permission="audit_logs:list">`.
+        // Declaring `null` here left the entry enabled for a principal the
+        // route would refuse — a live link into an Access Denied page, which is
+        // the "renders a control the server would refuse" class. Every other
+        // entry already agreed with its route; this one did not.
+        requiredPermission: "audit_logs:list",
       },
       {
         to: "/notification-rules",

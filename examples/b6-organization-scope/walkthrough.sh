@@ -33,16 +33,22 @@ TENANT_A_SLUG="alpha-${RUN_ID}"
 TENANT_B_SLUG="beta-${RUN_ID}"
 TA_USERNAME="tenant-admin-${RUN_ID}"
 TA_EMAIL="tenant-admin-${RUN_ID}@example.invalid"
+# The third principal: organization-level like the super-admin, but with its
+# role assignment confined to tenant A.
+SA_USERNAME="alpha-only-admin-${RUN_ID}"
+SA_EMAIL="alpha-only-admin-${RUN_ID}@example.invalid"
 # Freshly generated per run rather than a literal. This account is created and
 # used inside this script and nowhere else, so there is nothing to be gained by
 # pinning it — and a credential-shaped string in an example is a finding
 # wherever the example gets copied to. `Ax1!` satisfies every character-class
 # rule in the password policy; the hex tail supplies the length.
 TA_PASSWORD="Ax1!$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+SA_PASSWORD="Ax1!$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
 
 ORG_JAR="$(mktemp)"
 TA_JAR="$(mktemp)"
-trap 'rm -f "${ORG_JAR}" "${TA_JAR}"' EXIT
+SA_JAR="$(mktemp)"
+trap 'rm -f "${ORG_JAR}" "${TA_JAR}" "${SA_JAR}"' EXIT
 
 log()  { printf '\033[36m[b6-organization-scope]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m[b6-organization-scope] PASS:\033[0m %s\n' "$*"; }
@@ -190,6 +196,94 @@ ok "tenant admin administers its own tenant"
 log "tenant admin tries to reach ${TENANT_B_SLUG} with the header"
 api_expect GET "${TA_JAR}" "" /api/v1/users '' 403 "${TENANT_B}" >/dev/null
 ok "a tenant principal cannot act on another tenant, header or not"
+
+# ---------------------------------------------------------------------------
+# 6. The middle ground: an ORGANIZATION principal restricted to one tenant.
+#
+# Steps 1–4 gave one administrator every tenant; step 5 gave another exactly
+# one, permanently, by where its account lives. Neither expresses the common
+# case: an organization-level operator who should administer *some* of the
+# organization's tenants.
+#
+# A `tenant_scope` on the role assignment expresses it. The assignment applies
+# only while acting on a tenant it names, and nowhere else — the organization's
+# own scope included, because an account confined to two tenants is not an
+# organization-wide administrator.
+# ---------------------------------------------------------------------------
+log "creating an organization-level account restricted to ${TENANT_A_SLUG}"
+# Created in the ORGANIZATION scope: no X-Axiam-Tenant, so this account's record
+# lives where the super-admin's does. That is what makes it organization-level;
+# the restriction below is what makes it narrow.
+SA_USER=$(api_expect POST "${ORG_JAR}" "${ORG_CSRF}" /api/v1/users \
+  "{\"username\":\"${SA_USERNAME}\",\"email\":\"${SA_EMAIL}\",\"password\":\"${SA_PASSWORD}\"}" \
+  201 | jq -r '.id')
+api_expect PUT "${ORG_JAR}" "${ORG_CSRF}" "/api/v1/users/${SA_USER}" \
+  '{"status":"Active"}' 200 >/dev/null
+
+# The organization scope's own super-admin role — the same one the bootstrap
+# administrator holds. Assigning THIS role is what makes the point: the account
+# below is refused things not because it lacks a permission, but because its
+# assignment names the tenants it reaches.
+ORG_ROLES=$(api_expect GET "${ORG_JAR}" "" '/api/v1/roles?search=super-admin' '' 200)
+ORG_ROLE=$(printf '%s' "${ORG_ROLES}" | jq -r '.items[] | select(.name == "super-admin") | .id')
+if [ -z "${ORG_ROLE}" ] || [ "${ORG_ROLE}" = "null" ]; then
+  fail "the organization scope has no super-admin role: ${ORG_ROLES}"
+fi
+
+api_expect POST "${ORG_JAR}" "${ORG_CSRF}" "/api/v1/roles/${ORG_ROLE}/users" \
+  "{\"user_id\":\"${SA_USER}\",\"tenant_scope\":[\"${TENANT_A}\"]}" 204 >/dev/null
+ok "assigned the organization super-admin role, scoped to ${TENANT_A_SLUG} alone"
+
+log "signing in (no tenant named — it is an organization principal)"
+HDRS="$(mktemp)"
+SA_LOGIN=$(curl -sS -D "${HDRS}" -c "${SA_JAR}" -H "Content-Type: application/json" \
+  -d "{\"org_slug\":\"${ORG_SLUG}\",\"username_or_email\":\"${SA_USERNAME}\",\"password\":\"${SA_PASSWORD}\"}" \
+  "${AXIAM_URL}/api/v1/auth/login")
+SA_CSRF=$(grep -i '^x-csrf-token:' "${HDRS}" | tail -1 | tr -d '\r' | cut -d' ' -f2-)
+rm -f "${HDRS}"
+[ -n "${SA_CSRF}" ] || fail "no X-CSRF-Token on the login response: ${SA_LOGIN}"
+SA_LEVEL=$(printf '%s' "${SA_LOGIN}" | jq -r '.user.organization_level')
+[ "${SA_LEVEL}" = "true" ] \
+  || fail "the restricted account must still be organization_level: ${SA_LOGIN}"
+ok "signed in; organization_level=true, and yet:"
+
+log "  /auth/me reports the tenants it reaches, and withholds the wildcard"
+SA_ME=$(api_expect GET "${SA_JAR}" "" /api/v1/auth/me '' 200 "${TENANT_A}")
+SA_REACH=$(printf '%s' "${SA_ME}" | jq -r '.user.reachable_tenant_ids | join(",")')
+[ "${SA_REACH}" = "${TENANT_A}" ] \
+  || fail "reachable_tenant_ids should be exactly ${TENANT_A}, got '${SA_REACH}'"
+# `*` short-circuits every client-side permission check. Emitting it for an
+# account the server refuses organization-level actions is how an admin UI ends
+# up rendering buttons that answer 403.
+printf '%s' "${SA_ME}" | jq -e '.permissions | index("*") == null' >/dev/null \
+  || fail "a restricted principal must not be handed the wildcard: ${SA_ME}"
+ok "  reachable_tenant_ids=[${TENANT_A_SLUG}], no wildcard"
+
+log "  it administers ${TENANT_A_SLUG}"
+api_expect GET "${SA_JAR}" "" /api/v1/users '' 200 "${TENANT_A}" >/dev/null
+ok "  the tenant it was given works normally"
+
+log "  it cannot reach ${TENANT_B_SLUG}"
+# Refused at the header, not as a denial on every request that follows: the
+# difference between one clear answer and a session that looks switched and
+# then fails everywhere.
+api_expect GET "${SA_JAR}" "" /api/v1/users '' 403 "${TENANT_B}" >/dev/null
+ok "  a tenant its assignment does not name is refused"
+
+log "  it cannot see ${TENANT_B_SLUG} in the tenant roster either"
+SA_TENANTS=$(api_expect GET "${SA_JAR}" "" "/api/v1/organizations/${ORG_ID}/tenants" '' 200)
+printf '%s' "${SA_TENANTS}" | jq -e --arg b "${TENANT_B}" \
+  '[.items[].id] | index($b) == null' >/dev/null \
+  || fail "the roster must be filtered to the tenants in reach: ${SA_TENANTS}"
+ok "  the roster lists only what it can act on"
+
+log "  and it is not an organization administrator"
+# The half the authorization engine structurally cannot enforce: creating a
+# tenant names no tenant, so there is nothing for a tenant scope to be compared
+# against. The guard is explicit, and this is what proves it is there.
+api_expect POST "${SA_JAR}" "${SA_CSRF}" "/api/v1/organizations/${ORG_ID}/tenants" \
+  "{\"name\":\"Should Not Exist\",\"slug\":\"nope-${RUN_ID}\"}" 403 >/dev/null
+ok "  organization-level actions are refused"
 
 printf '\n'
 ok "all assertions passed"

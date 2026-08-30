@@ -48,6 +48,7 @@ import { SectionCard, InfoRow, ActionBadge } from "@/components/shared";
 import {
   AssignmentScopeBadge,
   ResourceScopePicker,
+  TenantScopePicker,
 } from "@/components/AssignmentScope";
 import { useResourceNames } from "@/hooks/useResourceNames";
 import { invalidateEntity } from "@/lib/queryInvalidation";
@@ -450,6 +451,9 @@ function AssignGroupDialog({
   const [selectedGroupId, setSelectedGroupId] = useState("");
   // "" is a global assignment — the only kind this dialog could make before.
   const [scopeResourceId, setScopeResourceId] = useState("");
+  // Empty reaches every tenant of the organization, which is what this dialog
+  // always produced. The picker renders nothing outside an organization scope.
+  const [tenantScope, setTenantScope] = useState<string[]>([]);
   const [assigning, setAssigning] = useState(false);
   const [error, setError] = useState("");
 
@@ -468,7 +472,12 @@ function AssignGroupDialog({
     setAssigning(true);
     setError("");
     try {
-      await roleService.assignToGroup(roleId, selectedGroupId, scopeResourceId);
+      await roleService.assignToGroup(
+        roleId,
+        selectedGroupId,
+        scopeResourceId,
+        tenantScope,
+      );
       onAssigned();
       setSelectedGroupId("");
       setScopeResourceId("");
@@ -537,6 +546,13 @@ function AssignGroupDialog({
           subject="group"
         />
       </div>
+      <div className="mt-4">
+        <TenantScopePicker
+          value={tenantScope}
+          onChange={setTenantScope}
+          subject="group"
+        />
+      </div>
     </FormDialog>
   );
 }
@@ -565,6 +581,7 @@ function AssignServiceAccountDialog({
   const [selectedId, setSelectedId] = useState("");
   // "" is a global assignment, the same default the user and group dialogs use.
   const [scopeResourceId, setScopeResourceId] = useState("");
+  const [tenantScope, setTenantScope] = useState<string[]>([]);
   const [assigning, setAssigning] = useState(false);
   const [error, setError] = useState("");
 
@@ -583,7 +600,12 @@ function AssignServiceAccountDialog({
     setAssigning(true);
     setError("");
     try {
-      await roleService.assignToServiceAccount(roleId, selectedId, scopeResourceId);
+      await roleService.assignToServiceAccount(
+        roleId,
+        selectedId,
+        scopeResourceId,
+        tenantScope,
+      );
       onAssigned();
       setSelectedId("");
       setScopeResourceId("");
@@ -649,6 +671,13 @@ function AssignServiceAccountDialog({
           id="assign-service-account-scope"
           value={scopeResourceId}
           onChange={setScopeResourceId}
+          subject="service account"
+        />
+      </div>
+      <div className="mt-4">
+        <TenantScopePicker
+          value={tenantScope}
+          onChange={setTenantScope}
           subject="service account"
         />
       </div>
@@ -927,6 +956,11 @@ export function RoleDetailPage() {
 
   // Scope of the next user assignment. "" is global — the old behaviour.
   const [assignUserScope, setAssignUserScope] = useState("");
+  // Empty reaches every tenant of the organization — the default, and the only
+  // thing this dialog could produce before the picker existed.
+  const [assignUserTenantScope, setAssignUserTenantScope] = useState<string[]>(
+    [],
+  );
 
   // ─── Permissions table columns ─────────────────────────────────────────────
   const permissionColumns: Column<Permission>[] = [
@@ -1120,6 +1154,7 @@ export function RoleDetailPage() {
                       <AssignmentScopeBadge
                         resourceId={a.resource_id}
                         nameFor={nameFor}
+                        tenantScope={a.tenant_scope}
                       />
                     </div>
                     <p className="text-xs text-muted-foreground">{a.user.email}</p>
@@ -1158,6 +1193,7 @@ export function RoleDetailPage() {
                     <AssignmentScopeBadge
                       resourceId={a.resource_id}
                       nameFor={nameFor}
+                      tenantScope={a.tenant_scope}
                     />
                   </div>
                   <button
@@ -1200,6 +1236,7 @@ export function RoleDetailPage() {
                       <AssignmentScopeBadge
                         resourceId={a.resource_id}
                         nameFor={nameFor}
+                        tenantScope={a.tenant_scope}
                       />
                     </div>
                     <p className="text-xs text-muted-foreground font-mono">
@@ -1268,20 +1305,33 @@ export function RoleDetailPage() {
         onClose={() => {
           setAssignUserOpen(false);
           setAssignUserScope("");
+          setAssignUserTenantScope([]);
         }}
         title="Assign User"
         actionLabel="Assign"
         header={
-          <ResourceScopePicker
-            id="assign-user-scope"
-            value={assignUserScope}
-            onChange={setAssignUserScope}
-            subject="user"
-          />
+          <div className="flex flex-col gap-4">
+            <ResourceScopePicker
+              id="assign-user-scope"
+              value={assignUserScope}
+              onChange={setAssignUserScope}
+              subject="user"
+            />
+            <TenantScopePicker
+              value={assignUserTenantScope}
+              onChange={setAssignUserTenantScope}
+              subject="user"
+            />
+          </div>
         }
         onAction={async (user) => {
           try {
-            await roleService.assignToUser(roleId!, user.id, assignUserScope);
+            await roleService.assignToUser(
+              roleId!,
+              user.id,
+              assignUserScope,
+              assignUserTenantScope,
+            );
             invalidateEntity(queryClient, "role-users");
           } catch (err) {
             // The dialog swallows the rejection, so the 409 an already-assigned

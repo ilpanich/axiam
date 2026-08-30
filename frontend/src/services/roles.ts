@@ -40,24 +40,40 @@ export type UpdateRolePayload = Partial<CreateRolePayload>;
 export interface RoleAssignment {
   role: Role;
   resource_id: string | null;
+  /**
+   * The tenants this assignment reaches, or absent for "wherever the role
+   * does".
+   *
+   * A second axis, not a finer resource scope. A role in an organization's
+   * scope reaches every tenant of the organization; naming tenants here
+   * confines it to those, and to nothing else — the organization's own scope
+   * included. Only ever present on an assignment made in an organization scope.
+   */
+  tenant_scope?: string[] | null;
 }
 
 /** A member row of `GET /roles/{id}/users`: the user plus the assignment scope. */
 export interface RoleUserAssignment {
   user: User;
   resource_id: string | null;
+  /** The tenants this assignment reaches. See {@link RoleAssignment}. */
+  tenant_scope?: string[] | null;
 }
 
 /** A member row of `GET /roles/{id}/groups`: the group plus the assignment scope. */
 export interface RoleGroupAssignment {
   group: Group;
   resource_id: string | null;
+  /** The tenants this assignment reaches. See {@link RoleAssignment}. */
+  tenant_scope?: string[] | null;
 }
 
 /** A service account holding this role, with the scope of the grant. */
 export interface RoleServiceAccountAssignment {
   service_account: ServiceAccount;
   resource_id: string | null;
+  /** The tenants this assignment reaches. See {@link RoleAssignment}. */
+  tenant_scope?: string[] | null;
 }
 
 // ─── Roles service ────────────────────────────────────────────────────────────
@@ -136,12 +152,20 @@ export const roleService = {
   assignToUser: (
     roleId: string,
     userId: string,
-    resourceId?: string | null
+    resourceId?: string | null,
+    tenantScope?: string[] | null
   ): Promise<void> =>
     api
       .post(`/api/v1/roles/${roleId}/users`, {
         user_id: userId,
         ...(resourceId ? { resource_id: resourceId } : {}),
+        // Sent only when there is one. The server refuses an empty list (an
+        // assignment that reaches nothing is not a restriction), and refuses
+        // the field at all outside an organization scope — so omitting it is
+        // both the default and the only correct value nearly everywhere.
+        ...(tenantScope && tenantScope.length > 0
+          ? { tenant_scope: tenantScope }
+          : {}),
       })
       .then(() => undefined),
 
@@ -171,12 +195,20 @@ export const roleService = {
   assignToGroup: (
     roleId: string,
     groupId: string,
-    resourceId?: string | null
+    resourceId?: string | null,
+    tenantScope?: string[] | null
   ): Promise<void> =>
     api
       .post(`/api/v1/roles/${roleId}/groups`, {
         group_id: groupId,
         ...(resourceId ? { resource_id: resourceId } : {}),
+        // Sent only when there is one. The server refuses an empty list (an
+        // assignment that reaches nothing is not a restriction), and refuses
+        // the field at all outside an organization scope — so omitting it is
+        // both the default and the only correct value nearly everywhere.
+        ...(tenantScope && tenantScope.length > 0
+          ? { tenant_scope: tenantScope }
+          : {}),
       })
       .then(() => undefined),
 
@@ -216,12 +248,17 @@ export const roleService = {
   assignToServiceAccount: (
     roleId: string,
     serviceAccountId: string,
-    resourceId?: string | null
+    resourceId?: string | null,
+    tenantScope?: string[] | null
   ): Promise<void> =>
     api
       .post(`/api/v1/roles/${roleId}/service-accounts`, {
         service_account_id: serviceAccountId,
         ...(resourceId ? { resource_id: resourceId } : {}),
+        // Same rule as the user and group paths — see `assignToUser`.
+        ...(tenantScope && tenantScope.length > 0
+          ? { tenant_scope: tenantScope }
+          : {}),
       })
       .then(() => undefined),
 

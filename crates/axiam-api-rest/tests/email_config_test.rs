@@ -25,6 +25,7 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
@@ -141,6 +142,27 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid) {
     (db, org.id, tenant.id)
 }
 
+/// The organization's own reserved tenant, seeded, and its id.
+///
+/// The organization-scope email config is an organization-level action:
+/// `handlers::org_scope::require_organization_principal` refuses it to any
+/// caller whose own record does not live in this tenant, whatever permissions
+/// it holds (B-04). `setup_db` deliberately builds an ordinary tenant, because
+/// that is what the *tenant*-scope cases in this file are about.
+async fn organization_scope_tenant(db: &Surreal<TestDb>, org_id: Uuid) -> Uuid {
+    let tenant = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant::organization_scope(org_id))
+        .await
+        .unwrap();
+    seed_permissions(db, tenant.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    seed_default_roles(db, tenant.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    tenant.id
+}
+
 async fn create_admin(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
     use axiam_core::repository::{Pagination, RoleRepository};
 
@@ -185,7 +207,7 @@ async fn create_admin(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
         .find(|r| r.name == "admin")
         .expect("default role `admin` not seeded");
     role_repo
-        .assign_to_user(tenant_id, user.id, role.id, None)
+        .assign_to_user(tenant_id, user.id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 
@@ -252,7 +274,10 @@ fn sample_smtp_config_body(password: &str) -> serde_json::Value {
 /// PUT then GET at org scope: 200, secrets never appear in either response body.
 #[actix_rt::test]
 async fn org_email_config_put_get_round_trip_omits_secrets() {
-    let (db, org_id, tenant_id) = setup_db().await;
+    let (db, org_id, _tenant_id) = setup_db().await;
+    // Organization-level: the caller must live in the organization's own
+    // reserved tenant, not merely hold the permission. See `handlers::org_scope`.
+    let tenant_id = organization_scope_tenant(&db, org_id).await;
     let auth = test_auth_config();
     let authz = make_authz(&db);
     let admin_id = create_admin(&db, tenant_id).await;
@@ -344,7 +369,10 @@ async fn org_email_config_cross_org_returns_403() {
 /// DELETE removes the org's email config row; a subsequent GET returns 404.
 #[actix_rt::test]
 async fn org_email_config_delete_then_get_returns_404() {
-    let (db, org_id, tenant_id) = setup_db().await;
+    let (db, org_id, _tenant_id) = setup_db().await;
+    // Organization-level: the caller must live in the organization's own
+    // reserved tenant, not merely hold the permission. See `handlers::org_scope`.
+    let tenant_id = organization_scope_tenant(&db, org_id).await;
     let auth = test_auth_config();
     let authz = make_authz(&db);
     let admin_id = create_admin(&db, tenant_id).await;
@@ -391,7 +419,10 @@ async fn org_email_config_delete_then_get_returns_404() {
 /// via the repository (bypassing HTTP serialization).
 #[actix_rt::test]
 async fn org_email_config_omitted_secret_preserves_stored_password() {
-    let (db, org_id, tenant_id) = setup_db().await;
+    let (db, org_id, _tenant_id) = setup_db().await;
+    // Organization-level: the caller must live in the organization's own
+    // reserved tenant, not merely hold the permission. See `handlers::org_scope`.
+    let tenant_id = organization_scope_tenant(&db, org_id).await;
     let auth = test_auth_config();
     let authz = make_authz(&db);
     let admin_id = create_admin(&db, tenant_id).await;

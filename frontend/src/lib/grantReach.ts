@@ -62,3 +62,51 @@ export function roleReach(
   if (!isGlobal) return "resource";
   return isOrganizationScope ? "organization" : "tenant";
 }
+
+/**
+ * Whether this principal may perform **organization-level** actions —
+ * creating an organization or a tenant, minting the organization's CA, flagging
+ * an mTLS trust anchor.
+ *
+ * Two conditions, both from `/auth/me`, and both mirroring exactly what
+ * `handlers::org_scope::require_organization_principal` checks on the server:
+ *
+ * 1. the principal's own record lives in the organization's reserved tenant
+ *    (`organization_level`), and
+ * 2. its roles are not confined to particular tenants of it
+ *    (`reachable_tenant_ids` absent).
+ *
+ * # Why this is not `useIsOrganizationScope`
+ *
+ * That one answers "which scope am I *editing* right now", and goes false the
+ * moment an organization administrator switches to a child tenant — correct
+ * for labelling a role's reach, wrong here. The server does not care which
+ * tenant is selected when it is asked to create another organization; it cares
+ * where the caller lives. A gate built on the other predicate would hide the
+ * organization's own controls from its own administrator for as long as they
+ * had a tenant selected.
+ *
+ * # Why a UI gate at all
+ *
+ * The server refuses these actions regardless, so this changes no security
+ * boundary. What it changes is that a tenant administrator no longer sees "New
+ * Organization", a tenant lifecycle menu and the CA controls, click one, and
+ * get a 403 — a control offered to somebody the server refuses is a defect in
+ * its own right, and the one this closes.
+ */
+export function useCanActOnOrganization(): boolean {
+  const user = useAuthStore((s) => s.user);
+  if (user?.organization_level !== true) return false;
+  return !Array.isArray(user.reachable_tenant_ids);
+}
+
+/**
+ * Whether this principal's roles are confined to particular tenants.
+ *
+ * Only ever true for an organization-level principal: an ordinary one has a
+ * single tenant and no restriction to express.
+ */
+export function useIsTenantRestricted(): boolean {
+  const user = useAuthStore((s) => s.user);
+  return Array.isArray(user?.reachable_tenant_ids);
+}

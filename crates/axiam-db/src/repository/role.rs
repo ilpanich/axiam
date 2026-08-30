@@ -3,7 +3,7 @@
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::role::{
-    CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole,
+    AssignmentScope, CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole,
 };
 use axiam_core::repository::{PaginatedResult, Pagination, RoleRepository};
 use chrono::{DateTime, Utc};
@@ -61,8 +61,27 @@ struct RoleAssignmentRow {
     description: String,
     is_global: bool,
     resource_id: Option<String>,
+    /// The tenants this assignment reaches (schema v51). `None` on every edge
+    /// written before the field existed, which is what unrestricted means.
+    tenant_scope: Option<Vec<String>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+/// Parse a `tenant_scope` list off an edge row.
+///
+/// Whether the list is absent and whether it is empty are different facts and
+/// stay different: `None` is an unrestricted assignment, and an empty `Some`
+/// would be one that reaches nothing. The write path refuses to create the
+/// second, but a row that somehow holds one must read back as itself rather
+/// than be silently widened to "everywhere".
+fn parse_tenant_scope(raw: Option<Vec<String>>) -> Result<Option<Vec<Uuid>>, DbError> {
+    raw.map(|ids| {
+        ids.iter()
+            .map(|s| parse_uuid(s, "tenant_scope"))
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .transpose()
 }
 
 impl RoleAssignmentRow {
@@ -74,6 +93,7 @@ impl RoleAssignmentRow {
             .as_deref()
             .map(|s| parse_uuid(s, "resource_id"))
             .transpose()?;
+        let tenant_scope = parse_tenant_scope(self.tenant_scope)?;
         Ok(RoleAssignment {
             role: Role {
                 id,
@@ -85,6 +105,7 @@ impl RoleAssignmentRow {
                 updated_at: self.updated_at,
             },
             resource_id,
+            tenant_scope,
         })
     }
 }
@@ -95,6 +116,7 @@ impl RoleAssignmentRow {
 struct RoleSubjectAssignmentRow {
     subject_id: String,
     resource_id: Option<String>,
+    tenant_scope: Option<Vec<String>>,
 }
 
 impl RoleSubjectAssignmentRow {
@@ -108,6 +130,7 @@ impl RoleSubjectAssignmentRow {
         Ok(RoleSubjectAssignment {
             subject_id,
             resource_id,
+            tenant_scope: parse_tenant_scope(self.tenant_scope)?,
         })
     }
 }
@@ -242,11 +265,18 @@ impl<C: Connection> SurrealRoleRepository<C> {
         tenant_id: Uuid,
         subject_id: Uuid,
         role_id: Uuid,
-        resource_id: Option<Uuid>,
+        scope: AssignmentScope,
     ) -> AxiamResult<()> {
         let subject_id_str = subject_id.to_string();
         let role_id_str = role_id.to_string();
-        let resource_id_str = resource_id.map(|r| r.to_string());
+        let resource_id_str = scope.resource_id.map(|r| r.to_string());
+        // Bound as `Option<Vec<String>>` so an absent scope lands as SurrealDB
+        // `NONE` and not as an empty array: those are the two different answers
+        // "reaches everywhere the role does" and "reaches nothing", and the
+        // read path keeps them apart too (see `parse_tenant_scope`).
+        let tenant_scope_strs = scope
+            .tenant_scope
+            .map(|ids| ids.iter().map(Uuid::to_string).collect::<Vec<_>>());
 
         // CQ-B07: verify both endpoints belong to the same tenant before RELATE.
         let query = format!(
@@ -256,7 +286,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
                  THROW 'cross-tenant edge denied';\
              }};\
              RELATE {subject_table}:`{subject_id_str}` -> has_role -> role:`{role_id_str}` \
-             SET resource_id = $resource_id;"
+             SET resource_id = $resource_id, tenant_scope = $tenant_scope;"
         );
 
         let result = self
@@ -265,6 +295,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
             .query(query)
             .bind(("tid", tenant_id.to_string()))
             .bind(("resource_id", resource_id_str))
+            .bind(("tenant_scope", tenant_scope_strs))
             .await
             .map_err(DbError::from)?;
 
@@ -364,7 +395,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
                      WHERE out = type::record('role', $role_id)\
                  )\
              ); \
-             SELECT meta::id(in.id) AS subject_id, resource_id \
+             SELECT meta::id(in.id) AS subject_id, resource_id, tenant_scope \
              FROM has_role \
              WHERE out = type::record('role', $role_id) \
              AND in IN $subjects;"
@@ -645,9 +676,9 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         tenant_id: Uuid,
         user_id: Uuid,
         role_id: Uuid,
-        resource_id: Option<Uuid>,
+        scope: AssignmentScope,
     ) -> AxiamResult<()> {
-        self.relate_subject_to_role("user", "user", tenant_id, user_id, role_id, resource_id)
+        self.relate_subject_to_role("user", "user", tenant_id, user_id, role_id, scope)
             .await
     }
 
@@ -729,7 +760,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                         out.is_global AS is_global, \
                         out.created_at AS created_at, \
                         out.updated_at AS updated_at, \
-                        resource_id \
+                        resource_id, \
+                        tenant_scope \
                  FROM has_role \
                  WHERE in IN $subject_records \
                  AND out.tenant_id = $tenant_id; \
@@ -745,7 +777,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                         out.is_global AS is_global, \
                         out.created_at AS created_at, \
                         out.updated_at AS updated_at, \
-                        resource_id \
+                        resource_id, \
+                        tenant_scope \
                  FROM has_role \
                  WHERE in IN $group_records \
                  AND out.tenant_id = $tenant_id;",
@@ -773,9 +806,9 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         tenant_id: Uuid,
         group_id: Uuid,
         role_id: Uuid,
-        resource_id: Option<Uuid>,
+        scope: AssignmentScope,
     ) -> AxiamResult<()> {
-        self.relate_subject_to_role("group", "group", tenant_id, group_id, role_id, resource_id)
+        self.relate_subject_to_role("group", "group", tenant_id, group_id, role_id, scope)
             .await
     }
 
@@ -795,7 +828,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         tenant_id: Uuid,
         service_account_id: Uuid,
         role_id: Uuid,
-        resource_id: Option<Uuid>,
+        scope: AssignmentScope,
     ) -> AxiamResult<()> {
         self.relate_subject_to_role(
             "service_account",
@@ -803,7 +836,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
             tenant_id,
             service_account_id,
             role_id,
-            resource_id,
+            scope,
         )
         .await
     }
@@ -942,7 +975,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                         out.is_global AS is_global, \
                         out.created_at AS created_at, \
                         out.updated_at AS updated_at, \
-                        resource_id \
+                        resource_id, \
+                        tenant_scope \
                  FROM has_role \
                  WHERE in = type::record('group', $group_id) \
                  AND out.tenant_id = $tenant_id;",

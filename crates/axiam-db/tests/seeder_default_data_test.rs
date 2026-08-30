@@ -8,15 +8,15 @@ use axiam_core::models::permission::CreatePermission;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
-    OrganizationRepository, PermissionRepository, TenantRepository, UserRepository,
+    OrganizationRepository, Pagination, PermissionRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealPermissionRepository, SurrealTenantRepository,
     SurrealUserRepository,
 };
 use axiam_db::seeder::{
-    SeederStateRow, mint_bootstrap_setup_token_if_needed, reconcile_default_role_grants,
-    seed_default_roles, seed_permissions,
+    ReconcileOutcome, SeederStateRow, mint_bootstrap_setup_token_if_needed,
+    reconcile_default_role_grants, seed_default_roles, seed_permissions,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -208,7 +208,7 @@ async fn reconcile_returns_zero_for_never_bootstrapped_tenant() {
     let created = reconcile_default_role_grants(&db, tenant_id)
         .await
         .expect("reconcile should not error for an unbootstrapped tenant");
-    assert_eq!(created, 0);
+    assert_eq!(created, ReconcileOutcome::default());
 }
 
 #[tokio::test]
@@ -243,7 +243,14 @@ async fn reconcile_backfills_grants_for_new_permission_and_is_idempotent() {
         .expect("reconcile failed");
     // super-admin + admin both need the new grant; viewer does not
     // (`webhooks:create` doesn't end with :list/:get).
-    assert_eq!(created, 2, "expected 2 new grants (super-admin + admin)");
+    assert_eq!(
+        created,
+        ReconcileOutcome {
+            granted: 2,
+            revoked: 0
+        },
+        "expected 2 new grants (super-admin + admin) and no revocations"
+    );
 
     let super_admin_perms = perm_repo
         .get_role_permissions(tenant_id, roles.super_admin_role_id)
@@ -259,7 +266,11 @@ async fn reconcile_backfills_grants_for_new_permission_and_is_idempotent() {
     let second = reconcile_default_role_grants(&db, tenant_id)
         .await
         .expect("second reconcile failed");
-    assert_eq!(second, 0, "reconcile must be idempotent");
+    assert_eq!(
+        second,
+        ReconcileOutcome::default(),
+        "reconcile must be idempotent"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -281,4 +292,229 @@ async fn seeder_state_row_is_readable_after_seed() {
     let rows: Vec<SeederStateRow> = result.take(0).unwrap();
     assert_eq!(rows.len(), 1);
     assert!(!rows[0].hash.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// B-04 follow-up — organization-level actions are withheld from an ordinary
+// tenant's seeded roles, and revoked from tenants an older version granted
+// them to.
+//
+// The scope guard in `axiam-api-rest` (`require_organization_principal`) is
+// what actually refuses the request; these assertions pin the second layer, so
+// that the grant is not merely unusable but absent.
+// ---------------------------------------------------------------------------
+
+/// A registry mixing the two kinds, so every assertion below shows both that
+/// the organization-level action was withheld AND that an ordinary one next to
+/// it survived — a filter that dropped everything would pass the first half
+/// alone.
+const SCOPED_REGISTRY: &[(&str, &str)] = &[
+    ("users:list", "List users"),
+    ("users:create", "Create a user"),
+    ("ca_certificates:manage", "Manage organization CA material"),
+    ("tenants:create", "Create a tenant"),
+    ("organizations:create", "Create an organization"),
+    // Shares a permission with tenant-level handlers, so it is deliberately
+    // NOT organization-level and must survive.
+    ("email_config:write", "Write the email configuration"),
+];
+
+async fn org_scope_tenant(db: &Db, organization_id: Uuid) -> Uuid {
+    SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id,
+            kind: TenantKind::Organization,
+            name: "Organization scope".into(),
+            slug: "org-scope".into(),
+            metadata: None,
+        })
+        .await
+        .expect("organization-scope tenant create failed")
+        .id
+}
+
+async fn actions_of(db: &Db, tenant_id: Uuid, role_id: Uuid) -> Vec<String> {
+    SurrealPermissionRepository::new(db.clone())
+        .get_role_permissions(tenant_id, role_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.action)
+        .collect()
+}
+
+#[tokio::test]
+async fn ordinary_tenant_roles_are_not_seeded_with_organization_level_actions() {
+    let (db, _org, tenant_id) = setup().await;
+    seed_permissions(&db, tenant_id, SCOPED_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&db, tenant_id, SCOPED_REGISTRY)
+        .await
+        .unwrap();
+
+    for (role, role_id) in [
+        ("super-admin", roles.super_admin_role_id),
+        ("admin", roles.admin_role_id),
+    ] {
+        let held = actions_of(&db, tenant_id, role_id).await;
+        for withheld in [
+            "ca_certificates:manage",
+            "tenants:create",
+            "organizations:create",
+        ] {
+            assert!(
+                !held.contains(&withheld.to_string()),
+                "{role} in an ordinary tenant must not be seeded with {withheld}; holds {held:?}"
+            );
+        }
+        // The filter must be selective, not a blanket refusal.
+        assert!(
+            held.contains(&"users:create".to_string()),
+            "{role} lost an ordinary tenant action; holds {held:?}"
+        );
+        assert!(
+            held.contains(&"email_config:write".to_string()),
+            "{role} lost email_config:write, which is shared with the \
+             tenant-level handlers and must stay grantable; holds {held:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_organization_scope_is_seeded_with_the_organization_level_actions() {
+    let (db, org_id, _tenant_id) = setup().await;
+    let scope_id = org_scope_tenant(&db, org_id).await;
+    seed_permissions(&db, scope_id, SCOPED_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&db, scope_id, SCOPED_REGISTRY)
+        .await
+        .unwrap();
+
+    let held = actions_of(&db, scope_id, roles.super_admin_role_id).await;
+    for action in [
+        "ca_certificates:manage",
+        "tenants:create",
+        "organizations:create",
+    ] {
+        assert!(
+            held.contains(&action.to_string()),
+            "the organization scope's super-admin must keep {action}; holds {held:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reconcile_revokes_an_organization_level_grant_an_older_version_made() {
+    let (db, _org, tenant_id) = setup().await;
+    seed_permissions(&db, tenant_id, SCOPED_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&db, tenant_id, SCOPED_REGISTRY)
+        .await
+        .unwrap();
+
+    // Reproduce the pre-fix state: grant the organization-level actions to
+    // super-admin and admin by hand, exactly as the old seeder did.
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let all = perm_repo
+        .list(
+            tenant_id,
+            Pagination {
+                offset: 0,
+                limit: 1000,
+                search: None,
+            },
+        )
+        .await
+        .unwrap();
+    let org_level: Vec<_> = all
+        .items
+        .iter()
+        .filter(|p| {
+            matches!(
+                p.action.as_str(),
+                "ca_certificates:manage" | "tenants:create" | "organizations:create"
+            )
+        })
+        .collect();
+    assert_eq!(
+        org_level.len(),
+        3,
+        "fixture should carry three org-level permissions"
+    );
+    for perm in &org_level {
+        for role_id in [roles.super_admin_role_id, roles.admin_role_id] {
+            perm_repo
+                .grant_to_role(tenant_id, role_id, perm.id)
+                .await
+                .unwrap();
+        }
+    }
+
+    let outcome = reconcile_default_role_grants(&db, tenant_id)
+        .await
+        .expect("reconcile failed");
+    assert_eq!(
+        outcome,
+        ReconcileOutcome {
+            granted: 0,
+            revoked: 6
+        },
+        "three organization-level actions across two roles must be revoked, \
+         and nothing granted"
+    );
+
+    for role_id in [roles.super_admin_role_id, roles.admin_role_id] {
+        let held = actions_of(&db, tenant_id, role_id).await;
+        for action in [
+            "ca_certificates:manage",
+            "tenants:create",
+            "organizations:create",
+        ] {
+            assert!(
+                !held.contains(&action.to_string()),
+                "{action} survived the revoke"
+            );
+        }
+        assert!(
+            held.contains(&"users:create".to_string()),
+            "the revoke took an unrelated grant with it; holds {held:?}"
+        );
+    }
+
+    // Steady state: with the grants gone there is nothing left to revoke.
+    let second = reconcile_default_role_grants(&db, tenant_id)
+        .await
+        .expect("second reconcile failed");
+    assert_eq!(
+        second,
+        ReconcileOutcome::default(),
+        "the revoking reconcile must still be idempotent"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_leaves_the_organization_scopes_grants_alone() {
+    let (db, org_id, _tenant_id) = setup().await;
+    let scope_id = org_scope_tenant(&db, org_id).await;
+    seed_permissions(&db, scope_id, SCOPED_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&db, scope_id, SCOPED_REGISTRY)
+        .await
+        .unwrap();
+
+    let outcome = reconcile_default_role_grants(&db, scope_id)
+        .await
+        .expect("reconcile failed");
+    assert_eq!(
+        outcome,
+        ReconcileOutcome::default(),
+        "the organization scope is already correct — reconcile must not touch it"
+    );
+
+    let held = actions_of(&db, scope_id, roles.super_admin_role_id).await;
+    assert!(held.contains(&"ca_certificates:manage".to_string()));
 }

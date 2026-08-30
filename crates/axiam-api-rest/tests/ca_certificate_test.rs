@@ -8,7 +8,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::{CreateTenant, TenantKind};
+use axiam_core::models::tenant::CreateTenant;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
 use axiam_db::{
@@ -98,15 +98,16 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid) {
         .await
         .unwrap();
 
+    // The organization's own reserved tenant, not an ordinary one.
+    //
+    // Every endpoint in this file is organization-level, and
+    // `handlers::org_scope::require_organization_principal` refuses those to any
+    // caller whose own record does not live in this tenant — whatever
+    // permissions it holds (B-04). A CA is the organization's, so this is the
+    // principal the endpoints are for, not a workaround for the guard.
     let tenant_repo = SurrealTenantRepository::new(db.clone());
     let tenant = tenant_repo
-        .create(CreateTenant {
-            organization_id: org.id,
-            kind: TenantKind::Standard,
-            name: "Test Tenant".into(),
-            slug: "test-tenant".into(),
-            metadata: None,
-        })
+        .create(CreateTenant::organization_scope(org.id))
         .await
         .unwrap();
 

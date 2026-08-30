@@ -546,17 +546,33 @@ async fn main() -> std::io::Result<()> {
                 // Back-fill default-role grants for any permissions added to the
                 // registry since this tenant was bootstrapped (bootstrap, which
                 // grants permissions to roles, self-disables after first admin).
-                let backfilled = axiam_db::reconcile_default_role_grants(
+                let reconciled = axiam_db::reconcile_default_role_grants(
                     &pool.handle_for_repo().current(),
                     tenant.id,
                 )
                 .await
                 .expect("Failed to reconcile default role grants for tenant");
-                if backfilled > 0 {
+                if reconciled.granted > 0 {
                     tracing::info!(
                         tenant = %tenant.id,
-                        grants = backfilled,
-                        "Back-filled {backfilled} missing default-role permission grants"
+                        grants = reconciled.granted,
+                        "Back-filled {} missing default-role permission grants",
+                        reconciled.granted
+                    );
+                }
+                // Logged separately and at WARN: this REMOVES a capability a
+                // role currently has. An operator whose tenant administrator
+                // has been minting CA material since before B-04 was fixed
+                // will start seeing 403s, and this line is where they find out
+                // why (see `ReconcileOutcome`).
+                if reconciled.revoked > 0 {
+                    tracing::warn!(
+                        tenant = %tenant.id,
+                        revoked = reconciled.revoked,
+                        "Revoked {} organization-level permission grant(s) from this tenant's \
+                         default roles — organization-level actions (CA material, tenant and \
+                         organization lifecycle) belong to the organization scope only",
+                        reconciled.revoked
                     );
                 }
                 seeded_count += 1;
@@ -680,6 +696,14 @@ async fn main() -> std::io::Result<()> {
     // close. See `claude_dev/organization-scope-design.md`.
     let tenant_scope_resolver: std::sync::Arc<dyn axiam_api_rest::TenantScopeResolver> =
         std::sync::Arc::new(SurrealTenantRepository::new(pool.handle_for_repo()));
+    // How far an organization-level principal's roles reach across the tenants
+    // of its organization, so a switch to a tenant outside that reach is
+    // refused once, at the header, instead of as a 403 on every page that
+    // follows. Registered the same way and for the same reason as the resolver
+    // above — see `axiam_api_rest::PrincipalReachResolver`, which also explains
+    // why its absence degrades to "unrestricted" rather than failing closed.
+    let principal_reach_resolver: std::sync::Arc<dyn axiam_api_rest::PrincipalReachResolver> =
+        std::sync::Arc::new(axiam_db::SurrealRoleRepository::new(pool.handle_for_repo()));
     // SCIM provisioning tokens: resolves the long-lived handle an IdP presents
     // on /scim/v2 into the tenant user it is bound to. Registered as its own
     // app_data (rather than reached through AppState) for the same reason
@@ -2312,6 +2336,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(session_validator.clone()))
             .app_data(web::Data::new(tenant_scope_resolver.clone()))
+            .app_data(web::Data::new(principal_reach_resolver.clone()))
             .app_data(web::Data::new(scim_token_resolver.clone()))
             // QUAL-01: single composition root — every other REST handler
             // dependency (repos, services, the 4 hoisted QUAL-07 singletons)

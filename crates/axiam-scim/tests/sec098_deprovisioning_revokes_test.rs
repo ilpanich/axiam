@@ -25,6 +25,7 @@ use axiam_auth::token::{AUD_USER, issue_access_token};
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::oauth2_client::CreateRefreshToken;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::session::CreateSession;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
@@ -174,7 +175,7 @@ async fn user_with_role(db: &Surreal<TestDb>, tenant_id: Uuid, role_name: &str) 
         .find(|r| r.name == role_name)
         .unwrap_or_else(|| panic!("default role `{role_name}` not seeded"));
     role_repo
-        .assign_to_user(tenant_id, user.id, role.id, None)
+        .assign_to_user(tenant_id, user.id, role.id, AssignmentScope::global())
         .await
         .unwrap();
     user.id

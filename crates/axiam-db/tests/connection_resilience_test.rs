@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use axiam_db::{DbConfig, DbError, DbManager, DbPool};
-use surrealdb::types::AuthError;
+use surrealdb::types::{AuthError, ConnectionError};
 
 /// Four weeks in seconds, mirroring `connection.rs`'s private
 /// `ROOT_TOKEN_DURATION` constant — kept in sync manually since the constant
@@ -80,6 +80,59 @@ fn health_classification_maps_revoked_credentials_to_unhealthy_too() {
     assert!(
         matches!(classified, DbError::Unhealthy(_)),
         "expected DbError::Unhealthy for a revoked/invalid-credential auth failure, got {classified:?}"
+    );
+}
+
+#[test]
+fn health_classification_maps_the_http_engines_401_to_unhealthy() {
+    // The shape the two tests above use is what the **WebSocket** engine
+    // produces. AXIAM runs the **HTTP** engine, and there an invalidated root
+    // token is answered `401` at the transport: the SDK maps every
+    // `reqwest::Error` to `Connection(ConnectionFailed)` with the status
+    // flattened into the message, so the error that must reach the reconnect
+    // loop used to classify as an ordinary query failure. The loop never ran,
+    // and the process served 401s until it was restarted.
+    //
+    // This is not a hypothetical error string: it is verbatim what
+    // `axiam-server` logged, once a second, for as long as it was left running
+    // after a second replica booted against the same datastore. Every AXIAM
+    // boot runs `DEFINE USER OVERWRITE ... ON ROOT`, which re-salts the
+    // password hash and invalidates every token already issued for that user.
+    // `Error::internal`, not `Error::connection`. The SDK's
+    // `From<reqwest::Error>` does build a `Connection` error, but this one does
+    // not arrive through it: reproduced against a live server it carries
+    // `details: Internal`, the forward-compatibility catch-all. Building this
+    // error the "obvious" way is how the first version of the fix passed its
+    // unit test and changed nothing on the running stack.
+    let err = surrealdb::Error::internal(
+        "HTTP status client error (401 Unauthorized) for url (http://surrealdb:8000/rpc)"
+            .to_string(),
+    );
+    let classified = DbManager::classify_query_error(err);
+    assert!(
+        matches!(classified, DbError::Unhealthy(_)),
+        "expected DbError::Unhealthy for the HTTP engine's 401 — without it the \
+         reconnect loop never fires and the process stays wedged, got {classified:?}"
+    );
+}
+
+#[test]
+fn health_classification_leaves_an_ordinary_connection_failure_alone() {
+    // The narrowness is the point. A refused connection or a timeout says
+    // nothing about whether this handle's credentials are still accepted, and
+    // treating it as Unhealthy would tear down and rebuild every pooled
+    // connection on any network blip — the thundering herd the backoff exists
+    // to avoid.
+    let err = surrealdb::Error::connection(
+        "error sending request for url (http://surrealdb:8000/rpc): connection refused".to_string(),
+        ConnectionError::ConnectionFailed,
+    );
+    // (Still constructed as a `Connection` error: an ordinary transport failure
+    // genuinely does arrive that way, and it must stay an ordinary error.)
+    let classified = DbManager::classify_query_error(err);
+    assert!(
+        matches!(classified, DbError::Surreal(_)),
+        "expected an ordinary connection failure to stay DbError::Surreal, got {classified:?}"
     );
 }
 
@@ -306,4 +359,79 @@ async fn pooled_handles_survive_token_expiry_without_restart() {
         .await
         .and_then(|r| r.check())
         .expect("a query on a pooled repo-bound handle should succeed post-TTL");
+}
+
+/// The B-07 scenario end to end, against a live server: a root user redefined
+/// out from under an authenticated handle must classify as `Unhealthy`.
+///
+/// The unit test above pins the classification of a *hand-written* error, which
+/// is only as good as the guess about what the SDK actually produces. This one
+/// makes the server produce it. It is the difference between "my matcher works
+/// on the string I imagined" and "my matcher works on the error that wedged the
+/// stack" — and the first version of the fix passed the former and failed the
+/// latter.
+///
+/// Requires a live SurrealDB at `AXIAM_TEST_DB_URL` (or `127.0.0.1:8000`).
+/// Run explicitly: `cargo test -p axiam-db --test connection_resilience_test -- --ignored`
+#[tokio::test]
+#[ignore = "requires a live SurrealDB instance (just dev-up)"]
+async fn a_redefined_root_user_classifies_as_unhealthy_on_the_http_engine() {
+    use surrealdb::Surreal;
+    use surrealdb::engine::remote::http::Http;
+    use surrealdb::opt::auth::Root;
+
+    let url = std::env::var("AXIAM_TEST_DB_URL").unwrap_or_else(|_| "127.0.0.1:8000".into());
+    let user = std::env::var("AXIAM_TEST_DB_USER").unwrap_or_else(|_| "root".into());
+    let pass = std::env::var("AXIAM_TEST_DB_PASS").unwrap_or_else(|_| "root".into());
+
+    let db: Surreal<_> = Surreal::new::<Http>(url.as_str())
+        .await
+        .expect("connect over the HTTP engine");
+    db.signin(Root {
+        username: user.clone(),
+        password: pass.clone(),
+    })
+    .await
+    .expect("root signin");
+    db.use_ns("axiam_test_b07")
+        .use_db("classification")
+        .await
+        .expect("select ns/db");
+
+    // Healthy first, so a failure below cannot be "it never worked".
+    db.query("RETURN 1").await.expect("a healthy query");
+
+    // Redefine the user from a SEPARATE connection — exactly what a second
+    // AXIAM process does at boot. The password is unchanged, so basic auth
+    // still works and only the already-issued token dies.
+    let other: Surreal<_> = Surreal::new::<Http>(url.as_str()).await.expect("connect");
+    other
+        .signin(Root {
+            username: user.clone(),
+            password: pass.clone(),
+        })
+        .await
+        .expect("second root signin");
+    other
+        .query(format!(
+            "DEFINE USER OVERWRITE {user} ON ROOT PASSWORD '{pass}' ROLES OWNER \
+             DURATION FOR TOKEN 4w, FOR SESSION NONE"
+        ))
+        .await
+        .expect("redefine")
+        .check()
+        .expect("redefine succeeded");
+
+    let err = db
+        .query("RETURN 1")
+        .await
+        .expect_err("the first handle's token must now be rejected");
+
+    let classified = DbManager::classify_query_error(err);
+    assert!(
+        matches!(classified, DbError::Unhealthy(_)),
+        "a token invalidated by a root-user redefine must classify as Unhealthy, \
+         or the reconnect loop never fires and the process serves 401s until it is \
+         restarted. Got {classified:?}"
+    );
 }

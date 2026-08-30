@@ -35,7 +35,7 @@ use axiam_core::models::permission::{
 };
 use axiam_core::models::resource::{CreateResource, Resource, UpdateResource};
 use axiam_core::models::role::{
-    CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole,
+    AssignmentScope, CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole,
 };
 use axiam_core::models::scope::{CreateScope, Scope, UpdateScope};
 use axiam_core::models::user::User;
@@ -148,7 +148,7 @@ impl RoleRepository for MockRoleRepo {
         _t: Uuid,
         _u: Uuid,
         _r: Uuid,
-        _res: Option<Uuid>,
+        _scope: AssignmentScope,
     ) -> AxiamResult<()> {
         unimplemented!()
     }
@@ -169,7 +169,7 @@ impl RoleRepository for MockRoleRepo {
         _t: Uuid,
         _g: Uuid,
         _r: Uuid,
-        _res: Option<Uuid>,
+        _scope: AssignmentScope,
     ) -> AxiamResult<()> {
         unimplemented!()
     }
@@ -425,6 +425,7 @@ fn build_engine(
         vec![RoleAssignment {
             role: role(role_id, tenant, false),
             resource_id: Some(resource_id),
+            tenant_scope: None,
         }],
     );
 
@@ -553,6 +554,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
         vec![RoleAssignment {
             role: role(role_a, tenant, false),
             resource_id: Some(resource_x),
+            tenant_scope: None,
         }],
     );
     by_subject.insert(
@@ -560,6 +562,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
         vec![RoleAssignment {
             role: role(role_b, tenant, false),
             resource_id: Some(resource_y),
+            tenant_scope: None,
         }],
     );
 
@@ -804,6 +807,7 @@ async fn coalesced_batch_resolves_scope_allow_and_not_found() {
         vec![RoleAssignment {
             role: role(role_id, tenant, false),
             resource_id: Some(resource_id),
+            tenant_scope: None,
         }],
     );
 

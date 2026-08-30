@@ -6,6 +6,7 @@
 use axiam_core::error::AxiamError;
 use axiam_core::models::group::CreateGroup;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
@@ -175,16 +176,26 @@ async fn get_user_role_assignments_includes_direct_and_group_with_resource_scopi
         .unwrap();
 
     let resource_id = Uuid::new_v4();
-    repo.assign_to_user(tenant_id, user_id, direct_role.id, Some(resource_id))
-        .await
-        .unwrap();
+    repo.assign_to_user(
+        tenant_id,
+        user_id,
+        direct_role.id,
+        AssignmentScope::resource(resource_id),
+    )
+    .await
+    .unwrap();
     SurrealGroupRepository::new(db)
         .add_member(tenant_id, user_id, group_id)
         .await
         .unwrap();
-    repo.assign_to_group(tenant_id, group_id, group_role.id, None)
-        .await
-        .unwrap();
+    repo.assign_to_group(
+        tenant_id,
+        group_id,
+        group_role.id,
+        AssignmentScope::global(),
+    )
+    .await
+    .unwrap();
 
     let assignments = repo
         .get_user_role_assignments(tenant_id, user_id)
@@ -236,13 +247,13 @@ async fn get_role_user_ids_returns_only_directly_assigned_users() {
         .await
         .unwrap();
 
-    repo.assign_to_user(tenant_id, user_id, role.id, None)
+    repo.assign_to_user(tenant_id, user_id, role.id, AssignmentScope::global())
         .await
         .unwrap();
     // Also assign the same role to the group; get_role_user_ids should NOT
     // pick up members through the group edge (it selects FROM `user`
     // filtered on has_role edges whose `in` is a user record directly).
-    repo.assign_to_group(tenant_id, group_id, role.id, None)
+    repo.assign_to_group(tenant_id, group_id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 
@@ -265,7 +276,7 @@ async fn get_role_group_ids_returns_assigned_groups() {
         .await
         .unwrap();
 
-    repo.assign_to_group(tenant_id, group_id, role.id, None)
+    repo.assign_to_group(tenant_id, group_id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 
@@ -324,7 +335,12 @@ async fn assign_to_user_cross_tenant_role_is_denied() {
         .unwrap();
 
     let result = repo
-        .assign_to_user(tenant_id, user_id, foreign_role.id, None)
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            foreign_role.id,
+            AssignmentScope::global(),
+        )
         .await;
     assert!(result.is_err());
     assert!(
@@ -350,7 +366,12 @@ async fn assign_to_group_cross_tenant_role_is_denied() {
         .unwrap();
 
     let result = repo
-        .assign_to_group(tenant_id, group_id, foreign_role.id, None)
+        .assign_to_group(
+            tenant_id,
+            group_id,
+            foreign_role.id,
+            AssignmentScope::global(),
+        )
         .await;
     assert!(result.is_err());
     assert!(matches!(
@@ -404,13 +425,15 @@ async fn assign_to_user_duplicate_edge_is_rejected() {
         .await
         .unwrap();
 
-    repo.assign_to_user(tenant_id, user_id, role.id, None)
+    repo.assign_to_user(tenant_id, user_id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 
     // Assigning the exact same (user, role, no resource) edge again must
     // fail — it hits idx_has_role_unique.
-    let result = repo.assign_to_user(tenant_id, user_id, role.id, None).await;
+    let result = repo
+        .assign_to_user(tenant_id, user_id, role.id, AssignmentScope::global())
+        .await;
     assert!(
         result.is_err(),
         "duplicate has_role edge must be rejected, not silently ignored"
@@ -465,17 +488,27 @@ async fn get_role_user_assignments_carries_the_resource_scope() {
         .await
         .unwrap();
 
-    repo.assign_to_user(tenant_id, user_id, scoped.id, Some(resource_id))
-        .await
-        .unwrap();
-    repo.assign_to_user(tenant_id, user_id, global.id, None)
+    repo.assign_to_user(
+        tenant_id,
+        user_id,
+        scoped.id,
+        AssignmentScope::resource(resource_id),
+    )
+    .await
+    .unwrap();
+    repo.assign_to_user(tenant_id, user_id, global.id, AssignmentScope::global())
         .await
         .unwrap();
     // A group edge on the scoped role must not surface in the *user* listing:
     // `has_role` holds both kinds of edge and only `in` tells them apart.
-    repo.assign_to_group(tenant_id, group_id, scoped.id, Some(resource_id))
-        .await
-        .unwrap();
+    repo.assign_to_group(
+        tenant_id,
+        group_id,
+        scoped.id,
+        AssignmentScope::resource(resource_id),
+    )
+    .await
+    .unwrap();
 
     let scoped_rows = repo
         .get_role_user_assignments(tenant_id, scoped.id)
@@ -513,12 +546,17 @@ async fn get_role_group_assignments_carries_the_resource_scope() {
         .await
         .unwrap();
 
-    repo.assign_to_group(tenant_id, group_id, role.id, Some(resource_id))
-        .await
-        .unwrap();
+    repo.assign_to_group(
+        tenant_id,
+        group_id,
+        role.id,
+        AssignmentScope::resource(resource_id),
+    )
+    .await
+    .unwrap();
     // The mirror of the check above: a user edge must not surface in the
     // *group* listing.
-    repo.assign_to_user(tenant_id, user_id, role.id, None)
+    repo.assign_to_user(tenant_id, user_id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 
@@ -546,10 +584,10 @@ async fn role_subject_assignments_are_scoped_to_the_tenant() {
         })
         .await
         .unwrap();
-    repo.assign_to_user(tenant_id, user_id, role.id, None)
+    repo.assign_to_user(tenant_id, user_id, role.id, AssignmentScope::global())
         .await
         .unwrap();
-    repo.assign_to_group(tenant_id, group_id, role.id, None)
+    repo.assign_to_group(tenant_id, group_id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 
@@ -623,10 +661,15 @@ async fn get_group_role_assignments_carries_the_resource_scope() {
         .await
         .unwrap();
 
-    repo.assign_to_group(tenant_id, group_id, scoped.id, Some(resource_id))
-        .await
-        .unwrap();
-    repo.assign_to_group(tenant_id, group_id, global.id, None)
+    repo.assign_to_group(
+        tenant_id,
+        group_id,
+        scoped.id,
+        AssignmentScope::resource(resource_id),
+    )
+    .await
+    .unwrap();
+    repo.assign_to_group(tenant_id, group_id, global.id, AssignmentScope::global())
         .await
         .unwrap();
 

@@ -25,6 +25,23 @@ pub enum MailType {
     ExportReady,
 }
 
+impl MailType {
+    /// Every mail type the system publishes.
+    ///
+    /// Exists so a test can walk all of them: each variant reaches a different
+    /// built-in template, and a template placeholder that no publisher supplies
+    /// renders as a literal `{{…}}` in somebody's inbox. A test that listed the
+    /// variants itself would go quiet the moment a sixth one was added — which
+    /// is precisely when it needs to speak.
+    pub const ALL: &[Self] = &[
+        Self::PasswordReset,
+        Self::EmailVerification,
+        Self::Notification,
+        Self::DeletionCancel,
+        Self::ExportReady,
+    ];
+}
+
 /// Outbound mail message published to `axiam.mail.outbound` (D-14).
 ///
 /// All fields except `to_address` are safe to include in audit metadata.

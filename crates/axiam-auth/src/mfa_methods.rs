@@ -82,7 +82,13 @@ impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> 
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
         let mut types = Vec::new();
 
-        if user.mfa_secret.is_some() {
+        // `mfa_enabled` is half of this condition, not decoration.
+        // [`AuthService::enroll_mfa`] writes the secret and leaves the flag
+        // off; [`AuthService::confirm_mfa`] is what turns it on. So a secret
+        // present while the flag is off is an enrollment the user never
+        // completed, and offering `totp` for it would list a factor the user
+        // never proved they hold. Same condition [`Self::list_methods`] uses.
+        if user.mfa_enabled && user.mfa_secret.is_some() {
             types.push("totp".into());
         }
 
@@ -95,6 +101,70 @@ impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> 
         }
 
         Ok(types)
+    }
+
+    /// Make MFA active because a factor was just enrolled.
+    ///
+    /// The counterpart of the disable in [`Self::delete_method`]: that one
+    /// turns `mfa_enabled` off when the last method goes, this one turns it on
+    /// when the first one arrives. Between them the flag means what it says —
+    /// *this account has a second factor* — rather than *this account has a
+    /// confirmed TOTP secret*, which is all it meant while `confirm_mfa` was
+    /// the only writer.
+    ///
+    /// That gap was the defect: `AuthService::login` gates the MFA challenge on
+    /// `mfa_enabled` alone, so a user who enrolled a passkey or a security key
+    /// and no TOTP signed in with a password and nothing else. The factor was
+    /// listed on the profile page, accepted at `/auth/webauthn/authenticate`,
+    /// and never asked for.
+    ///
+    /// # Why an abandoned TOTP enrollment is cleared rather than adopted
+    ///
+    /// [`AuthService::enroll_mfa`] writes `mfa_secret` and deliberately leaves
+    /// `mfa_enabled` false; [`AuthService::confirm_mfa`] verifies a code and
+    /// only then sets the flag. A secret sitting under a false flag is
+    /// therefore an enrollment nobody finished — the user scanned nothing, or
+    /// scanned it and could not produce a code.
+    ///
+    /// Turning the flag on for a *different* factor would promote that secret
+    /// to a live second factor in the same write, because every reader
+    /// downstream ([`Self::list_methods`], [`Self::available_method_types`],
+    /// `AuthService::verify_mfa`) reads the pair and not a separate
+    /// "confirmed" bit. The account would then accept codes from an
+    /// authenticator the user may never have successfully registered.
+    ///
+    /// So the pending secret is dropped. The cost is that a half-finished TOTP
+    /// enrollment has to be restarted; the alternative is a second factor that
+    /// was never confirmed, and re-running enrollment is two clicks.
+    ///
+    /// Idempotent: enrolling a second credential on an account that already has
+    /// MFA on writes nothing and returns `false`.
+    pub async fn enable_after_enrollment(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<bool> {
+        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+        if user.mfa_enabled {
+            return Ok(false);
+        }
+
+        self.user_repo
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    mfa_enabled: Some(true),
+                    // See the doc comment: an unconfirmed enrollment is
+                    // abandoned, not adopted. `None` here would leave it in
+                    // place, which is the whole hazard.
+                    mfa_secret: user.mfa_secret.is_some().then_some(None),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        Ok(true)
     }
 
     /// Delete an MFA method by ID.

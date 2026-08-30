@@ -5,6 +5,7 @@ use axiam_core::models::group::CreateGroup;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::{CreatePermission, PermissionEffect};
 use axiam_core::models::resource::CreateResource;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::scope::CreateScope;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
@@ -148,7 +149,7 @@ async fn grant_user_role_permission(
         .unwrap();
 
     role_repo
-        .assign_to_user(tenant_id, user_id, role.id, resource_id)
+        .assign_to_user(tenant_id, user_id, role.id, resource_id.into())
         .await
         .unwrap();
 
@@ -193,7 +194,12 @@ async fn grant_user_role_permission_with_scopes(
         .unwrap();
 
     role_repo
-        .assign_to_user(tenant_id, user_id, role.id, Some(resource_id))
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            role.id,
+            AssignmentScope::resource(resource_id),
+        )
         .await
         .unwrap();
 
@@ -338,7 +344,12 @@ async fn group_membership_inherits_roles() {
         .unwrap();
 
     role_repo
-        .assign_to_group(tenant_id, group.id, role.id, Some(resource_id))
+        .assign_to_group(
+            tenant_id,
+            group.id,
+            role.id,
+            AssignmentScope::resource(resource_id),
+        )
         .await
         .unwrap();
 
@@ -832,7 +843,12 @@ async fn one_of_two_applicable_roles_has_no_grants_still_allows() {
         .await
         .unwrap();
     role_repo
-        .assign_to_user(tenant_id, user_id, empty_role.id, Some(resource_id))
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            empty_role.id,
+            AssignmentScope::resource(resource_id),
+        )
         .await
         .unwrap();
 
@@ -993,7 +1009,7 @@ async fn assign_role_with_effect(
         .unwrap();
 
     role_repo
-        .assign_to_user(tenant_id, user_id, role.id, resource_id)
+        .assign_to_user(tenant_id, user_id, role.id, resource_id.into())
         .await
         .unwrap();
 
@@ -1146,7 +1162,12 @@ async fn a_group_inherited_deny_beats_a_directly_assigned_allow() {
         .await
         .unwrap();
     role_repo
-        .assign_to_group(tenant_id, group.id, role.id, Some(resource_id))
+        .assign_to_group(
+            tenant_id,
+            group.id,
+            role.id,
+            AssignmentScope::resource(resource_id),
+        )
         .await
         .unwrap();
 

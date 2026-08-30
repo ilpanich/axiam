@@ -13,6 +13,7 @@ vi.mock("react-router", async (importOriginal) => {
 
 import { OrganizationsPage } from "./OrganizationsPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
+import { useAuthStore } from "@/stores/auth";
 
 const orgs = [
   {
@@ -30,8 +31,40 @@ const orgs = [
   },
 ];
 
+
+/**
+ * Sign in as the organization's own administrator.
+ *
+ * Every control on this page — creating an organization, editing one, deleting
+ * one — is refused by the server to a principal that does not live in the
+ * organization's reserved tenant, so the page no longer renders them to one.
+ * A test that did not say who it was would be exercising a tenant
+ * administrator, for whom the buttons correctly do not exist.
+ *
+ * `organization_level` alone is what makes it one; the absent
+ * `reachable_tenant_ids` is what makes it an unrestricted one. See
+ * `lib/grantReach`'s `useCanActOnOrganization`.
+ */
+function signInAsOrganizationAdmin() {
+  useAuthStore.setState({
+    user: {
+      id: "u1",
+      username: "org-admin",
+      email: "org-admin@acme.test",
+      permissions: ["*"],
+      tenant_id: "org-tenant",
+      principal_tenant_id: "org-tenant",
+      org_id: "o1",
+      organization_level: true,
+    },
+    isAuthenticated: true,
+    isInitializing: false,
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  signInAsOrganizationAdmin();
 });
 
 describe("OrganizationsPage", () => {
@@ -178,5 +211,67 @@ describe("OrganizationsPage", () => {
     expect(
       await screen.findByText(/No organizations yet. Create your first one./)
     ).toBeInTheDocument();
+  });
+
+  it("offers no organization controls to a tenant administrator", async () => {
+    // The reported defect: a tenant's `super-admin` holds the whole permission
+    // registry — `organizations:create` included — so no permission check would
+    // have hidden anything. `require_organization_principal` refuses it anyway,
+    // on the basis of where the account lives, and the page now agrees.
+    useAuthStore.setState({
+      user: {
+        id: "u2",
+        username: "tenant-admin",
+        email: "tenant-admin@acme.test",
+        permissions: ["*"],
+        tenant_id: "t1",
+        principal_tenant_id: "t1",
+        org_id: "o1",
+        organization_level: false,
+      },
+      isAuthenticated: true,
+      isInitializing: false,
+    });
+    apiMock.get.mockResolvedValue(res(orgs));
+
+    renderWithProviders(<OrganizationsPage />);
+
+    // The list still renders — reading is not what was refused.
+    expect(await screen.findByText("Acme Corp")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /new organization/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /edit acme corp/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /delete acme corp/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers no organization controls to a tenant-restricted organization principal", async () => {
+    useAuthStore.setState({
+      user: {
+        id: "u3",
+        username: "alpha-admin",
+        email: "alpha-admin@acme.test",
+        permissions: ["organizations:list", "organizations:create"],
+        tenant_id: "org-tenant",
+        principal_tenant_id: "org-tenant",
+        org_id: "o1",
+        organization_level: true,
+        reachable_tenant_ids: ["t-alpha"],
+      },
+      isAuthenticated: true,
+      isInitializing: false,
+    });
+    apiMock.get.mockResolvedValue(res(orgs));
+
+    renderWithProviders(<OrganizationsPage />);
+
+    expect(await screen.findByText("Acme Corp")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /new organization/i }),
+    ).not.toBeInTheDocument();
   });
 });

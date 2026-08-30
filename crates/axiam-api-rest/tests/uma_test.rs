@@ -26,6 +26,7 @@ use axiam_core::models::oauth2_client::CreateOAuth2Client;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::{CreatePermission, PermissionEffect};
 use axiam_core::models::resource::CreateResource;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::scope::CreateScope;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
@@ -225,7 +226,12 @@ async fn setup() -> Fixture {
         .unwrap();
 
     role_repo
-        .assign_to_user(tenant.id, user.id, role.id, Some(resource.id))
+        .assign_to_user(
+            tenant.id,
+            user.id,
+            role.id,
+            AssignmentScope::resource(resource.id),
+        )
         .await
         .unwrap();
 

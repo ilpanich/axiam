@@ -44,6 +44,7 @@ use surrealdb::engine::local::{Db, Mem};
 use surrealdb_types::RecordId;
 use uuid::Uuid;
 
+use axiam_core::models::role::AssignmentScope;
 use axiam_test_support::test_password;
 
 /// Boot an in-memory SurrealDB with the production schema applied.
@@ -113,7 +114,7 @@ async fn seeded_db() -> (Surreal<Db>, Uuid, Uuid) {
         .await
         .unwrap();
     role_repo
-        .assign_to_group(tenant.id, group.id, role.id, None)
+        .assign_to_group(tenant.id, group.id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 

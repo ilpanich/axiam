@@ -16,15 +16,16 @@ use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::settings::system_defaults;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
-    OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
+    OrganizationRepository, RoleRepository, SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealOrganizationRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealRoleRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use std::sync::Arc;
 use surrealdb::Surreal;
@@ -1772,4 +1773,162 @@ async fn change_password_rejects_oversized_new_password() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 400);
+}
+
+// ---------------------------------------------------------------------------
+// B-09 — the `*` hint in /me must agree with what the server will allow
+// ---------------------------------------------------------------------------
+//
+// `/auth/me` prefixes `"*"` for a principal holding a role NAMED `super-admin`,
+// which the admin UI's `usePermissions().can()` treats as "yes" to everything.
+// That is true for the organization's own super-admin and false for an ordinary
+// tenant's: organization-level actions are refused by
+// `require_organization_principal` whatever the role carries, and since the B-04
+// follow-up they are not granted either.
+//
+// A `*` for a tenant super-admin therefore made the UI offer "New Organization",
+// the CA-management actions and the tenant lifecycle controls to somebody the
+// server answers 403 to — the "renders a control the server would refuse" half
+// of `claude_dev/E2E-TESTS.md` §2. The handler's own comment states the rule this pins:
+// "a hint that disagrees with the enforcement is worse than none".
+
+/// Sign `username` in and return the `permissions` array from `/auth/me`.
+async fn me_permissions<S, B>(app: &S, org_id: Uuid, tenant_id: Uuid, username: &str) -> Vec<String>
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
+    B: actix_web::body::MessageBody,
+{
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "org_id": org_id,
+            "username_or_email": username,
+            "password": "password12345"
+        }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "{username} must be able to log in"
+    );
+    let access_token = extract_cookie_value(&resp, "axiam_access").unwrap();
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/me")
+        .insert_header(("Cookie", format!("axiam_access={access_token}")))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "/me must return 200 for {username}"
+    );
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    body["permissions"]
+        .as_array()
+        .expect("/me must carry a permissions array")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// Give `user_id` a role called `super-admin` in `tenant_id`.
+async fn assign_super_admin(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) {
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let role = role_repo
+        .create(axiam_core::models::role::CreateRole {
+            tenant_id,
+            name: "super-admin".into(),
+            description: "Full system access — all permissions".into(),
+            is_global: true,
+        })
+        .await
+        .expect("super-admin role create failed");
+    role_repo
+        .assign_to_user(tenant_id, user_id, role.id, AssignmentScope::global())
+        .await
+        .expect("super-admin assignment failed");
+}
+
+#[actix_rt::test]
+async fn me_withholds_the_wildcard_from_an_ordinary_tenants_super_admin() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    assign_super_admin(&db, tenant_id, user_id).await;
+
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let permissions = me_permissions(&app, org_id, tenant_id, "alice").await;
+
+    assert!(
+        !permissions.contains(&"*".to_string()),
+        "a super-admin of an ORDINARY tenant must not be told it can do \
+         everything — organization-level actions are refused by the scope \
+         guard, so the UI would offer controls the server answers 403 to. \
+         Got: {permissions:?}"
+    );
+}
+
+#[actix_rt::test]
+async fn me_keeps_the_wildcard_for_the_organization_scopes_super_admin() {
+    let (db, org_id, _tenant_id, _user_id) = setup_db().await;
+
+    // The organization's own scope, and a super-admin living in it.
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let scope = tenant_repo
+        .create(CreateTenant {
+            organization_id: org_id,
+            kind: TenantKind::Organization,
+            name: "Organization scope".into(),
+            slug: "org-scope".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let admin = user_repo
+        .create(CreateUser {
+            tenant_id: scope.id,
+            username: "orgadmin".into(),
+            email: "orgadmin@example.com".into(),
+            password: "password12345".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    user_repo
+        .update(
+            scope.id,
+            admin.id,
+            UpdateUser {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assign_super_admin(&db, scope.id, admin.id).await;
+
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let permissions = me_permissions(&app, org_id, scope.id, "orgadmin").await;
+
+    assert!(
+        permissions.contains(&"*".to_string()),
+        "the ORGANIZATION scope's super-admin genuinely may do everything, so \
+         the wildcard must survive — without it the UI hides controls the \
+         server would allow, which is the other half of the same defect. \
+         Got: {permissions:?}"
+    );
 }

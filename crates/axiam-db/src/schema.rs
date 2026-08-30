@@ -292,6 +292,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "tenant_kind_organization_scope",
         sql: SCHEMA_V50,
     },
+    Migration {
+        version: 51,
+        name: "role_assignment_tenant_scope",
+        sql: SCHEMA_V51,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2823,9 +2828,45 @@ DEFINE FIELD IF NOT EXISTS created_at ON TABLE organization_scope
     TYPE datetime DEFAULT time::now();
 ";
 
+// -----------------------------------------------------------------------
+// Schema v51 — a role assignment can name the tenants it reaches
+// -----------------------------------------------------------------------
+//
+// `resource_id` says which resources an assignment covers. It could not say
+// which *tenants*, because until organization scope existed there was only one:
+// the tenant the role lives in.
+//
+// An organization-level principal's global assignments carry into every tenant
+// of the organization. That is right for an organization administrator and
+// wrong for an organization-level account meant to administer two of the
+// organization's tenants and no others — there was no way to write that down.
+// `tenant_scope` is that list.
+//
+// `option<array<string>>`, exactly the shape `grants.scope_ids` already uses
+// for the same kind of question ("everything, or these"), and read the same
+// way: NONE means unrestricted, a list means only those. So every `has_role`
+// edge that already exists reads back as unrestricted — which is precisely what
+// it has always meant — and no row is rewritten.
+//
+// There is deliberately no index. The field is only ever read as part of an
+// assignment already being fetched by subject, never searched across.
+const SCHEMA_V51: &str = "\
+DEFINE FIELD IF NOT EXISTS tenant_scope ON TABLE has_role TYPE option<array<string>>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_v51_leaves_every_existing_assignment_unrestricted() {
+        // The compatibility story in one assertion pair: the field is optional
+        // and nothing backfills it, so an assignment written before tenant
+        // scope existed keeps reaching exactly what it reached.
+        assert!(SCHEMA_V51.contains("tenant_scope ON TABLE has_role TYPE option<array<string>>"));
+        assert!(!SCHEMA_V51.contains("UPDATE"));
+        assert!(!SCHEMA_V51.contains("DEFAULT"));
+    }
 
     #[test]
     fn schema_v50_defaults_existing_tenants_to_standard() {

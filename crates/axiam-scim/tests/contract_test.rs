@@ -222,7 +222,7 @@ async fn create_user_with_role(db: &Surreal<TestDb>, tenant_id: Uuid, role_name:
         .find(|r| r.name == role_name)
         .unwrap_or_else(|| panic!("default role `{role_name}` not seeded"));
     role_repo
-        .assign_to_user(tenant_id, user.id, role.id, None)
+        .assign_to_user(tenant_id, user.id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 
@@ -278,7 +278,7 @@ async fn least_privilege_scim_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uui
         .await
         .unwrap();
     role_repo
-        .assign_to_user(tenant_id, user.id, role.id, None)
+        .assign_to_user(tenant_id, user.id, role.id, AssignmentScope::global())
         .await
         .unwrap();
     user.id
@@ -1718,6 +1718,7 @@ async fn user_put_on_an_unknown_id_is_not_found() {
 // ---------------------------------------------------------------------------
 
 use axiam_api_rest::extractors::scim_token::{ScimTokenPrincipal, ScimTokenResolver};
+use axiam_core::models::role::AssignmentScope;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A resolver that accepts exactly one handle.

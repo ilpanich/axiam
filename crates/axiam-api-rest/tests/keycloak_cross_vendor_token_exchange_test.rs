@@ -96,6 +96,7 @@ use axiam_core::models::federation::{
 use axiam_core::models::oauth2_client::CreateOAuth2Client;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::{CreatePermission, PermissionEffect};
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
@@ -569,7 +570,7 @@ async fn setup(keycloak_user_id: Uuid) -> Fixture {
         .await
         .unwrap();
     role_repo
-        .assign_to_user(tenant.id, user.id, role.id, None)
+        .assign_to_user(tenant.id, user.id, role.id, AssignmentScope::global())
         .await
         .unwrap();
     let perm = perm_repo

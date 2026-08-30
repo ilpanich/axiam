@@ -300,7 +300,9 @@ export function MfaManagementPage() {
     <div className="space-y-6 max-w-2xl">
       <PageHeader
         title="MFA Methods"
-        description="Manage your multi-factor authentication methods."
+        description="Manage your multi-factor authentication methods. Registering any
+          one of them — an authenticator app, a passkey or a security key — makes a
+          second factor required every time you sign in."
       />
 
       {/* ------------------------------------------------------------------ */}
@@ -370,6 +372,11 @@ export function MfaManagementPage() {
           Sign in with Touch&nbsp;ID, Face&nbsp;ID, Windows&nbsp;Hello, or a hardware
           security key instead of typing a code. Both are phishing-resistant: they
           only work on this site, so a lookalike page cannot use them.
+        </p>
+        <p className="text-sm text-muted-foreground mb-4">
+          Registering one turns on multi-factor authentication for this account,
+          the same way confirming an authenticator app does — your password alone
+          will no longer sign you in.
         </p>
 
         {!webauthnSupported ? (

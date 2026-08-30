@@ -250,7 +250,7 @@ mod tests {
     use super::*;
     use axiam_core::error::AxiamResult;
     use axiam_core::models::permission::{Permission, PermissionGrant};
-    use axiam_core::models::role::{Role, RoleAssignment, RoleSubjectAssignment};
+    use axiam_core::models::role::{AssignmentScope, Role, RoleAssignment, RoleSubjectAssignment};
     use chrono::Utc;
     use std::collections::HashMap;
 
@@ -316,10 +316,10 @@ mod tests {
         ) -> AxiamResult<axiam_core::repository::PaginatedResult<Role>> {
             unimplemented!()
         }
-        unreachable_method!(assign_to_user(Uuid, Uuid, Uuid, Option<Uuid>) -> ());
+        unreachable_method!(assign_to_user(Uuid, Uuid, Uuid, AssignmentScope) -> ());
         unreachable_method!(unassign_from_user(Uuid, Uuid, Uuid, Option<Uuid>) -> ());
         unreachable_method!(get_user_roles(Uuid, Uuid) -> Vec<Role>);
-        unreachable_method!(assign_to_group(Uuid, Uuid, Uuid, Option<Uuid>) -> ());
+        unreachable_method!(assign_to_group(Uuid, Uuid, Uuid, AssignmentScope) -> ());
         unreachable_method!(unassign_from_group(Uuid, Uuid, Uuid, Option<Uuid>) -> ());
         unreachable_method!(get_group_roles(Uuid, Uuid) -> Vec<Role>);
         unreachable_method!(get_role_user_ids(Uuid, Uuid) -> Vec<Uuid>);
@@ -401,6 +401,7 @@ mod tests {
             vec![RoleAssignment {
                 role: r,
                 resource_id: None,
+                tenant_scope: None,
             }],
             grants,
         );
@@ -436,6 +437,7 @@ mod tests {
                 RoleAssignment {
                     role: allower,
                     resource_id: None,
+                    tenant_scope: None,
                 },
                 RoleAssignment {
                     role: denier,
@@ -443,6 +445,7 @@ mod tests {
                     // whole scope. That is the conservative reading, argued on
                     // `RbacScopeAuthority`.
                     resource_id: Some(Uuid::new_v4()),
+                    tenant_scope: None,
                 },
             ],
             grants,
@@ -474,6 +477,7 @@ mod tests {
             vec![RoleAssignment {
                 role: r,
                 resource_id: None,
+                tenant_scope: None,
             }],
             grants,
         );
@@ -504,6 +508,7 @@ mod tests {
             vec![RoleAssignment {
                 role: r,
                 resource_id: None,
+                tenant_scope: None,
             }],
             grants,
         );

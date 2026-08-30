@@ -14,6 +14,7 @@
 
 use axiam_core::models::group::CreateGroup;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::service_account::CreateServiceAccount;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
@@ -126,7 +127,12 @@ async fn a_role_assigned_to_a_service_account_reaches_the_engine() {
     let roles = SurrealRoleRepository::new(f.db.clone());
 
     roles
-        .assign_to_service_account(f.tenant_id, f.service_account_id, f.role_id, None)
+        .assign_to_service_account(
+            f.tenant_id,
+            f.service_account_id,
+            f.role_id,
+            AssignmentScope::global(),
+        )
         .await
         .unwrap();
 
@@ -150,7 +156,12 @@ async fn get_service_account_roles_lists_the_assignment() {
     let roles = SurrealRoleRepository::new(f.db.clone());
 
     roles
-        .assign_to_service_account(f.tenant_id, f.service_account_id, f.role_id, None)
+        .assign_to_service_account(
+            f.tenant_id,
+            f.service_account_id,
+            f.role_id,
+            AssignmentScope::global(),
+        )
         .await
         .unwrap();
 
@@ -176,7 +187,12 @@ async fn unassigning_removes_the_grant() {
     let roles = SurrealRoleRepository::new(f.db.clone());
 
     roles
-        .assign_to_service_account(f.tenant_id, f.service_account_id, f.role_id, None)
+        .assign_to_service_account(
+            f.tenant_id,
+            f.service_account_id,
+            f.role_id,
+            AssignmentScope::global(),
+        )
         .await
         .unwrap();
     roles
@@ -204,7 +220,12 @@ async fn a_service_account_inherits_its_group_s_roles() {
         .await
         .unwrap();
     roles
-        .assign_to_group(f.tenant_id, f.group_id, f.role_id, None)
+        .assign_to_group(
+            f.tenant_id,
+            f.group_id,
+            f.role_id,
+            AssignmentScope::global(),
+        )
         .await
         .unwrap();
 
@@ -240,7 +261,12 @@ async fn removing_a_service_account_from_a_group_revokes_what_it_inherited() {
         .await
         .unwrap();
     roles
-        .assign_to_group(f.tenant_id, f.group_id, f.role_id, None)
+        .assign_to_group(
+            f.tenant_id,
+            f.group_id,
+            f.role_id,
+            AssignmentScope::global(),
+        )
         .await
         .unwrap();
     groups
@@ -310,7 +336,12 @@ async fn a_role_cannot_be_assigned_across_a_tenant_boundary() {
         .unwrap();
 
     let err = roles
-        .assign_to_service_account(f.tenant_id, f.service_account_id, foreign_role.id, None)
+        .assign_to_service_account(
+            f.tenant_id,
+            f.service_account_id,
+            foreign_role.id,
+            AssignmentScope::global(),
+        )
         .await
         .expect_err("a cross-tenant grant must be refused, not silently written");
     assert!(

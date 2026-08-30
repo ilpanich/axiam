@@ -85,6 +85,76 @@ crossing anything and gets ordinary resource-scoped evaluation there.
 Living in the organization tenant grants nothing by itself. An organization
 user with no roles is denied exactly like anyone else.
 
+## Restricting an organization user to some tenants
+
+The rule above is all-or-nothing: an organization principal's global grants
+reach *every* tenant of the organization. That is right for the organization's
+own administrator and wrong for the common case of an operator who should
+administer two of your twelve tenants — there was no way to write that down.
+
+A role **assignment** can now name the tenants it reaches:
+
+```http
+POST /api/v1/roles/{role_id}/users
+{ "user_id": "…", "tenant_scope": ["<tenant-a>", "<tenant-b>"] }
+```
+
+That assignment applies **only** while acting on `tenant-a` or `tenant-b`, and
+nowhere else. "Nowhere else" includes the organization's own scope: an account
+restricted to two tenants is not an organization-wide administrator, and letting
+its grants apply with no tenant selected would hand back exactly the reach the
+restriction removes.
+
+Omit the field and nothing changes — the assignment reaches wherever the role
+does, which is what every assignment written before this existed means and keeps
+meaning.
+
+### What it changes, endpoint by endpoint
+
+| Surface | For a restricted principal |
+| --- | --- |
+| Any tenant-scoped action | Allowed only in the named tenants; the authorization engine drops the assignment everywhere else |
+| Organization-level actions (create/update/delete a tenant or organization, mint or revoke the organization CA, set an mTLS trust anchor, organization email config, MDS refresh) | **Refused.** These name no tenant, so there is nothing for the engine to compare a scope against — the guard is explicit |
+| A tenant's signing CA (`…/tenants/{tenant}/signing-cas`) | Allowed when the reach covers *that* tenant. Organization-level, but what it produces belongs to one tenant |
+| `GET /organizations/{org}/tenants` | Returns only the tenants in reach |
+| `X-Axiam-Tenant` naming another tenant | `403` at the header, rather than a 403 on every request that follows |
+| `GET /auth/me` | `permissions` is computed for the tenant being acted on, and the `*` wildcard is **not** emitted |
+
+### Reach is a property of the whole set
+
+Holding one *unrestricted* assignment makes the principal unrestricted, however
+many tenant-scoped ones sit beside it — a tenant scope adds tenants, it cannot
+take any away from a grant that already reaches everywhere. So restricting an
+account means every one of its assignments must name tenants; leaving the
+organization's `super-admin` on it alongside a narrow role restricts nothing.
+
+`GET /auth/me` reports the result as `reachable_tenant_ids`: absent when the
+principal is unrestricted, a list when it is not.
+
+### What the API refuses
+
+| Request | Why |
+| --- | --- |
+| `tenant_scope` on an assignment made in an ordinary tenant | The only tenant it could name is that tenant itself, so it is a no-op or a contradiction. Accepting it would tell you a restriction was applied when none could be |
+| `"tenant_scope": []` | An assignment that reaches no tenant is not a restriction — it is a grant that does nothing anywhere, and the hardest kind to debug |
+| A tenant of another organization | The boundary an organization *is* |
+| The organization's own scope tenant | It would restore the organization-wide reach the restriction exists to remove |
+
+### In the admin UI
+
+The role assignment dialogs gain a **Tenants** picker, shown only while
+administering an organization scope (in an ordinary tenant there is nothing to
+choose). Leaving it empty is the default and means every tenant of the
+organization.
+
+An assignment that names tenants is badged with them rather than
+"Organization-wide", which for such a grant would be precisely wrong.
+
+A restricted operator signing in is placed in the first tenant it reaches rather
+than in the organization scope, where it would hold nothing; its tenant switcher
+lists only the tenants it reaches and does not offer the organization scope at
+all.
+
 ## Signing in
 
 The tenant is optional at login. Omitting it signs you in at organization
@@ -277,6 +347,10 @@ certificates page reported that the organization had no CA at all.
 
 Migration 50 adds `kind`, defaulting to `standard`. Every tenant you have is an
 ordinary tenant and reads back as one; every grant keeps meaning what it meant.
+
+Migration 51 adds `tenant_scope` to the `has_role` edge, optional and with no
+backfill. Every assignment that already exists reads back as unrestricted, which
+is exactly what it has always meant.
 
 The migration creates each organization's reserved tenant and **moves nobody
 into it**. Your users stay where they are with the access they have, and

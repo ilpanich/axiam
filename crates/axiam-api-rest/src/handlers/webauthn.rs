@@ -386,6 +386,37 @@ pub async fn finish_registration<C: Connection + Clone>(
         )
         .await?;
 
+    // A registered factor is a *required* factor. Without this the credential
+    // was listed on the profile page and accepted at
+    // `/auth/webauthn/authenticate`, but `AuthService::login` gates its MFA
+    // challenge on `mfa_enabled` — which only `confirm_mfa` ever set — so a
+    // user whose sole factor was a passkey or a security key signed in with a
+    // password and nothing else. Enrolling one now means the same thing
+    // enrolling TOTP means.
+    //
+    // Deliberately after the credential is persisted, and deliberately not
+    // failing the request if it goes wrong: the credential exists either way,
+    // and reporting the registration as failed would invite the user to
+    // register a second one. A failure here leaves MFA off, which the next
+    // enrollment or the profile page's own state will correct — and it is
+    // logged loudly rather than swallowed.
+    if let Err(e) = state
+        .mfa_method_service
+        .enable_after_enrollment(user.tenant_id, user.user_id)
+        .await
+    {
+        tracing::error!(
+            action = "webauthn.enable_mfa_failed",
+            tenant_id = %user.tenant_id,
+            user_id = %user.user_id,
+            credential_id = %cred.id,
+            error = %e,
+            "registered a WebAuthn credential but could not mark MFA as required \
+             for this account — sign-in will not challenge for it until the flag \
+             is set"
+        );
+    }
+
     Ok(HttpResponse::Created().json(CredentialResponse {
         id: cred.id,
         credential_id: cred.credential_id,

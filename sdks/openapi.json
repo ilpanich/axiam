@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta04",
-    "x-axiam-spec-digest": "sha256:7d714222dace54504866b679a5aeae233e3eaab2a008d257799b8094834d50f2"
+    "x-axiam-spec-digest": "sha256:4ec1429b43871068e6abfa35036d416fe223c337092d51742e9fe561b4328aa8"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -10735,6 +10735,17 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "tenant_scope": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The tenants this assignment reaches.\n\nOnly meaningful for an assignment made in an organization's scope,\nwhose global roles otherwise reach every tenant of the organization;\nnaming tenants here confines the assignment to those and to nothing\nelse, the organization's own scope included. Omitted — the default —\nreaches wherever the role does.\n\nRefused with 400 outside an organization scope, when empty, and when it\nnames a tenant of another organization or the organization's own scope\ntenant."
           }
         }
       },
@@ -10754,6 +10765,17 @@
           "service_account_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "tenant_scope": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The tenants this assignment reaches.\n\nOnly meaningful for an assignment made in an organization's scope,\nwhose global roles otherwise reach every tenant of the organization;\nnaming tenants here confines the assignment to those and to nothing\nelse, the organization's own scope included. Omitted — the default —\nreaches wherever the role does.\n\nRefused with 400 outside an organization scope, when empty, and when it\nnames a tenant of another organization or the organization's own scope\ntenant."
           }
         }
       },
@@ -10769,6 +10791,17 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "tenant_scope": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The tenants this assignment reaches.\n\nOnly meaningful for an assignment made in an organization's scope,\nwhose global roles otherwise reach every tenant of the organization;\nnaming tenants here confines the assignment to those and to nothing\nelse, the organization's own scope included. Omitted — the default —\nreaches wherever the role does.\n\nRefused with 400 outside an organization scope, when empty, and when it\nnames a tenant of another organization or the organization's own scope\ntenant."
           },
           "user_id": {
             "type": "string",
@@ -13324,6 +13357,17 @@
             ],
             "description": "Slug of [`Self::principal_tenant_id`], on the same terms as\n`tenant_slug`: resolved server-side and omitted (not an error) when the\nlookup fails."
           },
+          "reachable_tenant_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The tenants this caller's roles reach, when they are restricted to\nparticular ones; omitted when they are not.\n\nOmitted is the common case and means \"wherever this principal's roles\nreach\" — every tenant of the organization for an organization-level\nprincipal, its own tenant for anybody else. A present list is a\ndeliberately narrowed organization-level account, and it is what the\nadmin UI filters its tenant switcher and tenant list by.\n\nThe UI is not where this is enforced — `axiam_authz` drops the\nout-of-reach assignments and `resolve_active_tenant` refuses the header\noutright. Sending it means the UI can stop offering a switch that ends\nin a 403, rather than discovering the restriction one refusal at a time."
+          },
           "tenant_id": {
             "type": "string",
             "format": "uuid",
@@ -15703,6 +15747,17 @@
           },
           "role": {
             "$ref": "#/components/schemas/Role"
+          },
+          "tenant_scope": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The tenants this assignment reaches. See [`TenantScope`]."
           }
         }
       },
@@ -15724,6 +15779,17 @@
             ],
             "format": "uuid",
             "description": "`None` means the role was assigned globally (no resource scope)."
+          },
+          "tenant_scope": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The tenants this assignment reaches, or omitted for \"wherever the role\ndoes\". Shown next to the assignment so an operator can tell a\ndeliberately narrowed grant from an organization-wide one."
           }
         }
       },
@@ -15745,6 +15811,17 @@
           "service_account": {
             "$ref": "#/components/schemas/ServiceAccountResponse",
             "description": "The assigned service account. Carries no secret — the client secret is\nreturned once, at creation, and never again."
+          },
+          "tenant_scope": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The tenants this assignment reaches, or omitted for \"wherever the role\ndoes\". Shown next to the assignment so an operator can tell a\ndeliberately narrowed grant from an organization-wide one."
           }
         }
       },
@@ -15762,6 +15839,17 @@
             ],
             "format": "uuid",
             "description": "`None` means the role was assigned globally (no resource scope)."
+          },
+          "tenant_scope": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The tenants this assignment reaches, or omitted for \"wherever the role\ndoes\". Shown next to the assignment so an operator can tell a\ndeliberately narrowed grant from an organization-wide one."
           },
           "user": {
             "$ref": "#/components/schemas/UserResponse",

@@ -468,3 +468,242 @@ async fn delete_method_totp_disables_mfa_when_concurrent_recount_finds_zero() {
         "mfa_enabled should be cleared once the post-delete recount finds no methods left"
     );
 }
+
+// ── Enabling MFA because a factor was enrolled ───────────────────────
+
+#[tokio::test]
+async fn enrolling_a_passkey_makes_mfa_required() {
+    // The reported defect, stated as a test: adding a passkey left
+    // `mfa_enabled` false, and `AuthService::login` gates its MFA challenge on
+    // exactly that flag — so the account's only second factor was never asked
+    // for.
+    let (user_repo, cred_repo, tenant_id, user_id) = setup().await;
+    create_webauthn(
+        &cred_repo,
+        tenant_id,
+        user_id,
+        "iCloud Passkey",
+        WebauthnCredentialType::Passkey,
+    )
+    .await;
+    let svc = build_service(user_repo.clone(), cred_repo);
+
+    assert!(
+        !user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .unwrap()
+            .mfa_enabled,
+        "precondition: creating the credential alone must not have enabled MFA"
+    );
+
+    let changed = svc
+        .enable_after_enrollment(tenant_id, user_id)
+        .await
+        .unwrap();
+
+    assert!(changed, "the first factor flips the flag");
+    assert!(
+        user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .unwrap()
+            .mfa_enabled,
+        "a user holding a passkey must be challenged for it at sign-in"
+    );
+}
+
+#[tokio::test]
+async fn enrolling_a_security_key_makes_mfa_required() {
+    // Same rule for the other credential type. The user reported the passkey
+    // case; both are enrolled through the same ceremony and both are factors.
+    let (user_repo, cred_repo, tenant_id, user_id) = setup().await;
+    create_webauthn(
+        &cred_repo,
+        tenant_id,
+        user_id,
+        "YubiKey 5",
+        WebauthnCredentialType::SecurityKey,
+    )
+    .await;
+    let svc = build_service(user_repo.clone(), cred_repo);
+
+    svc.enable_after_enrollment(tenant_id, user_id)
+        .await
+        .unwrap();
+
+    assert!(
+        user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .unwrap()
+            .mfa_enabled
+    );
+}
+
+#[tokio::test]
+async fn enrolling_a_second_factor_changes_nothing() {
+    // Idempotence, and specifically that a second enrollment does not disturb
+    // an existing TOTP secret — the clearing below is for *unconfirmed* ones.
+    let (user_repo, cred_repo, tenant_id, user_id) = setup().await;
+    enable_totp(&user_repo, tenant_id, user_id).await;
+    let svc = build_service(user_repo.clone(), cred_repo);
+
+    let changed = svc
+        .enable_after_enrollment(tenant_id, user_id)
+        .await
+        .unwrap();
+
+    assert!(!changed, "MFA was already on; there was nothing to do");
+    let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert!(user.mfa_enabled);
+    assert_eq!(
+        user.mfa_secret.as_deref(),
+        Some("encrypted-secret-placeholder"),
+        "a CONFIRMED TOTP secret must survive — the user is still enrolled in it"
+    );
+}
+
+#[tokio::test]
+async fn an_unconfirmed_totp_enrollment_is_dropped_rather_than_promoted() {
+    // `enroll_mfa` writes the secret and leaves the flag off; `confirm_mfa`
+    // turns it on. A secret under a false flag is therefore an enrollment
+    // nobody finished. Turning the flag on for a *passkey* would make that
+    // secret a live second factor in the same write, because every reader
+    // downstream tests the pair and not a separate "confirmed" bit — so the
+    // account would start accepting codes from an authenticator the user never
+    // proved they hold.
+    let (user_repo, cred_repo, tenant_id, user_id) = setup().await;
+    user_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                mfa_secret: Some(Some("half-finished-enrollment".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    create_webauthn(
+        &cred_repo,
+        tenant_id,
+        user_id,
+        "iCloud Passkey",
+        WebauthnCredentialType::Passkey,
+    )
+    .await;
+    let svc = build_service(user_repo.clone(), cred_repo);
+
+    svc.enable_after_enrollment(tenant_id, user_id)
+        .await
+        .unwrap();
+
+    let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert!(
+        user.mfa_enabled,
+        "the passkey is still a factor and still counts"
+    );
+    assert!(
+        user.mfa_secret.is_none(),
+        "the unconfirmed TOTP secret must be gone, not silently activated"
+    );
+
+    // And the account offers only the factor it actually has.
+    let types = svc
+        .available_method_types(tenant_id, user_id)
+        .await
+        .unwrap();
+    assert_eq!(types, vec!["webauthn".to_string()]);
+}
+
+#[tokio::test]
+async fn an_unconfirmed_totp_secret_is_never_offered_at_sign_in() {
+    // The same rule read from the other side, and independent of the enable
+    // path above: `available_method_types` is what the login response lists as
+    // the factors the user may present. A secret whose enrollment was never
+    // confirmed is not one of them.
+    let (user_repo, cred_repo, tenant_id, user_id) = setup().await;
+    user_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                mfa_secret: Some(Some("half-finished-enrollment".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let svc = build_service(user_repo, cred_repo);
+
+    let types = svc
+        .available_method_types(tenant_id, user_id)
+        .await
+        .unwrap();
+
+    assert!(
+        types.is_empty(),
+        "an unconfirmed enrollment is not an available method, got {types:?}"
+    );
+}
+
+#[tokio::test]
+async fn removing_the_last_passkey_turns_mfa_back_off() {
+    // The round trip. `delete_method` already disabled MFA when the last method
+    // went, but nothing ever turned it on for a WebAuthn-only account, so that
+    // branch was unreachable for one. It is reachable now, and this asserts the
+    // pair composes: enroll -> required, remove the last one -> not required,
+    // rather than an account locked out of its own sign-in.
+    let (user_repo, cred_repo, tenant_id, user_id) = setup().await;
+    let cred_id = create_webauthn(
+        &cred_repo,
+        tenant_id,
+        user_id,
+        "Only Passkey",
+        WebauthnCredentialType::Passkey,
+    )
+    .await;
+    let svc = build_service(user_repo.clone(), cred_repo);
+    svc.enable_after_enrollment(tenant_id, user_id)
+        .await
+        .unwrap();
+
+    // The last method cannot be removed while MFA is on...
+    let err = svc
+        .delete_method(tenant_id, user_id, &cred_id.to_string())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AxiamError::Validation { .. } | AxiamError::Conflict { .. }
+        ) || err.to_string().to_lowercase().contains("last"),
+        "expected the last-method refusal, got {err:?}"
+    );
+
+    // ...so the user turns MFA off first, which is the documented way out.
+    user_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                mfa_enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    svc.delete_method(tenant_id, user_id, &cred_id.to_string())
+        .await
+        .unwrap();
+
+    let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert!(!user.mfa_enabled);
+    assert!(
+        svc.list_methods(tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

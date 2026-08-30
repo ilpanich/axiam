@@ -1,6 +1,7 @@
 import { useNavigate, useMatches } from "react-router";
 import { Menu, LogOut, ChevronDown, Building2, Check } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
+import { useCanActOnOrganization } from "@/lib/grantReach";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import api from "@/lib/api";
@@ -35,6 +36,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
   // Whether this principal lives in the organization's own scope. Only such a
   // principal can act on another tenant, because only its grants apply there.
   const isOrgLevel = user?.organization_level === true;
+  const canActOnOrganization = useCanActOnOrganization();
   const queryClientInstance = useQueryClient();
   const { can } = usePermissions();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -307,8 +309,16 @@ export function Topbar({ onMenuClick }: TopbarProps) {
                 </p>
               )}
               {/* Organization scope: only an organization-level principal has
-                  one to return to, and it is where its own record lives. */}
-              {isOrgLevel && (
+                  one to return to, and it is where its own record lives.
+
+                  Not offered to one whose roles name particular tenants. Those
+                  assignments apply only inside the tenants they name — the
+                  organization scope is deliberately never one of them — so
+                  selecting it would drop the operator into a scope where they
+                  hold nothing, which reads as a broken session rather than as a
+                  restriction. `useCanActOnOrganization` is the same predicate
+                  the server's own organization-level guard uses. */}
+              {isOrgLevel && canActOnOrganization && (
                 <button
                   role="menuitem"
                   onClick={() => selectActiveTenant(null, null)}

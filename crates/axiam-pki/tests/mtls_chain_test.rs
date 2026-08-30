@@ -133,15 +133,122 @@ async fn mtls_chain_accept_leaf_signed_by_tenant_ca() {
         .await
         .expect("cert bind must succeed");
 
-    // Authenticate — the leaf is signed by the CA in the DB → must succeed
+    // Enable the CA as an mTLS trust anchor.
+    //
+    // Being signed by a CA that exists is not sufficient and no longer was the
+    // moment the flag was introduced: authentication requires chaining to a CA
+    // an operator actually enabled for it. Without this the leaf below is
+    // correctly refused, and this fixture would be asserting the behaviour the
+    // flag exists to prevent.
+    ca_repo
+        .set_mtls_trust_anchor(org_id, ca.certificate.id, true)
+        .await
+        .expect("enabling the CA as an mTLS trust anchor must succeed");
+
+    // Authenticate — the leaf is signed by a CA in the DB that is enabled as an
+    // anchor → must succeed
     let svc_auth = DeviceAuthService::new(cert_repo, ca_repo);
     let identity = svc_auth
         .authenticate(&leaf.certificate.public_cert_pem)
         .await
-        .expect("leaf signed by tenant CA must authenticate successfully");
+        .expect("leaf signed by a trusted tenant CA must authenticate successfully");
 
     assert_eq!(identity.service_account_id, sa.id);
     assert_eq!(identity.tenant_id, tenant_id);
+}
+
+// ---------------------------------------------------------------------------
+// Case 1b: Reject — leaf signed by a real CA that is NOT a trust anchor
+// ---------------------------------------------------------------------------
+//
+// The mirror of case 1, and the one that was missing. Everything is valid —
+// the CA exists, is Active and in date, the signature verifies, and the leaf is
+// bound to a service account. The only thing wrong is that nobody enabled the
+// CA for mTLS. Before the anchor check this authenticated, which made
+// `mtls_trust_anchor` decorative on the proxy-terminated path.
+
+#[tokio::test]
+async fn mtls_chain_reject_leaf_from_ca_that_is_not_a_trust_anchor() {
+    let db = setup_db().await;
+
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let ca_svc = CaService::new(
+        ca_repo.clone(),
+        test_pki_config(),
+        sem.clone(),
+        test_ca_custodians(),
+    );
+    let ca = ca_svc
+        .generate(CreateCaCertificate {
+            organization_id: org_id,
+            subject: "Unflagged CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
+        })
+        .await
+        .expect("CA generation must succeed");
+    // Deliberately NOT flagged as an mTLS trust anchor.
+
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let cert_svc = CertService::new(
+        ca_repo.clone(),
+        cert_repo.clone(),
+        test_pki_config(),
+        sem.clone(),
+        test_ca_custodians(),
+    );
+    let leaf = cert_svc
+        .generate(
+            org_id,
+            CreateCertificate {
+                tenant_id,
+                issuer_ca_id: ca.certificate.id,
+                subject: "CN=unflagged-device-001".into(),
+                cert_type: CertificateType::Device,
+                key_algorithm: KeyAlgorithm::Ed25519,
+                validity_days: 30,
+                metadata: None,
+            },
+            None,
+        )
+        .await
+        .expect("leaf cert generation must succeed");
+
+    // Bound, so a refusal cannot be attributed to a missing binding — which is
+    // the other reason this endpoint says no, and would make the assertion pass
+    // without testing trust at all.
+    let sa_repo = SurrealServiceAccountRepository::new(db.clone());
+    let (sa, _secret) = sa_repo
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "Unflagged CA SA".into(),
+            description: None,
+        })
+        .await
+        .expect("service account creation must succeed");
+    cert_repo
+        .bind_to_service_account(tenant_id, leaf.certificate.id, sa.id)
+        .await
+        .expect("cert bind must succeed");
+
+    let svc_auth = DeviceAuthService::new(cert_repo, ca_repo);
+    let err = svc_auth
+        .authenticate(&leaf.certificate.public_cert_pem)
+        .await
+        .expect_err("a leaf whose CA is not an mTLS trust anchor must be refused");
+
+    assert!(
+        err.to_string().contains("trust anchor"),
+        "the refusal must name the reason, so an operator can tell it from a \
+         missing binding or a bad signature; got: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------

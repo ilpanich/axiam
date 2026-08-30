@@ -25,6 +25,7 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
@@ -198,7 +199,7 @@ async fn create_user_with_role(
             .find(|r| r.name == name)
             .unwrap_or_else(|| panic!("default role `{name}` not seeded"));
         role_repo
-            .assign_to_user(tenant_id, user.id, role.id, None)
+            .assign_to_user(tenant_id, user.id, role.id, AssignmentScope::global())
             .await
             .unwrap();
     }
@@ -577,7 +578,7 @@ async fn user_with_single_permission(
         .unwrap();
 
     role_repo
-        .assign_to_user(tenant_id, user.id, role.id, None)
+        .assign_to_user(tenant_id, user.id, role.id, AssignmentScope::global())
         .await
         .unwrap();
 

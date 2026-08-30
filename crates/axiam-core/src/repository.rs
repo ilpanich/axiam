@@ -43,7 +43,7 @@ use crate::models::{
     pgp_key::{PgpKey, StorePgpKey},
     reactor::{CreateReactor, Reactor, UpdateReactor},
     resource::{CreateResource, Resource, UpdateResource},
-    role::{CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole},
+    role::{AssignmentScope, CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole},
     scim_token::{CreateScimToken, ScimToken},
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
@@ -339,13 +339,17 @@ pub trait RoleRepository: Send + Sync {
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<Role>>> + Send;
 
-    /// Assign a role to a user, optionally scoped to a resource.
+    /// Assign a role to a user, optionally scoped to a resource and to a set
+    /// of tenants.
+    ///
+    /// [`AssignmentScope::global`] is the unscoped assignment every caller made
+    /// before either axis existed.
     fn assign_to_user(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
         role_id: Uuid,
-        resource_id: Option<Uuid>,
+        scope: AssignmentScope,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Remove a role assignment from a user.
@@ -391,7 +395,7 @@ pub trait RoleRepository: Send + Sync {
         _tenant_id: Uuid,
         _service_account_id: Uuid,
         _role_id: Uuid,
-        _resource_id: Option<Uuid>,
+        _scope: AssignmentScope,
     ) -> impl Future<Output = AxiamResult<()>> + Send {
         async {
             Err(AxiamError::Internal(
@@ -446,13 +450,14 @@ pub trait RoleRepository: Send + Sync {
         async { Ok(Vec::new()) }
     }
 
-    /// Assign a role to a group, optionally scoped to a resource.
+    /// Assign a role to a group, optionally scoped to a resource and to a set
+    /// of tenants.
     fn assign_to_group(
         &self,
         tenant_id: Uuid,
         group_id: Uuid,
         role_id: Uuid,
-        resource_id: Option<Uuid>,
+        scope: AssignmentScope,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Remove a role assignment from a group.

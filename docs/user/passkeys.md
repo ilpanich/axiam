@@ -30,6 +30,23 @@ which one to remove.
 that created it; if that device is your only factor and it is lost, you are
 locked out.
 
+### Registering one turns multi-factor authentication on
+
+The first factor you add — a passkey, a security key, or a confirmed
+authenticator app — makes a second factor **required** at every sign-in. Your
+password alone stops being enough from that moment.
+
+That is the point of registering one, and it used to be untrue of passkeys
+specifically: a passkey could be added, listed on this page and accepted at
+sign-in, and yet a password on its own still let you straight in, because the
+"does this account need a second factor?" switch was only ever flipped by
+confirming an authenticator app. It is now flipped by whichever factor you
+register first.
+
+Removing your last remaining factor turns it back off, so you cannot lock
+yourself out by deleting one — but see "register at least two" above, because a
+*lost* device is not a deleted one.
+
 ### If the buttons are not there
 
 The panel explains it inline: the browser you are using does not support
@@ -44,10 +61,11 @@ Three ways, and you do not have to choose in advance:
    passkey saved, your browser offers it there, alongside saved passwords.
 2. **"Sign in with a passkey"** — the button below the password field. You do
    not need to type a username first: the passkey itself identifies you.
-3. **As a second factor** — if you sign in with a password and your account
-   requires a second factor, you will be offered "Use a passkey or security
-   key instead" next to the code field. The code field stays available; the
-   passkey is an addition, not a replacement.
+3. **As a second factor** — if you sign in with a password, your account now
+   requires a second factor (see above), and you will be offered "Use a passkey
+   or security key instead" next to the code field. The code field is there only
+   if you also have an authenticator app; the passkey is an addition to your
+   password, not a replacement for it.
 
 ## When something goes wrong
 

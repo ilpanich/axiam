@@ -77,6 +77,35 @@ docker compose -f docker/docker-compose.e2e.yml up -d --wait
    one in tenant A is *tenant-wide*. That is why the admin UI stopped labelling
    both "Global".
 
+7. **The middle ground.** Steps 1–4 gave one administrator every tenant; step 5
+   gave another exactly one, permanently, by where its account lives. Neither
+   expresses the case operators actually ask for: an organization-level
+   operator who should administer *some* of the organization's tenants.
+
+   A `tenant_scope` on the role assignment expresses it:
+
+   ```json
+   POST /api/v1/roles/{role_id}/users
+   { "user_id": "…", "tenant_scope": ["<tenant-a>"] }
+   ```
+
+   The account is created in the organization scope and holds the
+   organization's own `super-admin` role — so nothing below is about a missing
+   permission. The walkthrough asserts all five consequences:
+
+   | | |
+   |---|---|
+   | `/auth/me` | reports `reachable_tenant_ids: ["<tenant-a>"]`, and **no** `*` wildcard |
+   | tenant A | works normally |
+   | tenant B | `403` at the `X-Axiam-Tenant` header, not one denial per request |
+   | `GET …/tenants` | lists tenant A only |
+   | `POST …/tenants` | `403` — an account confined to particular tenants is not an organization administrator |
+
+   The last one is the half the authorization engine structurally cannot
+   enforce: creating a tenant names no tenant, so there is nothing for a scope
+   to be compared against. That is why it is an explicit guard, and why the
+   walkthrough asserts it rather than assuming it.
+
 ## The rule, stated once
 
 > When a subject's grants are read across a tenant boundary, only **global**

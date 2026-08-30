@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Tenant-scoped role assignments: an organization-level account can now be
+  confined to particular tenants of its organization. `tenant_scope` on the
+  three assignment endpoints names the tenants an assignment reaches;
+  `reachable_tenant_ids` on `/auth/me` reports the result. Such an account is
+  refused organization-level actions, sees only the tenants it reaches in the
+  tenant roster, and is refused `X-Axiam-Tenant` for any other. Schema 51,
+  additive with no backfill — every existing assignment stays unrestricted.
+
+### Fixed
+
+- Enrolling a passkey or a security key now makes multi-factor authentication
+  **required** at sign-in, the way confirming an authenticator app always did.
+  The credential was listed on the profile page and accepted at
+  `/auth/webauthn/authenticate`, but the login gate reads `mfa_enabled`, which
+  only `confirm_mfa` ever set — so an account whose sole factor was a passkey
+  signed in with a password and nothing else.
+
+- The admin UI no longer renders organization-level controls to principals the
+  server refuses them to. A tenant's `super-admin` holds the whole permission
+  registry, so no permission check could have hidden "New Organization", the
+  tenant lifecycle buttons or the CA controls; the gate is now the same
+  standing the server checks.
+
+- `GET /organizations/{org}/tenants` returns only the tenants the caller may act
+  on. Every principal holding `tenants:list` previously saw every tenant of the
+  organization, including a tenant administrator whose reach is one tenant.
+
 ## [1.0.0-beta04] - 2026-08-28
 
 ### Changed

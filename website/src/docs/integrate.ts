@@ -1,6 +1,9 @@
 import { API_INDEX, API_OPERATION_COUNT, API_PATH_COUNT, API_VERSION } from "../apiIndex";
+import { contractLink } from "../contractAnchors";
 import type { DocBlock, DocPage } from "./types";
 import { DOCS_VERIFIED_RELEASE } from "../version";
+
+const GH_BLOB = "https://github.com/ilpanich/axiam/blob/main";
 
 /**
  * The endpoint index, expanded from the generated `apiIndex.ts`.
@@ -45,6 +48,10 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "p",
         text: "The running server serves the document and a browsable Swagger UI itself, at `/api/docs/openapi.json` and `/api/docs/`. Treat that as the authoritative copy for the build you are talking to — the committed spec is the same document, exported.",
       },
+      {
+        type: "p",
+        text: "The document carries its own content digest at `info.x-axiam-spec-digest` — a SHA-256 over the document with the digest field itself removed, so it is a fixed point rather than a chicken-and-egg. `scripts/check-spec-digest.py` verifies it on every commit. It exists for the tooling around the SDKs: a generator deciding whether to re-run, a contract test asserting a vendored copy is current, a gateway keyed on a spec revision. Comparing digests is exact where comparing versions was not — an amendment that changes an operation without bumping `info.version` moves the digest.",
+      },
       { type: "h", id: "shape", text: "Shape of the API" },
       {
         type: "table",
@@ -74,11 +81,26 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "list",
         items: [
           "**Two ways to authenticate.** A machine client sends `Authorization: Bearer <access_token>`, obtained from the OAuth2 token endpoint. An interactive login sets `httpOnly` cookies instead — `POST /auth/login` returns no token in its body — and state-changing requests must then echo the `axiam_csrf` cookie in an `X-CSRF-Token` header. The SDKs handle the second case for you.",
+          "**CSRF applies to the credential the browser attaches by itself.** A request authenticated *only* by a bearer token needs no CSRF token: a cross-site page cannot set an `Authorization` header on a victim's behalf, so the requirement would be unsatisfiable rather than protective. A request carrying a bearer header **and** a session cookie is still checked, deliberately — that is precisely the shape where the browser supplies the cookie and an attacker supplies the header, so the exemption cannot itself become the bypass.",
           "**Tenancy is explicit.** Entity routes are tenant-scoped through the authenticated principal; OAuth2 endpoints take `tenant_id` as a query parameter. Nothing is inferred from a default.",
           "**Every route is permission-guarded.** A caller needs an explicit grant for the action behind the route — the same 113-permission registry the admin console uses.",
           "**Collections paginate** with `offset` and `limit`, and return the items plus a total.",
+          "**Collections search** with `?search=`, on all twenty list endpoints. Each matches its own identifying columns plus the record's id, so a UUID copied out of a log line goes in the same box as a name. It is a substring match rather than tokenised full-text search, precisely so that pasting a fragment of an id finds the row. The filter applies to the `total` as well as to the page — a total describing the unfiltered set would hand the pager page numbers the filtered set cannot fill.",
           "**Mutations are audited.** Every write lands in the append-only audit log with the acting principal.",
         ],
+      },
+      { type: "h", id: "acting-tenant", text: "Acting on another tenant" },
+      {
+        type: "p",
+        text: "An organization-level principal switches the tenant a request acts on with the `X-Axiam-Tenant` header, without signing in again. The header is honoured only for a principal that lives in the organization's reserved scope, and only for a tenant inside its own organization; anything else is a `403` rather than a silent fallback. See [Organization-level principals](#/docs/organization-scope).",
+      },
+      {
+        type: "p",
+        text: "One rule governs the interaction with self-service routes, and it is the one that bites: **a request about the caller's own record resolves in the tenant the caller lives in, whatever the header says.** That covers `/auth/me`, `/auth/password/change`, `GET` and `PUT /users/{id}` for the caller's own id, that user's MFA methods and `reset-mfa`, MFA enrolment and confirmation, WebAuthn registration, `/users/me/resend-verification`, the GDPR self-service requests and `/oauth2/userinfo`. Anybody else's id follows the header, as does everything that is not about a user at all.",
+      },
+      {
+        type: "warn",
+        text: "The acting-tenant header is `X-Axiam-Tenant`. Contract versions before 1.36 named it `X-Tenant-ID`, which the server does not read — a client following that letter switched nothing and received a perfectly successful response describing its own tenant's data. `X-Tenant-ID` still exists as the unconditional constructor-tenant header and is deliberately *not* renamed: renaming it would make it override the acting tenant on every request made after a switch.",
       },
       { type: "h", id: "example", text: "A worked example" },
       {
@@ -96,6 +118,39 @@ export const INTEGRATE_PAGES: DocPage[] = [
         text: "Where a row carries no description, the handler has none in the specification beyond its route — the OpenAPI document is the place to fix that, not this page. For request and response schemas, read the document itself or point a viewer at the running server.",
       },
       ...API_INDEX_BLOCKS,
+      { type: "h", id: "management", text: "Managing AXIAM from an SDK" },
+      {
+        type: "p",
+        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **24 namespaces** and names the **155** that make up the surface, and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
+      },
+      {
+        type: "p",
+        text: "The registry is explicit about what it leaves out, and why: the authentication endpoints (§1, §23, §25), the authorization checks (§1), the OAuth2 grants and relying-party helpers (§12, §14, §15, §26), UMA (§20), the WebAuthn ceremonies (§24) and the device-grant user-interaction endpoints (§14) are all protocol surfaces with their own hand-written contract sections. Management is the CRUD half, and only the CRUD half.",
+      },
+      {
+        type: "list",
+        items: [
+          "**Namespaced, not flat.** Operations hang off a namespace handle — `client.service_accounts().rotate_secret(id)` — with a `client.management()` accessor beside it rather than instead of it. C is the one exception: it has no handle to hang operations on, so it gets the flat-symbol form.",
+          "**`search` is applied server-side, before `offset` and `limit`.** On all twenty paginated operations. Filtering a page client-side is forbidden by the contract, because it silently changes what pagination means: page 2 of a filtered set is not the filtered part of page 2.",
+          "**Sparse update or full replacement is classified per operation**, not guessed. A `PUT` that replaces and a `PATCH`-shaped `PUT` that merges are different things to a caller who omits a field, and the registry records which each one is.",
+          "**Declarative management is the second half.** §27.6 defines a manifest form — describe the desired state, apply it — which the SDKs expose in whatever their language calls idiomatic.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "CONTRACT §27 — Management API",
+            href: contractLink("27"),
+            note: "The normative section: namespaces, per-language naming, the pagination and search semantics, and how an SDK builds its generator.",
+          },
+          {
+            label: "`sdks/management-registry.json`",
+            href: `${GH_BLOB}/sdks/management-registry.json`,
+            note: "The registry itself — every namespace, every operation, and the exclusions with their stated reasons.",
+          },
+        ],
+      },
       { type: "h", id: "gdpr", text: "GDPR endpoints" },
       {
         type: "p",
@@ -104,6 +159,18 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "note",
         text: "Erasure pseudonymises the actor identity in the audit trail rather than deleting the records — an append-only log cannot have rows removed from it. The HMAC pepper that makes pseudonyms consistent is `AXIAM__GDPR_PSEUDONYM_PEPPER`; changing it breaks the linkage between old and new pseudonyms. See [Standards & compliance](#/docs/compliance).",
+      },
+      {
+        type: "p",
+        text: "An administrator's `DELETE /api/v1/users/{id}` is not the same operation, and the difference is worth knowing before you pick one. Deletion now **erases** the personal data rather than hiding it: `username`, `email` and `metadata` are overwritten with values derived from the row's own id, and the WebAuthn credentials, federation identity links and password history that live outside the user row go with them — the same tables the Art. 17 purge clears, so an administrator's delete and a data subject's request do not leave different residue.",
+      },
+      {
+        type: "p",
+        text: "Overwriting rather than tombstoning is what **frees the identifiers**. The username and email uniqueness indexes are enforced by the database, so a hidden tombstone would refuse the same person a new account later — and the duplicate-account error would itself disclose that the deleted account had existed. The row survives holding its id and nothing identifying, because audit entries name their actor by id and dropping it would leave every entry the user produced pointing at nothing.",
+      },
+      {
+        type: "note",
+        text: "What administrator deletion does **not** do, and why it is not a substitute for `POST /api/v1/account/delete`: it does not pseudonymise the audit log's actor references, and it writes no erasure proof. Where you need an Art. 17 record, use the data-subject pipeline.",
       },
     ],
   },

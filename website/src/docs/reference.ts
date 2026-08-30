@@ -208,7 +208,7 @@ export const REFERENCE_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "The OpenAPI document is **drift-gated** — a PR fails if the committed spec diverges from a fresh export from the server.",
+          "The OpenAPI document is **drift-gated** — a PR fails if the committed spec diverges from a fresh export from the server — and carries its own SHA-256 content digest at `info.x-axiam-spec-digest`, verified on every commit, so a vendored copy can be checked for currency exactly rather than by comparing version strings.",
           "The protobuf contract is guarded by `buf lint` and `buf breaking` on every change.",
           "Crate-layering invariants are enforced in CI: dependencies point inward, and adding a crate without placing it in the layering table is itself a failure.",
           "Remediation records are verified to resolve to commits reachable from the default branch — a claimed fix on an unmerged branch does not count as shipped.",
@@ -246,11 +246,15 @@ export const REFERENCE_PAGES: DocPage[] = [
       { type: "h", id: "contract", text: "One contract, many languages" },
       {
         type: "p",
-        text: "AXIAM ships SDKs for Rust, TypeScript, Python, Java, C#, PHP, Go, Kotlin, Swift, C and C++. Each lives in its own repository, and each vendors the same [CONTRACT.md](https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md), OpenAPI document and protobuf definitions — so behaviour is identical whichever language you pick, and a difference between two SDKs is a bug in one of them rather than a matter of taste.",
+        text: `AXIAM ships SDKs for Rust, TypeScript, Python, Java, C#, PHP, Go, Kotlin, Swift, C and C++. Each lives in its own repository, and each vendors the same three artifacts from this one — [CONTRACT.md](${GH_BLOB}/sdks/CONTRACT.md), [openapi.json](${GH_BLOB}/sdks/openapi.json) and [management-registry.json](${GH_BLOB}/sdks/management-registry.json) — alongside the protobuf definitions. Behaviour is therefore identical whichever language you pick, and a difference between two SDKs is a bug in one of them rather than a matter of taste.`,
       },
       {
         type: "p",
-        text: "The contract is not a style guide. It specifies the error taxonomy, CSRF behaviour, the cookie-jar requirement, tenant and organization context, TLS policy, the redacting secret type, the AMQP HMAC construction, the single-flight refresh guard, route-guard interfaces, declarative authorization helpers, OIDC relying-party helpers, webhook verification, the device grant, token exchange, retry policy, deterministic shutdown, telemetry hooks, UMA, FAPI 2.0, Reactors, OPAQUE, WebAuthn, the account-lifecycle and MFA-enrolment operations and pushed authorization requests.",
+        text: "The contract is not a style guide. It specifies the error taxonomy, CSRF behaviour, the cookie-jar requirement, tenant and organization context, TLS policy, the redacting secret type, the AMQP HMAC construction, the single-flight refresh guard, route-guard interfaces, declarative authorization helpers, OIDC relying-party helpers, webhook verification, the device grant, token exchange, retry policy, deterministic shutdown, telemetry hooks, UMA, FAPI 2.0, Reactors, OPAQUE, WebAuthn, the account-lifecycle and MFA-enrolment operations, pushed authorization requests, and the management API.",
+      },
+      {
+        type: "p",
+        text: `The last of those is generated rather than written. \`management-registry.json\` classifies the spec's operations into 24 namespaces and names the 155 that make up the administrative surface, deliberately excluding the protocol endpoints that have their own hand-written sections; each SDK ships a generator over it and a CI job that regenerates and diffs, so a new endpoint reaches all eleven by regeneration rather than by eleven people remembering. See [CONTRACT §27](${contractLink("27")}) and [Managing AXIAM from an SDK](#/docs/rest).`,
       },
       { type: "h", id: "matrix", text: "What each SDK ships" },
       {

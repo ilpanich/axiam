@@ -12,10 +12,10 @@
  * `claude_dev/threat-modeling-and-security.md`, which is the record of what that
  * verification covered.
  */
-export const SECURITY_VERIFIED_RELEASE = "1.0.0-beta03";
+export const SECURITY_VERIFIED_RELEASE = "1.0.0-beta06";
 
 /** Date of that verification pass, ISO 8601. */
-export const SECURITY_VERIFIED_DATE = "2026-08-28";
+export const SECURITY_VERIFIED_DATE = "2026-08-30";
 
 /**
  * The release a documentation page's claims were last verified against.

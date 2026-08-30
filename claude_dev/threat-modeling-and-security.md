@@ -14,8 +14,37 @@
 >
 > ## Handoff — the website section is in step with this document
 >
-> **Status: published, source and section both current as of 2026-08-28
-> (`1.0.0-beta03`).**
+> **Status: published, source and section both current as of 2026-08-30
+> (`1.0.0-beta06`).**
+>
+> **Beta05…beta06 wave (model 2.10.0).** Twelve new mitigated threats,
+> T-200…T-211, bring the model to **211 threats, 196 mitigated / 15 open** —
+> most of them found by the E2E permission matrix run against the production
+> image rather than the preview proxy. On the authorization diagram: the
+> organization-principal guard (B-04 — a tenant super-admin could flip a CA's
+> mTLS trust-anchor flag and mint sibling-tenant identities; T-202, which also
+> records B-08's MDS-refresh gap and B-09's `/auth/me` wildcard), the single
+> `ORGANIZATION_LEVEL_ACTIONS` list that makes the seeded grant data agree with
+> the guard (T-203), tenant-scoped role assignments — `tenant_scope`, schema 51
+> — enforced at all four doors (T-204), and reach-filtered organization and
+> tenant rosters (T-205). Enrolling a passkey now turns the second-factor
+> requirement on (T-201); a bearer-only machine caller is exempt from the CSRF
+> cookie while bearer-plus-cookie deliberately is not (T-200); device
+> authentication requires the chain to reach a CA enabled as an mTLS trust
+> anchor on the proxy-terminated path exactly as on the native one (T-206); a
+> rolling deployment no longer logs the surviving replicas out of SurrealDB
+> (T-207); the shipped nginx config is now the artifact CI measures (T-208);
+> the admin UI namespaces its query cache by acting tenant so a switch cannot
+> keep rendering the previous tenant's rows (T-209); the contract names the
+> acting-tenant header the server actually reads — `X-Axiam-Tenant`, contract
+> 1.36 (T-210); and the assignment dialogs offer the same scope pickers
+> everywhere roles are assigned (T-211). `npm run gen:threat-model` has been
+> re-run, `src/version.ts` stamps `1.0.0-beta06` / 2026-08-30, and the prose is
+> mirrored in `src/security.ts` in the same change: the passkey-is-a-factor
+> clause under *Authentication & sessions*, the organization-principal-guard
+> and tenant-scope bullets under *Authorization & tenant isolation*, the
+> trust-anchor chain-walk clause under *PKI*, and the tenant ↔ tenant boundary
+> row.
 >
 > **Beta03 hardening pass (model 2.9.0).** Three mitigations changed after the
 > wave below, and one threat closed. T-118 (audit trail deleted along with the
@@ -177,7 +206,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 199 threats** and a
+The system is verified against a **STRIDE threat model of 211 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices.
@@ -198,8 +227,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 199 |
-| Mitigated / Open | 183 / 16 |
+| Threats identified | 211 |
+| Mitigated / Open | 196 / 15 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -212,15 +241,15 @@ optimistic closed one.
 
 | Area | Threats | Open |
 |---|---|---|
-| System context | 28 | 2 |
-| Authentication & session management | 29 | 1 |
+| System context | 29 | 2 |
+| Authentication & session management | 30 | 1 |
 | OAuth2 / OIDC authorization server | 24 | 0 |
 | Federation (SAML SP & OIDC RP) | 23 | 1 |
-| Authorization engine (RBAC, hierarchy, scopes) | 19 | 0 |
-| PKI, certificates & IoT device identity | 23 | 1 |
-| Audit, webhooks, email & notifications | 18 | 3 |
-| Deployment & platform (Kubernetes) | 13 | 4 |
-| Client SDKs & admin-UI integration surface | 22 | 4 |
+| Authorization engine (RBAC, hierarchy, scopes) | 23 | 0 |
+| PKI, certificates & IoT device identity | 24 | 1 |
+| Audit, webhooks, email & notifications | 18 | 2 |
+| Deployment & platform (Kubernetes) | 15 | 4 |
+| Client SDKs & admin-UI integration surface | 25 | 4 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
@@ -238,25 +267,25 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 49 | 3 |
-| Tampering | 39 | 2 |
+| Spoofing | 51 | 3 |
+| Tampering | 42 | 1 |
 | Repudiation | 5 | 0 |
-| Information disclosure | 52 | 7 |
-| Denial of service | 19 | 2 |
-| Elevation of privilege | 35 | 2 |
+| Information disclosure | 54 | 7 |
+| Denial of service | 20 | 2 |
+| Elevation of privilege | 39 | 2 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
-| Critical | 26 | 1 |
-| High | 91 | 7 |
-| Medium | 75 | 7 |
+| Critical | 27 | 1 |
+| High | 98 | 7 |
+| Medium | 79 | 6 |
 | Low | 7 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 16 still-open items are listed one by one in
+the weight the control carries. The 15 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -272,7 +301,7 @@ have to be re-established — nothing is assumed across a boundary.
 |---|---|---|
 | **Public Internet ↔ AXIAM** | Browsers, SDK callers, IoT devices, external IdPs | TLS 1.3, authentication, rate limiting, CSRF on cookie requests, input validation |
 | **AXIAM ↔ data tier** | Application pods ↔ SurrealDB, RabbitMQ, Vault / Secrets | Private network, credentialed connections, TLS-only AMQP, parameterised queries, tenant scoping at the repository layer |
-| **Tenant ↔ tenant** | Every tenant's data from every other's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal; cross-tenant reach only as an explicit organization-scope claim, verified to stay inside the caller's organization |
+| **Tenant ↔ tenant** | Every tenant's data from every other's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal; cross-tenant reach only as an explicit organization-scope claim — narrowable to named tenants per role assignment — verified to stay inside the caller's organization and reach |
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, HTTPS enforcement, response-size caps, HMAC signatures on deliveries |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates |
 
@@ -329,7 +358,11 @@ have to be re-established — nothing is assumed across a boundary.
   accounts exist. A completed passkey ceremony also leaves the browser in the
   same session posture as a password login — the same `HttpOnly` cookie triple
   and CSRF token — while non-browser clients adopt the token pair from the
-  response body, as the SDK contract has them do.
+  response body, as the SDK contract has them do. And enrolling a passkey is
+  enrolling a *factor*: from the moment a WebAuthn credential exists, the next
+  sign-in demands a second factor — an abandoned, unconfirmed TOTP enrollment is
+  dropped rather than silently promoted alongside it — and removing the last
+  credential turns the requirement back off.
 - **Tokens**: access tokens are **EdDSA (Ed25519) JWTs**, 15 minutes long. The
   verifier pins the algorithm and never reads it from the token header, so
   `alg:none` and HMAC-key-confusion attacks are rejected outright. Refresh tokens
@@ -385,6 +418,27 @@ redundantly rather than at one chokepoint:
   verified to stay inside its own organization — failing closed when it cannot be
   verified. Revoking an organization-level role sweeps the decision cache in every
   tenant, not just the one the revocation happened in.
+- **Organization-level actions require an organization-scoped principal, not
+  merely the permission.** Creating organizations or tenants, every CA operation
+  and the FIDO metadata refresh are refused to any caller whose record does not
+  live in the organization's reserved scope — keyed on where the principal lives,
+  not on what its roles carry, and failing closed when that cannot be resolved.
+  The grant data agrees with the guard: tenant roles are seeded *without* the
+  organization-level actions, a boot-time reconciler revokes ones seeded earlier,
+  and a consistency test reads the handler sources to prove every withheld action
+  is scope-guarded. Deployment-wide rosters honour the same boundary — an
+  organization sees only itself in the organization listing, and the tenant
+  roster answers each administrator with exactly the tenants it reaches.
+- **Cross-tenant reach can be narrowed to named tenants.** A role assignment can
+  carry a `tenant_scope` confining an organization-level account to particular
+  tenants of its organization. The rule is written once and enforced at every
+  door: the engine's single and batch paths filter per decision, organization-wide
+  actions are refused to a confined account, the `X-Axiam-Tenant` switch refuses
+  tenants outside the account's reach, and `/auth/me` reports
+  `reachable_tenant_ids` and withholds the `*` wildcard so the admin UI never
+  offers a control the server would refuse. Existing assignments are untouched by
+  the migration — an unrestricted grant stays unrestricted until an administrator
+  narrows it.
 - **Repository queries are tenant-scoped and parameterised.** Every SurrealQL
   statement uses bind parameters — no query is assembled by string concatenation of
   user input — and carries a `tenant_id` predicate. Cross-tenant graph edges are
@@ -506,7 +560,14 @@ against the classic federation attacks:
 - **mTLS device authentication verifies the full chain** to the tenant/org CA after
   the fingerprint lookup, checks the issuing CA is active and within its validity
   window, and enforces the certificate's own validity period and live revocation
-  status on every connection — a fingerprint match alone is never enough.
+  status on every connection — a fingerprint match alone is never enough. The
+  chain must also reach a CA an administrator has **enabled as an mTLS trust
+  anchor** — on the proxy-terminated path exactly as on the native listener,
+  where the client-CA bundle is built from the flagged anchors. The walk climbs
+  the issuing chain (a tenant signing CA is deliberately an unflagged
+  intermediate), requires every CA on the way to be active and in date, and is
+  depth-bounded, so un-flagging a CA — the documented way to stop trusting it —
+  takes effect everywhere.
 - **An organization CA can anchor mTLS directly.** Flagging it exports only the
   public certificate into the client-verification bundle — the signing key is never
   copied — and the bundle is rewritten as the whole flagged set on every change and

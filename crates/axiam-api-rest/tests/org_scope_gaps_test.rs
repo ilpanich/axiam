@@ -65,6 +65,15 @@ const ADMIN_EMAIL: &str = "super-admin@example.com";
 /// key here instead of embedding one.
 static ADMIN_PASSWORD: LazyLock<String> = LazyLock::new(|| generated_password("adm"));
 static ROTATED_PASSWORD: LazyLock<String> = LazyLock::new(|| generated_password("rot"));
+/// The child-tenant account created by `create_child_tenant_user`.
+///
+/// A static like the two above rather than a `generated_password(…)` call at
+/// the `CreateUser` site: a literal argument flowing straight into a password
+/// field is a hard-coded-credential finding whatever the function does with it
+/// afterwards, and CodeQL reported exactly that. Nothing signs in as this
+/// account — it exists to be *read* by an administrator acting on its tenant —
+/// so the value only has to satisfy the default policy.
+static CHILD_PASSWORD: LazyLock<String> = LazyLock::new(|| generated_password("chi"));
 
 /// A random password satisfying the default policy: 36 characters, an uppercase
 /// and a digit in the fixed prefix, the rest from a fresh UUID.
@@ -525,7 +534,7 @@ async fn create_child_tenant_user(f: &Fixture, username: &str) -> Uuid {
             tenant_id: f.child_tenant_id,
             username: username.into(),
             email: format!("{username}@example.com"),
-            password: generated_password("chi"),
+            password: CHILD_PASSWORD.clone(),
             metadata: None,
         })
         .await

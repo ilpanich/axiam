@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta06] - 2026-08-30
+
+### Added
+
+- Assigning a role from a user or a group can name its scopes
+
+### Changed
+
+- Mint the child-tenant password into a static, like its two siblings
+
+### Fixed
+
+- The acting-tenant header is `X-Axiam-Tenant`, not `X-Tenant-ID`
+
+- The admin UI was showing the wrong tenant's data, or none at all
+
 ## [1.0.0-beta05] - 2026-08-30
 
 ### Added

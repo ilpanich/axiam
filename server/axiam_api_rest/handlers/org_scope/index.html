@@ -1,0 +1,40 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The scope guard for organization-level endpoints."><title>axiam_api_rest::handlers::org_scope - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0 (88d9e12ae 2026-08-18)" data-channel="1.98.0" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module org_scope</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.0.0-beta05</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module org_<wbr>scope</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-this-exists-to-stop" title="What this exists to stop">What this exists to stop</a></li><li><a href="#why-a-scope-check-and-not-a-new-permission" title="Why a scope check and not a new permission">Why a scope check and not a new permission</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>api_<wbr>rest::<wbr>handlers</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_rest</a>::<wbr><a href="../index.html">handlers</a></div><h1>Module <span>org_<wbr>scope</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_rest/handlers/org_scope.rs.html#1-193">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The scope guard for organization-level endpoints.</p>
+<h2 id="what-this-exists-to-stop"><a class="doc-anchor" href="#what-this-exists-to-stop">§</a>What this exists to stop</h2>
+<p>Organization-level handlers used to authorize on two things: the caller
+holds the permission, and the <code>org_id</code> in the path equals the caller’s own
+<code>org_id</code>. Both are necessary; together they are not sufficient, because
+<code>user.org_id</code> is the organization the caller’s <em>tenant</em> belongs to. It is
+therefore satisfied by <strong>every principal in the organization</strong>, including a
+tenant-level administrator.</p>
+<p>The seeded <code>super-admin</code> role of an ordinary tenant is granted the entire
+permission registry — organization-level actions included
+(<code>ca_certificates:generate</code>, <code>ca_certificates:manage</code>, <code>tenants:create</code>,
+<code>organizations:create</code>, …). So the two guards, each reasonable on its own,
+left a tenant administrator able to:</p>
+<ul>
+<li>mint an organization root CA,</li>
+<li>flag it as an <strong>mTLS trust anchor</strong>, which is organization-wide,</li>
+<li>create and delete tenants,</li>
+<li>create organizations.</li>
+</ul>
+<p>The second is the serious one. An mTLS trust anchor decides what client
+certificates authenticate against the whole deployment, and the tenant
+administrator holds that CA’s private key — so it could mint certificates
+authenticating as principals in <strong>sibling tenants</strong>. That is the isolation
+boundary the product is built on, crossed from inside.</p>
+<p>Meanwhile <code>scripts/e2e-bootstrap.sh</code> describes the intended reach in its own
+words: a tenant administrator “administers all of <code>default</code> and nothing
+outside it.”</p>
+<h2 id="why-a-scope-check-and-not-a-new-permission"><a class="doc-anchor" href="#why-a-scope-check-and-not-a-new-permission">§</a>Why a scope check and not a new permission</h2>
+<p>A permission can be granted to a tenant role by exactly the route that
+created this gap — it is a value in a registry that tenant roles are seeded
+from. Where a principal <em>lives</em> is not: it is the tenant its own record is
+in, and a caller cannot move itself. Gating on the scope closes the hole
+whatever a role happens to carry.</p>
+<p>The permission check stays. This is an additional condition, not a
+replacement: an organization-level principal without
+<code>ca_certificates:generate</code> still cannot mint a CA.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.principal_tenant_reach.html" title="fn axiam_api_rest::handlers::org_scope::principal_tenant_reach">principal_<wbr>tenant_<wbr>reach</a></dt><dd>How far across the organization’s tenants this caller’s grants reach.</dd><dt><a class="fn" href="fn.require_organization_principal.html" title="fn axiam_api_rest::handlers::org_scope::require_organization_principal">require_<wbr>organization_<wbr>principal</a></dt><dd>Refuses a caller whose own record does not live in the organization’s
+reserved scope.</dd><dt><a class="fn" href="fn.require_organization_principal_for_tenant.html" title="fn axiam_api_rest::handlers::org_scope::require_organization_principal_for_tenant">require_<wbr>organization_<wbr>principal_<wbr>for_<wbr>tenant</a></dt><dd>The per-tenant form of <a href="fn.require_organization_principal.html" title="fn axiam_api_rest::handlers::org_scope::require_organization_principal"><code>require_organization_principal</code></a>, for an
+organization-level endpoint that acts on <strong>one named tenant</strong> rather than on
+the organization as a whole.</dd></dl></section></div></main></body></html>

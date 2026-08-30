@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ORGANIZATION_LEVEL_ACTIONS"],"fn":["is_organization_level_action"]};

@@ -7,8 +7,8 @@
 <a href=#7 id=7 data-nosnippet>7</a><span class="kw">use </span>axiam_core::models::settings::{
 <a href=#8 id=8 data-nosnippet>8</a>    CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
 <a href=#9 id=9 data-nosnippet>9</a>    OpaquePolicy, PasswordPolicy, PrivacyPolicy, SecuritySettings, SetOrgSettings,
-<a href=#10 id=10 data-nosnippet>10</a>    SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy, diff_against_org,
-<a href=#11 id=11 data-nosnippet>11</a>    effective_settings, settings_from_org_input, system_defaults,
+<a href=#10 id=10 data-nosnippet>10</a>    SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy, clamp_overrides_to_org,
+<a href=#11 id=11 data-nosnippet>11</a>    diff_against_org, effective_settings, settings_from_org_input, system_defaults,
 <a href=#12 id=12 data-nosnippet>12</a>};
 <a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span>axiam_core::repository::SettingsRepository;
 <a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span>chrono::{DateTime, Utc};
@@ -716,7 +716,7 @@
 <a href=#716 id=716 data-nosnippet>716</a>            </span>.fetch_row_with_overrides(<span class="string">"tenant"</span>, <span class="kw-2">&amp;</span>tenant_id.to_string())
 <a href=#717 id=717 data-nosnippet>717</a>            .<span class="kw">await</span><span class="question-mark">?
 <a href=#718 id=718 data-nosnippet>718</a>        </span>{
-<a href=#719 id=719 data-nosnippet>719</a>            <span class="kw">let </span>overrides: TenantSettingsOverride = <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>json) = overrides_json_opt {
+<a href=#719 id=719 data-nosnippet>719</a>            <span class="kw">let </span><span class="kw-2">mut </span>overrides: TenantSettingsOverride = <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>json) = overrides_json_opt {
 <a href=#720 id=720 data-nosnippet>720</a>                <span class="comment">// V16+ row: use the stored sparse override mask directly so
 <a href=#721 id=721 data-nosnippet>721</a>                // that fields the tenant did NOT override pick up the current
 <a href=#722 id=722 data-nosnippet>722</a>                // org baseline (CQ-B03).
@@ -727,30 +727,58 @@
 <a href=#727 id=727 data-nosnippet>727</a>                // `set_tenant_override` or `store_effective_tenant_settings`.
 <a href=#728 id=728 data-nosnippet>728</a>                </span>diff_against_org(<span class="kw-2">&amp;</span>org, <span class="kw-2">&amp;</span>tenant_row)
 <a href=#729 id=729 data-nosnippet>729</a>            };
-<a href=#730 id=730 data-nosnippet>730</a>            <span class="kw">let </span><span class="kw-2">mut </span>merged = effective_settings(<span class="kw-2">&amp;</span>org, <span class="kw-2">&amp;</span>overrides, tenant_id, tenant_row.id);
-<a href=#731 id=731 data-nosnippet>731</a>            <span class="comment">// Preserve the persisted timestamps rather than using
-<a href=#732 id=732 data-nosnippet>732</a>            // Utc::now() from the merge function.
-<a href=#733 id=733 data-nosnippet>733</a>            </span>merged.created_at = tenant_row.created_at;
-<a href=#734 id=734 data-nosnippet>734</a>            merged.updated_at = tenant_row.updated_at;
-<a href=#735 id=735 data-nosnippet>735</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(merged);
-<a href=#736 id=736 data-nosnippet>736</a>        }
-<a href=#737 id=737 data-nosnippet>737</a>
-<a href=#738 id=738 data-nosnippet>738</a>        <span class="comment">// No tenant row — org settings (or system defaults) apply.
-<a href=#739 id=739 data-nosnippet>739</a>        // Re-scope as tenant so callers always receive a tenant-scoped
-<a href=#740 id=740 data-nosnippet>740</a>        // result with a stable deterministic ID and sentinel timestamps
-<a href=#741 id=741 data-nosnippet>741</a>        // (epoch = "never explicitly configured").
-<a href=#742 id=742 data-nosnippet>742</a>        </span><span class="kw">let </span>deterministic_id = Uuid::new_v5(
-<a href=#743 id=743 data-nosnippet>743</a>            <span class="kw-2">&amp;</span>Uuid::NAMESPACE_OID,
-<a href=#744 id=744 data-nosnippet>744</a>            <span class="macro">format!</span>(<span class="string">"tenant:{tenant_id}"</span>).as_bytes(),
-<a href=#745 id=745 data-nosnippet>745</a>        );
-<a href=#746 id=746 data-nosnippet>746</a>        <span class="prelude-val">Ok</span>(SecuritySettings {
-<a href=#747 id=747 data-nosnippet>747</a>            id: deterministic_id,
-<a href=#748 id=748 data-nosnippet>748</a>            scope: SettingsScope::Tenant,
-<a href=#749 id=749 data-nosnippet>749</a>            scope_id: tenant_id,
-<a href=#750 id=750 data-nosnippet>750</a>            created_at: DateTime::&lt;Utc&gt;::UNIX_EPOCH,
-<a href=#751 id=751 data-nosnippet>751</a>            updated_at: DateTime::&lt;Utc&gt;::UNIX_EPOCH,
-<a href=#752 id=752 data-nosnippet>752</a>            ..org
-<a href=#753 id=753 data-nosnippet>753</a>        })
-<a href=#754 id=754 data-nosnippet>754</a>    }
-<a href=#755 id=755 data-nosnippet>755</a>}
+<a href=#730 id=730 data-nosnippet>730</a>
+<a href=#731 id=731 data-nosnippet>731</a>            <span class="comment">// A tenant may only ever tighten. `validate_tenant_override`
+<a href=#732 id=732 data-nosnippet>732</a>            // enforces that when an override is written; this enforces it when
+<a href=#733 id=733 data-nosnippet>733</a>            // one is READ, which is the half that was missing.
+<a href=#734 id=734 data-nosnippet>734</a>            //
+<a href=#735 id=735 data-nosnippet>735</a>            // An organization baseline is not a constant. Raising `min_length`,
+<a href=#736 id=736 data-nosnippet>736</a>            // or moving `opaque_mode` from `disabled` to `required`, left every
+<a href=#737 id=737 data-nosnippet>737</a>            // tenant that had ever written an override for that field sitting
+<a href=#738 id=738 data-nosnippet>738</a>            // below the new floor — indefinitely, and invisibly: the
+<a href=#739 id=739 data-nosnippet>739</a>            // organization row said the control was on, tenants without an
+<a href=#740 id=740 data-nosnippet>740</a>            // override did inherit it, and only the ones that had visited their
+<a href=#741 id=741 data-nosnippet>741</a>            // own settings page quietly did not.
+<a href=#742 id=742 data-nosnippet>742</a>            //
+<a href=#743 id=743 data-nosnippet>743</a>            // Clamping here rather than only at write time also covers the rows
+<a href=#744 id=744 data-nosnippet>744</a>            // no write path will revisit: pre-V16 rows resolved by
+<a href=#745 id=745 data-nosnippet>745</a>            // `diff_against_org`, and anything a migration or bulk import wrote
+<a href=#746 id=746 data-nosnippet>746</a>            // directly. The effective policy cannot be weaker than the
+<a href=#747 id=747 data-nosnippet>747</a>            // organization's, whatever is stored.
+<a href=#748 id=748 data-nosnippet>748</a>            </span><span class="kw">let </span>cleared = clamp_overrides_to_org(<span class="kw-2">&amp;</span>org, <span class="kw-2">&amp;mut </span>overrides);
+<a href=#749 id=749 data-nosnippet>749</a>            <span class="kw">if </span>!cleared.is_empty() {
+<a href=#750 id=750 data-nosnippet>750</a>                <span class="macro">tracing::debug!</span>(
+<a href=#751 id=751 data-nosnippet>751</a>                    target: <span class="string">"axiam::settings"</span>,
+<a href=#752 id=752 data-nosnippet>752</a>                    tenant_id = %tenant_id,
+<a href=#753 id=753 data-nosnippet>753</a>                    fields = <span class="question-mark">?</span>cleared,
+<a href=#754 id=754 data-nosnippet>754</a>                    <span class="string">"tenant overrides weaker than the org baseline were ignored"
+<a href=#755 id=755 data-nosnippet>755</a>                </span>);
+<a href=#756 id=756 data-nosnippet>756</a>            }
+<a href=#757 id=757 data-nosnippet>757</a>
+<a href=#758 id=758 data-nosnippet>758</a>            <span class="kw">let </span><span class="kw-2">mut </span>merged = effective_settings(<span class="kw-2">&amp;</span>org, <span class="kw-2">&amp;</span>overrides, tenant_id, tenant_row.id);
+<a href=#759 id=759 data-nosnippet>759</a>            <span class="comment">// Preserve the persisted timestamps rather than using
+<a href=#760 id=760 data-nosnippet>760</a>            // Utc::now() from the merge function.
+<a href=#761 id=761 data-nosnippet>761</a>            </span>merged.created_at = tenant_row.created_at;
+<a href=#762 id=762 data-nosnippet>762</a>            merged.updated_at = tenant_row.updated_at;
+<a href=#763 id=763 data-nosnippet>763</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(merged);
+<a href=#764 id=764 data-nosnippet>764</a>        }
+<a href=#765 id=765 data-nosnippet>765</a>
+<a href=#766 id=766 data-nosnippet>766</a>        <span class="comment">// No tenant row — org settings (or system defaults) apply.
+<a href=#767 id=767 data-nosnippet>767</a>        // Re-scope as tenant so callers always receive a tenant-scoped
+<a href=#768 id=768 data-nosnippet>768</a>        // result with a stable deterministic ID and sentinel timestamps
+<a href=#769 id=769 data-nosnippet>769</a>        // (epoch = "never explicitly configured").
+<a href=#770 id=770 data-nosnippet>770</a>        </span><span class="kw">let </span>deterministic_id = Uuid::new_v5(
+<a href=#771 id=771 data-nosnippet>771</a>            <span class="kw-2">&amp;</span>Uuid::NAMESPACE_OID,
+<a href=#772 id=772 data-nosnippet>772</a>            <span class="macro">format!</span>(<span class="string">"tenant:{tenant_id}"</span>).as_bytes(),
+<a href=#773 id=773 data-nosnippet>773</a>        );
+<a href=#774 id=774 data-nosnippet>774</a>        <span class="prelude-val">Ok</span>(SecuritySettings {
+<a href=#775 id=775 data-nosnippet>775</a>            id: deterministic_id,
+<a href=#776 id=776 data-nosnippet>776</a>            scope: SettingsScope::Tenant,
+<a href=#777 id=777 data-nosnippet>777</a>            scope_id: tenant_id,
+<a href=#778 id=778 data-nosnippet>778</a>            created_at: DateTime::&lt;Utc&gt;::UNIX_EPOCH,
+<a href=#779 id=779 data-nosnippet>779</a>            updated_at: DateTime::&lt;Utc&gt;::UNIX_EPOCH,
+<a href=#780 id=780 data-nosnippet>780</a>            ..org
+<a href=#781 id=781 data-nosnippet>781</a>        })
+<a href=#782 id=782 data-nosnippet>782</a>    }
+<a href=#783 id=783 data-nosnippet>783</a>}
 </code></pre></div></section></main></body></html>

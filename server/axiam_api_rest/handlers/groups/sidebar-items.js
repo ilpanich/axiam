@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["add_member","create","delete","get","list","list_members","remove_member","update"],"struct":["AddMemberRequest","CreateGroupRequest","MemberPath"]};
+window.SIDEBAR_ITEMS = {"fn":["add_member","add_service_account_member","create","delete","get","list","list_members","list_service_account_groups","list_service_account_members","remove_member","remove_service_account_member","update"],"struct":["AddMemberRequest","AddServiceAccountMemberRequest","CreateGroupRequest","MemberPath","ServiceAccountMemberPath"]};

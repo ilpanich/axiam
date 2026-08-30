@@ -11,7 +11,7 @@
 <a href=#11 id=11 data-nosnippet>11</a>
 <a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span><span class="kw">crate</span>::error::DbError;
 <a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span><span class="kw">crate</span>::handle::DbHandle;
-<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{CountRow, paginate, take_first_or_not_found};
+<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 <a href=#15 id=15 data-nosnippet>15</a>
 <a href=#16 id=16 data-nosnippet>16</a><span class="kw">fn </span>parse_status(s: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;TenantStatus, DbError&gt; {
 <a href=#17 id=17 data-nosnippet>17</a>    <span class="kw">match </span>s {
@@ -181,187 +181,197 @@
 <a href=#181 id=181 data-nosnippet>181</a>            .<span class="kw">await
 <a href=#182 id=182 data-nosnippet>182</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#183 id=183 data-nosnippet>183</a>
-<a href=#184 id=184 data-nosnippet>184</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = result
-<a href=#185 id=185 data-nosnippet>185</a>            .check()
-<a href=#186 id=186 data-nosnippet>186</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
-<a href=#187 id=187 data-nosnippet>187</a>
-<a href=#188 id=188 data-nosnippet>188</a>        <span class="comment">// Statement 0 is the CREATE, statement 1 is the RELATE.
-<a href=#189 id=189 data-nosnippet>189</a>        </span><span class="kw">let </span>rows: Vec&lt;TenantRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#190 id=190 data-nosnippet>190</a>        <span class="kw">let </span>row = take_first_or_not_found(rows, <span class="string">"tenant"</span>, <span class="kw-2">&amp;</span>id_str)<span class="question-mark">?</span>;
-<a href=#191 id=191 data-nosnippet>191</a>
-<a href=#192 id=192 data-nosnippet>192</a>        <span class="prelude-val">Ok</span>(row.into_tenant(id)<span class="question-mark">?</span>)
-<a href=#193 id=193 data-nosnippet>193</a>    }
-<a href=#194 id=194 data-nosnippet>194</a>
-<a href=#195 id=195 data-nosnippet>195</a>    <span class="kw">async fn </span>get_by_id(<span class="kw-2">&amp;</span><span class="self">self</span>, id: Uuid) -&gt; AxiamResult&lt;Tenant&gt; {
-<a href=#196 id=196 data-nosnippet>196</a>        <span class="kw">let </span>id_str = id.to_string();
+<a href=#184 id=184 data-nosnippet>184</a>        <span class="comment">// A duplicate (organization_id, slug) trips the `idx_tenant_org_slug`
+<a href=#185 id=185 data-nosnippet>185</a>        // unique index. Left unclassified it becomes `DbError::Migration`, which
+<a href=#186 id=186 data-nosnippet>186</a>        // the API layer maps to a bare 500 `{"error":"internal_error"}` — so
+<a href=#187 id=187 data-nosnippet>187</a>        // re-running any provisioning script answers "something broke" for a
+<a href=#188 id=188 data-nosnippet>188</a>        // system that is in fact perfectly fine, and the documented 409 branch
+<a href=#189 id=189 data-nosnippet>189</a>        // of `scripts/e2e-bootstrap.sh` was dead code.
+<a href=#190 id=190 data-nosnippet>190</a>        //
+<a href=#191 id=191 data-nosnippet>191</a>        // Per D-09 the marker matching lives in `helpers::classify_write_error`
+<a href=#192 id=192 data-nosnippet>192</a>        // and nowhere else, so that a marker added there reaches every call
+<a href=#193 id=193 data-nosnippet>193</a>        // site at once.
+<a href=#194 id=194 data-nosnippet>194</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = result
+<a href=#195 id=195 data-nosnippet>195</a>            .check()
+<a href=#196 id=196 data-nosnippet>196</a>            .map_err(|e| classify_write_error(e, <span class="string">"tenant"</span>))<span class="question-mark">?</span>;
 <a href=#197 id=197 data-nosnippet>197</a>
-<a href=#198 id=198 data-nosnippet>198</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#199 id=199 data-nosnippet>199</a>            </span>.db
-<a href=#200 id=200 data-nosnippet>200</a>            .current()
-<a href=#201 id=201 data-nosnippet>201</a>            .query(<span class="string">"SELECT * FROM type::record('tenant', $id)"</span>)
-<a href=#202 id=202 data-nosnippet>202</a>            .bind((<span class="string">"id"</span>, id_str.clone()))
-<a href=#203 id=203 data-nosnippet>203</a>            .<span class="kw">await
-<a href=#204 id=204 data-nosnippet>204</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#205 id=205 data-nosnippet>205</a>
-<a href=#206 id=206 data-nosnippet>206</a>        <span class="kw">let </span>rows: Vec&lt;TenantRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#207 id=207 data-nosnippet>207</a>        <span class="kw">let </span>row = take_first_or_not_found(rows, <span class="string">"tenant"</span>, <span class="kw-2">&amp;</span>id_str)<span class="question-mark">?</span>;
-<a href=#208 id=208 data-nosnippet>208</a>
-<a href=#209 id=209 data-nosnippet>209</a>        <span class="prelude-val">Ok</span>(row.into_tenant(id)<span class="question-mark">?</span>)
-<a href=#210 id=210 data-nosnippet>210</a>    }
-<a href=#211 id=211 data-nosnippet>211</a>
-<a href=#212 id=212 data-nosnippet>212</a>    <span class="kw">async fn </span>get_by_slug(<span class="kw-2">&amp;</span><span class="self">self</span>, organization_id: Uuid, slug: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;Tenant&gt; {
-<a href=#213 id=213 data-nosnippet>213</a>        <span class="kw">let </span>org_id_str = organization_id.to_string();
-<a href=#214 id=214 data-nosnippet>214</a>        <span class="kw">let </span>slug_owned = slug.to_string();
+<a href=#198 id=198 data-nosnippet>198</a>        <span class="comment">// Statement 0 is the CREATE, statement 1 is the RELATE.
+<a href=#199 id=199 data-nosnippet>199</a>        </span><span class="kw">let </span>rows: Vec&lt;TenantRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#200 id=200 data-nosnippet>200</a>        <span class="kw">let </span>row = take_first_or_not_found(rows, <span class="string">"tenant"</span>, <span class="kw-2">&amp;</span>id_str)<span class="question-mark">?</span>;
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="prelude-val">Ok</span>(row.into_tenant(id)<span class="question-mark">?</span>)
+<a href=#203 id=203 data-nosnippet>203</a>    }
+<a href=#204 id=204 data-nosnippet>204</a>
+<a href=#205 id=205 data-nosnippet>205</a>    <span class="kw">async fn </span>get_by_id(<span class="kw-2">&amp;</span><span class="self">self</span>, id: Uuid) -&gt; AxiamResult&lt;Tenant&gt; {
+<a href=#206 id=206 data-nosnippet>206</a>        <span class="kw">let </span>id_str = id.to_string();
+<a href=#207 id=207 data-nosnippet>207</a>
+<a href=#208 id=208 data-nosnippet>208</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#209 id=209 data-nosnippet>209</a>            </span>.db
+<a href=#210 id=210 data-nosnippet>210</a>            .current()
+<a href=#211 id=211 data-nosnippet>211</a>            .query(<span class="string">"SELECT * FROM type::record('tenant', $id)"</span>)
+<a href=#212 id=212 data-nosnippet>212</a>            .bind((<span class="string">"id"</span>, id_str.clone()))
+<a href=#213 id=213 data-nosnippet>213</a>            .<span class="kw">await
+<a href=#214 id=214 data-nosnippet>214</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#215 id=215 data-nosnippet>215</a>
-<a href=#216 id=216 data-nosnippet>216</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#217 id=217 data-nosnippet>217</a>            </span>.db
-<a href=#218 id=218 data-nosnippet>218</a>            .current()
-<a href=#219 id=219 data-nosnippet>219</a>            .query(
-<a href=#220 id=220 data-nosnippet>220</a>                <span class="string">"SELECT meta::id(id) AS record_id, * \
-<a href=#221 id=221 data-nosnippet>221</a>                 FROM tenant \
-<a href=#222 id=222 data-nosnippet>222</a>                 WHERE organization_id = $org_id AND slug = $slug"</span>,
-<a href=#223 id=223 data-nosnippet>223</a>            )
-<a href=#224 id=224 data-nosnippet>224</a>            .bind((<span class="string">"org_id"</span>, org_id_str))
-<a href=#225 id=225 data-nosnippet>225</a>            .bind((<span class="string">"slug"</span>, slug_owned))
-<a href=#226 id=226 data-nosnippet>226</a>            .<span class="kw">await
-<a href=#227 id=227 data-nosnippet>227</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#228 id=228 data-nosnippet>228</a>
-<a href=#229 id=229 data-nosnippet>229</a>        <span class="kw">let </span>rows: Vec&lt;TenantRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#230 id=230 data-nosnippet>230</a>        <span class="kw">let </span>row = take_first_or_not_found(
-<a href=#231 id=231 data-nosnippet>231</a>            rows,
-<a href=#232 id=232 data-nosnippet>232</a>            <span class="string">"tenant"</span>,
-<a href=#233 id=233 data-nosnippet>233</a>            <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"org={organization_id},slug={slug}"</span>),
-<a href=#234 id=234 data-nosnippet>234</a>        )<span class="question-mark">?</span>;
-<a href=#235 id=235 data-nosnippet>235</a>
-<a href=#236 id=236 data-nosnippet>236</a>        <span class="prelude-val">Ok</span>(row.try_into_tenant()<span class="question-mark">?</span>)
-<a href=#237 id=237 data-nosnippet>237</a>    }
+<a href=#216 id=216 data-nosnippet>216</a>        <span class="kw">let </span>rows: Vec&lt;TenantRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#217 id=217 data-nosnippet>217</a>        <span class="kw">let </span>row = take_first_or_not_found(rows, <span class="string">"tenant"</span>, <span class="kw-2">&amp;</span>id_str)<span class="question-mark">?</span>;
+<a href=#218 id=218 data-nosnippet>218</a>
+<a href=#219 id=219 data-nosnippet>219</a>        <span class="prelude-val">Ok</span>(row.into_tenant(id)<span class="question-mark">?</span>)
+<a href=#220 id=220 data-nosnippet>220</a>    }
+<a href=#221 id=221 data-nosnippet>221</a>
+<a href=#222 id=222 data-nosnippet>222</a>    <span class="kw">async fn </span>get_by_slug(<span class="kw-2">&amp;</span><span class="self">self</span>, organization_id: Uuid, slug: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;Tenant&gt; {
+<a href=#223 id=223 data-nosnippet>223</a>        <span class="kw">let </span>org_id_str = organization_id.to_string();
+<a href=#224 id=224 data-nosnippet>224</a>        <span class="kw">let </span>slug_owned = slug.to_string();
+<a href=#225 id=225 data-nosnippet>225</a>
+<a href=#226 id=226 data-nosnippet>226</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#227 id=227 data-nosnippet>227</a>            </span>.db
+<a href=#228 id=228 data-nosnippet>228</a>            .current()
+<a href=#229 id=229 data-nosnippet>229</a>            .query(
+<a href=#230 id=230 data-nosnippet>230</a>                <span class="string">"SELECT meta::id(id) AS record_id, * \
+<a href=#231 id=231 data-nosnippet>231</a>                 FROM tenant \
+<a href=#232 id=232 data-nosnippet>232</a>                 WHERE organization_id = $org_id AND slug = $slug"</span>,
+<a href=#233 id=233 data-nosnippet>233</a>            )
+<a href=#234 id=234 data-nosnippet>234</a>            .bind((<span class="string">"org_id"</span>, org_id_str))
+<a href=#235 id=235 data-nosnippet>235</a>            .bind((<span class="string">"slug"</span>, slug_owned))
+<a href=#236 id=236 data-nosnippet>236</a>            .<span class="kw">await
+<a href=#237 id=237 data-nosnippet>237</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#238 id=238 data-nosnippet>238</a>
-<a href=#239 id=239 data-nosnippet>239</a>    <span class="kw">async fn </span>get_organization_tenant(<span class="kw-2">&amp;</span><span class="self">self</span>, organization_id: Uuid) -&gt; AxiamResult&lt;Tenant&gt; {
-<a href=#240 id=240 data-nosnippet>240</a>        <span class="kw">let </span>org_id_str = organization_id.to_string();
-<a href=#241 id=241 data-nosnippet>241</a>
-<a href=#242 id=242 data-nosnippet>242</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#243 id=243 data-nosnippet>243</a>            </span>.db
-<a href=#244 id=244 data-nosnippet>244</a>            .current()
-<a href=#245 id=245 data-nosnippet>245</a>            .query(
-<a href=#246 id=246 data-nosnippet>246</a>                <span class="string">"SELECT meta::id(id) AS record_id, * \
-<a href=#247 id=247 data-nosnippet>247</a>                 FROM tenant \
-<a href=#248 id=248 data-nosnippet>248</a>                 WHERE organization_id = $org_id AND kind = 'organization'"</span>,
-<a href=#249 id=249 data-nosnippet>249</a>            )
-<a href=#250 id=250 data-nosnippet>250</a>            .bind((<span class="string">"org_id"</span>, org_id_str))
-<a href=#251 id=251 data-nosnippet>251</a>            .<span class="kw">await
-<a href=#252 id=252 data-nosnippet>252</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#253 id=253 data-nosnippet>253</a>
-<a href=#254 id=254 data-nosnippet>254</a>        <span class="kw">let </span>rows: Vec&lt;TenantRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#255 id=255 data-nosnippet>255</a>        <span class="kw">let </span>row = take_first_or_not_found(
-<a href=#256 id=256 data-nosnippet>256</a>            rows,
-<a href=#257 id=257 data-nosnippet>257</a>            <span class="string">"tenant"</span>,
-<a href=#258 id=258 data-nosnippet>258</a>            <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"org={organization_id},kind=organization"</span>),
-<a href=#259 id=259 data-nosnippet>259</a>        )<span class="question-mark">?</span>;
-<a href=#260 id=260 data-nosnippet>260</a>
-<a href=#261 id=261 data-nosnippet>261</a>        <span class="prelude-val">Ok</span>(row.try_into_tenant()<span class="question-mark">?</span>)
-<a href=#262 id=262 data-nosnippet>262</a>    }
+<a href=#239 id=239 data-nosnippet>239</a>        <span class="kw">let </span>rows: Vec&lt;TenantRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#240 id=240 data-nosnippet>240</a>        <span class="kw">let </span>row = take_first_or_not_found(
+<a href=#241 id=241 data-nosnippet>241</a>            rows,
+<a href=#242 id=242 data-nosnippet>242</a>            <span class="string">"tenant"</span>,
+<a href=#243 id=243 data-nosnippet>243</a>            <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"org={organization_id},slug={slug}"</span>),
+<a href=#244 id=244 data-nosnippet>244</a>        )<span class="question-mark">?</span>;
+<a href=#245 id=245 data-nosnippet>245</a>
+<a href=#246 id=246 data-nosnippet>246</a>        <span class="prelude-val">Ok</span>(row.try_into_tenant()<span class="question-mark">?</span>)
+<a href=#247 id=247 data-nosnippet>247</a>    }
+<a href=#248 id=248 data-nosnippet>248</a>
+<a href=#249 id=249 data-nosnippet>249</a>    <span class="kw">async fn </span>get_organization_tenant(<span class="kw-2">&amp;</span><span class="self">self</span>, organization_id: Uuid) -&gt; AxiamResult&lt;Tenant&gt; {
+<a href=#250 id=250 data-nosnippet>250</a>        <span class="kw">let </span>org_id_str = organization_id.to_string();
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#253 id=253 data-nosnippet>253</a>            </span>.db
+<a href=#254 id=254 data-nosnippet>254</a>            .current()
+<a href=#255 id=255 data-nosnippet>255</a>            .query(
+<a href=#256 id=256 data-nosnippet>256</a>                <span class="string">"SELECT meta::id(id) AS record_id, * \
+<a href=#257 id=257 data-nosnippet>257</a>                 FROM tenant \
+<a href=#258 id=258 data-nosnippet>258</a>                 WHERE organization_id = $org_id AND kind = 'organization'"</span>,
+<a href=#259 id=259 data-nosnippet>259</a>            )
+<a href=#260 id=260 data-nosnippet>260</a>            .bind((<span class="string">"org_id"</span>, org_id_str))
+<a href=#261 id=261 data-nosnippet>261</a>            .<span class="kw">await
+<a href=#262 id=262 data-nosnippet>262</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#263 id=263 data-nosnippet>263</a>
-<a href=#264 id=264 data-nosnippet>264</a>    <span class="kw">async fn </span>update(<span class="kw-2">&amp;</span><span class="self">self</span>, id: Uuid, input: UpdateTenant) -&gt; AxiamResult&lt;Tenant&gt; {
-<a href=#265 id=265 data-nosnippet>265</a>        <span class="kw">let </span>id_str = id.to_string();
-<a href=#266 id=266 data-nosnippet>266</a>
-<a href=#267 id=267 data-nosnippet>267</a>        <span class="kw">let </span><span class="kw-2">mut </span>sets = Vec::new();
-<a href=#268 id=268 data-nosnippet>268</a>        <span class="kw">if </span>input.name.is_some() {
-<a href=#269 id=269 data-nosnippet>269</a>            sets.push(<span class="string">"name = $name"</span>);
-<a href=#270 id=270 data-nosnippet>270</a>        }
-<a href=#271 id=271 data-nosnippet>271</a>        <span class="kw">if </span>input.slug.is_some() {
-<a href=#272 id=272 data-nosnippet>272</a>            sets.push(<span class="string">"slug = $slug"</span>);
-<a href=#273 id=273 data-nosnippet>273</a>        }
-<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">if </span>input.status.is_some() {
-<a href=#275 id=275 data-nosnippet>275</a>            sets.push(<span class="string">"status = $status"</span>);
-<a href=#276 id=276 data-nosnippet>276</a>        }
-<a href=#277 id=277 data-nosnippet>277</a>        <span class="kw">if </span>input.metadata.is_some() {
-<a href=#278 id=278 data-nosnippet>278</a>            sets.push(<span class="string">"metadata = $metadata"</span>);
-<a href=#279 id=279 data-nosnippet>279</a>        }
-<a href=#280 id=280 data-nosnippet>280</a>        sets.push(<span class="string">"updated_at = time::now()"</span>);
-<a href=#281 id=281 data-nosnippet>281</a>
-<a href=#282 id=282 data-nosnippet>282</a>        <span class="kw">let </span>query = <span class="macro">format!</span>(<span class="string">"UPDATE type::record('tenant', $id) SET {}"</span>, sets.join(<span class="string">", "</span>));
-<a href=#283 id=283 data-nosnippet>283</a>
-<a href=#284 id=284 data-nosnippet>284</a>        <span class="kw">let </span>db = <span class="self">self</span>.db.current();
-<a href=#285 id=285 data-nosnippet>285</a>        <span class="kw">let </span><span class="kw-2">mut </span>builder = db.query(<span class="kw-2">&amp;</span>query).bind((<span class="string">"id"</span>, id_str.clone()));
-<a href=#286 id=286 data-nosnippet>286</a>
-<a href=#287 id=287 data-nosnippet>287</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(name) = input.name {
-<a href=#288 id=288 data-nosnippet>288</a>            builder = builder.bind((<span class="string">"name"</span>, name));
+<a href=#264 id=264 data-nosnippet>264</a>        <span class="kw">let </span>rows: Vec&lt;TenantRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#265 id=265 data-nosnippet>265</a>        <span class="kw">let </span>row = take_first_or_not_found(
+<a href=#266 id=266 data-nosnippet>266</a>            rows,
+<a href=#267 id=267 data-nosnippet>267</a>            <span class="string">"tenant"</span>,
+<a href=#268 id=268 data-nosnippet>268</a>            <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"org={organization_id},kind=organization"</span>),
+<a href=#269 id=269 data-nosnippet>269</a>        )<span class="question-mark">?</span>;
+<a href=#270 id=270 data-nosnippet>270</a>
+<a href=#271 id=271 data-nosnippet>271</a>        <span class="prelude-val">Ok</span>(row.try_into_tenant()<span class="question-mark">?</span>)
+<a href=#272 id=272 data-nosnippet>272</a>    }
+<a href=#273 id=273 data-nosnippet>273</a>
+<a href=#274 id=274 data-nosnippet>274</a>    <span class="kw">async fn </span>update(<span class="kw-2">&amp;</span><span class="self">self</span>, id: Uuid, input: UpdateTenant) -&gt; AxiamResult&lt;Tenant&gt; {
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">let </span>id_str = id.to_string();
+<a href=#276 id=276 data-nosnippet>276</a>
+<a href=#277 id=277 data-nosnippet>277</a>        <span class="kw">let </span><span class="kw-2">mut </span>sets = Vec::new();
+<a href=#278 id=278 data-nosnippet>278</a>        <span class="kw">if </span>input.name.is_some() {
+<a href=#279 id=279 data-nosnippet>279</a>            sets.push(<span class="string">"name = $name"</span>);
+<a href=#280 id=280 data-nosnippet>280</a>        }
+<a href=#281 id=281 data-nosnippet>281</a>        <span class="kw">if </span>input.slug.is_some() {
+<a href=#282 id=282 data-nosnippet>282</a>            sets.push(<span class="string">"slug = $slug"</span>);
+<a href=#283 id=283 data-nosnippet>283</a>        }
+<a href=#284 id=284 data-nosnippet>284</a>        <span class="kw">if </span>input.status.is_some() {
+<a href=#285 id=285 data-nosnippet>285</a>            sets.push(<span class="string">"status = $status"</span>);
+<a href=#286 id=286 data-nosnippet>286</a>        }
+<a href=#287 id=287 data-nosnippet>287</a>        <span class="kw">if </span>input.metadata.is_some() {
+<a href=#288 id=288 data-nosnippet>288</a>            sets.push(<span class="string">"metadata = $metadata"</span>);
 <a href=#289 id=289 data-nosnippet>289</a>        }
-<a href=#290 id=290 data-nosnippet>290</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(slug) = input.slug {
-<a href=#291 id=291 data-nosnippet>291</a>            builder = builder.bind((<span class="string">"slug"</span>, slug));
-<a href=#292 id=292 data-nosnippet>292</a>        }
-<a href=#293 id=293 data-nosnippet>293</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(status) = input.status {
-<a href=#294 id=294 data-nosnippet>294</a>            builder = builder.bind((<span class="string">"status"</span>, status_to_str(<span class="kw-2">&amp;</span>status).to_string()));
-<a href=#295 id=295 data-nosnippet>295</a>        }
-<a href=#296 id=296 data-nosnippet>296</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(metadata) = input.metadata {
-<a href=#297 id=297 data-nosnippet>297</a>            builder = builder.bind((<span class="string">"metadata"</span>, metadata));
-<a href=#298 id=298 data-nosnippet>298</a>        }
-<a href=#299 id=299 data-nosnippet>299</a>
-<a href=#300 id=300 data-nosnippet>300</a>        <span class="kw">let </span>result = builder.<span class="kw">await</span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#301 id=301 data-nosnippet>301</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = result
-<a href=#302 id=302 data-nosnippet>302</a>            .check()
-<a href=#303 id=303 data-nosnippet>303</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
-<a href=#304 id=304 data-nosnippet>304</a>
-<a href=#305 id=305 data-nosnippet>305</a>        <span class="kw">let </span>rows: Vec&lt;TenantRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#306 id=306 data-nosnippet>306</a>        <span class="kw">let </span>row = take_first_or_not_found(rows, <span class="string">"tenant"</span>, <span class="kw-2">&amp;</span>id_str)<span class="question-mark">?</span>;
-<a href=#307 id=307 data-nosnippet>307</a>
-<a href=#308 id=308 data-nosnippet>308</a>        <span class="prelude-val">Ok</span>(row.into_tenant(id)<span class="question-mark">?</span>)
-<a href=#309 id=309 data-nosnippet>309</a>    }
-<a href=#310 id=310 data-nosnippet>310</a>
-<a href=#311 id=311 data-nosnippet>311</a>    <span class="kw">async fn </span>delete(<span class="kw-2">&amp;</span><span class="self">self</span>, id: Uuid) -&gt; AxiamResult&lt;()&gt; {
-<a href=#312 id=312 data-nosnippet>312</a>        <span class="self">self</span>.db
-<a href=#313 id=313 data-nosnippet>313</a>            .current()
-<a href=#314 id=314 data-nosnippet>314</a>            .query(<span class="string">"DELETE type::record('tenant', $id)"</span>)
-<a href=#315 id=315 data-nosnippet>315</a>            .bind((<span class="string">"id"</span>, id.to_string()))
-<a href=#316 id=316 data-nosnippet>316</a>            .<span class="kw">await
-<a href=#317 id=317 data-nosnippet>317</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#318 id=318 data-nosnippet>318</a>
-<a href=#319 id=319 data-nosnippet>319</a>        <span class="prelude-val">Ok</span>(())
-<a href=#320 id=320 data-nosnippet>320</a>    }
-<a href=#321 id=321 data-nosnippet>321</a>
-<a href=#322 id=322 data-nosnippet>322</a>    <span class="kw">async fn </span>list_by_organization(
-<a href=#323 id=323 data-nosnippet>323</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#324 id=324 data-nosnippet>324</a>        organization_id: Uuid,
-<a href=#325 id=325 data-nosnippet>325</a>        pagination: Pagination,
-<a href=#326 id=326 data-nosnippet>326</a>    ) -&gt; AxiamResult&lt;PaginatedResult&lt;Tenant&gt;&gt; {
-<a href=#327 id=327 data-nosnippet>327</a>        <span class="kw">let </span>org_id_str = organization_id.to_string();
+<a href=#290 id=290 data-nosnippet>290</a>        sets.push(<span class="string">"updated_at = time::now()"</span>);
+<a href=#291 id=291 data-nosnippet>291</a>
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="kw">let </span>query = <span class="macro">format!</span>(<span class="string">"UPDATE type::record('tenant', $id) SET {}"</span>, sets.join(<span class="string">", "</span>));
+<a href=#293 id=293 data-nosnippet>293</a>
+<a href=#294 id=294 data-nosnippet>294</a>        <span class="kw">let </span>db = <span class="self">self</span>.db.current();
+<a href=#295 id=295 data-nosnippet>295</a>        <span class="kw">let </span><span class="kw-2">mut </span>builder = db.query(<span class="kw-2">&amp;</span>query).bind((<span class="string">"id"</span>, id_str.clone()));
+<a href=#296 id=296 data-nosnippet>296</a>
+<a href=#297 id=297 data-nosnippet>297</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(name) = input.name {
+<a href=#298 id=298 data-nosnippet>298</a>            builder = builder.bind((<span class="string">"name"</span>, name));
+<a href=#299 id=299 data-nosnippet>299</a>        }
+<a href=#300 id=300 data-nosnippet>300</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(slug) = input.slug {
+<a href=#301 id=301 data-nosnippet>301</a>            builder = builder.bind((<span class="string">"slug"</span>, slug));
+<a href=#302 id=302 data-nosnippet>302</a>        }
+<a href=#303 id=303 data-nosnippet>303</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(status) = input.status {
+<a href=#304 id=304 data-nosnippet>304</a>            builder = builder.bind((<span class="string">"status"</span>, status_to_str(<span class="kw-2">&amp;</span>status).to_string()));
+<a href=#305 id=305 data-nosnippet>305</a>        }
+<a href=#306 id=306 data-nosnippet>306</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(metadata) = input.metadata {
+<a href=#307 id=307 data-nosnippet>307</a>            builder = builder.bind((<span class="string">"metadata"</span>, metadata));
+<a href=#308 id=308 data-nosnippet>308</a>        }
+<a href=#309 id=309 data-nosnippet>309</a>
+<a href=#310 id=310 data-nosnippet>310</a>        <span class="kw">let </span>result = builder.<span class="kw">await</span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#311 id=311 data-nosnippet>311</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = result
+<a href=#312 id=312 data-nosnippet>312</a>            .check()
+<a href=#313 id=313 data-nosnippet>313</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#314 id=314 data-nosnippet>314</a>
+<a href=#315 id=315 data-nosnippet>315</a>        <span class="kw">let </span>rows: Vec&lt;TenantRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#316 id=316 data-nosnippet>316</a>        <span class="kw">let </span>row = take_first_or_not_found(rows, <span class="string">"tenant"</span>, <span class="kw-2">&amp;</span>id_str)<span class="question-mark">?</span>;
+<a href=#317 id=317 data-nosnippet>317</a>
+<a href=#318 id=318 data-nosnippet>318</a>        <span class="prelude-val">Ok</span>(row.into_tenant(id)<span class="question-mark">?</span>)
+<a href=#319 id=319 data-nosnippet>319</a>    }
+<a href=#320 id=320 data-nosnippet>320</a>
+<a href=#321 id=321 data-nosnippet>321</a>    <span class="kw">async fn </span>delete(<span class="kw-2">&amp;</span><span class="self">self</span>, id: Uuid) -&gt; AxiamResult&lt;()&gt; {
+<a href=#322 id=322 data-nosnippet>322</a>        <span class="self">self</span>.db
+<a href=#323 id=323 data-nosnippet>323</a>            .current()
+<a href=#324 id=324 data-nosnippet>324</a>            .query(<span class="string">"DELETE type::record('tenant', $id)"</span>)
+<a href=#325 id=325 data-nosnippet>325</a>            .bind((<span class="string">"id"</span>, id.to_string()))
+<a href=#326 id=326 data-nosnippet>326</a>            .<span class="kw">await
+<a href=#327 id=327 data-nosnippet>327</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#328 id=328 data-nosnippet>328</a>
-<a href=#329 id=329 data-nosnippet>329</a>        <span class="kw">let </span><span class="kw-2">mut </span>count_result = <span class="self">self
-<a href=#330 id=330 data-nosnippet>330</a>            </span>.db
-<a href=#331 id=331 data-nosnippet>331</a>            .current()
-<a href=#332 id=332 data-nosnippet>332</a>            .query(
-<a href=#333 id=333 data-nosnippet>333</a>                <span class="string">"SELECT count() AS total FROM tenant \
-<a href=#334 id=334 data-nosnippet>334</a>                 WHERE organization_id = $org_id GROUP ALL"</span>,
-<a href=#335 id=335 data-nosnippet>335</a>            )
-<a href=#336 id=336 data-nosnippet>336</a>            .bind((<span class="string">"org_id"</span>, org_id_str.clone()))
-<a href=#337 id=337 data-nosnippet>337</a>            .<span class="kw">await
-<a href=#338 id=338 data-nosnippet>338</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#339 id=339 data-nosnippet>339</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#340 id=340 data-nosnippet>340</a>
-<a href=#341 id=341 data-nosnippet>341</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#342 id=342 data-nosnippet>342</a>            </span>.db
-<a href=#343 id=343 data-nosnippet>343</a>            .current()
-<a href=#344 id=344 data-nosnippet>344</a>            .query(
-<a href=#345 id=345 data-nosnippet>345</a>                <span class="string">"SELECT meta::id(id) AS record_id, * \
-<a href=#346 id=346 data-nosnippet>346</a>                 FROM tenant \
-<a href=#347 id=347 data-nosnippet>347</a>                 WHERE organization_id = $org_id \
-<a href=#348 id=348 data-nosnippet>348</a>                 ORDER BY created_at ASC \
-<a href=#349 id=349 data-nosnippet>349</a>                 LIMIT $limit START $offset"</span>,
-<a href=#350 id=350 data-nosnippet>350</a>            )
-<a href=#351 id=351 data-nosnippet>351</a>            .bind((<span class="string">"org_id"</span>, org_id_str))
-<a href=#352 id=352 data-nosnippet>352</a>            .bind((<span class="string">"limit"</span>, pagination.limit))
-<a href=#353 id=353 data-nosnippet>353</a>            .bind((<span class="string">"offset"</span>, pagination.offset))
-<a href=#354 id=354 data-nosnippet>354</a>            .<span class="kw">await
-<a href=#355 id=355 data-nosnippet>355</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#356 id=356 data-nosnippet>356</a>
-<a href=#357 id=357 data-nosnippet>357</a>        <span class="kw">let </span>rows: Vec&lt;TenantRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#358 id=358 data-nosnippet>358</a>
-<a href=#359 id=359 data-nosnippet>359</a>        <span class="kw">let </span>items = rows
-<a href=#360 id=360 data-nosnippet>360</a>            .into_iter()
-<a href=#361 id=361 data-nosnippet>361</a>            .map(|row| row.try_into_tenant())
-<a href=#362 id=362 data-nosnippet>362</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()<span class="question-mark">?</span>;
-<a href=#363 id=363 data-nosnippet>363</a>
-<a href=#364 id=364 data-nosnippet>364</a>        <span class="prelude-val">Ok</span>(paginate(items, count_rows, <span class="kw-2">&amp;</span>pagination))
-<a href=#365 id=365 data-nosnippet>365</a>    }
-<a href=#366 id=366 data-nosnippet>366</a>}
+<a href=#329 id=329 data-nosnippet>329</a>        <span class="prelude-val">Ok</span>(())
+<a href=#330 id=330 data-nosnippet>330</a>    }
+<a href=#331 id=331 data-nosnippet>331</a>
+<a href=#332 id=332 data-nosnippet>332</a>    <span class="kw">async fn </span>list_by_organization(
+<a href=#333 id=333 data-nosnippet>333</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#334 id=334 data-nosnippet>334</a>        organization_id: Uuid,
+<a href=#335 id=335 data-nosnippet>335</a>        pagination: Pagination,
+<a href=#336 id=336 data-nosnippet>336</a>    ) -&gt; AxiamResult&lt;PaginatedResult&lt;Tenant&gt;&gt; {
+<a href=#337 id=337 data-nosnippet>337</a>        <span class="kw">let </span>org_id_str = organization_id.to_string();
+<a href=#338 id=338 data-nosnippet>338</a>
+<a href=#339 id=339 data-nosnippet>339</a>        <span class="kw">let </span><span class="kw-2">mut </span>count_result = <span class="self">self
+<a href=#340 id=340 data-nosnippet>340</a>            </span>.db
+<a href=#341 id=341 data-nosnippet>341</a>            .current()
+<a href=#342 id=342 data-nosnippet>342</a>            .query(
+<a href=#343 id=343 data-nosnippet>343</a>                <span class="string">"SELECT count() AS total FROM tenant \
+<a href=#344 id=344 data-nosnippet>344</a>                 WHERE organization_id = $org_id GROUP ALL"</span>,
+<a href=#345 id=345 data-nosnippet>345</a>            )
+<a href=#346 id=346 data-nosnippet>346</a>            .bind((<span class="string">"org_id"</span>, org_id_str.clone()))
+<a href=#347 id=347 data-nosnippet>347</a>            .<span class="kw">await
+<a href=#348 id=348 data-nosnippet>348</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#349 id=349 data-nosnippet>349</a>        <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#350 id=350 data-nosnippet>350</a>
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#352 id=352 data-nosnippet>352</a>            </span>.db
+<a href=#353 id=353 data-nosnippet>353</a>            .current()
+<a href=#354 id=354 data-nosnippet>354</a>            .query(
+<a href=#355 id=355 data-nosnippet>355</a>                <span class="string">"SELECT meta::id(id) AS record_id, * \
+<a href=#356 id=356 data-nosnippet>356</a>                 FROM tenant \
+<a href=#357 id=357 data-nosnippet>357</a>                 WHERE organization_id = $org_id \
+<a href=#358 id=358 data-nosnippet>358</a>                 ORDER BY created_at ASC \
+<a href=#359 id=359 data-nosnippet>359</a>                 LIMIT $limit START $offset"</span>,
+<a href=#360 id=360 data-nosnippet>360</a>            )
+<a href=#361 id=361 data-nosnippet>361</a>            .bind((<span class="string">"org_id"</span>, org_id_str))
+<a href=#362 id=362 data-nosnippet>362</a>            .bind((<span class="string">"limit"</span>, pagination.limit))
+<a href=#363 id=363 data-nosnippet>363</a>            .bind((<span class="string">"offset"</span>, pagination.offset))
+<a href=#364 id=364 data-nosnippet>364</a>            .<span class="kw">await
+<a href=#365 id=365 data-nosnippet>365</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#366 id=366 data-nosnippet>366</a>
+<a href=#367 id=367 data-nosnippet>367</a>        <span class="kw">let </span>rows: Vec&lt;TenantRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#368 id=368 data-nosnippet>368</a>
+<a href=#369 id=369 data-nosnippet>369</a>        <span class="kw">let </span>items = rows
+<a href=#370 id=370 data-nosnippet>370</a>            .into_iter()
+<a href=#371 id=371 data-nosnippet>371</a>            .map(|row| row.try_into_tenant())
+<a href=#372 id=372 data-nosnippet>372</a>            .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;, DbError&gt;&gt;()<span class="question-mark">?</span>;
+<a href=#373 id=373 data-nosnippet>373</a>
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="prelude-val">Ok</span>(paginate(items, count_rows, <span class="kw-2">&amp;</span>pagination))
+<a href=#375 id=375 data-nosnippet>375</a>    }
+<a href=#376 id=376 data-nosnippet>376</a>}
 </code></pre></div></section></main></body></html>

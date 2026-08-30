@@ -23,6 +23,7 @@ import {
   type ServiceAccount,
 } from "@/services/serviceAccounts";
 import { AssignmentScopeBadge } from "@/components/AssignmentScope";
+import { AssignRoleDialog } from "@/components/AssignRoleDialog";
 import { useResourceNames } from "@/hooks/useResourceNames";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
@@ -260,6 +261,12 @@ export function GroupDetailPage() {
     enabled: !!groupId,
   });
 
+  // Until this page could make an assignment it could only list and revoke
+  // them, so the sole route to a group's roles ran through whichever role you
+  // happened to open — and the scopes a grant can carry were unreachable from
+  // the group entirely.
+  const [assignRoleOpen, setAssignRoleOpen] = useState(false);
+
   // The target is the assignment, not the role: dropping its scope would ask
   // the server to remove a global grant this group may not even hold.
   const [unassignRole, setUnassignRole] = useState<RoleAssignment | null>(null);
@@ -396,14 +403,23 @@ export function GroupDetailPage() {
       </SectionCard>
 
       {/* ── Section 3: Roles ── */}
-      <SectionCard title="Assigned Roles">
+      <SectionCard
+        title="Assigned Roles"
+        action={
+          <Button size="sm" onClick={() => setAssignRoleOpen(true)}>
+            <Plus size={14} className="mr-1.5" />
+            Assign Role
+          </Button>
+        }
+      >
         {rolesLoading ? (
           <div className="flex items-center justify-center py-6">
             <Loader2 size={20} className="animate-spin text-primary/60" />
           </div>
         ) : groupRoles.length === 0 ? (
           <p className="text-sm text-muted-foreground text-center py-4">
-            No roles assigned to this group.
+            No roles assigned to this group. Use "Assign Role" to grant one —
+            every member inherits it.
           </p>
         ) : (
           <ul className="divide-y divide-white/5">
@@ -539,6 +555,18 @@ export function GroupDetailPage() {
           await groupService.addMember(groupId!, user.id);
           handleMemberAdded();
         }}
+      />
+
+      {/* Assign role dialog */}
+      <AssignRoleDialog
+        open={assignRoleOpen}
+        onClose={() => setAssignRoleOpen(false)}
+        subject="group"
+        errorId="group-assign-role-error"
+        onAssign={(roleId, resourceId, tenantScope) =>
+          roleService.assignToGroup(roleId, groupId!, resourceId, tenantScope)
+        }
+        onAssigned={() => invalidateEntity(queryClient, "role-groups")}
       />
 
       {/* Unassign role confirm */}

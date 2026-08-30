@@ -67,6 +67,7 @@ function routeGet(map: Record<string, unknown>) {
 
 function defaults(overrides: Record<string, unknown> = {}) {
   return {
+    "/api/v1/roles": [deployRole, { id: "r2", name: "Audit", is_global: true, created_at: "t" }],
     [URLS.group]: group,
     [URLS.members]: members,
     [URLS.roles]: groupRoles,
@@ -253,8 +254,36 @@ describe("GroupDetailPage", () => {
       await screen.findByText(/No service accounts in this group/)
     ).toBeInTheDocument();
     expect(
-      await screen.findByText("No roles assigned to this group.")
+      await screen.findByText(/No roles assigned to this group\./)
     ).toBeInTheDocument();
+  });
+
+  it("assigns a role to the group from the group's own page", async () => {
+    // Until this dialog existed the page could list and revoke assignments but
+    // not make one, so the only route to a group's roles ran through whichever
+    // role you happened to open.
+    routeGet(defaults());
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Assign Role/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Role"), "r2");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r2/groups", {
+        group_id: "g1",
+      })
+    );
+  });
+
+  it("refuses to assign without a role, and says which field is missing", async () => {
+    routeGet(defaults());
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Assign Role/ }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.submit(dialog.querySelector("form")!);
+    expect(await screen.findByText("Please select a role.")).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
   });
 
   it("lists the group's service-account members separately from its people", async () => {

@@ -142,13 +142,33 @@ principal is unrestricted, a list when it is not.
 
 ### In the admin UI
 
-The role assignment dialogs gain a **Tenants** picker, shown only while
-administering an organization scope (in an ordinary tenant there is nothing to
-choose). Leaving it empty is the default and means every tenant of the
+Every role assignment dialog carries a **Tenants** picker beside the resource
+**Scope** one, in all three places an assignment can be made:
+
+| Page | Dialog |
+| --- | --- |
+| **Roles** → a role | **Assign User** / **Assign Group** / **Assign Service Account** — pick the subject |
+| **Users** → a user | **Assign Role** — pick the role |
+| **Groups** → a group | **Assign Role** — pick the role; every member inherits it |
+
+Leaving the picker empty is the default and means every tenant of the
 organization.
+
+The picker only offers tenants while you are administering the organization
+scope; in an ordinary tenant there is nothing to choose, because a role
+assigned there lives in that tenant and reaches it alone. An organization
+administrator who has switched into a tenant is told exactly that, and pointed
+at the scope selector, rather than being shown a control that vanished. A
+principal that cannot reach the organization scope at all — an ordinary tenant
+administrator, or an organization account already confined to particular
+tenants — sees nothing, since for them there is no switch to make.
 
 An assignment that names tenants is badged with them rather than
 "Organization-wide", which for such a grant would be precisely wrong.
+
+**Changing an assignment's reach is a revoke and a re-assign.** `has_role` is
+created and deleted, never updated, so there is no "edit scope" control: unassign
+the grant and make it again with the tenants you want.
 
 A restricted operator signing in is placed in the first tenant it reaches rather
 than in the organization scope, where it would hold nothing; its tenant switcher

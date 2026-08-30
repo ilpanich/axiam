@@ -28,12 +28,7 @@ export default function NewsIndex({ openPost }: NewsIndexProps) {
         From the AXIAM project
       </h1>
       <p style={{ margin: "0 0 40px", fontSize: 17, color: "#94a3b8", maxWidth: 640 }}>
-        Milestones, engineering notes and releases. Each post is a Markdown file
-        with a metadata header — drop a new one in{" "}
-        <code style={{ color: "#67e8f9", fontFamily: "ui-monospace,Menlo,monospace" }}>
-          content/news/
-        </code>{" "}
-        and it appears here.
+        Milestones, engineering notes and releases, newest first.
       </p>
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
         {POSTS.map((p) => (

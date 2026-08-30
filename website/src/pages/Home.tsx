@@ -69,7 +69,7 @@ const ACCENTS = {
 
 const HERO_STATS = [
   { value: "64", label: "tasks" },
-  { value: "19", label: "phases" },
+  { value: "20", label: "phases" },
   { value: "11", label: "SDKs" },
   { value: "100%", label: "Rust" },
 ];

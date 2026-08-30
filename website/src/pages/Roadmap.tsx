@@ -34,13 +34,14 @@ export default function Roadmap() {
           letterSpacing: "-.02em",
         }}
       >
-        64 tasks. 19 phases. And counting.
+        64 tasks. 20 phases. Now in beta.
       </h1>
       <p style={{ margin: "0 0 14px", fontSize: 17, color: "#94a3b8", maxWidth: 640 }}>
         A structured path from project foundation to a security-audited,
-        SDK-complete platform — followed by an ongoing phase of benchmarking,
-        testing and hardening. AXIAM remains a work in progress until a stable
-        release.
+        SDK-complete platform, through a phase of benchmarking and hardening,
+        and into the beta line that phase reached. Beta settles the shape of
+        the system; it does not make it production-ready, and AXIAM remains a
+        work in progress until a stable release.
       </p>
       <p style={{ margin: "0 0 20px", fontSize: 13, color: "#64748b", maxWidth: 640 }}>
         Phase dates are approximate, reconstructed from the project's issue

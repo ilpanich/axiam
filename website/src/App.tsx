@@ -43,7 +43,7 @@ export default function App() {
     hashIsDocLink() ? "docs" : hashIsSecurityLink() ? "security" : "home",
   );
   const [sdkId, setSdkId] = useState("typescript");
-  const [postSlug, setPostSlug] = useState("feature-complete");
+  const [postSlug, setPostSlug] = useState("beta-phase");
 
   // A shared `#/docs/<slug>` or `#/security/diagram/...` link must open that
   // page on a cold load, and the browser's back button must return to it. The

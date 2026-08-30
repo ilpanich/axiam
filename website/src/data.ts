@@ -491,6 +491,57 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "beta-phase",
+    date: "August 30, 2026",
+    dateShort: "Aug 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "AXIAM reaches beta",
+    excerpt:
+      "Seven beta releases in, AXIAM officially enters its beta phase — still not for production, but from here the hardening is the work.",
+    body: [
+      {
+        type: "p",
+        text: "AXIAM has left alpha. The beta line opened with 1.0.0-beta01 on 26 August 2026 and has run to 1.0.0-beta07, which — correcting an issue in the SDK contract fan-out — is the release we intend as the official beta candidate. All eleven SDKs are tagged alongside it.",
+      },
+      {
+        type: "p",
+        text: "Beta means the shape of the system is settled. The domain model, the wire contracts and the security posture are no longer moving under integrators: the OpenAPI document is content-digested, the SDK behavioral contract is versioned and vendored, and a drift gate in CI fails the build when any of the eleven SDK repositories falls behind either one. What changes from here should be defects, not design.",
+      },
+      { type: "h", text: "What beta does not mean" },
+      {
+        type: "p",
+        text: "It does not mean production-ready, and we would rather say so plainly than let the label imply it. AXIAM is not yet usable in production. Everything in it needs deeper testing than it has had, and it has had no independent third-party penetration test or security certification.",
+      },
+      {
+        type: "p",
+        text: "Some surfaces need testing from the ground up, and they are worth naming rather than leaving a reader to discover: SAML and OIDC federation, and SCIM provisioning. All three are implemented, specified and unit-tested, and the admin UI drives their configuration — but no end-to-end run has yet exercised them against a real external identity provider or a real Okta or Entra tenant. The end-to-end federation tests today mock the external IdP redirect. Treat those three as implemented-but-unproven, not as tested.",
+      },
+      {
+        type: "quote",
+        text: "Beta is where the label stops being about features and starts being about evidence. We would rather name the surfaces we have not proven than let the word do it for us.",
+      },
+      { type: "h", text: "What the beta line has hardened so far" },
+      {
+        type: "p",
+        text: "Seven releases in five days, almost all of them driven by one thing: a full end-to-end permission matrix run against the production container image rather than a development proxy. That run found problems no unit test was ever going to. A tenant administrator could flip a certificate authority's mTLS trust-anchor flag and mint identities trusted across sibling tenants. The machine-facing REST surface was unreachable by a machine. An empty environment variable closed the first-run bootstrap gate entirely. The admin console could keep rendering the previous tenant's rows after a switch.",
+      },
+      {
+        type: "p",
+        text: "Those are fixed, and the fixes brought structure with them: organization-level actions now require a principal that lives in the organization scope rather than merely holding the permission; a role assignment can be confined to named tenants; enrolling a passkey turns the second-factor requirement on; device authentication requires the certificate chain to reach a CA an administrator has enabled as a trust anchor, on the proxy-terminated path exactly as on the native one; and a rolling deployment no longer logs its surviving replicas out of the datastore.",
+      },
+      {
+        type: "p",
+        text: "The STRIDE threat model grew to 211 threats across nine diagrams, 196 of them mitigated and 15 recorded openly as shared-responsibility or accepted items. Every one of the findings above is written down there rather than quietly absorbed — the Security section carries the model, the compliance self-assessment and the open risk register in full.",
+      },
+      { type: "h", text: "Trying it, and telling us what breaks" },
+      {
+        type: "p",
+        text: "The quickstart in the documentation brings a full stack up on Docker Compose and walks the first-run bootstrap. Run it against something you do not mind breaking, and please report what you find — issues on GitHub for defects, and the private advisory form in SECURITY.md for anything security-relevant. Reproductions from people integrating against the SDKs are the most useful thing we can receive right now, and federation, SAML, OIDC and SCIM are where we most need them.",
+      },
+    ],
+  },
+  {
     slug: "alpha-release",
     date: "July 16, 2026",
     dateShort: "Jul 2026",
@@ -575,6 +626,10 @@ export const POSTS: Post[] = [
         type: "p",
         text: "Tenant is always an explicit constructor parameter — AXIAM is multi-tenant, and there is no default tenant.",
       },
+      {
+        type: "p",
+        text: "Addendum, August 2026: there are now eleven. Kotlin, Swift, C and C++ joined the seven above, and the contract they all vendor has grown well past §11 — UMA, OPAQUE, reactors, WebAuthn, the account lifecycle, pushed authorization requests and the management API. The SDKs page carries the current set and what each one covers.",
+      },
     ],
   },
   {
@@ -608,8 +663,9 @@ export const POSTS: Post[] = [
  * Roadmap phases. Start/end dates are approximate, reconstructed from the
  * project's GitHub issue tracker (each task issue carries a `phase:N` label and
  * a close date) and commit history; phases are sequential and do not overlap.
- * Phases 0–18 are the delivered 64-task roadmap; phase 19 is the open-ended
- * hardening effort that began after the platform reached feature-complete.
+ * Phases 0–18 are the delivered 64-task roadmap; phase 19 is the hardening
+ * effort that began after the platform reached feature-complete and closed
+ * when it reached beta; phase 20 is the open-ended beta line.
  */
 export const PHASES: Phase[] = [
   {
@@ -751,7 +807,7 @@ export const PHASES: Phase[] = [
   {
     n: 17,
     title: "SDKs",
-    focus: "Rust, TS, Python, Java, C#, PHP, Go",
+    focus: "Rust, TS, Python, Java, C#, PHP, Go — Kotlin, Swift, C and C++ followed",
     start: "Mar 31, 2026",
     end: "Jul 3, 2026",
     status: "done",
@@ -767,8 +823,17 @@ export const PHASES: Phase[] = [
   {
     n: 19,
     title: "Benchmarking, testing, fixing & improving",
-    focus: "Load & soak testing, benchmarks, bug fixes and hardening toward beta",
+    focus: "Load & soak testing, benchmarks, bug fixes and the hardening that reached beta",
     start: "Jul 12, 2026",
+    end: "Aug 26, 2026",
+    status: "done",
+  },
+  {
+    n: 20,
+    title: "Beta line — stabilisation toward 1.0",
+    focus:
+      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0",
+    start: "Aug 26, 2026",
     end: "Ongoing",
     status: "ongoing",
   },

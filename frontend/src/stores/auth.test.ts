@@ -18,6 +18,7 @@ describe("useAuthStore", () => {
       orgSlug: null,
       isAuthenticated: false,
       isInitializing: true,
+      isSwitchingTenant: false,
     });
   });
 
@@ -62,5 +63,23 @@ describe("useAuthStore", () => {
     expect(useAuthStore.getState().isInitializing).toBe(false);
     useAuthStore.getState().setInitializing(true);
     expect(useAuthStore.getState().isInitializing).toBe(true);
+  });
+
+  it("setSwitchingTenant toggles the tenant-switch flag", () => {
+    expect(useAuthStore.getState().isSwitchingTenant).toBe(false);
+    useAuthStore.getState().setSwitchingTenant(true);
+    expect(useAuthStore.getState().isSwitchingTenant).toBe(true);
+    useAuthStore.getState().setSwitchingTenant(false);
+    expect(useAuthStore.getState().isSwitchingTenant).toBe(false);
+  });
+
+  it("clearAuth lowers the tenant-switch flag", () => {
+    // A sign-out mid-switch would otherwise leave the flag raised, and the
+    // layout renders a spinner in place of the page while it is — so the next
+    // sign-in would land on "Switching tenant…" and stay there.
+    useAuthStore.getState().setUser(user);
+    useAuthStore.getState().setSwitchingTenant(true);
+    useAuthStore.getState().clearAuth();
+    expect(useAuthStore.getState().isSwitchingTenant).toBe(false);
   });
 });

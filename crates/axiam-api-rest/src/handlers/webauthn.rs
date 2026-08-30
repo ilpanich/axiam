@@ -241,10 +241,18 @@ pub async fn start_registration<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let user_name = user.user_id.to_string();
+    // Registration is about the CALLER'S OWN account, so every tenant here is
+    // the one the caller lives in — never the one it is acting on. They differ
+    // only for an organization-level principal that has selected a child tenant
+    // in the admin UI, and reading the selected one enrolled the credential
+    // against a tenant that holds no such account. The attestation policy is
+    // read from the same tenant for the same reason: the policy that governs a
+    // credential is the policy of the tenant the credential is stored in.
+    let scope = user.principal_tenant_id;
     let policy = state
         .webauthn
         .webauthn_attestation_policy_repo
-        .get_by_tenant(user.tenant_id)
+        .get_by_tenant(scope)
         .await?
         .unwrap_or_default();
 
@@ -252,7 +260,7 @@ pub async fn start_registration<C: Connection + Clone>(
         .webauthn
         .webauthn_service
         .start_registration_for_policy(
-            user.tenant_id,
+            scope,
             user.org_id,
             user.user_id,
             &user_name,
@@ -362,20 +370,22 @@ pub async fn finish_registration<C: Connection + Clone>(
     body: web::Json<FinishRegistrationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
+    // The caller's own account — same rule as `start_registration` above.
+    let scope = user.principal_tenant_id;
     let policy = state
         .webauthn
         .webauthn_attestation_policy_repo
-        .get_by_tenant(user.tenant_id)
+        .get_by_tenant(scope)
         .await?
         .unwrap_or_default();
 
-    enforce_mds_freshness(&state, &policy, user.tenant_id, user.user_id).await?;
+    enforce_mds_freshness(&state, &policy, scope, user.user_id).await?;
 
     let cred = state
         .webauthn
         .webauthn_service
         .finish_registration_for_policy(
-            user.tenant_id,
+            scope,
             user.user_id,
             &b.state_token,
             &b.credential_name,
@@ -402,12 +412,12 @@ pub async fn finish_registration<C: Connection + Clone>(
     // logged loudly rather than swallowed.
     if let Err(e) = state
         .mfa_method_service
-        .enable_after_enrollment(user.tenant_id, user.user_id)
+        .enable_after_enrollment(scope, user.user_id)
         .await
     {
         tracing::error!(
             action = "webauthn.enable_mfa_failed",
-            tenant_id = %user.tenant_id,
+            tenant_id = %scope,
             user_id = %user.user_id,
             credential_id = %cred.id,
             error = %e,

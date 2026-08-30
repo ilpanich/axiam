@@ -20,6 +20,14 @@ use crate::handlers;
         // Health
         crate::health::health,
         crate::health::ready,
+        // Bootstrap
+        //
+        // First-run only, and deliberately outside the §27 management
+        // vocabulary (see `EXCLUDED_OPERATIONS` in
+        // `scripts/gen-management-registry.py`) — but a documented endpoint all
+        // the same, because an operator automating a first deployment has
+        // nothing else to read.
+        handlers::bootstrap::bootstrap,
         // Auth
         handlers::auth::login,
         handlers::opaque::opaque_register_start,
@@ -28,6 +36,14 @@ use crate::handlers;
         handlers::password_reset::reset_context,
         handlers::auth::logout,
         handlers::auth::refresh,
+        // `me` and `password/change` carried `#[utoipa::path]` annotations from
+        // the day they were written and were never listed here, so they existed
+        // in the server and in no generated document. Every SDK therefore had
+        // to hand-roll "who am I" and "change my password" — the two calls a
+        // client makes before it makes any other — against a spec that did not
+        // admit they existed.
+        handlers::auth::me,
+        handlers::auth::change_password,
         handlers::auth::enroll_mfa,
         handlers::auth::confirm_mfa,
         handlers::auth::verify_mfa,

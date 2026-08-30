@@ -143,7 +143,56 @@ api_expect GET "${ORG_JAR}" "" /api/v1/users '' 200 "${TENANT_B}" >/dev/null
 ok "a tenant created seconds ago is reachable with no grant, restart or re-login"
 
 # ---------------------------------------------------------------------------
-# 5. The boundary.
+# 5. The caller's OWN account, while a tenant is selected.
+#
+# `X-Axiam-Tenant` says which tenant a request ACTS ON. It says nothing about
+# where the caller lives, and for a request about the caller's own record the
+# second tenant is the one that matters: this administrator's account, its
+# credentials and its MFA factors are all in the organization's reserved scope.
+#
+# Reading the acting tenant here is a bug with a distinctive shape — every one
+# of these calls looks up an account in a tenant that does not have it and
+# answers 404, so the whole "my profile" section of the admin UI went blank for
+# an organization administrator the moment they picked a tenant, with nothing
+# else on screen having changed.
+#
+# The self-service endpoints therefore scope to `principal_tenant_id`; see
+# `docs/admin/organization-scope.md` and `axiam_api_rest::authz::user_scope_tenant`.
+# ---------------------------------------------------------------------------
+log "reading the administrator's own record while acting on ${TENANT_B_SLUG}"
+ADMIN_ID=$(printf '%s' "${ORG_LOGIN}" | jq -r '.user.id')
+
+ME_WHILE_SWITCHED=$(api_expect GET "${ORG_JAR}" "" "/api/v1/users/${ADMIN_ID}" '' 200 "${TENANT_B}")
+ME_TENANT=$(printf '%s' "${ME_WHILE_SWITCHED}" | jq -r '.tenant_id')
+[ "${ME_TENANT}" = "${ORG_TENANT_ID}" ] \
+  || fail "own profile must come back from the organization scope, got ${ME_TENANT}"
+ok "own profile loads, and reports the tenant it actually lives in"
+
+log "  and its MFA factors, which live in the same place"
+api_expect GET "${ORG_JAR}" "" "/api/v1/users/${ADMIN_ID}/mfa-methods" '' 200 "${TENANT_B}" >/dev/null
+ok "  own MFA methods list while acting elsewhere"
+
+log "  editing it writes to the organization scope, not the selected tenant"
+api_expect PUT "${ORG_JAR}" "${ORG_CSRF}" "/api/v1/users/${ADMIN_ID}" \
+  '{"metadata":{"display_name":"Org Administrator"}}' 200 "${TENANT_B}" >/dev/null
+STORED=$(api_expect GET "${ORG_JAR}" "" "/api/v1/users/${ADMIN_ID}" '' 200)
+printf '%s' "${STORED}" | jq -e '.metadata.display_name == "Org Administrator"' >/dev/null \
+  || fail "the self-update did not land on the account in the organization scope: ${STORED}"
+ok "  the edit is visible back in the organization scope"
+
+# The counter-case, and the reason this is a scoping rule rather than a blanket
+# "always use the principal's tenant": a request about ANYBODY ELSE still
+# follows the header, which is the whole point of the switcher.
+log "  while a request about another user still follows the header"
+OTHER_USER=$(api_expect POST "${ORG_JAR}" "${ORG_CSRF}" /api/v1/users \
+  "{\"username\":\"scoped-${RUN_ID}\",\"email\":\"scoped-${RUN_ID}@example.com\",\"password\":\"${SA_PASSWORD}\"}" \
+  201 "${TENANT_B}" | jq -r '.id')
+api_expect GET "${ORG_JAR}" "" "/api/v1/users/${OTHER_USER}" '' 200 "${TENANT_B}" >/dev/null
+api_expect GET "${ORG_JAR}" "" "/api/v1/users/${OTHER_USER}" '' 404 >/dev/null
+ok "  found in ${TENANT_B_SLUG}, absent from the organization scope — as it should be"
+
+# ---------------------------------------------------------------------------
+# 6. The boundary.
 #
 # A TENANT administrator in tenant A, holding a *global* role — `is_global`,
 # no resource — which reaches every resource in tenant A and nothing outside
@@ -198,9 +247,9 @@ api_expect GET "${TA_JAR}" "" /api/v1/users '' 403 "${TENANT_B}" >/dev/null
 ok "a tenant principal cannot act on another tenant, header or not"
 
 # ---------------------------------------------------------------------------
-# 6. The middle ground: an ORGANIZATION principal restricted to one tenant.
+# 7. The middle ground: an ORGANIZATION principal restricted to one tenant.
 #
-# Steps 1–4 gave one administrator every tenant; step 5 gave another exactly
+# Steps 1–4 gave one administrator every tenant; step 6 gave another exactly
 # one, permanently, by where its account lives. Neither expresses the common
 # case: an organization-level operator who should administer *some* of the
 # organization's tenants.

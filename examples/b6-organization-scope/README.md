@@ -66,18 +66,40 @@ docker compose -f docker/docker-compose.e2e.yml up -d --wait
    better than fanning grants out: a tenant created ten months from now is
    reachable by the same rule.
 
-5. **The boundary.** A tenant administrator is created in tenant A with a
+5. **Your own account, while a tenant is selected.** The header says which
+   tenant a request *acts on*. It says nothing about where the caller *lives* —
+   and this administrator's record, credentials and MFA factors are all in the
+   organization's reserved scope. So the self-service endpoints scope to the
+   caller's own tenant, whatever the header says:
+
+   | Request | Scoped to |
+   |---|---|
+   | `GET /users/{own id}`, `PUT /users/{own id}` | the organization scope |
+   | `GET /users/{own id}/mfa-methods` | the organization scope |
+   | `GET /users/{someone else}` | the tenant the header names |
+
+   The walkthrough asserts the edit lands back in the organization scope, and
+   that a user created in tenant B is found there and **not** found without the
+   header — because the rule is a scoping rule, not a blanket "always use the
+   caller's tenant", and the second half is what keeps the switcher useful.
+
+   Reading the acting tenant here has a distinctive shape: every one of those
+   calls looks an account up in a tenant that does not have it and answers 404,
+   so the whole profile section of the admin UI went blank the moment an
+   organization administrator picked a tenant.
+
+6. **The boundary.** A tenant administrator is created in tenant A with a
    *global* role — `is_global`, no resource — which reaches every resource in
    tenant A and nothing in tenant B. The header does not help it: the server
    refuses `X-Axiam-Tenant` for a principal that is not organization-level,
    with a 403 rather than a silent fallback.
 
-6. **Same name, different reach.** Both roles are called `operations` and both
+7. **Same name, different reach.** Both roles are called `operations` and both
    are global. The one in the organization tenant is *organization-wide*; the
    one in tenant A is *tenant-wide*. That is why the admin UI stopped labelling
    both "Global".
 
-7. **The middle ground.** Steps 1–4 gave one administrator every tenant; step 5
+8. **The middle ground.** Steps 1–4 gave one administrator every tenant; step 6
    gave another exactly one, permanently, by where its account lives. Neither
    expresses the case operators actually ask for: an organization-level
    operator who should administer *some* of the organization's tenants.

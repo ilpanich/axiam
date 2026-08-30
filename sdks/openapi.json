@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta05",
-    "x-axiam-spec-digest": "sha256:4a523b61e9f801069d9457494a21a2b93edecbff6a8b5b3cbb454501880db577"
+    "x-axiam-spec-digest": "sha256:e16439fa91bfe0b385eccf6cb45b1130133bc1c4c1f53813472e20c4e52b2c28"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -151,6 +151,47 @@
             "bearer": []
           }
         ]
+      }
+    },
+    "/api/v1/admin/bootstrap": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "`POST /api/v1/admin/bootstrap` — first-run admin setup.",
+        "description": "Creates the initial admin user with the super-admin role and seeds the\ndefault permission set. First-super-admin creation is atomic (SECHRD-04\n/ D-03c): a uniqueness-invariant `bootstrap_lock` CREATE inside the same\ntransaction means a second call — concurrent OR sequential — against a\ntenant that already has an admin is refused with 409 Conflict; no\npartial admin or orphan role RELATE can result. No token is issued —\nthe user must authenticate via `/api/v1/auth/login` (D-11).\n\nMandatory gate (D-03a): requires EITHER `AXIAM_BOOTSTRAP_ADMIN_EMAIL` set\nand matching the request email (403 on mismatch), OR a valid setup_token\n(403 if missing/invalid/already consumed).",
+        "operationId": "bootstrap",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BootstrapRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Organization, tenant and admin user created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BootstrapResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (missing required fields)"
+          },
+          "403": {
+            "description": "Bootstrap gate not satisfied (email mismatch or invalid/missing setup token)"
+          },
+          "409": {
+            "description": "Bootstrap already completed"
+          }
+        }
       }
     },
     "/api/v1/audit-logs": {
@@ -790,6 +831,36 @@
         ]
       }
     },
+    "/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`GET /api/v1/auth/me`",
+        "description": "Returns the authenticated user's profile. Requires a valid session cookie.",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "Authenticated user info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/auth/mfa/confirm": {
       "post": {
         "tags": [
@@ -1088,6 +1159,42 @@
             "description": "OPAQUE is enabled but the server has no keys configured"
           }
         }
+      }
+    },
+    "/api/v1/auth/password/change": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/auth/password/change`",
+        "description": "Change the authenticated user's password. Requires the current password for\nre-verification (T-04-21: guards against session-hijack pivot). On success,\nall other sessions and OAuth2 refresh tokens are revoked; the caller's\ncurrent session is preserved (D-14, D-15).\n\nReturns 204 on success, 401 on wrong current password, 422 on policy\nviolation.",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Password changed; other sessions revoked"
+          },
+          "401": {
+            "description": "Wrong current password or unauthenticated"
+          },
+          "422": {
+            "description": "New password violates policy"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/auth/refresh": {
@@ -10939,6 +11046,121 @@
           }
         }
       },
+      "BootstrapRequest": {
+        "type": "object",
+        "required": [
+          "organization_name",
+          "email",
+          "username",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Admin email address."
+          },
+          "opaque_ksf": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Client key-stretching function for the seeded baseline. Defaults to\n`argon2id`.",
+            "example": "argon2id"
+          },
+          "opaque_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OPAQUE policy to seed as the new organization's baseline. Omitted means\n`disabled`, which is what an operator who has not thought about OPAQUE\nshould get.\n\nSettable here — rather than only through `PUT /api/v1/settings/org`\nafterwards — because the alternative is a window in which the only\naccount on the deployment exists without a registration record. Turning\n`required` on later would then lock the sole administrator out of their\nown system, with no second admin to undo it.\n\n# Why bootstrap carries no client-built record\n\nEvery other enrolment path takes an `opaque` object holding a record the\nclient built, because the server must never see the plaintext. Bootstrap\nis the one place where that is not true and never was: it takes\n`password` and hashes it with Argon2id server-side, so the plaintext is\nin the request body by construction. The SRP version still asked the\nclient for a verifier, but that bought nothing — the password was in the\nsame request.\n\nSo bootstrap runs the client half of the registration itself, from the\npassword it already holds, and stores the resulting record. The record\nis indistinguishable from a client-built one and the admin can log in\nthrough `/auth/opaque/*` immediately. It also keeps bootstrap a single\ncall: an OPAQUE registration needs a server round trip for the OPRF, and\na client-built record would have required either a second endpoint that\ncreates the organization before bootstrap does, or a three-call\nfirst-run flow.\n\nAn operator who wants a record the server provably never had material\nfor changes the admin password once after bootstrap, through\n`/auth/password/change`, which is client-built like every other path.",
+            "example": "disabled"
+          },
+          "opaque_suite": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 9807 ciphersuite for the seeded baseline. Defaults to\n`ristretto255_sha512`.",
+            "example": "ristretto255_sha512"
+          },
+          "organization_name": {
+            "type": "string",
+            "description": "Display name of the organization to create (required). On a fresh\ndeployment nothing exists yet, so bootstrap provisions the organization\nand its own reserved scope itself rather than requiring pre-existing IDs."
+          },
+          "organization_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "URL-safe slug for the organization. Derived from `organization_name`\nwhen omitted or blank."
+          },
+          "password": {
+            "type": "string",
+            "description": "Admin password (hashed with Argon2id before storage)."
+          },
+          "setup_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One-time first-run setup token (D-03a/D-03b). Required when\n`AXIAM_BOOTSTRAP_ADMIN_EMAIL` is not set; ignored otherwise."
+          },
+          "tenant_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "**Deprecated and ignored.** Bootstrap no longer creates an ordinary\ntenant.\n\nThe super-admin it provisions is organization-level, so it administers\nevery tenant the organization has — including ones created long\nafterwards. Creating a tenant here is what produced the opposite: the\nsuper-admin's grants were rows in one tenant, and every tenant created\nlater was unreachable by everyone.\n\nStill accepted so an older client's request succeeds rather than failing\non an unknown field. Create tenants through\n`POST /api/v1/organizations/{org_id}/tenants` once you are signed in.",
+            "deprecated": true
+          },
+          "tenant_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "**Deprecated and ignored.** See [`Self::tenant_name`].",
+            "deprecated": true
+          },
+          "username": {
+            "type": "string",
+            "description": "Admin username."
+          }
+        }
+      },
+      "BootstrapResponse": {
+        "type": "object",
+        "required": [
+          "message",
+          "organization_id",
+          "organization_slug",
+          "tenant_id",
+          "tenant_slug",
+          "user_id"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "organization_slug": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tenant_slug": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "CaCertificate": {
         "type": "object",
         "description": "A CA (Certificate Authority) certificate at the organization level.\n\nCA certificates are the root of trust for all tenant certificates\nwithin the organization. Private keys for signing CAs are encrypted\nwith AES-256-GCM and stored separately; non-signing CAs only store\nthe public certificate.",
@@ -11182,6 +11404,33 @@
           "L3",
           "L3Plus"
         ]
+      },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/auth/password/change`.",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": "string"
+          },
+          "opaque": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OpaqueEnrollment",
+                "description": "Registration record for the NEW password, built client-side.\n\nOptional so a client that predates OPAQUE keeps working under\n`opaque_mode = optional`; required (and enforced server-side) under\n`opaque_mode = required`, where omitting it would leave the account\nunable to authenticate at all."
+              }
+            ]
+          }
+        }
       },
       "CheckAccessBody": {
         "type": "object",
@@ -13520,6 +13769,36 @@
           },
           "stale": {
             "type": "boolean"
+          }
+        }
+      },
+      "MeResponse": {
+        "type": "object",
+        "description": "GET /api/v1/auth/me response body.\n\n`permissions` contains the caller's effective permission action strings\n(deduplicated, sorted). If the caller has the `super-admin` role, the\narray is prefixed with `\"*\"` so clients can short-circuit fine-grained\nchecks. Empty array means the user has no assigned roles.",
+        "required": [
+          "user",
+          "permissions"
+        ],
+        "properties": {
+          "opaque": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OpaquePolicy",
+                "description": "The caller's own tenant's effective OPAQUE policy.\n\nHere rather than behind an admin-only settings endpoint because every\nauthenticated user needs it for one non-administrative reason: setting a\npassword requires building a registration record client-side, and the\nclient needs to know whether to do that at all. It discloses a property\nof the caller's own tenant and nothing about any other tenant or user.\n\nOmitted (not an error) when settings cannot be resolved, so a settings\noutage degrades to \"no OPAQUE\" rather than to a failed `/me` — the same\ntreatment `tenant_slug`/`org_slug` already get."
+              }
+            ]
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "user": {
+            "$ref": "#/components/schemas/LoginUserInfo"
           }
         }
       },

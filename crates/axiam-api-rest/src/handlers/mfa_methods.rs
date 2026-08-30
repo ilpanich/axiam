@@ -6,7 +6,7 @@ use serde::Serialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
-use crate::authz::{AuthzData, RequirePermission, is_own_resource};
+use crate::authz::{AuthzData, RequirePermission, is_own_resource, user_scope_tenant};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::state::AppState;
@@ -73,9 +73,13 @@ pub async fn list_mfa_methods<C: Connection + Clone>(
             .await?;
     }
 
+    // The caller's own methods live in the caller's own tenant, which is not
+    // the one an organization-level principal has selected — see
+    // [`user_scope_tenant`]. Without this the Security section of the profile
+    // came back empty for that principal.
     let methods = state
         .mfa_method_service
-        .list_methods(caller.tenant_id, user_id)
+        .list_methods(user_scope_tenant(&caller, user_id), user_id)
         .await?;
     let response: Vec<MfaMethodResponse> = methods.into_iter().map(Into::into).collect();
     Ok(HttpResponse::Ok().json(response))
@@ -119,7 +123,7 @@ pub async fn delete_mfa_method<C: Connection + Clone>(
 
     state
         .mfa_method_service
-        .delete_method(caller.tenant_id, user_id, &method_id)
+        .delete_method(user_scope_tenant(&caller, user_id), user_id, &method_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }

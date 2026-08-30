@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
-use crate::authz::{AuthzData, RequirePermission, is_own_resource};
+use crate::authz::{AuthzData, RequirePermission, is_own_resource, user_scope_tenant};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::client_info::{client_ip, user_agent};
@@ -323,7 +323,12 @@ pub async fn get<C: Connection + Clone>(
             .check(&user, authz.get_ref().as_ref())
             .await?;
     }
-    let target = state.user_repo.get_by_id(user.tenant_id, target_id).await?;
+    // The caller's own record lives in the tenant the caller belongs to, which
+    // is not the tenant an organization-level principal has selected. Reading
+    // the acting tenant here made "open my profile" a 404 for exactly that
+    // principal — see [`user_scope_tenant`].
+    let scope = user_scope_tenant(&user, target_id);
+    let target = state.user_repo.get_by_id(scope, target_id).await?;
     Ok(HttpResponse::Ok().json(UserResponse::from(target)))
 }
 
@@ -354,6 +359,10 @@ pub async fn update<C: Connection + Clone>(
             .check(&user, authz.get_ref().as_ref())
             .await?;
     }
+    // Same rule as `get` above, and it matters more here: writing a
+    // self-update into the *selected* tenant would not find the row to update
+    // at all. See [`user_scope_tenant`].
+    let scope = user_scope_tenant(&user, target_id);
     let req = body.into_inner();
 
     // SEC-050: Self-update guards:
@@ -365,7 +374,7 @@ pub async fn update<C: Connection + Clone>(
     // Load the current email to detect email changes on self-update.
     let email_changed_for_self = if self_update {
         if let Some(ref new_email) = req.email {
-            let current = state.user_repo.get_by_id(user.tenant_id, target_id).await?;
+            let current = state.user_repo.get_by_id(scope, target_id).await?;
             new_email != &current.email
         } else {
             false
@@ -394,18 +403,10 @@ pub async fn update<C: Connection + Clone>(
     // `effective_status` has already stripped a self-service status change, and
     // `status` is not in the event's allow-list, so neither the caller nor the
     // reactor can set it here.
-    crate::reactor_hooks::user_pre_update(
-        &state.events.reactor_gate,
-        user.tenant_id,
-        target_id,
-        &mut input,
-    )
-    .await?;
-
-    let updated = state
-        .user_repo
-        .update(user.tenant_id, target_id, input)
+    crate::reactor_hooks::user_pre_update(&state.events.reactor_gate, scope, target_id, &mut input)
         .await?;
+
+    let updated = state.user_repo.update(scope, target_id, input).await?;
 
     // A rename used to need work here: SRP derived `x` over
     // `username ":" password`, so this handler had to read the pre-update
@@ -427,7 +428,7 @@ pub async fn update<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, target_id)
+        .invalidate_subject(scope, target_id)
         .await?;
 
     // CQ-B22: dispatch the domain event to subscribed webhooks (best-effort).

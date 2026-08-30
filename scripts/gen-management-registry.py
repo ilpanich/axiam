@@ -81,6 +81,13 @@ EXCLUDED_OPERATIONS: dict[tuple[str, str], str] = {
         "§27.0 boundary -- destroying an organization destroys every tenant "
         "under it; deliberately unreachable from an SDK"
     ),
+    ("POST", "/api/v1/admin/bootstrap"): (
+        "§27.0 boundary -- first-run creation of the first organization, "
+        "tenant and administrator, gated on an out-of-band setup token or "
+        "environment variable. It is the act that brings a deployment into "
+        "existence, performed once by a platform operator; there is no "
+        "tenant-scoped client that could hold the credentials to call it"
+    ),
     ("POST", "/api/v1/users/me/resend-verification"): (
         "§25 account lifecycle, not §27 management -- this is self-service on "
         "the caller's OWN record, the authenticated sibling of the excluded "

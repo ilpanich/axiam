@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useEffect } from "react";
 import { createMemoryRouter } from "react-router";
 import { RouterProvider } from "react-router/dom";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -25,7 +26,10 @@ const superUser: AuthUser = {
 
 // AppLayout uses <Outlet/> and its Topbar child calls useMatches(), so it must
 // be mounted inside a data router (createMemoryRouter/RouterProvider).
-function renderLayout(initialPath = "/dashboard") {
+function renderLayout(
+  initialPath = "/dashboard",
+  page: React.ReactElement = <div>Dashboard body content</div>
+) {
   const client = makeClient();
   const router = createMemoryRouter(
     [
@@ -36,7 +40,7 @@ function renderLayout(initialPath = "/dashboard") {
           {
             path: "dashboard",
             handle: { crumb: "Dashboard" },
-            element: <div>Dashboard body content</div>,
+            element: page,
           },
         ],
       },
@@ -59,6 +63,9 @@ beforeEach(() => {
     isInitializing: false,
     tenantSlug: null,
     orgSlug: null,
+    activeTenantId: null,
+    activeTenantName: null,
+    isSwitchingTenant: false,
   });
 });
 
@@ -69,6 +76,9 @@ afterEach(() => {
     isInitializing: false,
     tenantSlug: null,
     orgSlug: null,
+    activeTenantId: null,
+    activeTenantName: null,
+    isSwitchingTenant: false,
   });
 });
 
@@ -140,5 +150,69 @@ describe("AppLayout", () => {
     expect(
       screen.queryByRole("dialog", { name: "Navigation menu" })
     ).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tenant switching
+// ---------------------------------------------------------------------------
+
+describe("AppLayout during a tenant switch", () => {
+  it("replaces the routed page with a switching indicator", () => {
+    // Not cosmetic. The caller's permission array is recomputed for the tenant
+    // being acted on, so between the header moving and `/auth/me` answering,
+    // any page on screen gates on the previous tenant's permissions while its
+    // requests go to the new one.
+    useAuthStore.setState({ isSwitchingTenant: true });
+    renderLayout();
+
+    expect(screen.getByText("Switching tenant…")).toBeInTheDocument();
+    expect(screen.queryByText("Dashboard body content")).not.toBeInTheDocument();
+    // The chrome stays — the operator can still see where they are.
+    expect(screen.getByLabelText("Open navigation menu")).toBeInTheDocument();
+  });
+
+  it("remounts the routed page when the acting tenant changes", () => {
+    // A remount is what turns the tenant-namespaced cache into a fresh fetch: a
+    // mounted observer keeps the key it was created with, so re-rendering alone
+    // would leave the previous tenant's rows on screen. Counting mounts is the
+    // only way to assert that from outside.
+    const mounts = vi.fn();
+    function CountingPage() {
+      useEffect(() => {
+        mounts();
+      }, []);
+      return <div>Dashboard body content</div>;
+    }
+
+    renderLayout("/dashboard", <CountingPage />);
+    expect(mounts).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      useAuthStore.setState({ activeTenantId: "t2", activeTenantName: "R&D" });
+    });
+
+    expect(mounts).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not remount the routed page on an unrelated store change", () => {
+    // The guard on the test above: if any auth-store write remounted the page,
+    // the assertion there would pass for the wrong reason.
+    const mounts = vi.fn();
+    function CountingPage() {
+      useEffect(() => {
+        mounts();
+      }, []);
+      return <div>Dashboard body content</div>;
+    }
+
+    renderLayout("/dashboard", <CountingPage />);
+    expect(mounts).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      useAuthStore.setState({ tenantSlug: "rd", orgSlug: "axiam-corp" });
+    });
+
+    expect(mounts).toHaveBeenCalledTimes(1);
   });
 });

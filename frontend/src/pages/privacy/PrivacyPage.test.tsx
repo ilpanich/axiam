@@ -112,4 +112,63 @@ describe("PrivacyPage", () => {
       })
     );
   });
+
+  it("quotes the tenant's own grace window in the erasure toast", async () => {
+    // The prose on the page has read the effective
+    // `privacy.deletion_grace_period_days` for a while; the toast still said
+    // "30 days" regardless, so an operator on a tenant with a 7-day window was
+    // told two different numbers on the same screen by the same action.
+    apiMock.get.mockResolvedValue(
+      res({ privacy: { deletion_grace_period_days: 7 } })
+    );
+    apiMock.post.mockResolvedValue(res({ scheduled: true }));
+    renderWithProviders(<PrivacyPage />);
+    await screen.findAllByText(/7 days/);
+
+    await userEvent.click(screen.getByRole("button", { name: "Request Erasure" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Request Erasure" })
+    );
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: expect.stringContaining("7 days"),
+        })
+      )
+    );
+  });
+
+  it("refreshes the user views after scheduling an erasure", async () => {
+    // The account is disabled and marked deletion-pending immediately. With a
+    // 60s stale time and no invalidation, the Users list went on reporting it
+    // Active — which reads as the erasure having silently failed.
+    apiMock.post.mockResolvedValue(res({ scheduled: true }));
+    const { client } = renderWithProviders(<PrivacyPage />);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    await userEvent.click(screen.getByRole("button", { name: "Request Erasure" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Request Erasure" })
+    );
+
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["users"] })
+    );
+  });
+
+  it("refreshes the user views after cancelling a deletion", async () => {
+    apiMock.get.mockResolvedValue(res({ cancelled: true }));
+    const { client } = renderWithProviders(<PrivacyPage />);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    await userEvent.type(screen.getByLabelText("Cancellation token"), "cancel-tok");
+    await userEvent.click(screen.getByRole("button", { name: "Cancel Deletion" }));
+
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["users"] })
+    );
+  });
 });

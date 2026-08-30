@@ -196,6 +196,34 @@ describe("TenantsPage", () => {
     );
   });
 
+  it("refreshes the topbar tenant switcher after creating a tenant", async () => {
+    // The switcher caches the same list under its own key root. Without an edge
+    // from `tenants` to it, creating a tenant refreshed this page and left the
+    // switcher answering from the copy it fetched before the tenant existed —
+    // so the obvious next action, switching into the tenant just created, was
+    // impossible for up to the 60s stale time.
+    mockDefaultGets();
+    apiMock.post.mockResolvedValue(
+      res({ id: "t3", name: "QA", slug: "qa", status: "Active", organization_id: "o1", created_at: "t" })
+    );
+    const { client } = renderWithProviders(<TenantsPage />);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    await userEvent.click(await screen.findByRole("button", { name: /New Tenant/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Organization *"), "o1");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "QA");
+    await userEvent.type(within(dialog).getByLabelText("Slug *"), "qa");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["topbar-tenants"] })
+    );
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["assignment-scope-tenants"],
+    });
+  });
+
   it("surfaces a create error from the service", async () => {
     mockDefaultGets();
     apiMock.post.mockRejectedValue(new Error("Slug taken"));

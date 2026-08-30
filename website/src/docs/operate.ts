@@ -316,6 +316,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "Settings & policies",
     intro:
       "Password, lockout, MFA, token, certificate, email and OPAQUE policy — set as an organization baseline, and tightened per tenant.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "shape", text: "Baseline and overrides" },
       {
@@ -629,6 +630,7 @@ export const OPERATE_PAGES: DocPage[] = [
     title: "Audit logging",
     intro:
       "An append-only, cryptographically signed record of every privileged action — tamper-evident rather than merely tamper-resistant.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "appendonly", text: "Append-only by design" },
       {
@@ -668,7 +670,15 @@ export const OPERATE_PAGES: DocPage[] = [
       { type: "h", id: "retention", text: "Retention" },
       {
         type: "p",
-        text: "Because the log only grows, retention is an operational decision you have to make deliberately: size the database for the volume your compliance obligation requires, and archive to cold storage rather than expecting the system to prune for you.",
+        text: "Retention is **bounded by default**: a background sweep prunes audit records older than 730 days. That default is deliberately longer than most compliance regimes ask of an access-control trail, because the failure modes are asymmetric — keeping records too long is a storage cost and a data-minimisation argument, while discarding them too early destroys the evidence an investigation runs on, irreversibly and silently.",
+      },
+      {
+        type: "p",
+        text: "Set `AXIAM__AUDIT_RETENTION_DAYS` to match your own lawful basis, or `0` to disable pruning entirely and keep the previous unbounded-growth behaviour. Either state is logged at startup, so the window a deployment is actually running is visible rather than assumed. Sizing the database for the volume your obligation requires, and archiving to cold storage, is still yours — pruning is a floor on growth, not an archive.",
+      },
+      {
+        type: "note",
+        text: "The sweep deletes through the audit table's **only** deletion path, which is deployment-wide and reachable from no HTTP handler. That is what keeps \"prune old records\" from becoming \"delete the evidence\": there is no request an administrator — or an attacker holding an administrator's credential — can make that removes audit rows.",
       },
     ],
   },
@@ -967,6 +977,19 @@ export const OPERATE_PAGES: DocPage[] = [
             "The decision cache is transformative on gRPC checks and marginal on REST ones, because REST carries a session lookup gRPC does not.",
           ],
         ],
+      },
+      { type: "h", id: "storage-engine", text: "Run SurrealDB on a persistent storage engine" },
+      {
+        type: "p",
+        text: "Use `surrealkv:` or `rocksdb:` — never `memory:`. This is a **correctness** requirement, not a durability preference, and it is the one item on this page a reader is most likely to skip because it looks like one.",
+      },
+      {
+        type: "p",
+        text: "AXIAM has three single-use credentials — UMA permission tickets, RFC 8628 device grants and RFC 9126 PAR `request_uri`s — and each is redeemed by a guarded `UPDATE` inside an explicit transaction, so a second concurrent redemption is a write-write conflict the engine must abort. Measured with `tools/surreal-race-probe`, `surrealkv` and `rocksdb` abort every one; the in-memory engine arbitrates at the same rate and then silently misses, admitting two winners in roughly 1% of contended rounds. A double redemption there yields two RPTs from one authorization decision, two token sets from one user approval, or a replayable authorization request.",
+      },
+      {
+        type: "warn",
+        text: "**The server cannot verify this for you.** SurrealDB exposes no datastore identity over the wire, so `axiam-server` logs a startup `WARN` that the engine could not be attested and the requirement lands on you. The shipped compose files and the Kubernetes StatefulSet already pin `surrealkv:`. A per-attempt redemption nonce, read back after the transaction commits, is a second layer that catches a missed conflict — so this is defence in depth rather than a single point of failure, but do not spend the second layer to save the first.",
       },
       { type: "h", id: "ops", text: "Operations" },
       {

@@ -33,6 +33,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
     title: "REST API",
     intro:
       "The broadest surface — every entity in the system is manageable here, described by an OpenAPI 3.1 document that is generated from the server and drift-gated in CI.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "spec", text: "The specification" },
       {
@@ -83,7 +84,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Two ways to authenticate.** A machine client sends `Authorization: Bearer <access_token>`, obtained from the OAuth2 token endpoint. An interactive login sets `httpOnly` cookies instead — `POST /auth/login` returns no token in its body — and state-changing requests must then echo the `axiam_csrf` cookie in an `X-CSRF-Token` header. The SDKs handle the second case for you.",
           "**CSRF applies to the credential the browser attaches by itself.** A request authenticated *only* by a bearer token needs no CSRF token: a cross-site page cannot set an `Authorization` header on a victim's behalf, so the requirement would be unsatisfiable rather than protective. A request carrying a bearer header **and** a session cookie is still checked, deliberately — that is precisely the shape where the browser supplies the cookie and an attacker supplies the header, so the exemption cannot itself become the bypass.",
           "**Tenancy is explicit.** Entity routes are tenant-scoped through the authenticated principal; OAuth2 endpoints take `tenant_id` as a query parameter. Nothing is inferred from a default.",
-          "**Every route is permission-guarded.** A caller needs an explicit grant for the action behind the route — the same 113-permission registry the admin console uses.",
+          "**Every route is permission-guarded.** A caller needs an explicit grant for the action behind the route — the same 115-permission registry the admin console uses.",
           "**Collections paginate** with `offset` and `limit`, and return the items plus a total.",
           "**Collections search** with `?search=`, on all twenty list endpoints. Each matches its own identifying columns plus the record's id, so a UUID copied out of a log line goes in the same box as a name. It is a substring match rather than tokenised full-text search, precisely so that pasting a fragment of an id finds the row. The filter applies to the `total` as well as to the page — a total describing the unfiltered set would hand the pager page numbers the filtered set cannot fill.",
           "**Mutations are audited.** Every write lands in the append-only audit log with the acting principal.",

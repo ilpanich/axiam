@@ -650,6 +650,18 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         type: "note",
         text: "Tune the mounts. A PKI mount's `max_lease_ttl` defaults to 30 days and Vault silently caps a longer request to it rather than failing, so an untuned mount turns a ten-year root into a month-long one. AXIAM records the certificate that came back rather than the one it asked for, and logs Vault's warning — neither is a substitute for `vault secrets tune -max-lease-ttl=87600h pki`.",
       },
+      { type: "h", id: "audit-retention", text: "Audit retention" },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__AUDIT_RETENTION_DAYS",
+            "How long audit entries are kept. A background sweep prunes anything older, through the audit table's only deletion path — deployment-wide, reachable from no HTTP handler. `0` disables pruning and restores unbounded growth, which is an explicit opt-out for deployments that archive out of band rather than something you fall into. Default `730`, chosen longer than most regimes ask because discarding evidence early is irreversible where keeping it is a storage cost.",
+            "365",
+          ],
+        ],
+      },
       { type: "h", id: "tls", text: "Direct TLS termination (opt-in)" },
       {
         type: "p",

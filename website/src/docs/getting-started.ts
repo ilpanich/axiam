@@ -135,6 +135,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
     title: "Quickstart",
     intro:
       "Get a local AXIAM instance running, create your first admin, then make an authenticated authorization check — in about ten minutes.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "prereq", text: "Prerequisites" },
       {
@@ -158,12 +159,12 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       { type: "h", id: "admin", text: "2. Create the first admin" },
       {
         type: "p",
-        text: "A fresh deployment has no users at all, and the bootstrap endpoint that creates the first one is fail-closed — it refuses unless you prove you are the operator. The full procedure, both gates and the seeded role set are on [First organization, tenant and admin](#/docs/bootstrap).",
+        text: "A fresh deployment has no users at all, and the bootstrap endpoint that creates the first one is fail-closed — it refuses unless you prove you are the operator. It creates an organization and an organization-level super-admin, and no ordinary tenant: create the tenant you will work in from the signed-in session, with `POST /api/v1/organizations/{org_id}/tenants`. The full procedure, both gates and the seeded role set are on [First organization and admin](#/docs/bootstrap).",
       },
       {
         type: "code",
         caption: "the short version",
-        code: "# Lock bootstrap to a known address before starting the server\nexport AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev\n\ncurl -X POST localhost:8090/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme\",\n        \"tenant_name\": \"Production\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
+        code: "# Lock bootstrap to a known address before starting the server\nexport AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev\n\ncurl -X POST localhost:8090/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme\",\n        \"organization_slug\": \"acme\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
       },
       { type: "h", id: "authz", text: "3. Your first authorization check" },
       {
@@ -333,10 +334,11 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
   {
     slug: "bootstrap",
     section: "Getting started",
-    navLabel: "First org, tenant & admin",
+    navLabel: "First organization & admin",
     title: "The bootstrap procedure",
     intro:
-      "A fresh AXIAM has no organizations, no tenants and no users — and every administrative endpoint requires an authenticated caller who holds an explicit grant. Bootstrap is the one call that resolves that circularity, and it is built so that it can only ever be made by the operator, exactly once.",
+      "A fresh AXIAM has no organizations and no users — and every administrative endpoint requires an authenticated caller who holds an explicit grant. Bootstrap is the one call that resolves that circularity, and it is built so that it can only ever be made by the operator, exactly once. It creates an organization and an organization-level super-admin; the tenants you actually work in come afterwards, from a signed-in session.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "why", text: "The problem bootstrap solves" },
       {
@@ -365,7 +367,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
           },
           {
             title: "Seeds the permission registry into that scope",
-            body: "All 113 built-in permissions across 25 families — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `audit_logs:*`, `reactors:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against.",
+            body: "All 115 built-in permissions across 25 families — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `audit_logs:*`, `reactors:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against.",
           },
           {
             title: "Seeds three default roles",
@@ -597,6 +599,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
     title: "Core concepts",
     intro:
       "The domain model AXIAM is built around — organizations and tenants at the top, and the entities scoped inside them.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "tenancy", text: "Organizations & tenants" },
       {
@@ -735,20 +738,33 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
         type: "note",
         text: "Wait for `/ready`, not `/health`. A server that is up but cannot reach its database will accept your bootstrap call and fail it, which looks like a bad request rather than a cold start.",
       },
-      { type: "h", id: "bootstrap", text: "2. Create the organization, tenant and admin" },
+      { type: "h", id: "bootstrap", text: "2. Create the organization and its admin" },
       {
         type: "p",
-        text: "A fresh deployment has no users, and the endpoint that creates the first one is fail-closed — it refuses unless you prove you are the operator. Both gates and the seeded role set are on [First organization, tenant and admin](#/docs/bootstrap); the short version:",
+        text: "A fresh deployment has no users, and the endpoint that creates the first one is fail-closed — it refuses unless you prove you are the operator. Both gates and the seeded role set are on [First organization and admin](#/docs/bootstrap); the short version:",
       },
       {
         type: "code",
         caption: "terminal",
-        code: "export AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev   # set before starting the server\n\ncurl -X POST localhost:8090/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme\",\n        \"tenant_name\": \"Production\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
+        code: "export AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev   # set before starting the server\n\ncurl -X POST localhost:8090/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme\",\n        \"organization_slug\": \"acme\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
+      },
+      {
+        type: "p",
+        text: "That admin is **organization-level**: it lives in the organization's reserved scope and administers every tenant the organization will ever have. Bootstrap creates no ordinary tenant, so the next call is yours to make. Sign in with the tenant left blank — that is what resolves the organization scope — and create the tenant this tutorial works in:",
+      },
+      {
+        type: "code",
+        caption: "terminal",
+        code: "TOKEN=$(curl -sS -X POST localhost:8090/api/v1/auth/login \\\n  -H 'content-type: application/json' \\\n  -d '{\"org_slug\":\"acme\",\"username_or_email\":\"admin\",\"password\":\"'\"$ADMIN_PASSWORD\"'\"}' \\\n  | jq -r .access_token)\n\n# `org_id` comes back on /auth/me, so no lookup is needed.\nORG=$(curl -sS localhost:8090/api/v1/auth/me \\\n  -H \"authorization: Bearer $TOKEN\" | jq -r .user.org_id)\n\ncurl -sS -X POST \"localhost:8090/api/v1/organizations/$ORG/tenants\" \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"name\":\"Production\",\"slug\":\"production\"}'",
+      },
+      {
+        type: "note",
+        text: "Creating a tenant seeds its permissions and its three default roles, and your organization-level admin already reaches it — no assignment is written, and none is needed. Every call in step 3 can therefore be made from this same session, adding `X-Axiam-Tenant: <the new tenant id>` to act on the tenant rather than on the organization scope. See [Organization-level principals](#/docs/organization-scope).",
       },
       { type: "h", id: "grant", text: "3. Create something to protect, and grant access to it" },
       {
         type: "p",
-        text: "An authorization check needs a resource to be about and a grant that reaches it. Four calls, as the tenant admin — a resource, a permission, a role holding it, and the assignment that ties a user to the role.",
+        text: "An authorization check needs a resource to be about and a grant that reaches it. Four calls — a resource, a permission, a role holding it, and the assignment that ties a user to the role — made against the tenant you just created, which means the same session with `X-Axiam-Tenant` naming it.",
       },
       {
         type: "steps",

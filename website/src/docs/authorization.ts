@@ -234,6 +234,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
     title: "Roles, permissions, resources & groups",
     intro:
       "The entities the engine evaluates over, how they relate, and the API for managing each.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "shape", text: "How they fit together" },
       {
@@ -244,7 +245,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
       { type: "h", id: "permissions", text: "Permissions" },
       {
         type: "p",
-        text: "A permission is an action name plus an effect. AXIAM seeds **113 built-in permissions across 25 families** into every tenant at bootstrap — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `ca_certificates:*`, `audit_logs:*`, `federation:*`, `webhooks:*`, `reactors:*`, `scim_tokens:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against, so an administrator's authority over AXIAM is expressed in the same model as an application's authority over its own resources.",
+        text: "A permission is an action name plus an effect. AXIAM seeds **115 built-in permissions across 25 families** into every tenant at bootstrap — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `ca_certificates:*`, `audit_logs:*`, `federation:*`, `webhooks:*`, `reactors:*`, `scim_tokens:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against, so an administrator's authority over AXIAM is expressed in the same model as an application's authority over its own resources.",
       },
       {
         type: "p",

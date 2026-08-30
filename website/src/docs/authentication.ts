@@ -15,6 +15,7 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
     title: "Passwords, sessions & tokens",
     intro:
       "How AXIAM verifies a credential, what it hands back, and how that session is kept alive — or ended.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "passwords", text: "Password storage" },
       {
@@ -274,6 +275,14 @@ await client.confirmPasswordReset({
         text: "Turning OPAQUE on provisions the tenant's server-side key material at the settings write, so `opaque_server_setup` is populated immediately rather than waiting for somebody's first sign-in. Registration records are a different matter: `opaque_credential` fills up only as users set passwords, which is what `optional` is for. A tenant that has just switched to `optional` has key material and no records at all, and that is the expected state, not a failure.",
       },
       {
+        type: "warn",
+        text: "**Under `optional`, a failed OPAQUE exchange means \"try the password path\", not \"wrong password\".** An account with no registration record is the *ordinary* case during a migration, and the server deliberately makes that indistinguishable from a wrong password — it must, or the exchange becomes an enrolment oracle. So `login/start` returns a `mode` field carrying the tenant's `opaque_mode`, and a client that sees a failed `KE2` under `optional` is required to retry over `POST /api/v1/auth/login` rather than treating the exchange as final. Without that retry, enabling `optional` is indistinguishable from enabling `required` with nobody enrolled — which is to say it locks out every user of the tenant.",
+      },
+      {
+        type: "note",
+        text: "`mode` is a property of the tenant, identical for a real and a decoy exchange, so it discloses nothing about whether an identity is enrolled. It is `\"optional\"` or `\"required\"` and never `\"disabled\"` — a disabled tenant answers `404`. An absent `mode` reads as `required`, so a client written before contract 1.29 stays correct against a `required` tenant and only a tenant mid-migration is affected.",
+      },
+      {
         type: "note",
         text: "Bootstrap is the exception, and the only moment a deployment can start with OPAQUE already working: `POST /api/v1/admin/bootstrap` receives the plaintext password — it must, to compute the Argon2id hash — so it runs both halves of the registration itself and the first administrator is enrolled with no client involvement. The admin UI's initialization page exposes the three policy fields for exactly this reason.",
       },
@@ -434,6 +443,7 @@ await client.confirmPasswordReset({
     title: "Multi-factor authentication",
     intro:
       "TOTP as the baseline second factor, enrolled voluntarily by a signed-in user or forced during a login that cannot complete without it.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "totp", text: "TOTP" },
       {
@@ -601,6 +611,7 @@ elif result.mfa_setup_required:
     title: "Passkeys & WebAuthn",
     intro:
       "Phishing-resistant authentication bound to your origin — as a second factor, or as the only factor — with an attestation policy for deployments that need to say which authenticators are acceptable.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "why", text: "Why they are different" },
       {

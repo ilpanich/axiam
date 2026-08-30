@@ -125,7 +125,13 @@ EXEMPT: dict[str, str] = {
         "the default"
     ),
     # -- Documented elsewhere on the site, not on the config page ----------
-    "AXIAM__AUDIT_RETENTION_DAYS": "audit retention is covered on the Audit page",
+    # `AXIAM__AUDIT_RETENTION_DAYS` was exempt here on the ground that "audit
+    # retention is covered on the Audit page". It was not: that page said
+    # retention was an operational decision and told operators not to expect
+    # the system to prune for them, which is the opposite of what ships. The
+    # key is now on the configuration page with its default and its `0`
+    # opt-out, so the exemption is gone rather than resting on a page that
+    # contradicted the code.
     "AXIAM__SERVER__CLEANUP_INTERVAL_SECS": (
         "the sweep interval; its observable effect is the stall threshold on the "
         "Health & observability page"

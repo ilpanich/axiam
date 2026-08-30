@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["is_own_resource"],"struct":["AllowAllAuthzChecker","AuthzChecked","DenyAllAuthzChecker","RequirePermission"],"trait":["AuthzChecker"],"type":["AuthzData"]};
+window.SIDEBAR_ITEMS = {"fn":["is_own_resource","user_scope_tenant"],"struct":["AllowAllAuthzChecker","AuthzChecked","DenyAllAuthzChecker","RequirePermission"],"trait":["AuthzChecker"],"type":["AuthzData"]};

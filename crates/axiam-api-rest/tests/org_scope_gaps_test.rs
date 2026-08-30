@@ -498,3 +498,236 @@ async fn opaque_register_start_accepts_a_tenant_id_without_an_organization() {
          caller to name one too locks out every unauthenticated flow"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Self-service endpoints while acting on a child tenant
+// ---------------------------------------------------------------------------
+//
+// `POST /auth/password/change` above was the first endpoint found to read the
+// ACTING tenant for a request about the CALLER'S OWN record. It was not the
+// only one: `GET /users/{id}`, `PUT /users/{id}`,
+// `GET /users/{id}/mfa-methods` and `POST /auth/mfa/enroll` all did the same,
+// which took the whole profile page down for an organization administrator with
+// a tenant selected — the account page would not load, the security section was
+// empty, and enrolling a second factor failed. The rule is now named in
+// `authz::user_scope_tenant`, and these pin it from the outside.
+
+/// A second principal, living in the CHILD tenant.
+///
+/// The counter-case for every test below: an organization administrator acting
+/// on a child tenant must still reach that tenant's users. A fix that scoped
+/// everything to the principal's own tenant would pass the self-service tests
+/// and break administration entirely.
+async fn create_child_tenant_user(f: &Fixture, username: &str) -> Uuid {
+    let user_repo = SurrealUserRepository::new(f.db.clone());
+    let u = user_repo
+        .create(CreateUser {
+            tenant_id: f.child_tenant_id,
+            username: username.into(),
+            email: format!("{username}@example.com"),
+            password: generated_password("chi"),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    user_repo
+        .update(
+            f.child_tenant_id,
+            u.id,
+            UpdateUser {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    u.id
+}
+
+/// `GET /api/v1/users/{id}` for the caller's own id, with a child tenant selected.
+///
+/// This is what "open my profile" is. The record lives in the organization's
+/// reserved scope; reading the acting tenant looked it up in the child tenant,
+/// found nothing, and answered 404 — so the profile page showed a load error
+/// for an account that plainly exists.
+#[actix_rt::test]
+async fn an_org_admin_can_read_their_own_profile_while_acting_on_a_child_tenant() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let state = AppState::for_test(f.db.clone(), auth.clone());
+    let app = test_app!(f, auth, state);
+
+    let (access, _) = login_at_org_scope(&app, ADMIN_PASSWORD.as_str()).await;
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{}", f.admin_id))
+        .insert_header(("Cookie", format!("axiam_access={access}")))
+        .insert_header((ACTIVE_TENANT_HEADER, f.child_tenant_id.to_string()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "the caller's own record lives in the tenant it inhabits, not the one \
+         it is acting on"
+    );
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["username"], json!(ADMIN_USERNAME));
+    assert_eq!(
+        body["tenant_id"],
+        json!(f.org_tenant_id.to_string()),
+        "and it is returned from the organization scope, not relabelled into \
+         the tenant being acted on"
+    );
+}
+
+/// The counter-case: administering somebody else still follows the header.
+#[actix_rt::test]
+async fn an_org_admin_still_reads_a_child_tenant_user_through_the_header() {
+    let f = setup().await;
+    let child_user = create_child_tenant_user(&f, "child-user").await;
+    let auth = test_auth_config();
+    let state = AppState::for_test(f.db.clone(), auth.clone());
+    let app = test_app!(f, auth, state);
+
+    let (access, _) = login_at_org_scope(&app, ADMIN_PASSWORD.as_str()).await;
+
+    let with_header = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{child_user}"))
+        .insert_header(("Cookie", format!("axiam_access={access}")))
+        .insert_header((ACTIVE_TENANT_HEADER, f.child_tenant_id.to_string()))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, with_header)
+            .await
+            .status()
+            .as_u16(),
+        200,
+        "a request about ANOTHER user acts on the selected tenant, as before"
+    );
+
+    let without_header = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{child_user}"))
+        .insert_header(("Cookie", format!("axiam_access={access}")))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, without_header)
+            .await
+            .status()
+            .as_u16(),
+        404,
+        "and without a selected tenant that user is not in scope at all — the \
+         self-service rule must not widen anything"
+    );
+}
+
+/// `PUT /api/v1/users/{id}` for the caller's own id — the profile edit form.
+#[actix_rt::test]
+async fn an_org_admin_can_edit_their_own_profile_while_acting_on_a_child_tenant() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let state = AppState::for_test(f.db.clone(), auth.clone());
+    let app = test_app!(f, auth, state);
+
+    let (access, csrf) = login_at_org_scope(&app, ADMIN_PASSWORD.as_str()).await;
+
+    let req = test::TestRequest::put()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{}", f.admin_id))
+        .insert_header((
+            "Cookie",
+            format!("axiam_access={access}; axiam_csrf={csrf}"),
+        ))
+        .insert_header(("X-CSRF-Token", csrf))
+        .insert_header((ACTIVE_TENANT_HEADER, f.child_tenant_id.to_string()))
+        .set_json(json!({ "metadata": { "display_name": "Org Admin" } }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // The write landed on the row in the organization scope — not on a row
+    // conjured in the child tenant, and not nowhere at all.
+    let stored = SurrealUserRepository::new(f.db.clone())
+        .get_by_id(f.org_tenant_id, f.admin_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.metadata["display_name"],
+        json!("Org Admin"),
+        "a self-update is written to the tenant the account lives in"
+    );
+}
+
+/// `GET /api/v1/users/{id}/mfa-methods` for the caller's own id.
+///
+/// The Security section of the profile page. It came back empty rather than
+/// erroring, which is what an account with no second factor looks like — so the
+/// page invited an administrator who had already enrolled TOTP to enrol it
+/// again.
+#[actix_rt::test]
+async fn an_org_admin_can_list_their_own_mfa_methods_while_acting_on_a_child_tenant() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let state = AppState::for_test(f.db.clone(), auth.clone());
+    let app = test_app!(f, auth, state);
+
+    let (access, _) = login_at_org_scope(&app, ADMIN_PASSWORD.as_str()).await;
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{}/mfa-methods", f.admin_id))
+        .insert_header(("Cookie", format!("axiam_access={access}")))
+        .insert_header((ACTIVE_TENANT_HEADER, f.child_tenant_id.to_string()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "listing the caller's own factors must not depend on which tenant is \
+         selected"
+    );
+}
+
+/// `POST /api/v1/auth/mfa/enroll` — enrolling a second factor on the caller's
+/// own account, with a child tenant selected.
+#[actix_rt::test]
+async fn an_org_admin_can_enroll_mfa_while_acting_on_a_child_tenant() {
+    let f = setup().await;
+    // TOTP secrets are AES-256-GCM encrypted at rest, so enrolment refuses to
+    // run at all without a key — a 500 that has nothing to do with tenants.
+    let auth = AuthConfig {
+        mfa_encryption_key: Some([3u8; 32]),
+        ..test_auth_config()
+    };
+    let state = AppState::for_test(f.db.clone(), auth.clone());
+    let app = test_app!(f, auth, state);
+
+    let (access, csrf) = login_at_org_scope(&app, ADMIN_PASSWORD.as_str()).await;
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/mfa/enroll")
+        .insert_header((
+            "Cookie",
+            format!("axiam_access={access}; axiam_csrf={csrf}"),
+        ))
+        .insert_header(("X-CSRF-Token", csrf))
+        .insert_header((ACTIVE_TENANT_HEADER, f.child_tenant_id.to_string()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "enrolment is about the caller's own account, wherever it is acting"
+    );
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        body["secret_base32"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "a secret is minted for the account in the organization scope"
+    );
+}

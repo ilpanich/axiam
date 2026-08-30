@@ -91,6 +91,19 @@ interface AuthState {
   activeTenantName: string | null;
   isAuthenticated: boolean;
   isInitializing: boolean;
+  /**
+   * True while a tenant switch is in flight.
+   *
+   * A switch is not one atomic thing: the header changes immediately, but the
+   * caller's *permissions* only change once `/auth/me` has been re-read for the
+   * new scope. Rendering pages in between means gating them on the previous
+   * tenant's permission set while their requests go to the new tenant — which
+   * shows a Forbidden page for something the operator is allowed to do, or
+   * offers a control the server will refuse. The layout holds a spinner while
+   * this is true, which also unmounts the pages so they remount fresh
+   * afterwards rather than re-rendering with a cache entry from before.
+   */
+  isSwitchingTenant: boolean;
 }
 
 interface AuthActions {
@@ -109,6 +122,8 @@ interface AuthActions {
    * another tenant's name is worse than a blank page.
    */
   selectTenant: (tenantId: string | null, tenantName?: string | null) => void;
+  /** Raise or lower {@link AuthState.isSwitchingTenant}. */
+  setSwitchingTenant: (value: boolean) => void;
 }
 
 const initialState: AuthState = {
@@ -122,6 +137,7 @@ const initialState: AuthState = {
   activeTenantName: restoredActiveTenant()?.name ?? null,
   isAuthenticated: false,
   isInitializing: true,
+  isSwitchingTenant: false,
 };
 
 export const useAuthStore = create<AuthState & AuthActions>()((set) => ({
@@ -150,4 +166,6 @@ export const useAuthStore = create<AuthState & AuthActions>()((set) => ({
     setActiveTenant(tenantId, tenantName);
     set({ activeTenantId: tenantId, activeTenantName: tenantName });
   },
+
+  setSwitchingTenant: (value) => set({ isSwitchingTenant: value }),
 }));

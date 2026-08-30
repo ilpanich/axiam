@@ -56,6 +56,27 @@ beforeEach(() => {
 });
 
 describe("OAuth2ClientsPage", () => {
+  it("lists from the registered route, not an /oauth2 sub-path", async () => {
+    // The regression this page shipped with: it asked for an "oauth2/clients"
+    // sub-path, which is not a route — the "/oauth2/…" prefix belongs to the
+    // protocol endpoints and is not under /api/v1 at all. Every load answered
+    // 404, and because the empty state is what an empty result looks like, the
+    // page read as "this tenant has no OAuth2 clients" rather than as an error.
+    //
+    // Every other test here mocks `api.get` to resolve for ANY url, which is
+    // correct for a component test and precisely why none of them could notice.
+    // This one asserts the url itself; `src/test/apiRoutes.test.ts` checks the
+    // same property for the whole app against the server's OpenAPI document.
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await screen.findByText("Web App");
+
+    expect(apiMock.get).toHaveBeenCalledWith(
+      "/api/v1/oauth2-clients",
+      expect.anything()
+    );
+  });
+
   it("renders the fetched clients with grant badges and URI counts", async () => {
     apiMock.get.mockResolvedValue(res(clients));
     renderWithProviders(<OAuth2ClientsPage />);

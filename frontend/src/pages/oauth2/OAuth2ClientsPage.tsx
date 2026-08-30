@@ -749,7 +749,18 @@ export function OAuth2ClientsPage() {
     total,
     setPage,
     isFiltered,
-  } = usePaginatedList<OAuth2Client>(["oauth2-clients"], "/api/v1/oauth2/clients");
+  } = usePaginatedList<OAuth2Client>(
+    ["oauth2-clients"],
+    // One hyphenated segment, NOT an "oauth2" sub-path. The `/oauth2/…` prefix
+    // belongs to the protocol endpoints (token, authorize, …), which do not sit
+    // under `/api/v1` at all — so the sub-path spelling this used to carry
+    // matched no route, and every load of the page answered 404. It rendered as
+    // a permanently empty client list rather than as an error, which is why it
+    // survived a release. `src/test/apiRoutes.test.ts` now checks every path
+    // this app requests against `sdks/openapi.json`, so the next such typo
+    // fails the suite instead of shipping.
+    "/api/v1/oauth2-clients",
+  );
 
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);

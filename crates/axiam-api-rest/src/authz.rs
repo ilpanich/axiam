@@ -283,6 +283,42 @@ pub fn is_own_resource(caller: &AuthenticatedUser, target_user_id: Uuid) -> bool
     caller.user_id == target_user_id
 }
 
+/// The tenant a request **about `target_user_id`** must be scoped to.
+///
+/// Every user-facing repository call takes a tenant id, and for ~100 handlers
+/// the only sensible one is [`AuthenticatedUser::tenant_id`] — the tenant being
+/// acted upon. A handler that reads or writes the **caller's own account** is
+/// the exception: that record lives in
+/// [`AuthenticatedUser::principal_tenant_id`], which differs from the acting
+/// tenant for exactly one kind of principal — an organization-level one that
+/// has selected a child tenant in the admin UI and therefore sends
+/// `X-Axiam-Tenant` on every subsequent request.
+///
+/// Getting this wrong does not leak anything: the lookup simply finds nothing
+/// in the selected tenant and the endpoint answers 404. It is nonetheless a
+/// bug that reads as a broken account — an organization administrator who had
+/// switched into a tenant could not open their own profile, list their own MFA
+/// methods, or enrol a passkey, and the only thing that had changed was which
+/// row of the tenant switcher was highlighted.
+///
+/// [`crate::handlers::auth::change_password`] already reasoned this through
+/// and hard-coded `principal_tenant_id`; this is the same rule, named, for the
+/// endpoints whose target is the caller only *sometimes*.
+///
+/// ```ignore
+/// // `GET /api/v1/users/{id}` — an admin reading somebody else's record acts
+/// // on the selected tenant; the same call for the caller's own id does not.
+/// let scope = user_scope_tenant(&caller, target_id);
+/// let target = state.user_repo.get_by_id(scope, target_id).await?;
+/// ```
+pub fn user_scope_tenant(caller: &AuthenticatedUser, target_user_id: Uuid) -> Uuid {
+    if is_own_resource(caller, target_user_id) {
+        caller.principal_tenant_id
+    } else {
+        caller.tenant_id
+    }
+}
+
 /// Marker inserted into request extensions after a successful
 /// [`RequirePermission`] check.
 ///

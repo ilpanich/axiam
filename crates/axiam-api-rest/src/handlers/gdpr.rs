@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use surrealdb::Connection;
 use uuid::Uuid;
 
-use crate::authz::{AuthzData, RequirePermission, is_own_resource};
+use crate::authz::{AuthzData, RequirePermission, is_own_resource, user_scope_tenant};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::state::AppState;
@@ -287,12 +287,19 @@ pub async fn request_account_export<C: Connection + Clone>(
             .await?;
     }
 
+    // The subject's data lives in the subject's own tenant. For a self-service
+    // request that is the caller's tenant, which is not the one an
+    // organization-level principal has selected — see [`user_scope_tenant`].
+    // An export job written into the selected tenant would be queued against a
+    // subject that tenant does not have.
+    let scope = user_scope_tenant(&auth_user, target_id);
+
     // CQ-B39: Deduplicate concurrent export requests — reject if a queued
     // export already exists for this user to avoid duplicate processing.
     if state
         .gdpr
         .export_job_repo
-        .has_pending_for_user(auth_user.tenant_id, target_id)
+        .has_pending_for_user(scope, target_id)
         .await?
     {
         return Err(AxiamError::AlreadyExists {
@@ -306,7 +313,7 @@ pub async fn request_account_export<C: Connection + Clone>(
         .gdpr
         .export_job_repo
         .create(CreateExportJob {
-            tenant_id: auth_user.tenant_id,
+            tenant_id: scope,
             user_id: target_id,
         })
         .await?;
@@ -314,7 +321,7 @@ pub async fn request_account_export<C: Connection + Clone>(
     // Audit: gdpr.data_export_requested.
     append_gdpr_audit(
         &state.audit_repo,
-        auth_user.tenant_id,
+        scope,
         auth_user.user_id,
         "gdpr.data_export_requested",
         Some(target_id),
@@ -353,15 +360,33 @@ pub async fn download_account_export<C: Connection + Clone>(
     let token = path.into_inner().token;
     let token_hash = sha256_hex(&token);
 
-    let job = state
+    // A download link mailed to the caller points at a job in the caller's own
+    // tenant. Looking it up in the tenant an organization-level principal has
+    // selected found nothing and answered 404 for a link that was perfectly
+    // valid — so the search is scoped to the principal's tenant first, and only
+    // falls back to the acting tenant for an administrator downloading somebody
+    // else's export. `find_by_download_token_hash` matches on a SHA-256 of a
+    // 256-bit token, so neither lookup can be steered by the caller.
+    let job = match state
         .gdpr
         .export_job_repo
-        .find_by_download_token_hash(auth_user.tenant_id, &token_hash)
+        .find_by_download_token_hash(auth_user.principal_tenant_id, &token_hash)
         .await?
-        .ok_or_else(|| AxiamError::NotFound {
-            entity: "export_job".into(),
-            id: "by-token".into(),
-        })?;
+    {
+        Some(job) => Some(job),
+        None if auth_user.tenant_id != auth_user.principal_tenant_id => {
+            state
+                .gdpr
+                .export_job_repo
+                .find_by_download_token_hash(auth_user.tenant_id, &token_hash)
+                .await?
+        }
+        None => None,
+    };
+    let job = job.ok_or_else(|| AxiamError::NotFound {
+        entity: "export_job".into(),
+        id: "by-token".into(),
+    })?;
 
     // Ownership check.
     if !is_own_resource(&auth_user, job.user_id) {
@@ -467,11 +492,14 @@ pub async fn request_account_delete<C: Connection + Clone>(
             .await?;
     }
 
+    // The subject's record, the deletion row, the sessions and the audit entry
+    // all belong to the subject's own tenant — for a self-service erasure the
+    // caller's, not the one an organization-level principal has selected. See
+    // [`user_scope_tenant`].
+    let scope = user_scope_tenant(&auth_user, target_id);
+
     // Load target user to get email for the cancel mail.
-    let target_user = state
-        .user_repo
-        .get_by_id(auth_user.tenant_id, target_id)
-        .await?;
+    let target_user = state.user_repo.get_by_id(scope, target_id).await?;
 
     // Schedule the purge at the end of the tenant's grace window (D-08).
     //
@@ -488,14 +516,10 @@ pub async fn request_account_delete<C: Connection + Clone>(
     let grace_days = {
         use axiam_core::repository::{SettingsRepository as _, TenantRepository as _};
         let resolved = async {
-            let tenant = state
-                .tenant_repo
-                .get_by_id(auth_user.tenant_id)
-                .await
-                .ok()?;
+            let tenant = state.tenant_repo.get_by_id(scope).await.ok()?;
             let settings = state
                 .settings_repo
-                .get_effective_settings(tenant.organization_id, auth_user.tenant_id)
+                .get_effective_settings(tenant.organization_id, scope)
                 .await
                 .ok()?;
             Some(settings.privacy.deletion_grace_period_days)
@@ -503,7 +527,7 @@ pub async fn request_account_delete<C: Connection + Clone>(
         .await;
         resolved.unwrap_or_else(|| {
             tracing::warn!(
-                tenant_id = %auth_user.tenant_id,
+                tenant_id = %scope,
                 "could not resolve the erasure grace window; using the 30-day default"
             );
             30
@@ -524,12 +548,7 @@ pub async fn request_account_delete<C: Connection + Clone>(
     state
         .gdpr
         .account_deletion_repo
-        .create_with_pending_flag(
-            auth_user.tenant_id,
-            target_id,
-            scheduled_purge_at,
-            cancel_token_hash,
-        )
+        .create_with_pending_flag(scope, target_id, scheduled_purge_at, cancel_token_hash)
         .await?;
 
     // Revoke all sessions immediately (D-08: account disabled). Kept as a
@@ -538,11 +557,11 @@ pub async fn request_account_delete<C: Connection + Clone>(
     // pre-existing concern, not an uncancellable purge.
     state
         .auth_service
-        .revoke_all_sessions(auth_user.tenant_id, target_id)
+        .revoke_all_sessions(scope, target_id)
         .await?;
 
     // Resolve org_id for the mail message.
-    let org_id = match state.tenant_repo.get_by_id(auth_user.tenant_id).await {
+    let org_id = match state.tenant_repo.get_by_id(scope).await {
         Ok(tenant) => tenant.organization_id,
         Err(e) => {
             tracing::warn!(error = %e, "failed to resolve org_id for delete-cancel mail");
@@ -557,7 +576,7 @@ pub async fn request_account_delete<C: Connection + Clone>(
     );
     let msg = OutboundMailMessage {
         mail_type: MailType::DeletionCancel,
-        tenant_id: auth_user.tenant_id,
+        tenant_id: scope,
         org_id,
         user_id: target_id,
         to_address: target_user.email.clone(),
@@ -575,7 +594,7 @@ pub async fn request_account_delete<C: Connection + Clone>(
     // Audit: gdpr.erasure_requested.
     append_gdpr_audit(
         &state.audit_repo,
-        auth_user.tenant_id,
+        scope,
         auth_user.user_id,
         "gdpr.erasure_requested",
         Some(target_id),

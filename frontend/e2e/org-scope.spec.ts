@@ -142,6 +142,61 @@ test.describe("Organization-level super-admin", () => {
     expect(changeUrl).toContain("/api/v1/auth/password/change");
   });
 
+  test("opens its own profile while acting on a child tenant", async ({
+    page,
+  }) => {
+    // The reported symptom: an organization-level administrator with a tenant
+    // selected could not open their own profile at all. `GET /users/{own id}`
+    // and `GET /users/{own id}/mfa-methods` were scoped to the tenant being
+    // ACTED ON, and the administrator's record lives in the organization's
+    // reserved scope — so both answered 404 and the page rendered its load
+    // error for an account that plainly exists.
+    await page.goto("/profile");
+    await expect(
+      page.getByRole("button", { name: /Edit Profile/i }),
+    ).toBeVisible({ timeout: 30_000 });
+
+    await selectTenant(page, /E2E Default Tenant/);
+
+    await page.goto("/profile");
+    await expect(page).not.toHaveURL(/\/login/);
+    // "Failed to load profile." is the whole page when the query rejects, and
+    // "Edit Profile" only renders once it resolves — so these two assertions
+    // are the difference between the bug and the fix.
+    await expect(
+      page.getByText(/Failed to load profile/i),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: /Edit Profile/i }),
+    ).toBeVisible({ timeout: 30_000 });
+  });
+
+  test("lists OAuth2 clients rather than an empty table", async ({ page }) => {
+    // The page requested an "/oauth2/clients" sub-path, which is not a route —
+    // the "/oauth2/…" prefix belongs to the protocol endpoints and is not under
+    // /api/v1 at all. Every load answered 404, and because an empty result and
+    // a failed request render identically here, it read as "this tenant has no
+    // OAuth2 clients" for an entire release.
+    //
+    // Asserting on the REQUEST is what makes this a regression test: asserting
+    // on the rendered table would pass against a 404 the moment the tenant
+    // genuinely has no clients.
+    const listUrls: string[] = [];
+    page.on("request", (req) => {
+      const url = new URL(req.url());
+      if (url.pathname.includes("oauth2") && url.pathname.startsWith("/api/"))
+        listUrls.push(url.pathname);
+    });
+
+    await page.goto("/oauth2-clients");
+    await expect(page.getByRole("button", { name: /New Client/i })).toBeVisible({
+      timeout: 30_000,
+    });
+
+    expect(listUrls).toContain("/api/v1/oauth2-clients");
+    expect(listUrls).not.toContain("/api/v1/oauth2/clients");
+  });
+
   test("offers the organization's CA certificates to a tenant", async ({
     page,
   }) => {

@@ -245,6 +245,29 @@ describe("AttestationPolicyPage — unknown_aaguid tri-state", () => {
     expect(body.require_fido_certified).toBe(false);
     expect(body.min_certification).toBeNull();
   });
+
+  it("refreshes the compliance report after saving the policy", async () => {
+    // The report is the server's verdict on THIS policy. Invalidating only the
+    // policy left the verdict beside the form contradicting the policy in it
+    // for up to the 60s stale time — the operator saved a stricter policy and
+    // the panel next to the button kept saying the tenant was compliant.
+    mockGets();
+    apiMock.put.mockResolvedValue(res(DEFAULT_ATTESTATION_POLICY));
+    const { client } = renderWithProviders(<AttestationPolicyPage />);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Policy/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Save Policy/ }));
+
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({
+        queryKey: ["webauthn-compliance-report"],
+      })
+    );
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["webauthn-attestation-policy"],
+    });
+  });
 });
 
 describe("AttestationPolicyPage — compliance report", () => {

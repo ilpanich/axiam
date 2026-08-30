@@ -198,6 +198,24 @@ tenant-level principal sees the same selector but switching signs it out and
 back in, because for it the premise is false: a principal of one tenant is not
 a principal of another, and no server-side operation could make it one.
 
+While a switch is in flight the UI shows *Switching tenant…* in place of the
+page. That pause is not cosmetic — it is how the UI avoids two states that look
+like bugs:
+
+* Showing the previous tenant's rows under the new tenant's name. Every list in
+  the admin UI is tenant-scoped, so the whole page means something different the
+  moment the header moves.
+* Gating the page on the previous tenant's permission set. `permissions` is
+  computed for the tenant being acted on, so between the header moving and
+  `/auth/me` answering, the UI would offer controls the server refuses and hide
+  ones it allows.
+
+So the page is unmounted, the cache for the tenant being left is dropped,
+`/auth/me` is re-read in the new scope, and the page is mounted again — with
+every request it makes going to the newly selected tenant. Anything you had
+typed into a form is discarded along with it, deliberately: after a switch it
+refers to rows and ids in a tenant nobody is looking at any more.
+
 ## Creating tenants
 
 ```http
@@ -242,16 +260,34 @@ organization administrator would be unable to act on any tenant at all.
 where the caller *lives*, and for the caller's own account that second tenant is
 the one that matters:
 
+The rule is: **a request about the caller's own record is scoped to the tenant
+the caller lives in, whatever the header says.** Everything else follows the
+header.
+
 | Operation | Tenant used |
 |---|---|
-| `POST /auth/password/change` | the principal's own — its password, and its OPAQUE record, live there |
 | `GET /auth/me` (the account, and the permission array) | the principal's own — grants live in the organization tenant |
+| `POST /auth/password/change` | the principal's own — its password, and its OPAQUE record, live there |
+| `GET /users/{id}` and `PUT /users/{id}`, **for the caller's own id** | the principal's own — this is "open my profile" and "save my profile" |
+| `GET /users/{id}/mfa-methods`, `DELETE …/mfa-methods/{m}`, `POST /users/{id}/reset-mfa`, for the caller's own id | the principal's own |
+| `POST /auth/mfa/enroll`, `POST /auth/mfa/confirm` | the principal's own |
+| `POST /auth/webauthn/register/start` and `/finish` | the principal's own — including the attestation policy applied, which is the policy of the tenant the credential is stored in |
+| `POST /users/me/resend-verification` | the principal's own |
+| `POST /account/export`, `POST /account/delete`, `GET /account/export/{token}`, for the caller's own id | the principal's own |
+| `GET /oauth2/userinfo` | the token subject's own |
+| The same user endpoints for **anybody else's** id | the tenant named by the header |
 | Everything else | the tenant named by the header |
 
-Reading the acting tenant for the first two is a bug with a distinctive
-symptom: an organization administrator selects a child tenant and is
-immediately unable to change its own password (404) or stay signed in (401),
-with nothing on screen having changed but the tenant switcher.
+Reading the acting tenant for any of these is a bug with a distinctive symptom:
+an organization administrator selects a child tenant and, with nothing on screen
+having changed but the tenant switcher, cannot open its own profile (404),
+cannot change its own password (404), sees an empty list of its own MFA methods,
+and cannot stay signed in (401).
+
+The rule is named once server-side, in `axiam_api_rest::authz::user_scope_tenant`,
+rather than repeated per handler — the endpoints above whose target is only
+*sometimes* the caller call it, and the ones whose target is always the caller
+read `principal_tenant_id` directly.
 
 `GET /auth/me` therefore returns both, and a client that switches tenants should
 use them accordingly:

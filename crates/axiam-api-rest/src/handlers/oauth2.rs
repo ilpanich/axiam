@@ -1062,9 +1062,14 @@ pub async fn userinfo<C: Connection + Clone>(
     // Fetch user details for email/username when the relevant
     // scopes are present.
     let (email, preferred_username) = if has_scope("email") || has_scope("profile") {
+        // UserInfo describes the SUBJECT of the token, and that account lives in
+        // the tenant the subject inhabits — never one it happens to be acting
+        // on. The two differ only for an organization-level principal whose
+        // request carried `X-Axiam-Tenant`; reading the acting tenant there
+        // found no account and answered with `sub` alone.
         match state
             .user_repo
-            .get_by_id(user.tenant_id, user.user_id)
+            .get_by_id(user.principal_tenant_id, user.user_id)
             .await
         {
             Ok(u) => (
@@ -1082,7 +1087,7 @@ pub async fn userinfo<C: Connection + Clone>(
             Err(e) => {
                 tracing::error!(
                     user_id = %user.user_id,
-                    tenant_id = %user.tenant_id,
+                    tenant_id = %user.principal_tenant_id,
                     error = %e,
                     "userinfo: failed to fetch user for scoped claims"
                 );

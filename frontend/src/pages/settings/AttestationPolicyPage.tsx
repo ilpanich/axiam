@@ -39,6 +39,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { formatDateTime } from "@/lib/utils";
 import { getApiErrorMessage } from "@/lib/apiError";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The passkey caveat (docs/admin/authenticator-policies.md, "The passkey
@@ -811,9 +812,9 @@ export function AttestationPolicyPage() {
     mutationFn: (next: WebauthnAttestationPolicy) =>
       webauthnPolicyService.setPolicy(tenantId!, next),
     onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["webauthn-attestation-policy", tenantId],
-      });
+      // Also refreshes the compliance report beside the form, which is the
+      // server's verdict on this very policy — see `INVALIDATION_GRAPH`.
+      invalidateEntity(queryClient, "webauthn-attestation-policy");
       setFormOverrides({});
       setEditing(false);
       setFormError(null);

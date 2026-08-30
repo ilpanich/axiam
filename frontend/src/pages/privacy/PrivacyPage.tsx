@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, KeyRound, Loader2, ShieldAlert, Undo2 } from "lucide-react";
 import { gdprService, saveExportBlob } from "@/services/gdpr";
 import { settingsService } from "@/services/settings";
@@ -7,6 +7,7 @@ import { DEFAULT_DELETION_GRACE_PERIOD_DAYS } from "@/services/organizations";
 import { usePermissions } from "@/hooks/usePermissions";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
+import { invalidateEntity } from "@/lib/queryInvalidation";
 import { PageHeader } from "@/components/PageHeader";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SectionCard } from "@/components/shared";
@@ -34,6 +35,7 @@ import { Label } from "@/components/ui/label";
 
 export function PrivacyPage() {
   const { can } = usePermissions();
+  const queryClient = useQueryClient();
 
   // `/api/v1/settings` is the caller's own effective settings and needs no
   // special permission beyond `settings:get`. A failed read falls back to the
@@ -88,9 +90,16 @@ export function PrivacyPage() {
     mutationFn: () => gdprService.requestErasure(eraseTargetId.trim() || undefined),
     onSuccess: () => {
       setConfirmEraseOpen(false);
+      // The account is disabled and marked deletion-pending right now, and both
+      // facts are shown on the Users list and on the user's own detail page. Without
+      // this those views keep answering from cache for up to `staleTime`, so an
+      // administrator who erases an account can go straight to the list and find
+      // it still Active — which reads as the erasure having silently failed.
+      invalidateEntity(queryClient, "users");
       toast({
         description:
-          "Erasure scheduled for 30 days from now. A cancellation link has been emailed — the account is disabled immediately.",
+          `Erasure scheduled for ${graceDays} ${graceDays === 1 ? "day" : "days"} from now. ` +
+          "A cancellation link has been emailed — the account is disabled immediately.",
       });
     },
     onError: (err: unknown) => {
@@ -107,6 +116,9 @@ export function PrivacyPage() {
     onSuccess: () => {
       setCancelError("");
       setCancelToken("");
+      // Same reason as the erasure above, in the other direction: the account is
+      // Active again, and the list is the first place anybody looks to confirm it.
+      invalidateEntity(queryClient, "users");
       toast({ description: "Pending deletion cancelled. The account is re-enabled." });
     },
     onError: (err: unknown) => {

@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use surrealdb::Connection;
 use uuid::Uuid;
 
-use crate::authz::{AuthzData, RequirePermission, is_own_resource};
+use crate::authz::{AuthzData, RequirePermission, is_own_resource, user_scope_tenant};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::cert_auth::CertificateAuthenticated;
@@ -753,9 +753,13 @@ pub async fn enroll_mfa<C: Connection + Clone>(
     user: AuthenticatedUser,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    // The caller's OWN account, so the tenant is the one the caller lives in,
+    // never the one it is acting on — the same rule `change_password` below
+    // spells out, and the same one `user_scope_tenant` names. Enrolling into
+    // the selected tenant found no account to enrol.
     let out = state
         .auth_service
-        .enroll_mfa(user.tenant_id, user.user_id)
+        .enroll_mfa(user.principal_tenant_id, user.user_id)
         .await?;
     Ok(HttpResponse::Ok().json(MfaEnrollResponse {
         secret_base32: out.secret_base32,
@@ -782,7 +786,7 @@ pub async fn confirm_mfa<C: Connection + Clone>(
 ) -> Result<HttpResponse, AxiamApiError> {
     state
         .auth_service
-        .confirm_mfa(user.tenant_id, user.user_id, &body.totp_code)
+        .confirm_mfa(user.principal_tenant_id, user.user_id, &body.totp_code)
         .await?;
     Ok(HttpResponse::Ok().json(MfaConfirmResponse { mfa_enabled: true }))
 }
@@ -1170,7 +1174,7 @@ pub async fn reset_mfa<C: Connection + Clone>(
     }
     state
         .auth_service
-        .reset_mfa(caller.tenant_id, target_user_id)
+        .reset_mfa(user_scope_tenant(&caller, target_user_id), target_user_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }

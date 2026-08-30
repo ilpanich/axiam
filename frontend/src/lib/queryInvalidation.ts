@@ -65,8 +65,18 @@ export const INVALIDATION_GRAPH: Record<string, readonly string[]> = {
   "group-members": ["group-members", "group", "groups", "users", "user"],
   "group-roles": ["group-roles", "group", "groups", "role-groups", "role", "user"],
 
-  // A user's own row is echoed in group membership and role assignment lists.
-  users: ["users", "user", "group-members", "role-users", "currentUser"],
+  // A user's own row is echoed in group membership and role assignment lists,
+  // and in the picker `UserSearchDialog` caches under its own root — which is
+  // how a freshly created user stayed unfindable in the "add a member" dialog
+  // for up to `staleTime` after appearing in the list right behind it.
+  users: [
+    "users",
+    "user",
+    "group-members",
+    "role-users",
+    "currentUser",
+    "user-search",
+  ],
 
   // Scopes live under a resource, and a scoped grant names them by id — so a
   // deleted scope leaves a grant pointing at nothing until the grant list is
@@ -80,8 +90,25 @@ export const INVALIDATION_GRAPH: Record<string, readonly string[]> = {
   "ca-certificates": ["ca-certificates", "certificates"],
 
   // A tenant belongs to an organization, whose detail page lists its tenants.
-  tenants: ["tenants", "organizations"],
-  organizations: ["organizations", "tenants", "ca-certificates"],
+  //
+  // Two other views hold the same list under their own roots and neither is a
+  // page: the topbar's tenant switcher and the assignment-scope picker. Leaving
+  // them out is what made "create a tenant, then switch to it" fail for a
+  // minute — the tenant existed, the list on screen said so, and the switcher
+  // was still answering from the copy it had fetched before the tenant did.
+  tenants: [
+    "tenants",
+    "organizations",
+    "topbar-tenants",
+    "assignment-scope-tenants",
+  ],
+  organizations: [
+    "organizations",
+    "tenants",
+    "ca-certificates",
+    "topbar-tenants",
+    "assignment-scope-tenants",
+  ],
 
   // Settings cascade org → tenant, so an org change alters what a tenant
   // resolves to even though the tenant's own overrides did not move.
@@ -89,6 +116,15 @@ export const INVALIDATION_GRAPH: Record<string, readonly string[]> = {
   settings: ["settings", "org-settings", "tenant-settings-override"],
   "tenant-settings-override": ["tenant-settings-override", "settings"],
   "org-email-config": ["org-email-config", "tenant-email-config"],
+
+  // The compliance report is DERIVED from the attestation policy — it is the
+  // server's verdict on whether the tenant's registered authenticators satisfy
+  // it. Saving a policy without this left the verdict beside the form
+  // contradicting the policy in it for up to `staleTime`.
+  "webauthn-attestation-policy": [
+    "webauthn-attestation-policy",
+    "webauthn-compliance-report",
+  ],
 
   // MFA state is shown both on the user's own profile and on their admin page.
   mfaMethods: ["mfaMethods", "user-mfa", "currentUser"],

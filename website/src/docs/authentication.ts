@@ -141,7 +141,12 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
           { method: "POST", path: "/api/v1/auth/reset", summary: "Begin a password reset. Accepts the workspace in slug form, like login.", public: true },
           { method: "GET", path: "/api/v1/auth/reset/context", summary: "The effective OPAQUE policy for the account a reset token belongs to.", public: true },
           { method: "POST", path: "/api/v1/auth/reset/confirm", summary: "Set the new password with the mailed token.", public: true },
+          { method: "POST", path: "/api/v1/users/me/resend-verification", summary: "Re-send the verification mail to the signed-in caller, reporting the real outcome." },
         ],
+      },
+      {
+        type: "p",
+        text: "The last of those is the signed-in counterpart to `POST /auth/resend-verification`, and the pair exists because the two answer to different constraints. The anonymous endpoint takes an address it cannot vouch for, so it answers a constant `200 {\"sent\": true}` whether or not the account exists — it has to, or it becomes an address oracle. The authenticated one already knows who is asking, so it can tell them the truth: that the address is already verified, that no address is on file, or that the mail could not be queued. Reporting a real outcome to a caller who is entitled to it is not a leak.",
       },
       {
         type: "warn",
@@ -188,6 +193,10 @@ await client.confirmPasswordReset({
       {
         type: "p",
         text: "Logout operates on a session, not on an identity. A user signed in on a phone and a laptop who logs out on the laptop expects the phone to stay signed in, and that is what happens. When relying parties are registered for back-channel logout, ending a session also notifies them — see [Logout & session management](#/docs/logout).",
+      },
+      {
+        type: "p",
+        text: "The removal cookies logout sends back are built from the same setters they clear, so their protective attributes — `Secure`, `HttpOnly`, `SameSite`, path and domain — are mirrored by construction rather than restated in a second place. A browser only replaces a cookie when the attributes match; a hand-written removal that drifted from the setter would leave the session cookie sitting in the jar while the response claimed to have cleared it.",
       },
       { type: "h", id: "rate", text: "Rate limiting" },
       {
@@ -439,6 +448,15 @@ await client.confirmPasswordReset({
         type: "warn",
         text: "**Treat the provisioning URI as the secret, because it is one.** `otpauth://totp/…?secret=…` contains the shared secret verbatim, and it is the field that actually reaches a log — it is the one you hand to a QR renderer. Every SDK wraps both in its redacting type; a receiver that unwraps the URI to render it has unwrapped the secret.",
       },
+      { type: "h", id: "what-counts", text: "What counts as a second factor" },
+      {
+        type: "p",
+        text: "The account's second-factor requirement is about *factors*, not about TOTP specifically. It turns on when the first method is enrolled — a confirmed TOTP secret, or a passkey, or a security key — and off when the last one is removed. So enrolling a passkey makes the next sign-in ask for a second factor just as confirming a TOTP code does, and an account holding only passkeys is a properly two-factor account.",
+      },
+      {
+        type: "note",
+        text: "One interaction is worth knowing if you enrol both: a TOTP enrolment that was started and never confirmed is **dropped** when a passkey turns the requirement on, rather than being promoted alongside it. There is no separate \"confirmed\" bit — every reader tests the pair of flag-and-secret — so adopting the pending secret would arm a factor the user never proved they could produce a code for.",
+      },
       { type: "h", id: "paths", text: "Two enrolment paths, and they are not interchangeable" },
       {
         type: "p",
@@ -630,6 +648,10 @@ elif result.mfa_setup_required:
             body: "A passkey lives on the device that created it. If that device is the only factor and it is lost, the account is locked out — and “Passkey 2” is not a name anyone can act on when deciding which to revoke.",
           },
         ],
+      },
+      {
+        type: "note",
+        text: "**Enrolling a passkey is enrolling a factor.** From the moment a WebAuthn credential exists on the account, the next sign-in demands a second factor — exactly as confirming a TOTP secret does. Removing the last credential turns the requirement back off. This used to be true only of TOTP: a passkey was listed on the profile and accepted at `/auth/webauthn/authenticate`, while a password on its own still let the account straight in. An abandoned, unconfirmed TOTP enrolment sitting on the same account is **dropped** rather than silently promoted alongside the passkey — the two are not the same factor, and turning the requirement on must not arm a secret the user never confirmed.",
       },
       {
         type: "warn",

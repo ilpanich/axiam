@@ -353,6 +353,14 @@ export const OPERATE_PAGES: DocPage[] = [
           ["max_lockout_duration_secs", "Ceiling the backoff is clamped to."],
         ],
       },
+      {
+        type: "p",
+        text: "These four are read by the code that actually locks accounts, resolved as the organization's effective settings — the organization baseline as tightened by the tenant — on every credential-checking path: REST login, OPAQUE login-finish and the gRPC `ValidateCredentials` service. An account therefore cannot lock after a different number of failures depending on which transport was used. Where the settings cannot be resolved at all, the deployment default applies as a fail-safe floor, because a settings outage must not become an open brute-force window.",
+      },
+      {
+        type: "note",
+        text: "Worth checking if your deployment predates this: the four fields were stored, merged organization → tenant and returned by the settings API, but never read — every path metered against the process-wide deployment defaults, so lowering `max_failed_login_attempts` in the console changed nothing.",
+      },
       { type: "h", id: "tokens", text: "Token & MFA policy" },
       {
         type: "table",

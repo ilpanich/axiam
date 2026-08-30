@@ -40,10 +40,27 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
         text: "Repeated failures lock an account with exponential backoff rather than a flat window: `max_failed_login_attempts` triggers a lock of `lockout_duration_secs`, multiplied by `lockout_backoff_multiplier` on each subsequent lock and clamped at `max_lockout_duration_secs`. An administrator holding `users:admin` can clear a lock early.",
       },
       {
+        type: "p",
+        text: "Those numbers come from the **organization's effective settings** — the organization baseline as tightened by the tenant — and not from the deployment's process-wide defaults. Every credential-checking path resolves the same policy before accruing a failure: the REST login handler, OPAQUE's login-finish, and the gRPC `ValidateCredentials` service. An account therefore cannot lock after a different number of failures depending on which transport an attacker chose. If the settings cannot be resolved at all, the deployment default applies as a fail-safe floor — a settings outage must not become an open brute-force window.",
+      },
+      {
+        type: "note",
+        text: "This is worth knowing if you administer a deployment that predates it: lowering `max_failed_login_attempts` in the admin console used to change nothing at all. The value was stored, merged organization → tenant, and returned by the settings API, but the code that locks accounts never read it.",
+      },
+      {
         type: "api",
         endpoints: [
           { method: "POST", path: "/api/v1/users/{user_id}/unlock", summary: "Clear an active lockout on an account." },
         ],
+      },
+      { type: "h", id: "tenant-at-login", text: "Naming the tenant — or not" },
+      {
+        type: "p",
+        text: "`POST /api/v1/auth/login` takes `org_slug` and, optionally, a tenant. Omitting the tenant signs you in at **organization level**, in the organization's reserved scope, which is where estate-wide administrators live. A tenant user who omits the tenant is simply not found there and receives the same enumeration-safe `401` as a wrong password — so a tenant user must name their tenant, and learns nothing by failing to.",
+      },
+      {
+        type: "p",
+        text: "Password, OPAQUE and discoverable-passkey sign-in all resolve the blank tenant the same way; nothing on those paths knows or cares which kind of tenant it is authenticating against. The login response carries `organization_level: true` for an organization principal, and such a principal then acts on a member tenant with the `X-Axiam-Tenant` header rather than by signing in again — see [Organization-level principals](#/docs/organization-scope).",
       },
       { type: "h", id: "tokens", text: "Tokens" },
       {
@@ -927,6 +944,10 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       {
         type: "p",
         text: "A service account is a tenant-scoped identity for an automated caller. It holds roles and permissions like a user, appears in the audit log like a user, and is denied by a deny grant like a user. What it does not have is a password, an email address or an interactive login.",
+      },
+      {
+        type: "p",
+        text: "One created in the organization's reserved scope is an **organization-level** service account: its global grants reach every tenant of the organization, including tenants created after it, which is what a deployment-wide automation actually needs. `POST /api/v1/roles/{role_id}/service-accounts` takes the same `tenant_scope` list as the user and group assignment endpoints, so such an account can be confined to named tenants instead — see [Organization-level principals](#/docs/organization-scope).",
       },
       {
         type: "p",

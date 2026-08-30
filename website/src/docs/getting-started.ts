@@ -343,11 +343,11 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
             body: "From `organization_name`, with `organization_slug` derived from it when you do not supply one. Get-or-create by slug, so retrying after a transient failure reuses the organization rather than duplicating it.",
           },
           {
-            title: "Creates the default tenant",
-            body: "From `tenant_name` (default `\"Default\"`) and `tenant_slug` (default `\"default\"`). Also get-or-create by slug.",
+            title: "Creates the organization's reserved scope",
+            body: "Not an ordinary tenant — the organization's own scope, slugged `organization`, which is where the super-admin will live. Get-or-create, so a concurrent racer reads the winner's row rather than duplicating it. **No ordinary tenant is created at all**; you create those once you are signed in.",
           },
           {
-            title: "Seeds the permission registry into the tenant",
+            title: "Seeds the permission registry into that scope",
             body: "All 113 built-in permissions across 25 families — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `audit_logs:*`, `reactors:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against.",
           },
           {
@@ -356,7 +356,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
           },
           {
             title: "Creates the admin user and binds the super-admin role",
-            body: "The password is hashed with Argon2id server-side. If you asked for an OPAQUE baseline, the registration record is created here too.",
+            body: "The password is hashed with Argon2id server-side. If you asked for an OPAQUE baseline, the registration record is created here too. The account lives in the organization scope, which is what makes it an administrator of every tenant the organization ever has — including ones created long afterwards.",
           },
           {
             title: "Takes the bootstrap lock",
@@ -367,6 +367,10 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       {
         type: "note",
         text: "Bootstrap issues **no token**. The new admin authenticates through `POST /api/v1/auth/login` like anybody else. That is deliberate: a provisioning endpoint that also hands out a session is a provisioning endpoint that is worth attacking twice.",
+      },
+      {
+        type: "warn",
+        text: "**Bootstrap no longer creates an ordinary tenant.** It used to, and that is precisely what left every *later* tenant unreachable by everybody: the super-admin's grants were rows in the one tenant bootstrap happened to create, and the authorization engine filters every lookup by tenant. The super-admin is now organization-level and reaches new tenants by rule rather than by a grant somebody has to remember to write. `tenant_name` and `tenant_slug` are still **accepted and ignored**, so an older client's request succeeds rather than failing on an unknown field — but nothing reads them, and the `tenant_slug` in the response is the organization scope's own. See [Organization-level principals](#/docs/organization-scope).",
       },
       { type: "h", id: "gates", text: "The gate — fail-closed, two ways to satisfy it" },
       {
@@ -380,7 +384,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
         rows: [
           [
             "`AXIAM_BOOTSTRAP_ADMIN_EMAIL`",
-            "Set this environment variable on the `axiam-server` process before it starts. The request's `email` field must match it **exactly**, or the call is refused. When this variable is set, `setup_token` is ignored entirely.",
+            "Set this environment variable on the `axiam-server` process before it starts. The request's `email` field must match it **exactly**, or the call is refused. When this variable is set to a non-empty value, `setup_token` is ignored entirely.",
             "Automated and declarative deployments. The operator names the first admin before the server exists, and nothing has to be recovered from a log.",
           ],
           [
@@ -397,6 +401,10 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       {
         type: "warn",
         text: "The setup token is written to the server log exactly once, at `info` level. If your log pipeline drops `info`, buffers it, or you simply scroll past it, there is no way to re-read or re-mint it. Set `AXIAM_BOOTSTRAP_ADMIN_EMAIL` and restart instead — for anything unattended, prefer that gate in the first place.",
+      },
+      {
+        type: "note",
+        text: "**An empty value is not a gate.** `AXIAM_BOOTSTRAP_ADMIN_EMAIL` set to the empty string — the shape Docker Compose produces for `AXIAM_BOOTSTRAP_ADMIN_EMAIL: \"${AXIAM_BOOTSTRAP_ADMIN_EMAIL:-}\"` when nothing is exported — is treated as unset, and the call falls through to the setup-token path. It used to be read as \"gate configured\", compared the request email against nothing, answered 403 and made the token path unreachable, so a deployment holding a perfectly valid one-time token could not bootstrap at all.",
       },
       {
         type: "note",
@@ -425,8 +433,12 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
             "no",
             "URL-safe slug. Derived from `organization_name` when omitted or blank — ASCII alphanumerics are lower-cased and every other run of characters collapses to a single dash.",
           ],
-          ["tenant_name", "no", "Display name of the default tenant. Defaults to `Default`."],
-          ["tenant_slug", "no", "URL-safe slug for that tenant. Defaults to `default`."],
+          [
+            "tenant_name",
+            "no",
+            "**Deprecated and ignored.** Accepted so an older client's request still succeeds. Bootstrap creates no ordinary tenant; use `POST /api/v1/organizations/{org_id}/tenants` once signed in.",
+          ],
+          ["tenant_slug", "no", "**Deprecated and ignored.** See `tenant_name`."],
           ["email", "yes", "Admin email address. Must match `AXIAM_BOOTSTRAP_ADMIN_EMAIL` when that gate is in use."],
           ["username", "yes", "Admin username."],
           ["password", "yes", "Admin password. Hashed with Argon2id before storage."],
@@ -456,7 +468,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "gate 1 — AXIAM_BOOTSTRAP_ADMIN_EMAIL",
-        code: "# Set on the axiam-server process, BEFORE it starts.\nexport AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev\n\ncurl -X POST https://iam.acme.dev/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme Corporation\",\n        \"organization_slug\": \"acme\",\n        \"tenant_name\": \"Production\",\n        \"tenant_slug\": \"production\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
+        code: "# Set on the axiam-server process, BEFORE it starts.\nexport AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev\n\ncurl -X POST https://iam.acme.dev/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme Corporation\",\n        \"organization_slug\": \"acme\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
       },
       {
         type: "code",
@@ -466,11 +478,11 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "201 Created",
-        code: "{\n  \"message\": \"Bootstrap completed\",\n  \"organization_id\": \"0f8c...\",\n  \"organization_slug\": \"acme\",\n  \"tenant_id\": \"3a91...\",\n  \"tenant_slug\": \"production\",\n  \"user_id\": \"c47b...\"\n}",
+        code: "{\n  \"message\": \"Bootstrap completed\",\n  \"organization_id\": \"0f8c...\",\n  \"organization_slug\": \"acme\",\n  \"tenant_id\": \"3a91...\",\n  \"tenant_slug\": \"organization\",\n  \"user_id\": \"c47b...\"\n}",
       },
       {
         type: "p",
-        text: "Keep `organization_slug` and `tenant_slug` — every SDK constructor takes them, and they are how a client names the tenant it is talking to.",
+        text: "The `tenant_id` and `tenant_slug` here are the organization scope's own, reported so you know where the administrator you just created lives — not an ordinary tenant to start putting things in. Keep `organization_slug`: every SDK constructor takes it, and an organization-level principal signs in with the tenant left blank.",
       },
       { type: "h", id: "responses", text: "Response codes" },
       {
@@ -494,6 +506,10 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
             "Not an error to retry. Log in as the existing admin; create further tenants and admins through the authenticated API.",
           ],
         ],
+      },
+      {
+        type: "note",
+        text: "On an already-bootstrapped deployment, **which** of those two you get depends on the gate, and deliberately so. The gate is evaluated first: a second call carrying a consumed setup token is refused `403` for the token, never reaching the already-initialised check — so an unauthenticated caller cannot use bootstrap to learn whether a deployment has been initialised. With `AXIAM_BOOTSTRAP_ADMIN_EMAIL` configured, the gate passes and the `409` is what you see.",
       },
       { type: "h", id: "opaque", text: "Seeding an OPAQUE baseline at bootstrap" },
       {
@@ -523,7 +539,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
           },
           {
             title: "Create the tenants you actually need",
-            body: "The bootstrap tenant is a starting point, not a container for everything. Tenants are the isolation boundary — one per customer, environment or business unit.",
+            body: "There is no starter tenant to grow out of — bootstrap creates none. Tenants are the isolation boundary: one per customer, environment or business unit. Creating one seeds its permissions and its three default roles, and your organization-level super-admin already reaches it.",
             code: "POST /api/v1/organizations/{org_id}/tenants\n{ \"name\": \"Acme Staging\", \"slug\": \"acme-staging\" }",
           },
           {
@@ -572,12 +588,16 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "There is no default tenant and no ambient tenant context. Every SDK constructor takes one, every gRPC request message carries `tenant_id`, and every OAuth2 endpoint takes it as a query parameter. This is deliberate: the most common multi-tenancy bug is a query that forgot to filter, and an API that cannot express *unscoped* cannot express that bug.",
+        text: "There is no default tenant and no ambient tenant context. Every SDK constructor takes one — left blank it means the organization scope, not \"whichever tenant is handy\" — every gRPC request message carries `tenant_id`, and every OAuth2 endpoint takes it as a query parameter. This is deliberate: the most common multi-tenancy bug is a query that forgot to filter, and an API that cannot express *unscoped* cannot express that bug.",
+      },
+      {
+        type: "p",
+        text: "One tenant per organization is **reserved**: the organization's own scope, slugged `organization` and flagged `kind: \"organization\"`. It is an ordinary tenant row in every other respect — deliberately, so every isolation control that protects a tenant protects it too — and it is where organization-level principals live. A *global* grant held there applies in every tenant of the organization, including tenants created long afterwards; a resource-scoped one does not travel, because the resource it names exists only in that scope. That is the whole of the cross-tenant rule, and [Organization-level principals](#/docs/organization-scope) is the page for it.",
       },
       {
         type: "code",
         caption: "the containment hierarchy",
-        code: "Organization  (CA certificates, settings baseline)\n └── Tenant   (the isolation boundary)\n      ├── Users, Groups, Service accounts\n      ├── Roles → Permissions (action + resource, allow or deny)\n      ├── Resources (a tree) → Scopes\n      ├── OAuth2 clients, Federation configs\n      ├── Certificates, PGP keys\n      └── Webhooks, Reactors, Notification rules",
+        code: "Organization  (CA certificates, settings baseline)\n ├── Organization scope  (reserved; slug `organization`) — estate-wide principals\n └── Tenant   (the isolation boundary)\n      ├── Users, Groups, Service accounts\n      ├── Roles → Permissions (action + resource, allow or deny)\n      ├── Resources (a tree) → Scopes\n      ├── OAuth2 clients, Federation configs\n      ├── Certificates, PGP keys\n      └── Webhooks, Reactors, Notification rules",
       },
       { type: "h", id: "identity", text: "Identities" },
       {

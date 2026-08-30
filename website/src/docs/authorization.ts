@@ -1,5 +1,8 @@
 import type { DocPage } from "./types";
+import { contractLink } from "../contractAnchors";
 import { DOCS_VERIFIED_RELEASE } from "../version";
+
+const GH_BLOB = "https://github.com/ilpanich/axiam/blob/main";
 
 /**
  * "Authorization" — the RBAC engine and the entities it evaluates over.
@@ -253,7 +256,13 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
           { method: "DELETE", path: "/api/v1/roles/{role_id}/users/{user_id}", summary: "Unassign it." },
           { method: "POST", path: "/api/v1/roles/{role_id}/groups", summary: "Assign the role to a group." },
           { method: "DELETE", path: "/api/v1/roles/{role_id}/groups/{group_id}", summary: "Unassign it." },
+          { method: "POST", path: "/api/v1/roles/{role_id}/service-accounts", summary: "Assign the role to a service account." },
+          { method: "DELETE", path: "/api/v1/roles/{role_id}/service-accounts/{service_account_id}", summary: "Unassign it." },
         ],
+      },
+      {
+        type: "p",
+        text: "How far an assignment reaches is a property of the assignment, not only of the role. Made in an ordinary tenant it reaches that tenant. Made in the organization's reserved scope it reaches **every** tenant of the organization if it is global, and only that scope if it names a resource — and the three assignment bodies above accept a `tenant_scope` list that confines it to named tenants instead. [Organization-level principals](#/docs/organization-scope) is the page for all of it.",
       },
       { type: "h", id: "groups", text: "Groups" },
       {
@@ -294,6 +303,15 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
           { method: "DELETE", path: "/api/v1/resources/{resource_id}/scopes/{scope_id}", summary: "Delete one." },
         ],
       },
+      { type: "h", id: "org-actions", text: "Actions a role cannot carry into a tenant" },
+      {
+        type: "p",
+        text: "A handful of actions operate on the organization rather than on a tenant, and for those, holding the permission is not enough: the caller's own record must live in the organization scope. Creating, updating or deleting organizations and tenants, every CA operation — including the mTLS trust-anchor flag — and the FIDO metadata refresh are all refused to a principal that lives in an ordinary tenant, however its roles are written. The guard keys on where the principal lives, which is a row it cannot edit, and fails closed when that cannot be resolved.",
+      },
+      {
+        type: "p",
+        text: "The grant data agrees with the guard rather than contradicting it: an ordinary tenant's seeded `super-admin` and `admin` roles are created *without* those actions, and a boot-time reconciler revokes them where an earlier version granted them. `viewer` is unaffected by construction — it is seeded only with `:list` and `:get` actions, and every withheld action is a mutation. So a role listing in an ordinary tenant looks different after the upgrade, while nothing that used to work stops working: the guard was already refusing every one of these calls.",
+      },
       { type: "h", id: "design", text: "Designing a role model that survives" },
       {
         type: "list",
@@ -308,6 +326,272 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
     ],
   },
 
+  {
+    slug: "organization-scope",
+    section: "Authorization",
+    navLabel: "Organization scope",
+    title: "Organization-level principals",
+    intro:
+      "One administrator for every tenant an organization will ever have — expressed as a claim the engine reads explicitly, never as an inference, and narrowable to named tenants.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
+    blocks: [
+      { type: "h", id: "two-levels", text: "Two levels of principal" },
+      {
+        type: "p",
+        text: "A **tenant** principal belongs to one tenant. Its grants apply there and nowhere else — this is every user, group, role and service account AXIAM had before 1.0.0. An **organization** principal lives in the organization's own reserved tenant, and its *global* grants apply to every tenant in that organization, including tenants created long after the grant was written.",
+      },
+      {
+        type: "p",
+        text: "The super-admin created at bootstrap is an organization principal. That is what makes it an administrator of every tenant the organization ever has, without anybody writing a grant per tenant.",
+      },
+      {
+        type: "note",
+        text: "This exists because a newly created tenant used to be unreachable by everybody, the bootstrap super-admin included. Tenant creation seeded permissions and stopped there, while the engine filters every lookup by tenant — so the answer for the new tenant was `no roles assigned` for all callers. Deriving reach at check time fixes that for tenants that do not exist yet, which no amount of fanning out grants at creation time can.",
+      },
+      { type: "h", id: "reserved-tenant", text: "The organization scope is itself a tenant" },
+      {
+        type: "p",
+        text: "Every organization has exactly one, created with the organization, flagged `kind: \"organization\"` and slugged `organization`. It is an ordinary tenant row in every other respect, and that is the point: organization-level users, groups, roles, permissions and service accounts are ordinary rows in it, evaluated by the same RBAC engine and audited the same way. Every isolation control that protects a tenant therefore protects it too.",
+      },
+      {
+        type: "p",
+        text: "You cannot create a second one — a marker row whose record id *is* the constraint prevents it, and `POST /api/v1/organizations/{org_id}/tenants` refuses the reserved slug. Uniqueness falls out of the existing indexes rather than needing a new rule: an organization-level `user1` is unique across the whole organization, while a tenant-level `user1` need only be unique within its tenant.",
+      },
+      {
+        type: "p",
+        text: "Living in the organization scope grants nothing by itself. An organization user with no roles is denied exactly like anyone else.",
+      },
+      { type: "h", id: "one-rule", text: "The one evaluation rule" },
+      {
+        type: "p",
+        text: "When a subject's grants are read across a tenant boundary, **only global grants carry**.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Assignment", "Lives in", "Applies to"],
+        rows: [
+          ["Global (`is_global`, no resource)", "organization scope", "Every resource in every tenant of the organization"],
+          ["Resource-scoped", "organization scope", "That resource, in the organization scope only"],
+          ["Global", "an ordinary tenant", "Every resource in that tenant"],
+          ["Resource-scoped", "an ordinary tenant", "That resource and its descendants"],
+        ],
+      },
+      {
+        type: "p",
+        text: "A resource-scoped assignment names a resource id in the organization scope. No resource with that id exists in a member tenant, and one that happened to share a *name* would be an unrelated thing — carrying the assignment across would turn a narrow grant into a grant on something else entirely, across an isolation boundary.",
+      },
+      {
+        type: "p",
+        text: "Everything else is unchanged. Deny-override still wins at any depth, scopes still narrow, group membership still inherits. An organization principal acting on the organization scope itself is not crossing anything and gets ordinary resource-scoped evaluation there.",
+      },
+      {
+        type: "note",
+        text: "Cross-tenant reach is an explicit claim, never an inference. The engine reads a subject's grants across a tenant boundary only under a `SubjectScope` claim that an ordinary tenant principal cannot express at all, produced in exactly one place after resolving the tenant record and confirming it is the organization's reserved scope. Revoking an organization-level role sweeps the decision cache in *every* tenant, not only the one the revocation happened in.",
+      },
+      { type: "h", id: "org-actions", text: "Organization-level actions need an organization principal" },
+      {
+        type: "p",
+        text: "A handful of actions operate on the organization rather than on a tenant, and holding the permission is not enough to perform them: the caller's own record must live in the organization scope. The guard keys on **where the principal lives** — a row it cannot edit — rather than on what its roles happen to carry, and fails closed when that cannot be resolved.",
+      },
+      {
+        type: "list",
+        items: [
+          "`organizations:create`, `organizations:update`, `organizations:delete`",
+          "`tenants:create`, `tenants:update`, `tenants:delete`",
+          "`ca_certificates:generate`, `ca_certificates:revoke`, `ca_certificates:manage` — the last one covers the mTLS trust-anchor flag",
+          "The FIDO metadata (MDS) refresh, whose trust store is deployment-global",
+          "The organization's own email configuration (a tenant's own mail config stays a tenant administrator's job, so the *action* is not withheld — only the organization half is guarded)",
+        ],
+      },
+      {
+        type: "p",
+        text: "The CA row is the one that matters most. A tenant administrator holding `ca_certificates:manage` could flag a CA as an mTLS trust anchor for the whole deployment and, with that CA's key, mint certificates authenticating as principals in sibling tenants. Two independent layers now stop it: the scope guard on the handler, and a single list — `axiam_core::permission_scope::ORGANIZATION_LEVEL_ACTIONS` — that withholds these actions from an ordinary tenant's seeded roles so the grant is not there to be relied on in the first place. A consistency test reads the handler sources to prove every withheld action is scope-guarded, rather than trusting a comment.",
+      },
+      {
+        type: "warn",
+        text: "**Upgrade note.** A boot-time reconciler revokes these actions from ordinary tenants' seeded `super-admin` and `admin` roles where an earlier version granted them. Nothing you could actually do stops working — the scope guard was already refusing every one of these calls — but the grants themselves disappear from those roles on first boot, so a role listing looks different afterwards. The `viewer` role is unaffected by construction: it is seeded only with `:list` and `:get` actions, and every action here is a mutation. Read actions are deliberately absent from both layers; the tenant switcher needs them and they leak nothing across the boundary.",
+      },
+      { type: "h", id: "tenant-scope", text: "Confining an account to named tenants" },
+      {
+        type: "p",
+        text: "The rule above is all-or-nothing: an organization principal's global grants reach *every* tenant of the organization. That is right for the organization's own administrator and wrong for an operator who should administer two of your twelve tenants. A role assignment can therefore name the tenants it reaches.",
+      },
+      {
+        type: "code",
+        caption: "restricting an assignment to two tenants",
+        code: 'POST /api/v1/roles/{role_id}/users\nContent-Type: application/json\n\n{\n  "user_id": "…",\n  "tenant_scope": ["<tenant-a>", "<tenant-b>"]\n}',
+      },
+      {
+        type: "p",
+        text: "The same field is accepted on the group and service-account assignment endpoints. Omit it and nothing changes — the assignment reaches wherever the role does, which is what every assignment written before this existed means and keeps meaning.",
+      },
+      {
+        type: "p",
+        text: "The rule is written once and enforced at every door a restricted account could reach through:",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Surface", "For a confined principal"],
+        rows: [
+          ["Any tenant-scoped action", "Allowed only in the named tenants — the engine drops the assignment everywhere else, on the single and the batch path alike"],
+          ["Organization-level actions", "**Refused.** They name no tenant, so there is nothing to compare a scope against; the guard is explicit rather than derived"],
+          ["A tenant's signing CA (`…/tenants/{tenant}/signing-cas`)", "Allowed when the reach covers *that* tenant — organization-level, but what it produces belongs to one tenant"],
+          ["`GET /api/v1/organizations/{org}/tenants`", "Returns only the tenants in reach"],
+          ["`X-Axiam-Tenant` naming another tenant", "`403` at the header, rather than a 403 on every request that follows"],
+          ["`GET /api/v1/auth/me`", "`permissions` is computed for the tenant being acted on, and the `*` wildcard is **not** emitted"],
+        ],
+      },
+      {
+        type: "p",
+        text: "\"Nowhere else\" includes the organization's own scope: an account confined to two tenants is not an organization-wide administrator, and letting its grants apply with no tenant selected would hand back exactly the reach the restriction removes. A confined operator signing in is therefore placed in the first tenant it reaches, and its tenant switcher lists only those tenants.",
+      },
+      {
+        type: "note",
+        text: "Reach is a property of the whole set. Holding one *unrestricted* assignment makes the principal unrestricted however many confined ones sit beside it — a tenant scope adds tenants, it cannot take any away from a grant that already reaches everywhere. Confining an account means every one of its assignments must name tenants; leaving the organization's `super-admin` on it beside a narrow role restricts nothing.",
+      },
+      {
+        type: "p",
+        text: "`GET /api/v1/auth/me` reports the result as `reachable_tenant_ids`: **absent** when the principal is unrestricted, a list when it is not. The login response deliberately omits the field — reach is a property of the session's current scope, not of the credential. A client that sees no field should read it as \"unrestricted\", which is also how it reads against a server older than contract 1.35.",
+      },
+      {
+        type: "p",
+        text: "Three requests are refused rather than silently accepted, each because accepting one would report a restriction that was not applied: `tenant_scope` on an assignment made in an ordinary tenant (the only tenant it could name is that tenant itself); an empty `tenant_scope` list (a grant that reaches nowhere is not a restriction, and is the hardest kind to debug); and a tenant belonging to another organization, or the organization's own scope.",
+      },
+      {
+        type: "warn",
+        text: "**Changing an assignment's reach is a revoke and a re-assign.** The `has_role` edge is created and deleted, never updated, so there is no \"edit scope\" control anywhere — unassign the grant and make it again with the tenants you want. Existing assignments are untouched by the migration that added the field: schema 51 is additive with no backfill, and an unrestricted grant stays unrestricted until an administrator narrows it.",
+      },
+      { type: "h", id: "signing-in", text: "Signing in, and acting on a tenant" },
+      {
+        type: "p",
+        text: "The tenant is optional at login. Omitting it signs you in at organization level. A tenant user who omits the tenant is not found in the organization scope and gets the same enumeration-safe 401 as a wrong password — so a tenant user must name their tenant, and learns nothing by failing to. Password, OPAQUE and discoverable-passkey sign-in all resolve the organization scope the same way; nothing on those paths knows or cares which kind of tenant it is authenticating against. The login response carries `organization_level: true`.",
+      },
+      {
+        type: "code",
+        caption: "signing in at organization level, and then acting on a tenant",
+        code: 'POST /api/v1/auth/login\n{ "org_slug": "acme", "username_or_email": "root", "password": "…" }\n\nGET /api/v1/users\nX-Axiam-Tenant: 0193f2a1-…      # any tenant in your organization',
+      },
+      {
+        type: "p",
+        text: "An organization principal switches tenant with the `X-Axiam-Tenant` header and **without signing in again** — it is already a principal of every tenant in its organization. The header is honoured only for a principal whose own tenant is the organization scope, and only for a tenant in that principal's own organization. Anything else is a 403 rather than a silent fallback, including a request made where no tenant resolver is configured, which fails closed. Without the header, an organization principal acts on the organization scope.",
+      },
+      {
+        type: "warn",
+        text: "The acting-tenant header is `X-Axiam-Tenant`. Contract versions before 1.36 named it `X-Tenant-ID`, which the server does not read — a client following that letter switched nothing and got a successful response describing its own tenant's data. `X-Tenant-ID` still exists and is deliberately *not* renamed: it is the unconditional constructor-tenant header, and renaming it would make it override the acting tenant on every request made after a switch.",
+      },
+      { type: "h", id: "own-account", text: "The caller's own account is not the acting tenant" },
+      {
+        type: "p",
+        text: "`X-Axiam-Tenant` says which tenant a request **acts on**. It says nothing about where the caller *lives*, and for the caller's own record that second tenant is the one that matters. The rule: **a request about the caller's own record is scoped to the tenant the caller lives in, whatever the header says.** Everything else follows the header.",
+      },
+      {
+        type: "list",
+        items: [
+          "`GET /api/v1/auth/me` — the account and its permission array",
+          "`POST /api/v1/auth/password/change` — the password, and the OPAQUE record, live where the principal does",
+          "`GET`/`PUT /api/v1/users/{id}` **for the caller's own id** — \"open my profile\" and \"save my profile\"",
+          "The caller's own MFA methods, `POST /api/v1/auth/mfa/enroll` and `/confirm`, and `POST /api/v1/users/{id}/reset-mfa`",
+          "`POST /api/v1/auth/webauthn/register/start` and `/finish` — including the attestation policy applied, which is the policy of the tenant the credential is stored in",
+          "`POST /api/v1/users/me/resend-verification`",
+          "The GDPR self-service endpoints (`/account/export`, `/account/delete`) for the caller's own id",
+          "`GET /oauth2/userinfo` — the token subject's own",
+        ],
+      },
+      {
+        type: "p",
+        text: "Reading the acting tenant for any of these has a distinctive symptom: an organization administrator selects a child tenant and, with nothing on screen changed but the tenant switcher, cannot open its own profile (404), cannot change its own password (404), sees an empty list of its own MFA methods, and cannot stay signed in (401). The rule is named once server-side rather than repeated per handler, and `GET /api/v1/auth/me` returns both tenants so a client can act on the distinction.",
+      },
+      {
+        type: "code",
+        caption: "GET /api/v1/auth/me, for an organization principal acting on a child tenant",
+        code: '{\n  "user": {\n    "tenant_id": "…",             // the tenant being acted on\n    "principal_tenant_id": "…",   // the tenant this principal lives in\n    "principal_tenant_slug": "organization",\n    "org_id": "…",                // addressable directly, no lookup needed\n    "organization_level": true\n  },\n  "permissions": ["*"]\n}',
+      },
+      {
+        type: "p",
+        text: "`permissions` is the caller's effective actions in the scope it is acting on, and across a tenant boundary carries only global grants — mirroring the engine exactly. It is a UI hint; the server enforces every action independently. `org_id` is there so a client never has to call `GET /api/v1/organizations` to turn a slug into an id.",
+      },
+      { type: "h", id: "creating-tenants", text: "Creating a tenant, and giving it its first administrator" },
+      {
+        type: "p",
+        text: "`POST /api/v1/organizations/{org_id}/tenants` seeds the new tenant's permissions **and** its default roles (`super-admin`, `admin`, `viewer`), so it is administrable immediately. It assigns those roles to nobody, deliberately: organization principals already reach the tenant by the rule above, so writing assignments at creation time would grant nothing new, would miss every organization principal created afterwards, and would have to be undone in every tenant to revoke.",
+      },
+      {
+        type: "p",
+        text: "Provisioning a tenant's first *tenant-level* administrator is three ordinary calls, all made from the organization session that just created the tenant:",
+      },
+      {
+        type: "code",
+        caption: "the new tenant's first administrator",
+        code: 'POST /api/v1/users                 X-Axiam-Tenant: <new tenant>\nPUT  /api/v1/users/{id}            X-Axiam-Tenant: <new tenant>   # {"status":"Active"}\nPOST /api/v1/roles/{role}/users    X-Axiam-Tenant: <new tenant>   # role = super-admin',
+      },
+      { type: "h", id: "admin-ui", text: "In the admin console" },
+      {
+        type: "p",
+        text: "Tenant switching is the top-right selector, listing **Organization** plus the organization's tenants. Switching takes effect immediately and in place: the page is unmounted, the cache for the tenant being left is dropped, `/auth/me` is re-read in the new scope and the page is mounted again. That pause — shown as *Switching tenant…* — is not cosmetic. It avoids rendering the previous tenant's rows under the new tenant's name, and avoids gating the page on the previous tenant's permission set, which would offer controls the server refuses and hide ones it allows. Anything typed into a form is discarded with it, deliberately: after a switch it refers to ids in a tenant nobody is looking at. The selected tenant persists per browser tab.",
+      },
+      {
+        type: "p",
+        text: "A tenant-level principal sees the same selector, but switching signs it out and back in, because for it the premise is false: a principal of one tenant is not a principal of another, and no server-side operation could make it one.",
+      },
+      {
+        type: "p",
+        text: "Every role-assignment dialog carries a **Tenants** picker beside the resource **Scope** one, in all three places an assignment can be made — from a role (*Assign User* / *Assign Group* / *Assign Service Account*), from a user (*Assign Role*) and from a group (*Assign Role*, which every member inherits). Leaving it empty means every tenant of the organization. The picker only offers tenants while you are administering the organization scope; an organization administrator who has switched into a tenant is told exactly that and pointed at the scope selector, rather than shown a control that vanished. An assignment that names tenants is badged with them rather than \"Organization-wide\", which for such a grant would be precisely wrong.",
+      },
+      { type: "h", id: "upgrading", text: "Upgrading an existing deployment" },
+      {
+        type: "p",
+        text: "Migration 50 adds `kind`, defaulting to `standard` — every tenant you have is an ordinary tenant and reads back as one, and every grant keeps meaning what it meant. Migration 51 adds `tenant_scope` to the `has_role` edge, optional and with no backfill. The migration creates each organization's reserved scope and **moves nobody into it**: your users stay where they are with the access they have, and nothing about who can reach what changes on upgrade.",
+      },
+      {
+        type: "p",
+        text: "Promoting an existing administrator to organization level is therefore a deliberate act — create an account in the organization scope and assign it `super-admin` there. Relocating accounts between tenants is not something a version upgrade should decide on your behalf, and the deployment that most needs the promotion is exactly the one where a human should look at it first.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Organization-level users, roles and service accounts",
+            href: `${GH_BLOB}/docs/admin/organization-scope.md`,
+            note: "The normative admin guide — the full endpoint-by-endpoint table, what tenants inherit from the organization, and the OPAQUE `required` gate.",
+          },
+          {
+            label: "CONTRACT §5.2 — organization-level principals",
+            href: contractLink("5.2"),
+            note: "What an SDK must do: §5.2.1 signing one in, §5.2.2 acting tenant vs principal tenant, §5.2.3 tenant-scoped assignments.",
+          },
+          {
+            label: "Design note — why the organization scope is a tenant",
+            href: `${GH_BLOB}/claude_dev/organization-scope-design.md`,
+            note: "Why a reserved tenant rather than an `Option<Uuid>`, and why access is derived at check time rather than fanned out.",
+          },
+          {
+            label: "Worked example — `examples/b6-organization-scope`",
+            href: `${GH_BLOB}/examples/b6-organization-scope`,
+            note: "The whole flow with assertions, from bootstrap to a new tenant's first administrator.",
+          },
+        ],
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Roles, permissions & resources",
+            body: "The entities an organization-level grant is written over, and the API for each.",
+            to: "docs",
+            doc: "rbac",
+          },
+          {
+            title: "The authorization engine",
+            body: "How a decision is computed, and where the cross-tenant claim enters it.",
+            to: "docs",
+            doc: "authz",
+          },
+        ],
+      },
+    ],
+  },
   {
     slug: "deny",
     section: "Authorization",

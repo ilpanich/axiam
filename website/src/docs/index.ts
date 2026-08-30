@@ -60,7 +60,7 @@ export const DOC_SECTIONS: DocSectionGroup[] = [
   },
   {
     label: "Authorization",
-    slugs: ["authz", "rbac", "deny", "uma"],
+    slugs: ["authz", "rbac", "organization-scope", "deny", "uma"],
   },
   {
     label: "OAuth2 & OIDC",

@@ -623,7 +623,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "Custody is recorded per CA, not read from this configuration, and that is the point: a deployment that adopts Vault does not thereby move the CAs it already has. Those records still say `database`, their keys are still sealed into them, and the signing path asks the record rather than the environment — so `AXIAM__PKI__ENCRYPTION_KEY` stays required for as long as any such CA exists. Switching custodian is a decision about new CAs.",
+        text: "**No `AXIAM__PKI__VAULT_*` pair means \"the Vault you already configured\".** A deployment that has set up Vault as its secret provider inherits it for CA custody rather than silently falling back to sealed database rows — the PKI-specific pair is an override, not the switch that turns Vault custody on. The startup line reports `vault_inherited` so an operator who never set `AXIAM__PKI__VAULT_ADDR` can see *why* their CA keys are in Vault, and so the reverse — a deployment expecting Vault and getting the database — is a line in the log rather than a discovery months later. Naming `database` explicitly beside a reachable Vault is legal and is warned about at startup: the two differ by whether one database dump is enough.",
+      },
+      {
+        type: "note",
+        text: "Custody is recorded per CA, not read from this configuration, and that is the point: a deployment that adopts Vault does not thereby move the CAs it already has. Those records still say `database`, their keys are still sealed into them, and the signing path asks the record rather than the environment — so `AXIAM__PKI__ENCRYPTION_KEY` stays required for as long as any such CA exists. What this configuration decides is the custodian for CAs created from now on; moving an existing one is `POST /api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody`, which copies the key to the new custodian and only then releases it from the old, so the CA is never left without it.",
       },
       {
         type: "p",

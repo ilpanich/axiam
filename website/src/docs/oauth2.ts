@@ -484,12 +484,8 @@ export const OAUTH2_PAGES: DocPage[] = [
         text: "`tls_client_auth` replaces the shared secret with a client certificate, matched against a configured identifier — `tls_client_auth_san_dns` and its siblings. The certificate is verified by AXIAM's own TLS listener; **no proxy-asserted identity header is in the trusted path**, so there is no `X-Client-Certificate` to forge.",
       },
       {
-        type: "table",
-        headers: ["Variable", "Values", "Default", "Meaning"],
-        rows: [
-          ["AXIAM__SERVER__TLS__CLIENT_AUTH", "off | optional | required", "off", "Client-certificate policy on the native listener."],
-          ["AXIAM__SERVER__TLS__CLIENT_CA_PATH", "PEM bundle path", "—", "Trust anchors for client certificates."],
-        ],
+        type: "p",
+        text: "The listener settings that make this work — `AXIAM__SERVER__TLS__CLIENT_AUTH`, `CLIENT_CA_PATH` and `CLIENT_CA_BUNDLE_PATH` — are documented once, under [mTLS for devices and services](#/docs/pki). This page used to restate them, and the copy fell behind: it never gained `CLIENT_CA_BUNDLE_PATH`, so a reader configuring FAPI 2.0 from here would not learn that flagging an organization CA as an mTLS trust anchor fills the first two in for them, and hot-reloads the anchor set without a restart.",
       },
       {
         type: "warn",

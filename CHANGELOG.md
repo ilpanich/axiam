@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta05] - 2026-08-30
+
 ### Added
+
+- A role assignment can name the tenants it reaches
 
 - Tenant-scoped role assignments: an organization-level account can now be
   confined to particular tenants of its organization. `tenant_scope` on the
@@ -17,7 +21,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant roster, and is refused `X-Axiam-Tenant` for any other. Schema 51,
   additive with no backfill — every existing assignment stays unrestricted.
 
+### Changed
+
+- Creating an organization or a tenant needs an organization principal
+
+- Revert "fix(authz): a tenant scope narrows reach across tenants, not within one"
+
+- Undo a gratuitous reformat of the nav destination table
+
+- The nav matrix has to know that one gate is not a permission
+
+- Six suites need an organization principal, and a real trust anchor
+
+- Track the matrix runbook, in claude_dev where it belongs
+
+- The organization lifecycle tests need an organization principal
+
+- Let the typecheck see the suite that reads the repo
+
+- Record wave 4 — the four open items, and what closing them found
+
+- Measure the in-page gates that only exist after a selection
+
+- Read the mail publishers instead of quoting them
+
+- Record wave 3 — the unverified half, and what closing it turned up
+
+- Reuse the captured session instead of signing in mid-test
+
+- Close three gaps where the matrix was measuring nothing
+
+- Measure the mTLS handshake half of §4
+
+- Assert no mail template leaves a placeholder standing
+
+- Sharpen the mTLS and matrix assertions; wave 2 is clean
+
+- Stop asserting one locale's number formatting; add the mTLS check
+
+- Record wave-1 findings and the fixes applied
+
+- Tenancy, group inheritance, service-account and PKI matrix + mail checks
+
+- RBAC/PKI permission matrix harness against the prod stack
+
+- Record the Sigstore half of H-1 as landed (T-148)
+
 ### Fixed
+
+- User creation was the next ceiling, for the same reason
+
+- The test stack was one login away from red
+
+- B5's login failure was unreportable, not just failing
+
+- A restricted organization principal can read its own reach
+
+- A tenant scope narrows reach across tenants, not within one
+
+- The preview proxy was swallowing /auth/mfa-setup
+
+- Refresh the management registry's spec digest
+
+- Clear the six failing gates on the E2E matrix branch
+
+- A passkey is a factor, so enrolling one requires MFA
+
+- Stop telling a tenant super-admin it can do everything
+
+- Type the captured request bodies, and make tsc a gate over the specs
+
+- Stop seeding organization-level actions into tenant roles
+
+- Stop a second replica logging out the first, and recover when it happens
+
+- Require a certificate to chain to a CA enabled as an mTLS trust anchor
+
+- Gate the Audit Logs nav entry, and keep the selected tenant
+
+- Make first-run and tenant provisioning idempotent and honest
+
+- Stop demanding a CSRF cookie from a bearer-only caller
+
+- Confine organization-level actions to organization-scoped principals
+
+- Stop nginx swallowing /oauth2-clients into the OAuth2 proxy
+
+- Organization scope, OPAQUE enrolment tenancy, settings inheritance, and RBAC for service accounts (#393)
 
 - Enrolling a passkey or a security key now makes multi-factor authentication
   **required** at sign-in, the way confirming an authenticator app always did.

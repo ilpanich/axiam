@@ -262,6 +262,7 @@ async fn federation_config_crud_and_backfill() {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: None,
+            button_icon: None,
         })
         .await
         .unwrap();
@@ -339,6 +340,7 @@ async fn a_provider_without_a_trust_block_reads_back_disabled() {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: None,
+            button_icon: None,
         })
         .await
         .unwrap();
@@ -401,6 +403,7 @@ async fn a_trust_block_round_trips_through_the_datastore() {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: None,
+            button_icon: None,
         })
         .await
         .unwrap();
@@ -483,6 +486,7 @@ async fn a_saml_provider_is_never_a_token_exchange_candidate() {
         apple_team_id: None,
         apple_key_id: None,
         require_pkce: None,
+        button_icon: None,
     })
     .await
     .unwrap();
@@ -530,6 +534,7 @@ async fn a_globally_disabled_provider_is_not_a_candidate() {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: None,
+            button_icon: None,
         })
         .await
         .unwrap();
@@ -609,6 +614,7 @@ async fn federation_config_list_excludes_secret_columns() {
         apple_team_id: None,
         apple_key_id: None,
         require_pkce: None,
+        button_icon: None,
     })
     .await
     .unwrap();
@@ -650,6 +656,7 @@ async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: None,
+            button_icon: None,
         })
         .await
         .unwrap();
@@ -677,6 +684,7 @@ async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: None,
+            button_icon: None,
         })
         .await
         .unwrap();

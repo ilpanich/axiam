@@ -1303,6 +1303,7 @@ mod tests {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: false,
+            button_icon: None,
         }
     }
 
@@ -1387,13 +1388,7 @@ mod tests {
         ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
             Ok(Vec::new())
         }
-        async fn list_enabled(
-            &self,
-            _tenant_id: Uuid,
-        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
-            Ok(Vec::new())
-        }
-        async fn list_inheritable_enabled(
+        async fn list_all(
             &self,
             _tenant_id: Uuid,
         ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
@@ -1680,13 +1675,7 @@ mod tests {
         ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
             Ok(Vec::new())
         }
-        async fn list_enabled(
-            &self,
-            _tenant_id: Uuid,
-        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
-            Ok(Vec::new())
-        }
-        async fn list_inheritable_enabled(
+        async fn list_all(
             &self,
             _tenant_id: Uuid,
         ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {

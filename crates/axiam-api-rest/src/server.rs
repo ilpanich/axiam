@@ -379,6 +379,76 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                         web::post()
                             .to(handlers::federation::oidc_callback_public::<C>),
                     ),
+            )
+            // The `response_mode=form_post` return (Apple). A cross-site form
+            // POST performed by the IdP, so it answers 303 with a handoff code
+            // rather than setting SameSite=Strict cookies the browser would
+            // then refuse to send.
+            .service(
+                web::resource("/federation/oidc/callback/form")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "federation_oidc_callback_form",
+                        rate_limit_cfg.login_per_min,
+                    ))
+                    .route(
+                        web::post()
+                            .to(handlers::federation_login::oidc_form_callback_public::<C>),
+                    ),
+            )
+            // The plain-OAuth2 variant (GitHub, Facebook, generic_oauth2).
+            .service(
+                web::resource("/federation/oauth2/start")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "federation_oauth2_start",
+                        rate_limit_cfg.login_per_min,
+                    ))
+                    .route(
+                        web::post()
+                            .to(handlers::federation_login::oauth2_start_public::<C>),
+                    ),
+            )
+            .service(
+                web::resource("/federation/oauth2/callback")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "federation_oauth2_callback",
+                        rate_limit_cfg.login_per_min,
+                    ))
+                    .route(
+                        web::post()
+                            .to(handlers::federation_login::oauth2_callback_public::<C>),
+                    ),
+            )
+            // Redeem a handoff code for session cookies. Same-origin, which is
+            // the whole point: this is the response that may set them.
+            .service(
+                web::resource("/federation/handoff")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "federation_handoff",
+                        rate_limit_cfg.login_per_min,
+                    ))
+                    .route(
+                        web::post()
+                            .to(handlers::federation_login::sso_handoff_public::<C>),
+                    ),
+            )
+            // Which sign-in buttons to render. Unauthenticated by necessity —
+            // the caller is at a login page — and rate-limited on the login
+            // budget, which is what bounds organization-slug guessing.
+            .service(
+                web::resource("/federation/providers")
+                    .wrap(build_governor(rate_limit_cfg.login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "federation_providers",
+                        rate_limit_cfg.login_per_min,
+                    ))
+                    .route(
+                        web::get()
+                            .to(handlers::federation_login::list_providers_public::<C>),
+                    ),
             );
     // First-time SSO SAML public routes — only when the `saml` feature is on.
     #[cfg(feature = "saml")]
@@ -400,6 +470,20 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     rate_limit_cfg.login_per_min,
                 ))
                 .route(web::post().to(handlers::federation::saml_acs_public::<C>)),
+        )
+        // The ACS a real IdP posts to: form-encoded per the HTTP-POST binding,
+        // where the JSON sibling above takes a JSON body no IdP will ever send.
+        // Kept as two routes rather than one content-negotiating route because
+        // they answer differently — the JSON one sets cookies for an SDK
+        // caller, this one 303s with a handoff code for a browser.
+        .service(
+            web::resource("/federation/saml/acs/form")
+                .wrap(build_governor(rate_limit_cfg.login_per_min))
+                .wrap(RateLimitShared::<C>::new(
+                    "federation_saml_acs_form",
+                    rate_limit_cfg.login_per_min,
+                ))
+                .route(web::post().to(handlers::federation_login::saml_acs_form_public::<C>)),
         );
     cfg.service(auth_scope);
     // OIDC Discovery (must be outside /oauth2 scope per spec)

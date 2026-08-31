@@ -203,8 +203,16 @@ effective_providers(org, tenant):
 - the `provider_kind` alone, for the branded kinds (`google`, `github`,
   `facebook`, `apple`, `microsoft`);
 - `provider_kind + ":" + provider_slug` for the three `generic_*` kinds, where
-  `provider_slug` is a required, lowercase, `[a-z0-9-]` operator-chosen
-  identifier.
+  `provider_slug` is an **optional** lowercase `[a-z0-9-]` identifier. A generic
+  config without one keys on `generic_oidc:` — exactly as a branded kind keys on
+  its kind alone.
+
+  The slug is optional rather than required for a compatibility reason worth
+  stating: a `POST /api/v1/federation-configs` that omits `provider_kind` — which
+  is every request written before this change — derives a *generic* kind, and
+  demanding a slug there would turn a working call into a `400`. The admin UI
+  fills one in from the display name, so configs created through it get distinct
+  keys without the API having to insist.
 
 A branded kind cannot appear twice in one tenant, which is exactly what makes
 "the tenant's Google overrides the organization's Google" a well-defined

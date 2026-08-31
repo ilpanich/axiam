@@ -1502,26 +1502,28 @@ pub trait FederationConfigRepository: Send + Sync {
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<FederationConfig>>> + Send;
 
-    /// Every **enabled** config of this tenant, oldest first.
+    /// Every config of this tenant, oldest first, without the secret columns.
     ///
     /// Backs the unauthenticated providers endpoint and the org→tenant
-    /// inheritance resolution, so it is deliberately not `list()` with a
-    /// filter: it is index-backed (`idx_federation_config_tenant_enabled`), it
-    /// never hydrates the encrypted secret columns, it is unpaginated because
-    /// its caller needs the whole set to compute overrides, and the ordering is
-    /// fixed so two calls produce the same button order.
-    fn list_enabled(
-        &self,
-        tenant_id: Uuid,
-    ) -> impl Future<Output = AxiamResult<Vec<FederationConfig>>> + Send;
-
-    /// Every **enabled** config of this tenant that tenants may inherit.
+    /// inheritance resolution. Deliberately not `list()` with a filter, and
+    /// deliberately unfiltered:
     ///
-    /// Only meaningful when `tenant_id` is an organization-scope tenant. Both
-    /// flags are required and they are different statements: `enabled` is "this
-    /// provider is live", `allow_tenant_inheritance` is "…and other tenants of
-    /// this organization may use it".
-    fn list_inheritable_enabled(
+    /// * **Unpaginated**, because both callers need the whole set at once — an
+    ///   override is decided by comparing a tenant's configs against the
+    ///   organization's, and a page boundary in the middle of that comparison
+    ///   would produce a different answer per page. The set is an operator's
+    ///   list of identity providers, which is a handful; if that ever stops
+    ///   being true this becomes a keyset scan, not a page.
+    /// * **Unfiltered by `enabled`**, because a *disabled* tenant config still
+    ///   shadows an inherited organization one. A tenant administrator who
+    ///   created a Google config and disabled it has said something about
+    ///   Google in this tenant, and the something is "no"; falling back to the
+    ///   inherited config there would make "disable" mean "re-enable the other
+    ///   one". Callers filter for their own question.
+    /// * **Secret-free**, like `list()`: neither caller decrypts anything.
+    ///
+    /// Ordering is fixed because it is the order sign-in buttons render in.
+    fn list_all(
         &self,
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<FederationConfig>>> + Send;

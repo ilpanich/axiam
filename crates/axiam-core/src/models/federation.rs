@@ -177,6 +177,18 @@ impl ProviderKind {
         }
     }
 
+    /// Whether AXIAM ships this provider's own sign-in mark.
+    ///
+    /// The branded kinds do, and their marks are **not** replaceable: Google,
+    /// Apple and Microsoft all publish sign-in-button rules that require their
+    /// own logo, wording and colours, so letting an operator substitute a
+    /// picture would produce a button that violates the guidelines it is meant
+    /// to follow. The generic kinds have no mark to ship, which is exactly why
+    /// they may carry a custom one.
+    pub const fn has_bundled_mark(self) -> bool {
+        !self.uses_slug()
+    }
+
     /// Whether this kind takes an operator-chosen [`FederationConfig::provider_slug`].
     ///
     /// Only the generic kinds do. A branded kind is its own key, which is what
@@ -291,6 +303,110 @@ pub fn validate_protocol_for_kind(
             submitted: protocol,
         })
     }
+}
+
+/// Edge length, in pixels, of a custom sign-in-button icon.
+///
+/// The admin UI crops and rescales whatever an operator uploads to exactly
+/// this, so the stored image is always square and always small. 64 px renders
+/// crisply at the ~20 px a button actually draws it at, on a 2× display,
+/// without storing a photograph.
+pub const PROVIDER_ICON_SIZE_PX: u32 = 64;
+
+/// Bound on the **decoded** size of a custom icon, in bytes.
+///
+/// A 64×64 PNG is typically one to four kilobytes; sixteen is generous even for
+/// a photographic one. The limit is expressed on the decoded image because that
+/// is the number an operator can act on — "your PNG is too big" — rather than
+/// on the base64 text, which is a detail of how it is carried.
+///
+/// It is a limit rather than a suggestion because this image is served by the
+/// **unauthenticated** providers endpoint on every login-page render. Without a
+/// bound, one operator pasting a photograph makes every visitor of that login
+/// page download it.
+pub const MAX_PROVIDER_ICON_BYTES: usize = 16 * 1024;
+
+/// Bound on the stored data-URL, derived from [`MAX_PROVIDER_ICON_BYTES`].
+///
+/// Base64 is 4 characters per 3 bytes; the slack covers the longest allowed
+/// `data:image/…;base64,` prefix. The decoded-size check is what actually
+/// decides — this one exists so a multi-megabyte paste is rejected before
+/// anything walks it byte by byte.
+pub const MAX_PROVIDER_ICON_LEN: usize = MAX_PROVIDER_ICON_BYTES.div_ceil(3) * 4 + 64;
+
+/// Data-URL prefixes a custom icon may use.
+///
+/// Raster formats only. `image/svg+xml` is deliberately absent: an SVG is a
+/// document with its own parser, and this one is served to every visitor of a
+/// login page. A PNG cannot be made to do anything but be a picture.
+pub const ALLOWED_PROVIDER_ICON_PREFIXES: &[&str] = &[
+    "data:image/png;base64,",
+    "data:image/jpeg;base64,",
+    "data:image/webp;base64,",
+];
+
+/// Validate a custom sign-in-button icon.
+///
+/// Structural only — this does not decode the image. What it guarantees is that
+/// the stored value is a bounded, base64 raster data-URL, which is what makes it
+/// safe to hand to an `<img src>` under the SPA's
+/// `default-src 'self'; img-src 'self' data:` CSP.
+pub fn validate_provider_icon(data_url: &str) -> Result<(), String> {
+    // Cheap length check first, so a multi-megabyte paste is rejected before
+    // anything walks it byte by byte.
+    if data_url.len() > MAX_PROVIDER_ICON_LEN {
+        return Err(icon_too_large_message(decoded_len(data_url.len())));
+    }
+    let Some(prefix) = ALLOWED_PROVIDER_ICON_PREFIXES
+        .iter()
+        .find(|p| data_url.starts_with(**p))
+    else {
+        return Err(format!(
+            "the button icon must be a base64 data URL in one of: {}. SVG is not \
+             accepted — it is a document with its own parser, and this image is \
+             served to everyone who loads a login page",
+            ALLOWED_PROVIDER_ICON_PREFIXES.join(", ")
+        ));
+    };
+    let payload = &data_url[prefix.len()..];
+    if payload.is_empty() {
+        return Err("the button icon data URL carries no image data".into());
+    }
+    // Standard base64 with padding, which is what `canvas.toDataURL` emits.
+    if !payload
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+    {
+        return Err("the button icon data URL is not valid base64".into());
+    }
+    let padding = payload.bytes().filter(|b| *b == b'=').count();
+    let decoded = decoded_len(payload.len()).saturating_sub(padding);
+    if decoded > MAX_PROVIDER_ICON_BYTES {
+        return Err(icon_too_large_message(decoded));
+    }
+    Ok(())
+}
+
+/// Decoded byte count for a base64 payload of `n` characters, before padding is
+/// subtracted.
+const fn decoded_len(n: usize) -> usize {
+    n / 4 * 3
+}
+
+/// The one message both size checks produce.
+///
+/// Stated in kibibytes of *image*, because the operator has a PNG in a file
+/// picker, not a data URL in a text field — and it says why the limit exists,
+/// because "too big" invites the question this answers.
+fn icon_too_large_message(decoded: usize) -> String {
+    format!(
+        "the button icon decodes to about {} KiB; the maximum is {} KiB. It is served \
+         to everyone who loads a login page, so it has to stay small — the admin UI \
+         crops to {PROVIDER_ICON_SIZE_PX}×{PROVIDER_ICON_SIZE_PX}, which is normally a \
+         few kilobytes",
+        decoded.div_ceil(1024),
+        MAX_PROVIDER_ICON_BYTES / 1024,
+    )
 }
 
 /// Bound on a `provider_slug`. Long enough for a readable name, short enough
@@ -690,6 +806,20 @@ pub struct FederationConfig {
     /// hatch for an operator who manages the JWT themselves.
     #[serde(default)]
     pub apple_key_id: Option<String>,
+    /// Custom sign-in-button icon for a generic provider, as a bounded raster
+    /// data URL.
+    ///
+    /// Only the `generic_*` kinds may carry one — see
+    /// [`ProviderKind::has_bundled_mark`]. `None` for every config written
+    /// before this field existed, and the button falls back to a neutral glyph
+    /// beside "Sign in with <provider>".
+    ///
+    /// Returned by the **unauthenticated** providers endpoint, because a login
+    /// button cannot render without it. It is branding, not configuration:
+    /// nothing about the provider's identity or credentials is derivable from
+    /// it.
+    #[serde(default)]
+    pub button_icon: Option<String>,
     /// Send PKCE (`S256`) on the authorization request.
     ///
     /// Forced on for [`FederationProtocol::OAuth2`] regardless of this flag —
@@ -720,12 +850,13 @@ impl FederationConfig {
     /// `kind:slug`, because an organization legitimately federates to two
     /// different Okta tenants.
     ///
-    /// A generic row written before `provider_slug` existed has none, and keys
-    /// on `kind:` — which is a key it shares with any other slug-less generic
-    /// row of the same kind. That is deliberate and harmless: such rows are all
-    /// tenant-local (nothing pre-v52 can be inherited, because
-    /// `allow_tenant_inheritance` defaults to false), so the key is never
-    /// consulted for them.
+    /// The slug is optional, so a generic config without one keys on `kind:` —
+    /// exactly as a branded kind keys on its kind alone. That is deliberate:
+    /// requiring a slug would turn every pre-existing `POST /federation-configs`
+    /// call into a 400, because a request that omits `provider_kind` derives a
+    /// generic kind. The admin UI fills a slug in from the display name, so
+    /// configs created through it get distinct keys without the API having to
+    /// demand one.
     pub fn override_key(&self) -> String {
         if self.provider_kind.uses_slug() {
             format!(
@@ -795,6 +926,12 @@ impl std::fmt::Debug for FederationConfig {
             .field("apple_team_id", &self.apple_team_id)
             .field("apple_key_id", &self.apple_key_id)
             .field("require_pkce", &self.require_pkce)
+            // Length only: a 32 KiB base64 blob in a log line is noise, and
+            // the one thing a reader wants to know is whether one is set.
+            .field(
+                "button_icon",
+                &self.button_icon.as_ref().map(|i| format!("<{} chars>", i.len())),
+            )
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -839,6 +976,8 @@ pub struct CreateFederationConfig {
     pub apple_key_id: Option<String>,
     /// Send PKCE on the authorization request (forced on for OAuth2).
     pub require_pkce: Option<bool>,
+    /// Custom sign-in-button icon (generic kinds only).
+    pub button_icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -883,6 +1022,8 @@ pub struct UpdateFederationConfig {
     pub apple_key_id: Option<Option<String>>,
     /// Send PKCE on the authorization request.
     pub require_pkce: Option<bool>,
+    /// Custom sign-in-button icon. `Some(None)` clears it.
+    pub button_icon: Option<Option<String>>,
 }
 
 /// Tracks the link between an AXIAM user and their external IdP identity.
@@ -955,6 +1096,7 @@ mod tests {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: false,
+            button_icon: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1203,6 +1345,7 @@ mod tests {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: false,
+            button_icon: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1392,6 +1535,81 @@ mod tests {
         g.apple_team_id = Some("ABCDE12345".into());
         g.apple_key_id = Some("KEYID67890".into());
         assert!(!g.mints_client_secret());
+    }
+
+    /// The rule that keeps a mandated mark mandated: only the kinds AXIAM
+    /// ships no logo for may carry a custom one.
+    #[test]
+    fn only_the_generic_kinds_lack_a_bundled_mark() {
+        for kind in [
+            ProviderKind::Google,
+            ProviderKind::Github,
+            ProviderKind::Facebook,
+            ProviderKind::Apple,
+            ProviderKind::Microsoft,
+        ] {
+            assert!(kind.has_bundled_mark(), "{kind:?} ships its own mark");
+        }
+        for kind in [
+            ProviderKind::GenericOidc,
+            ProviderKind::GenericOauth2,
+            ProviderKind::GenericSaml,
+        ] {
+            assert!(!kind.has_bundled_mark(), "{kind:?} has no mark to ship");
+        }
+    }
+
+    #[test]
+    fn a_button_icon_must_be_a_bounded_raster_data_url() {
+        assert!(validate_provider_icon("data:image/png;base64,iVBORw0KGgo=").is_ok());
+        assert!(validate_provider_icon("data:image/jpeg;base64,/9j/4AAQ").is_ok());
+        assert!(validate_provider_icon("data:image/webp;base64,UklGRg==").is_ok());
+
+        // SVG is a document with a parser, served to everyone who loads a
+        // login page. The message has to say so, or somebody will "fix" it.
+        let err = validate_provider_icon("data:image/svg+xml;base64,PHN2Zz4=").unwrap_err();
+        assert!(err.contains("SVG is not accepted"));
+
+        // A remote URL would be blocked by the SPA's CSP anyway — silently,
+        // which is the worst way to find out.
+        assert!(validate_provider_icon("https://cdn.example/logo.png").is_err());
+        assert!(validate_provider_icon("javascript:alert(1)").is_err());
+        assert!(validate_provider_icon("data:image/png;base64,").is_err());
+        assert!(validate_provider_icon("data:image/png;base64,not base64!").is_err());
+
+        // Bounded, because this is served by an unauthenticated endpoint on
+        // every render of a login page.
+        let too_big = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(MAX_PROVIDER_ICON_BYTES.div_ceil(3) * 4 + 8)
+        );
+        let err = validate_provider_icon(&too_big).unwrap_err();
+        assert!(err.contains("maximum"), "{err}");
+        // Stated in KiB of image: the operator has a PNG, not a data URL.
+        assert!(err.contains("KiB"), "{err}");
+        assert!(
+            err.contains(&PROVIDER_ICON_SIZE_PX.to_string()),
+            "the message should tell the operator what size to aim at: {err}"
+        );
+
+        // …and an icon just under the limit is accepted, so this is a bound
+        // rather than an off-by-one that rejects a legitimate image.
+        let at_limit = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(MAX_PROVIDER_ICON_BYTES / 3 * 4)
+        );
+        assert!(validate_provider_icon(&at_limit).is_ok());
+    }
+
+    /// A 32 KiB blob in `{:?}` is noise, and the only thing a reader wants is
+    /// whether one is set at all.
+    #[test]
+    fn debug_summarises_the_button_icon_rather_than_printing_it() {
+        let mut c = config(ProviderKind::GenericOidc, Some("okta"));
+        c.button_icon = Some(format!("data:image/png;base64,{}", "Q".repeat(400)));
+        let debug = format!("{c:?}");
+        assert!(!debug.contains(&"Q".repeat(400)));
+        assert!(debug.contains("chars"));
     }
 
     #[test]

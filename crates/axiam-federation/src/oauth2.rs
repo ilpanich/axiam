@@ -55,14 +55,20 @@ use crate::secrets::decrypt_client_secret_or_legacy;
 /// fit in a quarter-megabyte is not a userinfo document.
 const MAX_RESPONSE_SIZE: usize = 256 * 1024;
 
-/// GitHub's verified-address endpoint.
+/// GitHub's verified-address endpoint, derived from the configured
+/// `userinfo_endpoint`.
 ///
-/// `GET /user` frequently returns a null or unverified `email` — the user has
-/// it private — so the primary *verified* address has to come from here. This
-/// is the one provider-specific HTTP call in the crate, and it is here rather
-/// than in a config field because it is not configuration: it is a fact about
-/// GitHub's API shape.
-const GITHUB_EMAILS_ENDPOINT: &str = "https://api.github.com/user/emails";
+/// `GET /user` frequently returns a null or unverified `email` — the user keeps
+/// it private — so the primary *verified* address has to come from `/user/emails`.
+///
+/// Derived rather than hard-coded to `https://api.github.com/user/emails`,
+/// because that constant would be wrong for every GitHub Enterprise Server
+/// deployment, whose API lives at `https://<host>/api/v3/user`. The `/emails`
+/// resource is a sibling of `/user` on whichever host the operator configured,
+/// which is a fact about GitHub's API shape rather than about github.com.
+fn github_emails_endpoint(userinfo_endpoint: &str) -> String {
+    format!("{}/emails", userinfo_endpoint.trim_end_matches('/'))
+}
 
 /// Sent on every GitHub API call.
 ///
@@ -258,8 +264,13 @@ where
             .await?;
 
         if config.provider_kind == ProviderKind::Github {
-            self.github_merge_verified_email(&mut claims, &access_token, allow_private)
-                .await?;
+            self.github_merge_verified_email(
+                &mut claims,
+                &github_emails_endpoint(userinfo_endpoint),
+                &access_token,
+                allow_private,
+            )
+            .await?;
         }
 
         let identity = map_identity(config.provider_kind, &config.attribute_map, &claims)
@@ -419,11 +430,12 @@ where
     async fn github_merge_verified_email(
         &self,
         claims: &mut serde_json::Value,
+        emails_endpoint: &str,
         access_token: &str,
         allow_private: bool,
     ) -> Result<(), FederationError> {
         let bearer = format!("Bearer {access_token}");
-        let response = crate::ssrf::guarded_fetch(GITHUB_EMAILS_ENDPOINT, allow_private, |c, u| {
+        let response = crate::ssrf::guarded_fetch(emails_endpoint, allow_private, |c, u| {
             c.get(u)
                 .header(reqwest::header::AUTHORIZATION, &bearer)
                 .header(reqwest::header::ACCEPT, "application/vnd.github+json")
@@ -509,6 +521,7 @@ mod tests {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: false,
+            button_icon: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -595,6 +608,25 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(parsed.access_token, "at");
+    }
+
+    /// Derived from the configured endpoint, so GitHub Enterprise Server works
+    /// — a hard-coded `api.github.com` would have silently excluded it.
+    #[test]
+    fn the_email_endpoint_is_a_sibling_of_the_configured_userinfo_endpoint() {
+        assert_eq!(
+            github_emails_endpoint("https://api.github.com/user"),
+            "https://api.github.com/user/emails"
+        );
+        assert_eq!(
+            github_emails_endpoint("https://ghe.example.com/api/v3/user"),
+            "https://ghe.example.com/api/v3/user/emails"
+        );
+        // A trailing slash is the same endpoint, not a different one.
+        assert_eq!(
+            github_emails_endpoint("https://api.github.com/user/"),
+            "https://api.github.com/user/emails"
+        );
     }
 
     #[test]

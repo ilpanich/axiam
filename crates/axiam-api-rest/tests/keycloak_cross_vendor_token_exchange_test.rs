@@ -632,6 +632,7 @@ async fn setup(keycloak_user_id: Uuid) -> Fixture {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: None,
+            button_icon: None,
         })
         .await
         .unwrap();

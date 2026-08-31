@@ -57,6 +57,7 @@ struct FederationConfigRow {
     apple_team_id: Option<String>,
     apple_key_id: Option<String>,
     require_pkce: Option<bool>,
+    button_icon: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -99,6 +100,7 @@ struct FederationConfigRowWithId {
     apple_team_id: Option<String>,
     apple_key_id: Option<String>,
     require_pkce: Option<bool>,
+    button_icon: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -141,6 +143,7 @@ struct FederationConfigListRow {
     apple_team_id: Option<String>,
     apple_key_id: Option<String>,
     require_pkce: Option<bool>,
+    button_icon: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -171,6 +174,7 @@ type LoginProviderColumns = (
     Option<String>,
     Option<String>,
     Option<bool>,
+    Option<String>,
 );
 
 /// What the login-provider columns hydrate to.
@@ -186,6 +190,7 @@ struct LoginProviderFields {
     apple_team_id: Option<String>,
     apple_key_id: Option<String>,
     require_pkce: bool,
+    button_icon: Option<String>,
 }
 
 /// Hydrate the schema-v52 columns from a row.
@@ -213,6 +218,7 @@ fn login_provider_fields_from_columns(
         apple_team_id,
         apple_key_id,
         require_pkce,
+        button_icon,
     ) = cols;
     LoginProviderFields {
         provider_kind: kind
@@ -229,6 +235,7 @@ fn login_provider_fields_from_columns(
         apple_team_id,
         apple_key_id,
         require_pkce: require_pkce.unwrap_or(false),
+        button_icon,
     }
 }
 
@@ -295,6 +302,7 @@ impl FederationConfigRow {
                 self.apple_team_id.clone(),
                 self.apple_key_id.clone(),
                 self.require_pkce,
+                self.button_icon.clone(),
             ),
             protocol,
         );
@@ -333,6 +341,7 @@ impl FederationConfigRow {
             apple_team_id: lp.apple_team_id,
             apple_key_id: lp.apple_key_id,
             require_pkce: lp.require_pkce,
+            button_icon: lp.button_icon,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -360,6 +369,7 @@ impl FederationConfigListRow {
                 self.apple_team_id.clone(),
                 self.apple_key_id.clone(),
                 self.require_pkce,
+                self.button_icon.clone(),
             ),
             protocol,
         );
@@ -398,6 +408,7 @@ impl FederationConfigListRow {
             apple_team_id: lp.apple_team_id,
             apple_key_id: lp.apple_key_id,
             require_pkce: lp.require_pkce,
+            button_icon: lp.button_icon,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -421,6 +432,7 @@ impl FederationConfigRowWithId {
                 self.apple_team_id.clone(),
                 self.apple_key_id.clone(),
                 self.require_pkce,
+                self.button_icon.clone(),
             ),
             protocol,
         );
@@ -459,6 +471,7 @@ impl FederationConfigRowWithId {
             apple_team_id: lp.apple_team_id,
             apple_key_id: lp.apple_key_id,
             require_pkce: lp.require_pkce,
+            button_icon: lp.button_icon,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -487,27 +500,16 @@ impl<C: Connection> SurrealFederationConfigRepository<C> {
         Self { db }
     }
 
-    /// Shared body of `list_enabled` and `list_inheritable_enabled`.
+    /// Body of `list_all`.
     ///
-    /// One query with one extra predicate rather than two near-identical
-    /// copies: the projection is the narrowed, secret-free one (SECHRD-09) and
-    /// having it written twice is how one of them ends up hydrating the
-    /// encrypted columns after a later edit.
-    async fn list_enabled_inner(
-        &self,
-        tenant_id: Uuid,
-        inheritable_only: bool,
-    ) -> AxiamResult<Vec<FederationConfig>> {
-        let extra = if inheritable_only {
-            "AND allow_tenant_inheritance = true "
-        } else {
-            ""
-        };
+    /// The projection is the narrowed, secret-free one (SECHRD-09) — the same
+    /// one `list()` uses. A second copy of it is how one of them ends up
+    /// hydrating the encrypted columns after a later edit.
+    async fn list_all_inner(&self, tenant_id: Uuid) -> AxiamResult<Vec<FederationConfig>> {
         // `created_at ASC` is not cosmetic: it is the order the sign-in buttons
         // render in, and an unordered query would reshuffle a login page
         // between requests.
-        let sql = format!(
-            "SELECT meta::id(id) AS record_id, tenant_id, provider, protocol, \
+        let sql = "SELECT meta::id(id) AS record_id, tenant_id, provider, protocol, \
              metadata_url, client_id, attribute_map, enabled, allowed_algorithms, \
              idp_signing_cert_pem, token_exchange_enabled, \
              token_exchange_accepted_audiences, token_exchange_subject_mapping, \
@@ -515,16 +517,16 @@ impl<C: Connection> SurrealFederationConfigRepository<C> {
              token_exchange_max_lifetime_secs, provider_kind, provider_slug, \
              allow_tenant_inheritance, scopes, authorization_endpoint, \
              token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
-             apple_team_id, apple_key_id, require_pkce, created_at, updated_at \
+             apple_team_id, apple_key_id, require_pkce, button_icon, \
+             created_at, updated_at \
              FROM federation_config \
-             WHERE tenant_id = $tenant_id AND enabled = true {extra}\
-             ORDER BY created_at ASC"
-        );
+             WHERE tenant_id = $tenant_id \
+             ORDER BY created_at ASC";
 
         let result = self
             .db
             .current()
-            .query(&sql)
+            .query(sql)
             .bind(("tenant_id", tenant_id.to_string()))
             .await
             .map_err(DbError::from)?;
@@ -594,6 +596,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  apple_team_id = $apple_team_id, \
                  apple_key_id = $apple_key_id, \
                  require_pkce = $require_pkce, \
+                 button_icon = $button_icon, \
                  enabled = true, \
                  created_at = time::now(), \
                  updated_at = time::now()",
@@ -636,6 +639,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             .bind(("apple_team_id", input.apple_team_id))
             .bind(("apple_key_id", input.apple_key_id))
             .bind(("require_pkce", input.require_pkce.unwrap_or(false)))
+            .bind(("button_icon", input.button_icon))
             .await
             .map_err(DbError::from)?;
 
@@ -795,6 +799,10 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             set_clauses.push("require_pkce = $require_pkce".into());
             binds.push(("require_pkce".into(), serde_json::json!(v)));
         }
+        if let Some(ref v) = input.button_icon {
+            set_clauses.push("button_icon = $button_icon".into());
+            binds.push(("button_icon".into(), serde_json::json!(v)));
+        }
 
         let sql = format!(
             "UPDATE type::record('federation_config', $id) SET {} \
@@ -886,7 +894,8 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  token_exchange_max_lifetime_secs, provider_kind, provider_slug, \
                  allow_tenant_inheritance, scopes, authorization_endpoint, \
                  token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
-                 apple_team_id, apple_key_id, require_pkce, created_at, updated_at \
+                 apple_team_id, apple_key_id, require_pkce, button_icon, \
+             created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  ORDER BY created_at DESC \
@@ -931,7 +940,8 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  token_exchange_max_lifetime_secs, provider_kind, provider_slug, \
                  allow_tenant_inheritance, scopes, authorization_endpoint, \
                  token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
-                 apple_team_id, apple_key_id, require_pkce, created_at, updated_at \
+                 apple_team_id, apple_key_id, require_pkce, button_icon, \
+             created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  AND token_exchange_enabled = true \
@@ -952,15 +962,8 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             .collect()
     }
 
-    async fn list_enabled(&self, tenant_id: Uuid) -> AxiamResult<Vec<FederationConfig>> {
-        self.list_enabled_inner(tenant_id, false).await
-    }
-
-    async fn list_inheritable_enabled(
-        &self,
-        tenant_id: Uuid,
-    ) -> AxiamResult<Vec<FederationConfig>> {
-        self.list_enabled_inner(tenant_id, true).await
+    async fn list_all(&self, tenant_id: Uuid) -> AxiamResult<Vec<FederationConfig>> {
+        self.list_all_inner(tenant_id).await
     }
 
     async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {

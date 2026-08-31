@@ -194,6 +194,7 @@ fn make_config(plaintext: &str) -> FederationConfig {
         apple_team_id: None,
         apple_key_id: None,
         require_pkce: false,
+        button_icon: None,
     }
 }
 
@@ -234,13 +235,7 @@ impl FederationConfigRepository for MockFedRepo {
     ) -> AxiamResult<Vec<FederationConfig>> {
         Ok(Vec::new())
     }
-    async fn list_enabled(&self, _tenant_id: Uuid) -> AxiamResult<Vec<FederationConfig>> {
-        Ok(Vec::new())
-    }
-    async fn list_inheritable_enabled(
-        &self,
-        _tenant_id: Uuid,
-    ) -> AxiamResult<Vec<FederationConfig>> {
+    async fn list_all(&self, _tenant_id: Uuid) -> AxiamResult<Vec<FederationConfig>> {
         Ok(Vec::new())
     }
     async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {

@@ -1453,6 +1453,7 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
             apple_team_id: None,
             apple_key_id: None,
             require_pkce: None,
+            button_icon: None,
         })
         .await
         .unwrap();

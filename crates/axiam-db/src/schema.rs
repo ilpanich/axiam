@@ -2917,6 +2917,10 @@ DEFINE FIELD IF NOT EXISTS apple_key_id ON TABLE federation_config \
     TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS require_pkce ON TABLE federation_config \
     TYPE bool DEFAULT false;
+-- A custom sign-in-button icon for a generic provider, as a bounded raster
+-- data URL. Branded kinds ship their own mark and may not carry one.
+DEFINE FIELD IF NOT EXISTS button_icon ON TABLE federation_config \
+    TYPE option<string>;
 -- Backs the providers endpoint, which runs unauthenticated on every login-page
 -- render: 'this tenant's enabled configs' and 'this organization tenant's
 -- inheritable ones' are both index lookups rather than table scans.

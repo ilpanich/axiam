@@ -59,8 +59,8 @@ pub use repository::{
     SurrealRateLimitBucketRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
     SurrealResourceRepository, SurrealRoleRepository, SurrealScimTokenRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealSsoHandoffCodeRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
     SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 

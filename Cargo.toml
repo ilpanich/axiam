@@ -120,7 +120,7 @@ arc-swap = "1"
 # auto-selects a default provider when *exactly one* of the two backend
 # features is active; enabling both re-triggers the same panic.
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
-argon2 = "0.5"
+argon2 = "0.6"
 totp-rs = { version = "6", features = ["gen_secret", "otpauth"] }
 rand = "0.10"
 hmac = "0.13"

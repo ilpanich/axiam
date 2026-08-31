@@ -1200,3 +1200,94 @@ async fn a_handoff_code_buys_exactly_one_session() {
         401
     );
 }
+
+// ---------------------------------------------------------------------------
+// Where a handoff code may be delivered
+// ---------------------------------------------------------------------------
+
+/// A handoff code is a bearer credential for a session, and on the SAML and
+/// Apple flows no identity provider ever sees — let alone validates — the SPA
+/// `redirect_uri`: the IdP is pointed at AXIAM's own ACS. AXIAM alone decides
+/// where the browser goes next, so an attacker who could name that target on
+/// this *unauthenticated* endpoint could lure a victim through the victim's own
+/// real IdP and read a working session credential out of their access log.
+///
+/// The unit tests in `handlers::federation_login` cover the decision itself.
+/// This one covers the wiring: that the check is actually on the SAML start
+/// path, and that it runs *after* workspace and config resolution, so an
+/// unknown slug still gets the uniform 401 rather than being told which check
+/// it failed.
+#[cfg(feature = "saml")]
+#[actix_rt::test]
+async fn a_saml_login_may_not_name_a_foreign_redirect_target() {
+    let f = setup("origin").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db.clone(), auth.clone());
+
+    let (status, body) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "saml-admin",
+        json!({
+            "provider": "Acme SAML",
+            "provider_kind": "generic_saml",
+            "provider_slug": "acme",
+            "protocol": "Saml",
+            "metadata_url": "https://idp.example.com/metadata",
+            "client_id": "https://axiam.test/saml/sp",
+            "client_secret": "saml-dummy-secret",
+        })
+    );
+    assert_eq!(status, 201, "{body}");
+    let config_id = body["id"].as_str().unwrap().to_string();
+
+    let start = |redirect_uri: &str| {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/saml/login")
+            .set_json(json!({
+                "org_slug": f.org_slug,
+                "tenant_slug": f.tenant_slug,
+                "federation_config_id": config_id,
+                "redirect_uri": redirect_uri,
+            }))
+            .to_request()
+    };
+
+    let resp = test::call_service(&app, start("https://attacker.example/catch")).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.to_string().contains("SSO_SPA_ORIGINS"),
+        "the refusal must name the knob an operator would need: {body}"
+    );
+
+    // The deployment's own origin — `jwt_issuer` in this fixture — gets past
+    // this check. It fails later, on the IdP metadata fetch, which is exactly
+    // the point: the origin is no longer what stops it.
+    let resp = test::call_service(&app, start("https://axiam.test/auth/sso/callback")).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        !body.to_string().contains("SSO_SPA_ORIGINS"),
+        "the deployment's own origin must not be refused: {status} {body}"
+    );
+
+    // Resolution comes first: an unknown organization still answers the uniform
+    // 401 and never reveals that a redirect_uri check exists.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/federation/saml/login")
+        .set_json(json!({
+            "org_slug": "no-such-org-at-all",
+            "federation_config_id": config_id,
+            "redirect_uri": "https://attacker.example/catch",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}

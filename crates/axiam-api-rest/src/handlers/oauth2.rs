@@ -2219,6 +2219,7 @@ mod dpop_htu_tests {
         let db = Surreal::new::<Mem>(()).await.expect("in-memory db");
         let auth_config = AuthConfig {
             oauth2_issuer_url: issuer.to_string(),
+            sso_spa_origins: Vec::new(),
             ..AuthConfig::default()
         };
         AppState::for_test(db, auth_config)

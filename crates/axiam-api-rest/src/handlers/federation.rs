@@ -2011,7 +2011,9 @@ pub async fn saml_login_public<C: Connection + Clone>(
     app_state: web::Data<AppState<C>>,
     body: web::Json<SamlLoginRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    use super::federation_login::{resolve_config_for_login, resolve_workspace, saml_acs_url};
+    use super::federation_login::{
+        require_deployment_spa_origin, resolve_config_for_login, resolve_workspace, saml_acs_url,
+    };
 
     let b = body.into_inner();
 
@@ -2046,6 +2048,14 @@ pub async fn saml_login_public<C: Connection + Clone>(
     // The AuthnRequest now names this deployment's real ACS URL — the
     // form-encoded one an IdP can actually post to. It was previously empty,
     // which is why `handle_saml_response` had no Recipient value to compare.
+    // A SAML IdP posts its assertion to AXIAM's ACS — the URL built on the next
+    // line — and never sees `redirect_uri`, so its own registered-redirect
+    // allowlist cannot reject an attacker's host. This check is the only one
+    // there is; see `require_deployment_spa_origin`. It runs after the
+    // workspace and config have resolved so that an unknown slug still answers
+    // the uniform 401 rather than being told which check it failed.
+    require_deployment_spa_origin(&app_state, &b.redirect_uri)?;
+
     let acs_url = saml_acs_url(&app_state)?;
 
     // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
@@ -2115,7 +2125,9 @@ pub async fn saml_acs_public<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     body: web::Json<SamlAcsPublicRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    use super::federation_login::consume_login_state;
+    use super::federation_login::{
+        consume_login_state, resolve_config_for_login, workspace_for_tenant,
+    };
 
     let b = body.into_inner();
 
@@ -2130,17 +2142,25 @@ pub async fn saml_acs_public<C: Connection + Clone>(
     let login_state = consume_login_state(&state, &b.relay_state).await?;
 
     let tenant_id = login_state.tenant_id;
-    let config_id = login_state.federation_config_id;
     let spa_redirect_uri = login_state.redirect_uri.clone();
+
+    // Re-resolved rather than loaded by id alone, exactly as
+    // `oidc_callback_public` does: an organization-level config with
+    // `allow_tenant_inheritance` is not found by a `get_by_id` scoped to the
+    // requesting tenant, so a login that *started* would fail here. The same
+    // visibility rules that let it start decide whether it may finish.
+    let workspace = workspace_for_tenant(&state, tenant_id).await?;
+    let resolved =
+        resolve_config_for_login(&state, workspace, login_state.federation_config_id).await?;
 
     // QUAL-07: SamlFederationService is now a hoisted AppState singleton.
     // Run the verified SAML flow (04-03): signature verify + replay check.
     let callback_result = state
         .federation
         .saml_federation_service
-        .handle_saml_response(
+        .handle_saml_response_for(
+            &resolved.config,
             tenant_id,
-            config_id,
             &b.saml_response_b64,
             Some(&b.relay_state),
             // Pass stored request_id for InResponseTo check (SEC-005/REQ-14 AC-5).

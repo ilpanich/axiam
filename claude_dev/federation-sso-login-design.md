@@ -260,6 +260,23 @@ in a later change:
 > **The config may live in the organization tenant. The user and the federation
 > link are always created in the *requesting* tenant.**
 
+SAML is the one protocol where both tenants do real work, and differently.
+`handle_saml_response_for(&config, requesting_tenant_id, …)` takes them as two
+arguments rather than one:
+
+* the **assertion-replay** row is recorded under `config.tenant_id`. For a config
+  the requesting tenant owns the two are the same value and nothing changes; for
+  an inherited one it is strictly stronger, because an assertion spent in one
+  tenant can then not be spent in a sibling.
+* the **user and the link** are created under `requesting_tenant_id`, like every
+  other protocol.
+
+Both ACS entry points — the JSON one and the form-encoded one a real IdP posts
+to — resolve the config through `effective_providers` first, exactly as the OIDC
+and OAuth2 callbacks do. The original `get_by_id(tenant_id, config_id)` could not
+find an inherited config at all, so SAML inheritance would have started and then
+failed at its last hop.
+
 `FederationLink`'s uniqueness index is
 `(tenant_id, federation_config_id, external_subject) UNIQUE`
 (`idx_fed_link_subject`, schema v7). With an inherited config that becomes
@@ -368,13 +385,57 @@ parameter from the URL with `history.replaceState`.
 
 **The residual risk, stated rather than hidden:** the code appears in a URL, and
 URLs reach browser history and `Referer`. That is why the TTL is 60 s rather than
-10 minutes, why it is single-use, why the SPA strips it on arrival, and why the
-redirect target is the already-validated `redirect_uri` from the login state row
-(absolute HTTPS, or HTTP only for loopback) rather than anything the IdP supplies.
-An attacker who reads the URL within 60 seconds and redeems it before the
-legitimate SPA does gets a session — and the legitimate user gets a visible
-failure, because the code is gone. This is the same trade the OAuth authorization
-code itself makes, and it is bounded the same way.
+10 minutes, why it is single-use, and why the SPA strips it on arrival. An
+attacker who reads the URL within 60 seconds and redeems it before the legitimate
+SPA does gets a session — and the legitimate user gets a visible failure, because
+the code is gone. This is the same trade the OAuth authorization code itself
+makes, and it is bounded the same way.
+
+#### Where a handoff code may be delivered
+
+The redirect target is **not** the caller's to choose, and this is the part that
+carries the mechanism.
+
+`redirect_uri` arrives on an *unauthenticated* start endpoint, and
+`validate_redirect_uri` checks nothing but the scheme — every `https://` host on
+the internet passes it, as its own `TODO(T19.14)` says. On the OIDC and OAuth2
+flows that weakness is backstopped by the provider: it is handed the same
+`redirect_uri` and compares it against its registered set before redirecting
+anything anywhere. The two cross-site flows have **no such backstop, by
+construction** — a SAML IdP is pointed at AXIAM's ACS and Apple at AXIAM's
+form-callback, so neither provider ever sees the SPA URI. AXIAM alone decides
+where the browser goes next, and it goes there carrying a credential that
+`POST /handoff` will exchange for session cookies for whoever presents it.
+
+Left unchecked, that is an authentication bypass rather than an open redirect:
+start a login with `redirect_uri = https://attacker.example/`, lure a victim
+through the victim's own real IdP, read a working session credential out of your
+own access log. The TTL, the single use, the hash-only storage and
+`Referrer-Policy: no-referrer` are all irrelevant when the attacker *is* the
+destination.
+
+`require_deployment_spa_origin` confines the target to:
+
+* the **origin** of `AuthConfig::effective_issuer()` — the same value
+  `server_form_callback_url` and `saml_acs_url` are built from, so it cannot be
+  wrong in a deployment where these flows work at all, and needs no configuration
+  in the same-origin shape `docker/nginx.conf` describes; plus
+* anything the operator names in `AXIAM__AUTH__SSO_SPA_ORIGINS`, for a deployment
+  that serves the SPA from a different host than the API.
+
+Comparison is by `Url::origin`, not by string: `https://axiam.example.com@attacker.example/`,
+a different port, a different scheme and a path suffix are all different origins,
+and a `starts_with` would have accepted the first of them. The check runs at login
+start (a `400` that names the knob an operator would need), again at the mint —
+so a state row written before the check existed is not honoured by a newer
+binary — and on the error redirect. It deliberately runs *after* workspace and
+config resolution, so an unknown slug still answers the uniform `401` rather than
+being told which check it failed.
+
+This is the rule AXIAM's own OAuth2 authorization server already applies to its
+`redirect_uri` (threat model T-52). Extending the registered-redirect allowlist to
+the OIDC and OAuth2 federation paths as well remains T19.14's job; there the
+provider is still checking.
 
 **Alternatives considered and rejected.** `SameSite=Lax` on the session cookies
 would fix SAML and Apple and re-open the CSRF surface `Strict` was chosen to

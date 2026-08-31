@@ -29,6 +29,36 @@ pub struct AuthConfig {
     /// OIDC issuer base URL (e.g. "https://auth.example.com"). Used for
     /// OIDC discovery endpoint URLs. Falls back to `jwt_issuer` if unset.
     pub oauth2_issuer_url: String,
+    /// Extra browser origins this deployment will hand a **federation SSO
+    /// handoff code** to (`AXIAM__AUTH__SSO_SPA_ORIGINS`; a list, set the same
+    /// way as `AXIAM__SERVER__CORS_ALLOWED_ORIGINS`).
+    ///
+    /// # Why this exists
+    ///
+    /// SAML and Apple return by cross-site form POST, so the session cookies
+    /// cannot be set on that response. AXIAM instead mints a single-use handoff
+    /// code and redirects the browser to the SPA with it — and that code is a
+    /// bearer credential for a session. The redirect target therefore may not
+    /// be whatever the caller of the *unauthenticated* login-start endpoint
+    /// asked for: on those two protocols the identity provider never sees the
+    /// SPA `redirect_uri`, so its own registered-redirect allowlist is not
+    /// there to reject an attacker's host.
+    ///
+    /// The default is empty, which means **the origin of
+    /// [`effective_issuer`](Self::effective_issuer) only**. That is the right
+    /// default rather than a restrictive one: the endpoint a SAML IdP or Apple
+    /// posts to is itself built from `effective_issuer`, so a deployment whose
+    /// SPA is served from that origin — the shape `docker/nginx.conf` and the
+    /// deployment guides describe, and the only shape in which
+    /// `SameSite=Strict` session cookies work same-origin — needs no entry
+    /// here at all.
+    ///
+    /// Set it when the SPA is served from a different host than the API (for
+    /// example `https://app.example.com` against `https://api.example.com`).
+    /// Values are compared as **origins**: scheme, host and port, with the path
+    /// ignored. It has no effect on the OIDC and OAuth2 flows, whose
+    /// `redirect_uri` is registered at the provider and checked there.
+    pub sso_spa_origins: Vec<String>,
     /// Optional pepper prepended to passwords before Argon2id verification.
     /// Wrapped in `SecretString` so `Debug`/logging never leaks it by
     /// accident (SECHRD-12) — exposed only via `.expose_secret()` at the
@@ -265,6 +295,7 @@ impl Default for AuthConfig {
             auth_code_lifetime_secs: 600,
             jwt_issuer: "axiam".into(),
             oauth2_issuer_url: String::new(),
+            sso_spa_origins: Vec::new(),
             pepper: None,
             pepper_previous: None,
             min_password_length: 12,

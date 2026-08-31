@@ -70,6 +70,7 @@ fn test_auth_config() -> AuthConfig {
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
         oauth2_issuer_url: "https://localhost".into(),
+        sso_spa_origins: Vec::new(),
         ..AuthConfig::default()
     }
 }

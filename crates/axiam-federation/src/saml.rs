@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use axiam_core::error::AxiamError;
-use axiam_core::models::federation::{CreateFederationLink, FederationProtocol};
+use axiam_core::models::federation::{CreateFederationLink, FederationConfig, FederationProtocol};
 use axiam_core::models::federation_claims::{MappedIdentity, map_identity};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
@@ -371,7 +371,7 @@ where
         tenant_id: Uuid,
         config_id: Uuid,
         saml_response_b64: &str,
-        _relay_state: Option<&str>,
+        relay_state: Option<&str>,
         expected_request_id: Option<&str>,
         expected_destination: Option<&str>,
         require_in_response_to: bool,
@@ -384,6 +384,48 @@ where
                 AxiamError::NotFound { id, .. } => FederationError::ConfigNotFound(id),
                 other => FederationError::Internal(other.to_string()),
             })?;
+
+        self.handle_saml_response_for(
+            &config,
+            tenant_id,
+            saml_response_b64,
+            relay_state,
+            expected_request_id,
+            expected_destination,
+            require_in_response_to,
+        )
+        .await
+    }
+
+    /// Handle a SAML Response against a config the caller has already resolved.
+    ///
+    /// The two-tenant form of [`handle_saml_response`](Self::handle_saml_response),
+    /// and the one the public ACS uses. An organization-level config with
+    /// `allow_tenant_inheritance` is reachable from a tenant that does not own
+    /// it, so "which tenant" has two answers and they are not interchangeable:
+    ///
+    /// * `config.tenant_id` owns the assertion-replay row. Recording a replay
+    ///   under the config's tenant is a no-op for a config the requesting
+    ///   tenant owns, and strictly stronger for an inherited one — an assertion
+    ///   spent in one tenant cannot be spent again in a sibling.
+    /// * `requesting_tenant_id` owns the user and the federation link. A person
+    ///   signing in to tenant B through the organization's IdP gets an account
+    ///   in tenant B, never in the organization tenant.
+    ///
+    /// See `claude_dev/federation-sso-login-design.md` §4.4 and threat-model
+    /// T-169. Every other argument behaves exactly as documented on
+    /// [`handle_saml_response`](Self::handle_saml_response).
+    pub async fn handle_saml_response_for(
+        &self,
+        config: &FederationConfig,
+        requesting_tenant_id: Uuid,
+        saml_response_b64: &str,
+        _relay_state: Option<&str>,
+        expected_request_id: Option<&str>,
+        expected_destination: Option<&str>,
+        require_in_response_to: bool,
+    ) -> Result<FederationCallbackResult, FederationError> {
+        let config_id = config.id;
 
         if !config.enabled {
             return Err(FederationError::ConfigDisabled);
@@ -413,7 +455,7 @@ where
         //   - idp_signing_cert_pem is None (config incomplete)
         //   - <ds:Signature> is absent from the document
         //   - The digest or signature value does not verify
-        self.verify_signature(xml.as_bytes(), &config)?;
+        self.verify_signature(xml.as_bytes(), config)?;
 
         // Step 1a — Protocol binding checks (SEC-005/REQ-14 AC-5).
         // These run after signature verification so we only check authentic responses.
@@ -570,8 +612,10 @@ where
             .not_on_or_after
             .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(1));
 
+        // Under the CONFIG's tenant, not the requesting one: see this method's
+        // doc comment. For a non-inherited config the two are the same value.
         self.replay_repo
-            .insert_assertion(tenant_id, &assertion.id, replay_expires_at)
+            .insert_assertion(config.tenant_id, &assertion.id, replay_expires_at)
             .await
             .map_err(|e| match e {
                 AxiamError::ReplayDetected => FederationError::AssertionReplay,
@@ -582,7 +626,8 @@ where
         let claims = extract_assertion_claims(assertion)?;
 
         info!(
-            tenant_id = %tenant_id,
+            tenant_id = %requesting_tenant_id,
+            config_tenant_id = %config.tenant_id,
             config_id = %config_id,
             name_id = %claims.name_id,
             "SAML ACS: assertion validated successfully"
@@ -592,7 +637,7 @@ where
         let (email, display_name) = apply_attribute_map(&claims, &config.attribute_map);
 
         self.provision_or_link_user(
-            tenant_id,
+            requesting_tenant_id,
             config_id,
             &claims.name_id,
             email.as_deref(),

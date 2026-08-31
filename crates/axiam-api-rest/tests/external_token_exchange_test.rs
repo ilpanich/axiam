@@ -131,6 +131,7 @@ fn test_auth_config() -> AuthConfig {
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
         oauth2_issuer_url: "https://id.axiam.test".into(),
+        sso_spa_origins: Vec::new(),
         federation_encryption_key: Some(TEST_FED_ENC_KEY),
         ..AuthConfig::default()
     }

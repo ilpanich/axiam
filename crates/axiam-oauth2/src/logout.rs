@@ -218,6 +218,7 @@ mod tests {
             jwt_public_key_pem: TEST_PUBLIC_KEY_PEM.into(),
             jwt_issuer: "axiam-test".into(),
             oauth2_issuer_url: "https://id.test.example".into(),
+            sso_spa_origins: Vec::new(),
             ..AuthConfig::default()
         }
     }

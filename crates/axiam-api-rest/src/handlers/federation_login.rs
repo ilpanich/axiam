@@ -401,6 +401,92 @@ pub async fn list_providers_public<C: Connection + Clone>(
 // Handoff codes
 // ---------------------------------------------------------------------------
 
+/// The origin part of a URL — scheme, host and port — or `None` if it has none.
+///
+/// `url::Origin::ascii_serialization` is what makes the comparison total: it
+/// normalises the default port away, so `https://app.example.com` and
+/// `https://app.example.com:443/` are the same origin, and a path or query
+/// cannot smuggle a second host past a string compare.
+fn origin_of(uri: &str) -> Option<String> {
+    let parsed = url::Url::parse(uri).ok()?;
+    let origin = parsed.origin();
+    origin.is_tuple().then(|| origin.ascii_serialization())
+}
+
+/// Refuse a handoff redirect target that is not an origin this deployment owns.
+///
+/// # Why this is not `validate_redirect_uri`
+///
+/// [`validate_redirect_uri`] checks the *scheme* only — any `https://` host on
+/// the internet passes it, and its own `TODO(T19.14)` says so. On the OIDC and
+/// OAuth2 flows that is backstopped by the identity provider, which is handed
+/// the same `redirect_uri` and compares it against its registered set before it
+/// will redirect anything anywhere.
+///
+/// The two cross-site flows have no such backstop **by construction**: a SAML
+/// IdP is pointed at [`saml_acs_url`] and Apple at
+/// [`server_form_callback_url`], both AXIAM's own endpoints, so the provider
+/// never sees the SPA URI and never validates it. AXIAM alone decides where the
+/// browser goes next — and it goes there carrying a handoff code, which
+/// [`sso_handoff_public`] will exchange for session cookies for whoever
+/// presents it.
+///
+/// Without this check, anyone could call the unauthenticated login-start
+/// endpoint with `redirect_uri = https://attacker.example/`, lure a victim
+/// through their own real IdP, and read a working session credential out of
+/// their access log. The 60-second TTL, the single use, the hash-only storage
+/// and `Referrer-Policy: no-referrer` are all irrelevant when the attacker *is*
+/// the redirect destination. This is the same rule the OAuth2 authorization
+/// server already applies to its own `redirect_uri` (threat model T-52), and
+/// threat model T-164 for the handoff mechanism.
+///
+/// The allowed set is the origin of `AuthConfig::effective_issuer()` — which
+/// the ACS and form-callback URLs are themselves built from, so it cannot be
+/// wrong in a deployment where these flows work at all — plus anything the
+/// operator adds in [`AuthConfig::sso_spa_origins`], for a deployment that
+/// serves the SPA from a different host than the API.
+pub(crate) fn require_deployment_spa_origin<C: Connection + Clone>(
+    state: &AppState<C>,
+    redirect_uri: &str,
+) -> Result<(), AxiamApiError> {
+    require_spa_origin(
+        state.auth_config.effective_issuer(),
+        &state.auth_config.sso_spa_origins,
+        redirect_uri,
+    )
+}
+
+/// The decision [`require_deployment_spa_origin`] makes, over the two
+/// configuration values it reads and nothing else — so it can be tested without
+/// standing up an `AppState`.
+fn require_spa_origin(
+    issuer: &str,
+    extra_origins: &[String],
+    redirect_uri: &str,
+) -> Result<(), AxiamApiError> {
+    let Some(target) = origin_of(redirect_uri) else {
+        return Err(validation_err("redirect_uri is not a valid absolute URL"));
+    };
+
+    if origin_of(issuer).as_deref() == Some(target.as_str())
+        || extra_origins
+            .iter()
+            .filter_map(|o| origin_of(o))
+            .any(|o| o == target)
+    {
+        return Ok(());
+    }
+
+    // Named in the message because the operator, not the caller, is the one who
+    // can fix it — and because the alternative is a sign-in that fails at its
+    // last hop with nothing to go on.
+    Err(validation_err(
+        "redirect_uri must be on this deployment's own origin for SAML and Apple \
+         sign-in; add the SPA's origin to AXIAM__AUTH__SSO_SPA_ORIGINS if it is \
+         served from a different host than the API",
+    ))
+}
+
 /// SHA-256, lowercase hex. The stored form of a handoff code.
 pub(crate) fn hash_handoff_code(code: &str) -> String {
     hex::encode(Sha256::digest(code.as_bytes()))
@@ -419,8 +505,9 @@ pub(crate) fn hash_handoff_code(code: &str) -> String {
 /// The residual risk is stated rather than hidden: the code is in a URL, and
 /// URLs reach history and `Referer`. That is why the TTL is sixty seconds, why
 /// it is single-use, why only its hash is stored, why the SPA strips it on
-/// arrival, and why the redirect target is the already-validated
-/// `redirect_uri` from the login state row rather than anything the IdP said.
+/// arrival, and why the redirect target is confined to an origin this
+/// deployment owns — see [`require_deployment_spa_origin`], which is the check
+/// that makes the target trustworthy at all.
 pub(crate) async fn mint_handoff_and_redirect<C: Connection + Clone>(
     state: &web::Data<AppState<C>>,
     http_req: &actix_web::HttpRequest,
@@ -428,6 +515,11 @@ pub(crate) async fn mint_handoff_and_redirect<C: Connection + Clone>(
     user: &axiam_core::models::user::User,
     spa_redirect_uri: &str,
 ) -> Result<HttpResponse, AxiamApiError> {
+    // Checked again here, not only at login start: this is the single point
+    // every handoff passes through, and a state row written before the check
+    // existed must not be honoured by a newer binary.
+    require_deployment_spa_origin(state, spa_redirect_uri)?;
+
     // The reactor gate fires here, where the IdP has just verified the
     // credentials and no session exists — the contract `login.post_auth`
     // states. A veto therefore prevents the code from being minted at all,
@@ -782,7 +874,7 @@ pub async fn oidc_form_callback_public<C: Connection + Clone>(
         // SPA with the reason rather than rendering an API error page at a URL
         // they did not navigate to.
         warn!(idp_error = %err, "federation form-post callback carried an error");
-        return redirect_with_error(&login_state.redirect_uri, err);
+        return redirect_with_error(&state, &login_state.redirect_uri, err);
     }
 
     let code = f
@@ -912,12 +1004,21 @@ pub async fn saml_acs_form_public<C: Connection + Clone>(
 
     let login_state = consume_login_state(&state, relay_state).await?;
 
+    // The config may be inherited from the organization, in which case it is
+    // not reachable by a `get_by_id` scoped to `login_state.tenant_id`. Resolve
+    // it the same way the start endpoint did, and hand the resolved config to
+    // the service: the assertion-replay row is recorded under the config's
+    // tenant and the user is provisioned under the requesting one (T-169).
+    let workspace = workspace_for_tenant(&state, login_state.tenant_id).await?;
+    let resolved =
+        resolve_config_for_login(&state, workspace, login_state.federation_config_id).await?;
+
     let callback_result = state
         .federation
         .saml_federation_service
-        .handle_saml_response(
+        .handle_saml_response_for(
+            &resolved.config,
             login_state.tenant_id,
-            login_state.federation_config_id,
             &f.saml_response,
             Some(relay_state),
             Some(login_state.request_id.as_str()),
@@ -1020,7 +1121,17 @@ pub(crate) fn workspace_error(e: WorkspaceError) -> AxiamApiError {
 /// AXIAM endpoint: rendering a JSON error there leaves the person staring at a
 /// payload on a URL they never chose. The SPA's callback route has real error
 /// UI for each case.
-fn redirect_with_error(redirect_uri: &str, error: &str) -> Result<HttpResponse, AxiamApiError> {
+fn redirect_with_error<C: Connection + Clone>(
+    state: &AppState<C>,
+    redirect_uri: &str,
+    error: &str,
+) -> Result<HttpResponse, AxiamApiError> {
+    // Same confinement as the success path: this is still AXIAM navigating a
+    // browser to a caller-supplied URL on an unauthenticated endpoint, and an
+    // open redirect on the API origin is worth closing even when it carries no
+    // credential.
+    require_deployment_spa_origin(state, redirect_uri)?;
+
     let mut target = url::Url::parse(redirect_uri).map_err(|_| {
         AxiamApiError(AxiamError::Validation {
             message: "stored redirect_uri is not a valid URL".into(),
@@ -1082,6 +1193,12 @@ pub(crate) fn idp_redirect_uri_for<C: Connection + Clone>(
     spa_redirect_uri: &str,
 ) -> Result<(String, Option<String>), AxiamApiError> {
     if config.provider_kind == axiam_core::models::federation::ProviderKind::Apple {
+        // Apple posts its response to AXIAM rather than redirecting the browser
+        // to `spa_redirect_uri`, so Apple never validates that URI and AXIAM
+        // must. Refusing at start, rather than only at the handoff mint, is the
+        // difference between a 400 the caller can read and a sign-in that dies
+        // at its last hop.
+        require_deployment_spa_origin(state, spa_redirect_uri)?;
         let server = server_form_callback_url(state, OIDC_FORM_CALLBACK_PATH)?;
         // Returned as `Some` so the state row records it: the token exchange
         // must echo the exact string the authorize request carried, and
@@ -1136,6 +1253,94 @@ mod tests {
     fn a_malformed_apple_user_field_contributes_nothing() {
         for raw in ["", "not json", "[]", "{}", r#"{"name":{}}"#, "null"] {
             assert!(parse_apple_user_field(raw).is_none(), "{raw}");
+        }
+    }
+
+    const ISSUER: &str = "https://axiam.example.com";
+
+    /// The whole point: a handoff code is a bearer credential for a session,
+    /// and the SAML and Apple flows are the two where no identity provider ever
+    /// sees — or validates — the SPA `redirect_uri`. If an attacker could name
+    /// the redirect target on the unauthenticated start endpoint, they could
+    /// lure a victim through the victim's own real IdP and read a working
+    /// session credential out of their own access log.
+    #[test]
+    fn a_foreign_origin_may_not_receive_a_handoff_code() {
+        for uri in [
+            "https://attacker.example/catch",
+            "https://axiam.example.com.attacker.example/catch",
+            "https://evil.example.com",
+            // A userinfo prefix is the classic way to make a URL *look* like it
+            // is on the right host. `Url::origin` is not fooled; a string
+            // `starts_with` would have been.
+            "https://axiam.example.com@attacker.example/catch",
+            // Same host, different scheme and port: still a different origin,
+            // and http would put the code on the wire in clear.
+            "http://axiam.example.com/cb",
+            "https://axiam.example.com:8443/cb",
+        ] {
+            assert!(
+                require_spa_origin(ISSUER, &[], uri).is_err(),
+                "must refuse {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_deployments_own_origin_is_allowed_without_configuration() {
+        // The default: no `sso_spa_origins` at all, because the endpoint the
+        // IdP posts to is built from this same issuer, so a same-origin SPA —
+        // the only shape in which SameSite=Strict cookies work — needs no
+        // entry.
+        for uri in [
+            "https://axiam.example.com/auth/sso/callback",
+            "https://axiam.example.com",
+            // The default port, spelled out, is the same origin.
+            "https://axiam.example.com:443/auth/sso/callback",
+        ] {
+            assert!(require_spa_origin(ISSUER, &[], uri).is_ok(), "{uri}");
+        }
+    }
+
+    #[test]
+    fn an_operator_may_name_a_separately_hosted_spa() {
+        let extra = vec!["https://app.example.com".to_string()];
+        assert!(
+            require_spa_origin(ISSUER, &extra, "https://app.example.com/auth/sso/callback").is_ok()
+        );
+        // Configuring one origin does not open the next one along.
+        assert!(require_spa_origin(ISSUER, &extra, "https://other.example.com/cb").is_err());
+    }
+
+    /// A configured value is compared as an origin, so a trailing slash or a
+    /// path on it neither breaks the match nor widens it.
+    #[test]
+    fn a_configured_origin_is_compared_as_an_origin() {
+        let extra = vec!["https://app.example.com/ignored/path/".to_string()];
+        assert!(
+            require_spa_origin(ISSUER, &extra, "https://app.example.com/auth/sso/callback").is_ok()
+        );
+    }
+
+    /// An issuer that is a bare identifier rather than a URL has no origin, so
+    /// nothing matches it. That is not a new deployment requirement: the ACS
+    /// and form-callback URLs are built from the same value, and
+    /// `server_form_callback_url` already refuses when it does not yield a
+    /// usable HTTPS URL.
+    #[test]
+    fn an_issuer_that_is_not_a_url_allows_nothing() {
+        assert!(require_spa_origin("axiam-test", &[], "https://anything.example/cb").is_err());
+    }
+
+    #[test]
+    fn a_redirect_uri_that_is_not_a_url_is_refused() {
+        for uri in [
+            "",
+            "not a url at all",
+            "/relative/only",
+            "javascript:alert(1)",
+        ] {
+            assert!(require_spa_origin(ISSUER, &[], uri).is_err(), "{uri}");
         }
     }
 }

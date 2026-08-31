@@ -1446,6 +1446,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             max_lockout_duration_secs: 3600,
             auth_code_lifetime_secs: 600,
             oauth2_issuer_url: String::new(),
+            sso_spa_origins: Vec::new(),
             email_verification_grace_period_hours: 24,
             password_reset_token_expiry_hours: 1,
             webauthn_rp_id: "localhost".into(),

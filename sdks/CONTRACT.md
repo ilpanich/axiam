@@ -1529,7 +1529,8 @@ any of them for §12.
 
 ### §12.1 Canonical operation set and endpoint map
 
-Nine canonical operations. Every column below is verified against `openapi.json`; deviating
+Thirteen canonical operations — the original nine, plus the four public "Sign in with X" entry points
+added at contract 1.37. Every column below is verified against `openapi.json`; deviating
 from a schema name, HTTP method, content type, or parameter location is a contract violation.
 
 | Canonical operation | Wire call | Request (content type / schema) | Success response |
@@ -1867,6 +1868,10 @@ Casing follows the §1 rules unchanged. Twelve languages are covered: the seven 
 | `revoke` | `revoke` | `revoke` | `revoke` | `revoke` | `RevokeAsync` | `revoke` | `Revoke` |
 | `sso_start` | `sso_start` | `ssoStart` | `sso_start` | `ssoStart` | `SsoStartAsync` | `ssoStart` | `SsoStart` |
 | `sso_complete` | `sso_complete` | `ssoComplete` | `sso_complete` | `ssoComplete` | `SsoCompleteAsync` | `ssoComplete` | `SsoComplete` |
+| `sso_providers` | `sso_providers` | `ssoProviders` | `sso_providers` | `ssoProviders` | `SsoProvidersAsync` | `ssoProviders` | `SsoProviders` |
+| `sso_start_oauth2` | `sso_start_oauth2` | `ssoStartOauth2` | `sso_start_oauth2` | `ssoStartOauth2` | `SsoStartOauth2Async` | `ssoStartOauth2` | `SsoStartOauth2` |
+| `sso_complete_oauth2` | `sso_complete_oauth2` | `ssoCompleteOauth2` | `sso_complete_oauth2` | `ssoCompleteOauth2` | `SsoCompleteOauth2Async` | `ssoCompleteOauth2` | `SsoCompleteOauth2` |
+| `sso_complete_handoff` | `sso_complete_handoff` | `ssoCompleteHandoff` | `sso_complete_handoff` | `ssoCompleteHandoff` | `SsoCompleteHandoffAsync` | `ssoCompleteHandoff` | `SsoCompleteHandoff` |
 
 **C# `Async` suffix (§1 "Async method naming", SDK-Q08).** C# is `*Async`-only (TAP) for every
 operation that performs I/O, exactly as it is for `GetUserInfoAsync` in the §1 map. `OidcBegin`
@@ -1886,17 +1891,21 @@ prohibited (SDK-Q08).
 **Additional languages (Kotlin, Swift, C, C++).** **Kotlin** implements §12 and uses camelCase
 `suspend` functions identical to the TypeScript column (`oidcDiscover`, `oidcBegin`,
 `oidcExchange`, `oidcRefresh`, `loginClientCredentials`, `introspect`, `revoke`, `ssoStart`,
-`ssoComplete`); no `*Async` twins. **Swift**, **C**, and **C++** implement the section as of contract
+`ssoComplete`, `ssoProviders`, `ssoStartOauth2`, `ssoCompleteOauth2`, `ssoCompleteHandoff`);
+no `*Async` twins. **Swift**, **C**, and **C++** implement the section as of contract
 1.11 ([§12.6](#§126-swift-c-and-c-ported--contract-111)), using the names reserved for them here
 while it was deferred — a port that diverged from them was never an option: **Swift** camelCase
 and **C++** snake_case exactly as the TypeScript and Rust columns above; **C** snake_case with
 the mandatory `axiam_` prefix — `axiam_oidc_discover`,
 `axiam_oidc_begin`, `axiam_oidc_exchange`, `axiam_oidc_refresh`,
 `axiam_login_client_credentials`, `axiam_introspect`, `axiam_revoke`, `axiam_sso_start`,
-`axiam_sso_complete`. No login/auth/authz method names beyond this map and the §1 map are
+`axiam_sso_complete`, `axiam_sso_providers`, `axiam_sso_start_oauth2`,
+`axiam_sso_complete_oauth2`, `axiam_sso_complete_handoff`. No login/auth/authz method names beyond this map and the §1 map are
 permitted in any SDK.
 
-**Which object hosts the nine methods** (added in contract 1.5 — §12 was previously silent). They
+**Which object hosts the methods** (added in contract 1.5 — §12 was previously silent; it said "the
+nine methods" until the four login-provider operations joined them at contract 1.37, and their
+arrival changes nothing about the rule). They
 SHOULD live directly on the SDK's existing client type, and do in seven of the eight implementing
 SDKs. An SDK MAY instead place them on a separate, additionally-exported host object where a
 **packaging constraint** requires it: the TypeScript SDK uses a Node-only `OidcClient` because its
@@ -1904,7 +1913,7 @@ CI forbids `node:crypto` and `jose` from reaching the browser bundle, and §12 h
 persona to serve (a browser relying party performs the redirect; it holds no `client_secret` and
 never calls `/oauth2/token`). The method **names** in the map above are fixed either way — only the
 host is free. An SDK that uses a separate host MUST say so in its README's §12 section, and MUST
-NOT split the nine across two hosts.
+NOT split them across two hosts.
 
 ### §12.3 Cross-cutting rules (normative, identical in all SDKs)
 

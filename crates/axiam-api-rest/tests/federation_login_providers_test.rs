@@ -1316,6 +1316,30 @@ struct Oauth2Failure {
 }
 
 impl Oauth2Failure {
+    /// What a failing assertion is allowed to print.
+    ///
+    /// Not the response body and not the cookies: an assertion that fires
+    /// writes its message to the CI log, and on the one path where these tests
+    /// could fail — a session was issued when it should not have been — the
+    /// values in hand are a live access cookie and a body carrying whatever the
+    /// provider said. Cookie *names* are what diagnoses "a session was issued";
+    /// the value never adds anything, and the `error` code is the useful half
+    /// of the body. Flagged by CodeQL as cleartext logging of sensitive
+    /// information, correctly.
+    fn diagnostic(&self) -> String {
+        let names: Vec<&str> = self
+            .cookies
+            .iter()
+            .filter_map(|c| c.split('=').next())
+            .collect();
+        let error = self
+            .body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("<no error field>");
+        format!("status={} error={error} cookies={names:?}", self.status)
+    }
+
     /// The invariant every one of these shares, and the only one worth pinning:
     /// no session was issued. The exact status is a mapping detail — a provider
     /// that refuses the code surfaces as `503` through `TokenExchangeFailed`,
@@ -1324,14 +1348,13 @@ impl Oauth2Failure {
     fn assert_no_session(&self) {
         assert!(
             !(200..300).contains(&self.status),
-            "a failed exchange must not succeed: {} {}",
-            self.status,
-            self.body
+            "a failed exchange must not succeed: {}",
+            self.diagnostic()
         );
         assert!(
             !self.cookies.iter().any(|c| c.starts_with("axiam_access=")),
-            "no session cookie may be issued: {:?}",
-            self.cookies
+            "no session cookie may be issued: {}",
+            self.diagnostic()
         );
     }
 }
@@ -1572,7 +1595,7 @@ async fn a_github_email_lookup_without_the_scope_says_which_scope() {
     assert!(
         out.body.to_string().contains("user:email"),
         "the refusal must name the missing scope: {}",
-        out.body
+        out.diagnostic()
     );
 }
 

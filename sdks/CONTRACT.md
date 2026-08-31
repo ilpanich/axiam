@@ -1646,7 +1646,11 @@ verifier, at the `jwks_uri` the discovery document advertises.
    not-found error from an empty list, and MUST NOT treat the empty case as a
    failure: the endpoint is deliberately shaped so it cannot be used to
    enumerate organization or tenant slugs, and an SDK that reintroduces the
-   distinction reintroduces the oracle.
+   distinction reintroduces the oracle. A request naming **no** workspace at all
+   answers the same way, for the same reason — a `400` there against a `200 []`
+   for an unknown slug would restore the two-valued answer the empty list
+   removes. The start operations, where every failure is a uniform `401`, are
+   where a caller learns it named the workspace wrongly.
 
    The response carries only what a sign-in button needs — `id`, `provider_kind`,
    `display_name`, `protocol`, `has_bundled_mark`, an optional `button_icon`

@@ -144,7 +144,12 @@ async fn admin_in(db: &Surreal<TestDb>, tenant_id: Uuid, username: &str) -> Uuid
             tenant_id,
             username: username.into(),
             email: format!("{username}@example.com"),
-            password: "password12345".into(),
+            // Generated per test binary rather than a literal: this fixture
+            // user is authenticated with a minted token, never with a
+            // password, so nothing here needs a stable value — and a
+            // hard-coded credential in a new file is a CodeQL alert the older
+            // fixtures are only spared because they predate the scan.
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await
@@ -1286,6 +1291,537 @@ async fn a_saml_login_may_not_name_a_foreign_redirect_target() {
             "org_slug": "no-such-org-at-all",
             "federation_config_id": config_id,
             "redirect_uri": "https://attacker.example/catch",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+// ---------------------------------------------------------------------------
+// What the OAuth2 variant does when the provider misbehaves
+// ---------------------------------------------------------------------------
+
+/// On this path there is no signature, no `nonce` and no `aud` — the userinfo
+/// call *is* the authentication (design doc §3). So every way that exchange can
+/// go wrong has to end in a refusal rather than in a half-built identity, and
+/// each of these drives one of them through the real public endpoints.
+///
+/// The shape is shared: mount a mock provider, create a config against it,
+/// start a login, complete it, and report what came back.
+#[cfg(test)]
+struct Oauth2Failure {
+    status: u16,
+    body: Value,
+    cookies: Vec<String>,
+}
+
+impl Oauth2Failure {
+    /// The invariant every one of these shares, and the only one worth pinning:
+    /// no session was issued. The exact status is a mapping detail — a provider
+    /// that refuses the code surfaces as `503` through `TokenExchangeFailed`,
+    /// while an identity that cannot be trusted is a `401` — and asserting the
+    /// number in each test would pin the mapping rather than the behaviour.
+    fn assert_no_session(&self) {
+        assert!(
+            !(200..300).contains(&self.status),
+            "a failed exchange must not succeed: {} {}",
+            self.status,
+            self.body
+        );
+        assert!(
+            !self.cookies.iter().any(|c| c.starts_with("axiam_access=")),
+            "no session cookie may be issued: {:?}",
+            self.cookies
+        );
+    }
+}
+
+async fn oauth2_login_against(
+    slug_prefix: &str,
+    kind: &str,
+    mount: impl AsyncFnOnce(&MockServer),
+) -> Oauth2Failure {
+    let f = setup(slug_prefix).await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    let idp = MockServer::start().await;
+    let base = idp.uri();
+    mount(&idp).await;
+
+    let (created_status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        json!({
+            "provider": "Provider",
+            "provider_kind": kind,
+            "provider_slug": if kind == "github" { Value::Null } else { json!("acme") },
+            "protocol": "OAuth2",
+            "client_id": "cid",
+            "client_secret": "secret",
+            "scopes": ["read:user", "user:email"],
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "userinfo_endpoint": format!("{base}/user"),
+        })
+    );
+    assert_eq!(created_status, 201, "{created}");
+
+    let start_req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/federation/oauth2/start")
+        .set_json(json!({
+            "org_slug": f.org_slug,
+            "tenant_slug": f.tenant_slug,
+            "federation_config_id": created["id"],
+            "redirect_uri": "https://spa.example.test/auth/sso/callback",
+        }))
+        .to_request();
+    let start_resp = test::call_service(&app, start_req).await;
+    assert_eq!(start_resp.status().as_u16(), 200, "start must succeed");
+    let start: Value = test::read_body_json(start_resp).await;
+
+    let cb = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/federation/oauth2/callback")
+        .set_json(json!({ "state": start["state"], "code": "provider-code" }))
+        .to_request();
+    let resp = test::call_service(&app, cb).await;
+    let status = resp.status().as_u16();
+    let cookies: Vec<String> = resp
+        .response()
+        .headers()
+        .get_all(actix_web::http::header::SET_COOKIE)
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    let body: Value = test::read_body_json(resp).await;
+    Oauth2Failure {
+        status,
+        body,
+        cookies,
+    }
+}
+
+/// Mount a `/token` that answers exactly this.
+async fn mount_token(idp: &MockServer, template: ResponseTemplate) {
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(template)
+        .mount(idp)
+        .await;
+}
+
+async fn mount_ok_token(idp: &MockServer) {
+    mount_token(
+        idp,
+        ResponseTemplate::new(200).set_body_json(json!({"access_token": "at"})),
+    )
+    .await;
+}
+
+#[actix_rt::test]
+async fn an_oauth2_token_endpoint_that_refuses_the_code_is_not_a_login() {
+    let out = oauth2_login_against("oa2-tok-400", "generic_oauth2", async |idp| {
+        mount_token(idp, ResponseTemplate::new(400).set_body_string("nope")).await;
+    })
+    .await;
+    out.assert_no_session();
+}
+
+/// Several providers report a reused or expired code as `200` with an `error`
+/// key. Treating that as success would hand the next step an empty bearer
+/// token and produce a confusing userinfo failure instead of the real one.
+#[actix_rt::test]
+async fn an_error_in_a_200_token_body_is_still_a_failure() {
+    let out = oauth2_login_against("oa2-tok-200err", "generic_oauth2", async |idp| {
+        mount_token(
+            idp,
+            ResponseTemplate::new(200).set_body_json(json!({"error": "bad_verification_code"})),
+        )
+        .await;
+    })
+    .await;
+    out.assert_no_session();
+}
+
+#[actix_rt::test]
+async fn a_token_response_that_is_not_json_is_a_failure() {
+    let out = oauth2_login_against("oa2-tok-nonjson", "generic_oauth2", async |idp| {
+        mount_token(
+            idp,
+            ResponseTemplate::new(200).set_body_string("not json at all"),
+        )
+        .await;
+    })
+    .await;
+    out.assert_no_session();
+}
+
+/// An access token of spaces is not an access token. Catching it here is the
+/// difference between one clear failure and an unauthenticated userinfo call.
+#[actix_rt::test]
+async fn a_blank_access_token_is_refused_before_the_userinfo_call() {
+    let out = oauth2_login_against("oa2-tok-blank", "generic_oauth2", async |idp| {
+        mount_token(
+            idp,
+            ResponseTemplate::new(200).set_body_json(json!({"access_token": "   "})),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"sub": "u"})))
+            .expect(0)
+            .mount(idp)
+            .await;
+    })
+    .await;
+    out.assert_no_session();
+}
+
+#[actix_rt::test]
+async fn a_userinfo_endpoint_that_rejects_the_token_is_not_a_login() {
+    let out = oauth2_login_against("oa2-ui-401", "generic_oauth2", async |idp| {
+        mount_ok_token(idp).await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(idp)
+            .await;
+    })
+    .await;
+    out.assert_no_session();
+}
+
+/// A JSON array is valid JSON and is not a userinfo document. The claim lookup
+/// would find nothing in it, so it is refused for what it is.
+#[actix_rt::test]
+async fn a_userinfo_response_that_is_not_an_object_is_refused() {
+    let out = oauth2_login_against("oa2-ui-array", "generic_oauth2", async |idp| {
+        mount_ok_token(idp).await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([1, 2, 3])))
+            .mount(idp)
+            .await;
+    })
+    .await;
+    out.assert_no_session();
+}
+
+#[actix_rt::test]
+async fn a_userinfo_response_that_is_not_json_is_refused() {
+    let out = oauth2_login_against("oa2-ui-nonjson", "generic_oauth2", async |idp| {
+        mount_ok_token(idp).await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>hello</html>"))
+            .mount(idp)
+            .await;
+    })
+    .await;
+    out.assert_no_session();
+}
+
+/// A userinfo document with nothing that maps to an external subject cannot
+/// name anybody, and provisioning from it would create an account keyed on
+/// nothing.
+#[actix_rt::test]
+async fn a_userinfo_response_with_no_subject_cannot_provision() {
+    let out = oauth2_login_against("oa2-ui-nosub", "generic_oauth2", async |idp| {
+        mount_ok_token(idp).await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"name": "No Subject", "email": "a@b.test"})),
+            )
+            .mount(idp)
+            .await;
+    })
+    .await;
+    out.assert_no_session();
+}
+
+/// The most likely real misconfiguration: a GitHub app registered without
+/// `user:email`. The message has to name the scope, because the fix is in the
+/// federation config and nothing about the person signing in.
+#[actix_rt::test]
+async fn a_github_email_lookup_without_the_scope_says_which_scope() {
+    let out = oauth2_login_against("oa2-gh-403", "github", async |idp| {
+        mount_ok_token(idp).await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": 1, "login": "octocat", "email": Value::Null})),
+            )
+            .mount(idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/emails"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(idp)
+            .await;
+    })
+    .await;
+    out.assert_no_session();
+    assert!(
+        out.body.to_string().contains("user:email"),
+        "the refusal must name the missing scope: {}",
+        out.body
+    );
+}
+
+#[actix_rt::test]
+async fn a_github_email_list_that_is_not_a_list_is_refused() {
+    let out = oauth2_login_against("oa2-gh-shape", "github", async |idp| {
+        mount_ok_token(idp).await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": 1, "login": "octocat", "email": Value::Null})),
+            )
+            .mount(idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/emails"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"not": "a list"})))
+            .mount(idp)
+            .await;
+    })
+    .await;
+    out.assert_no_session();
+}
+
+/// A verified *non-primary* address is somebody else's choice of which mailbox
+/// represents them. Picking it would key their AXIAM account — and its account
+/// recovery — on an address they did not nominate.
+#[actix_rt::test]
+async fn a_verified_but_non_primary_github_address_is_not_adopted() {
+    let out = oauth2_login_against("oa2-gh-nonprimary", "github", async |idp| {
+        mount_ok_token(idp).await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": 1, "login": "octocat", "email": Value::Null})),
+            )
+            .mount(idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/emails"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"email": "work@example.com", "verified": true, "primary": false},
+                {"email": "main@example.com", "verified": false, "primary": true},
+            ])))
+            .mount(idp)
+            .await;
+    })
+    .await;
+    out.assert_no_session();
+}
+
+// ---------------------------------------------------------------------------
+// The form-POST returns, and the shapes a browser can arrive in
+// ---------------------------------------------------------------------------
+
+/// Apple and a SAML IdP both navigate the browser to an AXIAM endpoint with a
+/// form body rather than redirecting to the SPA. Everything a browser can
+/// arrive with there is attacker-influenced, so each malformed shape has to be
+/// a clean refusal rather than a panic or a half-consumed login.
+#[actix_rt::test]
+async fn the_form_post_callbacks_refuse_a_body_with_nothing_in_it() {
+    let f = setup("form-empty").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    for (uri, body) in [
+        ("/api/v1/auth/federation/oidc/callback/form", "state="),
+        (
+            "/api/v1/auth/federation/oidc/callback/form",
+            "state=&code=abc",
+        ),
+    ] {
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(uri)
+            .insert_header((
+                actix_web::http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            ))
+            .set_payload(body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            400,
+            "an empty state must be a validation failure, not a lookup: {body}"
+        );
+    }
+}
+
+/// An unknown `state` is a `401` and says nothing more. It is the same answer
+/// for a state that expired, one already spent, and one that never existed —
+/// distinguishing them would tell a holder of a stolen value which it was.
+#[actix_rt::test]
+async fn an_unknown_form_post_state_is_refused_uniformly() {
+    let f = setup("form-unknown").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/federation/oidc/callback/form")
+        .insert_header((
+            actix_web::http::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload("state=no-such-state&code=abc")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[actix_rt::test]
+async fn a_blank_handoff_code_is_a_validation_failure() {
+    let f = setup("handoff-blank").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    for code in ["", "   "] {
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/handoff")
+            .set_json(json!({ "code": code }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            400,
+            "an empty code is a malformed request, not a failed lookup"
+        );
+    }
+}
+
+/// The workspace may be named by slug — what a person types on a login page —
+/// or by id, which is what an SDK holding a tenant UUID has. Both reach the
+/// same providers, and a test says so because the two take different branches.
+#[actix_rt::test]
+async fn a_workspace_can_be_named_by_id_as_well_as_by_slug() {
+    let f = setup("by-id").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db.clone(), auth.clone());
+
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "id-admin",
+        json!({
+            "provider": "Google",
+            "provider_kind": "google",
+            "protocol": "OidcConnect",
+            "metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+            "client_id": "cid",
+            "client_secret": "secret",
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+
+    let by_id = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/api/v1/auth/federation/providers?org_id={}&tenant_id={}",
+            f.org_id, f.tenant_id
+        ))
+        .to_request();
+    let resp = test::call_service(&app, by_id).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(kinds(&body), vec!["google"]);
+
+    // And the slug form agrees, which is the point of asserting both.
+    let by_slug = providers_for(&app, &f.org_slug, Some(&f.tenant_slug)).await;
+    assert_eq!(kinds(&by_slug), vec!["google"]);
+}
+
+/// Naming **no** workspace answers the same `200 []` as naming an unknown one.
+///
+/// That looks like a missing validation and is the opposite: this endpoint's
+/// whole security property is that its answer carries no information about
+/// which organizations exist, and a `400` for "malformed" against a `200 []`
+/// for "unknown" would restore exactly the two-valued oracle the empty list is
+/// there to remove. The start endpoints, where every failure is a uniform
+/// `401`, are where a caller learns it got the workspace wrong.
+#[actix_rt::test]
+async fn the_providers_listing_answers_the_same_way_with_no_workspace_at_all() {
+    let f = setup("no-workspace").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    for uri in [
+        "/api/v1/auth/federation/providers",
+        "/api/v1/auth/federation/providers?org_slug=no-such-org",
+        "/api/v1/auth/federation/providers?tenant_slug=orphan",
+    ] {
+        let req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(uri)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 200, "{uri}");
+        let body: Value = test::read_body_json(resp).await;
+        assert_eq!(
+            body["providers"].as_array().map(Vec::len),
+            Some(0),
+            "every unresolvable workspace answers an empty list: {uri}"
+        );
+    }
+}
+
+/// Posting the id of a config that exists but is not visible to this workspace
+/// answers the same `401` as an id that does not exist — the buttons decide
+/// what is reachable, and a start call cannot widen that set.
+#[actix_rt::test]
+async fn a_config_from_another_tenant_cannot_be_started() {
+    let a = setup("cross-a").await;
+    let auth = test_auth_config();
+    let app = test_app!(a.db.clone(), auth.clone());
+
+    let (status, created) = create_config!(
+        app,
+        auth,
+        a.db,
+        a.org_id,
+        a.tenant_id,
+        "cross-admin",
+        json!({
+            "provider": "Google",
+            "provider_kind": "google",
+            "protocol": "OidcConnect",
+            "metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+            "client_id": "cid",
+            "client_secret": "secret",
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+
+    // The organization scope of the *same* deployment does not inherit a
+    // tenant's config — inheritance only ever points downward.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/federation/oidc/start")
+        .set_json(json!({
+            "org_slug": a.org_slug,
+            "federation_config_id": created["id"],
+            "redirect_uri": "https://spa.example.test/auth/sso/callback",
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;

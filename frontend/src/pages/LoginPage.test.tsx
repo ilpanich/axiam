@@ -980,3 +980,235 @@ describe("LoginPage — OPAQUE", () => {
     expect(screen.getByRole("alert")).not.toHaveTextContent(/invalid credentials/i);
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// Federated sign-in
+// ───────────────────────────────────────────────────────────────────────────
+
+const PROVIDERS_PATH = "/api/v1/auth/federation/providers";
+
+/** Answer the providers probe, and the OPAQUE probe every path makes. */
+function withProviders(providers: unknown[]) {
+  apiMock.get.mockImplementation((url: string) =>
+    url === PROVIDERS_PATH
+      ? Promise.resolve(res({ providers }))
+      : Promise.reject(new Error(`unexpected get ${url}`)),
+  );
+}
+
+const googleProvider = {
+  id: "cfg-google",
+  provider_kind: "google",
+  display_name: "Google",
+  protocol: "OidcConnect",
+  has_bundled_mark: true,
+  inherited: false,
+};
+
+describe("LoginPage — federated sign-in", () => {
+  /**
+   * The page cannot know which providers exist until it knows the
+   * organization, and the user types that on the first step. Asking earlier
+   * would mean asking without an answer.
+   */
+  it("does not ask for providers before the organization is known", async () => {
+    withProviders([]);
+    renderWithProviders(<LoginPage />, { route: "/login" });
+    await screen.findByLabelText("Organization slug");
+    expect(apiMock.get).not.toHaveBeenCalledWith(
+      PROVIDERS_PATH,
+      expect.anything(),
+    );
+  });
+
+  it("asks for the workspace's providers once it has one", async () => {
+    withProviders([googleProvider]);
+    await goToCredentials();
+
+    await waitFor(() =>
+      expect(apiMock.get).toHaveBeenCalledWith(PROVIDERS_PATH, {
+        params: { org_slug: "acme", tenant_slug: "default" },
+      }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Sign in with Google" }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * An empty "no providers" state on a page whose password form works is
+   * noise. Nothing at all is the right amount of UI for a workspace that
+   * federates with nobody.
+   */
+  it("renders no federation section when the workspace has no providers", async () => {
+    withProviders([]);
+    await goToCredentials();
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalled());
+    // "Sign in with a passkey" is a different control on the same step, so the
+    // assertion names the federated wording rather than the shared prefix.
+    expect(
+      screen.queryByRole("button", { name: /Sign in with (?!a passkey)/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  /**
+   * The providers endpoint answers 200 with an empty list for an unknown
+   * organization, so a rejection here is a fault — and an error banner about
+   * federation would send a user whose password still works looking in the
+   * wrong place.
+   */
+  it("stays quiet when the providers call fails outright", async () => {
+    apiMock.get.mockRejectedValue(new Error("network down"));
+    await goToCredentials();
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalled());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Sign in with (?!a passkey)/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("names a generic provider by the operator's display name", async () => {
+    withProviders([
+      {
+        id: "cfg-acme",
+        provider_kind: "generic_oidc",
+        display_name: "Acme SSO",
+        protocol: "OidcConnect",
+        has_bundled_mark: false,
+        inherited: true,
+      },
+    ]);
+    await goToCredentials();
+    expect(
+      await screen.findByRole("button", { name: "Sign in with Acme SSO" }),
+    ).toBeInTheDocument();
+  });
+
+  it("starts an OIDC login at the OIDC endpoint and navigates to the provider", async () => {
+    withProviders([googleProvider]);
+    const assign = vi.fn();
+    vi.spyOn(window, "location", "get").mockReturnValue({
+      ...window.location,
+      origin: "https://spa.example",
+      assign,
+    } as unknown as Location);
+    apiMock.post.mockImplementation((url: string) =>
+      url === "/api/v1/auth/federation/oidc/start"
+        ? Promise.resolve(
+            res({
+              authorize_url: "https://accounts.google.com/o/oauth2/v2/auth?x=1",
+              state: "st",
+              expires_in_secs: 600,
+            }),
+          )
+        : Promise.reject(new Error(`unexpected post ${url}`)),
+    );
+
+    await goToCredentials();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Sign in with Google" }),
+    );
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/auth/federation/oidc/start",
+        {
+          org_slug: "acme",
+          tenant_slug: "default",
+          federation_config_id: "cfg-google",
+          // Built from the SPA's own origin: the provider matches it byte for
+          // byte against what is registered there.
+          redirect_uri: "https://spa.example/auth/sso/callback",
+        },
+      ),
+    );
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith(
+        "https://accounts.google.com/o/oauth2/v2/auth?x=1",
+      ),
+    );
+    vi.restoreAllMocks();
+  });
+
+  /** A provider with no ID token goes to the OAuth2 endpoint, not the OIDC one. */
+  it("starts an OAuth2 login at the OAuth2 endpoint", async () => {
+    withProviders([
+      {
+        id: "cfg-github",
+        provider_kind: "github",
+        display_name: "GitHub",
+        protocol: "OAuth2",
+        has_bundled_mark: true,
+        inherited: false,
+      },
+    ]);
+    const assign = vi.fn();
+    vi.spyOn(window, "location", "get").mockReturnValue({
+      ...window.location,
+      origin: "https://spa.example",
+      assign,
+    } as unknown as Location);
+    apiMock.post.mockImplementation((url: string) =>
+      url === "/api/v1/auth/federation/oauth2/start"
+        ? Promise.resolve(
+            res({
+              authorize_url: "https://github.com/login/oauth/authorize?x=1",
+              state: "st",
+              expires_in_secs: 600,
+            }),
+          )
+        : Promise.reject(new Error(`unexpected post ${url}`)),
+    );
+
+    await goToCredentials();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Sign in with GitHub" }),
+    );
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/auth/federation/oauth2/start",
+        expect.objectContaining({ federation_config_id: "cfg-github" }),
+      ),
+    );
+    vi.restoreAllMocks();
+  });
+
+  it("reports a failure to start without navigating away", async () => {
+    withProviders([googleProvider]);
+    apiMock.post.mockRejectedValue(
+      Object.assign(new Error("nope"), {
+        isAxiosError: true,
+        response: { status: 401, data: {} },
+      }),
+    );
+
+    await goToCredentials();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Sign in with Google" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/Google/),
+    );
+    // …and the button is usable again, rather than stuck in its busy state.
+    expect(
+      screen.getByRole("button", { name: "Sign in with Google" }),
+    ).toBeEnabled();
+  });
+
+  /** An organization-level sign-in leaves the tenant blank, and so does the call. */
+  it("omits the tenant when signing in at organization level", async () => {
+    withProviders([googleProvider]);
+    renderWithProviders(<LoginPage />, { route: "/login" });
+    await userEvent.type(screen.getByLabelText("Organization slug"), "acme");
+    await userEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByRole("heading", { name: "Sign in" });
+
+    await waitFor(() =>
+      expect(apiMock.get).toHaveBeenCalledWith(PROVIDERS_PATH, {
+        params: { org_slug: "acme" },
+      }),
+    );
+  });
+});

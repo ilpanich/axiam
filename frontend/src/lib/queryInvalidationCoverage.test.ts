@@ -45,6 +45,8 @@ const STANDALONE: Record<string, string> = {
   "audit-logs": "append-only log; no other view holds its rows",
   "federation-configs":
     "shown only on the Federation page, and on the user detail page as a name lookup that a config change cannot invalidate meaningfully",
+  "federation-effective-providers":
+    "the Federation page's read-only view of what this tenant can sign in with, from the public providers endpoint. Its inherited half is the organization's rows, which nothing this tenant does can change; its own half is a projection of federation-configs, which the page refetches beside it.",
   "mds-status": "FIDO metadata freshness probe; read-only, server-side state",
   "notification-rules": "shown only on the Notification Rules page",
   "oauth2-clients": "shown only on the OAuth2 Clients page",

@@ -87,7 +87,7 @@ describe("FederationPage", () => {
     fireEvent.submit(
       within(dialog).getByRole("button", { name: "Create" }).closest("form")!
     );
-    expect(await screen.findByText("Provider is required.")).toBeInTheDocument();
+    expect(await screen.findByText("Display name is required.")).toBeInTheDocument();
     expect(apiMock.post).not.toHaveBeenCalled();
   });
 
@@ -96,7 +96,7 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
     const dialog = screen.getByRole("dialog");
-    await userEvent.type(within(dialog).getByLabelText("Provider *"), "Auth0");
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Auth0");
     // Client ID (required, still empty) would block a native submit; submit the
     // form directly to reach the component's validation.
     fireEvent.submit(
@@ -111,7 +111,7 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
     const dialog = screen.getByRole("dialog");
-    await userEvent.type(within(dialog).getByLabelText("Provider *"), "Auth0");
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Auth0");
     await userEvent.type(within(dialog).getByLabelText("Client ID *"), "abc");
     await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
     expect(await screen.findByText("Client Secret is required.")).toBeInTheDocument();
@@ -128,13 +128,16 @@ describe("FederationPage", () => {
       within(dialog).queryByLabelText(/IdP Signing Certificate/),
     ).not.toBeInTheDocument();
 
+    // The protocol follows the provider now: a kind and a protocol that
+    // disagree is a configuration the server refuses, so the form does not
+    // offer the pairing at all.
     await userEvent.selectOptions(
-      within(dialog).getByLabelText("Federation protocol"),
-      "Saml",
+      within(dialog).getByLabelText("Provider *"),
+      "generic_saml",
     );
 
     expect(within(dialog).getByLabelText(/IdP Signing Certificate/)).toBeInTheDocument();
-    expect(within(dialog).getByLabelText("Allowed Algorithms")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Allowed signature algorithms")).toBeInTheDocument();
   });
 
   it("requires an IdP signing certificate for SAML configs", async () => {
@@ -142,12 +145,15 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
     const dialog = screen.getByRole("dialog");
-    await userEvent.type(within(dialog).getByLabelText("Provider *"), "ADFS2");
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "ADFS2");
     await userEvent.type(within(dialog).getByLabelText("Client ID *"), "abc");
     await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "shh");
+    // The protocol follows the provider now: a kind and a protocol that
+    // disagree is a configuration the server refuses, so the form does not
+    // offer the pairing at all.
     await userEvent.selectOptions(
-      within(dialog).getByLabelText("Federation protocol"),
-      "Saml",
+      within(dialog).getByLabelText("Provider *"),
+      "generic_saml",
     );
     await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
     expect(
@@ -161,7 +167,7 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
     const dialog = screen.getByRole("dialog");
-    await userEvent.type(within(dialog).getByLabelText("Provider *"), "Auth0");
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Auth0");
     await userEvent.type(within(dialog).getByLabelText("Client ID *"), "abc");
     await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "shh");
     await userEvent.type(
@@ -181,7 +187,7 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
     const dialog = screen.getByRole("dialog");
-    await userEvent.type(within(dialog).getByLabelText("Provider *"), "Auth0");
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Auth0");
     await userEvent.type(within(dialog).getByLabelText("Client ID *"), "abc");
     await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "shh");
     // `[[` escapes the literal `[` (userEvent treats `[`/`{` as special).
@@ -201,7 +207,7 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
     const dialog = screen.getByRole("dialog");
-    await userEvent.type(within(dialog).getByLabelText("Provider *"), "Auth0");
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Auth0");
     await userEvent.type(within(dialog).getByLabelText("Client ID *"), "auth0-client");
     await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "shh-secret");
     await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
@@ -214,6 +220,22 @@ describe("FederationPage", () => {
         client_secret: "shh-secret",
         metadata_url: null,
         attribute_map: {},
+        // Every login-provider field is sent explicitly, including the ones
+        // left at their defaults. The server never has to guess what an older
+        // client meant, and an operator who clears a field gets it cleared —
+        // rather than keeping whatever was stored because the key was omitted.
+        provider_kind: "generic_oidc",
+        provider_slug: null,
+        allow_tenant_inheritance: false,
+        scopes: [],
+        authorization_endpoint: null,
+        token_endpoint: null,
+        userinfo_endpoint: null,
+        allowed_issuer_tenants: [],
+        apple_team_id: null,
+        apple_key_id: null,
+        require_pkce: false,
+        button_icon: null,
       }),
     );
   });
@@ -224,19 +246,22 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
     const dialog = screen.getByRole("dialog");
-    await userEvent.type(within(dialog).getByLabelText("Provider *"), "ADFS2");
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "ADFS2");
     await userEvent.type(within(dialog).getByLabelText("Client ID *"), "adfs2-client");
     await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "shh-secret");
+    // The protocol follows the provider now: a kind and a protocol that
+    // disagree is a configuration the server refuses, so the form does not
+    // offer the pairing at all.
     await userEvent.selectOptions(
-      within(dialog).getByLabelText("Federation protocol"),
-      "Saml",
+      within(dialog).getByLabelText("Provider *"),
+      "generic_saml",
     );
     await userEvent.type(
       within(dialog).getByLabelText(/IdP Signing Certificate/),
       "-----BEGIN CERTIFICATE-----abc",
     );
     await userEvent.type(
-      within(dialog).getByLabelText("Allowed Algorithms"),
+      within(dialog).getByLabelText("Allowed signature algorithms"),
       "RS256, RS384",
     );
     await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
@@ -249,6 +274,22 @@ describe("FederationPage", () => {
         client_secret: "shh-secret",
         metadata_url: null,
         attribute_map: {},
+        // Every login-provider field is sent explicitly, including the ones
+        // left at their defaults. The server never has to guess what an older
+        // client meant, and an operator who clears a field gets it cleared —
+        // rather than keeping whatever was stored because the key was omitted.
+        provider_kind: "generic_saml",
+        provider_slug: null,
+        allow_tenant_inheritance: false,
+        scopes: [],
+        authorization_endpoint: null,
+        token_endpoint: null,
+        userinfo_endpoint: null,
+        allowed_issuer_tenants: [],
+        apple_team_id: null,
+        apple_key_id: null,
+        require_pkce: false,
+        button_icon: null,
         idp_signing_cert_pem: "-----BEGIN CERTIFICATE-----abc",
         allowed_algorithms: ["RS256", "RS384"],
       }),
@@ -266,7 +307,7 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
     const dialog = screen.getByRole("dialog");
-    await userEvent.type(within(dialog).getByLabelText("Provider *"), "Okta");
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Okta");
     await userEvent.type(within(dialog).getByLabelText("Client ID *"), "abc");
     await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "shh");
     await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
@@ -289,7 +330,7 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).getByLabelText("Provider *")).toHaveValue("Okta");
+    expect(within(dialog).getByLabelText("Display name *")).toHaveValue("Okta");
     expect(within(dialog).getByLabelText("Client ID *")).toHaveValue("okta-client-id");
     expect(within(dialog).getByLabelText(/Client Secret/)).toHaveValue("");
     expect(within(dialog).getByLabelText("Federation protocol")).toBeDisabled();
@@ -305,7 +346,7 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
     const dialog = screen.getByRole("dialog");
-    const providerField = within(dialog).getByLabelText("Provider *");
+    const providerField = within(dialog).getByLabelText("Display name *");
     await userEvent.clear(providerField);
     await userEvent.type(providerField, "Okta Prod");
     await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
@@ -317,6 +358,22 @@ describe("FederationPage", () => {
         metadata_url: "https://okta.example.com/.well-known/openid-configuration",
         attribute_map: { email: "mail" },
         enabled: true,
+        // `provider_kind` is absent on purpose: it is immutable after creation,
+        // because it decides the protocol and which inherited provider a tenant
+        // overrides. Everything else is sent whole, for the same reason the
+        // create payload is.
+        provider_slug: null,
+        allow_tenant_inheritance: false,
+        scopes: [],
+        authorization_endpoint: null,
+        token_endpoint: null,
+        userinfo_endpoint: null,
+        allowed_issuer_tenants: [],
+        apple_team_id: null,
+        apple_key_id: null,
+        require_pkce: false,
+        button_icon: null,
+        allowed_algorithms: [],
         // X4: an OIDC provider always carries its complete trust block. The
         // server replaces it wholesale, so sending a patch — or omitting it —
         // is how an operator keeps a setting they believed they had changed.
@@ -354,7 +411,7 @@ describe("FederationPage", () => {
       "-----BEGIN CERTIFICATE-----xyz",
     );
     await userEvent.type(
-      within(dialog).getByLabelText("Allowed Algorithms"),
+      within(dialog).getByLabelText("Allowed signature algorithms"),
       "RS512",
     );
     await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
@@ -375,13 +432,13 @@ describe("FederationPage", () => {
     renderWithProviders(<FederationPage />);
     await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
     const dialog = screen.getByRole("dialog");
-    const providerField = within(dialog).getByLabelText("Provider *");
+    const providerField = within(dialog).getByLabelText("Display name *");
     await userEvent.clear(providerField);
     // Empty required provider blocks a native submit; submit the form directly.
     fireEvent.submit(
       within(dialog).getByRole("button", { name: "Save Changes" }).closest("form")!
     );
-    expect(await screen.findByText("Provider is required.")).toBeInTheDocument();
+    expect(await screen.findByText("Display name is required.")).toBeInTheDocument();
     expect(apiMock.put).not.toHaveBeenCalled();
   });
 

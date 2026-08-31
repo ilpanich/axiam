@@ -15,23 +15,46 @@ export interface ToggleFieldProps {
   label: string;
   checked: boolean;
   onChange: (v: boolean) => void;
+  /**
+   * What the switch actually does, for the cases where the label cannot say it.
+   *
+   * Wired through `aria-describedby` rather than rendered as loose text, so a
+   * screen reader announces the explanation with the control instead of leaving
+   * it stranded after it.
+   */
+  description?: React.ReactNode;
 }
 
-export function ToggleField({ id, label, checked, onChange }: ToggleFieldProps) {
+export function ToggleField({
+  id,
+  label,
+  checked,
+  onChange,
+  description,
+}: ToggleFieldProps) {
+  const descriptionId = description ? `${id}-description` : undefined;
   return (
-    <div className="flex items-center gap-3">
-      <input
-        type="checkbox"
-        id={id}
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="focus-ring w-5 h-5 accent-cyan-400 cursor-pointer rounded-sm"
-      />
-      {/* Extend the click/tap target: the whole label row is comfortably large
-          and the htmlFor association keeps the checkbox the control. */}
-      <Label htmlFor={id} className="cursor-pointer py-1.5 flex-1">
-        {label}
-      </Label>
+    <div className="space-y-1">
+      <div className="flex items-center gap-3">
+        <input
+          type="checkbox"
+          id={id}
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          aria-describedby={descriptionId}
+          className="focus-ring w-5 h-5 accent-cyan-400 cursor-pointer rounded-sm"
+        />
+        {/* Extend the click/tap target: the whole label row is comfortably large
+            and the htmlFor association keeps the checkbox the control. */}
+        <Label htmlFor={id} className="cursor-pointer py-1.5 flex-1">
+          {label}
+        </Label>
+      </div>
+      {description && (
+        <p id={descriptionId} className="pl-8 text-xs text-muted-foreground">
+          {description}
+        </p>
+      )}
     </div>
   );
 }

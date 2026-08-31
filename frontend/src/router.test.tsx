@@ -15,6 +15,9 @@ describe("router", () => {
     expect(topLevelPaths).toContain("/auth/reset-password");
     expect(topLevelPaths).toContain("/auth/verify-email");
     expect(topLevelPaths).toContain("/auth/mfa-setup");
+    // Where every identity provider returns the browser. It has to be public
+    // and top-level: the visitor has no session yet, which is the point.
+    expect(topLevelPaths).toContain("/auth/sso/callback");
     expect(topLevelPaths).toContain("*");
   });
 

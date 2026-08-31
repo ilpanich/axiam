@@ -46,6 +46,13 @@ const EXEMPT = new Set<string>([
   // A base-URL constant, concatenated with "/user/{id}" or "/{id}" at the call
   // site. Both concrete paths are checked; the bare prefix is never requested.
   "/api/v1/federation-links",
+  // Real, routed, and absent from the document this test reads: the committed
+  // `sdks/openapi.json` is generated with `--no-default-features`, which is the
+  // build the `OpenAPI Drift Gate (SAML off)` job compares against, and the SAML
+  // endpoints only exist when the `saml` feature is on. Exempting the one path
+  // the admin UI calls is narrower than committing a second spec — and the
+  // route is covered on the server side by `federation_test.rs`.
+  "/api/v1/auth/federation/saml/login",
 ]);
 
 function sourceFiles(dir: string): string[] {

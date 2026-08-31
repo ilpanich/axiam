@@ -35,6 +35,7 @@ import { ForgotPasswordPage } from "@/pages/auth/ForgotPasswordPage";
 import { ResetPasswordPage } from "@/pages/auth/ResetPasswordPage";
 import { VerifyEmailPage } from "@/pages/auth/VerifyEmailPage";
 import { MfaSetupPage } from "@/pages/auth/MfaSetupPage";
+import { SsoCallbackPage } from "@/pages/auth/SsoCallbackPage";
 import { DevicePage } from "@/pages/device/DevicePage";
 import { PrivacyPage } from "@/pages/privacy/PrivacyPage";
 
@@ -59,6 +60,12 @@ export const router = createBrowserRouter([
   {
     path: "/auth/verify-email",
     element: <VerifyEmailPage />,
+  },
+  {
+    // Where every identity provider returns the browser. Public by necessity:
+    // the whole point of the route is that the visitor has no session yet.
+    path: "/auth/sso/callback",
+    element: <SsoCallbackPage />,
   },
   {
     path: "/auth/mfa-setup",

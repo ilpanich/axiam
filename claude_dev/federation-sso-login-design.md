@@ -9,10 +9,11 @@ first-time-SSO backend into something a person can actually click. Everything
 normative that comes out of it lands in `sdks/CONTRACT.md` §12.1 and in
 `claude_dev/threat-model-stride.md`; this file is where the choices are argued.
 
-Its companion is
-[`rpi5-prod-google-federation-guide.md`](rpi5-prod-google-federation-guide.md),
-the operator runbook whose §0 named the gap: *"the backend implements first-time
-SSO but the frontend has no way to use it."*
+Its companion is `claude_dev/rpi5-prod-google-federation-guide.md`, the operator
+runbook whose §0 named the gap: *"the backend implements first-time SSO but the
+frontend has no way to use it."* Deliberately named rather than linked — at the
+time of writing it lives on branch `claude/axiam-federation-setup-guide-dnha1y`
+and not on the default branch, so a relative link here would be a broken one.
 
 ---
 
@@ -575,6 +576,34 @@ check that does not happen.
 
 ---
 
+## 8.4 Custom button icons for generic providers
+
+A branded kind renders its own mark, and that mark is not replaceable: Google,
+Apple and Microsoft all publish sign-in-button rules requiring their own logo,
+and letting an operator substitute a picture would produce a button that breaks
+the guidelines it exists to follow. The server refuses `button_icon` for those
+kinds, and the client would ignore one even if a stale row carried it, so the
+two cannot disagree.
+
+The `generic_*` kinds have no mark to reproduce, which is exactly why they may
+carry one. `button_icon` holds a `data:` URL and the button reads
+**"Sign in with &lt;display name&gt;"**. Without an icon it falls back to a
+neutral key glyph rather than a letter or a coloured circle — something that
+looks deliberate beside the real marks, instead of looking like one that failed
+to load.
+
+**Constraints, and why each one is where it is:**
+
+| Rule | Value | Why |
+|---|---|---|
+| Cropped client-side | 64×64 PNG, centre-cropped | The source file never reaches the server. Centre-crop rather than stretch: a squashed wordmark is worse than a trimmed one, and the operator sees the result before saving. |
+| Stored size | **16 KiB decoded**, checked on the URL length first | It is served by the *unauthenticated* providers endpoint on every login-page render. One operator pasting a photograph would otherwise cost every visitor. |
+| Source file size | 5 MB, client-side only | A different limit for a different reason: decoding a 200 MB TIFF locks the tab. Failing on file size before touching a canvas turns that into a sentence. |
+| Formats | PNG, JPEG, WebP | **No SVG.** An SVG is a document with its own parser, and this one is served to everyone who loads a login page. A PNG cannot be made to do anything but be a picture. |
+| Rendering | `<img src>` only | Fits the SPA's `img-src 'self' data:` CSP, which is also why the bundled marks are inline SVG rather than fetched. |
+
+---
+
 ## 9. Frontend
 
 - **Buttons** render on the credentials step, below the password form, from the
@@ -591,10 +620,15 @@ check that does not happen.
   error, and network failure are four different sentences, not one blank page.
 - **`FederationPage`** gains `provider_kind` (which drives every default),
   `allow_tenant_inheritance`, the OAuth2 endpoints, scopes, `allowed_issuer_tenants`,
-  the Apple fields, and the two defect fixes. An **inherited** config is listed
-  with an "Inherited" badge, is not editable in the tenant, and offers a single
-  action — "Override in this tenant", which opens the create form prefilled from
-  the inherited config.
+  the Apple fields, the icon upload (§8.4), and the two defect fixes. An
+  **inherited** config is listed with an "Inherited" badge, is not editable in
+  the tenant, and offers a single action — "Override in this tenant", which
+  opens the create form prefilled from the inherited config. The inherited list
+  comes from the same public providers endpoint the login page uses, because the
+  admin CRUD list is tenant-scoped by construction and cannot mention what a
+  tenant inherits — without it, a tenant administrator sees an empty Federation
+  page and a login page with a Google button on it, and nothing explains the
+  difference.
 
 ---
 
@@ -698,5 +732,7 @@ this work and are written down rather than fixed:
    origin.
 5. **The Pi guide's §7.3 tells the operator to register `/login` as the Google
    redirect URI.** With a real callback route it should be
-   `https://<host>/auth/sso/callback`. The guide is on another branch; it needs
-   the one-line change when both land.
+   `https://<host>/auth/sso/callback`, and §0's "the honest shape of this
+   exercise" table — which routes the flow through two `curl` calls because
+   there was no button — is now describable as a browser flow. The guide is on
+   another branch; it needs both edits when the two land.

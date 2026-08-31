@@ -8,7 +8,10 @@
 use std::sync::Arc;
 
 use axiam_core::error::AxiamError;
-use axiam_core::models::federation::{CreateFederationLink, FederationLink, FederationProtocol};
+use axiam_core::models::federation::{
+    CreateFederationLink, FederationConfig, FederationLink, FederationProtocol, ProviderKind,
+};
+use axiam_core::models::federation_claims::{MappedIdentity, map_identity};
 use axiam_core::models::user::{CreateUser, User};
 use axiam_core::repository::{
     FederationConfigRepository, FederationLinkRepository, UserRepository,
@@ -75,6 +78,38 @@ pub struct IdTokenClaims {
     pub email_verified: Option<bool>,
     pub name: Option<String>,
     pub nonce: Option<String>,
+}
+
+/// A verified ID token: the typed claims AXIAM needs, plus the full claim
+/// object an operator's `attribute_map` may name.
+///
+/// Both come from one `decode` call, so there is no path by which a mapped
+/// value comes from a token whose signature was not checked.
+#[derive(Debug, Clone)]
+pub struct VerifiedIdToken {
+    /// The claims AXIAM itself reads.
+    pub claims: IdTokenClaims,
+    /// Every verified claim, as sent.
+    pub raw: serde_json::Value,
+}
+
+/// Merge provider-supplied, **unsigned** values under a verified claim set.
+///
+/// Apple is why this exists: the user's name arrives once, in a form field of
+/// the `response_mode=form_post` callback, and never in the ID token. The merge
+/// is deliberately one-directional — an existing verified claim is never
+/// overwritten — so an attacker who can shape the form POST cannot restate a
+/// claim the signature already fixed.
+fn merge_unsigned_claims(verified: &mut serde_json::Value, unsigned: &serde_json::Value) {
+    let (Some(target), Some(source)) = (verified.as_object_mut(), unsigned.as_object()) else {
+        return;
+    };
+    for (key, value) in source {
+        // `sub`, `iss`, `aud`, `exp` and every other signed claim are already
+        // present and therefore untouchable. Only genuinely absent keys can be
+        // contributed.
+        target.entry(key.clone()).or_insert_with(|| value.clone());
+    }
 }
 
 /// Result of a successful OIDC callback: the local user and their
@@ -178,6 +213,20 @@ where
         &self.user_repo
     }
 
+    /// The test-only allow-private-networks seam, read once here so the OAuth2
+    /// path reaches it the same way `discover` does rather than growing a
+    /// second copy of the reasoning. `false` in every production code path.
+    pub(crate) fn allow_private_networks(&self) -> bool {
+        self.cache.allow_private_networks()
+    }
+
+    /// The AES-256-GCM key used to decrypt a stored client secret at use time
+    /// (SEC-045). Borrowed rather than copied so no call site can accidentally
+    /// keep one alive past the request that needed it.
+    pub(crate) fn encryption_key_ref(&self) -> &[u8; 32] {
+        &self.encryption_key
+    }
+
     /// Fetch and parse the OIDC discovery document from the provider.
     ///
     /// Only HTTPS URLs are accepted to mitigate SSRF risks, since the
@@ -223,15 +272,50 @@ where
         state: &str,
         nonce: &str,
     ) -> Result<AuthorizationUrl, FederationError> {
-        let config = self
-            .federation_config_repo
+        let config = self.load_config(tenant_id, config_id).await?;
+        self.build_authorization_url_for(&config, redirect_uri, state, nonce, None)
+            .await
+    }
+
+    /// Fetch a config, mapping the repository's `NotFound` onto this crate's.
+    ///
+    /// One helper rather than the same six-line `map_err` at four call sites:
+    /// a config that is missing and a config whose tenant does not match are
+    /// the same answer here, and they must stay the same answer.
+    pub(crate) async fn load_config(
+        &self,
+        tenant_id: Uuid,
+        config_id: Uuid,
+    ) -> Result<FederationConfig, FederationError> {
+        self.federation_config_repo
             .get_by_id(tenant_id, config_id)
             .await
             .map_err(|e| match e {
                 AxiamError::NotFound { id, .. } => FederationError::ConfigNotFound(id),
                 other => FederationError::Internal(other.to_string()),
-            })?;
+            })
+    }
 
+    /// Build the OIDC authorization URL from an already-resolved config.
+    ///
+    /// Split from [`OidcFederationService::build_authorization_url`] because a
+    /// config may be **inherited**: it can live in the organization-scope
+    /// tenant while the login is for one of that organization's tenants, and a
+    /// `get_by_id(requesting_tenant, id)` cannot find it. The REST layer
+    /// resolves it once and hands it here.
+    ///
+    /// `pkce_challenge` is `Some` when the config opts into PKCE. On this path
+    /// it is an addition to the server-side `nonce`, not a replacement for it —
+    /// see [`crate::pkce`] for why it is opt-in here and mandatory on the
+    /// OAuth2 path.
+    pub async fn build_authorization_url_for(
+        &self,
+        config: &FederationConfig,
+        redirect_uri: &str,
+        state: &str,
+        nonce: &str,
+        pkce_challenge: Option<&str>,
+    ) -> Result<AuthorizationUrl, FederationError> {
         if !config.enabled {
             return Err(FederationError::ConfigDisabled);
         }
@@ -254,21 +338,45 @@ where
             FederationError::DiscoveryFailed(format!("Invalid authorization endpoint URL: {e}"))
         })?;
 
+        // Per-config scopes, defaulting per kind. This used to be the literal
+        // string "openid email profile", which is why Apple could not work: it
+        // rejects `profile` and wants `name email`.
+        let scopes = config.effective_scopes().join(" ");
+
         auth_url
             .query_pairs_mut()
             .append_pair("response_type", "code")
             .append_pair("client_id", &config.client_id)
             .append_pair("redirect_uri", redirect_uri)
-            .append_pair("scope", "openid email profile")
+            .append_pair("scope", &scopes)
             .append_pair("state", state)
             .append_pair("nonce", nonce);
+
+        if let Some(challenge) = pkce_challenge {
+            auth_url
+                .query_pairs_mut()
+                .append_pair("code_challenge", challenge)
+                .append_pair("code_challenge_method", crate::pkce::CHALLENGE_METHOD);
+        }
+
+        // Apple returns the authorization code by cross-site form POST whenever
+        // `name` or `email` is requested, and returns the user's name *only* in
+        // that POST. Setting it explicitly rather than relying on Apple's
+        // inference keeps the callback route AXIAM registers and the response
+        // mode Apple uses from drifting apart.
+        if config.provider_kind == ProviderKind::Apple {
+            auth_url
+                .query_pairs_mut()
+                .append_pair("response_mode", "form_post");
+        }
 
         let url = auth_url.to_string();
 
         info!(
-            tenant_id = %tenant_id,
-            config_id = %config_id,
+            tenant_id = %config.tenant_id,
+            config_id = %config.id,
             provider = %config.provider,
+            provider_kind = %config.provider_kind.as_str(),
             "Built OIDC authorization URL"
         );
 
@@ -288,15 +396,43 @@ where
         redirect_uri: &str,
         expected_nonce: &str,
     ) -> Result<FederationCallbackResult, FederationError> {
-        let config = self
-            .federation_config_repo
-            .get_by_id(tenant_id, config_id)
-            .await
-            .map_err(|e| match e {
-                AxiamError::NotFound { id, .. } => FederationError::ConfigNotFound(id),
-                other => FederationError::Internal(other.to_string()),
-            })?;
+        let config = self.load_config(tenant_id, config_id).await?;
+        self.handle_callback_for(
+            &config,
+            tenant_id,
+            code,
+            redirect_uri,
+            expected_nonce,
+            None,
+            None,
+        )
+        .await
+    }
 
+    /// Complete an OIDC login from an already-resolved config.
+    ///
+    /// `requesting_tenant_id` is where the user and the federation link are
+    /// created, and it is **not** necessarily `config.tenant_id`: an inherited
+    /// organization-level provider signs people into the tenant they asked for,
+    /// not into the organization scope the config lives in. Getting this
+    /// backwards would put every tenant's federated users in one shared tenant.
+    ///
+    /// `extra_claims` carries data a provider sends *outside* the ID token.
+    /// Apple is the reason it exists: the user's name arrives once, in a form
+    /// field of the `response_mode=form_post` callback, and never again. Values
+    /// there are merged **under** the ID token's, so a signed claim always wins
+    /// over an unsigned form field.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn handle_callback_for(
+        &self,
+        config: &FederationConfig,
+        requesting_tenant_id: Uuid,
+        code: &str,
+        redirect_uri: &str,
+        expected_nonce: &str,
+        code_verifier: Option<&str>,
+        extra_claims: Option<&serde_json::Value>,
+    ) -> Result<FederationCallbackResult, FederationError> {
         if !config.enabled {
             return Err(FederationError::ConfigDisabled);
         }
@@ -317,7 +453,7 @@ where
         // Decrypt the client secret at use-time (SEC-045 / D-10..D-13).
         // Supports both encrypted rows (post-backfill) and legacy plaintext
         // rows (brief deploy window before backfill runs).
-        let client_secret = decrypt_client_secret_or_legacy(
+        let stored_secret = decrypt_client_secret_or_legacy(
             &self.encryption_key,
             config.client_secret_nonce.as_deref(),
             config.client_secret_ciphertext.as_deref(),
@@ -325,14 +461,30 @@ where
         )
         .map_err(|_| FederationError::ConfigIncomplete)?;
 
+        // Apple's client secret is an ES256 JWT that expires, not a string.
+        // What was decrypted above is then the `.p8` private key, and the
+        // secret is minted fresh here with a five-minute life — see
+        // `crate::apple` for why this is minted rather than stored.
+        let client_secret = if config.mints_client_secret() {
+            crate::apple::mint_client_secret(
+                config.apple_team_id.as_deref().unwrap_or_default(),
+                config.apple_key_id.as_deref().unwrap_or_default(),
+                &config.client_id,
+                &stored_secret,
+            )?
+        } else {
+            stored_secret
+        };
+
         // Exchange authorization code for tokens.
         let token_response = self
-            .exchange_code(
+            .exchange_code_with_pkce(
                 &discovery.token_endpoint,
                 code,
                 redirect_uri,
                 &config.client_id,
                 &client_secret,
+                code_verifier,
             )
             .await?;
 
@@ -340,19 +492,23 @@ where
             FederationError::TokenExchangeFailed("No id_token in token response".into())
         })?;
 
-        // Cryptographically verify the ID token (D-01..D-05).
-        let claims = self
-            .verify_id_token(
+        // Cryptographically verify the ID token (D-01..D-05), resolving a
+        // templated issuer against the config's accepted tenants (§6).
+        let verified = self
+            .verify_id_token_full(
                 &id_token_str,
                 &discovery,
                 &config.client_id,
                 &config.allowed_algorithms,
-                (tenant_id, config_id),
+                &config.allowed_issuer_tenants,
+                (config.tenant_id, config.id),
             )
             .await?;
+        let claims = verified.claims;
 
-        // Validate nonce to prevent replay attacks.
-        // TODO(plan 04-05): source nonce from federation_login_state keyed by `state`
+        // Validate nonce to prevent replay attacks. The expected value comes
+        // from the server-side `federation_login_state` row, never from the
+        // caller (SECHRD-07/D-04).
         if let Some(ref token_nonce) = claims.nonce {
             if token_nonce != expected_nonce {
                 return Err(FederationError::IdTokenValidationFailed(
@@ -366,14 +522,27 @@ where
         }
 
         info!(
-            tenant_id = %tenant_id,
-            config_id = %config_id,
+            tenant_id = %requesting_tenant_id,
+            config_id = %config.id,
             external_subject = %claims.sub,
             "OIDC callback: token exchange and verification successful"
         );
 
-        // Provision or link the user.
-        self.provision_or_link_user(tenant_id, config_id, &claims)
+        // Apply the configured attribute map to the *verified* claim set. The
+        // raw object is used rather than the typed `IdTokenClaims` so an
+        // operator can map a claim AXIAM has no field for.
+        let mut merged = verified.raw;
+        if let Some(extra) = extra_claims {
+            merge_unsigned_claims(&mut merged, extra);
+        }
+        let identity = map_identity(config.provider_kind, &config.attribute_map, &merged)
+            .ok_or_else(|| {
+                FederationError::IdTokenValidationFailed(
+                    "no external subject could be mapped from the ID token".into(),
+                )
+            })?;
+
+        self.provision_or_link_identity(requesting_tenant_id, config.id, &identity)
             .await
     }
 
@@ -394,6 +563,39 @@ where
         allowed_algorithms: &[String],
         cache_key: (Uuid, Uuid),
     ) -> Result<IdTokenClaims, FederationError> {
+        self.verify_id_token_full(
+            token,
+            discovery,
+            client_id,
+            allowed_algorithms,
+            // No templated-issuer allow-list: this entry point is for a
+            // provider whose discovery document names a concrete issuer, and
+            // `resolve_expected_issuer` refuses a templated one with an empty
+            // list rather than accepting anyone.
+            &[],
+            cache_key,
+        )
+        .await
+        .map(|v| v.claims)
+    }
+
+    /// [`OidcFederationService::verify_id_token`], plus the raw verified claim
+    /// object and templated-issuer resolution.
+    ///
+    /// The raw object is what makes `attribute_map` able to name a claim AXIAM
+    /// has no typed field for; it is produced by the *same* `decode` call that
+    /// checks the signature, so there is no path by which a mapped value comes
+    /// from an unverified token.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn verify_id_token_full(
+        &self,
+        token: &str,
+        discovery: &OidcDiscoveryDocument,
+        client_id: &str,
+        allowed_algorithms: &[String],
+        allowed_issuer_tenants: &[String],
+        cache_key: (Uuid, Uuid),
+    ) -> Result<VerifiedIdToken, FederationError> {
         // Step 1 — Belt-and-suspenders: reject `alg=none` by inspecting the raw
         // JOSE header before handing the token to `decode_header`.
         // `jsonwebtoken` 10 does not have an `Algorithm::None` variant and
@@ -437,15 +639,28 @@ where
         let decoding_key =
             DecodingKey::from_jwk(&jwk).map_err(|_| FederationError::JwksKidUnknown)?;
 
+        // Step 5a — Resolve the issuer to require. For every provider that
+        // publishes a concrete one this is the discovered string unchanged; for
+        // Entra's `common` authority it substitutes the token's `tid`, which
+        // must appear in the config's allow-list. See `crate::issuer`.
+        let expected_issuer = crate::issuer::resolve_expected_issuer(
+            &discovery.issuer,
+            token,
+            allowed_issuer_tenants,
+        )?;
+
         let mut validation = Validation::new(header.alg);
         validation.algorithms = allowed;
-        validation.set_issuer(&[&discovery.issuer]);
+        validation.set_issuer(&[&expected_issuer]);
         validation.set_audience(&[client_id]);
         validation.set_required_spec_claims(&["iss", "aud", "exp", "iat"]);
         validation.leeway = 60; // REQ-5 clock-skew tolerance
 
+        // Decoded as an open object, then narrowed. One `decode` call, so the
+        // typed claims and the raw map are the same verified bytes — decoding
+        // twice would leave room for them to disagree.
         let token_data =
-            decode::<IdTokenClaims>(token, &decoding_key, &validation).map_err(|e| {
+            decode::<serde_json::Value>(token, &decoding_key, &validation).map_err(|e| {
                 use jsonwebtoken::errors::ErrorKind;
                 match e.kind() {
                     ErrorKind::InvalidSignature => FederationError::JwtSignatureInvalid,
@@ -453,11 +668,17 @@ where
                 }
             })?;
 
-        Ok(token_data.claims)
+        let raw = token_data.claims;
+        let claims: IdTokenClaims = serde_json::from_value(raw.clone()).map_err(|e| {
+            FederationError::JwtClaimRejected(format!("ID token claims are not usable: {e}"))
+        })?;
+
+        Ok(VerifiedIdToken { claims, raw })
     }
 
     /// Exchange an authorization code for tokens at the external IdP's
     /// token endpoint.
+    #[allow(dead_code)]
     async fn exchange_code(
         &self,
         token_endpoint: &str,
@@ -466,17 +687,43 @@ where
         client_id: &str,
         client_secret: &str,
     ) -> Result<TokenResponse, FederationError> {
+        self.exchange_code_with_pkce(
+            token_endpoint,
+            code,
+            redirect_uri,
+            client_id,
+            client_secret,
+            None,
+        )
+        .await
+    }
+
+    /// [`OidcFederationService::exchange_code`], echoing a PKCE verifier when
+    /// the config opted into one.
+    #[allow(clippy::too_many_arguments)]
+    async fn exchange_code_with_pkce(
+        &self,
+        token_endpoint: &str,
+        code: &str,
+        redirect_uri: &str,
+        client_id: &str,
+        client_secret: &str,
+        code_verifier: Option<&str>,
+    ) -> Result<TokenResponse, FederationError> {
         // SECHRD-02: route the token-endpoint POST through the shared,
         // IP-pinning SSRF guard (D-01a/b/c) — the token endpoint comes from
         // the (already HTTPS-validated) discovery document, not just the
         // configured issuer, so it must be guarded here too.
-        let form_params = [
+        let mut form_params: Vec<(&str, &str)> = vec![
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", redirect_uri),
             ("client_id", client_id),
             ("client_secret", client_secret),
         ];
+        if let Some(verifier) = code_verifier.filter(|v| !v.trim().is_empty()) {
+            form_params.push(("code_verifier", verifier));
+        }
         // Test-only seam — see `discover()`'s matching comment. `false` in
         // every production code path (`JwksCache::new()`'s default).
         let allow_private = self.cache.allow_private_networks();
@@ -543,9 +790,41 @@ where
         config_id: Uuid,
         claims: &IdTokenClaims,
     ) -> Result<FederationCallbackResult, FederationError> {
+        // The X4 exchange path has typed claims and no config in hand, so it
+        // gets the standard OIDC mapping — which is exactly what this function
+        // did before `attribute_map` was applied anywhere.
+        let identity = MappedIdentity {
+            external_subject: claims.sub.clone(),
+            username: claims.email.clone(),
+            email: claims.email.clone(),
+            email_verified: claims.email_verified.unwrap_or(false),
+            display_name: claims.name.clone(),
+        };
+        self.provision_or_link_identity(tenant_id, config_id, &identity)
+            .await
+    }
+
+    /// Resolve a mapped external identity to an AXIAM user, provisioning one on
+    /// first sight.
+    ///
+    /// `tenant_id` is the tenant the user belongs to — the **requesting**
+    /// tenant, which for an inherited organization-level provider is not the
+    /// tenant the config lives in. `config_id` is the provider's id either way,
+    /// so the `(tenant_id, federation_config_id, external_subject)` uniqueness
+    /// index means "one link per external identity per tenant", and the same
+    /// Google account signing into two tenants through one inherited config
+    /// gets two AXIAM users. That is correct rather than a defect: tenants are
+    /// data-isolation boundaries, and one user row spanning two of them would
+    /// be the actual bug.
+    pub(crate) async fn provision_or_link_identity(
+        &self,
+        tenant_id: Uuid,
+        config_id: Uuid,
+        identity: &MappedIdentity,
+    ) -> Result<FederationCallbackResult, FederationError> {
         let existing_link = self
             .federation_link_repo
-            .get_by_external_subject(tenant_id, config_id, &claims.sub)
+            .get_by_external_subject(tenant_id, config_id, &identity.external_subject)
             .await;
 
         match existing_link {
@@ -563,7 +842,7 @@ where
                 info!(
                     tenant_id = %tenant_id,
                     user_id = %user.id,
-                    external_subject = %claims.sub,
+                    external_subject = %identity.external_subject,
                     "Returning existing federated user"
                 );
 
@@ -574,7 +853,8 @@ where
                 })
             }
             Err(AxiamError::NotFound { .. }) => {
-                self.provision_new_user(tenant_id, config_id, claims).await
+                self.provision_new_user(tenant_id, config_id, identity)
+                    .await
             }
             Err(e) => Err(FederationError::ProvisioningFailed(format!(
                 "Failed to check existing federation link: {e}"
@@ -586,33 +866,46 @@ where
         &self,
         tenant_id: Uuid,
         config_id: Uuid,
-        claims: &IdTokenClaims,
+        identity: &MappedIdentity,
     ) -> Result<FederationCallbackResult, FederationError> {
-        let username = claims
-            .email
+        // The fallbacks are unchanged from before `attribute_map` was applied,
+        // and with an empty map the mapped values are the same ones this used
+        // to read directly — so an existing config provisions identically.
+        let username = identity
+            .username
             .clone()
-            .unwrap_or_else(|| format!("federated-{}-{}", config_id, claims.sub));
+            .unwrap_or_else(|| format!("federated-{}-{}", config_id, identity.external_subject));
 
-        let email = claims
-            .email
-            .clone()
-            .unwrap_or_else(|| format!("{}.{}@federated.local", claims.sub, config_id));
+        let email = identity.email.clone().unwrap_or_else(|| {
+            format!(
+                "{}.{}@federated.local",
+                identity.external_subject, config_id
+            )
+        });
 
         // Deliberately v4, not `new_id()`: a non-usable password must still be
         // unguessable, and v7 trades randomness for a sortable timestamp.
         // See `axiam_core::id` — v7 is for identifiers, never for secrets.
         let random_password = Uuid::new_v4().to_string();
 
+        let mut metadata = serde_json::json!({
+            "federation_config_id": config_id.to_string(),
+            "external_subject": identity.external_subject,
+            "provisioned_by": "oidc_federation",
+        });
+        // `User` has no display-name column, so a mapped one goes here rather
+        // than being dropped — which is what happened to every attribute map
+        // written before this change.
+        if let Some(ref display_name) = identity.display_name {
+            metadata["display_name"] = serde_json::Value::String(display_name.clone());
+        }
+
         let create_user = CreateUser {
             tenant_id,
             username,
             email,
             password: random_password,
-            metadata: Some(serde_json::json!({
-                "federation_config_id": config_id.to_string(),
-                "external_subject": claims.sub,
-                "provisioned_by": "oidc_federation",
-            })),
+            metadata: Some(metadata),
         };
 
         let user = self.user_repo.create(create_user).await.map_err(|e| {
@@ -623,8 +916,8 @@ where
             tenant_id,
             user_id: user.id,
             federation_config_id: config_id,
-            external_subject: claims.sub.clone(),
-            external_email: claims.email.clone(),
+            external_subject: identity.external_subject.clone(),
+            external_email: identity.email.clone(),
         };
 
         let link = self
@@ -640,7 +933,7 @@ where
         info!(
             tenant_id = %tenant_id,
             user_id = %user.id,
-            external_subject = %claims.sub,
+            external_subject = %identity.external_subject,
             "Provisioned new federated user"
         );
 

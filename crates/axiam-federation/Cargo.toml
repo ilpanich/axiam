@@ -17,7 +17,13 @@ axiam-db = { workspace = true }
 axiam-pki = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
+# PKCE verifier generation (`rand`), the S256 challenge and the handoff-code
+# hash (`sha2`/`hex`). All three are already workspace dependencies used the
+# same way elsewhere; none is new to the dependency graph.
+hex = { workspace = true }
 jsonwebtoken = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -9,6 +9,7 @@ use std::io::Write;
 
 use axiam_core::error::AxiamError;
 use axiam_core::models::federation::{CreateFederationLink, FederationProtocol};
+use axiam_core::models::federation_claims::{MappedIdentity, map_identity};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     AssertionReplayRepository, FederationConfigRepository, FederationLinkRepository, UserRepository,
@@ -1160,19 +1161,63 @@ fn apply_attribute_map(
     claims: &SamlAssertionClaims,
     attribute_map: &serde_json::Value,
 ) -> (Option<String>, Option<String>) {
-    let get_mapped = |field: &str| -> Option<String> {
-        let saml_attr_name = attribute_map.get(field)?.as_str()?;
-        claims
-            .attributes
-            .get(saml_attr_name)
-            .and_then(|vals| vals.first())
-            .cloned()
-    };
+    let identity = map_saml_identity(claims, attribute_map);
+    (identity.email, identity.display_name)
+}
 
-    let email = get_mapped("email");
-    let display_name = get_mapped("name").or_else(|| get_mapped("displayName"));
+/// Flatten a SAML assertion into the claim object the shared mapper reads.
+///
+/// The NameID becomes `sub`, so one default map covers OIDC's `sub` and SAML's
+/// NameID without a protocol-specific special case. Each attribute contributes
+/// its **first** value: SAML attributes are multi-valued and AXIAM's fields are
+/// not, and picking the first is what `apply_attribute_map` has always done.
+fn saml_claims_object(claims: &SamlAssertionClaims) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "sub".to_string(),
+        serde_json::Value::String(claims.name_id.clone()),
+    );
+    for (name, values) in &claims.attributes {
+        if let Some(first) = values.first() {
+            // The NameID is authoritative for `sub`; an IdP that also sends an
+            // attribute literally called `sub` must not be able to redefine who
+            // signed in.
+            if name == "sub" {
+                continue;
+            }
+            obj.insert(name.clone(), serde_json::Value::String(first.clone()));
+        }
+    }
+    serde_json::Value::Object(obj)
+}
 
-    (email, display_name)
+/// Map a validated SAML assertion onto an AXIAM identity.
+///
+/// Routed through the same `federation_claims` mapper as OIDC and OAuth2 rather
+/// than a third private copy: an operator writing an attribute map should not
+/// have to learn which protocol they are configuring, and a mapping bug should
+/// be fixable once.
+fn map_saml_identity(
+    claims: &SamlAssertionClaims,
+    attribute_map: &serde_json::Value,
+) -> MappedIdentity {
+    let obj = saml_claims_object(claims);
+    map_identity(
+        axiam_core::models::federation::ProviderKind::GenericSaml,
+        attribute_map,
+        &obj,
+    )
+    // Infallible in practice: `sub` is always present because the NameID is
+    // always present (the assertion validator rejects one without it). The
+    // fallback keeps this total rather than panicking on a shape that would be
+    // a bug elsewhere.
+    .unwrap_or_else(|| MappedIdentity {
+        external_subject: claims.name_id.clone(),
+        username: None,
+        email: None,
+        email_verified: true,
+        display_name: None,
+    })
 }
 
 /// Escape XML special characters in attribute values and text content.

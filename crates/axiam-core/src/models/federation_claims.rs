@@ -33,6 +33,34 @@ pub const ATTRIBUTE_MAP_FIELDS: &[&str] = &[
     "display_name",
 ];
 
+/// Keys AXIAM used to accept, and the field each one now means, **in
+/// precedence order**.
+///
+/// The SAML path shipped before this module existed and read `"name"` (falling
+/// back to `"displayName"`) as the display name. Refusing those keys outright
+/// would turn an existing, working SAML config into one that cannot be saved —
+/// an operator opening the edit dialog to change something unrelated would be
+/// told their attribute map is invalid. They are accepted, canonicalised, and
+/// deliberately absent from [`ATTRIBUTE_MAP_FIELDS`] so the admin UI offers only
+/// the current names to anyone writing a new one.
+///
+/// Order is load-bearing: the SAML path read `name` *before* `displayName`, and
+/// a config that sets both must keep resolving to the same attribute it did
+/// before this table existed.
+pub const ATTRIBUTE_MAP_ALIASES: &[(&str, &str)] =
+    &[("name", "display_name"), ("displayName", "display_name")];
+
+/// The AXIAM field a map key names, accepting the deprecated aliases.
+pub fn canonical_field(key: &str) -> Option<&'static str> {
+    if let Some(f) = ATTRIBUTE_MAP_FIELDS.iter().find(|f| **f == key) {
+        return Some(f);
+    }
+    ATTRIBUTE_MAP_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == key)
+        .map(|(_, field)| *field)
+}
+
 /// Prefix marking a mapping value as a literal rather than a claim path.
 ///
 /// `{"email_verified": "@true"}` states "I accept this provider's unflagged
@@ -103,7 +131,7 @@ pub fn validate_attribute_map(map: &Value) -> Result<(), AttributeMapError> {
         return Err(AttributeMapError::TooManyEntries(obj.len()));
     }
     for (key, value) in obj {
-        if !ATTRIBUTE_MAP_FIELDS.contains(&key.as_str()) {
+        if canonical_field(key).is_none() {
             return Err(AttributeMapError::UnknownField(key.clone()));
         }
         let Some(raw) = value.as_str() else {
@@ -205,9 +233,19 @@ pub fn resolve_field(
     claims: &Value,
     field: &str,
 ) -> Option<String> {
-    let configured = attribute_map
-        .get(field)
-        .and_then(Value::as_str)
+    // The canonical name first, then each deprecated alias in the table's own
+    // order. Iterating the JSON object instead would make precedence depend on
+    // key ordering — which for `serde_json`'s default map is alphabetical, and
+    // would silently flip `name` and `displayName` for every SAML config that
+    // sets both.
+    let configured = std::iter::once(field)
+        .chain(
+            ATTRIBUTE_MAP_ALIASES
+                .iter()
+                .filter(|(_, f)| *f == field)
+                .map(|(alias, _)| *alias),
+        )
+        .find_map(|key| attribute_map.get(key).and_then(Value::as_str))
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
@@ -463,6 +501,38 @@ mod tests {
             validate_attribute_map(&json!({"email": "@"})).unwrap_err(),
             AttributeMapError::EmptyValue("email".into())
         );
+    }
+
+    /// An existing SAML config must not become unsaveable. `name` was the key
+    /// the SAML path read before this module existed.
+    #[test]
+    fn the_deprecated_saml_display_name_keys_still_work() {
+        for alias in ["name", "displayName"] {
+            let map = json!({ alias: "cn" });
+            assert!(
+                validate_attribute_map(&map).is_ok(),
+                "{alias} must remain saveable"
+            );
+            let claims = json!({"sub": "nid", "cn": "Full Name"});
+            let m = map_identity(ProviderKind::GenericSaml, &map, &claims).unwrap();
+            assert_eq!(m.display_name.as_deref(), Some("Full Name"));
+        }
+        // …but the canonical name wins where both are present, so an operator
+        // migrating one entry at a time gets the value they just typed.
+        let map = json!({"name": "cn", "display_name": "givenName"});
+        let claims = json!({"sub": "nid", "cn": "Old", "givenName": "New"});
+        let m = map_identity(ProviderKind::GenericSaml, &map, &claims).unwrap();
+        assert_eq!(m.display_name.as_deref(), Some("New"));
+    }
+
+    #[test]
+    fn aliases_are_not_offered_as_current_field_names() {
+        for (alias, _) in ATTRIBUTE_MAP_ALIASES {
+            assert!(
+                !ATTRIBUTE_MAP_FIELDS.contains(alias),
+                "{alias} is deprecated and must not be advertised"
+            );
+        }
     }
 
     #[test]

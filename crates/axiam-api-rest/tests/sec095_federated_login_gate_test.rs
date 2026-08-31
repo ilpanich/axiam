@@ -582,6 +582,8 @@ mod saml {
                 redirect_uri: "https://spa.example.com/callback".into(),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
                 request_id: FIXTURE_REQUEST_ID.into(),
+                code_verifier: None,
+                idp_redirect_uri: None,
             })
             .await
             .expect("seed federation_login_state");

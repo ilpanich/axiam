@@ -297,6 +297,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "role_assignment_tenant_scope",
         sql: SCHEMA_V51,
     },
+    Migration {
+        version: 52,
+        name: "federation_login_providers",
+        sql: SCHEMA_V52,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2854,9 +2859,163 @@ const SCHEMA_V51: &str = "\
 DEFINE FIELD IF NOT EXISTS tenant_scope ON TABLE has_role TYPE option<array<string>>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v52 — "Sign in with X": provider kind, inheritance, OAuth2, handoff
+// -----------------------------------------------------------------------
+//
+// Every column here is additive and every one reads back, on a row written
+// before this migration, as the value that preserves that row's existing
+// behaviour. Nothing is backfilled and no row is rewritten — an operator who
+// upgrades and changes nothing has the deployment they had.
+//
+// The single exception is `protocol`'s ASSERT, which cannot be added to.
+// SurrealDB *replaces* a field definition rather than merging it, so the new
+// assertion restates 'OidcConnect' and 'Saml' alongside 'OAuth2'. Dropping
+// either would strand every row that already holds one; a test says so.
+//
+// See `claude_dev/federation-sso-login-design.md` §10.
+const SCHEMA_V52: &str = "\
+-- The third protocol variant. OVERWRITE, not IF NOT EXISTS: the field already
+-- exists and its ASSERT is what has to change.
+DEFINE FIELD OVERWRITE protocol ON TABLE federation_config TYPE string \
+    ASSERT $value IN ['OidcConnect', 'Saml', 'OAuth2'];
+-- Which provider this is. option<string> rather than a DEFAULT, because the
+-- honest reading of a pre-v52 row is derived from its protocol (see
+-- ProviderKind::from_legacy_protocol) and a DEFAULT would have to pick one
+-- kind for OIDC and SAML rows alike.
+DEFINE FIELD IF NOT EXISTS provider_kind ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS provider_slug ON TABLE federation_config \
+    TYPE option<string>;
+-- Default false: an existing config stays private to the tenant that owns it,
+-- which is the only thing it has ever been. Inheritance is opted into.
+DEFINE FIELD IF NOT EXISTS allow_tenant_inheritance ON TABLE federation_config \
+    TYPE bool DEFAULT false;
+-- Empty resolves to the per-kind default, which for OIDC is the
+-- 'openid email profile' that used to be hard-coded in build_authorization_url.
+DEFINE FIELD IF NOT EXISTS scopes ON TABLE federation_config \
+    TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS scopes.* ON TABLE federation_config TYPE string;
+-- The OAuth2 variant has no discovery document to derive endpoints from.
+DEFINE FIELD IF NOT EXISTS authorization_endpoint ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS token_endpoint ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS userinfo_endpoint ON TABLE federation_config \
+    TYPE option<string>;
+-- Only consulted when the discovered issuer is templated (Entra's {tenantid}).
+DEFINE FIELD IF NOT EXISTS allowed_issuer_tenants ON TABLE federation_config \
+    TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS allowed_issuer_tenants.* ON TABLE federation_config \
+    TYPE string;
+-- Apple. Not secret: the .p8 private key lives in the existing encrypted
+-- client_secret columns; these two are the identifiers that go in the minted
+-- JWT's iss and kid.
+DEFINE FIELD IF NOT EXISTS apple_team_id ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS apple_key_id ON TABLE federation_config \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS require_pkce ON TABLE federation_config \
+    TYPE bool DEFAULT false;
+-- Backs the providers endpoint, which runs unauthenticated on every login-page
+-- render: 'this tenant's enabled configs' and 'this organization tenant's
+-- inheritable ones' are both index lookups rather than table scans.
+DEFINE INDEX IF NOT EXISTS idx_federation_config_tenant_enabled \
+    ON TABLE federation_config COLUMNS tenant_id, enabled;
+
+-- PKCE verifier and the IdP-side redirect_uri (form_post providers register an
+-- AXIAM server endpoint, not the SPA route, and the token exchange must echo
+-- that value).
+DEFINE FIELD IF NOT EXISTS code_verifier ON TABLE federation_login_state \
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS idp_redirect_uri ON TABLE federation_login_state \
+    TYPE option<string>;
+
+-- =======================================================================
+-- SSO handoff codes
+-- =======================================================================
+-- One-shot codes that turn a cross-site SSO return (SAML, Apple form_post)
+-- into a same-site session issuance without weakening SameSite=Strict on the
+-- session cookies. Only the SHA-256 hash is stored: a read of this table must
+-- not yield a usable credential. No token material is here at all — the
+-- session is minted at redemption from user_id/tenant_id.
+DEFINE TABLE IF NOT EXISTS sso_handoff_code SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS code_hash ON TABLE sso_handoff_code TYPE string;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE sso_handoff_code TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE sso_handoff_code TYPE string;
+DEFINE FIELD IF NOT EXISTS redirect_uri ON TABLE sso_handoff_code TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE sso_handoff_code TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE sso_handoff_code TYPE datetime \
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_sso_handoff_code_hash ON TABLE sso_handoff_code \
+    COLUMNS code_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_sso_handoff_expires_at ON TABLE sso_handoff_code \
+    COLUMNS expires_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one destructive-looking statement in v52, and why it is not.
+    ///
+    /// SurrealDB replaces a field definition rather than merging it, so
+    /// widening an ASSERT means restating every value it already admits.
+    /// Dropping 'OidcConnect' or 'Saml' here would strand every federation
+    /// config in every existing deployment.
+    #[test]
+    fn schema_v52_widens_the_protocol_assert_without_stranding_a_row() {
+        assert!(SCHEMA_V52.contains("DEFINE FIELD OVERWRITE protocol ON TABLE federation_config"));
+        for existing in ["'OidcConnect'", "'Saml'"] {
+            assert!(
+                SCHEMA_V52.contains(existing),
+                "{existing} must survive the widened ASSERT"
+            );
+        }
+        assert!(SCHEMA_V52.contains("'OAuth2'"));
+    }
+
+    /// The compatibility story in one test: every new federation_config column
+    /// is additive, and none of them is backfilled.
+    #[test]
+    fn schema_v52_adds_only_columns_that_read_back_as_todays_behaviour() {
+        // Optional, so a pre-v52 row's kind is *derived* from its protocol
+        // rather than guessed by a DEFAULT that would have to be wrong for one
+        // of OIDC and SAML.
+        assert!(SCHEMA_V52.contains("provider_kind ON TABLE federation_config"));
+        assert!(SCHEMA_V52.contains("TYPE option<string>"));
+        // Inheritance is opted into; an existing config stays tenant-private.
+        assert!(SCHEMA_V52.contains("allow_tenant_inheritance ON TABLE federation_config"));
+        assert!(SCHEMA_V52.contains("TYPE bool DEFAULT false"));
+        // Empty scopes resolve to the per-kind default in Rust, which for OIDC
+        // is the previously hard-coded set.
+        assert!(SCHEMA_V52.contains("scopes ON TABLE federation_config"));
+        assert!(SCHEMA_V52.contains("TYPE array<string> DEFAULT []"));
+        // No UPDATE anywhere: the migration must not rewrite an operator's rows.
+        assert!(!SCHEMA_V52.contains("UPDATE"));
+    }
+
+    #[test]
+    fn schema_v52_stores_only_a_hash_of_a_handoff_code() {
+        assert!(SCHEMA_V52.contains("DEFINE TABLE IF NOT EXISTS sso_handoff_code"));
+        assert!(SCHEMA_V52.contains("code_hash ON TABLE sso_handoff_code TYPE string"));
+        // The table must not have a column that could hold the code itself, or
+        // any token material — the session is minted at redemption.
+        for forbidden in [
+            "code ON TABLE sso_handoff_code",
+            "access_token",
+            "refresh_token",
+        ] {
+            assert!(
+                !SCHEMA_V52.contains(forbidden),
+                "sso_handoff_code must not carry `{forbidden}`"
+            );
+        }
+        // Single use is enforced by the unique index plus the atomic consume;
+        // the index is the half that survives a buggy caller.
+        assert!(SCHEMA_V52.contains("idx_sso_handoff_code_hash"));
+        assert!(SCHEMA_V52.contains("COLUMNS code_hash UNIQUE"));
+    }
 
     #[test]
     fn schema_v51_leaves_every_existing_assignment_unrestricted() {

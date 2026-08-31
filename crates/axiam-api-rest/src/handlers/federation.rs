@@ -285,10 +285,7 @@ fn validation_err(msg: impl Into<String>) -> AxiamApiError {
 }
 
 fn protocol_to_string(p: &FederationProtocol) -> &'static str {
-    match p {
-        FederationProtocol::OidcConnect => "OidcConnect",
-        FederationProtocol::Saml => "Saml",
-    }
+    p.as_str()
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +388,17 @@ pub async fn create<C: Connection + Clone>(
             idp_signing_cert_pem: req.idp_signing_cert_pem,
             allowed_algorithms: req.allowed_algorithms,
             token_exchange,
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
         })
         .await?;
 
@@ -582,6 +590,7 @@ pub async fn update<C: Connection + Clone>(
                 idp_signing_cert_pem: req.idp_signing_cert_pem,
                 allowed_algorithms: req.allowed_algorithms,
                 token_exchange,
+                ..Default::default()
             },
         )
         .await?;
@@ -736,6 +745,8 @@ pub async fn oidc_authorize<C: Connection + Clone>(
             redirect_uri: req.redirect_uri,
             expires_at,
             request_id: String::new(), // OIDC — no request ID
+            code_verifier: None,
+            idp_redirect_uri: None,
         })
         .await?;
 
@@ -1413,6 +1424,8 @@ pub async fn oidc_start_public<C: Connection + Clone>(
             redirect_uri: b.redirect_uri,
             expires_at,
             request_id: String::new(), // OIDC — no request ID
+            code_verifier: None,
+            idp_redirect_uri: None,
         })
         .await?;
 
@@ -1661,6 +1674,8 @@ pub async fn saml_login_public<C: Connection + Clone>(
             redirect_uri: b.redirect_uri,
             expires_at,
             request_id: result.request_id.clone(),
+            code_verifier: None,
+            idp_redirect_uri: None,
         })
         .await?;
 

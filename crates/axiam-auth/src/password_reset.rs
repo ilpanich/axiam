@@ -577,6 +577,17 @@ mod tests {
                 idp_signing_cert_pem: None,
                 allowed_algorithms: None,
                 token_exchange: None,
+                provider_kind: None,
+                provider_slug: None,
+                allow_tenant_inheritance: None,
+                scopes: None,
+                authorization_endpoint: None,
+                token_endpoint: None,
+                userinfo_endpoint: None,
+                allowed_issuer_tenants: None,
+                apple_team_id: None,
+                apple_key_id: None,
+                require_pkce: None,
             })
             .await
             .unwrap();
@@ -1255,6 +1266,17 @@ mod tests {
                 idp_signing_cert_pem: None,
                 allowed_algorithms: None,
                 token_exchange: None,
+                provider_kind: None,
+                provider_slug: None,
+                allow_tenant_inheritance: None,
+                scopes: None,
+                authorization_endpoint: None,
+                token_endpoint: None,
+                userinfo_endpoint: None,
+                allowed_issuer_tenants: None,
+                apple_team_id: None,
+                apple_key_id: None,
+                require_pkce: None,
             })
             .await
             .unwrap();
@@ -1419,6 +1441,17 @@ mod tests {
                 idp_signing_cert_pem: None,
                 allowed_algorithms: None,
                 token_exchange: None,
+                provider_kind: None,
+                provider_slug: None,
+                allow_tenant_inheritance: None,
+                scopes: None,
+                authorization_endpoint: None,
+                token_endpoint: None,
+                userinfo_endpoint: None,
+                allowed_issuer_tenants: None,
+                apple_team_id: None,
+                apple_key_id: None,
+                require_pkce: None,
             })
             .await
             .unwrap();

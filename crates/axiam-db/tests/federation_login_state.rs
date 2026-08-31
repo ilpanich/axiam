@@ -28,6 +28,8 @@ fn fresh_row() -> FederationLoginState {
         redirect_uri: "https://app.example.com/callback".into(),
         expires_at: Utc::now() + Duration::minutes(10),
         request_id: String::new(),
+        code_verifier: None,
+        idp_redirect_uri: None,
     }
 }
 

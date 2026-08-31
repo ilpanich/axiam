@@ -621,6 +621,17 @@ async fn setup(keycloak_user_id: Uuid) -> Fixture {
                 max_token_age_secs: 300,
                 max_lifetime_secs: None,
             }),
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
         })
         .await
         .unwrap();

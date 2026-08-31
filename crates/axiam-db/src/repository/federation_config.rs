@@ -4,7 +4,7 @@ use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::federation::{
     CreateFederationConfig, DEFAULT_MAX_TOKEN_AGE_SECS, FederationConfig, FederationProtocol,
-    SubjectMapping, TokenExchangeTrust, UpdateFederationConfig,
+    ProviderKind, SubjectMapping, TokenExchangeTrust, UpdateFederationConfig,
 };
 use axiam_core::repository::{FederationConfigRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -44,6 +44,19 @@ struct FederationConfigRow {
     token_exchange_scope_map_json: Option<String>,
     token_exchange_max_token_age_secs: Option<i64>,
     token_exchange_max_lifetime_secs: Option<i64>,
+    // Login-provider columns (schema v52) — every one is optional or
+    // DEFAULT-ed, so a pre-v52 row hydrates to exactly today's behaviour.
+    provider_kind: Option<String>,
+    provider_slug: Option<String>,
+    allow_tenant_inheritance: Option<bool>,
+    scopes: Option<Vec<String>>,
+    authorization_endpoint: Option<String>,
+    token_endpoint: Option<String>,
+    userinfo_endpoint: Option<String>,
+    allowed_issuer_tenants: Option<Vec<String>>,
+    apple_team_id: Option<String>,
+    apple_key_id: Option<String>,
+    require_pkce: Option<bool>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -73,6 +86,19 @@ struct FederationConfigRowWithId {
     token_exchange_scope_map_json: Option<String>,
     token_exchange_max_token_age_secs: Option<i64>,
     token_exchange_max_lifetime_secs: Option<i64>,
+    // Login-provider columns (schema v52) — every one is optional or
+    // DEFAULT-ed, so a pre-v52 row hydrates to exactly today's behaviour.
+    provider_kind: Option<String>,
+    provider_slug: Option<String>,
+    allow_tenant_inheritance: Option<bool>,
+    scopes: Option<Vec<String>>,
+    authorization_endpoint: Option<String>,
+    token_endpoint: Option<String>,
+    userinfo_endpoint: Option<String>,
+    allowed_issuer_tenants: Option<Vec<String>>,
+    apple_team_id: Option<String>,
+    apple_key_id: Option<String>,
+    require_pkce: Option<bool>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -102,6 +128,19 @@ struct FederationConfigListRow {
     token_exchange_scope_map_json: Option<String>,
     token_exchange_max_token_age_secs: Option<i64>,
     token_exchange_max_lifetime_secs: Option<i64>,
+    // Login-provider columns (schema v52) — every one is optional or
+    // DEFAULT-ed, so a pre-v52 row hydrates to exactly today's behaviour.
+    provider_kind: Option<String>,
+    provider_slug: Option<String>,
+    allow_tenant_inheritance: Option<bool>,
+    scopes: Option<Vec<String>>,
+    authorization_endpoint: Option<String>,
+    token_endpoint: Option<String>,
+    userinfo_endpoint: Option<String>,
+    allowed_issuer_tenants: Option<Vec<String>>,
+    apple_team_id: Option<String>,
+    apple_key_id: Option<String>,
+    require_pkce: Option<bool>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -111,19 +150,85 @@ struct FederationConfigListRow {
 // ---------------------------------------------------------------------------
 
 fn parse_protocol(s: &str) -> Result<FederationProtocol, DbError> {
-    match s {
-        "OidcConnect" => Ok(FederationProtocol::OidcConnect),
-        "Saml" => Ok(FederationProtocol::Saml),
-        other => Err(DbError::Migration(format!(
-            "Unknown federation protocol: {other}"
-        ))),
-    }
+    FederationProtocol::from_wire(s)
+        .ok_or_else(|| DbError::Migration(format!("Unknown federation protocol: {s}")))
 }
 
 fn protocol_to_string(p: &FederationProtocol) -> &'static str {
-    match p {
-        FederationProtocol::OidcConnect => "OidcConnect",
-        FederationProtocol::Saml => "Saml",
+    p.as_str()
+}
+
+/// The eleven login-provider columns, as they were read back, in row order.
+type LoginProviderColumns = (
+    Option<String>,
+    Option<String>,
+    Option<bool>,
+    Option<Vec<String>>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<Vec<String>>,
+    Option<String>,
+    Option<String>,
+    Option<bool>,
+);
+
+/// What the login-provider columns hydrate to.
+struct LoginProviderFields {
+    provider_kind: ProviderKind,
+    provider_slug: Option<String>,
+    allow_tenant_inheritance: bool,
+    scopes: Vec<String>,
+    authorization_endpoint: Option<String>,
+    token_endpoint: Option<String>,
+    userinfo_endpoint: Option<String>,
+    allowed_issuer_tenants: Vec<String>,
+    apple_team_id: Option<String>,
+    apple_key_id: Option<String>,
+    require_pkce: bool,
+}
+
+/// Hydrate the schema-v52 columns from a row.
+///
+/// Every absent or unparseable value resolves **towards today's behaviour**,
+/// which is also the more restrictive one: no inheritance, no PKCE beyond what
+/// the protocol forces, no issuer templating, and the per-kind default scopes.
+/// A `provider_kind` this build does not recognise reads as the generic kind of
+/// the row's own protocol rather than as an error, so a downgrade cannot make a
+/// tenant's federation configs unreadable — but it can never widen what a row
+/// permits, because the generic kinds carry no extra permission.
+fn login_provider_fields_from_columns(
+    cols: LoginProviderColumns,
+    protocol: FederationProtocol,
+) -> LoginProviderFields {
+    let (
+        kind,
+        slug,
+        inherit,
+        scopes,
+        authorization_endpoint,
+        token_endpoint,
+        userinfo_endpoint,
+        allowed_issuer_tenants,
+        apple_team_id,
+        apple_key_id,
+        require_pkce,
+    ) = cols;
+    LoginProviderFields {
+        provider_kind: kind
+            .as_deref()
+            .and_then(ProviderKind::from_wire)
+            .unwrap_or_else(|| ProviderKind::from_legacy_protocol(protocol)),
+        provider_slug: slug,
+        allow_tenant_inheritance: inherit.unwrap_or(false),
+        scopes: scopes.unwrap_or_default(),
+        authorization_endpoint,
+        token_endpoint,
+        userinfo_endpoint,
+        allowed_issuer_tenants: allowed_issuer_tenants.unwrap_or_default(),
+        apple_team_id,
+        apple_key_id,
+        require_pkce: require_pkce.unwrap_or(false),
     }
 }
 
@@ -176,12 +281,29 @@ fn scope_map_json(trust: &TokenExchangeTrust) -> String {
 
 impl FederationConfigRow {
     fn try_into_entry(self, id: Uuid) -> Result<FederationConfig, DbError> {
+        let protocol = parse_protocol(&self.protocol)?;
+        let lp = login_provider_fields_from_columns(
+            (
+                self.provider_kind.clone(),
+                self.provider_slug.clone(),
+                self.allow_tenant_inheritance,
+                self.scopes.clone(),
+                self.authorization_endpoint.clone(),
+                self.token_endpoint.clone(),
+                self.userinfo_endpoint.clone(),
+                self.allowed_issuer_tenants.clone(),
+                self.apple_team_id.clone(),
+                self.apple_key_id.clone(),
+                self.require_pkce,
+            ),
+            protocol,
+        );
         Ok(FederationConfig {
             id,
             tenant_id: Uuid::parse_str(&self.tenant_id)
                 .map_err(|e| DbError::Migration(e.to_string()))?,
             provider: self.provider,
-            protocol: parse_protocol(&self.protocol)?,
+            protocol,
             metadata_url: self.metadata_url,
             client_id: self.client_id,
             client_secret: self.client_secret,
@@ -200,6 +322,17 @@ impl FederationConfigRow {
                 self.token_exchange_max_token_age_secs,
                 self.token_exchange_max_lifetime_secs,
             )),
+            provider_kind: lp.provider_kind,
+            provider_slug: lp.provider_slug,
+            allow_tenant_inheritance: lp.allow_tenant_inheritance,
+            scopes: lp.scopes,
+            authorization_endpoint: lp.authorization_endpoint,
+            token_endpoint: lp.token_endpoint,
+            userinfo_endpoint: lp.userinfo_endpoint,
+            allowed_issuer_tenants: lp.allowed_issuer_tenants,
+            apple_team_id: lp.apple_team_id,
+            apple_key_id: lp.apple_key_id,
+            require_pkce: lp.require_pkce,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -213,12 +346,29 @@ impl FederationConfigListRow {
     /// legitimate decrypt-at-use path).
     fn try_into_entry(self) -> Result<FederationConfig, DbError> {
         let id = Uuid::parse_str(&self.record_id).map_err(|e| DbError::Migration(e.to_string()))?;
+        let protocol = parse_protocol(&self.protocol)?;
+        let lp = login_provider_fields_from_columns(
+            (
+                self.provider_kind.clone(),
+                self.provider_slug.clone(),
+                self.allow_tenant_inheritance,
+                self.scopes.clone(),
+                self.authorization_endpoint.clone(),
+                self.token_endpoint.clone(),
+                self.userinfo_endpoint.clone(),
+                self.allowed_issuer_tenants.clone(),
+                self.apple_team_id.clone(),
+                self.apple_key_id.clone(),
+                self.require_pkce,
+            ),
+            protocol,
+        );
         Ok(FederationConfig {
             id,
             tenant_id: Uuid::parse_str(&self.tenant_id)
                 .map_err(|e| DbError::Migration(e.to_string()))?,
             provider: self.provider,
-            protocol: parse_protocol(&self.protocol)?,
+            protocol,
             metadata_url: self.metadata_url,
             client_id: self.client_id,
             client_secret: String::new(),
@@ -237,6 +387,17 @@ impl FederationConfigListRow {
                 self.token_exchange_max_token_age_secs,
                 self.token_exchange_max_lifetime_secs,
             )),
+            provider_kind: lp.provider_kind,
+            provider_slug: lp.provider_slug,
+            allow_tenant_inheritance: lp.allow_tenant_inheritance,
+            scopes: lp.scopes,
+            authorization_endpoint: lp.authorization_endpoint,
+            token_endpoint: lp.token_endpoint,
+            userinfo_endpoint: lp.userinfo_endpoint,
+            allowed_issuer_tenants: lp.allowed_issuer_tenants,
+            apple_team_id: lp.apple_team_id,
+            apple_key_id: lp.apple_key_id,
+            require_pkce: lp.require_pkce,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -246,12 +407,29 @@ impl FederationConfigListRow {
 impl FederationConfigRowWithId {
     fn try_into_entry(self) -> Result<FederationConfig, DbError> {
         let id = Uuid::parse_str(&self.record_id).map_err(|e| DbError::Migration(e.to_string()))?;
+        let protocol = parse_protocol(&self.protocol)?;
+        let lp = login_provider_fields_from_columns(
+            (
+                self.provider_kind.clone(),
+                self.provider_slug.clone(),
+                self.allow_tenant_inheritance,
+                self.scopes.clone(),
+                self.authorization_endpoint.clone(),
+                self.token_endpoint.clone(),
+                self.userinfo_endpoint.clone(),
+                self.allowed_issuer_tenants.clone(),
+                self.apple_team_id.clone(),
+                self.apple_key_id.clone(),
+                self.require_pkce,
+            ),
+            protocol,
+        );
         Ok(FederationConfig {
             id,
             tenant_id: Uuid::parse_str(&self.tenant_id)
                 .map_err(|e| DbError::Migration(e.to_string()))?,
             provider: self.provider,
-            protocol: parse_protocol(&self.protocol)?,
+            protocol,
             metadata_url: self.metadata_url,
             client_id: self.client_id,
             client_secret: self.client_secret,
@@ -270,6 +448,17 @@ impl FederationConfigRowWithId {
                 self.token_exchange_max_token_age_secs,
                 self.token_exchange_max_lifetime_secs,
             )),
+            provider_kind: lp.provider_kind,
+            provider_slug: lp.provider_slug,
+            allow_tenant_inheritance: lp.allow_tenant_inheritance,
+            scopes: lp.scopes,
+            authorization_endpoint: lp.authorization_endpoint,
+            token_endpoint: lp.token_endpoint,
+            userinfo_endpoint: lp.userinfo_endpoint,
+            allowed_issuer_tenants: lp.allowed_issuer_tenants,
+            apple_team_id: lp.apple_team_id,
+            apple_key_id: lp.apple_key_id,
+            require_pkce: lp.require_pkce,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -297,6 +486,57 @@ impl<C: Connection> SurrealFederationConfigRepository<C> {
         let db = db.into();
         Self { db }
     }
+
+    /// Shared body of `list_enabled` and `list_inheritable_enabled`.
+    ///
+    /// One query with one extra predicate rather than two near-identical
+    /// copies: the projection is the narrowed, secret-free one (SECHRD-09) and
+    /// having it written twice is how one of them ends up hydrating the
+    /// encrypted columns after a later edit.
+    async fn list_enabled_inner(
+        &self,
+        tenant_id: Uuid,
+        inheritable_only: bool,
+    ) -> AxiamResult<Vec<FederationConfig>> {
+        let extra = if inheritable_only {
+            "AND allow_tenant_inheritance = true "
+        } else {
+            ""
+        };
+        // `created_at ASC` is not cosmetic: it is the order the sign-in buttons
+        // render in, and an unordered query would reshuffle a login page
+        // between requests.
+        let sql = format!(
+            "SELECT meta::id(id) AS record_id, tenant_id, provider, protocol, \
+             metadata_url, client_id, attribute_map, enabled, allowed_algorithms, \
+             idp_signing_cert_pem, token_exchange_enabled, \
+             token_exchange_accepted_audiences, token_exchange_subject_mapping, \
+             token_exchange_scope_map_json, token_exchange_max_token_age_secs, \
+             token_exchange_max_lifetime_secs, provider_kind, provider_slug, \
+             allow_tenant_inheritance, scopes, authorization_endpoint, \
+             token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
+             apple_team_id, apple_key_id, require_pkce, created_at, updated_at \
+             FROM federation_config \
+             WHERE tenant_id = $tenant_id AND enabled = true {extra}\
+             ORDER BY created_at ASC"
+        );
+
+        let result = self
+            .db
+            .current()
+            .query(&sql)
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<FederationConfigListRow> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|r| r.try_into_entry().map_err(Into::into))
+            .collect()
+    }
 }
 
 impl<C: Connection> FederationConfigRepository for SurrealFederationConfigRepository<C> {
@@ -305,9 +545,17 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         let protocol = protocol_to_string(&input.protocol);
         let attribute_map = input.attribute_map.unwrap_or_else(|| serde_json::json!({}));
 
+        // The kind decides the algorithm default, because "RS256" is wrong for
+        // Apple (ES256-signed client secret, RS256 ID tokens — but the field is
+        // per-kind on purpose) and meaningless for the OAuth2 variant, which has
+        // no signature at all. Omitted kind ⇒ derived from the protocol, which
+        // reproduces the previous unconditional `["RS256"]` for OIDC.
+        let provider_kind = input
+            .provider_kind
+            .unwrap_or_else(|| ProviderKind::from_legacy_protocol(input.protocol));
         let allowed_algorithms = input
             .allowed_algorithms
-            .unwrap_or_else(|| vec!["RS256".to_string()]);
+            .unwrap_or_else(|| provider_kind.default_allowed_algorithms());
 
         // X4: absent means "no external token exchange", which is also what
         // `TokenExchangeTrust::default()` means. The caller (the REST handler)
@@ -335,6 +583,17 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  token_exchange_scope_map_json = $tx_scope_map, \
                  token_exchange_max_token_age_secs = $tx_max_age, \
                  token_exchange_max_lifetime_secs = $tx_max_lifetime, \
+                 provider_kind = $provider_kind, \
+                 provider_slug = $provider_slug, \
+                 allow_tenant_inheritance = $allow_inherit, \
+                 scopes = $scopes, \
+                 authorization_endpoint = $authorization_endpoint, \
+                 token_endpoint = $token_endpoint, \
+                 userinfo_endpoint = $userinfo_endpoint, \
+                 allowed_issuer_tenants = $allowed_issuer_tenants, \
+                 apple_team_id = $apple_team_id, \
+                 apple_key_id = $apple_key_id, \
+                 require_pkce = $require_pkce, \
                  enabled = true, \
                  created_at = time::now(), \
                  updated_at = time::now()",
@@ -360,6 +619,23 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             .bind(("tx_scope_map", scope_map_json(&trust)))
             .bind(("tx_max_age", trust.max_token_age_secs))
             .bind(("tx_max_lifetime", trust.max_lifetime_secs))
+            .bind(("provider_kind", provider_kind.as_str().to_string()))
+            .bind(("provider_slug", input.provider_slug))
+            .bind((
+                "allow_inherit",
+                input.allow_tenant_inheritance.unwrap_or(false),
+            ))
+            .bind(("scopes", input.scopes.unwrap_or_default()))
+            .bind(("authorization_endpoint", input.authorization_endpoint))
+            .bind(("token_endpoint", input.token_endpoint))
+            .bind(("userinfo_endpoint", input.userinfo_endpoint))
+            .bind((
+                "allowed_issuer_tenants",
+                input.allowed_issuer_tenants.unwrap_or_default(),
+            ))
+            .bind(("apple_team_id", input.apple_team_id))
+            .bind(("apple_key_id", input.apple_key_id))
+            .bind(("require_pkce", input.require_pkce.unwrap_or(false)))
             .await
             .map_err(DbError::from)?;
 
@@ -475,6 +751,51 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             ));
         }
 
+        // Login-provider columns (schema v52). `provider_kind` is deliberately
+        // absent: it selects the protocol and the override key, and changing it
+        // on a live config would silently re-point which inherited provider a
+        // tenant is shadowing.
+        if let Some(ref provider_slug) = input.provider_slug {
+            set_clauses.push("provider_slug = $provider_slug".into());
+            binds.push(("provider_slug".into(), serde_json::json!(provider_slug)));
+        }
+        if let Some(allow) = input.allow_tenant_inheritance {
+            set_clauses.push("allow_tenant_inheritance = $allow_inherit".into());
+            binds.push(("allow_inherit".into(), serde_json::json!(allow)));
+        }
+        if let Some(ref scopes) = input.scopes {
+            set_clauses.push("scopes = $scopes".into());
+            binds.push(("scopes".into(), serde_json::json!(scopes)));
+        }
+        if let Some(ref v) = input.authorization_endpoint {
+            set_clauses.push("authorization_endpoint = $authorization_endpoint".into());
+            binds.push(("authorization_endpoint".into(), serde_json::json!(v)));
+        }
+        if let Some(ref v) = input.token_endpoint {
+            set_clauses.push("token_endpoint = $token_endpoint".into());
+            binds.push(("token_endpoint".into(), serde_json::json!(v)));
+        }
+        if let Some(ref v) = input.userinfo_endpoint {
+            set_clauses.push("userinfo_endpoint = $userinfo_endpoint".into());
+            binds.push(("userinfo_endpoint".into(), serde_json::json!(v)));
+        }
+        if let Some(ref v) = input.allowed_issuer_tenants {
+            set_clauses.push("allowed_issuer_tenants = $allowed_issuer_tenants".into());
+            binds.push(("allowed_issuer_tenants".into(), serde_json::json!(v)));
+        }
+        if let Some(ref v) = input.apple_team_id {
+            set_clauses.push("apple_team_id = $apple_team_id".into());
+            binds.push(("apple_team_id".into(), serde_json::json!(v)));
+        }
+        if let Some(ref v) = input.apple_key_id {
+            set_clauses.push("apple_key_id = $apple_key_id".into());
+            binds.push(("apple_key_id".into(), serde_json::json!(v)));
+        }
+        if let Some(v) = input.require_pkce {
+            set_clauses.push("require_pkce = $require_pkce".into());
+            binds.push(("require_pkce".into(), serde_json::json!(v)));
+        }
+
         let sql = format!(
             "UPDATE type::record('federation_config', $id) SET {} \
              WHERE tenant_id = $tenant_id",
@@ -562,7 +883,10 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  idp_signing_cert_pem, token_exchange_enabled, \
                  token_exchange_accepted_audiences, token_exchange_subject_mapping, \
                  token_exchange_scope_map_json, token_exchange_max_token_age_secs, \
-                 token_exchange_max_lifetime_secs, created_at, updated_at \
+                 token_exchange_max_lifetime_secs, provider_kind, provider_slug, \
+                 allow_tenant_inheritance, scopes, authorization_endpoint, \
+                 token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
+                 apple_team_id, apple_key_id, require_pkce, created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  ORDER BY created_at DESC \
@@ -604,7 +928,10 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  idp_signing_cert_pem, token_exchange_enabled, \
                  token_exchange_accepted_audiences, token_exchange_subject_mapping, \
                  token_exchange_scope_map_json, token_exchange_max_token_age_secs, \
-                 token_exchange_max_lifetime_secs, created_at, updated_at \
+                 token_exchange_max_lifetime_secs, provider_kind, provider_slug, \
+                 allow_tenant_inheritance, scopes, authorization_endpoint, \
+                 token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
+                 apple_team_id, apple_key_id, require_pkce, created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  AND token_exchange_enabled = true \
@@ -623,6 +950,17 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         rows.into_iter()
             .map(|r| r.try_into_entry().map_err(Into::into))
             .collect()
+    }
+
+    async fn list_enabled(&self, tenant_id: Uuid) -> AxiamResult<Vec<FederationConfig>> {
+        self.list_enabled_inner(tenant_id, false).await
+    }
+
+    async fn list_inheritable_enabled(
+        &self,
+        tenant_id: Uuid,
+    ) -> AxiamResult<Vec<FederationConfig>> {
+        self.list_enabled_inner(tenant_id, true).await
     }
 
     async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {

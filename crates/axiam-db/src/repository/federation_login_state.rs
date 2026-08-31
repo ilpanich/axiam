@@ -32,6 +32,12 @@ struct FederationLoginStateRow {
     /// SAML AuthnRequest ID for InResponseTo verification (SEC-005/REQ-14 AC-5).
     /// Empty string for OIDC flows where no request ID is tracked.
     request_id: Option<String>,
+    /// PKCE code verifier (schema v52). `None` on every pre-v52 row, which is
+    /// what "no PKCE was sent" has always meant.
+    code_verifier: Option<String>,
+    /// The `redirect_uri` actually sent to the IdP, when it differs from the
+    /// SPA destination (schema v52; `response_mode=form_post` providers).
+    idp_redirect_uri: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +72,9 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
                  federation_config_id = $config_id, \
                  redirect_uri = $redirect_uri, \
                  expires_at = $expires_at, \
-                 request_id = $request_id",
+                 request_id = $request_id, \
+                 code_verifier = $code_verifier, \
+                 idp_redirect_uri = $idp_redirect_uri",
             )
             .bind(("id", row_id))
             .bind(("state", row.state.clone()))
@@ -76,6 +84,8 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
             .bind(("redirect_uri", row.redirect_uri.clone()))
             .bind(("expires_at", row.expires_at))
             .bind(("request_id", row.request_id.clone()))
+            .bind(("code_verifier", row.code_verifier.clone()))
+            .bind(("idp_redirect_uri", row.idp_redirect_uri.clone()))
             .await
             .map_err(DbError::from)?;
 
@@ -99,7 +109,8 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
             .query(
                 "BEGIN TRANSACTION; \
                  LET $row = (SELECT state, nonce, tenant_id, federation_config_id, \
-                               redirect_uri, expires_at, request_id \
+                               redirect_uri, expires_at, request_id, \
+                               code_verifier, idp_redirect_uri \
                              FROM federation_login_state \
                              WHERE state = $state LIMIT 1); \
                  DELETE federation_login_state WHERE state = $state; \
@@ -131,6 +142,8 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
                     redirect_uri: row.redirect_uri,
                     expires_at: row.expires_at,
                     request_id: row.request_id.unwrap_or_default(),
+                    code_verifier: row.code_verifier,
+                    idp_redirect_uri: row.idp_redirect_uri,
                 };
 
                 // Check expiry in Rust — row was deleted; returning None here

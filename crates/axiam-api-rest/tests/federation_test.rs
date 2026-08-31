@@ -2108,6 +2108,8 @@ async fn oidc_callback_public_fails_when_service_not_configured_but_state_exists
             redirect_uri: "https://spa.example.com/cb".into(),
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
             request_id: String::new(),
+            code_verifier: None,
+            idp_redirect_uri: None,
         })
         .await
         .unwrap();

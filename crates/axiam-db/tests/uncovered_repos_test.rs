@@ -251,6 +251,17 @@ async fn federation_config_crud_and_backfill() {
             idp_signing_cert_pem: None,
             allowed_algorithms: Some(vec!["RS256".into()]),
             token_exchange: None,
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
         })
         .await
         .unwrap();
@@ -317,6 +328,17 @@ async fn a_provider_without_a_trust_block_reads_back_disabled() {
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
             token_exchange: None,
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
         })
         .await
         .unwrap();
@@ -368,6 +390,17 @@ async fn a_trust_block_round_trips_through_the_datastore() {
             idp_signing_cert_pem: None,
             allowed_algorithms: Some(vec!["RS256".into()]),
             token_exchange: Some(trust.clone()),
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
         })
         .await
         .unwrap();
@@ -439,6 +472,17 @@ async fn a_saml_provider_is_never_a_token_exchange_candidate() {
             accepted_audiences: vec!["https://api.example.com".into()],
             ..TokenExchangeTrust::default()
         }),
+        provider_kind: None,
+        provider_slug: None,
+        allow_tenant_inheritance: None,
+        scopes: None,
+        authorization_endpoint: None,
+        token_endpoint: None,
+        userinfo_endpoint: None,
+        allowed_issuer_tenants: None,
+        apple_team_id: None,
+        apple_key_id: None,
+        require_pkce: None,
     })
     .await
     .unwrap();
@@ -475,6 +519,17 @@ async fn a_globally_disabled_provider_is_not_a_candidate() {
                 accepted_audiences: vec!["https://api.example.com".into()],
                 ..TokenExchangeTrust::default()
             }),
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
         })
         .await
         .unwrap();
@@ -543,6 +598,17 @@ async fn federation_config_list_excludes_secret_columns() {
         idp_signing_cert_pem: None,
         allowed_algorithms: None,
         token_exchange: None,
+        provider_kind: None,
+        provider_slug: None,
+        allow_tenant_inheritance: None,
+        scopes: None,
+        authorization_endpoint: None,
+        token_endpoint: None,
+        userinfo_endpoint: None,
+        allowed_issuer_tenants: None,
+        apple_team_id: None,
+        apple_key_id: None,
+        require_pkce: None,
     })
     .await
     .unwrap();
@@ -573,6 +639,17 @@ async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
             token_exchange: None,
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
         })
         .await
         .unwrap();
@@ -589,6 +666,17 @@ async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
             token_exchange: None,
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
         })
         .await
         .unwrap();

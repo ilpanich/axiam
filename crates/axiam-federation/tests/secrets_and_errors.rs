@@ -183,6 +183,17 @@ fn make_config(plaintext: &str) -> FederationConfig {
         token_exchange: Default::default(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        provider_kind: axiam_core::models::federation::ProviderKind::GenericOidc,
+        provider_slug: None,
+        allow_tenant_inheritance: false,
+        scopes: Vec::new(),
+        authorization_endpoint: None,
+        token_endpoint: None,
+        userinfo_endpoint: None,
+        allowed_issuer_tenants: Vec::new(),
+        apple_team_id: None,
+        apple_key_id: None,
+        require_pkce: false,
     }
 }
 
@@ -218,6 +229,15 @@ impl FederationConfigRepository for MockFedRepo {
         unimplemented!()
     }
     async fn list_token_exchange_enabled(
+        &self,
+        _tenant_id: Uuid,
+    ) -> AxiamResult<Vec<FederationConfig>> {
+        Ok(Vec::new())
+    }
+    async fn list_enabled(&self, _tenant_id: Uuid) -> AxiamResult<Vec<FederationConfig>> {
+        Ok(Vec::new())
+    }
+    async fn list_inheritable_enabled(
         &self,
         _tenant_id: Uuid,
     ) -> AxiamResult<Vec<FederationConfig>> {

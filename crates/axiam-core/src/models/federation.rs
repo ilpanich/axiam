@@ -9,10 +9,319 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub enum FederationProtocol {
+    /// OpenID Connect: a discovery document, and a signed `id_token` that
+    /// carries the authentication assertion.
     OidcConnect,
+    /// SAML 2.0: a signed assertion posted to the ACS endpoint.
     Saml,
+    /// Plain OAuth2, authenticating by a **userinfo call** rather than a
+    /// signed ID token.
+    ///
+    /// This is deliberately a third variant rather than a flag on
+    /// [`FederationProtocol::OidcConnect`], because it is a *different trust
+    /// statement* and the difference must be visible everywhere the protocol
+    /// is: there is no signature, no `nonce` and no `aud` to check. The whole
+    /// assurance is "the access token we just received, at a token endpoint we
+    /// configured, using a secret only we hold, works against a userinfo
+    /// endpoint we configured".
+    ///
+    /// It exists because GitHub publishes no discovery document and issues no
+    /// ID token at all, and because Facebook's web authorization-code flow
+    /// returns only an access token to a confidential client. See
+    /// `claude_dev/federation-sso-login-design.md` §3.
+    OAuth2,
+}
+
+impl FederationProtocol {
+    /// The wire/storage spelling. One function so the REST layer, the
+    /// repository and the schema `ASSERT` cannot drift apart.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OidcConnect => "OidcConnect",
+            Self::Saml => "Saml",
+            Self::OAuth2 => "OAuth2",
+        }
+    }
+
+    /// Parse a wire value. Unknown values yield `None` so a caller can refuse
+    /// them rather than silently defaulting — a typo must not become OIDC.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "OidcConnect" => Some(Self::OidcConnect),
+            "Saml" => Some(Self::Saml),
+            "OAuth2" => Some(Self::OAuth2),
+            _ => None,
+        }
+    }
+
+    /// Whether this protocol authenticates without a verifiable signed
+    /// assertion, and therefore carries reduced assurance.
+    pub const fn is_unsigned_assertion(self) -> bool {
+        matches!(self, Self::OAuth2)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provider kind
+// ---------------------------------------------------------------------------
+
+/// Which identity provider a federation config is for.
+///
+/// Distinct from `provider`, which is a free-text display name an operator can
+/// put anything into. Three separate jobs needed a key that is *not* free text
+/// and they all needed the same one: choosing the sign-in button's branding,
+/// choosing the per-kind defaults below, and deciding whether a tenant config
+/// overrides an inherited organization one (see
+/// [`FederationConfig::override_key`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    /// Google, via OIDC discovery at `accounts.google.com`.
+    Google,
+    /// GitHub. **Not OIDC** — no discovery document, no ID token.
+    Github,
+    /// Facebook. Defaults to the OAuth2 variant: the web authorization-code
+    /// flow returns only an access token to a confidential client.
+    Facebook,
+    /// Sign in with Apple. OIDC, with an ES256 client secret AXIAM mints
+    /// per exchange rather than storing (see the `apple_*` fields).
+    Apple,
+    /// Microsoft Entra ID. OIDC; a `common`/`organizations` authority
+    /// publishes a templated issuer — see `allowed_issuer_tenants`.
+    Microsoft,
+    /// Any other OIDC provider.
+    GenericOidc,
+    /// Any other plain-OAuth2 provider.
+    GenericOauth2,
+    /// Any SAML 2.0 identity provider.
+    GenericSaml,
+}
+
+impl ProviderKind {
+    /// The wire/storage spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::Github => "github",
+            Self::Facebook => "facebook",
+            Self::Apple => "apple",
+            Self::Microsoft => "microsoft",
+            Self::GenericOidc => "generic_oidc",
+            Self::GenericOauth2 => "generic_oauth2",
+            Self::GenericSaml => "generic_saml",
+        }
+    }
+
+    /// Parse a wire value; unknown values yield `None`.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "google" => Some(Self::Google),
+            "github" => Some(Self::Github),
+            "facebook" => Some(Self::Facebook),
+            "apple" => Some(Self::Apple),
+            "microsoft" => Some(Self::Microsoft),
+            "generic_oidc" => Some(Self::GenericOidc),
+            "generic_oauth2" => Some(Self::GenericOauth2),
+            "generic_saml" => Some(Self::GenericSaml),
+            _ => None,
+        }
+    }
+
+    /// Every kind, for enumeration in tests and in the admin UI's option list.
+    pub const ALL: &'static [Self] = &[
+        Self::Google,
+        Self::Github,
+        Self::Facebook,
+        Self::Apple,
+        Self::Microsoft,
+        Self::GenericOidc,
+        Self::GenericOauth2,
+        Self::GenericSaml,
+    ];
+
+    /// The kind a row written before `provider_kind` existed reads back as.
+    ///
+    /// Derived from the protocol rather than guessed from the display name:
+    /// `provider` is free text, and a config called "Google SSO (old)" is not
+    /// evidence of anything. The generic kinds carry no per-kind behaviour
+    /// beyond the OIDC/SAML defaults such a row already had, so this is a
+    /// faithful reading of an existing row, not a reclassification.
+    pub const fn from_legacy_protocol(protocol: FederationProtocol) -> Self {
+        match protocol {
+            FederationProtocol::OidcConnect => Self::GenericOidc,
+            FederationProtocol::Saml => Self::GenericSaml,
+            // Unreachable for a legacy row — `OAuth2` did not exist before
+            // `provider_kind` did — but total rather than panicking.
+            FederationProtocol::OAuth2 => Self::GenericOauth2,
+        }
+    }
+
+    /// The protocol this kind uses.
+    ///
+    /// Not merely a default: [`validate_protocol_for_kind`] refuses any other
+    /// pairing for the branded kinds, which is what stops the reduced-assurance
+    /// OAuth2 variant being selected for a provider that supports OIDC
+    /// properly.
+    pub const fn protocol(self) -> FederationProtocol {
+        match self {
+            Self::Google | Self::Apple | Self::Microsoft | Self::GenericOidc => {
+                FederationProtocol::OidcConnect
+            }
+            Self::Github | Self::GenericOauth2 => FederationProtocol::OAuth2,
+            // Facebook's *default*; the one kind where both are admissible.
+            // See `validate_protocol_for_kind`.
+            Self::Facebook => FederationProtocol::OAuth2,
+            Self::GenericSaml => FederationProtocol::Saml,
+        }
+    }
+
+    /// Whether this kind takes an operator-chosen [`FederationConfig::provider_slug`].
+    ///
+    /// Only the generic kinds do. A branded kind is its own key, which is what
+    /// makes "the tenant's Google overrides the organization's Google" a
+    /// well-defined sentence; an organization legitimately federates to two
+    /// different Okta tenants, and then the slug is what tells them apart.
+    pub const fn uses_slug(self) -> bool {
+        matches!(
+            self,
+            Self::GenericOidc | Self::GenericOauth2 | Self::GenericSaml
+        )
+    }
+
+    /// Default OAuth/OIDC scopes when the config names none.
+    ///
+    /// Apple is the reason this is per-kind rather than a constant: it rejects
+    /// `profile`, and the previously hard-coded `openid email profile` is
+    /// exactly why Apple could not have worked.
+    pub fn default_scopes(self) -> Vec<String> {
+        let s: &[&str] = match self {
+            Self::Google | Self::Microsoft | Self::GenericOidc => &["openid", "email", "profile"],
+            Self::Apple => &["name", "email"],
+            Self::Github => &["read:user", "user:email"],
+            Self::Facebook => &["email", "public_profile"],
+            // No safe default: a plain-OAuth2 provider's scope names are its
+            // own, and guessing one produces an authorize URL that fails at the
+            // provider with an error the operator cannot map back to us.
+            Self::GenericOauth2 => &[],
+            Self::GenericSaml => &[],
+        };
+        s.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    /// Default accepted ID-token signing algorithms.
+    ///
+    /// Empty for SAML (where the field means assertion signature algorithms and
+    /// the SAML path reads it separately) and for OAuth2 (where there is no
+    /// signature at all — see [`ProviderKind::uses_allowed_algorithms`]).
+    pub fn default_allowed_algorithms(self) -> Vec<String> {
+        match self.protocol() {
+            FederationProtocol::OidcConnect => vec!["RS256".to_string()],
+            FederationProtocol::Saml | FederationProtocol::OAuth2 => Vec::new(),
+        }
+    }
+
+    /// Whether `allowed_algorithms` means anything for this kind.
+    ///
+    /// `false` for the OAuth2 variant: there is no signature to constrain, and
+    /// an inert control implying a check that does not happen is worse than no
+    /// control.
+    pub const fn uses_allowed_algorithms(self) -> bool {
+        !matches!(self.protocol(), FederationProtocol::OAuth2)
+    }
+}
+
+/// Why a `(provider_kind, protocol)` pair was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolKindMismatch {
+    /// The kind that was submitted.
+    pub kind: ProviderKind,
+    /// The protocol that was submitted alongside it.
+    pub submitted: FederationProtocol,
+}
+
+impl std::fmt::Display for ProtocolKindMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.submitted.is_unsigned_assertion() {
+            write!(
+                f,
+                "provider_kind '{}' supports OpenID Connect, which verifies a signed \
+                 ID token; the OAuth2 variant authenticates by an unsigned userinfo \
+                 call and must not be selected for it. Use protocol '{}'.",
+                self.kind.as_str(),
+                self.kind.protocol().as_str()
+            )
+        } else {
+            write!(
+                f,
+                "provider_kind '{}' uses protocol '{}', not '{}'",
+                self.kind.as_str(),
+                self.kind.protocol().as_str(),
+                self.submitted.as_str()
+            )
+        }
+    }
+}
+
+/// Refuse a `(kind, protocol)` pair that cannot work — or that would silently
+/// downgrade assurance.
+///
+/// The rule that earns its keep: a kind whose provider supports OIDC properly
+/// (`google`, `microsoft`, `apple`) may **not** be configured as
+/// [`FederationProtocol::OAuth2`]. Facebook is the single kind that admits
+/// both, because its web flow genuinely returns no ID token to a confidential
+/// client while its Limited Login path does.
+pub fn validate_protocol_for_kind(
+    kind: ProviderKind,
+    protocol: FederationProtocol,
+) -> Result<(), ProtocolKindMismatch> {
+    let ok = match kind {
+        ProviderKind::Facebook => matches!(
+            protocol,
+            FederationProtocol::OAuth2 | FederationProtocol::OidcConnect
+        ),
+        other => protocol == other.protocol(),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(ProtocolKindMismatch {
+            kind,
+            submitted: protocol,
+        })
+    }
+}
+
+/// Bound on a `provider_slug`. Long enough for a readable name, short enough
+/// that it cannot be used to smuggle a payload into an override key.
+pub const MAX_PROVIDER_SLUG_LEN: usize = 64;
+
+/// Validate an operator-chosen provider slug.
+///
+/// Lowercase `[a-z0-9-]`, non-empty, no leading/trailing or doubled hyphen —
+/// the same shape as every other slug in AXIAM, and restrictive enough that the
+/// `kind:slug` override key has exactly one spelling per provider.
+pub fn validate_provider_slug(slug: &str) -> Result<(), String> {
+    if slug.is_empty() {
+        return Err("provider_slug must not be empty".into());
+    }
+    if slug.len() > MAX_PROVIDER_SLUG_LEN {
+        return Err(format!(
+            "provider_slug is {} characters; the maximum is {MAX_PROVIDER_SLUG_LEN}",
+            slug.len()
+        ));
+    }
+    if !slug
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err("provider_slug may contain only lowercase letters, digits and hyphens".into());
+    }
+    if slug.starts_with('-') || slug.ends_with('-') || slug.contains("--") {
+        return Err("provider_slug must not start or end with a hyphen, or contain '--'".into());
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -315,8 +624,143 @@ pub struct FederationConfig {
     /// today's behaviour.
     #[serde(default)]
     pub token_exchange: TokenExchangeTrust,
+    // ------------------------------------------------------------------
+    // Login-provider additions (schema v52) — see
+    // `claude_dev/federation-sso-login-design.md`.
+    //
+    // Every one of these reads back from a pre-v52 row as the value that
+    // preserves that row's existing behaviour exactly. Nothing is backfilled.
+    // ------------------------------------------------------------------
+    /// Which provider this is, for branding, per-kind defaults, and override
+    /// identity. A pre-v52 row derives it from `protocol`
+    /// ([`ProviderKind::from_legacy_protocol`]).
+    #[serde(default = "default_provider_kind")]
+    pub provider_kind: ProviderKind,
+    /// Operator-chosen identifier, for the `generic_*` kinds only.
+    ///
+    /// Part of the override key so an organization can federate to two
+    /// different generic providers of the same kind and a tenant can override
+    /// exactly one of them.
+    #[serde(default)]
+    pub provider_slug: Option<String>,
+    /// Whether tenants of this organization may inherit this provider.
+    ///
+    /// Only meaningful on a config that lives in the organization-scope
+    /// tenant. **Default `false`**: an existing row stays private to the tenant
+    /// that owns it, which is what it has always been.
+    #[serde(default)]
+    pub allow_tenant_inheritance: bool,
+    /// Scopes requested at the authorization endpoint.
+    ///
+    /// Empty means "use [`ProviderKind::default_scopes`]", which for an OIDC
+    /// config is `openid email profile` — the value that used to be hard-coded
+    /// in `build_authorization_url`, so an untouched row is unchanged.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// OAuth2-variant authorization endpoint. There is no discovery document
+    /// to derive it from; validated as absolute HTTPS on write.
+    #[serde(default)]
+    pub authorization_endpoint: Option<String>,
+    /// OAuth2-variant token endpoint.
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+    /// OAuth2-variant userinfo endpoint — the *entire* authentication
+    /// assertion on that path, which is why it is explicit and HTTPS-only.
+    #[serde(default)]
+    pub userinfo_endpoint: Option<String>,
+    /// External IdP tenant identifiers accepted when the discovered issuer is
+    /// templated (Entra ID's `{tenantid}`).
+    ///
+    /// **Required, non-empty, whenever the issuer is templated.** Empty with a
+    /// templated issuer would mean "every Microsoft account on earth may sign
+    /// in here", which is occasionally intended and never intended by accident;
+    /// the config is refused rather than accepted with that meaning.
+    #[serde(default)]
+    pub allowed_issuer_tenants: Vec<String>,
+    /// Apple: the 10-character Team ID that becomes the client secret's `iss`.
+    #[serde(default)]
+    pub apple_team_id: Option<String>,
+    /// Apple: the 10-character Key ID of the `.p8` signing key, carried in the
+    /// client secret's JOSE `kid` header.
+    ///
+    /// Its presence is what selects server-side secret minting: with both
+    /// `apple_team_id` and `apple_key_id` set, the stored secret is the `.p8`
+    /// private key and AXIAM mints a fresh 5-minute ES256 JWT per exchange.
+    /// Without them the stored secret is used verbatim, which is the escape
+    /// hatch for an operator who manages the JWT themselves.
+    #[serde(default)]
+    pub apple_key_id: Option<String>,
+    /// Send PKCE (`S256`) on the authorization request.
+    ///
+    /// Forced on for [`FederationProtocol::OAuth2`] regardless of this flag —
+    /// it is the only replay protection left there once `nonce` is gone. Opt-in
+    /// for OIDC, where the server-side nonce already provides it and where
+    /// requiring it would break every config written before this field existed.
+    #[serde(default)]
+    pub require_pkce: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Serde default for [`FederationConfig::provider_kind`].
+///
+/// Only reached when deserializing a payload that predates the field. The
+/// datastore path does not use it — the repository derives the kind from the
+/// row's own `protocol`, which is strictly better information.
+fn default_provider_kind() -> ProviderKind {
+    ProviderKind::GenericOidc
+}
+
+impl FederationConfig {
+    /// The key on which a tenant config shadows an inherited organization one.
+    ///
+    /// The branded kinds key on the kind alone: "the tenant's Google overrides
+    /// the organization's Google" has to be a well-defined sentence, and it only
+    /// is if a tenant cannot hold two Googles. The `generic_*` kinds key on
+    /// `kind:slug`, because an organization legitimately federates to two
+    /// different Okta tenants.
+    ///
+    /// A generic row written before `provider_slug` existed has none, and keys
+    /// on `kind:` — which is a key it shares with any other slug-less generic
+    /// row of the same kind. That is deliberate and harmless: such rows are all
+    /// tenant-local (nothing pre-v52 can be inherited, because
+    /// `allow_tenant_inheritance` defaults to false), so the key is never
+    /// consulted for them.
+    pub fn override_key(&self) -> String {
+        if self.provider_kind.uses_slug() {
+            format!(
+                "{}:{}",
+                self.provider_kind.as_str(),
+                self.provider_slug.as_deref().unwrap_or("")
+            )
+        } else {
+            self.provider_kind.as_str().to_string()
+        }
+    }
+
+    /// Scopes to request, resolving the empty-means-default rule.
+    pub fn effective_scopes(&self) -> Vec<String> {
+        if self.scopes.is_empty() {
+            self.provider_kind.default_scopes()
+        } else {
+            self.scopes.clone()
+        }
+    }
+
+    /// Whether PKCE must be sent for this config.
+    ///
+    /// Unconditional for the OAuth2 variant — see [`FederationConfig::require_pkce`].
+    pub fn pkce_required(&self) -> bool {
+        self.require_pkce || self.protocol.is_unsigned_assertion()
+    }
+
+    /// Whether AXIAM mints this config's client secret itself rather than
+    /// sending the stored one.
+    pub fn mints_client_secret(&self) -> bool {
+        self.provider_kind == ProviderKind::Apple
+            && self.apple_team_id.is_some()
+            && self.apple_key_id.is_some()
+    }
 }
 
 /// Manual `Debug` impl (SECHRD-09 / D-06): redacts the four secret-bearing
@@ -340,6 +784,17 @@ impl std::fmt::Debug for FederationConfig {
             .field("client_secret_nonce", &"[REDACTED]")
             .field("client_secret_key_version", &"[REDACTED]")
             .field("token_exchange", &self.token_exchange)
+            .field("provider_kind", &self.provider_kind)
+            .field("provider_slug", &self.provider_slug)
+            .field("allow_tenant_inheritance", &self.allow_tenant_inheritance)
+            .field("scopes", &self.scopes)
+            .field("authorization_endpoint", &self.authorization_endpoint)
+            .field("token_endpoint", &self.token_endpoint)
+            .field("userinfo_endpoint", &self.userinfo_endpoint)
+            .field("allowed_issuer_tenants", &self.allowed_issuer_tenants)
+            .field("apple_team_id", &self.apple_team_id)
+            .field("apple_key_id", &self.apple_key_id)
+            .field("require_pkce", &self.require_pkce)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -361,6 +816,29 @@ pub struct CreateFederationConfig {
     pub allowed_algorithms: Option<Vec<String>>,
     /// X4 trust for exchanging this provider's tokens. Omitted ⇒ disabled.
     pub token_exchange: Option<TokenExchangeTrust>,
+    // --- schema v52 login-provider fields ---
+    /// Which provider this is. Omitted ⇒ derived from `protocol`.
+    pub provider_kind: Option<ProviderKind>,
+    /// Operator-chosen identifier, required for the `generic_*` kinds.
+    pub provider_slug: Option<String>,
+    /// Whether tenants may inherit this organization-level provider.
+    pub allow_tenant_inheritance: Option<bool>,
+    /// Requested scopes. Omitted or empty ⇒ [`ProviderKind::default_scopes`].
+    pub scopes: Option<Vec<String>>,
+    /// OAuth2-variant authorization endpoint (required for that protocol).
+    pub authorization_endpoint: Option<String>,
+    /// OAuth2-variant token endpoint (required for that protocol).
+    pub token_endpoint: Option<String>,
+    /// OAuth2-variant userinfo endpoint (required for that protocol).
+    pub userinfo_endpoint: Option<String>,
+    /// Accepted external IdP tenants for a templated issuer.
+    pub allowed_issuer_tenants: Option<Vec<String>>,
+    /// Apple Team ID.
+    pub apple_team_id: Option<String>,
+    /// Apple Key ID of the `.p8` signing key.
+    pub apple_key_id: Option<String>,
+    /// Send PKCE on the authorization request (forced on for OAuth2).
+    pub require_pkce: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -379,6 +857,32 @@ pub struct UpdateFederationConfig {
     /// trust configuration is how an operator ends up with an
     /// `accepted_audiences` they did not intend to keep.
     pub token_exchange: Option<TokenExchangeTrust>,
+    // --- schema v52 login-provider fields ---
+    /// Operator-chosen identifier. `Some(None)` clears it.
+    ///
+    /// `provider_kind` is deliberately **not** updatable: it selects the
+    /// protocol and the override key, and changing it on a live config would
+    /// silently re-point which inherited provider a tenant is shadowing.
+    pub provider_slug: Option<Option<String>>,
+    /// Whether tenants may inherit this organization-level provider.
+    pub allow_tenant_inheritance: Option<bool>,
+    /// Requested scopes. Replaced wholesale; an empty vector restores the
+    /// per-kind default.
+    pub scopes: Option<Vec<String>>,
+    /// OAuth2-variant authorization endpoint. `Some(None)` clears it.
+    pub authorization_endpoint: Option<Option<String>>,
+    /// OAuth2-variant token endpoint. `Some(None)` clears it.
+    pub token_endpoint: Option<Option<String>>,
+    /// OAuth2-variant userinfo endpoint. `Some(None)` clears it.
+    pub userinfo_endpoint: Option<Option<String>>,
+    /// Accepted external IdP tenants for a templated issuer. Replaced wholesale.
+    pub allowed_issuer_tenants: Option<Vec<String>>,
+    /// Apple Team ID. `Some(None)` clears it.
+    pub apple_team_id: Option<Option<String>>,
+    /// Apple Key ID. `Some(None)` clears it.
+    pub apple_key_id: Option<Option<String>>,
+    /// Send PKCE on the authorization request.
+    pub require_pkce: Option<bool>,
 }
 
 /// Tracks the link between an AXIAM user and their external IdP identity.
@@ -440,6 +944,17 @@ mod tests {
             client_secret_nonce: Some(NONCE.to_string()),
             client_secret_key_version: Some(1),
             token_exchange: TokenExchangeTrust::default(),
+            provider_kind: ProviderKind::GenericOidc,
+            provider_slug: None,
+            allow_tenant_inheritance: false,
+            scopes: Vec::new(),
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: Vec::new(),
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -654,6 +1169,265 @@ mod tests {
                 assert!(range.contains(&got), "{got} escaped the map's range");
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Login providers — ProviderKind, protocol pairing, override identity
+    // -----------------------------------------------------------------
+
+    fn config(kind: ProviderKind, slug: Option<&str>) -> FederationConfig {
+        FederationConfig {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            provider: "display name".into(),
+            protocol: kind.protocol(),
+            metadata_url: None,
+            client_id: "cid".into(),
+            client_secret: String::new(),
+            attribute_map: serde_json::json!({}),
+            enabled: true,
+            allowed_algorithms: kind.default_allowed_algorithms(),
+            idp_signing_cert_pem: None,
+            client_secret_ciphertext: None,
+            client_secret_nonce: None,
+            client_secret_key_version: None,
+            token_exchange: TokenExchangeTrust::default(),
+            provider_kind: kind,
+            provider_slug: slug.map(str::to_string),
+            allow_tenant_inheritance: false,
+            scopes: Vec::new(),
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: Vec::new(),
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn every_kind_round_trips_through_its_wire_spelling() {
+        for kind in ProviderKind::ALL {
+            assert_eq!(ProviderKind::from_wire(kind.as_str()), Some(*kind));
+        }
+        assert_eq!(ProviderKind::from_wire("Google"), None, "case matters");
+        assert_eq!(ProviderKind::from_wire("googl"), None);
+    }
+
+    #[test]
+    fn every_protocol_round_trips_through_its_wire_spelling() {
+        for p in [
+            FederationProtocol::OidcConnect,
+            FederationProtocol::Saml,
+            FederationProtocol::OAuth2,
+        ] {
+            assert_eq!(FederationProtocol::from_wire(p.as_str()), Some(p));
+        }
+        assert_eq!(FederationProtocol::from_wire("oauth2"), None);
+    }
+
+    /// The rule that keeps the reduced-assurance path from being chosen by
+    /// accident for a provider that does OIDC properly.
+    #[test]
+    fn a_provider_that_does_oidc_cannot_be_configured_as_plain_oauth2() {
+        for kind in [
+            ProviderKind::Google,
+            ProviderKind::Microsoft,
+            ProviderKind::Apple,
+            ProviderKind::GenericOidc,
+        ] {
+            let err = validate_protocol_for_kind(kind, FederationProtocol::OAuth2)
+                .expect_err("must be refused");
+            assert_eq!(err.kind, kind);
+            // The message has to say *why*, because "not allowed" invites a
+            // workaround and "it has no signature to check" does not.
+            assert!(err.to_string().contains("unsigned userinfo call"));
+        }
+    }
+
+    /// Facebook is the single kind that admits both, and the reason is on the
+    /// wire, not in our preferences: its web flow returns no ID token to a
+    /// confidential client, while Limited Login does.
+    #[test]
+    fn facebook_admits_both_protocols_and_nothing_else_does() {
+        assert!(
+            validate_protocol_for_kind(ProviderKind::Facebook, FederationProtocol::OAuth2).is_ok()
+        );
+        assert!(
+            validate_protocol_for_kind(ProviderKind::Facebook, FederationProtocol::OidcConnect)
+                .is_ok()
+        );
+        assert!(
+            validate_protocol_for_kind(ProviderKind::Facebook, FederationProtocol::Saml).is_err()
+        );
+        for kind in ProviderKind::ALL {
+            if *kind == ProviderKind::Facebook {
+                continue;
+            }
+            let admissible = [
+                FederationProtocol::OidcConnect,
+                FederationProtocol::Saml,
+                FederationProtocol::OAuth2,
+            ]
+            .into_iter()
+            .filter(|p| validate_protocol_for_kind(*kind, *p).is_ok())
+            .count();
+            assert_eq!(admissible, 1, "{kind:?} must admit exactly one protocol");
+        }
+    }
+
+    #[test]
+    fn a_branded_kind_keys_on_the_kind_and_a_generic_one_on_its_slug() {
+        assert_eq!(config(ProviderKind::Google, None).override_key(), "google");
+        // A slug on a branded kind is not part of the key — otherwise a tenant
+        // could fail to override the organization's Google by typing a
+        // different display slug.
+        assert_eq!(
+            config(ProviderKind::Google, Some("anything")).override_key(),
+            "google"
+        );
+        assert_eq!(
+            config(ProviderKind::GenericOidc, Some("okta-eu")).override_key(),
+            "generic_oidc:okta-eu"
+        );
+        assert_ne!(
+            config(ProviderKind::GenericOidc, Some("okta-eu")).override_key(),
+            config(ProviderKind::GenericOidc, Some("okta-us")).override_key(),
+        );
+        // Two generic kinds with the same slug are still different providers.
+        assert_ne!(
+            config(ProviderKind::GenericOidc, Some("x")).override_key(),
+            config(ProviderKind::GenericOauth2, Some("x")).override_key(),
+        );
+    }
+
+    #[test]
+    fn a_legacy_row_reads_back_as_the_generic_kind_of_its_protocol() {
+        assert_eq!(
+            ProviderKind::from_legacy_protocol(FederationProtocol::OidcConnect),
+            ProviderKind::GenericOidc
+        );
+        assert_eq!(
+            ProviderKind::from_legacy_protocol(FederationProtocol::Saml),
+            ProviderKind::GenericSaml
+        );
+    }
+
+    /// The compatibility property that matters most: an untouched OIDC config
+    /// still asks for exactly the scopes `build_authorization_url` used to
+    /// hard-code.
+    #[test]
+    fn empty_scopes_resolve_to_the_previously_hard_coded_oidc_set() {
+        let c = config(ProviderKind::GenericOidc, None);
+        assert_eq!(
+            c.effective_scopes(),
+            vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string()
+            ]
+        );
+    }
+
+    /// …and Apple's is different, which is the whole reason the hard-coding
+    /// was wrong: Apple rejects `profile`.
+    #[test]
+    fn apple_does_not_get_the_profile_scope() {
+        let scopes = ProviderKind::Apple.default_scopes();
+        assert!(!scopes.contains(&"profile".to_string()));
+        assert_eq!(scopes, vec!["name".to_string(), "email".to_string()]);
+    }
+
+    #[test]
+    fn configured_scopes_win_over_the_default() {
+        let mut c = config(ProviderKind::Google, None);
+        c.scopes = vec!["openid".into()];
+        assert_eq!(c.effective_scopes(), vec!["openid".to_string()]);
+    }
+
+    #[test]
+    fn pkce_is_unconditional_for_the_oauth2_variant() {
+        // Not merely defaulted — a config with the flag off still gets it,
+        // because it is the only replay protection left there.
+        let mut c = config(ProviderKind::Github, None);
+        c.require_pkce = false;
+        assert!(c.pkce_required());
+        // On OIDC it stays opt-in, so an existing config is unchanged.
+        let mut c = config(ProviderKind::Google, None);
+        c.require_pkce = false;
+        assert!(!c.pkce_required());
+        c.require_pkce = true;
+        assert!(c.pkce_required());
+    }
+
+    #[test]
+    fn allowed_algorithms_is_meaningless_for_the_oauth2_variant() {
+        assert!(!ProviderKind::Github.uses_allowed_algorithms());
+        assert!(ProviderKind::Google.uses_allowed_algorithms());
+        assert!(ProviderKind::GenericSaml.uses_allowed_algorithms());
+        assert!(ProviderKind::Github.default_allowed_algorithms().is_empty());
+        assert_eq!(
+            ProviderKind::Apple.default_allowed_algorithms(),
+            vec!["RS256".to_string()]
+        );
+    }
+
+    #[test]
+    fn apple_mints_its_own_secret_only_when_both_ids_are_present() {
+        let mut c = config(ProviderKind::Apple, None);
+        assert!(!c.mints_client_secret(), "no ids: use the stored secret");
+        c.apple_team_id = Some("ABCDE12345".into());
+        assert!(
+            !c.mints_client_secret(),
+            "half-configured is not configured"
+        );
+        c.apple_key_id = Some("KEYID67890".into());
+        assert!(c.mints_client_secret());
+        // The mechanism is Apple-only; another kind with stray ids does not
+        // acquire it.
+        let mut g = config(ProviderKind::Google, None);
+        g.apple_team_id = Some("ABCDE12345".into());
+        g.apple_key_id = Some("KEYID67890".into());
+        assert!(!g.mints_client_secret());
+    }
+
+    #[test]
+    fn provider_slugs_have_exactly_one_spelling() {
+        for good in ["okta", "okta-eu", "idp1", "a"] {
+            assert!(validate_provider_slug(good).is_ok(), "{good}");
+        }
+        for bad in ["", "Okta", "okta_eu", "-okta", "okta-", "okta--eu", "ok ta"] {
+            assert!(validate_provider_slug(bad).is_err(), "{bad}");
+        }
+        assert!(validate_provider_slug(&"a".repeat(MAX_PROVIDER_SLUG_LEN)).is_ok());
+        assert!(validate_provider_slug(&"a".repeat(MAX_PROVIDER_SLUG_LEN + 1)).is_err());
+    }
+
+    /// The new columns must not become a leak. Restates the existing
+    /// SECHRD-09 property against the widened struct.
+    #[test]
+    fn the_widened_config_still_redacts_every_secret() {
+        let mut c = config(ProviderKind::Apple, None);
+        c.client_secret = "PLAINTEXT-SECRET-MARKER".into();
+        c.client_secret_ciphertext = Some("CIPHERTEXT-MARKER".into());
+        c.client_secret_nonce = Some("NONCE-MARKER".into());
+        let debug = format!("{c:?}");
+        let json = serde_json::to_string(&c).unwrap();
+        for marker in [
+            "PLAINTEXT-SECRET-MARKER",
+            "CIPHERTEXT-MARKER",
+            "NONCE-MARKER",
+        ] {
+            assert!(!debug.contains(marker), "Debug leaked {marker}");
+            assert!(!json.contains(marker), "JSON leaked {marker}");
+        }
+        // …while the new non-secret fields stay legible, which is the point of
+        // a manual Debug impl rather than a blanket redaction.
+        assert!(debug.contains("provider_kind"));
+        assert!(debug.contains("allow_tenant_inheritance"));
     }
 
     #[test]

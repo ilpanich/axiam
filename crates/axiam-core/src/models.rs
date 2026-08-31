@@ -9,6 +9,7 @@ pub mod email;
 pub mod email_template;
 pub mod email_verification;
 pub mod federation;
+pub mod federation_claims;
 pub mod gdpr;
 pub mod group;
 pub mod mail;

@@ -1247,6 +1247,17 @@ mod tests {
             token_exchange: Default::default(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            provider_kind: axiam_core::models::federation::ProviderKind::GenericOidc,
+            provider_slug: None,
+            allow_tenant_inheritance: false,
+            scopes: Vec::new(),
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: Vec::new(),
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: false,
         }
     }
 
@@ -1326,6 +1337,18 @@ mod tests {
             unimplemented!()
         }
         async fn list_token_exchange_enabled(
+            &self,
+            _tenant_id: Uuid,
+        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
+            Ok(Vec::new())
+        }
+        async fn list_enabled(
+            &self,
+            _tenant_id: Uuid,
+        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
+            Ok(Vec::new())
+        }
+        async fn list_inheritable_enabled(
             &self,
             _tenant_id: Uuid,
         ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
@@ -1612,6 +1635,18 @@ mod tests {
         ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
             Ok(Vec::new())
         }
+        async fn list_enabled(
+            &self,
+            _tenant_id: Uuid,
+        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
+            Ok(Vec::new())
+        }
+        async fn list_inheritable_enabled(
+            &self,
+            _tenant_id: Uuid,
+        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
+            Ok(Vec::new())
+        }
         async fn list_with_legacy_plaintext_secret(
             &self,
         ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
@@ -1807,7 +1842,8 @@ mod tests {
     /// fixture signature, attribute_map resolves `email`.
     fn acs_config() -> FederationConfig {
         let mut c = test_federation_config(Some(test_cert_pem()));
-        c.attribute_map = serde_json::json!({ "email": "email", "name": "displayName" });
+        c.attribute_map = serde_json::json!({ "email": "email", "display_name": "displayName" });
+        c.provider_kind = axiam_core::models::federation::ProviderKind::GenericSaml;
         c
     }
 

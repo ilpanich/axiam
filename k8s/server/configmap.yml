@@ -32,6 +32,51 @@ data:
   AXIAM__AMQP__TLS__CA_CERT_PATH: "/etc/axiam/broker-tls/ca.crt"
   AXIAM__SERVER__HOST: "0.0.0.0"
   AXIAM__GRPC__HOST: "0.0.0.0"
+  # ---------------------------------------------------------------------
+  # Rate-limit keying
+  # ---------------------------------------------------------------------
+  #
+  # trusted_hops = (reverse proxies between the client and the server) - 1.
+  #
+  # A proxy appends the address it received FROM, not its own
+  # (`proxy_add_x_forwarded_for`), so the nearest proxy is the socket peer and
+  # never appears in X-Forwarded-For. `k8s/ingress.yml` puts exactly ONE proxy
+  # in front — ingress-nginx routes /api, /oauth2 and /.well-known here
+  # directly — so the header the server reads is just `<client>` and the value
+  # is 0.
+  #
+  # RAISE IT BY ONE FOR EVERY ADDITIONAL PROXY. A cloud L7 load balancer in
+  # front of the ingress makes it 1; a service mesh sidecar that also appends
+  # makes it 2. Get it too HIGH and the extractor discards the header entirely
+  # and keys every client on the internet to the proxy's address — one global
+  # bucket, including /auth/login, which is deliberately always per-IP so that
+  # an attacker cannot lock out a victim. Get it too LOW and you key off a proxy
+  # instead of the client, which fails the same way.
+  #
+  # Set explicitly even though 0 is the built-in default: a value that is
+  # correct by accident is one nobody re-derives when they add a load balancer.
+  # Derivation and worked table: claude_dev/public-backend-tls-design.md §4.
+  #
+  # Read via std::env::var directly rather than through the config layer, but
+  # the name is the same either way.
+  AXIAM__RATE_LIMIT__TRUSTED_HOPS: "0"
+  # ---------------------------------------------------------------------
+  # Forwarded client certificates
+  # ---------------------------------------------------------------------
+  #
+  # Left at its default of false, i.e. an X-Client-Certificate header is NOT
+  # accepted as device identity. ingress-nginx terminates TLS here, so a client
+  # certificate presented to it never reaches rustls — which means the only way
+  # this deployment could do certificate-based device auth through the ingress
+  # is the header, and the header proves nothing: a certificate is public data
+  # and there is no handshake on that path to prove possession of its key.
+  #
+  # If you enrol IoT devices, give them a route that is NOT terminated by the
+  # ingress — a TCP passthrough Service, or a second hostname — and let rustls
+  # verify the certificate itself. See claude_dev/public-backend-tls-design.md
+  # §11. Turn this on only if the ingress performs the mTLS handshake AND
+  # overwrites the header on every request it forwards.
+  AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT: "false"
   # SEC-052: Narrow RUST_LOG — no internal module exposure in production
   RUST_LOG: "info"
   # ---------------------------------------------------------------------

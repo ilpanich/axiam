@@ -375,6 +375,11 @@ prod-up:
     export AXIAM__AUTH__JWT_PRIVATE_KEY_PEM="$(cat "$PRIV")"
     export AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="$(cat "$PUB")"
 
+    # docker-compose.prod.yml bind-mounts this into axiam-server unconditionally
+    # (see the comment there). Created here so Docker does not create it as a
+    # root-owned directory the certbot deploy hook then cannot write into.
+    mkdir -p "$SECRETS_DIR/server-tls"
+
     # Vault is mandatory in this stack, so it comes up first and gets
     # initialised, unsealed and seeded before the server is allowed to start.
     bash scripts/gen-vault-tls.sh
@@ -445,11 +450,50 @@ prod-up:
             "$VAULT_ADDR/v1/sys/unseal" > /dev/null
     fi
 
+    # Seeding runs with the root token: it needs create/update on
+    # secret/data/axiam, which the server's policy deliberately does not have.
+    # The seeding credential and the serving credential are two different
+    # things (docs/deployment/vault.md §5.4) and this is where they part ways.
     JWT_PRIVATE_KEY_PEM="$AXIAM__AUTH__JWT_PRIVATE_KEY_PEM" \
     JWT_PUBLIC_KEY_PEM="$AXIAM__AUTH__JWT_PUBLIC_KEY_PEM" \
         bash scripts/vault-seed.sh
 
-    export AXIAM__AUTH__VAULT_TOKEN="$VAULT_TOKEN"
+    # The server gets a READ-ONLY token scoped to one path, not root.
+    #
+    # It used to get the root token straight out of vault-init.json, which meant
+    # the credential sitting in `docker inspect` output and in the server's
+    # environment could read, write and delete every secret in the Vault, revoke
+    # tokens, and mount new engines. Nothing in axiam-server wants any of that:
+    # it reads secret/axiam once at boot and never writes. `just vault-status`
+    # reports anything wider as OVER-SCOPED, and until now it was reporting that
+    # about this stack every single time.
+    #
+    # The policy is the one in docs/deployment/vault.md §5.4, written here so the
+    # local stack and the documented production ceremony cannot drift.
+    echo "→ Writing the read-only 'axiam' policy and issuing a scoped token"
+    AXIAM_POLICY='path "secret/data/axiam" { capabilities = ["read"] }
+    path "secret/metadata/axiam" { capabilities = ["read"] }'
+    curl -sS --cacert "$VAULT_CACERT" -H "X-Vault-Token: $VAULT_TOKEN" \
+        --request PUT \
+        --data "$(python3 -c 'import json,sys; print(json.dumps({"policy": sys.stdin.read()}))' <<< "$AXIAM_POLICY")" \
+        "$VAULT_ADDR/v1/sys/policies/acl/axiam" > /dev/null
+
+    # Renewable and periodic: the server holds it for the life of the container
+    # and a restart re-runs this recipe, so a 768h period is a bound on how long
+    # a leaked token stays useful rather than an expiry anybody has to manage.
+    SCOPED_TOKEN_JSON="$(curl -sS --cacert "$VAULT_CACERT" -H "X-Vault-Token: $VAULT_TOKEN" \
+        --request POST \
+        --data '{"policies":["axiam"],"period":"768h","renewable":true,"display_name":"axiam-server"}' \
+        "$VAULT_ADDR/v1/auth/token/create")"
+    AXIAM_SERVER_TOKEN="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["auth"]["client_token"])' <<< "$SCOPED_TOKEN_JSON" 2>/dev/null || true)"
+    if [[ -z "$AXIAM_SERVER_TOKEN" ]]; then
+        echo "✗ Could not issue a scoped Vault token for axiam-server:" >&2
+        head -c 500 <<< "$SCOPED_TOKEN_JSON" >&2; echo >&2
+        echo "  Refusing to fall back to the root token — that is the thing this" >&2
+        echo "  step exists to stop. Check 'docker logs axiam-vault'." >&2
+        exit 1
+    fi
+    export AXIAM__AUTH__VAULT_TOKEN="$AXIAM_SERVER_TOKEN"
     # axiam-server and axiam-frontend come from the official images published
     # to ghcr.io/ilpanich/axiam/* by the release workflow, so there is no local
     # build here. `--pull always` is deliberately absent: the tag is a pinned,
@@ -506,7 +550,7 @@ prod-down: (_prod-compose "down")
 #
 # The state files under docker/.secrets/ go with them. Each one describes a
 # volume that no longer exists — the datastore credentials minted for
-# surrealdb-data, and the unseal key + root token for vault-data — so keeping
+# surrealdb-data, and the unseal key + root token for vault-raft-data — so keeping
 # them past the volume they belong to is exactly what strands the next
 # `prod-up` (see the guard there). `prod-up`'s "discard the Vault entirely
 # with 'just prod-clean'" is only true because of the second `rm` here.

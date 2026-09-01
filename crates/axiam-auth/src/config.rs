@@ -18,6 +18,40 @@ pub struct AuthConfig {
     pub jwt_private_key_pem: String,
     /// PEM-encoded Ed25519 public key for JWT verification.
     pub jwt_public_key_pem: String,
+    /// Trust an `X-Client-Certificate` request header as proof of device
+    /// identity when the connection carries no TLS-verified client
+    /// certificate. Default **`false`**.
+    ///
+    /// # Why this is off by default
+    ///
+    /// The header carries a PEM certificate, and a certificate is public data.
+    /// `DeviceAuthService::authenticate` checks the fingerprint, the status,
+    /// the expiry and the chain up to the tenant or organization CA — every one
+    /// of which a *copy* of an enrolled device's certificate also satisfies.
+    /// Nothing in that path proves the sender holds the private key, because
+    /// nothing can: possession is proven by the TLS handshake, and on this path
+    /// there was no handshake to prove it in.
+    ///
+    /// That is sound only while the header cannot originate with the client —
+    /// i.e. a reverse proxy performs the mTLS handshake itself and
+    /// unconditionally overwrites the header on every request it forwards.
+    /// It stops being sound the moment the server is reachable by anything but
+    /// that proxy, where anyone holding a copy of a device certificate
+    /// authenticates as that device.
+    ///
+    /// Native mTLS is unaffected and always preferred: when rustls verified a
+    /// client certificate on the connection, that certificate is authoritative
+    /// and this setting is not consulted.
+    ///
+    /// Set it to `true` only if all of the following hold, and say so in your
+    /// runbook:
+    ///
+    /// 1. TLS (and the client-certificate handshake) terminates at a proxy you
+    ///    operate;
+    /// 2. that proxy sets `X-Client-Certificate` from the certificate **it**
+    ///    verified, on every request, overwriting anything the client sent;
+    /// 3. nothing else can reach this server's listener.
+    pub trust_forwarded_client_cert: bool,
     /// Access token lifetime in seconds (default: 900 = 15 minutes).
     pub access_token_lifetime_secs: u64,
     /// Refresh token lifetime in seconds (default: 2_592_000 = 30 days).
@@ -290,6 +324,10 @@ impl Default for AuthConfig {
         Self {
             jwt_private_key_pem: String::new(),
             jwt_public_key_pem: String::new(),
+            // Fail closed: a forwarded certificate is trusted only where an
+            // operator has asserted a proxy terminates mTLS and overwrites the
+            // header. See the field docs for what that assertion costs if wrong.
+            trust_forwarded_client_cert: false,
             access_token_lifetime_secs: 900,
             refresh_token_lifetime_secs: 2_592_000,
             auth_code_lifetime_secs: 600,

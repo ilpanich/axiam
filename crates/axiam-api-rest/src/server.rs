@@ -35,8 +35,15 @@ use crate::openapi::api_doc;
 pub fn build_governor(
     requests_per_min: u32,
 ) -> Governor<XForwardedForKeyExtractor, NoOpMiddleware> {
-    // SEC-048: trusted_hops=0 default; override via AXIAM__RATE_LIMIT__TRUSTED_HOPS
-    // when running behind a single ingress/nginx layer (set to 1).
+    // SEC-048: trusted_hops=0 default, overridden via
+    // AXIAM__RATE_LIMIT__TRUSTED_HOPS. 0 is CORRECT behind a single appending
+    // proxy — both shipped topologies (k8s/ingress.yml, the Compose/Pi stack)
+    // put exactly one in front, and a proxy appends the address it received
+    // from, so the nearest one is the socket peer and never an XFF entry.
+    // Setting 1 here behind one proxy would discard the header and key every
+    // client on the internet to that proxy's address. The rule is
+    // `trusted_hops = proxies - 1`; the derivation and the table live on
+    // `extractors::rate_limit`.
     let trusted_hops: usize = std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
         .ok()
         .and_then(|v| v.parse().ok())

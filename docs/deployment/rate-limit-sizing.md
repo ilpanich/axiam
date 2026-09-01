@@ -348,9 +348,13 @@ AXIAM__RATE_LIMIT__PROFILE=gateway
 AXIAM__RATE_LIMIT__TOKEN_PER_MIN=2000     # wins over the preset
 ```
 
-Behind a NAT/ingress also set `AXIAM__RATE_LIMIT__TRUSTED_HOPS` to the
-number of trusted proxy hops, otherwise every bucket keys on the proxy's
-IP (see [Deployment Guide § Rate limiting](README.md#rate-limiting)).
+Behind a NAT/ingress, check `AXIAM__RATE_LIMIT__TRUSTED_HOPS` — otherwise every
+bucket keys on the proxy's IP. It is **the number of proxies in front of the
+server minus one**, not the number of proxies: a proxy appends the address it
+received *from*, so the nearest one is the socket peer and never appears in the
+header. A single ingress therefore wants `0`, which is the default. Derivation
+and the per-topology table: [Deployment Guide § Deriving
+`TRUSTED_HOPS`](README.md#deriving-trusted_hops).
 
 ### Measured: the `gateway` preset actually applied (H7, 2026-07-29)
 

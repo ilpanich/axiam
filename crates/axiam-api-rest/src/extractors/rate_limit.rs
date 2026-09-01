@@ -2,12 +2,40 @@
 //!
 //! SEC-048: The extractor selects the *rightmost untrusted* hop from the
 //! X-Forwarded-For header to prevent IP-spoofing based rate-limit evasion.
-//! The `trusted_hops` value should equal the number of trusted reverse-proxy
-//! hops (e.g. 1 for a single nginx/ingress in front of the server).
 //!
-//! Example:
+//! # Deriving `trusted_hops`
+//!
+//! The value follows from one fact about how proxies write the header: a proxy
+//! appends **the address it received the request from**, not its own. nginx's
+//! `proxy_add_x_forwarded_for` is `$http_x_forwarded_for, $remote_addr`; Caddy's
+//! `reverse_proxy` and ingress-nginx do the same. So the *nearest* proxy never
+//! appears in the header the server reads — it is the socket peer. Therefore:
+//!
+//! > **`trusted_hops` = (number of reverse proxies between the client and this
+//! > server) − 1** — equivalently, the number of *proxy* addresses that appear
+//! > in the X-Forwarded-For header this server receives.
+//!
+//! | Proxies in front | Header the server sees | `trusted_hops` |
+//! | --- | --- | --- |
+//! | 1 (Caddy, or an ingress) | `<client>` | **0** |
+//! | 2 (Caddy → nginx) | `<client>, <caddy>` | **1** |
+//! | 3 (LB → ingress → mesh) | `<client>, <lb>, <ingress>` | **2** |
+//!
+//! Example, with a client that spoofs a header of its own behind two proxies:
 //!   X-Forwarded-For: <attacker-ip>, <real-client-ip>, <trusted-proxy-ip>
 //!   trusted_hops = 1 → selects <real-client-ip> (skip 1 from right)
+//!
+//! Behind a *single* appending proxy, `0` selects the real client whether or not
+//! the client lies: with no spoof the header is `<client>` and index 0 is the
+//! client; with a spoof it is `<attacker>, <client>` and index 1 is the client.
+//!
+//! **This corrected an off-by-one in the previous text**, which said the value
+//! "should equal the number of trusted reverse-proxy hops (e.g. 1 for a single
+//! nginx/ingress in front of the server)". Setting 1 behind one proxy makes
+//! `trusted_hops >= hops.len()`, so the header is discarded and the key becomes
+//! `peer_addr()` — the proxy's own address — collapsing every client on the
+//! internet into a single bucket. The advice produced exactly the failure this
+//! extractor exists to prevent. See `claude_dev/public-backend-tls-design.md` §4.
 //!
 //! Falls back to the direct peer address when the header is absent, unparseable,
 //! or has fewer hops than `trusted_hops` (a client cannot manufacture extra
@@ -36,10 +64,11 @@ use crate::config::rate_limit::RateLimitKeyMode;
 /// `trusted_hops` controls how many rightmost entries in the XFF header to skip
 /// (they come from trusted proxies). The selected entry is the **rightmost
 /// untrusted** hop — `idx = len - 1 - trusted_hops` — which is correct for a
-/// single trusted reverse proxy that right-appends the real client IP (nginx
-/// `proxy_add_x_forwarded_for`). `trusted_hops = 1` selects the client IP a
-/// single proxy appended; `trusted_hops = 0` selects the rightmost entry
-/// verbatim. (SEC-070: earlier doc text wrongly described this as using the
+/// chain of proxies that right-append the address they received from (nginx
+/// `proxy_add_x_forwarded_for`, Caddy, ingress-nginx). `trusted_hops = 0`
+/// selects the rightmost entry, which is the real client behind exactly one
+/// such proxy; `trusted_hops = 1` skips one appended proxy address, which is
+/// what two proxies produce — see the module docs for the derivation. (SEC-070: earlier doc text wrongly described this as using the
 /// *leftmost* entry — the leftmost is the most attacker-controllable position
 /// and is never used.)
 #[derive(Debug, Clone, Default)]
@@ -48,11 +77,12 @@ pub struct XForwardedForKeyExtractor {
     /// the X-Forwarded-For list. Set to the number of load-balancers/
     /// ingress proxies between the client and this server.
     ///
-    /// Default: 0 (rightmost entry). NOTE: when the server is exposed directly
-    /// (no proxy), a client can still set XFF to mint fresh rate-limit buckets;
-    /// deploy behind a proxy that overwrites/right-appends XFF and set
-    /// `trusted_hops` to the proxy count so the untrusted client value is
-    /// skipped.
+    /// Default: 0 (rightmost entry), which is **correct** behind exactly one
+    /// appending proxy — the shape of both shipped topologies
+    /// (`k8s/ingress.yml` and the Compose/Pi deployment). NOTE: when the server
+    /// is exposed with no proxy at all, a client can set XFF freely; the
+    /// `peer_addr()` fallback is what keeps that safe, and such a server should
+    /// stay on 0 rather than trusting anything the client sent.
     pub trusted_hops: usize,
 }
 

@@ -1,10 +1,22 @@
 # Vault manifests
 
-These deploy a **single-node Vault with file storage**, which is deliberately
-the simplest thing that is honestly production-*shaped* rather than
+These deploy a **single-node Vault with Raft (integrated) storage**, which is
+deliberately the simplest thing that is honestly production-*shaped* rather than
 production-*ready*. It gives you a real sealed/unsealed lifecycle, persistent
-storage and TLS — the parts that differ from `-dev` mode and that an operator
-must understand — without pretending to be an HA cluster.
+storage, snapshots (`vault operator raft snapshot save`) and TLS — the parts
+that differ from `-dev` mode and that an operator must understand — without
+pretending to be an HA cluster.
+
+The single thing that still makes it not production is **auto-unseal**: no
+`seal` block is configured, so every restart leaves Vault sealed and AXIAM
+unable to start until a human unseals it. `statefulset.yml` carries the
+commented `seal` blocks and `docs/deployment/vault.md` §5.3 explains why this
+is the step most often deferred and most expensive to defer.
+
+**Upgrading from an earlier revision of these manifests**, which used the `file`
+backend at `/vault/file`: the storage backend and the mount path have both
+changed, so the existing PVC is not readable by Raft. Migrate with
+`vault operator migrate` before applying — see `docs/deployment/vault.md` §5.
 
 For a real deployment, prefer one of:
 

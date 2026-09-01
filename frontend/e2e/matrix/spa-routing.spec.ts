@@ -11,7 +11,7 @@ import { NAV_DESTINATIONS } from "../helpers/matrix";
  * tell the difference between "correctly refused" and "unreachable".
  *
  * It exists because of a defect only a production-image run could find:
- * `docker/nginx.conf` proxied `location /oauth2` — a *prefix* match, which also
+ * `docker/nginx.conf.template` proxied `location /oauth2` — a *prefix* match, which also
  * captured the admin UI's own `/oauth2-clients` route and sent it to a backend
  * with no such endpoint. The page was a blank 404 for every principal.
  * `frontend/vite.config.ts` had already been taught to exclude that path

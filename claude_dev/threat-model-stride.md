@@ -1692,9 +1692,11 @@ AXIAM enforces TLS to the provider, but the provider-to-recipient hop is outside
 
 ### 5.8 Deployment & platform (Kubernetes)
 
-Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Threats here are largely deployment responsibilities rather than application code.
+Runtime and platform view: the edge (ingress or reverse proxy), replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Threats here are largely deployment responsibilities rather than application code.
 
-*15 threats — 1 critical, 10 high, 4 medium; 4 open.*
+T-212…T-217 record the 1.0.0-beta08 topology change (`claude_dev/public-backend-tls-design.md`): the edge now routes **by path** — the SPA at `/`, and `/api`, `/oauth2` and `/.well-known` to the server over TLS the server terminates itself. That removes a proxy hop and a cleartext leg, and moves four things across a trust boundary that were previously behind one.
+
+*21 threats — 2 critical, 14 high, 5 medium; 5 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1713,6 +1715,12 @@ Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monit
 | T-180 | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Store* | I | Vault concentrates every long-lived secret behind one credential | High | Open |
 | T-207 | AXIAM deployment (N replicas, HPA) <br/>*Process* | D | A rolling deployment logs every not-yet-replaced replica out of the datastore | High | Mitigated |
 | T-208 | Ingress controller (TLS 1.3) <br/>*Process* | T | The shipped proxy config diverges from the proxy CI tests | Medium | Mitigated |
+| T-212 | Ingress controller (TLS 1.3) <br/>*Process* | T | An unaccounted proxy hop collapses every per-IP rate limit into one bucket | High | Mitigated |
+| T-213 | AXIAM deployment (N replicas, HPA) <br/>*Process* | I | Path-routing at the edge makes the health endpoints internet-reachable | Medium | Mitigated |
+| T-214 | AXIAM deployment (N replicas, HPA) <br/>*Process* | D | The TLS leaf expires because rustls binds it for the process's life | High | Mitigated |
+| T-215 | IoT device / service account <br/>*Actor* | S | A forwarded client certificate authenticates whoever can set the header | Critical | Mitigated |
+| T-216 | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Store* | E | The unseal key sits on the same disk as the sealed data | High | Open |
+| T-217 | proxy → axiam-server <br/>*Flow* | I | Credentials cross the internal network in cleartext | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1915,6 +1923,48 @@ Starting a second AXIAM process against the same SurrealDB took the first from h
 The nginx config in the shipped admin-UI image used location /oauth2 — a prefix match that captured the SPA’s own /oauth2-clients route and answered a bare 404 before React was ever reached (F-02), so ProtectedRoute never ran and there was nothing to render or refuse. The vite preview proxy had the same shape, with /auth/mfa swallowing /auth/mfa-setup. The deeper defect: the fix had been made in the dev and preview proxies and never mirrored into the nginx config the image ships — and CI ran the E2E suite against vite preview, so the suite was green while the shipped artifact was broken. A route the proxy captures never reaches the permission layer, and no downstream permission assertion can tell “correctly refused” from “unreachable”.
 
 > Fixed in 1.0.0-beta05: the nginx rule is narrowed to location /oauth2/ — all nine backend OAuth2 endpoints live under the slash-terminated prefix — and the preview regex gained the same boundary. The generalising guard is the spa-routing E2E matrix spec, which asserts every registered SPA route answers 200 text/html unauthenticated: a server-level check, run against the production image rather than the preview proxy, so the artifact being measured is the artifact being shipped.
+
+**T-212 — An unaccounted proxy hop collapses every per-IP rate limit into one bucket**  
+`Ingress controller (TLS 1.3)` (Process) · Tampering · High · Mitigated
+
+`XForwardedForKeyExtractor` selects `hops[len - 1 - trusted_hops]` and falls back to `peer_addr()` when `trusted_hops >= len`. Both the extractor's own doc comment and three documentation sites told operators to set `AXIAM__RATE_LIMIT__TRUSTED_HOPS` to the *number of trusted proxy hops* — "1 behind a single ingress/nginx". That is off by one: a proxy appends the address it received **from**, not its own, so the nearest proxy is the socket peer and never appears in the header. Following the advice behind one proxy makes `trusted_hops >= hops.len()`, the header is discarded, and every client on the internet keys to the proxy's address. The documented Compose topology hit the same failure from the other direction — it had **two** appending proxies with the default `0`, so the extractor selected the inner proxy's address for every request. Either way the effect is one global bucket, including on `/auth/login`, which is deliberately keyed per-IP and never per-principal precisely so an attacker cannot lock a victim out. Collapsed, it does exactly that: one attacker's flood exhausts the allowance every legitimate user shares.
+
+> Fixed in 1.0.0-beta08. The rule is stated as `trusted_hops = proxies − 1` with a derivation and a per-topology table in `crates/axiam-api-rest/src/extractors/rate_limit.rs`, `docs/deployment/README.md` and the docs site. Five tests in `rate_limit_keying_test.rs` pin the table, including a regression witness asserting that the old advice really does collapse two different clients onto one key. Structurally, the topology change removes the second hop, so both shipped deployments now have exactly one proxy and the default `0` is correct — and both set it **explicitly** anyway, with the derivation in a comment, because a value that is right by accident is one nobody re-derives when they add a load balancer.
+
+**T-213 — Path-routing at the edge makes the health endpoints internet-reachable**  
+`AXIAM deployment (N replicas, HPA)` (Process) · Information disclosure · Medium · Mitigated
+
+`/health`, `/ready` and `/health/jobs` are served at the **server root**, not under `/api/v1`. While the edge forwarded everything to the frontend's nginx — which proxies only `/api`, `/oauth2` and `/.well-known` — they were unreachable from outside by accident rather than by decision. Routing by path forces the decision, and the wrong answer is expensive: `/health/jobs` reports per-job scheduler state (names, last-run timestamps, consecutive-failure counts), which is a free map of what a deployment runs and what is currently broken in it, and `/ready` answers "can this instance reach its datastore", a cheap oracle for whether an attack on the datastore is working. Neither is rate-limited the way `/api` is, because neither was ever internet-facing.
+
+> Deliberately **not routed** at the edge. The Caddyfile in `claude_dev/rpi5-prod-google-federation-guide.md` §4.3 claims `/api`, `/oauth2` and `/.well-known` and nothing else, so `/health` falls through to the SPA route and returns `index.html` rather than the health payload. The probes that need them — the Docker healthcheck and the Kubernetes liveness/readiness probes — reach the server on the container or pod network, which is where a health probe belongs. The guide shows the loopback probe for an operator checking by hand.
+
+**T-214 — The TLS leaf expires because rustls binds it for the process's life**  
+`AXIAM deployment (N replicas, HPA)` (Process) · Denial of service · High · Mitigated
+
+rustls resolves the server certificate per handshake but reads nothing from disk: `with_single_cert` installed an immutable `SingleCertAndKey`, and actix binds the resulting config for the process's life. The certificate a server booted with was the certificate it served forever. Harmless for a leaf installed by hand once a year; a scheduled outage once an ACME client is involved, since Let's Encrypt issues for 90 days and clients renew at 60 — the renewed certificate lands on disk and changes nothing, and the listener starts failing every handshake on day 90. The only remedy was restarting an identity provider every couple of months, which drops in-flight requests and re-reads every secret out of Vault on a schedule.
+
+> Fixed in 1.0.0-beta08. `ReloadableCertResolver` holds the certificate in an `ArcSwap` that rustls consults per handshake, so a renewal takes effect on the next connection with no restart and no dropped request — the same mechanism `ReloadableClientCertVerifier` already used for trust anchors, rather than a second one. Two triggers, because they fail differently: `SIGHUP` (immediate, what an ACME deploy hook sends, and a signal actix-server does not claim) and an hourly `stat` poll (`AXIAM__SERVER__TLS__RELOAD_INTERVAL_SECS`) for the case that actually happens — a hook nobody wired up, or a runtime that does not forward signals. The swap is validated before it happens: a reload that finds an unreadable or mismatched pair leaves the previous certificate serving and retries, which is what makes a renewal observed mid-write (certbot writes the chain and the key as two operations) a logged warning instead of a dead listener. A test drives two real TLS 1.3 handshakes against one `ServerConfig` and asserts the client is presented the renewed leaf on the second.
+
+**T-215 — A forwarded client certificate authenticates whoever can set the header**  
+`IoT device / service account` (Actor) · Spoofing · Critical · Mitigated
+
+`CertificateAuthenticated::extract` prefers the rustls-verified peer certificate and falls back to an `X-Client-Certificate` header when the connection carries none. `DeviceAuthService::authenticate` then checks the fingerprint, the status, the expiry, and the chain to the tenant or organization CA — every one of which a **copy** of an enrolled device's certificate also satisfies. A certificate is public data: it is handed out at enrollment, it appears in every handshake, and the certificates API returns it to anyone who may read it. Nothing on that path proves possession of the private key, and nothing can — possession is proven by a handshake, and on that path there was none. The fallback was sound only while the header could not originate with the client, i.e. while a trusted proxy terminated mTLS and overwrote it. It stops being sound the moment anything else can reach the listener, which is what exposing the backend does — and Caddy forwards client headers verbatim unless told otherwise.
+
+> Fixed in 1.0.0-beta08. `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` gates the fallback and defaults to **false**, so the header is consulted only where an operator asserts that a proxy they run performs the mTLS handshake and overwrites the header on every request. Native mTLS is unaffected and always preferred: a certificate rustls verified on the connection is authoritative and the setting is never consulted. Defence in depth rather than a single gate — the edge Caddyfile and `docker/nginx.conf.template` both strip `X-Client-Certificate` from inbound requests, so neither half has to be the only one. The FAPI2 client-credential path never accepted the header at all and still does not (`claude_dev/threat-model-stride.md` §5.3, X5.1): a client credential must not be assertable by anything that can set a header, and this brings the device path to the same standard. Devices that need real mTLS get a route the edge does not terminate — a second hostname or a TCP-passthrough Service — where rustls verifies the certificate itself.
+
+**T-216 — The unseal key sits on the same disk as the sealed data**  
+`Secrets (Vault / K8s Secrets / ConfigMap)` (Store) · Elevation of privilege · High · Open
+
+`just prod-up` initialises Vault with a single Shamir share and writes it, with the root token, to `docker/.secrets/vault-init.json` — the same disk as the sealed data. That is not Shamir's scheme with the shares stored badly; it is no seal at all, and anyone who can read the disk can unseal and then read every long-lived secret AXIAM has (the set enumerated in T-180). The stack also handed the server that **root token**, so a credential visible in `docker inspect` could read, write and delete every secret, revoke tokens and mount engines — for a process that reads one path once at boot and never writes. Both were acceptable while `docker-compose.prod.yml` was only ever a laptop stack; they stopped being acceptable when a deployment guide pointed a real domain at it.
+
+> Narrowed, not closed. `prod-up` now writes the read-only `axiam` policy from `docs/deployment/vault.md` §5.4 and issues a **scoped, periodic token** for the server, refusing to fall back to root if that fails; seeding keeps its own short-lived credential, because the seeding token and the serving token were never the same thing. Both the Compose stack and `k8s/vault/statefulset.yml` move from the `file` backend to **Raft**, which has a consistent backup story (`vault operator raft snapshot save`) and a migration path to three nodes that does not require a re-seed — a re-seed changes the OPAQUE setup key, i.e. a password reset for every user in every tenant. What remains **open** is auto-unseal, which cannot be closed from inside AXIAM: every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option whatever the hardware. `docs/deployment/vault.md` §5.3 and the Pi runbook §7.1 give the honest option table — GCP Cloud KMS at roughly $0.06 per key per month is the cheapest real answer — and state plainly that a deployment which configures none of them needs a human with three shares after every restart and is not production. A script that unseals from shares kept on the machine is explicitly **not** offered as an alternative: it removes the seal rather than automating it, and is strictly worse than Shamir because the shares are now in the one place an attacker already has.
+
+**T-217 — Credentials cross the internal network in cleartext**  
+`proxy → axiam-server` (Flow) · Information disclosure · High · Mitigated
+
+`docker/nginx.conf` proxied to `http://axiam-server:8090`. Every password on its way to `/api/v1/auth/login`, every bearer token, every session cookie and every OAuth2 client secret crossed the container network in the clear, readable by anything that could join that bridge or read the host's network namespace — which on a single host also running an operator's other containers is not hypothetical. The project's own standard ("TLS 1.3 minimum for all external communication") was satisfied only by treating the container network as not external, which is exactly the assumption CONTRACT §8b already refused to make for AMQP, where `AXIAM__AMQP__ALLOW_PLAINTEXT` was **removed** rather than left as an escape hatch. The REST leg was held to a weaker standard than the message bus for no recorded reason.
+
+> Fixed in 1.0.0-beta08. `docker/nginx.conf` becomes a template whose upstream is rendered from `AXIAM_BACKEND_ORIGIN` / `AXIAM_BACKEND_SNI` / `AXIAM_BACKEND_CA`, and the documented topology points the edge at `https://` with the server terminating TLS 1.3 itself. Certificate verification is unconditional in every rendering: there is no `proxy_ssl_verify off` anywhere in the change and no documented setting that produces one, because a backend certificate that does not verify is a misconfiguration to fix and an escape hatch here is the first thing reached for at 3am. Defaults are unchanged, so the dev stack and the E2E suite keep the plaintext behaviour they rely on and reaching the frontend container directly keeps working.
 
 </details>
 
@@ -2136,7 +2186,7 @@ tenant_scope was reachable from exactly one of the places roles are assigned —
 
 ## 6. Open risk register
 
-15 of 219 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+16 of 225 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -2147,6 +2197,7 @@ tenant_scope was reachable from exactly one of the places roles are assigned —
 | T-133 | High | Backup media accessible outside the cluster | Backups / volume snapshots <br/>*Deployment & platform (Kubernetes)* | Not addressed by AXIAM. Encrypt backups at rest with a key separate from the cluster, restrict snapshot IAM, and include backup media in the same access review as the live data… |
 | T-135 | High | Dependency-confusion or typosquatted SDK package | Integrator / developer <br/>*Client SDKs & admin UI integration surface* | Not fully controllable from this repository. Publish under reserved names, enable 2FA and trusted publishing on every registry, sign releases, and document the exact canonical… |
 | T-146 | High | Long-lived client secret committed to a repository | SDK configuration (client secrets, CA bundles) <br/>*Client SDKs & admin UI integration surface* | Outside AXIAM's control. Mitigate by preferring mTLS or short-lived workload identity over static secrets, rotating regularly through the client-rotation endpoint, and enabling… |
+| T-216 | High | The unseal key sits on the same disk as the sealed data | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Deployment & platform (Kubernetes)* | Narrowed at beta08: the server now holds a read-only token scoped to one path rather than root, seeding uses its own short-lived credential, and both Vault deployments moved to Raft. Open because **auto-unseal cannot be closed from inside AXIAM** — every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option. A deployment that configures none of them needs a human with three shares after every restart… |
 | T-180 | High | Vault concentrates every long-lived secret behind one credential | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility — a token AXIAM is handed is a token AXIAM must use. Narrowed by H-4: `just vault-status` now reports the token's actual capabilities and flags anything beyond `read`, so the documented read-only policy is checkable rather than merely stated… |
 | T-9 | Medium | Connection flood exhausts ingress capacity | Ingress / TLS 1.3 termination <br/>*System diagram* | Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is… |
 | T-39 | Medium | Access token still valid after entitlement revocation | Token service EdDSA JWT + refresh rotation <br/>*Authentication & session management* | Accepted trade-off for stateless verification. The 15-minute lifetime bounds the window; sessions are invalidated on password change; deployments needing immediate revocation… |
@@ -2173,6 +2224,9 @@ tenant_scope was reachable from exactly one of the places roles are assigned —
 - etcd encryption at rest. Which secrets reach the container is no longer an operator choice (T-132): the manifests default to the Vault provider, and the `file` provider mounts key material for deployments without Vault. `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` are the remaining environment variables, read before any provider exists
 - Backup encryption, restricted snapshot IAM, and backups included in access review
 - Edge protection (WAF, connection limits) in front of the ingress
+- **Auto-unseal on Vault** (T-216). The one production step AXIAM cannot take for you, and the one most often deferred: without it every restart leaves Vault sealed and the server crash-looping until a human with three shares arrives. A cloud KMS seal is the cheap answer (GCP Cloud KMS is roughly $0.06 per key per month); a transit seal against a Vault you already run elsewhere is the other. A script that unseals from shares kept on the machine is not auto-unseal
+- **Deriving `AXIAM__RATE_LIMIT__TRUSTED_HOPS` for your own topology** (T-212). It is the number of proxies in front of the server **minus one**, and both too high and too low collapse every client into one bucket. The shipped values are right for the shipped topologies and stop being right the moment you add a load balancer or a CDN
+- **Stripping `X-Forwarded-For` and `X-Client-Certificate` at the edge**, and at the firewall for any route that reaches the server without a proxy (T-215). A directly-reachable listener with `trusted_hops = 0` will honour an `X-Forwarded-For` the client invented, which is a fresh rate-limit bucket per request
 - Kubernetes audit logging, since cluster-admin bypasses the AXIAM audit trail entirely
 - Running SurrealDB on a **persistent** storage engine (`surrealkv:` or `rocksdb:`, never `memory:`). This is a correctness control, not a durability preference: the first layer deciding a contended single-use redemption is the engine aborting the loser of a write-write conflict, which the in-memory datastore does not do reliably (T-163, T-164, T-165). The shipped compose files and k8s StatefulSet already pin it, and the server cannot verify it for you — SurrealDB exposes no datastore identity over the wire, so `axiam-server` logs a WARN that the engine could not be attested
 - Re-supplying the local FIDO MDS3 BLOB file on air-gapped deployments (`AXIAM__PKI__MDS_BLOB_PATH`) — there is no automatic refresh path off the public network, so an operator who never updates the file never gets the newer BLOB's revocations either
@@ -2200,20 +2254,20 @@ tenant_scope was reachable from exactly one of the places roles are assigned —
 
 | Category | Threats |
 |---|---|
-| Spoofing | 55 |
-| Tampering | 44 |
+| Spoofing | 56 |
+| Tampering | 45 |
 | Repudiation | 5 |
-| Information disclosure | 55 |
-| Denial of service | 20 |
-| Elevation of privilege | 40 |
+| Information disclosure | 57 |
+| Denial of service | 21 |
+| Elevation of privilege | 41 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
-| Critical | 27 | 1 |
-| High | 103 | 7 |
-| Medium | 82 | 6 |
+| Critical | 28 | 1 |
+| High | 107 | 8 |
+| Medium | 83 | 6 |
 | Low | 7 | 1 |
 
 **By diagram**
@@ -2227,14 +2281,14 @@ tenant_scope was reachable from exactly one of the places roles are assigned —
 | Authorization engine — RBAC, hierarchy & scopes | 23 | 0 |
 | PKI, certificates & IoT device identity | 24 | 1 |
 | Audit, webhooks, email & notifications | 18 | 2 |
-| Deployment & platform (Kubernetes) | 15 | 4 |
+| Deployment & platform (Kubernetes) | 21 | 5 |
 | Client SDKs & admin UI integration surface | 25 | 4 |
 
 ## 8. Assumptions
 
 The analysis holds only while these hold. If one stops being true, revisit the diagrams it touches.
 
-1. TLS 1.3 terminates at the ingress and the hop to the pods stays inside the cluster network.
+1. TLS 1.3 terminates at the edge. The hop from the edge to the pods stays inside the cluster or host network **and is itself TLS 1.3** wherever the deployment carries a certificate for it — which the documented topology does (T-217). A deployment that leaves that leg plaintext is relying on the network being trustworthy, and should say so deliberately rather than inherit it from this assumption.
 2. The data tier has no route from the public Internet.
 3. The configured secret provider — Vault in the production stacks, Kubernetes Secrets otherwise — is the only source of key material, and CA signing-key custody is recorded per CA on its own row; nothing sensitive is baked into an image.
 4. Cluster-admin is equivalent to full AXIAM compromise and is governed outside this model.
@@ -2247,7 +2301,7 @@ The analysis holds only while these hold. If one stops being true, revisit the d
 Revisit the model when any of the following happens, and re-run the generator so this document tracks the JSON:
 
 - A new API surface, protocol or external integration is added (the OPAQUE endpoints, the SCIM provisioning tokens and the Vault secret provider are the 2026-08 examples — each added or changed threats here)
-- A trust boundary moves — a new component, a change in deployment topology (organization-level principals moved the tenant ↔ tenant boundary in 1.0.0-beta02, and tenant signing CAs with per-CA Vault custody re-shaped the PKI diagram — T-187…T-199 record the 1.0.0-beta01…beta03 wave; tenant-scoped role assignments and the organization-principal guard narrowed the same boundary again in 1.0.0-beta05…beta06 — T-200…T-211 record that wave, most of it found by the E2E permission matrix run against the production image)
+- A trust boundary moves — a new component, a change in deployment topology (organization-level principals moved the tenant ↔ tenant boundary in 1.0.0-beta02, and tenant signing CAs with per-CA Vault custody re-shaped the PKI diagram — T-187…T-199 record the 1.0.0-beta01…beta03 wave; tenant-scoped role assignments and the organization-principal guard narrowed the same boundary again in 1.0.0-beta05…beta06 — T-200…T-211 record that wave, most of it found by the E2E permission matrix run against the production image; and exposing the backend at `/api` on the public origin with its own TLS moved the edge ↔ server boundary in 1.0.0-beta08 — T-212…T-217 record that wave)
 - A security review raises a finding with no corresponding threat here
 - A deferred item lands (SEC-040 deny-override did, closing T-16/T-87)
 - The SDK contract gains or relaxes a security clause (contract 1.28's WebAuthn, account-lifecycle and PAR sections and the Swift/C/C++ reactor protocol core are the 2026-08-22 examples — T-183…T-186 record them)

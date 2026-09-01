@@ -220,3 +220,148 @@ fn client_aware_extractor_falls_back_to_ip_when_no_client_id_present() {
     let key = extractor.extract(&with_no_client_id).unwrap();
     assert_eq!(key, peer_ip().to_string());
 }
+
+// ---------------------------------------------------------------------------
+// Topology derivation (public-backend-TLS design §4)
+// ---------------------------------------------------------------------------
+//
+// These pin the rule that decides what an operator sets:
+//
+//   trusted_hops = (reverse proxies between the client and this server) - 1
+//
+// because a proxy appends the address it received FROM, so the nearest proxy is
+// the socket peer and never appears in the header. The rule used to be
+// documented as "= the proxy count", which is off by one and, at one proxy,
+// discards the header and keys every client on the internet to the proxy's own
+// address. That is not a hypothetical: it was the live behaviour of the only
+// deployment the repository documented end to end.
+
+/// The Compose/Pi topology and `k8s/ingress.yml`: exactly one appending proxy
+/// (Caddy, or ingress-nginx) in front of the server. The proxy sets
+/// `X-Forwarded-For: <client>` and is itself the peer, so the default 0 is
+/// correct and selects the real client.
+#[actix_web::test]
+async fn one_proxy_with_default_zero_selects_the_real_client() {
+    let extractor = XForwardedForKeyExtractor::with_trusted_hops(0);
+
+    let req = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .insert_header(("X-Forwarded-For", "198.51.100.23"))
+        .to_srv_request();
+
+    assert_eq!(
+        extractor.extract(&req).expect("key extraction succeeds"),
+        "198.51.100.23".parse::<IpAddr>().unwrap(),
+        "behind one appending proxy, trusted_hops=0 must key off the client"
+    );
+}
+
+/// The same single-proxy topology, with a client that sends its own
+/// `X-Forwarded-For` to try to mint a fresh bucket. The proxy appends the real
+/// peer to the right of the spoof, so 0 still selects the real client and the
+/// spoof is inert. This is the property that makes 0 the right default rather
+/// than merely the convenient one.
+#[actix_web::test]
+async fn one_proxy_ignores_a_client_supplied_xff_prefix() {
+    let extractor = XForwardedForKeyExtractor::with_trusted_hops(0);
+
+    let req = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        // "<attacker's invention>, <what the proxy appended>"
+        .insert_header(("X-Forwarded-For", "10.0.0.1, 198.51.100.23"))
+        .to_srv_request();
+
+    assert_eq!(
+        extractor.extract(&req).expect("key extraction succeeds"),
+        "198.51.100.23".parse::<IpAddr>().unwrap(),
+        "a client-supplied XFF prefix must not shift the selected hop"
+    );
+}
+
+/// The topology this change removes: Caddy → nginx → server. nginx appends
+/// Caddy's address, so the header carries one proxy entry and the correct value
+/// is 1. Kept as a test because the shape is still legal — an operator who
+/// keeps the old routing needs it — and because it is the case the old default
+/// of 0 got wrong.
+#[actix_web::test]
+async fn two_proxies_need_one_trusted_hop() {
+    let header = "198.51.100.23, 192.0.2.10"; // <client>, <caddy>
+
+    let correct = XForwardedForKeyExtractor::with_trusted_hops(1);
+    let req = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .insert_header(("X-Forwarded-For", header))
+        .to_srv_request();
+    assert_eq!(
+        correct.extract(&req).expect("key extraction succeeds"),
+        "198.51.100.23".parse::<IpAddr>().unwrap(),
+        "two appending proxies must be configured as trusted_hops=1"
+    );
+
+    // What the shipped default did to that topology: it selected the middle
+    // proxy's address, so every client on the internet shared one bucket.
+    let wrong = XForwardedForKeyExtractor::with_trusted_hops(0);
+    let req = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .insert_header(("X-Forwarded-For", header))
+        .to_srv_request();
+    assert_eq!(
+        wrong.extract(&req).expect("key extraction succeeds"),
+        "192.0.2.10".parse::<IpAddr>().unwrap(),
+        "regression witness: trusted_hops=0 behind TWO proxies keys off the \
+         inner proxy, collapsing every client into a single bucket"
+    );
+}
+
+/// Three proxies (cloud L7 load balancer → ingress → mesh sidecar) carry two
+/// proxy entries, so the value is 2. Completes the table in the extractor's
+/// module docs.
+#[actix_web::test]
+async fn three_proxies_need_two_trusted_hops() {
+    let extractor = XForwardedForKeyExtractor::with_trusted_hops(2);
+
+    let req = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        // <client>, <lb>, <ingress>
+        .insert_header(("X-Forwarded-For", "198.51.100.23, 192.0.2.10, 192.0.2.11"))
+        .to_srv_request();
+
+    assert_eq!(
+        extractor.extract(&req).expect("key extraction succeeds"),
+        "198.51.100.23".parse::<IpAddr>().unwrap(),
+        "three appending proxies must be configured as trusted_hops=2"
+    );
+}
+
+/// Setting the value to the *proxy count* rather than the count minus one —
+/// the advice the docs used to give — makes `trusted_hops >= hops.len()`, so
+/// the header is discarded and the key becomes the proxy's own address. Every
+/// client collapses into one bucket, including on `/auth/login`, which is
+/// deliberately always keyed per-IP.
+///
+/// This is the exact failure the corrected documentation exists to prevent, so
+/// it is asserted rather than described.
+#[actix_web::test]
+async fn the_old_off_by_one_advice_collapses_every_client_into_one_bucket() {
+    // One proxy in front, told (wrongly) that there is one *entry* to skip.
+    let extractor = XForwardedForKeyExtractor::with_trusted_hops(1);
+
+    let first = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .insert_header(("X-Forwarded-For", "198.51.100.23"))
+        .to_srv_request();
+    let second = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .insert_header(("X-Forwarded-For", "203.0.113.77"))
+        .to_srv_request();
+
+    let a = extractor.extract(&first).expect("key extraction succeeds");
+    let b = extractor.extract(&second).expect("key extraction succeeds");
+
+    assert_eq!(a, peer_ip());
+    assert_eq!(
+        a, b,
+        "two different clients must NOT share a key — they do here, which is \
+         why trusted_hops = proxies - 1 rather than proxies"
+    );
+}

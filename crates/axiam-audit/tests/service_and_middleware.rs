@@ -305,6 +305,7 @@ fn test_auth_config() -> AuthConfig {
         "-----END PUBLIC KEY-----"
     );
     AuthConfig {
+        trust_forwarded_client_cert: false,
         jwt_private_key_pem: private_key.into(),
         jwt_public_key_pem: public_key.into(),
         access_token_lifetime_secs: 900,

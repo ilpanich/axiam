@@ -1,8 +1,24 @@
-# Single-node Vault with file storage.
+# Single-node Vault with Raft (integrated) storage.
 #
 # A StatefulSet rather than a Deployment because Vault owns durable state: the
 # encrypted secret store. A Deployment's rolling update could run two pods
-# against the same PVC, which the file backend does not tolerate.
+# against the same PVC, which no storage backend tolerates.
+#
+# Raft rather than the `file` backend, which this used to run: `file` is a
+# single-node development backend with no consistent backup — `vault operator
+# raft snapshot save` takes one while Vault is running, whereas backing up
+# `file` means copying a directory underneath a live process and hoping. Raft
+# is also the only path to more than one replica later, and growing this to
+# three nodes is `retry_join` plus a restart rather than a re-seed. A re-seed
+# would change the OPAQUE setup key, which means a password reset for every
+# user in every tenant.
+#
+# MIGRATION: this changes the storage backend and the mount path
+# (/vault/file -> /vault/data). An existing single-node Vault deployed from the
+# previous revision of this file must be migrated with `vault operator migrate`
+# (docs/deployment/vault.md §5) — its PVC is not readable by Raft as-is. Most
+# teams should run HashiCorp's Helm chart with Raft and 3-5 replicas instead of
+# this manifest at all.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -18,8 +34,12 @@ data:
   vault.hcl: |
     ui = false
 
-    storage "file" {
-      path = "/vault/file"
+    storage "raft" {
+      path    = "/vault/data"
+      # Stable across restarts because the StatefulSet gives the pod a stable
+      # name; a node_id that changed on every restart would make the node fail
+      # to rejoin its own single-node cluster.
+      node_id = "vault-0"
     }
 
     listener "tcp" {
@@ -126,7 +146,7 @@ spec:
               mountPath: /vault/tls
               readOnly: true
             - name: data
-              mountPath: /vault/file
+              mountPath: /vault/data
             - name: tmp
               mountPath: /tmp
           readinessProbe:

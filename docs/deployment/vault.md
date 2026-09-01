@@ -149,21 +149,52 @@ secrets, then starts the server.
 just prod-up
 ```
 
-Two things about this stack are deliberately not production:
+It runs **Raft (integrated) storage** and gives the server a **read-only token
+scoped to `secret/axiam`**, not the root token — the same two things §5 asks a
+production deployment for, so that the local stack and the documented ceremony
+cannot quietly drift apart. Seeding uses its own credential, because the seeding
+token and the serving token were never the same thing (§5.4).
 
-1. **The unseal key and root token are written to
-   `docker/.secrets/vault-init.json`.** That file is the whole of your Vault.
-   It exists so a local stack survives `docker compose restart` without a
-   human. Never do this on a real deployment.
-2. **There is no auto-unseal**, so a restart leaves Vault sealed until
-   `just prod-up` runs again.
+Exactly **one** thing about this stack is deliberately not production, and it is
+the important one:
+
+> **The unseal key is written to `docker/.secrets/vault-init.json`** — the same
+> disk as the sealed data. That is not Shamir's scheme with the shares stored
+> badly; it is no seal at all, and anyone who can read the disk can unseal. It
+> exists so a local stack survives `docker compose restart` without a human.
+> **Never do this on a real deployment**, and do not automate it and call the
+> problem solved: configure auto-unseal (§5.3) instead.
+
+`just prod-clean` removes that file along with the volume it describes.
+
+### 4.1 Migrating a stack that predates Raft
+
+Earlier revisions of `docker/vault/vault.hcl` used the `file` backend at
+`/vault/file`. The current file uses Raft at `/vault/data` **on a new named
+volume**, so an existing stack is left completely intact rather than pointed at
+silently — Raft would refuse to start on a `file` directory, which is a
+confusing failure rather than a migration.
+
+Two ways forward:
+
+* **Re-seed** a fresh Vault (`just prod-clean && just prod-up`). Simplest, and
+  correct for a local stack — but it mints a **new OPAQUE setup key**, which
+  means every OPAQUE-registered user must reset their password. Read that
+  sentence twice before running it against anything with real users.
+* **Migrate** with `vault operator migrate` from the old directory to the new
+  one, following [HashiCorp's storage-migration
+  guide](https://developer.hashicorp.com/vault/docs/commands/operator/migrate).
+  Take a copy of both volumes first.
+
+`k8s/vault/statefulset.yml` changed the same way, and its PVC mount path moved
+with it; the same two options apply.
 
 ---
 
 ## 5. Production: what you must do by hand
 
-The manifests in `k8s/vault/` deploy a single-node Vault with file storage —
-production-*shaped*, not production-*ready*. Most teams should run
+The manifests in `k8s/vault/` deploy a single-node Vault with Raft storage —
+production-*shaped*, not production-*ready*, the gap being auto-unseal (§5.3). Most teams should run
 [HashiCorp's Helm chart](https://github.com/hashicorp/vault-helm) with Raft and
 3–5 replicas instead, or use an existing Vault. Either way, the steps below are
 what AXIAM needs and none of them can be automated safely.
@@ -230,7 +261,8 @@ Without it, every restart — a node drain, an upgrade, an OOM kill — leaves V
 sealed and AXIAM unable to start, until three people are woken up. This is the
 single most important production step and the one most often deferred.
 
-Uncomment the appropriate `seal` block in `k8s/vault/statefulset.yml`:
+Uncomment the appropriate `seal` block in `k8s/vault/statefulset.yml` (or
+`docker/vault/vault.hcl`, which carries the same set commented):
 
 ```hcl
 seal "awskms" {
@@ -240,6 +272,29 @@ seal "awskms" {
 ```
 
 Then migrate: `vault operator unseal -migrate` (three shares), once.
+
+#### If you have no cloud KMS
+
+Every Vault OSS seal type needs something outside the box. The honest options,
+including for a home lab or an air-gapped site:
+
+| Seal | What it needs | Notes |
+|---|---|---|
+| `gcpckms` | GCP Cloud KMS | **~$0.06 per key per month.** The cheapest real answer by an order of magnitude, and it works fine from a home connection — the only cloud footprint is one key. |
+| `awskms` | AWS KMS | ~$1 per key per month. Same shape. |
+| `azurekeyvault` | Azure Key Vault | Same shape. |
+| `transit` | A **second** Vault, elsewhere, already unsealed | Good if you already run one. A second Vault on the *same* host solves nothing — it needs unsealing too. |
+| `pkcs11` | An HSM **and a Vault Enterprise licence** | Not available on the open-source binary. Vault OSS cannot auto-unseal from a TPM, whatever hardware the machine has. |
+
+A script that unseals from shares stored on the machine is **not** auto-unseal:
+it removes the seal rather than automating it, and it is strictly worse than
+Shamir because the shares are now in one place and that place is the one an
+attacker already has.
+
+If none of the above is acceptable, that is a legitimate decision — but the
+resulting deployment is one where **every restart needs a human with three
+shares**, and it should be described that way in your runbook rather than as
+production.
 
 ### 5.4 Enable KV v2 and create AXIAM's policy
 

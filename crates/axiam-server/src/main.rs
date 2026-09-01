@@ -2422,7 +2422,13 @@ async fn main() -> std::io::Result<()> {
         // Also fails fast on `http2=false`, which the actix rustls bind cannot
         // honour (it re-prepends h2 to ALPN) — see `axiam_server::tls`.
         let rustls_config = axiam_server::tls::build_rustls_server_config(&tls_config)?;
+        // The seam that lets an ACME renewal take effect without a restart.
+        // Spawned only on the TLS path: with no listener there is no leaf to
+        // reload, and a SIGHUP handler that logs "nothing to reload" on a
+        // plaintext deployment is noise an operator has to learn to ignore.
+        axiam_server::tls::spawn_leaf_reloader(tls_config.reload_interval_secs);
         tracing::info!(
+            reload_interval_secs = tls_config.reload_interval_secs,
             bind = %bind_addr,
             alpn = "h2,http/1.1",
             resumption = "tls1.3-tickets",

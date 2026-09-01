@@ -70,8 +70,8 @@ use axiam_db::{
     SurrealRateLimitBucketRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
     SurrealResourceRepository, SurrealRoleRepository, SurrealScimTokenRepository,
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealSsoHandoffCodeRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
     SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
@@ -769,6 +769,7 @@ impl<C: Connection + Clone> AppState<C> {
                 federation_config_repo: federation_config_repo.clone(),
                 federation_link_repo: federation_link_repo.clone(),
                 federation_login_state_repo: SurrealFederationLoginStateRepository::new(db.clone()),
+                sso_handoff_code_repo: SurrealSsoHandoffCodeRepository::new(db.clone()),
                 assertion_replay_repo: assertion_replay_repo.clone(),
                 oidc_federation_service: None,
                 #[cfg(feature = "saml")]

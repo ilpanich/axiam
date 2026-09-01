@@ -1502,6 +1502,32 @@ pub trait FederationConfigRepository: Send + Sync {
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<FederationConfig>>> + Send;
 
+    /// Every config of this tenant, oldest first, without the secret columns.
+    ///
+    /// Backs the unauthenticated providers endpoint and the org→tenant
+    /// inheritance resolution. Deliberately not `list()` with a filter, and
+    /// deliberately unfiltered:
+    ///
+    /// * **Unpaginated**, because both callers need the whole set at once — an
+    ///   override is decided by comparing a tenant's configs against the
+    ///   organization's, and a page boundary in the middle of that comparison
+    ///   would produce a different answer per page. The set is an operator's
+    ///   list of identity providers, which is a handful; if that ever stops
+    ///   being true this becomes a keyset scan, not a page.
+    /// * **Unfiltered by `enabled`**, because a *disabled* tenant config still
+    ///   shadows an inherited organization one. A tenant administrator who
+    ///   created a Google config and disabled it has said something about
+    ///   Google in this tenant, and the something is "no"; falling back to the
+    ///   inherited config there would make "disable" mean "re-enable the other
+    ///   one". Callers filter for their own question.
+    /// * **Secret-free**, like `list()`: neither caller decrypts anything.
+    ///
+    /// Ordering is fixed because it is the order sign-in buttons render in.
+    fn list_all(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<FederationConfig>>> + Send;
+
     /// Return all `federation_config` rows where the legacy plaintext
     /// `client_secret` is present and the encrypted columns are absent.
     ///
@@ -1577,6 +1603,106 @@ pub struct FederationLoginState {
     /// Stored at SAML login-start time so the ACS handler can verify
     /// `Response.InResponseTo` matches the request ID (SEC-005/REQ-14 AC-5).
     pub request_id: String,
+    /// PKCE code verifier, when one was sent (schema v52).
+    ///
+    /// Mandatory for [`crate::models::federation::FederationProtocol::OAuth2`],
+    /// where it is the only replay protection left once `nonce` is gone;
+    /// opt-in for OIDC. `None` on every row written before v52, which is what
+    /// "no PKCE was sent" has always meant.
+    pub code_verifier: Option<String>,
+    /// The `redirect_uri` that was actually sent to the IdP, when it differs
+    /// from `redirect_uri` (the SPA destination).
+    ///
+    /// They differ for `response_mode=form_post` providers: the URI registered
+    /// with Apple is an AXIAM **server** endpoint, because the IdP posts the
+    /// response rather than redirecting the browser to it. The token exchange
+    /// must echo *that* value, byte for byte, so it is stored rather than
+    /// reconstructed. `None` means the SPA `redirect_uri` was sent, which is
+    /// every row written before v52.
+    pub idp_redirect_uri: Option<String>,
+}
+
+impl FederationLoginState {
+    /// The `redirect_uri` to echo at the token endpoint.
+    ///
+    /// One accessor rather than the same `unwrap_or` at three call sites: the
+    /// authorize request and the token exchange must agree byte for byte or the
+    /// IdP refuses the exchange, and a mismatch here is a bug that only shows up
+    /// against a live provider.
+    pub fn token_exchange_redirect_uri(&self) -> &str {
+        self.idp_redirect_uri
+            .as_deref()
+            .unwrap_or(&self.redirect_uri)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSO handoff codes
+// ---------------------------------------------------------------------------
+
+/// A one-shot code that converts a cross-site SSO return into a same-site
+/// session issuance.
+///
+/// # Why this exists
+///
+/// AXIAM's session cookies are `SameSite=Strict`. SAML and Apple's
+/// `response_mode=form_post` both have the IdP perform a **cross-site form
+/// POST** directly to an AXIAM endpoint; setting `Strict` cookies on that
+/// response is permitted, but the browser will not *send* them on the
+/// navigation that follows, so the user lands back in the SPA with a session
+/// they cannot use.
+///
+/// So the receiving endpoint mints one of these instead of setting cookies, and
+/// `303`-redirects to the SPA with it. The SPA posts it back **same-origin**,
+/// and that response sets the cookies. The alternative — weakening the cookies
+/// to `SameSite=Lax` — would re-open the CSRF surface `Strict` closes, across
+/// every endpoint, permanently, to serve two flows.
+///
+/// The row carries **no token material**: the access and refresh tokens are
+/// created at redemption, from `user_id` and `tenant_id`, not stored here.
+/// The stored value is a SHA-256 hash of the code, so a database read does not
+/// yield a usable credential.
+///
+/// See `claude_dev/federation-sso-login-design.md` §5.2.
+#[derive(Debug, Clone)]
+pub struct SsoHandoffCode {
+    /// Lowercase hex SHA-256 of the code. The code itself is never stored.
+    pub code_hash: String,
+    pub tenant_id: uuid::Uuid,
+    pub user_id: uuid::Uuid,
+    /// SPA destination, carried through from the login state row.
+    pub redirect_uri: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// How long a handoff code is valid.
+///
+/// It exists to survive exactly one redirect. Sixty seconds is generous for
+/// that and short enough that a code caught in browser history or a `Referer`
+/// header is almost certainly already dead. The login state row it descends
+/// from gets ten minutes because a human is reading an IdP consent screen in
+/// the middle of it; nobody is reading anything during this hop.
+pub const SSO_HANDOFF_TTL_SECS: i64 = 60;
+
+/// Repository for [`SsoHandoffCode`] rows.
+pub trait SsoHandoffCodeRepository: Send + Sync {
+    /// Persist a new handoff code. `Err(Conflict)` if the hash already exists.
+    fn insert(&self, row: &SsoHandoffCode) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Atomically consume a code by its hash: SELECT + DELETE in one statement.
+    ///
+    /// Returns `Ok(None)` for "not found" and for "expired" alike — the caller
+    /// MUST treat both as the same failure, for the same reason
+    /// [`FederationLoginStateRepository::consume_by_state`] does. The row is
+    /// deleted whenever it is found, expired or not, so a second redemption
+    /// cannot succeed.
+    fn consume_by_hash(
+        &self,
+        code_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<SsoHandoffCode>>> + Send;
+
+    /// Delete all rows where `expires_at < now()`. Returns the count deleted.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 /// Repository for first-time SSO login state rows.

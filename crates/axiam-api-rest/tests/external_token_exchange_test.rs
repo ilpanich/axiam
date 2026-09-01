@@ -131,6 +131,7 @@ fn test_auth_config() -> AuthConfig {
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
         oauth2_issuer_url: "https://id.axiam.test".into(),
+        sso_spa_origins: Vec::new(),
         federation_encryption_key: Some(TEST_FED_ENC_KEY),
         ..AuthConfig::default()
     }
@@ -347,6 +348,18 @@ async fn setup(spec: TrustSpec) -> Fixture {
                 max_token_age_secs: spec.max_token_age_secs,
                 max_lifetime_secs: spec.max_lifetime_secs,
             }),
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
+            button_icon: None,
         })
         .await
         .unwrap();

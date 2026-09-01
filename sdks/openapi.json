@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta07",
-    "x-axiam-spec-digest": "sha256:84c956102d62dcd5ba9a4a0cb5d8a28206e2dfa7ee51563643effdb8af82640d"
+    "x-axiam-spec-digest": "sha256:9fd94606da13d027f5d206fb8eca209d764166799381744df9f48e4598d6fec2"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -682,6 +682,114 @@
         }
       }
     },
+    "/api/v1/auth/federation/handoff": {
+      "post": {
+        "tags": [
+          "federation-sso"
+        ],
+        "summary": "`POST /api/v1/auth/federation/handoff`",
+        "description": "Exchange a handoff code for session cookies.\n\nThis is the same-origin half of the mechanism described on\n[`mint_handoff_and_redirect`]: the SPA posts the code it was redirected\nwith, and *this* response is the one that carries `Set-Cookie`, on a\nsame-site request, where `SameSite=Strict` behaves as intended.\n\nThe session is created **here**, from the row's `user_id` and `tenant_id` —\nno token material was ever stored — so a code that is never redeemed leaves\nno session behind.",
+        "operationId": "sso_handoff_public",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoHandoffRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Session issued; cookies set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoLoginSuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Code not found, expired, or already used"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/federation/oauth2/callback": {
+      "post": {
+        "tags": [
+          "federation-sso"
+        ],
+        "summary": "`POST /api/v1/auth/federation/oauth2/callback`",
+        "description": "Complete a plain-OAuth2 login. Called by the SPA, same-origin, so the\nsession cookies are set directly rather than through a handoff code.",
+        "operationId": "oauth2_callback_public",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuth2CallbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Session issued; cookies set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoLoginSuccessResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "State not found or expired, or the provider returned no verified email"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/federation/oauth2/start": {
+      "post": {
+        "tags": [
+          "federation-sso"
+        ],
+        "summary": "`POST /api/v1/auth/federation/oauth2/start`",
+        "description": "Begin a login through a plain-OAuth2 provider (GitHub, Facebook, or any\nconfigured `generic_oauth2`).\n\nPKCE is generated unconditionally here — on this path there is no ID token\nand therefore no `nonce`, so the verifier is what binds the code to this\nbrowser. See `axiam_federation::pkce`.",
+        "operationId": "oauth2_start_public",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuth2StartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Authorize URL returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2StartResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "401": {
+            "description": "Unknown workspace or provider"
+          }
+        }
+      }
+    },
     "/api/v1/auth/federation/oidc/callback": {
       "post": {
         "tags": [
@@ -710,6 +818,35 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "State not found or expired"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/federation/oidc/callback/form": {
+      "post": {
+        "tags": [
+          "federation-sso"
+        ],
+        "summary": "`POST /api/v1/auth/federation/oidc/callback/form`",
+        "description": "The `response_mode=form_post` return, which Apple uses whenever `name` or\n`email` is requested.\n\nThis is a **cross-site** POST performed by the IdP, so it answers `303` with\na handoff code rather than setting cookies — see\n[`mint_handoff_and_redirect`]. It is also where Apple's `user` field is\nread: the display name arrives there once, in an unsigned form field, and\nnever in the ID token.",
+        "operationId": "oidc_form_callback_public",
+        "requestBody": {
+          "description": "application/x-www-form-urlencoded with `state`, `code`, and optionally Apple's `user`",
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "303": {
+            "description": "Redirect to the SPA with a single-use handoff code"
           },
           "401": {
             "description": "State not found or expired"
@@ -751,6 +888,80 @@
           },
           "401": {
             "description": "Unknown org/tenant slug"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/federation/providers": {
+      "get": {
+        "tags": [
+          "federation-sso"
+        ],
+        "summary": "`GET /api/v1/auth/federation/providers`",
+        "description": "Which \"Sign in with X\" buttons to render for a workspace.\n\n# Why an unknown organization gets `200 []` and not `401`\n\n`oidc_start_public` answers `401` for a slug miss, deliberately, so it does\nnot enumerate tenants — and there that works, because *every* failure on\nthat endpoint is a `401` and the answer carries no information.\n\nThis endpoint's answer is a **list**, so the two shapes are distinguishable:\n`401` for an unknown organization against `200 []` for a known one with no\nproviders would be a two-valued oracle and a perfect organization-slug\nenumerator. `200 []` for both leaks nothing, and it is also the only shape\nthe login page can render without a special case. What bounds the guessing\nrate is the rate limit, which is the same login budget the start endpoints\nuse.",
+        "operationId": "list_providers_public",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "description": "Organization UUID. Alternative to `org_slug`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "org_slug",
+            "in": "query",
+            "description": "Organization slug, as typed on the login page.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant UUID. Alternative to `tenant_slug`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_slug",
+            "in": "query",
+            "description": "Tenant slug. Omitted or blank means the organization's own scope.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Providers configured for this workspace (empty for an unknown organization or tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicFederationProvidersResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -2047,11 +2258,66 @@
                           "attribute_map",
                           "enabled",
                           "token_exchange",
+                          "provider_kind",
+                          "allow_tenant_inheritance",
+                          "scopes",
+                          "effective_scopes",
+                          "allowed_issuer_tenants",
+                          "allowed_algorithms",
+                          "mints_client_secret",
+                          "pkce_required",
+                          "has_bundled_mark",
                           "created_at",
                           "updated_at"
                         ],
                         "properties": {
+                          "allow_tenant_inheritance": {
+                            "type": "boolean",
+                            "description": "Whether tenants of this organization may inherit this provider."
+                          },
+                          "allowed_algorithms": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "Accepted signing algorithms. Returned for OIDC and SAML; meaningless,\nand therefore empty, for the OAuth2 variant."
+                          },
+                          "allowed_issuer_tenants": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "Accepted external IdP tenants for a templated issuer."
+                          },
+                          "apple_key_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Apple Key ID."
+                          },
+                          "apple_team_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Apple Team ID. Not secret — the `.p8` key is, and it is never returned."
+                          },
                           "attribute_map": {},
+                          "authorization_endpoint": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "OAuth2-variant authorization endpoint."
+                          },
+                          "button_icon": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Custom sign-in-button icon, when one is set."
+                          },
                           "client_id": {
                             "type": "string"
                           },
@@ -2059,8 +2325,19 @@
                             "type": "string",
                             "format": "date-time"
                           },
+                          "effective_scopes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "The per-kind default that an empty `scopes` resolves to. Returned so the\nadmin UI can show what will actually be requested without duplicating\nthe table."
+                          },
                           "enabled": {
                             "type": "boolean"
+                          },
+                          "has_bundled_mark": {
+                            "type": "boolean",
+                            "description": "Whether AXIAM ships this provider's own mark. When true the button uses\nit and `button_icon` is refused; when false the button reads\n\"Sign in with <provider>\" and may carry a custom icon."
                           },
                           "id": {
                             "type": "string",
@@ -2072,15 +2349,48 @@
                               "null"
                             ]
                           },
+                          "mints_client_secret": {
+                            "type": "boolean",
+                            "description": "Whether AXIAM mints this provider's client secret itself, per exchange,\nrather than sending a stored one. True only for an Apple config with\nboth identifiers set."
+                          },
+                          "pkce_required": {
+                            "type": "boolean",
+                            "description": "Whether PKCE is sent on the authorization request. Always true for the\nOAuth2 variant regardless of the stored flag."
+                          },
                           "protocol": {
                             "type": "string"
                           },
                           "provider": {
                             "type": "string"
                           },
+                          "provider_kind": {
+                            "type": "string",
+                            "description": "Which provider this is. Derived from `protocol` for a config written\nbefore the field existed."
+                          },
+                          "provider_slug": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Operator-chosen identifier for a `generic_*` kind."
+                          },
+                          "scopes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "Scopes as stored. Empty means \"use the per-kind default\"; see\n`effective_scopes`."
+                          },
                           "tenant_id": {
                             "type": "string",
                             "format": "uuid"
+                          },
+                          "token_endpoint": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "OAuth2-variant token endpoint."
                           },
                           "token_exchange": {
                             "$ref": "#/components/schemas/TokenExchangeTrustResponse",
@@ -2089,6 +2399,13 @@
                           "updated_at": {
                             "type": "string",
                             "format": "date-time"
+                          },
+                          "userinfo_endpoint": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "OAuth2-variant userinfo endpoint."
                           }
                         }
                       }
@@ -11776,6 +12093,13 @@
           "client_secret"
         ],
         "properties": {
+          "allow_tenant_inheritance": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether tenants of this organization may inherit this provider. Only\nmeaningful on a config in the organization-scope tenant."
+          },
           "allowed_algorithms": {
             "type": [
               "array",
@@ -11786,8 +12110,46 @@
             },
             "description": "Accepted JWT signing algorithms (OIDC) or signature algorithms (SAML).\nDefaults to `[\"RS256\"]` when not provided (CQ-B40/REQ-14 AC-5)."
           },
+          "allowed_issuer_tenants": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "External IdP tenant identifiers accepted when the provider publishes a\ntemplated issuer (Entra ID's `{tenantid}`)."
+          },
+          "apple_key_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Apple Key ID of the `.p8` signing key (10 characters). With both Apple\nidentifiers set, `client_secret` is the `.p8` key itself and AXIAM mints\na fresh five-minute client secret per token exchange."
+          },
+          "apple_team_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Apple Team ID (10 characters)."
+          },
           "attribute_map": {
             "description": "Maps external IdP attributes to AXIAM user fields."
+          },
+          "authorization_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth2-variant authorization endpoint. Required for `OAuth2`."
+          },
+          "button_icon": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sign-in-button icon for a **generic** provider, as a base64 raster data\nURL (`data:image/png;base64,…`), already cropped to\n`PROVIDER_ICON_SIZE_PX` square by the client.\n\nRefused for the branded kinds: Google, Apple and Microsoft all publish\nsign-in-button rules that require their own mark, so substituting a\npicture would produce a button that breaks the guidelines it exists to\nfollow."
           },
           "client_id": {
             "type": "string",
@@ -11819,6 +12181,44 @@
             "type": "string",
             "description": "Display name for the identity provider (e.g., \"Google\", \"Okta\")."
           },
+          "provider_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which provider this is: `google`, `github`, `facebook`, `apple`,\n`microsoft`, `generic_oidc`, `generic_oauth2` or `generic_saml`.\n\nSelects the sign-in button's branding, the per-kind defaults, and the\nkey on which a tenant config overrides an inherited organization one.\nOmitted ⇒ derived from `protocol`, which is what every config written\nbefore this field existed means."
+          },
+          "provider_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator-chosen identifier, **required** for the `generic_*` kinds and\nrefused for the branded ones."
+          },
+          "require_pkce": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Send PKCE on the authorization request. Forced on for `OAuth2`."
+          },
+          "scopes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Scopes to request. Omitted or empty ⇒ the per-kind default."
+          },
+          "token_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth2-variant token endpoint. Required for `OAuth2`."
+          },
           "token_exchange": {
             "oneOf": [
               {
@@ -11829,6 +12229,13 @@
                 "description": "X4 external token-exchange trust. Omitted means disabled."
               }
             ]
+          },
+          "userinfo_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth2-variant userinfo endpoint. Required for `OAuth2`."
           }
         }
       },
@@ -12960,11 +13367,66 @@
           "attribute_map",
           "enabled",
           "token_exchange",
+          "provider_kind",
+          "allow_tenant_inheritance",
+          "scopes",
+          "effective_scopes",
+          "allowed_issuer_tenants",
+          "allowed_algorithms",
+          "mints_client_secret",
+          "pkce_required",
+          "has_bundled_mark",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "allow_tenant_inheritance": {
+            "type": "boolean",
+            "description": "Whether tenants of this organization may inherit this provider."
+          },
+          "allowed_algorithms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Accepted signing algorithms. Returned for OIDC and SAML; meaningless,\nand therefore empty, for the OAuth2 variant."
+          },
+          "allowed_issuer_tenants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Accepted external IdP tenants for a templated issuer."
+          },
+          "apple_key_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Apple Key ID."
+          },
+          "apple_team_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Apple Team ID. Not secret — the `.p8` key is, and it is never returned."
+          },
           "attribute_map": {},
+          "authorization_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth2-variant authorization endpoint."
+          },
+          "button_icon": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Custom sign-in-button icon, when one is set."
+          },
           "client_id": {
             "type": "string"
           },
@@ -12972,8 +13434,19 @@
             "type": "string",
             "format": "date-time"
           },
+          "effective_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The per-kind default that an empty `scopes` resolves to. Returned so the\nadmin UI can show what will actually be requested without duplicating\nthe table."
+          },
           "enabled": {
             "type": "boolean"
+          },
+          "has_bundled_mark": {
+            "type": "boolean",
+            "description": "Whether AXIAM ships this provider's own mark. When true the button uses\nit and `button_icon` is refused; when false the button reads\n\"Sign in with <provider>\" and may carry a custom icon."
           },
           "id": {
             "type": "string",
@@ -12985,15 +13458,48 @@
               "null"
             ]
           },
+          "mints_client_secret": {
+            "type": "boolean",
+            "description": "Whether AXIAM mints this provider's client secret itself, per exchange,\nrather than sending a stored one. True only for an Apple config with\nboth identifiers set."
+          },
+          "pkce_required": {
+            "type": "boolean",
+            "description": "Whether PKCE is sent on the authorization request. Always true for the\nOAuth2 variant regardless of the stored flag."
+          },
           "protocol": {
             "type": "string"
           },
           "provider": {
             "type": "string"
           },
+          "provider_kind": {
+            "type": "string",
+            "description": "Which provider this is. Derived from `protocol` for a config written\nbefore the field existed."
+          },
+          "provider_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator-chosen identifier for a `generic_*` kind."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Scopes as stored. Empty means \"use the per-kind default\"; see\n`effective_scopes`."
+          },
           "tenant_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "token_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth2-variant token endpoint."
           },
           "token_exchange": {
             "$ref": "#/components/schemas/TokenExchangeTrustResponse",
@@ -13002,6 +13508,13 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "userinfo_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth2-variant userinfo endpoint."
           }
         }
       },
@@ -13056,7 +13569,8 @@
         "type": "string",
         "enum": [
           "OidcConnect",
-          "Saml"
+          "Saml",
+          "OAuth2"
         ]
       },
       "FinishAuthenticationRequest": {
@@ -14186,6 +14700,24 @@
           }
         }
       },
+      "OAuth2CallbackRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/auth/federation/oauth2/callback`.",
+        "required": [
+          "state",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The authorization code returned by the provider."
+          },
+          "state": {
+            "type": "string",
+            "description": "The `state` returned by the provider."
+          }
+        }
+      },
       "OAuth2ClientCreatedResponse": {
         "type": "object",
         "description": "Response for client creation -- includes the one-time plaintext secret.",
@@ -14380,6 +14912,79 @@
           },
           "error_description": {
             "type": "string"
+          }
+        }
+      },
+      "OAuth2StartRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/auth/federation/oauth2/start`.",
+        "required": [
+          "federation_config_id",
+          "redirect_uri"
+        ],
+        "properties": {
+          "federation_config_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Which provider to use, from the providers endpoint."
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Organization UUID. Alternative to `org_slug`."
+          },
+          "org_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Organization slug."
+          },
+          "redirect_uri": {
+            "type": "string",
+            "description": "The SPA callback route. Sent to the provider verbatim, so it must match\nwhat is registered there byte for byte."
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Tenant UUID. Alternative to `tenant_slug`."
+          },
+          "tenant_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant slug. Omitted means the organization's own scope."
+          }
+        }
+      },
+      "OAuth2StartResponse": {
+        "type": "object",
+        "description": "Response body for `POST /api/v1/auth/federation/oauth2/start`.\n\nThe PKCE verifier is **not** here. It stays server-side in the login state\nrow for the same reason the OIDC `nonce` does: a value the client can supply\nis a value an attacker can supply.",
+        "required": [
+          "authorize_url",
+          "state",
+          "expires_in_secs"
+        ],
+        "properties": {
+          "authorize_url": {
+            "type": "string",
+            "description": "The provider's authorization URL to navigate to."
+          },
+          "expires_in_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Remaining TTL in seconds."
+          },
+          "state": {
+            "type": "string",
+            "description": "CSRF state, round-tripped through the provider."
           }
         }
       },
@@ -15427,6 +16032,68 @@
           }
         ],
         "description": "Provider-specific connection details."
+      },
+      "PublicFederationProvider": {
+        "type": "object",
+        "description": "One sign-in button.\n\nA dedicated struct rather than a narrowed [`super::federation::FederationConfigResponse`]:\nthis is an **unauthenticated** response, and a field added to the admin\nresponse must not be able to reach it by inheritance. What is here is what a\nbutton needs and nothing else; `client_id`, `metadata_url`, the OAuth2\nendpoints and every secret column are absent by construction, not by\nfiltering.",
+        "required": [
+          "id",
+          "provider_kind",
+          "display_name",
+          "protocol",
+          "has_bundled_mark",
+          "inherited"
+        ],
+        "properties": {
+          "button_icon": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operator's uploaded button icon, as a bounded raster data URL.\n\nPresent only for generic providers that have one. It is branding rather\nthan configuration — nothing about the provider's identity, endpoints or\ncredentials is derivable from a picture — which is why it is the one\nadditional field this unauthenticated response carries."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "The operator's display name for the provider."
+          },
+          "has_bundled_mark": {
+            "type": "boolean",
+            "description": "Whether AXIAM ships this provider's own sign-in mark.\n\n`true` for the branded kinds, whose buttons must use it. `false` for the\ngeneric kinds, whose buttons read \"Sign in with <display_name>\" and use\n`button_icon` when the operator uploaded one."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Config id, to be echoed back to the matching start endpoint."
+          },
+          "inherited": {
+            "type": "boolean",
+            "description": "`true` when the provider is inherited from the organization.\n\nNot needed to sign in, and returned because the admin UI reuses this\nendpoint's shape and a tenant administrator must be able to see that a\nprovider is not theirs to edit."
+          },
+          "protocol": {
+            "type": "string",
+            "description": "`OidcConnect`, `Saml` or `OAuth2` — selects which start endpoint the\nclient calls."
+          },
+          "provider_kind": {
+            "type": "string",
+            "description": "Which provider this is, for the button's branding."
+          }
+        }
+      },
+      "PublicFederationProvidersResponse": {
+        "type": "object",
+        "description": "Response body for the public providers listing.",
+        "required": [
+          "providers"
+        ],
+        "properties": {
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicFederationProvider"
+            },
+            "description": "Providers to offer, in a stable order."
+          }
+        }
       },
       "PushedAuthorizationRequest": {
         "type": "object",
@@ -16825,6 +17492,19 @@
           }
         }
       },
+      "SsoHandoffRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/auth/federation/handoff`.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The single-use code the SPA received on its callback route."
+          }
+        }
+      },
       "SsoLoginSuccessResponse": {
         "type": "object",
         "description": "Returned by both OIDC callback and SAML ACS on success (alongside\nSet-Cookie headers). The `redirect_uri` field allows the SPA to route\nthe user to the originally requested destination.",
@@ -17623,6 +18303,13 @@
       "UpdateFederationConfigRequest": {
         "type": "object",
         "properties": {
+          "allow_tenant_inheritance": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether tenants may inherit this organization-level provider."
+          },
           "allowed_algorithms": {
             "type": [
               "array",
@@ -17633,7 +18320,45 @@
             },
             "description": "Accepted signature algorithms (CQ-B40/REQ-14 AC-5)."
           },
+          "allowed_issuer_tenants": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Accepted external IdP tenants for a templated issuer. Replaced wholesale."
+          },
+          "apple_key_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Apple Key ID. `Some(None)` clears it."
+          },
+          "apple_team_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Apple Team ID. `Some(None)` clears it."
+          },
           "attribute_map": {},
+          "authorization_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth2-variant authorization endpoint. `Some(None)` clears it."
+          },
+          "button_icon": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sign-in-button icon for a generic provider. `Some(None)` clears it."
+          },
           "client_id": {
             "type": [
               "string",
@@ -17671,6 +18396,37 @@
               "null"
             ]
           },
+          "provider_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator-chosen identifier for a `generic_*` kind. `Some(None)` clears it."
+          },
+          "require_pkce": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Send PKCE on the authorization request."
+          },
+          "scopes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Scopes to request. Replaced wholesale; empty restores the per-kind default."
+          },
+          "token_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth2-variant token endpoint. `Some(None)` clears it."
+          },
           "token_exchange": {
             "oneOf": [
               {
@@ -17681,6 +18437,13 @@
                 "description": "X4 external token-exchange trust. Replaced **wholesale** when present:\na partial merge of a trust configuration is how an operator ends up\nkeeping an `accepted_audiences` entry they believed they had removed."
               }
             ]
+          },
+          "userinfo_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OAuth2-variant userinfo endpoint. `Some(None)` clears it."
           }
         }
       },

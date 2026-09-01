@@ -4,11 +4,21 @@
 //! users through external identity providers (Google, Okta, Azure AD,
 //! Shibboleth, ADFS, etc.).
 
+/// Sign in with Apple's ES256 client secret, minted rather than stored.
+pub mod apple;
 pub mod cert;
 pub mod discovery_cache;
 pub mod error;
+/// Templated OIDC issuers (Entra ID's `{tenantid}`) and the allow-list that
+/// keeps "any tenant" from being an accident.
+pub mod issuer;
 pub mod jwks_cache;
+/// The plain-OAuth2 login variant: authentication by userinfo call, for
+/// providers that issue no ID token.
+pub mod oauth2;
 pub mod oidc;
+/// PKCE (RFC 7636) for the outbound federation flows.
+pub mod pkce;
 #[cfg(feature = "saml")]
 pub mod saml;
 pub mod secrets;

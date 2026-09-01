@@ -372,6 +372,26 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/auth/federation/oidc/callback",
     "/api/v1/auth/federation/saml/login",
     "/api/v1/auth/federation/saml/acs",
+    // Login providers. Public for the same reason /login is: the caller is at
+    // a login page and has no credential yet. It returns only what a button
+    // needs — id, kind, display name, protocol — and answers an unknown
+    // organization with an empty list rather than a 401, so it is not a
+    // two-valued oracle for organization slugs. Rate-limited on the login
+    // budget. See `handlers::federation_login::list_providers_public`.
+    "/api/v1/auth/federation/providers",
+    // The plain-OAuth2 variant's two halves, public exactly as the OIDC pair
+    // above is.
+    "/api/v1/auth/federation/oauth2/start",
+    "/api/v1/auth/federation/oauth2/callback",
+    // The two cross-site form-POST returns. The IdP performs these, so there
+    // is by construction no AXIAM credential on them; each verifies the
+    // provider's own assertion and answers 303 with a single-use handoff code.
+    "/api/v1/auth/federation/oidc/callback/form",
+    "/api/v1/auth/federation/saml/acs/form",
+    // Redeeming that handoff code. Public because the SPA holding it has no
+    // session yet — obtaining one is what the call is for. The code is the
+    // credential: 256 bits, single-use, 60-second TTL, stored only as a hash.
+    "/api/v1/auth/federation/handoff",
     // Admin bootstrap (public until first admin is created; handler enforces one-shot logic)
     "/api/v1/admin/bootstrap",
     // OpenAPI docs

@@ -56,6 +56,7 @@ fn test_auth_config() -> AuthConfig {
         refresh_token_lifetime_secs: 2_592_000,
         jwt_issuer: "axiam-test".into(),
         oauth2_issuer_url: String::new(),
+        sso_spa_origins: Vec::new(),
         pepper: None,
         pepper_previous: None,
         min_password_length: 12,

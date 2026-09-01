@@ -100,6 +100,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "100",
           ],
           [
+            "AXIAM__AUTH__SSO_SPA_ORIGINS",
+            "Extra browser origins a federation SSO handoff code may be delivered to. Empty (the default) means the issuer's own origin only, which is right whenever the admin UI is served from the same origin as the API. Set it when the SPA is on a different host — SAML and Apple sign-in are refused for any other origin, because on those two flows the identity provider never validates the SPA redirect URI and this is the only check there is.",
+            "https://app.acme.dev",
+          ],
+          [
             "AXIAM__SERVER__CORS_ALLOWED_ORIGINS",
             "Allowed CORS origins; empty disables cross-origin requests (restrictive default).",
             "https://admin.acme.dev",

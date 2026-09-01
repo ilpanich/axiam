@@ -751,6 +751,8 @@ async fn oidc_linking_ignores_client_supplied_nonce() {
             redirect_uri: "https://spa.example.com/callback".into(),
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
             request_id: String::new(),
+            code_verifier: None,
+            idp_redirect_uri: None,
         })
         .await
         .expect("insert login state (simulates oidc_authorize)");
@@ -818,6 +820,8 @@ async fn oidc_linking_ignores_client_supplied_nonce() {
             redirect_uri: "https://spa.example.com/callback".into(),
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
             request_id: String::new(),
+            code_verifier: None,
+            idp_redirect_uri: None,
         })
         .await
         .expect("insert login state 2");

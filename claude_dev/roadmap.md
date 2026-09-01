@@ -630,6 +630,11 @@ On a critical network-topology anomaly or an authentication-handshake timeout, t
 
 **Commit**: `fix(db): evict and regenerate poisoned connections from the pool`
 
+### T19.35 — "Sign in with X": working federated login, end to end
+The backend implemented first-time SSO completely and the SPA had no way to reach it — no button, no callback route, and a federation service that only did CRUD (`claude_dev/rpi5-prod-google-federation-guide.md` §0). Close that, and the gaps that block the providers people actually ask for: a public providers-listing endpoint so a login page knows what to render; `FederationProtocol::OAuth2` for GitHub and Facebook, which issue no ID token; per-config scopes (Apple rejects the hard-coded `openid email profile`); server-minted Apple client secrets; templated-issuer support for Entra's `common` authority; organization→tenant inheritance of a federation config; a form-encoded SAML ACS a real IdP can post to; and single-use handoff codes so a cross-site SAML or Apple return can issue a session without weakening `SameSite=Strict`. Fix the two standing defects while in there: `attribute_map` was stored and read by nothing, and `allowed_algorithms` was hidden from OIDC in the admin UI. Design: `claude_dev/federation-sso-login-design.md`.
+
+**Commit**: `feat(federation): working "Sign in with X" login providers`
+
 ---
 
 ## Phase 20: Axiam website
@@ -669,8 +674,8 @@ Generate the website to be deployed on github.io for the documentation. Produce 
 | Phase 16 | 3 | Docker, K8s, CD pipeline |
 | Phase 17 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 18 | 4 | Security, compliance, performance, docs |
-| Phase 19 | 24 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
+| Phase 19 | 25 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
 
-**Total: 101 tasks across 21 phases**
+**Total: 102 tasks across 21 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

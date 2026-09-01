@@ -24,8 +24,8 @@ use axiam_core::repository::{
     AccountDeletionRepository, AmqpNonceRepository, AssertionReplayRepository, AuditLogFilter,
     AuditLogRepository, ConsentRepository, ErasureProofRepository, ExportJobRepository,
     FederationLinkRepository, FederationLoginStateRepository, GroupRepository, MailPublisher,
-    Pagination, PasswordHistoryRepository, RoleRepository, SessionRepository, TenantRepository,
-    UserRepository, WebauthnCredentialRepository,
+    Pagination, PasswordHistoryRepository, RoleRepository, SessionRepository,
+    SsoHandoffCodeRepository, TenantRepository, UserRepository, WebauthnCredentialRepository,
 };
 use axiam_db::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
@@ -33,8 +33,8 @@ use axiam_db::{
     SurrealExportJobRepository, SurrealFederationLinkRepository,
     SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealPasswordHistoryRepository, SurrealRefreshTokenRepository, SurrealRoleRepository,
-    SurrealSessionRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnCredentialRepository,
+    SurrealSessionRepository, SurrealSsoHandoffCodeRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use chrono::Utc;
 use surrealdb::Connection;
@@ -58,6 +58,11 @@ pub struct CleanupTask<C: Connection> {
     // Existing federation cleanup repos.
     replay_repo: Arc<SurrealAssertionReplayRepository<C>>,
     state_repo: Arc<SurrealFederationLoginStateRepository<C>>,
+    // SSO handoff codes. Sixty-second TTL and consumed on use, so in a healthy
+    // deployment this sweeps almost nothing — but an abandoned login (the user
+    // closed the tab at the IdP) leaves a row behind, and "almost nothing"
+    // accumulates without a sweep.
+    sso_handoff_code_repo: Arc<SurrealSsoHandoffCodeRepository<C>>,
     // NEW-4: AMQP nonce replay store sweep.
     amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
     // GDPR purge sweep (D-05/D-06/D-08).
@@ -167,6 +172,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     pub fn new(
         replay_repo: Arc<SurrealAssertionReplayRepository<C>>,
         state_repo: Arc<SurrealFederationLoginStateRepository<C>>,
+        sso_handoff_code_repo: Arc<SurrealSsoHandoffCodeRepository<C>>,
         amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
         user_repo: Arc<SurrealUserRepository<C>>,
         auth_svc: Arc<AuthSvc<C>>,
@@ -201,6 +207,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         Self {
             replay_repo,
             state_repo,
+            sso_handoff_code_repo,
             amqp_nonce_repo,
             user_repo,
             auth_svc,
@@ -251,6 +258,13 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         &self.job_health,
                         "federation_login_state",
                         self.state_repo.cleanup_expired().await,
+                        tracing::Level::DEBUG,
+                    );
+
+                    Self::record(
+                        &self.job_health,
+                        "sso_handoff_code",
+                        self.sso_handoff_code_repo.cleanup_expired().await,
                         tracing::Level::DEBUG,
                     );
 

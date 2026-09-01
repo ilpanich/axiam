@@ -183,6 +183,18 @@ fn make_config(plaintext: &str) -> FederationConfig {
         token_exchange: Default::default(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        provider_kind: axiam_core::models::federation::ProviderKind::GenericOidc,
+        provider_slug: None,
+        allow_tenant_inheritance: false,
+        scopes: Vec::new(),
+        authorization_endpoint: None,
+        token_endpoint: None,
+        userinfo_endpoint: None,
+        allowed_issuer_tenants: Vec::new(),
+        apple_team_id: None,
+        apple_key_id: None,
+        require_pkce: false,
+        button_icon: None,
     }
 }
 
@@ -221,6 +233,9 @@ impl FederationConfigRepository for MockFedRepo {
         &self,
         _tenant_id: Uuid,
     ) -> AxiamResult<Vec<FederationConfig>> {
+        Ok(Vec::new())
+    }
+    async fn list_all(&self, _tenant_id: Uuid) -> AxiamResult<Vec<FederationConfig>> {
         Ok(Vec::new())
     }
     async fn list_with_legacy_plaintext_secret(&self) -> AxiamResult<Vec<FederationConfig>> {

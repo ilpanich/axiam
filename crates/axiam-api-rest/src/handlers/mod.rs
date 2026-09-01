@@ -8,6 +8,7 @@ pub mod device;
 pub mod email_config;
 pub mod email_verification;
 pub mod federation;
+pub mod federation_login;
 pub mod gdpr;
 pub mod groups;
 pub mod mds;

@@ -3,8 +3,174 @@ import { fetchAllPages, unwrapList } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
-/** Backend protocol discriminator (exact strings from `protocol_to_string`). */
-export type FederationProtocol = "OidcConnect" | "Saml";
+/** Backend protocol discriminator (exact strings from `FederationProtocol::as_str`). */
+export type FederationProtocol = "OidcConnect" | "Saml" | "OAuth2";
+
+/**
+ * Which identity provider a config is for.
+ *
+ * Distinct from `provider`, which is a display name an operator types. This is
+ * what selects the button's branding, the per-kind defaults below, and the key
+ * on which a tenant config overrides an inherited organization one.
+ */
+export type ProviderKind =
+  | "google"
+  | "github"
+  | "facebook"
+  | "apple"
+  | "microsoft"
+  | "generic_oidc"
+  | "generic_oauth2"
+  | "generic_saml";
+
+/** Every kind, in the order the admin UI offers them. */
+export const PROVIDER_KINDS: ProviderKind[] = [
+  "google",
+  "microsoft",
+  "apple",
+  "github",
+  "facebook",
+  "generic_oidc",
+  "generic_oauth2",
+  "generic_saml",
+];
+
+/**
+ * Per-kind form prefills, mirroring `ProviderKind`'s server-side table.
+ *
+ * These are **prefills only**. Every value is sent explicitly on the wire, so
+ * the server never has to guess what an older client meant, and the server's
+ * own table stays the authority for behaviour. What this buys is an operator
+ * not having to look up Facebook's Graph endpoints to configure Facebook.
+ */
+export interface ProviderKindDefaults {
+  label: string;
+  protocol: FederationProtocol;
+  /** Both admissible only for Facebook — see the server's `validate_protocol_for_kind`. */
+  protocolOptions: FederationProtocol[];
+  scopes: string[];
+  allowedAlgorithms: string[];
+  metadataUrl?: string;
+  authorizationEndpoint?: string;
+  tokenEndpoint?: string;
+  userinfoEndpoint?: string;
+  /** Whether AXIAM ships this provider's own sign-in mark. */
+  hasBundledMark: boolean;
+  /** Whether the kind takes an operator-chosen slug. */
+  usesSlug: boolean;
+}
+
+export const PROVIDER_KIND_DEFAULTS: Record<ProviderKind, ProviderKindDefaults> =
+  {
+    google: {
+      label: "Google",
+      protocol: "OidcConnect",
+      protocolOptions: ["OidcConnect"],
+      scopes: ["openid", "email", "profile"],
+      allowedAlgorithms: ["RS256"],
+      metadataUrl:
+        "https://accounts.google.com/.well-known/openid-configuration",
+      hasBundledMark: true,
+      usesSlug: false,
+    },
+    microsoft: {
+      label: "Microsoft Entra ID",
+      protocol: "OidcConnect",
+      protocolOptions: ["OidcConnect"],
+      scopes: ["openid", "email", "profile"],
+      allowedAlgorithms: ["RS256"],
+      // A **tenant-specific** authority by default. The `common` authority
+      // publishes a templated issuer, which needs an explicit accepted-tenant
+      // list — so it is something an operator opts into, not a default.
+      metadataUrl:
+        "https://login.microsoftonline.com/<your-tenant-id>/v2.0/.well-known/openid-configuration",
+      hasBundledMark: true,
+      usesSlug: false,
+    },
+    apple: {
+      label: "Apple",
+      protocol: "OidcConnect",
+      protocolOptions: ["OidcConnect"],
+      // Apple rejects `profile`, which is why scopes are per-kind at all.
+      scopes: ["name", "email"],
+      allowedAlgorithms: ["RS256"],
+      metadataUrl: "https://appleid.apple.com/.well-known/openid-configuration",
+      hasBundledMark: true,
+      usesSlug: false,
+    },
+    github: {
+      label: "GitHub",
+      protocol: "OAuth2",
+      protocolOptions: ["OAuth2"],
+      scopes: ["read:user", "user:email"],
+      allowedAlgorithms: [],
+      authorizationEndpoint: "https://github.com/login/oauth/authorize",
+      tokenEndpoint: "https://github.com/login/oauth/access_token",
+      userinfoEndpoint: "https://api.github.com/user",
+      hasBundledMark: true,
+      usesSlug: false,
+    },
+    facebook: {
+      label: "Facebook",
+      protocol: "OAuth2",
+      protocolOptions: ["OAuth2", "OidcConnect"],
+      scopes: ["email", "public_profile"],
+      allowedAlgorithms: [],
+      authorizationEndpoint: "https://www.facebook.com/v21.0/dialog/oauth",
+      tokenEndpoint: "https://graph.facebook.com/v21.0/oauth/access_token",
+      userinfoEndpoint:
+        "https://graph.facebook.com/v21.0/me?fields=id,name,email",
+      hasBundledMark: true,
+      usesSlug: false,
+    },
+    generic_oidc: {
+      label: "Other OpenID Connect provider",
+      protocol: "OidcConnect",
+      protocolOptions: ["OidcConnect"],
+      scopes: ["openid", "email", "profile"],
+      allowedAlgorithms: ["RS256"],
+      hasBundledMark: false,
+      usesSlug: true,
+    },
+    generic_oauth2: {
+      label: "Other OAuth2 provider",
+      protocol: "OAuth2",
+      protocolOptions: ["OAuth2"],
+      scopes: [],
+      allowedAlgorithms: [],
+      hasBundledMark: false,
+      usesSlug: true,
+    },
+    generic_saml: {
+      label: "Other SAML provider",
+      protocol: "Saml",
+      protocolOptions: ["Saml"],
+      scopes: [],
+      allowedAlgorithms: [],
+      hasBundledMark: false,
+      usesSlug: true,
+    },
+  };
+
+/**
+ * Edge length of a custom sign-in-button icon, mirroring
+ * `PROVIDER_ICON_SIZE_PX`. The upload control crops and rescales to exactly
+ * this, so what reaches the server is always square and always small.
+ */
+export const PROVIDER_ICON_SIZE_PX = 64;
+
+/** Maximum decoded icon size, mirroring `MAX_PROVIDER_ICON_BYTES`. */
+export const MAX_PROVIDER_ICON_BYTES = 16 * 1024;
+
+/**
+ * Largest source file the picker will read, before cropping.
+ *
+ * Not the same limit as the stored icon: the operator uploads a photograph and
+ * the browser produces a 64×64 PNG from it. This bound exists so an accidental
+ * 200 MB TIFF fails immediately instead of locking the tab while a canvas tries
+ * to decode it.
+ */
+export const MAX_PROVIDER_ICON_SOURCE_BYTES = 5 * 1024 * 1024;
 
 /** How an unlinked external subject is handled (X4). */
 export type SubjectMapping = "linked_only" | "jit_provision";
@@ -100,6 +266,26 @@ export interface FederationConfig {
   enabled: boolean;
   /** X4. Always present on responses; absent on pre-X4 servers. */
   token_exchange?: TokenExchangeTrust;
+  // --- login-provider fields (absent on a pre-1.30 server) ---
+  provider_kind?: ProviderKind;
+  provider_slug?: string | null;
+  allow_tenant_inheritance?: boolean;
+  /** As stored. Empty means "use the per-kind default". */
+  scopes?: string[];
+  /** What an empty `scopes` resolves to, computed server-side. */
+  effective_scopes?: string[];
+  authorization_endpoint?: string | null;
+  token_endpoint?: string | null;
+  userinfo_endpoint?: string | null;
+  allowed_issuer_tenants?: string[];
+  allowed_algorithms?: string[];
+  apple_team_id?: string | null;
+  apple_key_id?: string | null;
+  /** True only for an Apple config with both identifiers set. */
+  mints_client_secret?: boolean;
+  pkce_required?: boolean;
+  button_icon?: string | null;
+  has_bundled_mark?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -115,6 +301,18 @@ export interface CreateFederationConfigRequest {
   idp_signing_cert_pem?: string | null;
   allowed_algorithms?: string[];
   token_exchange?: TokenExchangeTrust;
+  provider_kind?: ProviderKind;
+  provider_slug?: string | null;
+  allow_tenant_inheritance?: boolean;
+  scopes?: string[];
+  authorization_endpoint?: string | null;
+  token_endpoint?: string | null;
+  userinfo_endpoint?: string | null;
+  allowed_issuer_tenants?: string[];
+  apple_team_id?: string | null;
+  apple_key_id?: string | null;
+  require_pkce?: boolean;
+  button_icon?: string | null;
 }
 
 /** Client → server payload for updating a federation config (all fields optional). */
@@ -134,6 +332,20 @@ export interface UpdateFederationConfigRequest {
    * believed they had removed.
    */
   token_exchange?: TokenExchangeTrust;
+  // `provider_kind` is deliberately not updatable: it selects the protocol and
+  // the override key, and changing it on a live config would silently re-point
+  // which inherited provider a tenant is shadowing.
+  provider_slug?: string | null;
+  allow_tenant_inheritance?: boolean;
+  scopes?: string[];
+  authorization_endpoint?: string | null;
+  token_endpoint?: string | null;
+  userinfo_endpoint?: string | null;
+  allowed_issuer_tenants?: string[];
+  apple_team_id?: string | null;
+  apple_key_id?: string | null;
+  require_pkce?: boolean;
+  button_icon?: string | null;
 }
 
 // ─── Federation links ─────────────────────────────────────────────────────────

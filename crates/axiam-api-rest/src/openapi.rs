@@ -258,6 +258,11 @@ use crate::handlers;
         // `#[cfg(feature = "saml")]` and documented in `SamlApiDoc` instead.
         handlers::federation::oidc_start_public,
         handlers::federation::oidc_callback_public,
+        handlers::federation_login::list_providers_public,
+        handlers::federation_login::oauth2_start_public,
+        handlers::federation_login::oauth2_callback_public,
+        handlers::federation_login::oidc_form_callback_public,
+        handlers::federation_login::sso_handoff_public,
         // Email Verification
         handlers::email_verification::verify_email,
         handlers::email_verification::resend_verification,
@@ -445,6 +450,12 @@ use crate::handlers;
         handlers::federation::OidcCallbackResponse,
         // SAML SP schemas live in `SamlApiDoc` (feature-gated).
         handlers::federation::FederationLinkResponse,
+        handlers::federation_login::PublicFederationProvider,
+        handlers::federation_login::PublicFederationProvidersResponse,
+        handlers::federation_login::OAuth2StartRequest,
+        handlers::federation_login::OAuth2StartResponse,
+        handlers::federation_login::OAuth2CallbackRequest,
+        handlers::federation_login::SsoHandoffRequest,
         axiam_core::models::federation::FederationProtocol,
         // OAuth2 Flow
         handlers::oauth2::OAuth2ErrorResponse,
@@ -588,6 +599,9 @@ pub struct ApiDoc;
         // First-time SSO — public SAML login/ACS (FUNC-01 / D-12).
         handlers::federation::saml_login_public,
         handlers::federation::saml_acs_public,
+        // The form-encoded ACS a real IdP posts to (the JSON sibling above is
+        // the SDK-facing one).
+        handlers::federation_login::saml_acs_form_public,
     ),
     components(schemas(
         handlers::federation::SamlAuthnRequestRequest,

@@ -239,6 +239,12 @@ pub struct FederationState<C: Connection + Clone> {
     pub federation_config_repo: SurrealFederationConfigRepository<C>,
     pub federation_link_repo: SurrealFederationLinkRepository<C>,
     pub federation_login_state_repo: SurrealFederationLoginStateRepository<C>,
+    /// Single-use, 60-second codes that turn a cross-site SSO return (SAML,
+    /// Apple's `response_mode=form_post`) into a same-site session issuance
+    /// without weakening `SameSite=Strict` on the session cookies. Here rather
+    /// than with the session repositories because the only thing that mints or
+    /// redeems one is a federation callback.
+    pub sso_handoff_code_repo: SurrealSsoHandoffCodeRepository<C>,
     pub assertion_replay_repo: SurrealAssertionReplayRepository<C>,
     /// `None` when `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` is unset — the
     /// OIDC federation encryption key is baked into `OidcFederationService`

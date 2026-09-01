@@ -91,6 +91,22 @@ const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
     "/api/v1/auth/federation/oidc/callback",
     "/api/v1/auth/federation/saml/login",
     "/api/v1/auth/federation/saml/acs",
+    // The login-provider surface added with "Sign in with X", exempt for the
+    // same reason as the four above: none of these callers has a prior session,
+    // so none has an `axiam_csrf` cookie to echo.
+    //
+    // The two `…/form` entries additionally *cannot* carry one even in
+    // principle — the request is a cross-site form POST performed by the
+    // identity provider. What stands in for CSRF protection there is the
+    // provider's own signed assertion plus the single-use server-side state
+    // row, both of which an attacker would have to forge.
+    "/api/v1/auth/federation/oauth2/start",
+    "/api/v1/auth/federation/oauth2/callback",
+    "/api/v1/auth/federation/oidc/callback/form",
+    "/api/v1/auth/federation/saml/acs/form",
+    // Redeeming a handoff code is same-origin but pre-session: the response
+    // being requested is the one that *sets* the CSRF cookie.
+    "/api/v1/auth/federation/handoff",
 ];
 
 /// Path prefixes that are exempt from CSRF validation (OAuth2).

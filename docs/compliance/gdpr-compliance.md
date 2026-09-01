@@ -124,7 +124,7 @@ invoked as a deliberate additional step rather than an always-on default.
 
 **Evidence:** account deletion durably pseudonymizes audit PII per
 **SECHRD-06** (Phase 25,
-[`25-04-PLAN.md`](../../.planning/phases/25-security-hardening-ii-federation-pki-data-protection-infra/25-04-PLAN.md)):
+`.planning/phases/25-security-hardening-ii-federation-pki-data-protection-infra/25-04-PLAN.md`):
 
 - `gdpr_pseudonym(pepper, tenant_id, user_id)` derives a stable
   `DELETED_USER_<hash>` pseudonym.
@@ -267,7 +267,11 @@ endpoint.
   the detailed CMPL-02 backing evidence that `security-audit.md` should link
   to for its own GDPR row (cross-reference, not duplication, per D-01/D-09).
 - **Erasure durability upstream artifact:** SECHRD-06, Phase 25
-  ([`25-04-PLAN.md`](../../.planning/phases/25-security-hardening-ii-federation-pki-data-protection-infra/25-04-PLAN.md))
+  (`.planning/phases/25-security-hardening-ii-federation-pki-data-protection-infra/25-04-PLAN.md`)
+  — cited by path rather than linked, like the two `.planning/` references
+  above it: `5d454f1` archived that phase, and `.planning/` is not part of the
+  repository, so a link would resolve to nothing in a fresh checkout. The path
+  still names the artifact for anyone who has the planning tree.
 - **No production code was modified by this verification pass** — all four
   evidence tests already existed and already passed prior to this plan; this
   document is the net-new artifact.

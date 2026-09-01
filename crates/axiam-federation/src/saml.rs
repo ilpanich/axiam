@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use axiam_core::error::AxiamError;
-use axiam_core::models::federation::{CreateFederationLink, FederationProtocol};
+use axiam_core::models::federation::{CreateFederationLink, FederationConfig, FederationProtocol};
+use axiam_core::models::federation_claims::{MappedIdentity, map_identity};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     AssertionReplayRepository, FederationConfigRepository, FederationLinkRepository, UserRepository,
@@ -370,7 +371,7 @@ where
         tenant_id: Uuid,
         config_id: Uuid,
         saml_response_b64: &str,
-        _relay_state: Option<&str>,
+        relay_state: Option<&str>,
         expected_request_id: Option<&str>,
         expected_destination: Option<&str>,
         require_in_response_to: bool,
@@ -383,6 +384,48 @@ where
                 AxiamError::NotFound { id, .. } => FederationError::ConfigNotFound(id),
                 other => FederationError::Internal(other.to_string()),
             })?;
+
+        self.handle_saml_response_for(
+            &config,
+            tenant_id,
+            saml_response_b64,
+            relay_state,
+            expected_request_id,
+            expected_destination,
+            require_in_response_to,
+        )
+        .await
+    }
+
+    /// Handle a SAML Response against a config the caller has already resolved.
+    ///
+    /// The two-tenant form of [`handle_saml_response`](Self::handle_saml_response),
+    /// and the one the public ACS uses. An organization-level config with
+    /// `allow_tenant_inheritance` is reachable from a tenant that does not own
+    /// it, so "which tenant" has two answers and they are not interchangeable:
+    ///
+    /// * `config.tenant_id` owns the assertion-replay row. Recording a replay
+    ///   under the config's tenant is a no-op for a config the requesting
+    ///   tenant owns, and strictly stronger for an inherited one — an assertion
+    ///   spent in one tenant cannot be spent again in a sibling.
+    /// * `requesting_tenant_id` owns the user and the federation link. A person
+    ///   signing in to tenant B through the organization's IdP gets an account
+    ///   in tenant B, never in the organization tenant.
+    ///
+    /// See `claude_dev/federation-sso-login-design.md` §4.4 and threat-model
+    /// T-169. Every other argument behaves exactly as documented on
+    /// [`handle_saml_response`](Self::handle_saml_response).
+    pub async fn handle_saml_response_for(
+        &self,
+        config: &FederationConfig,
+        requesting_tenant_id: Uuid,
+        saml_response_b64: &str,
+        _relay_state: Option<&str>,
+        expected_request_id: Option<&str>,
+        expected_destination: Option<&str>,
+        require_in_response_to: bool,
+    ) -> Result<FederationCallbackResult, FederationError> {
+        let config_id = config.id;
 
         if !config.enabled {
             return Err(FederationError::ConfigDisabled);
@@ -412,7 +455,7 @@ where
         //   - idp_signing_cert_pem is None (config incomplete)
         //   - <ds:Signature> is absent from the document
         //   - The digest or signature value does not verify
-        self.verify_signature(xml.as_bytes(), &config)?;
+        self.verify_signature(xml.as_bytes(), config)?;
 
         // Step 1a — Protocol binding checks (SEC-005/REQ-14 AC-5).
         // These run after signature verification so we only check authentic responses.
@@ -569,8 +612,10 @@ where
             .not_on_or_after
             .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(1));
 
+        // Under the CONFIG's tenant, not the requesting one: see this method's
+        // doc comment. For a non-inherited config the two are the same value.
         self.replay_repo
-            .insert_assertion(tenant_id, &assertion.id, replay_expires_at)
+            .insert_assertion(config.tenant_id, &assertion.id, replay_expires_at)
             .await
             .map_err(|e| match e {
                 AxiamError::ReplayDetected => FederationError::AssertionReplay,
@@ -581,7 +626,8 @@ where
         let claims = extract_assertion_claims(assertion)?;
 
         info!(
-            tenant_id = %tenant_id,
+            tenant_id = %requesting_tenant_id,
+            config_tenant_id = %config.tenant_id,
             config_id = %config_id,
             name_id = %claims.name_id,
             "SAML ACS: assertion validated successfully"
@@ -591,7 +637,7 @@ where
         let (email, display_name) = apply_attribute_map(&claims, &config.attribute_map);
 
         self.provision_or_link_user(
-            tenant_id,
+            requesting_tenant_id,
             config_id,
             &claims.name_id,
             email.as_deref(),
@@ -1160,19 +1206,63 @@ fn apply_attribute_map(
     claims: &SamlAssertionClaims,
     attribute_map: &serde_json::Value,
 ) -> (Option<String>, Option<String>) {
-    let get_mapped = |field: &str| -> Option<String> {
-        let saml_attr_name = attribute_map.get(field)?.as_str()?;
-        claims
-            .attributes
-            .get(saml_attr_name)
-            .and_then(|vals| vals.first())
-            .cloned()
-    };
+    let identity = map_saml_identity(claims, attribute_map);
+    (identity.email, identity.display_name)
+}
 
-    let email = get_mapped("email");
-    let display_name = get_mapped("name").or_else(|| get_mapped("displayName"));
+/// Flatten a SAML assertion into the claim object the shared mapper reads.
+///
+/// The NameID becomes `sub`, so one default map covers OIDC's `sub` and SAML's
+/// NameID without a protocol-specific special case. Each attribute contributes
+/// its **first** value: SAML attributes are multi-valued and AXIAM's fields are
+/// not, and picking the first is what `apply_attribute_map` has always done.
+fn saml_claims_object(claims: &SamlAssertionClaims) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "sub".to_string(),
+        serde_json::Value::String(claims.name_id.clone()),
+    );
+    for (name, values) in &claims.attributes {
+        if let Some(first) = values.first() {
+            // The NameID is authoritative for `sub`; an IdP that also sends an
+            // attribute literally called `sub` must not be able to redefine who
+            // signed in.
+            if name == "sub" {
+                continue;
+            }
+            obj.insert(name.clone(), serde_json::Value::String(first.clone()));
+        }
+    }
+    serde_json::Value::Object(obj)
+}
 
-    (email, display_name)
+/// Map a validated SAML assertion onto an AXIAM identity.
+///
+/// Routed through the same `federation_claims` mapper as OIDC and OAuth2 rather
+/// than a third private copy: an operator writing an attribute map should not
+/// have to learn which protocol they are configuring, and a mapping bug should
+/// be fixable once.
+fn map_saml_identity(
+    claims: &SamlAssertionClaims,
+    attribute_map: &serde_json::Value,
+) -> MappedIdentity {
+    let obj = saml_claims_object(claims);
+    map_identity(
+        axiam_core::models::federation::ProviderKind::GenericSaml,
+        attribute_map,
+        &obj,
+    )
+    // Infallible in practice: `sub` is always present because the NameID is
+    // always present (the assertion validator rejects one without it). The
+    // fallback keeps this total rather than panicking on a shape that would be
+    // a bug elsewhere.
+    .unwrap_or_else(|| MappedIdentity {
+        external_subject: claims.name_id.clone(),
+        username: None,
+        email: None,
+        email_verified: true,
+        display_name: None,
+    })
 }
 
 /// Escape XML special characters in attribute values and text content.
@@ -1247,6 +1337,18 @@ mod tests {
             token_exchange: Default::default(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            provider_kind: axiam_core::models::federation::ProviderKind::GenericOidc,
+            provider_slug: None,
+            allow_tenant_inheritance: false,
+            scopes: Vec::new(),
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: Vec::new(),
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: false,
+            button_icon: None,
         }
     }
 
@@ -1326,6 +1428,12 @@ mod tests {
             unimplemented!()
         }
         async fn list_token_exchange_enabled(
+            &self,
+            _tenant_id: Uuid,
+        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
+            Ok(Vec::new())
+        }
+        async fn list_all(
             &self,
             _tenant_id: Uuid,
         ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
@@ -1612,6 +1720,12 @@ mod tests {
         ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
             Ok(Vec::new())
         }
+        async fn list_all(
+            &self,
+            _tenant_id: Uuid,
+        ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
+            Ok(Vec::new())
+        }
         async fn list_with_legacy_plaintext_secret(
             &self,
         ) -> axiam_core::error::AxiamResult<Vec<FederationConfig>> {
@@ -1807,7 +1921,8 @@ mod tests {
     /// fixture signature, attribute_map resolves `email`.
     fn acs_config() -> FederationConfig {
         let mut c = test_federation_config(Some(test_cert_pem()));
-        c.attribute_map = serde_json::json!({ "email": "email", "name": "displayName" });
+        c.attribute_map = serde_json::json!({ "email": "email", "display_name": "displayName" });
+        c.provider_kind = axiam_core::models::federation::ProviderKind::GenericSaml;
         c
     }
 

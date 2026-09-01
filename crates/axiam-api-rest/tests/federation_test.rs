@@ -807,6 +807,45 @@ async fn saml_authn_request_without_auth_returns_401() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
+/// Write a federation config straight through the repository.
+///
+/// Used by the two "service not configured" tests below. They need a config
+/// that *resolves* — since the login providers change, `start`/`callback`
+/// resolve the config (honouring org→tenant inheritance) before they look at
+/// the federation service, so a random UUID now fails at resolution and never
+/// reaches the arm those tests exist to cover.
+async fn seed_config_row(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
+    use axiam_core::models::federation::{CreateFederationConfig, FederationProtocol};
+    SurrealFederationConfigRepository::new(db.clone())
+        .create(CreateFederationConfig {
+            tenant_id,
+            provider: "Seeded".into(),
+            protocol: FederationProtocol::OidcConnect,
+            metadata_url: Some("https://idp.example.com/.well-known/openid-configuration".into()),
+            client_id: "cid".into(),
+            client_secret: String::new(),
+            attribute_map: None,
+            idp_signing_cert_pem: None,
+            allowed_algorithms: None,
+            token_exchange: None,
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
+            button_icon: None,
+        })
+        .await
+        .unwrap()
+        .id
+}
+
 // ---------------------------------------------------------------------------
 // SEC-045 / SEC-017: federation secret encryption round-trip tests
 // ---------------------------------------------------------------------------
@@ -1967,24 +2006,47 @@ async fn oidc_start_public_rejects_unknown_org_slug() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
+/// An omitted tenant now means the **organization's own scope**, not a
+/// malformed request.
+///
+/// Changed deliberately with the login-providers work: the login page's tenant
+/// field is optional and blank means "sign in at organization level", and the
+/// providers endpoint resolves a blank tenant the same way. If `start` still
+/// rejected it, the buttons an organization-level user is shown could not be
+/// clicked. The organization tenant is a real row, so this resolves to it —
+/// or, in a deployment that has none, still fails.
 #[actix_rt::test]
-async fn oidc_start_public_rejects_missing_tenant_identifier() {
+async fn oidc_start_public_without_a_tenant_uses_the_organization_scope() {
     let (db, org_id, _tenant_id) = setup_db().await;
     let auth = test_auth_config();
-    let app = test_app!(db, auth);
+    let app = test_app!(db.clone(), auth);
+
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let org_tenant = tenant_repo
+        .create(axiam_core::models::tenant::CreateTenant::organization_scope(org_id))
+        .await
+        .unwrap();
+    let config_id = seed_config_row(&db, org_tenant.id).await;
 
     let req = test::TestRequest::post()
         .uri("/api/v1/auth/federation/oidc/start")
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .set_json(serde_json::json!({
             "org_id": org_id,
-            "federation_config_id": Uuid::new_v4(),
+            "federation_config_id": config_id,
             "redirect_uri": "https://spa.example.com/callback"
         }))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 400);
+    // 400 rather than 401: the workspace and the provider both resolved, and
+    // what stops the request is this file's deliberately absent federation
+    // service. A 401 here would mean the organization scope was not found.
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "a blank tenant must resolve to the organization scope, not be refused"
+    );
 }
 
 #[actix_rt::test]
@@ -2015,7 +2077,10 @@ async fn oidc_start_public_rejects_unknown_tenant_slug() {
 async fn oidc_start_public_fails_when_service_not_configured() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
-    let app = test_app!(db, auth);
+    let app = test_app!(db.clone(), auth);
+    // A config that actually resolves, so the request reaches the service
+    // check rather than stopping at "no such provider".
+    let config_id = seed_config_row(&db, tenant_id).await;
 
     let req = test::TestRequest::post()
         .uri("/api/v1/auth/federation/oidc/start")
@@ -2023,7 +2088,7 @@ async fn oidc_start_public_fails_when_service_not_configured() {
         .set_json(serde_json::json!({
             "org_id": org_id,
             "tenant_id": tenant_id,
-            "federation_config_id": Uuid::new_v4(),
+            "federation_config_id": config_id,
             "redirect_uri": "https://spa.example.com/callback"
         }))
         .to_request();
@@ -2104,10 +2169,12 @@ async fn oidc_callback_public_fails_when_service_not_configured_but_state_exists
             state: "pre-existing-state".into(),
             nonce: Uuid::new_v4().to_string(),
             tenant_id,
-            federation_config_id: Uuid::new_v4(),
+            federation_config_id: seed_config_row(&db, tenant_id).await,
             redirect_uri: "https://spa.example.com/cb".into(),
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
             request_id: String::new(),
+            code_verifier: None,
+            idp_redirect_uri: None,
         })
         .await
         .unwrap();
@@ -2209,10 +2276,17 @@ async fn saml_login_public_rejects_unknown_org_slug() {
 }
 
 #[actix_rt::test]
-async fn saml_login_public_rejects_missing_tenant_identifier() {
+async fn saml_login_public_without_a_tenant_uses_the_organization_scope() {
+    // SAML's half of the same deliberate change — see
+    // `oidc_start_public_without_a_tenant_uses_the_organization_scope`.
     let (db, org_id, _tenant_id) = setup_db().await;
     let auth = test_auth_config();
-    let app = test_app!(db, auth);
+    let app = test_app!(db.clone(), auth);
+
+    SurrealTenantRepository::new(db.clone())
+        .create(axiam_core::models::tenant::CreateTenant::organization_scope(org_id))
+        .await
+        .unwrap();
 
     let req = test::TestRequest::post()
         .uri("/api/v1/auth/federation/saml/login")
@@ -2225,7 +2299,9 @@ async fn saml_login_public_rejects_missing_tenant_identifier() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 400);
+    // The workspace resolves; the *provider* does not, because the id is
+    // random — so this is the uniform provider 401, not a malformed-request 400.
+    assert_eq!(resp.status().as_u16(), 401);
 }
 
 #[actix_rt::test]

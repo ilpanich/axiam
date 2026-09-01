@@ -89,6 +89,45 @@ pub enum FederationError {
     /// (replay attack detected).
     #[error("Assertion replay detected")]
     AssertionReplay,
+
+    // ------------------------------------------------------------------
+    // Login-provider errors
+    // ------------------------------------------------------------------
+    /// The stored configuration cannot be used as written — a missing OAuth2
+    /// endpoint, a malformed Apple identifier, an unusable signing key, or a
+    /// templated issuer with no accepted tenants.
+    ///
+    /// Distinct from [`FederationError::ConfigIncomplete`], which says only
+    /// that credentials are absent: this one carries *which* part is wrong, so
+    /// the operator is not left comparing their form against an IdP error page.
+    #[error("Federation config is invalid: {0}")]
+    ConfigInvalid(String),
+
+    /// The provider returned no email address it affirmatively marks verified.
+    ///
+    /// Refused rather than provisioned. AXIAM keys account recovery,
+    /// verification and administrative notification on the address; adopting an
+    /// unverified one is account takeover by whoever typed it into the provider
+    /// first, and provisioning without one produces an account that cannot
+    /// recover itself and an operator a user row that looks real. See
+    /// `claude_dev/federation-sso-login-design.md` §5.3.
+    #[error(
+        "the identity provider returned no verified email address; \
+         AXIAM will not adopt an unverified address as an identity"
+    )]
+    UnverifiedExternalEmail,
+
+    /// The userinfo endpoint answered, but not with something that identifies
+    /// anyone — no subject could be mapped out of it.
+    #[error("userinfo response did not identify a subject: {0}")]
+    UserinfoUnusable(String),
+
+    /// The ID token's `tid` names an external IdP tenant this config does not
+    /// accept (templated-issuer path).
+    #[error(
+        "the identity provider tenant that issued this token is not accepted by this configuration"
+    )]
+    IssuerTenantNotAllowed,
 }
 
 impl From<FederationError> for axiam_core::error::AxiamError {
@@ -128,6 +167,24 @@ impl From<FederationError> for axiam_core::error::AxiamError {
             // IdP cert validation error → admin-facing 400 (Validation)
             FederationError::InvalidIdpCert(msg) => {
                 axiam_core::error::AxiamError::Validation { message: msg }
+            }
+            // A config the operator has to fix → 400, with the reason. These
+            // are not authentication failures: nothing about the end user is
+            // wrong, and telling them "invalid credentials" would send the
+            // wrong person looking.
+            FederationError::ConfigInvalid(msg) => {
+                axiam_core::error::AxiamError::Validation { message: msg }
+            }
+            // Refusals that ARE about this sign-in attempt → 401. The
+            // unverified-email message is deliberately specific: a user who
+            // cannot sign in with GitHub needs to be told to verify their
+            // GitHub email, not to try a different password.
+            FederationError::UnverifiedExternalEmail
+            | FederationError::IssuerTenantNotAllowed
+            | FederationError::UserinfoUnusable(_) => {
+                axiam_core::error::AxiamError::AuthenticationFailed {
+                    reason: err.to_string(),
+                }
             }
             // CQ-B23: upstream-IdP failures (discovery fetch/parse, token
             // exchange, JWKS fetch) are NOT our bug — the local server did

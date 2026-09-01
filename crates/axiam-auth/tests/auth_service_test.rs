@@ -68,6 +68,7 @@ fn test_config() -> AuthConfig {
         max_lockout_duration_secs: 3600,
         auth_code_lifetime_secs: 600,
         oauth2_issuer_url: String::new(),
+        sso_spa_origins: Vec::new(),
         email_verification_grace_period_hours: 24,
         password_reset_token_expiry_hours: 1,
         webauthn_rp_id: "localhost".into(),
@@ -1442,6 +1443,18 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
             token_exchange: None,
+            provider_kind: None,
+            provider_slug: None,
+            allow_tenant_inheritance: None,
+            scopes: None,
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            allowed_issuer_tenants: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            require_pkce: None,
+            button_icon: None,
         })
         .await
         .unwrap();

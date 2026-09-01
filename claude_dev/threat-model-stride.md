@@ -838,9 +838,9 @@ A client registered with `jwks_uri` cannot authenticate if AXIAM cannot fetch it
 
 ### 5.4 Federation — SAML SP & OIDC relying party
 
-Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning.
+Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the *public* login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a `SameSite=Strict` session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config.
 
-*23 threats — 4 critical, 7 high, 10 medium, 2 low; 1 open.*
+*31 threats — 4 critical, 12 high, 13 medium, 2 low; 1 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -867,6 +867,14 @@ Inbound federation from external identity providers: OIDC discovery and code exc
 | T-160 | Attribute mapping & JIT provisioning <br/>*Process* | E | A suspended user is revived through the exchange path (X4) | Medium | Mitigated |
 | T-161 | Attribute mapping & JIT provisioning <br/>*Process* | D | A partner's IdP silently populates the AXIAM user table (X4) | Low | Open |
 | T-162 | federation_config (encrypted secrets) <br/>*Store* | T | A malformed trust block is enabled without review (X4) | Medium | Mitigated |
+| T-163 | Public providers listing <br/>*Process* | I | The login-page provider list enumerates organizations and tenants | Medium | Mitigated |
+| T-164 | SSO handoff code <br/>*Flow* | S | A handoff code is captured from a URL and redeemed first | Medium | Mitigated |
+| T-165 | OAuth2 RP (userinfo variant) <br/>*Process* | S | Authentication rests on a userinfo call with no verifiable assertion | High | Mitigated |
+| T-166 | OAuth2 RP (userinfo variant) <br/>*Process* | T | A substituted userinfo endpoint is an authentication bypass | High | Mitigated |
+| T-167 | OAuth2 RP (userinfo variant) <br/>*Process* | S | A provider asserts an email nobody has proved they control | High | Mitigated |
+| T-168 | OIDC RP (discovery, code exchange) <br/>*Process* | S | A templated issuer accepts every tenant of the provider | High | Mitigated |
+| T-169 | Federation config inheritance <br/>*Process* | E | An inherited organization provider signs users into the wrong tenant | High | Mitigated |
+| T-170 | federation_config (encrypted secrets) <br/>*Store* | T | A custom button icon is stored content served to every login-page visitor | Medium | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1031,6 +1039,66 @@ With subject_mapping set to jit_provision, every previously-unseen subject the p
 A scope_map entry mapping to no scopes, an out-of-range token age, or an unknown subject_mapping value stored while token exchange is disabled becomes live the moment an administrator ticks the enable box — which is not where they expect to be told their configuration was wrong.
 
 > The trust block is validated at the API edge on every write, whether or not it is enabled (only the non-empty-audience rule is conditional). On read, every hydration failure resolves towards the default, and enabled is read from its own column so a corrupt neighbouring column can never switch exchange on. A provider whose stored trust block fails validation is skipped at resolution time with a warning rather than being used.
+
+**T-163 — The login-page provider list enumerates organizations and tenants**  
+`Public providers listing` (Process) · Information disclosure · Medium · Mitigated
+
+`GET /api/v1/auth/federation/providers` has to be unauthenticated — its caller is a person at a login page — and it takes an organization slug. If it answered differently for a slug that exists and one that does not, it would be an organization-slug oracle, and knowing which organizations a deployment hosts is reconnaissance for every other attack on it.
+
+> An unknown organization or tenant and a known one with nothing configured return the **same** answer: `200` with an empty list. That is deliberately different from `oidc_start_public`, which answers `401` for a slug miss: there every failure is a `401`, so the answer carries nothing, whereas a *list* endpoint answering `401` for unknown and `200 []` for known-but-empty would be two-valued. The rate is bounded by the same `login_per_min` budget the sign-in endpoints use, through both the per-process governor and the shared limiter. The response body is a dedicated struct carrying only what a button needs — config id, provider kind, display name, protocol, and the operator's icon — rather than a narrowed admin response, so a field added to the admin surface cannot reach it by inheritance; an integration test asserts the body contains no client id, secret, metadata URL or endpoint.
+
+**T-164 — A handoff code is captured from a URL and redeemed first**  
+`SSO handoff code` (Flow) · Spoofing · Medium · Mitigated
+
+AXIAM's session cookies are `SameSite=Strict`. SAML and Apple's `response_mode=form_post` both return **cross-site**, so cookies set on that response would not be sent on the navigation that follows. The mechanism that bridges it — a code in a redirect URL, exchanged same-origin — puts a session-bearing credential somewhere URLs go: browser history, and a `Referer` header.
+
+> The code is 256 bits from the same CSPRNG as `state`; only its SHA-256 hash is stored, so a database read yields nothing usable; it lives **60 seconds**, not the ten minutes a login state row gets, because it exists to survive exactly one redirect; and it is consumed atomically by the same `SELECT`+`DELETE` transaction pattern as `consume_by_state`, so a replay is refused with the same answer as an unknown code. It carries no token material at all — the session is minted from `user_id`/`tenant_id` at redemption, so a code that is never redeemed leaves no session behind. The redirect response sets `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and the SPA strips the parameter with `history.replaceState` before doing anything else.
+>
+> **Where the code may be delivered is the load-bearing part, and it is not the caller's choice.** `redirect_uri` reaches AXIAM on an *unauthenticated* start endpoint, and `validate_redirect_uri` checks its scheme only — every `https://` host on the internet passes it (`TODO(T19.14)`). On the OIDC and OAuth2 flows that is backstopped by the provider, which is handed the same URI and compares it against its registered set. The two cross-site flows have no such backstop **by construction**: a SAML IdP is pointed at AXIAM's own ACS and Apple at AXIAM's own form-callback, so the provider never sees the SPA URI and never validates it — AXIAM alone decides where the browser goes next, carrying a credential the handoff endpoint will exchange for session cookies for whoever presents it. Without a check, anyone could start a login with `redirect_uri = https://attacker.example/`, lure a victim through the victim's own real IdP, and read a working session out of their access log; the 60-second TTL, the single use and the hash-only storage are all irrelevant when the attacker *is* the destination. `require_deployment_spa_origin` therefore confines the target to the **origin of** `AuthConfig::effective_issuer()` — the same value the ACS and form-callback URLs are built from, so it cannot be wrong where these flows work at all — plus anything an operator names in `AXIAM__AUTH__SSO_SPA_ORIGINS` for a separately hosted SPA. Compared as origins via `Url::origin`, so a userinfo prefix, a path, a port or a scheme cannot smuggle a second host past it. It is enforced at login start (a `400` naming the knob), again at the mint (so a state row written by an older binary is not honoured), and on the error redirect. It runs *after* workspace and config resolution, so an unknown slug still answers the uniform `401`. This is the rule T-52 already states for the OAuth2 authorization server's own `redirect_uri`.
+>
+> Weakening the session cookies to `SameSite=Lax` would have removed the need for any of this, and re-opened the CSRF surface `Strict` closes across every endpoint, permanently, to serve two flows. Residual risk accepted: an attacker who reads the URL inside 60 seconds *and* redeems before the legitimate SPA gets a session — and the legitimate user gets a visible failure, because the code is gone. That is the same trade the OAuth authorization code itself makes.
+
+**T-165 — Authentication rests on a userinfo call with no verifiable assertion**  
+`OAuth2 RP (userinfo variant)` (Process) · Spoofing · High · Mitigated
+
+`FederationProtocol::OAuth2` exists because GitHub publishes no discovery document and issues no ID token, and Facebook's web flow returns only an access token to a confidential client. On that path there is no signature, no `nonce` and no `aud` — the whole assurance is "the access token we just received works against the userinfo endpoint we configured". That is a genuine downgrade from the OIDC path, and a downgrade nobody writes down is a downgrade nobody notices.
+
+> Stated explicitly in the module documentation, in the design doc (§3), in the admin UI (the protocol carries its own warning and its own badge colour), and here. Enforced rather than merely documented: `validate_protocol_for_kind` **refuses** this protocol for `google`, `microsoft`, `apple` and `generic_oidc`, so it cannot be selected for a provider that supports OIDC properly, and the refusal says why. PKCE (`S256`) is mandatory on this path rather than optional — it is the only replay protection left once `nonce` is gone — with the verifier generated server-side, stored in `federation_login_state`, and never returned to the client. `state` stays 256-bit, server-side and single-use. The token exchange is server-side with the encrypted client secret; nothing about it happens in the browser. Honest caveat, recorded in `crate::pkce`: a provider that *ignores* `code_challenge` gives us nothing for it, and no relying party can make a remote server verify something — GitHub has supported S256 since July 2025, and where a provider does not, the residual protection is the single-use state plus the confidential-client secret.
+
+**T-166 — A substituted userinfo endpoint is an authentication bypass**  
+`OAuth2 RP (userinfo variant)` (Process) · Tampering · High · Mitigated
+
+With no signature to check, whoever answers the userinfo request decides who signed in. An endpoint redirected to an attacker — by a plaintext URL, a redirect, a rebound DNS name, or a value derived at runtime from something the IdP said — is a complete authentication bypass with nothing to catch it.
+
+> The three OAuth2 endpoints are **explicit per config**, never derived from a discovery document or from anything the provider sends at runtime, and each is validated as absolute HTTPS (loopback excepted, for tests) at write time, by the same rule `validate_metadata_url` applies to the OIDC discovery URL. Every fetch goes through the shared `guarded_fetch` SSRF guard: HTTPS on every hop, resolve-and-pin against DNS rebinding, bounded redirects, and a 256 KiB response cap read as a running byte count. A `200` carrying `{"error": …}` is treated as the failure it is, rather than handed onward as an empty bearer token.
+
+**T-167 — A provider asserts an email nobody has proved they control**  
+`OAuth2 RP (userinfo variant)` (Process) · Spoofing · High · Mitigated
+
+AXIAM keys account recovery, email verification and administrative notification on the address. An unverified address adopted as an identity is account takeover by whoever typed it into the provider first — and `GET https://api.github.com/user` returns `email: null` or an unverified address for a large share of accounts.
+
+> An address the provider does not affirmatively mark verified is **never** adopted on this path: `email_verified` must be truthy or the login is refused with `UnverifiedExternalEmail`, and absent, `null` and falsey all read as false. For GitHub the primary *verified* address comes from a second, mandatory call to the `/emails` resource — derived from the configured `userinfo_endpoint`, so GitHub Enterprise Server works too — and only a `primary && verified` entry is taken, because a verified non-primary address is somebody else's choice of which mailbox represents them. Where a provider offers no verification signal at all (Facebook's Graph API), the decision is the operator's and is written down where it can be audited: an `attribute_map` literal, `"email_verified": "@true"`. Refusing rather than provisioning without an address is deliberate — an account that cannot recover itself is not a better outcome than a clear failure. See design doc §5.3.
+
+**T-168 — A templated issuer accepts every tenant of the provider**  
+`OIDC RP (discovery, code exchange)` (Process) · Spoofing · High · Mitigated
+
+Verified live: Entra ID's `common` authority publishes `issuer` as `https://login.microsoftonline.com/{tenantid}/v2.0` — the placeholder literally. Strict `iss` matching rejects every token, so supporting it at all means substituting the token's `tid`. Microsoft signs every tenant's tokens at `common` with the same keys, so "accept whatever `tid` says" means *every Microsoft account on earth may sign in here*.
+
+> Templated issuers are supported, and a config with one and an **empty** `allowed_issuer_tenants` is refused at create and update time — the message names both ways out (a tenant-specific authority, or a list of accepted tenants), because that configuration is occasionally intended and never intended by accident. The refusal is repeated at sign-in time, so a row written before the check existed cannot fall through to "accept anyone". The `tid` is read from the *unverified* payload solely to select which of a closed, operator-written set of issuer strings to require: it must parse as a UUID (otherwise a crafted value could substitute path segments), it must appear in the allow-list, and the signature check and the verified `iss` comparison both still run afterwards. It can never widen the accepted set.
+
+**T-169 — An inherited organization provider signs users into the wrong tenant**  
+`Federation config inheritance` (Process) · Elevation of privilege · High · Mitigated
+
+A federation config may now live in the organization-scope tenant and be used by the organization's tenants. The config's tenant and the tenant being signed into are therefore different, and every place that previously said "the tenant" now has two candidates. Provisioning into the config's tenant would put every tenant's federated users in one shared tenant — an isolation failure with a benign-looking cause.
+
+> Visibility and provisioning are decided in one place each and are deliberately different: `effective_providers` decides which configs a tenant may use, and `provision_or_link_identity` is documented and tested to create the user and the link in the **requesting** tenant. A login resolves its config through the same `effective_providers` the buttons were rendered from, so a config that is disabled, not inheritable, or shadowed by a tenant override cannot be reached by posting its id. `FederationLink`'s `(tenant_id, federation_config_id, external_subject)` uniqueness still means one link per external identity per tenant — verified, not assumed — so one Google account signing into two tenants through one inherited config gets two AXIAM users, which is what tenant isolation requires. A tenant's own config of the same kind always shadows the inherited one, **including a disabled one**, so "disable" cannot come to mean "re-enable the organization's". The SAML assertion-consumer path is the one place where the two tenants both do real work and differently: `handle_saml_response_for` records the assertion-replay row under the **config's** tenant — a no-op for a config the requesting tenant owns, and strictly stronger for an inherited one, since an assertion spent in one tenant cannot then be spent in a sibling — while the user and the link are created in the **requesting** tenant like every other protocol. Both ACS entry points resolve the config through `effective_providers` first, exactly as the OIDC and OAuth2 callbacks do; loading it with a `get_by_id` scoped to the requesting tenant, as the ACS originally did, could not find an inherited config at all.
+
+**T-170 — A custom button icon is stored content served to every login-page visitor**  
+`federation_config (encrypted secrets)` (Store) · Tampering · Medium · Mitigated
+
+A generic provider may carry an operator-uploaded icon, and that image is returned by the unauthenticated providers endpoint on every render of a login page. An SVG would be a document with its own parser in that position; an unbounded one would make every visitor download whatever an operator pasted.
+
+> Raster only — `image/png`, `image/jpeg`, `image/webp` — with `image/svg+xml` refused by name and the refusal saying why. Bounded to 16 KiB decoded, checked on the data URL's length first (so a multi-megabyte paste is rejected before anything walks it) and then on the decoded size; the admin UI crops to 64×64 in the browser, so what is uploaded is a few kilobytes and the source file never reaches the server. The value is only ever rendered as an `<img src>` under the SPA's `default-src 'self'; img-src 'self' data:` CSP. It is refused outright for the branded kinds, whose published sign-in-button rules require their own mark.
 
 </details>
 
@@ -2068,7 +2136,7 @@ tenant_scope was reachable from exactly one of the places roles are assigned —
 
 ## 6. Open risk register
 
-15 of 211 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
+15 of 219 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -2132,20 +2200,20 @@ tenant_scope was reachable from exactly one of the places roles are assigned —
 
 | Category | Threats |
 |---|---|
-| Spoofing | 51 |
-| Tampering | 42 |
+| Spoofing | 55 |
+| Tampering | 44 |
 | Repudiation | 5 |
-| Information disclosure | 54 |
+| Information disclosure | 55 |
 | Denial of service | 20 |
-| Elevation of privilege | 39 |
+| Elevation of privilege | 40 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 27 | 1 |
-| High | 98 | 7 |
-| Medium | 79 | 6 |
+| High | 103 | 7 |
+| Medium | 82 | 6 |
 | Low | 7 | 1 |
 
 **By diagram**
@@ -2155,7 +2223,7 @@ tenant_scope was reachable from exactly one of the places roles are assigned —
 | System diagram | 29 | 2 |
 | Authentication & session management | 30 | 1 |
 | OAuth2 / OIDC authorization server | 24 | 0 |
-| Federation — SAML SP & OIDC relying party | 23 | 1 |
+| Federation — SAML SP & OIDC relying party | 31 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 23 | 0 |
 | PKI, certificates & IoT device identity | 24 | 1 |
 | Audit, webhooks, email & notifications | 18 | 2 |

@@ -25,6 +25,14 @@ import {
   OpaqueNotOfferedError,
   loginOpaque,
 } from "@/services/opaque";
+import {
+  rememberPendingSso,
+  ssoCallbackUrl,
+  ssoLoginService,
+  submitSamlAuthnRequest,
+  type PublicFederationProvider,
+} from "@/services/ssoLogin";
+import { ProviderSignInButton } from "@/components/providers/ProviderSignInButton";
 
 type LoginStep = "org-tenant" | "credentials" | "mfa";
 
@@ -105,6 +113,19 @@ export function LoginPage() {
   // Guards the conditional-mediation ceremony so it is started at most once
   // per mount; a second concurrent request aborts the first in every browser.
   const conditionalStarted = useRef(false);
+
+  // ─── Federated sign-in ────────────────────────────────────────────────────
+  //
+  // The provider list cannot load on mount: which providers exist depends on
+  // the organization, and the page does not know it until the user types it.
+  // So it is fetched when the workspace step is submitted. `null` means "not
+  // asked yet" and renders nothing at all — an empty "no providers" state
+  // before we have asked would be a claim we cannot support.
+  const [providers, setProviders] = useState<PublicFederationProvider[] | null>(
+    null,
+  );
+  const [providersLoading, setProvidersLoading] = useState(false);
+  const [ssoBusyId, setSsoBusyId] = useState<string | null>(null);
 
   /**
    * Shared tail of every successful sign-in, whatever proved the identity.
@@ -216,6 +237,78 @@ export function LoginPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, passkeySupported]);
 
+  /**
+   * Fetch the sign-in buttons for a workspace.
+   *
+   * Failures are swallowed on purpose. The providers endpoint answers 200 with
+   * an empty list for an unknown organization, so the only way here is a
+   * network or server fault — and an error banner about federation on a page
+   * whose password form still works would send the user looking in the wrong
+   * place. The buttons simply do not appear.
+   */
+  const loadProviders = async (orgSlug: string, tenantSlug: string) => {
+    setProvidersLoading(true);
+    try {
+      setProviders(
+        await ssoLoginService.listProviders(
+          orgSlug.trim(),
+          tenantSlug.trim() || undefined,
+        ),
+      );
+    } catch {
+      setProviders([]);
+    } finally {
+      setProvidersLoading(false);
+    }
+  };
+
+  /**
+   * Start a federated login.
+   *
+   * Three protocols, three shapes. OIDC and OAuth2 return a URL to navigate to;
+   * SAML returns a POST-binding payload the browser has to submit as a form,
+   * because that is what the binding is.
+   *
+   * Nothing is stored client-side beyond which completion endpoint to use when
+   * the browser comes back: the `state` round-trips through the provider, and
+   * the nonce and PKCE verifier never leave the server.
+   */
+  const handleSsoSelect = async (provider: PublicFederationProvider) => {
+    setError(null);
+    setSsoBusyId(provider.id);
+    const body = {
+      org_slug: orgTenantData.orgSlug.trim(),
+      ...(orgTenantData.tenantSlug.trim()
+        ? { tenant_slug: orgTenantData.tenantSlug.trim() }
+        : {}),
+      federation_config_id: provider.id,
+      redirect_uri: ssoCallbackUrl(),
+    };
+    rememberPendingSso({
+      protocol: provider.protocol,
+      displayName: provider.display_name,
+    });
+    try {
+      if (provider.protocol === "Saml") {
+        submitSamlAuthnRequest(await ssoLoginService.startSaml(body));
+        return;
+      }
+      const start =
+        provider.protocol === "OAuth2"
+          ? await ssoLoginService.startOauth2(body)
+          : await ssoLoginService.startOidc(body);
+      window.location.assign(start.authorize_url);
+    } catch (err) {
+      setSsoBusyId(null);
+      setError(
+        getApiErrorMessage(
+          err,
+          `Could not start sign-in with ${provider.display_name}. Please try again.`,
+        ),
+      );
+    }
+  };
+
   const handleOrgTenantSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -228,6 +321,10 @@ export function LoginPage() {
       setError("Please enter your organization slug.");
       return;
     }
+    // Fire-and-forget: the credentials step renders immediately and the
+    // buttons appear when the answer arrives. Blocking the step transition on
+    // a network call would make every password login wait for federation.
+    void loadProviders(orgTenantData.orgSlug, orgTenantData.tenantSlug);
     setStep("credentials");
   };
 
@@ -612,6 +709,50 @@ export function LoginPage() {
               </Button>
             </div>
           
+            {/* Federated sign-in. Rendered only once the providers endpoint has
+                answered *and* returned something: a "no providers" empty state
+                on a page whose password form works would be noise, and one
+                shown before we have asked would be a claim we cannot support.
+                The skeleton reserves the same height so the layout does not
+                jump when the answer arrives. */}
+            {providersLoading && (
+              <div className="mt-6" aria-hidden="true">
+                <div className="flex items-center gap-3 my-5">
+                  <span className="h-px flex-1 bg-border" />
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                    or
+                  </span>
+                  <span className="h-px flex-1 bg-border" />
+                </div>
+                <div className="h-10 w-full animate-pulse rounded-md bg-white/5" />
+              </div>
+            )}
+            {!providersLoading && providers && providers.length > 0 && (
+              <div className="mt-6">
+                <div className="flex items-center gap-3 my-5" aria-hidden="true">
+                  <span className="h-px flex-1 bg-border" />
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                    or
+                  </span>
+                  <span className="h-px flex-1 bg-border" />
+                </div>
+                <ul className="space-y-2 list-none p-0 m-0">
+                  {providers.map((p) => (
+                    <li key={p.id}>
+                      <ProviderSignInButton
+                        provider={p}
+                        onSelect={handleSsoSelect}
+                        busy={ssoBusyId === p.id}
+                        disabled={
+                          isLoading || passkeyBusy || ssoBusyId !== null
+                        }
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {passkeySupported && (
               <>
                 <div className="flex items-center gap-3 my-5" aria-hidden="true">

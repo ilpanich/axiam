@@ -67,8 +67,9 @@ use axiam_db::{
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
     SurrealScimTokenRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
     SurrealSessionClientRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
-    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealSsoHandoffCodeRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnAttestationPolicyRepository, SurrealWebauthnCredentialRepository,
+    SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
@@ -1023,6 +1024,7 @@ async fn main() -> std::io::Result<()> {
     let amqp_nonce_repo = SurrealAmqpNonceRepository::new(pool.handle_for_repo());
     let federation_login_state_repo =
         SurrealFederationLoginStateRepository::new(pool.handle_for_repo());
+    let sso_handoff_code_repo = SurrealSsoHandoffCodeRepository::new(pool.handle_for_repo());
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
     // B3: process-wide in-process cache for AXIAM's OWN `GET /oauth2/jwks`
@@ -2107,6 +2109,7 @@ async fn main() -> std::io::Result<()> {
     let cleanup = cleanup::CleanupTask::new(
         Arc::new(assertion_replay_repo.clone()),
         Arc::new(federation_login_state_repo.clone()),
+        Arc::new(sso_handoff_code_repo.clone()),
         Arc::new(amqp_nonce_repo.clone()),
         Arc::new(user_repo.clone()),
         Arc::new(auth_service.clone()),
@@ -2283,6 +2286,7 @@ async fn main() -> std::io::Result<()> {
             federation_config_repo: federation_config_repo.clone(),
             federation_link_repo: federation_link_repo.clone(),
             federation_login_state_repo: federation_login_state_repo.clone(),
+            sso_handoff_code_repo: sso_handoff_code_repo.clone(),
             assertion_replay_repo: assertion_replay_repo.clone(),
             oidc_federation_service: oidc_federation_service.clone(),
             #[cfg(feature = "saml")]

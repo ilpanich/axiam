@@ -106,8 +106,13 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__SERVER__CORS_ALLOWED_ORIGINS",
-            "Allowed CORS origins; empty disables cross-origin requests (restrictive default).",
+            "Allowed CORS origins; empty disables cross-origin requests (restrictive default). The supported topologies serve the admin UI and the API from one origin, so this stays empty in both.",
             "https://admin.acme.dev",
+          ],
+          [
+            "AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT",
+            "Accept an `X-Client-Certificate` header as device identity when the connection has no TLS-verified client certificate. **Off by default, and it should stay off unless a proxy you operate terminates mTLS and overwrites that header on every request.** A certificate is public data and the header path cannot prove possession of the private key, so wherever anything but that proxy can reach the listener, anyone holding a copy of an enrolled device's certificate authenticates as that device. Native mTLS is unaffected — a certificate rustls verified on the connection is always preferred and this setting is not consulted.",
+            "false",
           ],
           [
             "RUST_LOG",
@@ -377,7 +382,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__RATE_LIMIT__TRUSTED_HOPS",
-            "Trusted reverse-proxy hops to skip from the right of X-Forwarded-For (set 1 behind a single ingress).",
+            "Trusted reverse-proxy entries to skip from the right of X-Forwarded-For. Set it to **the number of proxies in front of the server minus one** — a proxy appends the address it received *from*, so the nearest proxy is the socket peer and never appears in the header. One proxy (the shipped Compose and Kubernetes topologies both have exactly one) therefore wants `0`, two want `1`, three want `2`. Setting it to the proxy count instead makes the header unusable and keys every client in the world to the proxy's own address — one global bucket, `/auth/login` included.",
             "0",
           ],
           [
@@ -691,7 +696,31 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "Path to the PEM private key (PKCS#8, PKCS#1 or SEC1).",
             "/etc/axiam/tls/tls.key",
           ],
+          [
+            "AXIAM__SERVER__TLS__RELOAD_INTERVAL_SECS",
+            "How often to re-read the certificate and key and pick up a renewal, in seconds. `0` disables polling; `SIGHUP` reloads immediately either way and is what an ACME deploy hook should send. The poll exists because the signal is the part that silently does not happen — a hook nobody wired up, or a runtime that does not forward signals — and a Let's Encrypt certificate renewed at day 60 stops being accepted on day 90. A reload that finds an unreadable or mismatched pair leaves the previous certificate serving and retries.",
+            "3600",
+          ],
+          [
+            "AXIAM__SERVER__TLS__CLIENT_AUTH",
+            "Native client-certificate policy: `off` (default), `optional` or `required`. `optional` is what a listener serving both browser traffic and mTLS devices wants.",
+            "optional",
+          ],
+          [
+            "AXIAM__SERVER__TLS__CLIENT_CA_PATH",
+            "PEM bundle used to verify client certificates. Required when `client_auth` is `optional` or `required`; ignored when `off`.",
+            "/etc/axiam/tls/client-ca.pem",
+          ],
+          [
+            "AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH",
+            "Where the server writes the client-CA bundle assembled from the organization CAs an operator flagged as mTLS trust anchors. Defaults to `client-ca-bundle.pem` beside the other TLS material.",
+            "/etc/axiam/tls/client-ca-bundle.pem",
+          ],
         ],
+      },
+      {
+        type: "note",
+        text: "The certificate is resolved per TLS handshake from a slot the server can replace while it is listening, so a renewal takes effect on the next connection with no restart and no dropped request. Certificate renewal is the reason the reload exists: rustls otherwise binds the certificate for the process's life.",
       },
       {
         type: "note",

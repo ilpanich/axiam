@@ -52,6 +52,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 fn test_auth_config(lifetime: u64) -> AuthConfig {
     let (priv_pem, pub_pem) = test_keypair();
     AuthConfig {
+        trust_forwarded_client_cert: false,
         jwt_private_key_pem: priv_pem,
         jwt_public_key_pem: pub_pem,
         access_token_lifetime_secs: lifetime,

@@ -149,6 +149,15 @@ services:
       # D-18: cookies work over HTTP in CI/local dev (http://localhost).
       # Default in code is true (prod-safe). NEVER set false in production.
       AXIAM__AUTH__COOKIE_SECURE: "false"
+      # scripts/e2e-mtls-check.sh drives the PROXY-TERMINATED mTLS path — it
+      # posts an X-Client-Certificate header to /api/v1/auth/device, which is
+      # what a deployment whose proxy performs the client-certificate handshake
+      # looks like. That path is off by default (a forwarded certificate proves
+      # nothing about who sent it), so this stack opts in the same way such a
+      # deployment does. The NATIVE path has its own check —
+      # scripts/e2e-mtls-native-check.sh — which sends no header at all and is
+      # unaffected by this setting.
+      AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT: "true"
       # Bootstrap guard: only requests with this email are accepted by /admin/bootstrap.
       # NOTE: the bootstrap handler reads this via `std::env::var` directly (NOT
       # through the `AXIAM__`-prefixed config layer), so the OS env var name must

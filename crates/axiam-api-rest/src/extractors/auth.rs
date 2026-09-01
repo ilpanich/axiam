@@ -906,6 +906,7 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
 MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
 -----END PUBLIC KEY-----";
         AuthConfig {
+            trust_forwarded_client_cert: false,
             jwt_private_key_pem: private_key.into(),
             jwt_public_key_pem: public_key.into(),
             access_token_lifetime_secs: 900,

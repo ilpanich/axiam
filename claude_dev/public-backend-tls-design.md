@@ -554,7 +554,95 @@ production-shaped deployments since D3.
 
 ---
 
-## 11. Implementation checklist
+## 11. mTLS, which does not survive a terminating proxy
+
+AXIAM authenticates IoT devices and service accounts by client certificate, and
+the topology above breaks that — so this section says exactly how, and what the
+supported answer is.
+
+### 11.1 Two paths, and only one of them is sound in public
+
+`CertificateAuthenticated::extract`
+(`crates/axiam-api-rest/src/extractors/cert_auth.rs`) has two sources:
+
+1. **Native (D3).** `main.rs`'s `on_connect` hook lifts the rustls-**verified**
+   peer certificate off the TLS connection into `conn_data`. The handshake
+   proved the client holds the private key, so the identity is authoritative.
+2. **Proxy header.** `X-Client-Certificate`, a URL-encoded PEM, consulted when
+   the connection carries no verified certificate.
+
+`DeviceAuthService::authenticate` checks the fingerprint, the status, the
+expiry, and the chain to the tenant or organization CA. A **copy** of an
+enrolled device's certificate satisfies every one of them, because a
+certificate is public data — it is handed out at enrollment, it appears in
+every handshake, and the certificates API returns it. Nothing on the header path
+proves possession of the private key, and nothing can: possession is proven by a
+handshake, and on that path there was no handshake.
+
+So path 2 authenticates *whoever can set the header*. That was acceptable while
+the backend was reachable only from a container network. It is an
+authentication bypass the moment the backend is reachable from the internet —
+which is what this change makes it. Caddy forwards client headers verbatim
+unless told otherwise, so a browser could have sent one.
+
+**Decision: `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT`, default `false`.** The
+header is consulted only where an operator asserts that a proxy they run
+terminates mTLS itself and overwrites the header on every request. Native mTLS
+is unaffected and always preferred: a verified certificate on the connection
+wins and the setting is never consulted. The refusal names the setting, so an
+operator who needs it is told rather than left with a bare 401.
+
+This is a **breaking change** for a deployment that relies on proxy-terminated
+mTLS. It is the right default anyway: an authentication method that works
+because nobody has tried the obvious thing is not a method, and the E2E suite's
+proxy-path check (`scripts/e2e-mtls-check.sh`) now opts in explicitly, exactly
+as such a deployment must.
+
+### 11.2 Doing real mTLS in this topology
+
+Caddy terminates TLS, so a client certificate presented to Caddy never reaches
+the backend. Caddy can verify it and forward it as a header, but per §11.1 that
+turns an unforgeable credential into a forgeable one — so it is not offered as
+an option here, and `docker/nginx.conf` and the Caddyfile both **strip**
+`X-Client-Certificate` from inbound requests rather than passing it through.
+
+Native mTLS therefore needs a route to the backend that no proxy terminates.
+The supported shape is a **second public hostname for the API**, e.g.
+`axiam-iam-api.duckdns.org`, resolving to the same address and forwarded
+straight to `axiam-server`:
+
+```
+Browsers  ──> https://axiam-iam.duckdns.org/        Caddy ──> SPA
+                                        /api/*      Caddy ──> axiam-server (TLS)
+
+Devices   ──> https://axiam-iam-api.duckdns.org/   ─────────> axiam-server
+              (mTLS; no proxy, rustls verifies the client certificate)
+```
+
+This costs nothing that matters and buys the thing that does:
+
+* **No CORS.** The browser never uses the API hostname — the SPA keeps calling
+  same-origin `/api`. The second name exists for device and SDK clients, which
+  are not subject to the same-origin policy. §7 still holds.
+* **One certificate.** Issue the leaf with both names as SANs and both listeners
+  use it; §3's certbot hook is unchanged.
+* **`client_auth: optional`**, so the same listener serves Caddy (which presents
+  no certificate) and devices (which do).
+* **`TRUSTED_HOPS` stays `0`** and stays correct: the direct path has no proxy,
+  so the header is absent and the key is `peer_addr()` — the real client.
+
+The hazard the direct route adds is that a client can now *send* an
+`X-Forwarded-For` of its own. With `trusted_hops = 0` and a single-entry header
+the extractor would select the attacker's value, minting a fresh rate-limit
+bucket per request. Two things hold it: `X-Forwarded-For` is stripped at the
+edge for the proxied path, and on the direct path the deployment must strip it
+too — the guide's router/firewall section says so, and it is recorded in the
+threat model (T-PBT-05) rather than left implicit. A deployment that runs no
+IoT devices should simply not publish the second hostname.
+
+---
+
+## 12. Implementation checklist
 
 * [x] `ReloadableCertResolver` + `reload_leaf_certificate`, `SIGHUP`, mtime poll
 * [x] `AXIAM__SERVER__TLS__RELOAD_INTERVAL_SECS`, documented on the website
@@ -565,6 +653,7 @@ production-shaped deployments since D3.
 * [x] `docker/vault/vault.hcl` → Raft; `prod-up` issues a scoped token
 * [x] Pi guide rewritten
 * [x] `docs/deployment/README.md`, `vault.md`, `docs/admin/`, website block content
+* [x] `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT`, default false (§11.1)
 * [x] `claude_dev/threat-model-stride.md`
 
 No existing test is weakened, skipped or quarantined for any of it.

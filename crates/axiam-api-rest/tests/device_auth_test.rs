@@ -63,12 +63,23 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 }
 
 fn test_auth_config() -> AuthConfig {
+    test_auth_config_with(true)
+}
+
+/// `trust_forwarded_client_cert` is off by default in production, because a
+/// forwarded certificate proves nothing about who sent it. These tests drive
+/// the `X-Client-Certificate` path on purpose — they are the tests *for* the
+/// proxy-terminated deployment — so they opt in explicitly, which is the same
+/// thing such a deployment does. `forwarded_certificate_is_rejected_by_default`
+/// below covers the other setting.
+fn test_auth_config_with(trust_forwarded_client_cert: bool) -> AuthConfig {
     let (priv_pem, pub_pem) = test_keypair();
     AuthConfig {
         jwt_private_key_pem: priv_pem,
         jwt_public_key_pem: pub_pem,
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
+        trust_forwarded_client_cert,
         ..AuthConfig::default()
     }
 }
@@ -315,6 +326,65 @@ fn urlencode(input: &str) -> String {
         }
     }
     result
+}
+
+/// The same certificate that authenticates in `device_auth_full_flow` must be
+/// refused when `trust_forwarded_client_cert` is left at its default.
+///
+/// A certificate is public data: it is handed out at enrollment, it appears in
+/// every handshake, and `POST /api/v1/certificates` returns it to anyone who
+/// may read it. Every check on the header path — fingerprint, status, expiry,
+/// chain to the CA — is satisfied by a *copy*, so the header authenticates
+/// whoever can set it. That is fine behind a proxy that overwrites the header
+/// and terminates mTLS itself, and it is an authentication bypass on a server
+/// anything else can reach — which is what the public-backend topology makes
+/// this server.
+#[actix_rt::test]
+async fn forwarded_certificate_is_rejected_by_default() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config_with(false);
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+
+    let ca_id = generate_ca!(app, org_id, ca_token);
+    flag_trust_anchor(&db, org_id, &ca_id).await;
+    let (cert_id, public_cert_pem) = generate_device_cert!(app, ca_id, token);
+    let sa_id = create_service_account!(app, token);
+
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/v1/service-accounts/{sa_id}/bind-certificate"
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({ "certificate_id": cert_id }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+
+    // Everything above is a valid, bound, active certificate. The only thing
+    // missing is a TLS handshake proving the sender holds its private key.
+    let encoded_pem = urlencode(&public_cert_pem);
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/device")
+        .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+
+    assert_eq!(
+        status, 401,
+        "a forwarded certificate must not authenticate under the default \
+         configuration: {body}"
+    );
+    assert!(
+        body.to_string().contains("TLS-verified"),
+        "the refusal should tell an operator what is actually required: {body}"
+    );
 }
 
 #[actix_rt::test]

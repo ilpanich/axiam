@@ -125,10 +125,32 @@ impl CertificateAuthenticated {
         // (D3 native mTLS): rustls has already checked it against the client-CA
         // bundle, so it is authoritative and cannot be spoofed by a header. Only
         // fall back to the `X-Client-Certificate` proxy header when TLS was
-        // terminated upstream (no verified cert on this connection).
+        // terminated upstream (no verified cert on this connection) AND the
+        // operator has said that upstream is trusted to set the header.
         let identity_result = if let Some(verified) = req.conn_data::<VerifiedClientCert>() {
             service.authenticate_der(&verified.der).await
         } else {
+            // A certificate is public data, and every check on the header path
+            // — fingerprint, status, expiry, chain to the CA — is satisfied by a
+            // *copy* of an enrolled device's certificate. Only the TLS handshake
+            // proves possession of the private key, and on this path there was
+            // no handshake to prove it in. So the header is worth exactly as
+            // much as the guarantee that a client could not have set it, and
+            // that guarantee is a property of the deployment, not of the
+            // request. Off by default; see
+            // `axiam_auth::AuthConfig::trust_forwarded_client_cert`.
+            if !state.auth_config.trust_forwarded_client_cert {
+                return Err(AxiamError::AuthenticationFailed {
+                    reason: "client certificate authentication requires a TLS-verified \
+                             peer certificate on this connection. The X-Client-Certificate \
+                             header is not trusted unless \
+                             AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT is set, which is \
+                             only safe when a proxy terminates mTLS and overwrites that \
+                             header on every request"
+                        .into(),
+                }
+                .into());
+            }
             let header = req
                 .headers()
                 .get("X-Client-Certificate")

@@ -43,6 +43,7 @@ fn test_config() -> AuthConfig {
     AuthConfig {
         jwt_private_key_pem: TEST_PRIVATE_KEY.into(),
         jwt_public_key_pem: TEST_PUBLIC_KEY.into(),
+        trust_forwarded_client_cert: false,
         access_token_lifetime_secs: 900,
         refresh_token_lifetime_secs: 2_592_000,
         jwt_issuer: "axiam-test".into(),

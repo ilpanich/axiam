@@ -612,8 +612,6 @@ mod tests {
 
     mod integration {
         use super::*;
-        use argon2::password_hash::SaltString;
-        use argon2::password_hash::rand_core::OsRng;
         use argon2::{Argon2, PasswordHasher};
         use axiam_core::models::password_history::CreatePasswordHistoryEntry;
         use axiam_core::repository::PasswordHistoryRepository;
@@ -630,10 +628,9 @@ mod tests {
         }
 
         fn hash_pw(password: &str) -> String {
-            let salt = SaltString::generate(&mut OsRng);
             let argon2 = Argon2::default();
             argon2
-                .hash_password(password.as_bytes(), &salt)
+                .hash_password(password.as_bytes())
                 .unwrap()
                 .to_string()
         }

@@ -1316,45 +1316,33 @@ struct Oauth2Failure {
 }
 
 impl Oauth2Failure {
-    /// What a failing assertion is allowed to print.
-    ///
-    /// Not the response body and not the cookies: an assertion that fires
-    /// writes its message to the CI log, and on the one path where these tests
-    /// could fail — a session was issued when it should not have been — the
-    /// values in hand are a live access cookie and a body carrying whatever the
-    /// provider said. Cookie *names* are what diagnoses "a session was issued";
-    /// the value never adds anything, and the `error` code is the useful half
-    /// of the body. Flagged by CodeQL as cleartext logging of sensitive
-    /// information, correctly.
-    fn diagnostic(&self) -> String {
-        let names: Vec<&str> = self
-            .cookies
-            .iter()
-            .filter_map(|c| c.split('=').next())
-            .collect();
-        let error = self
-            .body
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("<no error field>");
-        format!("status={} error={error} cookies={names:?}", self.status)
-    }
-
     /// The invariant every one of these shares, and the only one worth pinning:
     /// no session was issued. The exact status is a mapping detail — a provider
     /// that refuses the code surfaces as `503` through `TokenExchangeFailed`,
     /// while an identity that cannot be trusted is a `401` — and asserting the
     /// number in each test would pin the mapping rather than the behaviour.
+    ///
+    /// # Why these messages carry no values
+    ///
+    /// An assertion message is written to the CI log when it fires, and these
+    /// fire on exactly one path: a session was issued when it should not have
+    /// been. The values in hand at that moment are a live `axiam_access` cookie
+    /// and a body carrying whatever the provider said, so CodeQL flags any of
+    /// them reaching a message as cleartext logging of sensitive information —
+    /// and it stays flagged for anything *derived* from them, because the taint
+    /// is on the response, not on the particular field picked out of it.
+    ///
+    /// Nothing is lost by leaving them out. Each of these tests drives exactly
+    /// one scenario, so the failing test's own name is the diagnostic, and what
+    /// a reader needs next is the mock provider's script a few lines above.
     fn assert_no_session(&self) {
         assert!(
             !(200..300).contains(&self.status),
-            "a failed exchange must not succeed: {}",
-            self.diagnostic()
+            "a failed token exchange must not produce a successful response"
         );
         assert!(
             !self.cookies.iter().any(|c| c.starts_with("axiam_access=")),
-            "no session cookie may be issued: {}",
-            self.diagnostic()
+            "no session cookie may be issued when the exchange failed"
         );
     }
 }
@@ -1594,8 +1582,7 @@ async fn a_github_email_lookup_without_the_scope_says_which_scope() {
     out.assert_no_session();
     assert!(
         out.body.to_string().contains("user:email"),
-        "the refusal must name the missing scope: {}",
-        out.diagnostic()
+        "the refusal must name the missing scope, or an operator has nothing to act on"
     );
 }
 

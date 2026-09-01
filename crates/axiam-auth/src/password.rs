@@ -1,6 +1,5 @@
 //! Password verification and hashing using Argon2id.
 
-use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use zeroize::Zeroizing;
 
@@ -17,7 +16,8 @@ pub(crate) const DUMMY_HASH: &str =
 /// Hash a password with Argon2id using OWASP-recommended parameters.
 ///
 /// If `pepper` is provided it is prepended to the password before
-/// hashing. The salt is randomly generated for each call.
+/// hashing. A fresh 16-byte salt is drawn from the OS RNG for each call
+/// by `PasswordHasher::hash_password` itself.
 pub fn hash_password(password: &str, pepper: Option<&str>) -> Result<String, AuthError> {
     // OWASP ASVS recommended: m=19456 (19 MiB), t=2, p=1
     let params = argon2::Params::new(19456, 2, 1, None)
@@ -35,9 +35,8 @@ pub fn hash_password(password: &str, pepper: Option<&str>) -> Result<String, Aut
 
     // `peppered` is zeroized on drop at end of scope — including on the
     // `?`-propagated error path below (Drop runs during unwind/early-return).
-    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
     let hash = argon2
-        .hash_password(input, &salt)
+        .hash_password(input)
         .map_err(|e| AuthError::Crypto(format!("hash error: {e}")))?;
 
     Ok(hash.to_string())
@@ -72,7 +71,7 @@ pub fn verify_password(
     let argon2 = Argon2::default();
     match argon2.verify_password(input, &parsed_hash) {
         Ok(()) => Ok(true),
-        Err(argon2::password_hash::Error::Password) => Ok(false),
+        Err(argon2::password_hash::Error::PasswordInvalid) => Ok(false),
         Err(e) => Err(AuthError::Crypto(format!("verify error: {e}"))),
     }
 }
@@ -81,8 +80,6 @@ pub fn verify_password(
 mod tests {
     use super::*;
     use argon2::PasswordHasher;
-    use argon2::password_hash::SaltString;
-    use argon2::password_hash::rand_core::OsRng;
 
     /// Helper: hash a password with optional pepper using Argon2id.
     fn hash_password(password: &str, pepper: Option<&str>) -> String {
@@ -94,10 +91,9 @@ mod tests {
             }
             None => password.as_bytes(),
         };
-        let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
         argon2
-            .hash_password(input, &salt)
+            .hash_password(input)
             .expect("hashing failed")
             .to_string()
     }

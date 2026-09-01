@@ -120,7 +120,11 @@ arc-swap = "1"
 # auto-selects a default provider when *exactly one* of the two backend
 # features is active; enabling both re-triggers the same panic.
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
-argon2 = "0.5"
+# default-features off so the wasm build (axiam-opaque-wasm, via axiam-opaque)
+# can take the raw KDF alone. argon2 0.6 made `getrandom` a default feature,
+# and getrandom 0.4 refuses to compile for wasm32-unknown-unknown without a
+# JS backend. Each member opts into what it actually uses.
+argon2 = { version = "0.6", default-features = false }
 totp-rs = { version = "6", features = ["gen_secret", "otpauth"] }
 rand = "0.10"
 hmac = "0.13"

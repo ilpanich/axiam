@@ -30,7 +30,13 @@ opaque-ke = { version = "4.0.1", default-features = false, features = ["ristrett
 # AXIAM workspace has moved to 0.11. Both are in the tree; the aliases keep it
 # unambiguous which is meant at each use site.
 sha2_v10 = { version = "0.10", package = "sha2" }
-argon2 = { workspace = true }
+# Only the raw KDF is used here (hash_password_into), never the PHC string
+# API. argon2 0.6 turned `getrandom` into a default feature, which drags
+# getrandom 0.4 into the wasm32-unknown-unknown build of axiam-opaque-wasm,
+# where it fails to compile without a JS backend. Take only `alloc`, which
+# is all hash_password_into needs; axiam-auth still enables the full
+# feature set for its own use on native targets.
+argon2 = { workspace = true, features = ["alloc"] }
 scrypt = "0.12"
 hex = { workspace = true }
 thiserror = { workspace = true }

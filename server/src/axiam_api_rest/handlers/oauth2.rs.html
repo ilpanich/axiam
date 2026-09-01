@@ -2219,66 +2219,67 @@
 <a href=#2219 id=2219 data-nosnippet>2219</a>        <span class="kw">let </span>db = Surreal::new::&lt;Mem&gt;(()).<span class="kw">await</span>.expect(<span class="string">"in-memory db"</span>);
 <a href=#2220 id=2220 data-nosnippet>2220</a>        <span class="kw">let </span>auth_config = AuthConfig {
 <a href=#2221 id=2221 data-nosnippet>2221</a>            oauth2_issuer_url: issuer.to_string(),
-<a href=#2222 id=2222 data-nosnippet>2222</a>            ..AuthConfig::default()
-<a href=#2223 id=2223 data-nosnippet>2223</a>        };
-<a href=#2224 id=2224 data-nosnippet>2224</a>        AppState::for_test(db, auth_config)
-<a href=#2225 id=2225 data-nosnippet>2225</a>    }
-<a href=#2226 id=2226 data-nosnippet>2226</a>
-<a href=#2227 id=2227 data-nosnippet>2227</a>    <span class="doccomment">/// SEC-102. `htu` must be the server's own view of its endpoint, never the
-<a href=#2228 id=2228 data-nosnippet>2228</a>    /// caller's.
-<a href=#2229 id=2229 data-nosnippet>2229</a>    ///
-<a href=#2230 id=2230 data-nosnippet>2230</a>    /// `HttpRequest::full_url()` — what this used to call — takes the
-<a href=#2231 id=2231 data-nosnippet>2231</a>    /// authority from `ConnectionInfo`, which prefers `Forwarded`, then
-<a href=#2232 id=2232 data-nosnippet>2232</a>    /// `X-Forwarded-Host`, then `Host`, and no trusted-proxy layer normalises
-<a href=#2233 id=2233 data-nosnippet>2233</a>    /// any of the three here. With the authority sourced from the request, the
-<a href=#2234 id=2234 data-nosnippet>2234</a>    /// caller chooses **both** sides of RFC 9449 §4.3 step 9's comparison, so
-<a href=#2235 id=2235 data-nosnippet>2235</a>    /// a client phished into signing a proof for
-<a href=#2236 id=2236 data-nosnippet>2236</a>    /// `https://attacker.example/oauth2/token` could have it accepted by
-<a href=#2237 id=2237 data-nosnippet>2237</a>    /// sending a matching `Host`.
-<a href=#2238 id=2238 data-nosnippet>2238</a>    </span><span class="attr">#[actix_web::test]
-<a href=#2239 id=2239 data-nosnippet>2239</a>    </span><span class="kw">async fn </span>htu_ignores_every_request_supplied_authority_header() {
-<a href=#2240 id=2240 data-nosnippet>2240</a>        <span class="kw">let </span>state = state_with_issuer(<span class="string">"https://id.example.test"</span>).<span class="kw">await</span>;
-<a href=#2241 id=2241 data-nosnippet>2241</a>
-<a href=#2242 id=2242 data-nosnippet>2242</a>        <span class="kw">for </span>header <span class="kw">in </span>[<span class="string">"Host"</span>, <span class="string">"X-Forwarded-Host"</span>] {
-<a href=#2243 id=2243 data-nosnippet>2243</a>            <span class="kw">let </span>req = TestRequest::post()
-<a href=#2244 id=2244 data-nosnippet>2244</a>                .uri(<span class="string">"/oauth2/token?tenant_id=x"</span>)
-<a href=#2245 id=2245 data-nosnippet>2245</a>                .insert_header((header, <span class="string">"attacker.example"</span>))
-<a href=#2246 id=2246 data-nosnippet>2246</a>                .to_http_request();
-<a href=#2247 id=2247 data-nosnippet>2247</a>            <span class="macro">assert_eq!</span>(
-<a href=#2248 id=2248 data-nosnippet>2248</a>                dpop_htu(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>req),
-<a href=#2249 id=2249 data-nosnippet>2249</a>                <span class="string">"https://id.example.test/oauth2/token"</span>,
-<a href=#2250 id=2250 data-nosnippet>2250</a>                <span class="string">"the {header} header must not reach htu"
-<a href=#2251 id=2251 data-nosnippet>2251</a>            </span>);
-<a href=#2252 id=2252 data-nosnippet>2252</a>        }
-<a href=#2253 id=2253 data-nosnippet>2253</a>
-<a href=#2254 id=2254 data-nosnippet>2254</a>        <span class="kw">let </span>req = TestRequest::post()
-<a href=#2255 id=2255 data-nosnippet>2255</a>            .uri(<span class="string">"/oauth2/token"</span>)
-<a href=#2256 id=2256 data-nosnippet>2256</a>            .insert_header((<span class="string">"Forwarded"</span>, <span class="string">"host=attacker.example;proto=https"</span>))
-<a href=#2257 id=2257 data-nosnippet>2257</a>            .to_http_request();
-<a href=#2258 id=2258 data-nosnippet>2258</a>        <span class="macro">assert_eq!</span>(
-<a href=#2259 id=2259 data-nosnippet>2259</a>            dpop_htu(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>req),
-<a href=#2260 id=2260 data-nosnippet>2260</a>            <span class="string">"https://id.example.test/oauth2/token"
-<a href=#2261 id=2261 data-nosnippet>2261</a>        </span>);
-<a href=#2262 id=2262 data-nosnippet>2262</a>    }
-<a href=#2263 id=2263 data-nosnippet>2263</a>
-<a href=#2264 id=2264 data-nosnippet>2264</a>    <span class="doccomment">/// The path still comes from the request — that is what keeps a
-<a href=#2265 id=2265 data-nosnippet>2265</a>    /// `/oauth2/par` proof from being replayed at `/oauth2/token` — and the
-<a href=#2266 id=2266 data-nosnippet>2266</a>    /// query string is excluded, which is exactly what RFC 9449 compares.
-<a href=#2267 id=2267 data-nosnippet>2267</a>    </span><span class="attr">#[actix_web::test]
-<a href=#2268 id=2268 data-nosnippet>2268</a>    </span><span class="kw">async fn </span>htu_keeps_the_path_and_drops_the_query() {
-<a href=#2269 id=2269 data-nosnippet>2269</a>        <span class="kw">let </span>state = state_with_issuer(<span class="string">"https://id.example.test/"</span>).<span class="kw">await</span>;
-<a href=#2270 id=2270 data-nosnippet>2270</a>
-<a href=#2271 id=2271 data-nosnippet>2271</a>        <span class="kw">let </span>par = TestRequest::post()
-<a href=#2272 id=2272 data-nosnippet>2272</a>            .uri(<span class="string">"/oauth2/par?tenant_id=00000000-0000-0000-0000-000000000000"</span>)
-<a href=#2273 id=2273 data-nosnippet>2273</a>            .to_http_request();
-<a href=#2274 id=2274 data-nosnippet>2274</a>        <span class="macro">assert_eq!</span>(dpop_htu(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>par), <span class="string">"https://id.example.test/oauth2/par"</span>);
-<a href=#2275 id=2275 data-nosnippet>2275</a>
-<a href=#2276 id=2276 data-nosnippet>2276</a>        <span class="kw">let </span>token = TestRequest::post().uri(<span class="string">"/oauth2/token"</span>).to_http_request();
-<a href=#2277 id=2277 data-nosnippet>2277</a>        <span class="macro">assert_ne!</span>(
-<a href=#2278 id=2278 data-nosnippet>2278</a>            dpop_htu(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>par),
-<a href=#2279 id=2279 data-nosnippet>2279</a>            dpop_htu(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>token),
-<a href=#2280 id=2280 data-nosnippet>2280</a>            <span class="string">"cross-endpoint replay must still be refused by the htu comparison"
-<a href=#2281 id=2281 data-nosnippet>2281</a>        </span>);
-<a href=#2282 id=2282 data-nosnippet>2282</a>    }
-<a href=#2283 id=2283 data-nosnippet>2283</a>}
+<a href=#2222 id=2222 data-nosnippet>2222</a>            sso_spa_origins: Vec::new(),
+<a href=#2223 id=2223 data-nosnippet>2223</a>            ..AuthConfig::default()
+<a href=#2224 id=2224 data-nosnippet>2224</a>        };
+<a href=#2225 id=2225 data-nosnippet>2225</a>        AppState::for_test(db, auth_config)
+<a href=#2226 id=2226 data-nosnippet>2226</a>    }
+<a href=#2227 id=2227 data-nosnippet>2227</a>
+<a href=#2228 id=2228 data-nosnippet>2228</a>    <span class="doccomment">/// SEC-102. `htu` must be the server's own view of its endpoint, never the
+<a href=#2229 id=2229 data-nosnippet>2229</a>    /// caller's.
+<a href=#2230 id=2230 data-nosnippet>2230</a>    ///
+<a href=#2231 id=2231 data-nosnippet>2231</a>    /// `HttpRequest::full_url()` — what this used to call — takes the
+<a href=#2232 id=2232 data-nosnippet>2232</a>    /// authority from `ConnectionInfo`, which prefers `Forwarded`, then
+<a href=#2233 id=2233 data-nosnippet>2233</a>    /// `X-Forwarded-Host`, then `Host`, and no trusted-proxy layer normalises
+<a href=#2234 id=2234 data-nosnippet>2234</a>    /// any of the three here. With the authority sourced from the request, the
+<a href=#2235 id=2235 data-nosnippet>2235</a>    /// caller chooses **both** sides of RFC 9449 §4.3 step 9's comparison, so
+<a href=#2236 id=2236 data-nosnippet>2236</a>    /// a client phished into signing a proof for
+<a href=#2237 id=2237 data-nosnippet>2237</a>    /// `https://attacker.example/oauth2/token` could have it accepted by
+<a href=#2238 id=2238 data-nosnippet>2238</a>    /// sending a matching `Host`.
+<a href=#2239 id=2239 data-nosnippet>2239</a>    </span><span class="attr">#[actix_web::test]
+<a href=#2240 id=2240 data-nosnippet>2240</a>    </span><span class="kw">async fn </span>htu_ignores_every_request_supplied_authority_header() {
+<a href=#2241 id=2241 data-nosnippet>2241</a>        <span class="kw">let </span>state = state_with_issuer(<span class="string">"https://id.example.test"</span>).<span class="kw">await</span>;
+<a href=#2242 id=2242 data-nosnippet>2242</a>
+<a href=#2243 id=2243 data-nosnippet>2243</a>        <span class="kw">for </span>header <span class="kw">in </span>[<span class="string">"Host"</span>, <span class="string">"X-Forwarded-Host"</span>] {
+<a href=#2244 id=2244 data-nosnippet>2244</a>            <span class="kw">let </span>req = TestRequest::post()
+<a href=#2245 id=2245 data-nosnippet>2245</a>                .uri(<span class="string">"/oauth2/token?tenant_id=x"</span>)
+<a href=#2246 id=2246 data-nosnippet>2246</a>                .insert_header((header, <span class="string">"attacker.example"</span>))
+<a href=#2247 id=2247 data-nosnippet>2247</a>                .to_http_request();
+<a href=#2248 id=2248 data-nosnippet>2248</a>            <span class="macro">assert_eq!</span>(
+<a href=#2249 id=2249 data-nosnippet>2249</a>                dpop_htu(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>req),
+<a href=#2250 id=2250 data-nosnippet>2250</a>                <span class="string">"https://id.example.test/oauth2/token"</span>,
+<a href=#2251 id=2251 data-nosnippet>2251</a>                <span class="string">"the {header} header must not reach htu"
+<a href=#2252 id=2252 data-nosnippet>2252</a>            </span>);
+<a href=#2253 id=2253 data-nosnippet>2253</a>        }
+<a href=#2254 id=2254 data-nosnippet>2254</a>
+<a href=#2255 id=2255 data-nosnippet>2255</a>        <span class="kw">let </span>req = TestRequest::post()
+<a href=#2256 id=2256 data-nosnippet>2256</a>            .uri(<span class="string">"/oauth2/token"</span>)
+<a href=#2257 id=2257 data-nosnippet>2257</a>            .insert_header((<span class="string">"Forwarded"</span>, <span class="string">"host=attacker.example;proto=https"</span>))
+<a href=#2258 id=2258 data-nosnippet>2258</a>            .to_http_request();
+<a href=#2259 id=2259 data-nosnippet>2259</a>        <span class="macro">assert_eq!</span>(
+<a href=#2260 id=2260 data-nosnippet>2260</a>            dpop_htu(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>req),
+<a href=#2261 id=2261 data-nosnippet>2261</a>            <span class="string">"https://id.example.test/oauth2/token"
+<a href=#2262 id=2262 data-nosnippet>2262</a>        </span>);
+<a href=#2263 id=2263 data-nosnippet>2263</a>    }
+<a href=#2264 id=2264 data-nosnippet>2264</a>
+<a href=#2265 id=2265 data-nosnippet>2265</a>    <span class="doccomment">/// The path still comes from the request — that is what keeps a
+<a href=#2266 id=2266 data-nosnippet>2266</a>    /// `/oauth2/par` proof from being replayed at `/oauth2/token` — and the
+<a href=#2267 id=2267 data-nosnippet>2267</a>    /// query string is excluded, which is exactly what RFC 9449 compares.
+<a href=#2268 id=2268 data-nosnippet>2268</a>    </span><span class="attr">#[actix_web::test]
+<a href=#2269 id=2269 data-nosnippet>2269</a>    </span><span class="kw">async fn </span>htu_keeps_the_path_and_drops_the_query() {
+<a href=#2270 id=2270 data-nosnippet>2270</a>        <span class="kw">let </span>state = state_with_issuer(<span class="string">"https://id.example.test/"</span>).<span class="kw">await</span>;
+<a href=#2271 id=2271 data-nosnippet>2271</a>
+<a href=#2272 id=2272 data-nosnippet>2272</a>        <span class="kw">let </span>par = TestRequest::post()
+<a href=#2273 id=2273 data-nosnippet>2273</a>            .uri(<span class="string">"/oauth2/par?tenant_id=00000000-0000-0000-0000-000000000000"</span>)
+<a href=#2274 id=2274 data-nosnippet>2274</a>            .to_http_request();
+<a href=#2275 id=2275 data-nosnippet>2275</a>        <span class="macro">assert_eq!</span>(dpop_htu(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>par), <span class="string">"https://id.example.test/oauth2/par"</span>);
+<a href=#2276 id=2276 data-nosnippet>2276</a>
+<a href=#2277 id=2277 data-nosnippet>2277</a>        <span class="kw">let </span>token = TestRequest::post().uri(<span class="string">"/oauth2/token"</span>).to_http_request();
+<a href=#2278 id=2278 data-nosnippet>2278</a>        <span class="macro">assert_ne!</span>(
+<a href=#2279 id=2279 data-nosnippet>2279</a>            dpop_htu(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>par),
+<a href=#2280 id=2280 data-nosnippet>2280</a>            dpop_htu(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>token),
+<a href=#2281 id=2281 data-nosnippet>2281</a>            <span class="string">"cross-endpoint replay must still be refused by the htu comparison"
+<a href=#2282 id=2282 data-nosnippet>2282</a>        </span>);
+<a href=#2283 id=2283 data-nosnippet>2283</a>    }
+<a href=#2284 id=2284 data-nosnippet>2284</a>}
 </code></pre></div></section></main></body></html>

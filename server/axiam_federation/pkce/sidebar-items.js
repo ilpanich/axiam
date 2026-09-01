@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CHALLENGE_METHOD"],"fn":["challenge_for","generate"],"struct":["PkcePair"]};

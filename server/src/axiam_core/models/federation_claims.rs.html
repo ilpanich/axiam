@@ -1,0 +1,559 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-core/src/models/federation_claims.rs`."><title>federation_claims.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.0 (88d9e12ae 2026-08-18)" data-channel="1.98.0" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_core/models/</div>federation_claims.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Mapping an external identity provider's claims onto an AXIAM user.
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! This module is the fix for the defect where `attribute_map` was collected by
+<a href=#4 id=4 data-nosnippet>4</a>//! the admin UI, stored by the database, and read by nothing: `provision_new_user`
+<a href=#5 id=5 data-nosnippet>5</a>//! took the username and email straight off the `email` claim and the configured
+<a href=#6 id=6 data-nosnippet>6</a>//! map was inert. An operator could write a mapping, save it, see it come back
+<a href=#7 id=7 data-nosnippet>7</a>//! on the next page load, and have it change nothing.
+<a href=#8 id=8 data-nosnippet>8</a>//!
+<a href=#9 id=9 data-nosnippet>9</a>//! It is deliberately **one** mechanism for all three protocols. OIDC ID-token
+<a href=#10 id=10 data-nosnippet>10</a>//! claims, SAML assertion attributes and an OAuth2 userinfo response all arrive
+<a href=#11 id=11 data-nosnippet>11</a>//! here as a `serde_json::Value` object and leave as a [`MappedIdentity`]. A
+<a href=#12 id=12 data-nosnippet>12</a>//! claim-mapping bug should be fixable in one place, and an operator should not
+<a href=#13 id=13 data-nosnippet>13</a>//! have to learn two syntaxes because AXIAM happened to implement two protocols
+<a href=#14 id=14 data-nosnippet>14</a>//! in different years.
+<a href=#15 id=15 data-nosnippet>15</a>//!
+<a href=#16 id=16 data-nosnippet>16</a>//! See `claude_dev/federation-sso-login-design.md` §8.
+<a href=#17 id=17 data-nosnippet>17</a>
+<a href=#18 id=18 data-nosnippet>18</a></span><span class="kw">use </span>serde_json::Value;
+<a href=#19 id=19 data-nosnippet>19</a>
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">use </span><span class="kw">super</span>::federation::ProviderKind;
+<a href=#21 id=21 data-nosnippet>21</a>
+<a href=#22 id=22 data-nosnippet>22</a><span class="doccomment">/// The AXIAM-side fields an attribute map may set.
+<a href=#23 id=23 data-nosnippet>23</a>///
+<a href=#24 id=24 data-nosnippet>24</a>/// A key outside this list is a **validation error** at write time, not a
+<a href=#25 id=25 data-nosnippet>25</a>/// silently ignored one. The whole defect being closed here is a field that
+<a href=#26 id=26 data-nosnippet>26</a>/// looked configured and did nothing; accepting `"e-mail": "mail"` and quietly
+<a href=#27 id=27 data-nosnippet>27</a>/// dropping it would recreate that failure one typo down.
+<a href=#28 id=28 data-nosnippet>28</a></span><span class="kw">pub const </span>ATTRIBUTE_MAP_FIELDS: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str] = <span class="kw-2">&amp;</span>[
+<a href=#29 id=29 data-nosnippet>29</a>    <span class="string">"external_subject"</span>,
+<a href=#30 id=30 data-nosnippet>30</a>    <span class="string">"username"</span>,
+<a href=#31 id=31 data-nosnippet>31</a>    <span class="string">"email"</span>,
+<a href=#32 id=32 data-nosnippet>32</a>    <span class="string">"email_verified"</span>,
+<a href=#33 id=33 data-nosnippet>33</a>    <span class="string">"display_name"</span>,
+<a href=#34 id=34 data-nosnippet>34</a>];
+<a href=#35 id=35 data-nosnippet>35</a>
+<a href=#36 id=36 data-nosnippet>36</a><span class="doccomment">/// Keys AXIAM used to accept, and the field each one now means, **in
+<a href=#37 id=37 data-nosnippet>37</a>/// precedence order**.
+<a href=#38 id=38 data-nosnippet>38</a>///
+<a href=#39 id=39 data-nosnippet>39</a>/// The SAML path shipped before this module existed and read `"name"` (falling
+<a href=#40 id=40 data-nosnippet>40</a>/// back to `"displayName"`) as the display name. Refusing those keys outright
+<a href=#41 id=41 data-nosnippet>41</a>/// would turn an existing, working SAML config into one that cannot be saved —
+<a href=#42 id=42 data-nosnippet>42</a>/// an operator opening the edit dialog to change something unrelated would be
+<a href=#43 id=43 data-nosnippet>43</a>/// told their attribute map is invalid. They are accepted, canonicalised, and
+<a href=#44 id=44 data-nosnippet>44</a>/// deliberately absent from [`ATTRIBUTE_MAP_FIELDS`] so the admin UI offers only
+<a href=#45 id=45 data-nosnippet>45</a>/// the current names to anyone writing a new one.
+<a href=#46 id=46 data-nosnippet>46</a>///
+<a href=#47 id=47 data-nosnippet>47</a>/// Order is load-bearing: the SAML path read `name` *before* `displayName`, and
+<a href=#48 id=48 data-nosnippet>48</a>/// a config that sets both must keep resolving to the same attribute it did
+<a href=#49 id=49 data-nosnippet>49</a>/// before this table existed.
+<a href=#50 id=50 data-nosnippet>50</a></span><span class="kw">pub const </span>ATTRIBUTE_MAP_ALIASES: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)] =
+<a href=#51 id=51 data-nosnippet>51</a>    <span class="kw-2">&amp;</span>[(<span class="string">"name"</span>, <span class="string">"display_name"</span>), (<span class="string">"displayName"</span>, <span class="string">"display_name"</span>)];
+<a href=#52 id=52 data-nosnippet>52</a>
+<a href=#53 id=53 data-nosnippet>53</a><span class="doccomment">/// The AXIAM field a map key names, accepting the deprecated aliases.
+<a href=#54 id=54 data-nosnippet>54</a></span><span class="kw">pub fn </span>canonical_field(key: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt; {
+<a href=#55 id=55 data-nosnippet>55</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(f) = ATTRIBUTE_MAP_FIELDS.iter().find(|f| <span class="kw-2">**</span>f == key) {
+<a href=#56 id=56 data-nosnippet>56</a>        <span class="kw">return </span><span class="prelude-val">Some</span>(f);
+<a href=#57 id=57 data-nosnippet>57</a>    }
+<a href=#58 id=58 data-nosnippet>58</a>    ATTRIBUTE_MAP_ALIASES
+<a href=#59 id=59 data-nosnippet>59</a>        .iter()
+<a href=#60 id=60 data-nosnippet>60</a>        .find(|(alias, <span class="kw">_</span>)| <span class="kw-2">*</span>alias == key)
+<a href=#61 id=61 data-nosnippet>61</a>        .map(|(<span class="kw">_</span>, field)| <span class="kw-2">*</span>field)
+<a href=#62 id=62 data-nosnippet>62</a>}
+<a href=#63 id=63 data-nosnippet>63</a>
+<a href=#64 id=64 data-nosnippet>64</a><span class="doccomment">/// Prefix marking a mapping value as a literal rather than a claim path.
+<a href=#65 id=65 data-nosnippet>65</a>///
+<a href=#66 id=66 data-nosnippet>66</a>/// `{"email_verified": "@true"}` states "I accept this provider's unflagged
+<a href=#67 id=67 data-nosnippet>67</a>/// email as verified" in a place that shows up in an audit diff, rather than
+<a href=#68 id=68 data-nosnippet>68</a>/// AXIAM making that decision silently on the operator's behalf.
+<a href=#69 id=69 data-nosnippet>69</a></span><span class="kw">pub const </span>LITERAL_PREFIX: char = <span class="string">'@'</span>;
+<a href=#70 id=70 data-nosnippet>70</a>
+<a href=#71 id=71 data-nosnippet>71</a><span class="doccomment">/// Bound on the number of entries in an attribute map.
+<a href=#72 id=72 data-nosnippet>72</a>///
+<a href=#73 id=73 data-nosnippet>73</a>/// Not tidiness: the map is walked once per federated login, so an unbounded
+<a href=#74 id=74 data-nosnippet>74</a>/// map is an unbounded per-login cost an admin can set. Five recognised fields
+<a href=#75 id=75 data-nosnippet>75</a>/// makes anything past a handful a mistake anyway.
+<a href=#76 id=76 data-nosnippet>76</a></span><span class="kw">pub const </span>MAX_ATTRIBUTE_MAP_ENTRIES: usize = <span class="number">32</span>;
+<a href=#77 id=77 data-nosnippet>77</a>
+<a href=#78 id=78 data-nosnippet>78</a><span class="doccomment">/// Why a submitted `attribute_map` was refused.
+<a href=#79 id=79 data-nosnippet>79</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#80 id=80 data-nosnippet>80</a></span><span class="kw">pub enum </span>AttributeMapError {
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="doccomment">/// The map was not a JSON object.
+<a href=#82 id=82 data-nosnippet>82</a>    </span>NotAnObject,
+<a href=#83 id=83 data-nosnippet>83</a>    <span class="doccomment">/// The map names an AXIAM field that does not exist.
+<a href=#84 id=84 data-nosnippet>84</a>    </span>UnknownField(String),
+<a href=#85 id=85 data-nosnippet>85</a>    <span class="doccomment">/// A value was not a string (paths and literals are both strings).
+<a href=#86 id=86 data-nosnippet>86</a>    </span>NonStringValue(String),
+<a href=#87 id=87 data-nosnippet>87</a>    <span class="doccomment">/// A value was empty, or a literal with nothing after the `@`.
+<a href=#88 id=88 data-nosnippet>88</a>    </span>EmptyValue(String),
+<a href=#89 id=89 data-nosnippet>89</a>    <span class="doccomment">/// Too many entries.
+<a href=#90 id=90 data-nosnippet>90</a>    </span>TooManyEntries(usize),
+<a href=#91 id=91 data-nosnippet>91</a>}
+<a href=#92 id=92 data-nosnippet>92</a>
+<a href=#93 id=93 data-nosnippet>93</a><span class="kw">impl </span>std::fmt::Display <span class="kw">for </span>AttributeMapError {
+<a href=#94 id=94 data-nosnippet>94</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
+<a href=#95 id=95 data-nosnippet>95</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#96 id=96 data-nosnippet>96</a>            <span class="self">Self</span>::NotAnObject =&gt; <span class="macro">write!</span>(f, <span class="string">"attribute_map must be a JSON object"</span>),
+<a href=#97 id=97 data-nosnippet>97</a>            <span class="self">Self</span>::UnknownField(k) =&gt; <span class="macro">write!</span>(
+<a href=#98 id=98 data-nosnippet>98</a>                f,
+<a href=#99 id=99 data-nosnippet>99</a>                <span class="string">"attribute_map key '{k}' is not an AXIAM user field; the recognised \
+<a href=#100 id=100 data-nosnippet>100</a>                 keys are {}"</span>,
+<a href=#101 id=101 data-nosnippet>101</a>                ATTRIBUTE_MAP_FIELDS.join(<span class="string">", "</span>)
+<a href=#102 id=102 data-nosnippet>102</a>            ),
+<a href=#103 id=103 data-nosnippet>103</a>            <span class="self">Self</span>::NonStringValue(k) =&gt; <span class="macro">write!</span>(
+<a href=#104 id=104 data-nosnippet>104</a>                f,
+<a href=#105 id=105 data-nosnippet>105</a>                <span class="string">"attribute_map entry '{k}' must be a string — either a claim path \
+<a href=#106 id=106 data-nosnippet>106</a>                 like 'user.email' or a literal like '@true'"
+<a href=#107 id=107 data-nosnippet>107</a>            </span>),
+<a href=#108 id=108 data-nosnippet>108</a>            <span class="self">Self</span>::EmptyValue(k) =&gt; {
+<a href=#109 id=109 data-nosnippet>109</a>                <span class="macro">write!</span>(f, <span class="string">"attribute_map entry '{k}' is empty; remove it instead"</span>)
+<a href=#110 id=110 data-nosnippet>110</a>            }
+<a href=#111 id=111 data-nosnippet>111</a>            <span class="self">Self</span>::TooManyEntries(n) =&gt; <span class="macro">write!</span>(
+<a href=#112 id=112 data-nosnippet>112</a>                f,
+<a href=#113 id=113 data-nosnippet>113</a>                <span class="string">"attribute_map has {n} entries; the maximum is {MAX_ATTRIBUTE_MAP_ENTRIES}"
+<a href=#114 id=114 data-nosnippet>114</a>            </span>),
+<a href=#115 id=115 data-nosnippet>115</a>        }
+<a href=#116 id=116 data-nosnippet>116</a>    }
+<a href=#117 id=117 data-nosnippet>117</a>}
+<a href=#118 id=118 data-nosnippet>118</a>
+<a href=#119 id=119 data-nosnippet>119</a><span class="doccomment">/// Reject an attribute map that cannot be applied.
+<a href=#120 id=120 data-nosnippet>120</a>///
+<a href=#121 id=121 data-nosnippet>121</a>/// An absent map (`null`) and an empty object are both fine and both mean
+<a href=#122 id=122 data-nosnippet>122</a>/// "use the per-kind defaults".
+<a href=#123 id=123 data-nosnippet>123</a></span><span class="kw">pub fn </span>validate_attribute_map(map: <span class="kw-2">&amp;</span>Value) -&gt; <span class="prelude-ty">Result</span>&lt;(), AttributeMapError&gt; {
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="kw">if </span>map.is_null() {
+<a href=#125 id=125 data-nosnippet>125</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#126 id=126 data-nosnippet>126</a>    }
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(obj) = map.as_object() <span class="kw">else </span>{
+<a href=#128 id=128 data-nosnippet>128</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AttributeMapError::NotAnObject);
+<a href=#129 id=129 data-nosnippet>129</a>    };
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="kw">if </span>obj.len() &gt; MAX_ATTRIBUTE_MAP_ENTRIES {
+<a href=#131 id=131 data-nosnippet>131</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AttributeMapError::TooManyEntries(obj.len()));
+<a href=#132 id=132 data-nosnippet>132</a>    }
+<a href=#133 id=133 data-nosnippet>133</a>    <span class="kw">for </span>(key, value) <span class="kw">in </span>obj {
+<a href=#134 id=134 data-nosnippet>134</a>        <span class="kw">if </span>canonical_field(key).is_none() {
+<a href=#135 id=135 data-nosnippet>135</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AttributeMapError::UnknownField(key.clone()));
+<a href=#136 id=136 data-nosnippet>136</a>        }
+<a href=#137 id=137 data-nosnippet>137</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(raw) = value.as_str() <span class="kw">else </span>{
+<a href=#138 id=138 data-nosnippet>138</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AttributeMapError::NonStringValue(key.clone()));
+<a href=#139 id=139 data-nosnippet>139</a>        };
+<a href=#140 id=140 data-nosnippet>140</a>        <span class="kw">let </span>trimmed = raw.trim();
+<a href=#141 id=141 data-nosnippet>141</a>        <span class="kw">if </span>trimmed.is_empty() || trimmed == LITERAL_PREFIX.to_string() {
+<a href=#142 id=142 data-nosnippet>142</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AttributeMapError::EmptyValue(key.clone()));
+<a href=#143 id=143 data-nosnippet>143</a>        }
+<a href=#144 id=144 data-nosnippet>144</a>    }
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="prelude-val">Ok</span>(())
+<a href=#146 id=146 data-nosnippet>146</a>}
+<a href=#147 id=147 data-nosnippet>147</a>
+<a href=#148 id=148 data-nosnippet>148</a><span class="doccomment">/// The per-kind default mapping, as `(axiam_field, claim_path)` pairs.
+<a href=#149 id=149 data-nosnippet>149</a>///
+<a href=#150 id=150 data-nosnippet>150</a>/// The OIDC rows reproduce `provision_new_user`'s pre-existing behaviour
+<a href=#151 id=151 data-nosnippet>151</a>/// exactly — username from `email`, email from `email` — so an existing Google
+<a href=#152 id=152 data-nosnippet>152</a>/// config behaves identically before and after this change. That is asserted by
+<a href=#153 id=153 data-nosnippet>153</a>/// a test, not merely intended.
+<a href=#154 id=154 data-nosnippet>154</a></span><span class="kw">pub fn </span>default_attribute_map(kind: ProviderKind) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>[(<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str)] {
+<a href=#155 id=155 data-nosnippet>155</a>    <span class="kw">match </span>kind {
+<a href=#156 id=156 data-nosnippet>156</a>        ProviderKind::Github =&gt; <span class="kw-2">&amp;</span>[
+<a href=#157 id=157 data-nosnippet>157</a>            <span class="comment">// GitHub's numeric `id` is the stable subject; `login` is renameable
+<a href=#158 id=158 data-nosnippet>158</a>            // and must never be the identity key.
+<a href=#159 id=159 data-nosnippet>159</a>            </span>(<span class="string">"external_subject"</span>, <span class="string">"id"</span>),
+<a href=#160 id=160 data-nosnippet>160</a>            (<span class="string">"username"</span>, <span class="string">"login"</span>),
+<a href=#161 id=161 data-nosnippet>161</a>            <span class="comment">// Injected by the GitHub path from `GET /user/emails` — see
+<a href=#162 id=162 data-nosnippet>162</a>            // `MappedIdentity`'s doc comment.
+<a href=#163 id=163 data-nosnippet>163</a>            </span>(<span class="string">"email"</span>, <span class="string">"email"</span>),
+<a href=#164 id=164 data-nosnippet>164</a>            (<span class="string">"email_verified"</span>, <span class="string">"email_verified"</span>),
+<a href=#165 id=165 data-nosnippet>165</a>            (<span class="string">"display_name"</span>, <span class="string">"name"</span>),
+<a href=#166 id=166 data-nosnippet>166</a>        ],
+<a href=#167 id=167 data-nosnippet>167</a>        ProviderKind::Facebook =&gt; <span class="kw-2">&amp;</span>[
+<a href=#168 id=168 data-nosnippet>168</a>            (<span class="string">"external_subject"</span>, <span class="string">"id"</span>),
+<a href=#169 id=169 data-nosnippet>169</a>            (<span class="string">"username"</span>, <span class="string">"email"</span>),
+<a href=#170 id=170 data-nosnippet>170</a>            (<span class="string">"email"</span>, <span class="string">"email"</span>),
+<a href=#171 id=171 data-nosnippet>171</a>            <span class="comment">// Deliberately no `email_verified` entry: the Graph API carries no
+<a href=#172 id=172 data-nosnippet>172</a>            // verification flag, so absent reads as unverified and the login is
+<a href=#173 id=173 data-nosnippet>173</a>            // refused unless the operator writes `"email_verified": "@true"`.
+<a href=#174 id=174 data-nosnippet>174</a>            </span>(<span class="string">"display_name"</span>, <span class="string">"name"</span>),
+<a href=#175 id=175 data-nosnippet>175</a>        ],
+<a href=#176 id=176 data-nosnippet>176</a>        ProviderKind::GenericSaml =&gt; <span class="kw-2">&amp;</span>[
+<a href=#177 id=177 data-nosnippet>177</a>            (<span class="string">"external_subject"</span>, <span class="string">"sub"</span>),
+<a href=#178 id=178 data-nosnippet>178</a>            (<span class="string">"username"</span>, <span class="string">"email"</span>),
+<a href=#179 id=179 data-nosnippet>179</a>            (<span class="string">"email"</span>, <span class="string">"email"</span>),
+<a href=#180 id=180 data-nosnippet>180</a>            (<span class="string">"display_name"</span>, <span class="string">"displayName"</span>),
+<a href=#181 id=181 data-nosnippet>181</a>        ],
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="comment">// Google, Microsoft, Apple, generic OIDC and generic OAuth2 all use the
+<a href=#183 id=183 data-nosnippet>183</a>        // standard OIDC claim names.
+<a href=#184 id=184 data-nosnippet>184</a>        </span><span class="kw">_ </span>=&gt; <span class="kw-2">&amp;</span>[
+<a href=#185 id=185 data-nosnippet>185</a>            (<span class="string">"external_subject"</span>, <span class="string">"sub"</span>),
+<a href=#186 id=186 data-nosnippet>186</a>            (<span class="string">"username"</span>, <span class="string">"email"</span>),
+<a href=#187 id=187 data-nosnippet>187</a>            (<span class="string">"email"</span>, <span class="string">"email"</span>),
+<a href=#188 id=188 data-nosnippet>188</a>            (<span class="string">"email_verified"</span>, <span class="string">"email_verified"</span>),
+<a href=#189 id=189 data-nosnippet>189</a>            (<span class="string">"display_name"</span>, <span class="string">"name"</span>),
+<a href=#190 id=190 data-nosnippet>190</a>        ],
+<a href=#191 id=191 data-nosnippet>191</a>    }
+<a href=#192 id=192 data-nosnippet>192</a>}
+<a href=#193 id=193 data-nosnippet>193</a>
+<a href=#194 id=194 data-nosnippet>194</a><span class="doccomment">/// What an external identity resolved to, before any AXIAM user exists.
+<a href=#195 id=195 data-nosnippet>195</a>///
+<a href=#196 id=196 data-nosnippet>196</a>/// `email` and `email_verified` travel together on purpose. An email the
+<a href=#197 id=197 data-nosnippet>197</a>/// provider has not affirmatively marked verified is never adopted as an AXIAM
+<a href=#198 id=198 data-nosnippet>198</a>/// identity: AXIAM keys account recovery, verification and administrative
+<a href=#199 id=199 data-nosnippet>199</a>/// notification on the address, and adopting an unverified one is account
+<a href=#200 id=200 data-nosnippet>200</a>/// takeover by whoever typed it into the provider first.
+<a href=#201 id=201 data-nosnippet>201</a>///
+<a href=#202 id=202 data-nosnippet>202</a>/// For GitHub, `GET /user` frequently returns a null or unverified `email`, so
+<a href=#203 id=203 data-nosnippet>203</a>/// the GitHub path resolves the primary **verified** address from
+<a href=#204 id=204 data-nosnippet>204</a>/// `GET /user/emails` and writes it into the userinfo object under the ordinary
+<a href=#205 id=205 data-nosnippet>205</a>/// `email` / `email_verified` keys before mapping runs. That keeps one syntax:
+<a href=#206 id=206 data-nosnippet>206</a>/// a default map and an operator's custom map both name `email`.
+<a href=#207 id=207 data-nosnippet>207</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#208 id=208 data-nosnippet>208</a></span><span class="kw">pub struct </span>MappedIdentity {
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="doccomment">/// The external subject identifier. Without it there is no identity, which
+<a href=#210 id=210 data-nosnippet>210</a>    /// is why [`map_identity`] returns `None` rather than a partial result.
+<a href=#211 id=211 data-nosnippet>211</a>    </span><span class="kw">pub </span>external_subject: String,
+<a href=#212 id=212 data-nosnippet>212</a>    <span class="doccomment">/// Preferred username, if the provider supplied one.
+<a href=#213 id=213 data-nosnippet>213</a>    </span><span class="kw">pub </span>username: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#214 id=214 data-nosnippet>214</a>    <span class="doccomment">/// Email address, if the provider supplied one.
+<a href=#215 id=215 data-nosnippet>215</a>    </span><span class="kw">pub </span>email: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#216 id=216 data-nosnippet>216</a>    <span class="doccomment">/// Whether the provider affirmatively said the address is verified.
+<a href=#217 id=217 data-nosnippet>217</a>    /// Absent, null or falsey all read as `false`.
+<a href=#218 id=218 data-nosnippet>218</a>    </span><span class="kw">pub </span>email_verified: bool,
+<a href=#219 id=219 data-nosnippet>219</a>    <span class="doccomment">/// Human-readable name, if supplied. Stored in the user's `metadata` —
+<a href=#220 id=220 data-nosnippet>220</a>    /// `User` has no column for it.
+<a href=#221 id=221 data-nosnippet>221</a>    </span><span class="kw">pub </span>display_name: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#222 id=222 data-nosnippet>222</a>}
+<a href=#223 id=223 data-nosnippet>223</a>
+<a href=#224 id=224 data-nosnippet>224</a><span class="doccomment">/// Resolve one AXIAM field from the map (or the per-kind default), against a
+<a href=#225 id=225 data-nosnippet>225</a>/// claims object.
+<a href=#226 id=226 data-nosnippet>226</a>///
+<a href=#227 id=227 data-nosnippet>227</a>/// Returns `None` when the field has no mapping, when the path is absent from
+<a href=#228 id=228 data-nosnippet>228</a>/// the claims, or when the value present is not something a string can be made
+<a href=#229 id=229 data-nosnippet>229</a>/// of (an array or an object).
+<a href=#230 id=230 data-nosnippet>230</a></span><span class="kw">pub fn </span>resolve_field(
+<a href=#231 id=231 data-nosnippet>231</a>    kind: ProviderKind,
+<a href=#232 id=232 data-nosnippet>232</a>    attribute_map: <span class="kw-2">&amp;</span>Value,
+<a href=#233 id=233 data-nosnippet>233</a>    claims: <span class="kw-2">&amp;</span>Value,
+<a href=#234 id=234 data-nosnippet>234</a>    field: <span class="kw-2">&amp;</span>str,
+<a href=#235 id=235 data-nosnippet>235</a>) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#236 id=236 data-nosnippet>236</a>    <span class="comment">// The canonical name first, then each deprecated alias in the table's own
+<a href=#237 id=237 data-nosnippet>237</a>    // order. Iterating the JSON object instead would make precedence depend on
+<a href=#238 id=238 data-nosnippet>238</a>    // key ordering — which for `serde_json`'s default map is alphabetical, and
+<a href=#239 id=239 data-nosnippet>239</a>    // would silently flip `name` and `displayName` for every SAML config that
+<a href=#240 id=240 data-nosnippet>240</a>    // sets both.
+<a href=#241 id=241 data-nosnippet>241</a>    </span><span class="kw">let </span>configured = std::iter::once(field)
+<a href=#242 id=242 data-nosnippet>242</a>        .chain(
+<a href=#243 id=243 data-nosnippet>243</a>            ATTRIBUTE_MAP_ALIASES
+<a href=#244 id=244 data-nosnippet>244</a>                .iter()
+<a href=#245 id=245 data-nosnippet>245</a>                .filter(|(<span class="kw">_</span>, f)| <span class="kw-2">*</span>f == field)
+<a href=#246 id=246 data-nosnippet>246</a>                .map(|(alias, <span class="kw">_</span>)| <span class="kw-2">*</span>alias),
+<a href=#247 id=247 data-nosnippet>247</a>        )
+<a href=#248 id=248 data-nosnippet>248</a>        .find_map(|key| attribute_map.get(key).and_then(Value::as_str))
+<a href=#249 id=249 data-nosnippet>249</a>        .map(str::trim)
+<a href=#250 id=250 data-nosnippet>250</a>        .filter(|s| !s.is_empty());
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a>    <span class="kw">let </span>path = <span class="kw">match </span>configured {
+<a href=#253 id=253 data-nosnippet>253</a>        <span class="prelude-val">Some</span>(p) =&gt; p,
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="prelude-val">None </span>=&gt; default_attribute_map(kind)
+<a href=#255 id=255 data-nosnippet>255</a>            .iter()
+<a href=#256 id=256 data-nosnippet>256</a>            .find(|(f, <span class="kw">_</span>)| <span class="kw-2">*</span>f == field)
+<a href=#257 id=257 data-nosnippet>257</a>            .map(|(<span class="kw">_</span>, p)| <span class="kw-2">*</span>p)<span class="question-mark">?</span>,
+<a href=#258 id=258 data-nosnippet>258</a>    };
+<a href=#259 id=259 data-nosnippet>259</a>
+<a href=#260 id=260 data-nosnippet>260</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(literal) = path.strip_prefix(LITERAL_PREFIX) {
+<a href=#261 id=261 data-nosnippet>261</a>        <span class="kw">let </span>literal = literal.trim();
+<a href=#262 id=262 data-nosnippet>262</a>        <span class="kw">return </span>(!literal.is_empty()).then(|| literal.to_string());
+<a href=#263 id=263 data-nosnippet>263</a>    }
+<a href=#264 id=264 data-nosnippet>264</a>
+<a href=#265 id=265 data-nosnippet>265</a>    lookup_path(claims, path).and_then(stringify_claim)
+<a href=#266 id=266 data-nosnippet>266</a>}
+<a href=#267 id=267 data-nosnippet>267</a>
+<a href=#268 id=268 data-nosnippet>268</a><span class="doccomment">/// Look a claim path up in a claims object.
+<a href=#269 id=269 data-nosnippet>269</a>///
+<a href=#270 id=270 data-nosnippet>270</a>/// The **whole path is tried as a single key first**, and that ordering is
+<a href=#271 id=271 data-nosnippet>271</a>/// load-bearing rather than an optimisation: SAML attribute names are routinely
+<a href=#272 id=272 data-nosnippet>272</a>/// OIDs like `urn:oid:0.9.2342.19200300.100.1.3`, which contain dots and are not
+<a href=#273 id=273 data-nosnippet>273</a>/// nested paths. Only if no such key exists is the value split on `.` and walked
+<a href=#274 id=274 data-nosnippet>274</a>/// as a path, which is what makes `user.email` work for a nested userinfo
+<a href=#275 id=275 data-nosnippet>275</a>/// response.
+<a href=#276 id=276 data-nosnippet>276</a></span><span class="kw">pub fn </span>lookup_path&lt;<span class="lifetime">'a</span>&gt;(claims: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>Value, path: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'a </span>Value&gt; {
+<a href=#277 id=277 data-nosnippet>277</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(direct) = claims.get(path) {
+<a href=#278 id=278 data-nosnippet>278</a>        <span class="kw">return </span><span class="prelude-val">Some</span>(direct);
+<a href=#279 id=279 data-nosnippet>279</a>    }
+<a href=#280 id=280 data-nosnippet>280</a>    <span class="kw">if </span>!path.contains(<span class="string">'.'</span>) {
+<a href=#281 id=281 data-nosnippet>281</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#282 id=282 data-nosnippet>282</a>    }
+<a href=#283 id=283 data-nosnippet>283</a>    <span class="kw">let </span><span class="kw-2">mut </span>cursor = claims;
+<a href=#284 id=284 data-nosnippet>284</a>    <span class="kw">for </span>segment <span class="kw">in </span>path.split(<span class="string">'.'</span>) {
+<a href=#285 id=285 data-nosnippet>285</a>        cursor = cursor.get(segment)<span class="question-mark">?</span>;
+<a href=#286 id=286 data-nosnippet>286</a>    }
+<a href=#287 id=287 data-nosnippet>287</a>    <span class="prelude-val">Some</span>(cursor)
+<a href=#288 id=288 data-nosnippet>288</a>}
+<a href=#289 id=289 data-nosnippet>289</a>
+<a href=#290 id=290 data-nosnippet>290</a><span class="doccomment">/// Coerce a claim value to a string.
+<a href=#291 id=291 data-nosnippet>291</a>///
+<a href=#292 id=292 data-nosnippet>292</a>/// Strings, numbers and booleans convert; arrays, objects and null do not.
+<a href=#293 id=293 data-nosnippet>293</a>/// GitHub's `id` is a JSON number and is a subject identifier, so numbers must
+<a href=#294 id=294 data-nosnippet>294</a>/// convert or GitHub has no `external_subject`.
+<a href=#295 id=295 data-nosnippet>295</a></span><span class="kw">fn </span>stringify_claim(value: <span class="kw-2">&amp;</span>Value) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#296 id=296 data-nosnippet>296</a>    <span class="kw">match </span>value {
+<a href=#297 id=297 data-nosnippet>297</a>        Value::String(s) =&gt; {
+<a href=#298 id=298 data-nosnippet>298</a>            <span class="kw">let </span>t = s.trim();
+<a href=#299 id=299 data-nosnippet>299</a>            (!t.is_empty()).then(|| t.to_string())
+<a href=#300 id=300 data-nosnippet>300</a>        }
+<a href=#301 id=301 data-nosnippet>301</a>        Value::Number(n) =&gt; <span class="prelude-val">Some</span>(n.to_string()),
+<a href=#302 id=302 data-nosnippet>302</a>        Value::Bool(b) =&gt; <span class="prelude-val">Some</span>(b.to_string()),
+<a href=#303 id=303 data-nosnippet>303</a>        Value::Null | Value::Array(<span class="kw">_</span>) | Value::Object(<span class="kw">_</span>) =&gt; <span class="prelude-val">None</span>,
+<a href=#304 id=304 data-nosnippet>304</a>    }
+<a href=#305 id=305 data-nosnippet>305</a>}
+<a href=#306 id=306 data-nosnippet>306</a>
+<a href=#307 id=307 data-nosnippet>307</a><span class="doccomment">/// Whether a resolved `email_verified` value means "verified".
+<a href=#308 id=308 data-nosnippet>308</a>///
+<a href=#309 id=309 data-nosnippet>309</a>/// Deliberately narrow. `true`, `"true"` and `1` are affirmative; everything
+<a href=#310 id=310 data-nosnippet>310</a>/// else — including absent, `null`, `"unknown"` and `0` — is not. A provider
+<a href=#311 id=311 data-nosnippet>311</a>/// that does not say yes has not said yes.
+<a href=#312 id=312 data-nosnippet>312</a></span><span class="kw">fn </span>is_affirmative(raw: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#313 id=313 data-nosnippet>313</a>    <span class="macro">matches!</span>(raw.trim().to_ascii_lowercase().as_str(), <span class="string">"true" </span>| <span class="string">"1"</span>)
+<a href=#314 id=314 data-nosnippet>314</a>}
+<a href=#315 id=315 data-nosnippet>315</a>
+<a href=#316 id=316 data-nosnippet>316</a><span class="doccomment">/// Map a provider's claims onto an AXIAM identity.
+<a href=#317 id=317 data-nosnippet>317</a>///
+<a href=#318 id=318 data-nosnippet>318</a>/// Returns `None` when no `external_subject` can be resolved. There is no
+<a href=#319 id=319 data-nosnippet>319</a>/// partial success here: an identity with no subject is not an identity, and
+<a href=#320 id=320 data-nosnippet>320</a>/// falling back to some other field would silently key the account on something
+<a href=#321 id=321 data-nosnippet>321</a>/// the provider is free to let the user change.
+<a href=#322 id=322 data-nosnippet>322</a></span><span class="kw">pub fn </span>map_identity(
+<a href=#323 id=323 data-nosnippet>323</a>    kind: ProviderKind,
+<a href=#324 id=324 data-nosnippet>324</a>    attribute_map: <span class="kw-2">&amp;</span>Value,
+<a href=#325 id=325 data-nosnippet>325</a>    claims: <span class="kw-2">&amp;</span>Value,
+<a href=#326 id=326 data-nosnippet>326</a>) -&gt; <span class="prelude-ty">Option</span>&lt;MappedIdentity&gt; {
+<a href=#327 id=327 data-nosnippet>327</a>    <span class="kw">let </span>external_subject = resolve_field(kind, attribute_map, claims, <span class="string">"external_subject"</span>)<span class="question-mark">?</span>;
+<a href=#328 id=328 data-nosnippet>328</a>    <span class="prelude-val">Some</span>(MappedIdentity {
+<a href=#329 id=329 data-nosnippet>329</a>        external_subject,
+<a href=#330 id=330 data-nosnippet>330</a>        username: resolve_field(kind, attribute_map, claims, <span class="string">"username"</span>),
+<a href=#331 id=331 data-nosnippet>331</a>        email: resolve_field(kind, attribute_map, claims, <span class="string">"email"</span>),
+<a href=#332 id=332 data-nosnippet>332</a>        email_verified: resolve_field(kind, attribute_map, claims, <span class="string">"email_verified"</span>)
+<a href=#333 id=333 data-nosnippet>333</a>            .as_deref()
+<a href=#334 id=334 data-nosnippet>334</a>            .is_some_and(is_affirmative),
+<a href=#335 id=335 data-nosnippet>335</a>        display_name: resolve_field(kind, attribute_map, claims, <span class="string">"display_name"</span>),
+<a href=#336 id=336 data-nosnippet>336</a>    })
+<a href=#337 id=337 data-nosnippet>337</a>}
+<a href=#338 id=338 data-nosnippet>338</a>
+<a href=#339 id=339 data-nosnippet>339</a><span class="attr">#[cfg(test)]
+<a href=#340 id=340 data-nosnippet>340</a></span><span class="kw">mod </span>tests {
+<a href=#341 id=341 data-nosnippet>341</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="kw">use </span>serde_json::json;
+<a href=#343 id=343 data-nosnippet>343</a>
+<a href=#344 id=344 data-nosnippet>344</a>    <span class="kw">fn </span>google_claims() -&gt; Value {
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="macro">json!</span>({
+<a href=#346 id=346 data-nosnippet>346</a>            <span class="string">"sub"</span>: <span class="string">"108371829371"</span>,
+<a href=#347 id=347 data-nosnippet>347</a>            <span class="string">"email"</span>: <span class="string">"ada@example.com"</span>,
+<a href=#348 id=348 data-nosnippet>348</a>            <span class="string">"email_verified"</span>: <span class="bool-val">true</span>,
+<a href=#349 id=349 data-nosnippet>349</a>            <span class="string">"name"</span>: <span class="string">"Ada Lovelace"</span>,
+<a href=#350 id=350 data-nosnippet>350</a>        })
+<a href=#351 id=351 data-nosnippet>351</a>    }
+<a href=#352 id=352 data-nosnippet>352</a>
+<a href=#353 id=353 data-nosnippet>353</a>    <span class="doccomment">/// The headline compatibility property: with no map configured, an OIDC
+<a href=#354 id=354 data-nosnippet>354</a>    /// config produces exactly what `provision_new_user` produced before this
+<a href=#355 id=355 data-nosnippet>355</a>    /// module existed — username and email both from the `email` claim.
+<a href=#356 id=356 data-nosnippet>356</a>    </span><span class="attr">#[test]
+<a href=#357 id=357 data-nosnippet>357</a>    </span><span class="kw">fn </span>an_empty_map_reproduces_the_previous_oidc_behaviour() {
+<a href=#358 id=358 data-nosnippet>358</a>        <span class="kw">let </span>m = map_identity(ProviderKind::Google, <span class="kw-2">&amp;</span><span class="macro">json!</span>({}), <span class="kw-2">&amp;</span>google_claims()).unwrap();
+<a href=#359 id=359 data-nosnippet>359</a>        <span class="macro">assert_eq!</span>(m.external_subject, <span class="string">"108371829371"</span>);
+<a href=#360 id=360 data-nosnippet>360</a>        <span class="macro">assert_eq!</span>(m.username.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"ada@example.com"</span>));
+<a href=#361 id=361 data-nosnippet>361</a>        <span class="macro">assert_eq!</span>(m.email.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"ada@example.com"</span>));
+<a href=#362 id=362 data-nosnippet>362</a>        <span class="macro">assert!</span>(m.email_verified);
+<a href=#363 id=363 data-nosnippet>363</a>        <span class="macro">assert_eq!</span>(m.display_name.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"Ada Lovelace"</span>));
+<a href=#364 id=364 data-nosnippet>364</a>    }
+<a href=#365 id=365 data-nosnippet>365</a>
+<a href=#366 id=366 data-nosnippet>366</a>    <span class="doccomment">/// …and a `null` map (the shape a row with no attribute_map hydrates to)
+<a href=#367 id=367 data-nosnippet>367</a>    /// behaves identically to an empty object.
+<a href=#368 id=368 data-nosnippet>368</a>    </span><span class="attr">#[test]
+<a href=#369 id=369 data-nosnippet>369</a>    </span><span class="kw">fn </span>a_null_map_is_the_same_as_an_empty_one() {
+<a href=#370 id=370 data-nosnippet>370</a>        <span class="macro">assert_eq!</span>(
+<a href=#371 id=371 data-nosnippet>371</a>            map_identity(ProviderKind::Google, <span class="kw-2">&amp;</span>Value::Null, <span class="kw-2">&amp;</span>google_claims()),
+<a href=#372 id=372 data-nosnippet>372</a>            map_identity(ProviderKind::Google, <span class="kw-2">&amp;</span><span class="macro">json!</span>({}), <span class="kw-2">&amp;</span>google_claims()),
+<a href=#373 id=373 data-nosnippet>373</a>        );
+<a href=#374 id=374 data-nosnippet>374</a>    }
+<a href=#375 id=375 data-nosnippet>375</a>
+<a href=#376 id=376 data-nosnippet>376</a>    <span class="attr">#[test]
+<a href=#377 id=377 data-nosnippet>377</a>    </span><span class="kw">fn </span>a_configured_map_overrides_the_default() {
+<a href=#378 id=378 data-nosnippet>378</a>        <span class="kw">let </span>map = <span class="macro">json!</span>({<span class="string">"username"</span>: <span class="string">"preferred_username"</span>, <span class="string">"display_name"</span>: <span class="string">"given_name"</span>});
+<a href=#379 id=379 data-nosnippet>379</a>        <span class="kw">let </span>claims = <span class="macro">json!</span>({
+<a href=#380 id=380 data-nosnippet>380</a>            <span class="string">"sub"</span>: <span class="string">"s-1"</span>,
+<a href=#381 id=381 data-nosnippet>381</a>            <span class="string">"email"</span>: <span class="string">"ada@example.com"</span>,
+<a href=#382 id=382 data-nosnippet>382</a>            <span class="string">"preferred_username"</span>: <span class="string">"ada"</span>,
+<a href=#383 id=383 data-nosnippet>383</a>            <span class="string">"given_name"</span>: <span class="string">"Ada"</span>,
+<a href=#384 id=384 data-nosnippet>384</a>            <span class="string">"name"</span>: <span class="string">"Ada Lovelace"</span>,
+<a href=#385 id=385 data-nosnippet>385</a>        });
+<a href=#386 id=386 data-nosnippet>386</a>        <span class="kw">let </span>m = map_identity(ProviderKind::GenericOidc, <span class="kw-2">&amp;</span>map, <span class="kw-2">&amp;</span>claims).unwrap();
+<a href=#387 id=387 data-nosnippet>387</a>        <span class="macro">assert_eq!</span>(m.username.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"ada"</span>));
+<a href=#388 id=388 data-nosnippet>388</a>        <span class="macro">assert_eq!</span>(m.display_name.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"Ada"</span>));
+<a href=#389 id=389 data-nosnippet>389</a>        <span class="comment">// Unmapped fields still fall through to the default.
+<a href=#390 id=390 data-nosnippet>390</a>        </span><span class="macro">assert_eq!</span>(m.email.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"ada@example.com"</span>));
+<a href=#391 id=391 data-nosnippet>391</a>    }
+<a href=#392 id=392 data-nosnippet>392</a>
+<a href=#393 id=393 data-nosnippet>393</a>    <span class="attr">#[test]
+<a href=#394 id=394 data-nosnippet>394</a>    </span><span class="kw">fn </span>dotted_paths_reach_nested_claims() {
+<a href=#395 id=395 data-nosnippet>395</a>        <span class="kw">let </span>map = <span class="macro">json!</span>({<span class="string">"email"</span>: <span class="string">"user.contact.email"</span>});
+<a href=#396 id=396 data-nosnippet>396</a>        <span class="kw">let </span>claims = <span class="macro">json!</span>({<span class="string">"sub"</span>: <span class="string">"s"</span>, <span class="string">"user"</span>: {<span class="string">"contact"</span>: {<span class="string">"email"</span>: <span class="string">"a@b.test"</span>}}});
+<a href=#397 id=397 data-nosnippet>397</a>        <span class="kw">let </span>m = map_identity(ProviderKind::GenericOauth2, <span class="kw-2">&amp;</span>map, <span class="kw-2">&amp;</span>claims).unwrap();
+<a href=#398 id=398 data-nosnippet>398</a>        <span class="macro">assert_eq!</span>(m.email.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"a@b.test"</span>));
+<a href=#399 id=399 data-nosnippet>399</a>    }
+<a href=#400 id=400 data-nosnippet>400</a>
+<a href=#401 id=401 data-nosnippet>401</a>    <span class="doccomment">/// The ordering that matters: a SAML attribute name is an OID full of dots
+<a href=#402 id=402 data-nosnippet>402</a>    /// and is a key, not a path. Splitting first would make it unreachable.
+<a href=#403 id=403 data-nosnippet>403</a>    </span><span class="attr">#[test]
+<a href=#404 id=404 data-nosnippet>404</a>    </span><span class="kw">fn </span>a_dotted_key_wins_over_a_dotted_path() {
+<a href=#405 id=405 data-nosnippet>405</a>        <span class="kw">let </span>oid = <span class="string">"urn:oid:0.9.2342.19200300.100.1.3"</span>;
+<a href=#406 id=406 data-nosnippet>406</a>        <span class="kw">let </span>map = <span class="macro">json!</span>({ <span class="string">"email"</span>: oid });
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="kw">let </span>claims = <span class="macro">json!</span>({ <span class="string">"sub"</span>: <span class="string">"s"</span>, oid: <span class="string">"ada@example.com" </span>});
+<a href=#408 id=408 data-nosnippet>408</a>        <span class="kw">let </span>m = map_identity(ProviderKind::GenericSaml, <span class="kw-2">&amp;</span>map, <span class="kw-2">&amp;</span>claims).unwrap();
+<a href=#409 id=409 data-nosnippet>409</a>        <span class="macro">assert_eq!</span>(m.email.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"ada@example.com"</span>));
+<a href=#410 id=410 data-nosnippet>410</a>    }
+<a href=#411 id=411 data-nosnippet>411</a>
+<a href=#412 id=412 data-nosnippet>412</a>    <span class="attr">#[test]
+<a href=#413 id=413 data-nosnippet>413</a>    </span><span class="kw">fn </span>a_literal_states_a_decision_rather_than_reading_one() {
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="kw">let </span>map = <span class="macro">json!</span>({<span class="string">"email_verified"</span>: <span class="string">"@true"</span>});
+<a href=#415 id=415 data-nosnippet>415</a>        <span class="kw">let </span>claims = <span class="macro">json!</span>({<span class="string">"id"</span>: <span class="number">42</span>, <span class="string">"email"</span>: <span class="string">"a@b.test"</span>, <span class="string">"name"</span>: <span class="string">"A"</span>});
+<a href=#416 id=416 data-nosnippet>416</a>        <span class="kw">let </span>m = map_identity(ProviderKind::Facebook, <span class="kw-2">&amp;</span>map, <span class="kw-2">&amp;</span>claims).unwrap();
+<a href=#417 id=417 data-nosnippet>417</a>        <span class="macro">assert!</span>(
+<a href=#418 id=418 data-nosnippet>418</a>            m.email_verified,
+<a href=#419 id=419 data-nosnippet>419</a>            <span class="string">"the operator wrote the decision down; it must be honoured"
+<a href=#420 id=420 data-nosnippet>420</a>        </span>);
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="comment">// …and without it, Facebook's flagless email reads as unverified.
+<a href=#422 id=422 data-nosnippet>422</a>        </span><span class="kw">let </span>m = map_identity(ProviderKind::Facebook, <span class="kw-2">&amp;</span><span class="macro">json!</span>({}), <span class="kw-2">&amp;</span>claims).unwrap();
+<a href=#423 id=423 data-nosnippet>423</a>        <span class="macro">assert!</span>(!m.email_verified);
+<a href=#424 id=424 data-nosnippet>424</a>    }
+<a href=#425 id=425 data-nosnippet>425</a>
+<a href=#426 id=426 data-nosnippet>426</a>    <span class="attr">#[test]
+<a href=#427 id=427 data-nosnippet>427</a>    </span><span class="kw">fn </span>githubs_numeric_id_is_the_subject() {
+<a href=#428 id=428 data-nosnippet>428</a>        <span class="kw">let </span>claims = <span class="macro">json!</span>({
+<a href=#429 id=429 data-nosnippet>429</a>            <span class="string">"id"</span>: <span class="number">583231</span>,
+<a href=#430 id=430 data-nosnippet>430</a>            <span class="string">"login"</span>: <span class="string">"octocat"</span>,
+<a href=#431 id=431 data-nosnippet>431</a>            <span class="string">"name"</span>: <span class="string">"The Octocat"</span>,
+<a href=#432 id=432 data-nosnippet>432</a>            <span class="string">"email"</span>: <span class="string">"octocat@users.noreply.github.com"</span>,
+<a href=#433 id=433 data-nosnippet>433</a>            <span class="string">"email_verified"</span>: <span class="bool-val">true</span>,
+<a href=#434 id=434 data-nosnippet>434</a>        });
+<a href=#435 id=435 data-nosnippet>435</a>        <span class="kw">let </span>m = map_identity(ProviderKind::Github, <span class="kw-2">&amp;</span><span class="macro">json!</span>({}), <span class="kw-2">&amp;</span>claims).unwrap();
+<a href=#436 id=436 data-nosnippet>436</a>        <span class="macro">assert_eq!</span>(m.external_subject, <span class="string">"583231"</span>);
+<a href=#437 id=437 data-nosnippet>437</a>        <span class="macro">assert_eq!</span>(m.username.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"octocat"</span>));
+<a href=#438 id=438 data-nosnippet>438</a>        <span class="macro">assert!</span>(m.email_verified);
+<a href=#439 id=439 data-nosnippet>439</a>    }
+<a href=#440 id=440 data-nosnippet>440</a>
+<a href=#441 id=441 data-nosnippet>441</a>    <span class="attr">#[test]
+<a href=#442 id=442 data-nosnippet>442</a>    </span><span class="kw">fn </span>no_subject_means_no_identity() {
+<a href=#443 id=443 data-nosnippet>443</a>        <span class="kw">let </span>claims = <span class="macro">json!</span>({<span class="string">"email"</span>: <span class="string">"ada@example.com"</span>, <span class="string">"name"</span>: <span class="string">"Ada"</span>});
+<a href=#444 id=444 data-nosnippet>444</a>        <span class="macro">assert!</span>(map_identity(ProviderKind::Google, <span class="kw-2">&amp;</span><span class="macro">json!</span>({}), <span class="kw-2">&amp;</span>claims).is_none());
+<a href=#445 id=445 data-nosnippet>445</a>    }
+<a href=#446 id=446 data-nosnippet>446</a>
+<a href=#447 id=447 data-nosnippet>447</a>    <span class="attr">#[test]
+<a href=#448 id=448 data-nosnippet>448</a>    </span><span class="kw">fn </span>only_affirmative_verification_counts() {
+<a href=#449 id=449 data-nosnippet>449</a>        <span class="kw">for </span>(raw, expected) <span class="kw">in </span>[
+<a href=#450 id=450 data-nosnippet>450</a>            (<span class="macro">json!</span>(<span class="bool-val">true</span>), <span class="bool-val">true</span>),
+<a href=#451 id=451 data-nosnippet>451</a>            (<span class="macro">json!</span>(<span class="string">"true"</span>), <span class="bool-val">true</span>),
+<a href=#452 id=452 data-nosnippet>452</a>            (<span class="macro">json!</span>(<span class="number">1</span>), <span class="bool-val">true</span>),
+<a href=#453 id=453 data-nosnippet>453</a>            (<span class="macro">json!</span>(<span class="bool-val">false</span>), <span class="bool-val">false</span>),
+<a href=#454 id=454 data-nosnippet>454</a>            (<span class="macro">json!</span>(<span class="string">"unknown"</span>), <span class="bool-val">false</span>),
+<a href=#455 id=455 data-nosnippet>455</a>            (<span class="macro">json!</span>(<span class="number">0</span>), <span class="bool-val">false</span>),
+<a href=#456 id=456 data-nosnippet>456</a>            (Value::Null, <span class="bool-val">false</span>),
+<a href=#457 id=457 data-nosnippet>457</a>        ] {
+<a href=#458 id=458 data-nosnippet>458</a>            <span class="kw">let </span>claims = <span class="macro">json!</span>({<span class="string">"sub"</span>: <span class="string">"s"</span>, <span class="string">"email"</span>: <span class="string">"a@b.test"</span>, <span class="string">"email_verified"</span>: raw});
+<a href=#459 id=459 data-nosnippet>459</a>            <span class="kw">let </span>m = map_identity(ProviderKind::GenericOidc, <span class="kw-2">&amp;</span><span class="macro">json!</span>({}), <span class="kw-2">&amp;</span>claims).unwrap();
+<a href=#460 id=460 data-nosnippet>460</a>            <span class="macro">assert_eq!</span>(m.email_verified, expected, <span class="string">"for {raw:?}"</span>);
+<a href=#461 id=461 data-nosnippet>461</a>        }
+<a href=#462 id=462 data-nosnippet>462</a>    }
+<a href=#463 id=463 data-nosnippet>463</a>
+<a href=#464 id=464 data-nosnippet>464</a>    <span class="attr">#[test]
+<a href=#465 id=465 data-nosnippet>465</a>    </span><span class="kw">fn </span>structured_values_do_not_become_identities() {
+<a href=#466 id=466 data-nosnippet>466</a>        <span class="comment">// A `sub` that arrives as an array is not a subject; treating it as
+<a href=#467 id=467 data-nosnippet>467</a>        // `["a","b"]`-stringified would key an account on a debug format.
+<a href=#468 id=468 data-nosnippet>468</a>        </span><span class="kw">let </span>claims = <span class="macro">json!</span>({<span class="string">"sub"</span>: [<span class="string">"a"</span>, <span class="string">"b"</span>]});
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="macro">assert!</span>(map_identity(ProviderKind::Google, <span class="kw-2">&amp;</span><span class="macro">json!</span>({}), <span class="kw-2">&amp;</span>claims).is_none());
+<a href=#470 id=470 data-nosnippet>470</a>    }
+<a href=#471 id=471 data-nosnippet>471</a>
+<a href=#472 id=472 data-nosnippet>472</a>    <span class="attr">#[test]
+<a href=#473 id=473 data-nosnippet>473</a>    </span><span class="kw">fn </span>an_unknown_field_is_refused_rather_than_ignored() {
+<a href=#474 id=474 data-nosnippet>474</a>        <span class="kw">let </span>err = validate_attribute_map(<span class="kw-2">&amp;</span><span class="macro">json!</span>({<span class="string">"e-mail"</span>: <span class="string">"mail"</span>})).unwrap_err();
+<a href=#475 id=475 data-nosnippet>475</a>        <span class="macro">assert_eq!</span>(err, AttributeMapError::UnknownField(<span class="string">"e-mail"</span>.into()));
+<a href=#476 id=476 data-nosnippet>476</a>        <span class="comment">// The message names the recognised keys, because the operator's next
+<a href=#477 id=477 data-nosnippet>477</a>        // question is "then what is it called".
+<a href=#478 id=478 data-nosnippet>478</a>        </span><span class="macro">assert!</span>(err.to_string().contains(<span class="string">"email_verified"</span>));
+<a href=#479 id=479 data-nosnippet>479</a>    }
+<a href=#480 id=480 data-nosnippet>480</a>
+<a href=#481 id=481 data-nosnippet>481</a>    <span class="attr">#[test]
+<a href=#482 id=482 data-nosnippet>482</a>    </span><span class="kw">fn </span>validation_accepts_what_mapping_accepts() {
+<a href=#483 id=483 data-nosnippet>483</a>        <span class="macro">assert!</span>(validate_attribute_map(<span class="kw-2">&amp;</span>Value::Null).is_ok());
+<a href=#484 id=484 data-nosnippet>484</a>        <span class="macro">assert!</span>(validate_attribute_map(<span class="kw-2">&amp;</span><span class="macro">json!</span>({})).is_ok());
+<a href=#485 id=485 data-nosnippet>485</a>        <span class="macro">assert!</span>(
+<a href=#486 id=486 data-nosnippet>486</a>            validate_attribute_map(<span class="kw-2">&amp;</span><span class="macro">json!</span>({<span class="string">"email"</span>: <span class="string">"mail"</span>, <span class="string">"email_verified"</span>: <span class="string">"@true"</span>})).is_ok()
+<a href=#487 id=487 data-nosnippet>487</a>        );
+<a href=#488 id=488 data-nosnippet>488</a>        <span class="macro">assert_eq!</span>(
+<a href=#489 id=489 data-nosnippet>489</a>            validate_attribute_map(<span class="kw-2">&amp;</span><span class="macro">json!</span>([])).unwrap_err(),
+<a href=#490 id=490 data-nosnippet>490</a>            AttributeMapError::NotAnObject
+<a href=#491 id=491 data-nosnippet>491</a>        );
+<a href=#492 id=492 data-nosnippet>492</a>        <span class="macro">assert_eq!</span>(
+<a href=#493 id=493 data-nosnippet>493</a>            validate_attribute_map(<span class="kw-2">&amp;</span><span class="macro">json!</span>({<span class="string">"email"</span>: <span class="number">3</span>})).unwrap_err(),
+<a href=#494 id=494 data-nosnippet>494</a>            AttributeMapError::NonStringValue(<span class="string">"email"</span>.into())
+<a href=#495 id=495 data-nosnippet>495</a>        );
+<a href=#496 id=496 data-nosnippet>496</a>        <span class="macro">assert_eq!</span>(
+<a href=#497 id=497 data-nosnippet>497</a>            validate_attribute_map(<span class="kw-2">&amp;</span><span class="macro">json!</span>({<span class="string">"email"</span>: <span class="string">"  "</span>})).unwrap_err(),
+<a href=#498 id=498 data-nosnippet>498</a>            AttributeMapError::EmptyValue(<span class="string">"email"</span>.into())
+<a href=#499 id=499 data-nosnippet>499</a>        );
+<a href=#500 id=500 data-nosnippet>500</a>        <span class="macro">assert_eq!</span>(
+<a href=#501 id=501 data-nosnippet>501</a>            validate_attribute_map(<span class="kw-2">&amp;</span><span class="macro">json!</span>({<span class="string">"email"</span>: <span class="string">"@"</span>})).unwrap_err(),
+<a href=#502 id=502 data-nosnippet>502</a>            AttributeMapError::EmptyValue(<span class="string">"email"</span>.into())
+<a href=#503 id=503 data-nosnippet>503</a>        );
+<a href=#504 id=504 data-nosnippet>504</a>    }
+<a href=#505 id=505 data-nosnippet>505</a>
+<a href=#506 id=506 data-nosnippet>506</a>    <span class="doccomment">/// An existing SAML config must not become unsaveable. `name` was the key
+<a href=#507 id=507 data-nosnippet>507</a>    /// the SAML path read before this module existed.
+<a href=#508 id=508 data-nosnippet>508</a>    </span><span class="attr">#[test]
+<a href=#509 id=509 data-nosnippet>509</a>    </span><span class="kw">fn </span>the_deprecated_saml_display_name_keys_still_work() {
+<a href=#510 id=510 data-nosnippet>510</a>        <span class="kw">for </span>alias <span class="kw">in </span>[<span class="string">"name"</span>, <span class="string">"displayName"</span>] {
+<a href=#511 id=511 data-nosnippet>511</a>            <span class="kw">let </span>map = <span class="macro">json!</span>({ alias: <span class="string">"cn" </span>});
+<a href=#512 id=512 data-nosnippet>512</a>            <span class="macro">assert!</span>(
+<a href=#513 id=513 data-nosnippet>513</a>                validate_attribute_map(<span class="kw-2">&amp;</span>map).is_ok(),
+<a href=#514 id=514 data-nosnippet>514</a>                <span class="string">"{alias} must remain saveable"
+<a href=#515 id=515 data-nosnippet>515</a>            </span>);
+<a href=#516 id=516 data-nosnippet>516</a>            <span class="kw">let </span>claims = <span class="macro">json!</span>({<span class="string">"sub"</span>: <span class="string">"nid"</span>, <span class="string">"cn"</span>: <span class="string">"Full Name"</span>});
+<a href=#517 id=517 data-nosnippet>517</a>            <span class="kw">let </span>m = map_identity(ProviderKind::GenericSaml, <span class="kw-2">&amp;</span>map, <span class="kw-2">&amp;</span>claims).unwrap();
+<a href=#518 id=518 data-nosnippet>518</a>            <span class="macro">assert_eq!</span>(m.display_name.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"Full Name"</span>));
+<a href=#519 id=519 data-nosnippet>519</a>        }
+<a href=#520 id=520 data-nosnippet>520</a>        <span class="comment">// …but the canonical name wins where both are present, so an operator
+<a href=#521 id=521 data-nosnippet>521</a>        // migrating one entry at a time gets the value they just typed.
+<a href=#522 id=522 data-nosnippet>522</a>        </span><span class="kw">let </span>map = <span class="macro">json!</span>({<span class="string">"name"</span>: <span class="string">"cn"</span>, <span class="string">"display_name"</span>: <span class="string">"givenName"</span>});
+<a href=#523 id=523 data-nosnippet>523</a>        <span class="kw">let </span>claims = <span class="macro">json!</span>({<span class="string">"sub"</span>: <span class="string">"nid"</span>, <span class="string">"cn"</span>: <span class="string">"Old"</span>, <span class="string">"givenName"</span>: <span class="string">"New"</span>});
+<a href=#524 id=524 data-nosnippet>524</a>        <span class="kw">let </span>m = map_identity(ProviderKind::GenericSaml, <span class="kw-2">&amp;</span>map, <span class="kw-2">&amp;</span>claims).unwrap();
+<a href=#525 id=525 data-nosnippet>525</a>        <span class="macro">assert_eq!</span>(m.display_name.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"New"</span>));
+<a href=#526 id=526 data-nosnippet>526</a>    }
+<a href=#527 id=527 data-nosnippet>527</a>
+<a href=#528 id=528 data-nosnippet>528</a>    <span class="attr">#[test]
+<a href=#529 id=529 data-nosnippet>529</a>    </span><span class="kw">fn </span>aliases_are_not_offered_as_current_field_names() {
+<a href=#530 id=530 data-nosnippet>530</a>        <span class="kw">for </span>(alias, <span class="kw">_</span>) <span class="kw">in </span>ATTRIBUTE_MAP_ALIASES {
+<a href=#531 id=531 data-nosnippet>531</a>            <span class="macro">assert!</span>(
+<a href=#532 id=532 data-nosnippet>532</a>                !ATTRIBUTE_MAP_FIELDS.contains(alias),
+<a href=#533 id=533 data-nosnippet>533</a>                <span class="string">"{alias} is deprecated and must not be advertised"
+<a href=#534 id=534 data-nosnippet>534</a>            </span>);
+<a href=#535 id=535 data-nosnippet>535</a>        }
+<a href=#536 id=536 data-nosnippet>536</a>    }
+<a href=#537 id=537 data-nosnippet>537</a>
+<a href=#538 id=538 data-nosnippet>538</a>    <span class="attr">#[test]
+<a href=#539 id=539 data-nosnippet>539</a>    </span><span class="kw">fn </span>every_default_map_names_only_recognised_fields() {
+<a href=#540 id=540 data-nosnippet>540</a>        <span class="kw">for </span>kind <span class="kw">in </span>ProviderKind::ALL {
+<a href=#541 id=541 data-nosnippet>541</a>            <span class="kw">for </span>(field, path) <span class="kw">in </span>default_attribute_map(<span class="kw-2">*</span>kind) {
+<a href=#542 id=542 data-nosnippet>542</a>                <span class="macro">assert!</span>(
+<a href=#543 id=543 data-nosnippet>543</a>                    ATTRIBUTE_MAP_FIELDS.contains(field),
+<a href=#544 id=544 data-nosnippet>544</a>                    <span class="string">"{kind:?} default names unknown field {field}"
+<a href=#545 id=545 data-nosnippet>545</a>                </span>);
+<a href=#546 id=546 data-nosnippet>546</a>                <span class="macro">assert!</span>(!path.is_empty(), <span class="string">"{kind:?} default has an empty path"</span>);
+<a href=#547 id=547 data-nosnippet>547</a>            }
+<a href=#548 id=548 data-nosnippet>548</a>            <span class="comment">// Every kind must be able to produce a subject, or no login through
+<a href=#549 id=549 data-nosnippet>549</a>            // it can ever succeed.
+<a href=#550 id=550 data-nosnippet>550</a>            </span><span class="macro">assert!</span>(
+<a href=#551 id=551 data-nosnippet>551</a>                default_attribute_map(<span class="kw-2">*</span>kind)
+<a href=#552 id=552 data-nosnippet>552</a>                    .iter()
+<a href=#553 id=553 data-nosnippet>553</a>                    .any(|(f, <span class="kw">_</span>)| <span class="kw-2">*</span>f == <span class="string">"external_subject"</span>),
+<a href=#554 id=554 data-nosnippet>554</a>                <span class="string">"{kind:?} has no default external_subject mapping"
+<a href=#555 id=555 data-nosnippet>555</a>            </span>);
+<a href=#556 id=556 data-nosnippet>556</a>        }
+<a href=#557 id=557 data-nosnippet>557</a>    }
+<a href=#558 id=558 data-nosnippet>558</a>}
+</code></pre></div></section></main></body></html>

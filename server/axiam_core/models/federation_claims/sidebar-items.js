@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ATTRIBUTE_MAP_ALIASES","ATTRIBUTE_MAP_FIELDS","LITERAL_PREFIX","MAX_ATTRIBUTE_MAP_ENTRIES"],"enum":["AttributeMapError"],"fn":["canonical_field","default_attribute_map","lookup_path","map_identity","resolve_field","validate_attribute_map"],"struct":["MappedIdentity"]};

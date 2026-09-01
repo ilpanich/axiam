@@ -18,283 +18,352 @@
 <a href=#18 id=18 data-nosnippet>18</a>    </span><span class="kw">pub </span>jwt_private_key_pem: String,
 <a href=#19 id=19 data-nosnippet>19</a>    <span class="doccomment">/// PEM-encoded Ed25519 public key for JWT verification.
 <a href=#20 id=20 data-nosnippet>20</a>    </span><span class="kw">pub </span>jwt_public_key_pem: String,
-<a href=#21 id=21 data-nosnippet>21</a>    <span class="doccomment">/// Access token lifetime in seconds (default: 900 = 15 minutes).
-<a href=#22 id=22 data-nosnippet>22</a>    </span><span class="kw">pub </span>access_token_lifetime_secs: u64,
-<a href=#23 id=23 data-nosnippet>23</a>    <span class="doccomment">/// Refresh token lifetime in seconds (default: 2_592_000 = 30 days).
-<a href=#24 id=24 data-nosnippet>24</a>    </span><span class="kw">pub </span>refresh_token_lifetime_secs: u64,
-<a href=#25 id=25 data-nosnippet>25</a>    <span class="doccomment">/// Authorization code lifetime in seconds (default: 600 = 10 minutes).
-<a href=#26 id=26 data-nosnippet>26</a>    </span><span class="kw">pub </span>auth_code_lifetime_secs: u64,
-<a href=#27 id=27 data-nosnippet>27</a>    <span class="doccomment">/// JWT issuer (`iss` claim).
-<a href=#28 id=28 data-nosnippet>28</a>    </span><span class="kw">pub </span>jwt_issuer: String,
-<a href=#29 id=29 data-nosnippet>29</a>    <span class="doccomment">/// OIDC issuer base URL (e.g. "https://auth.example.com"). Used for
-<a href=#30 id=30 data-nosnippet>30</a>    /// OIDC discovery endpoint URLs. Falls back to `jwt_issuer` if unset.
-<a href=#31 id=31 data-nosnippet>31</a>    </span><span class="kw">pub </span>oauth2_issuer_url: String,
-<a href=#32 id=32 data-nosnippet>32</a>    <span class="doccomment">/// Optional pepper prepended to passwords before Argon2id verification.
-<a href=#33 id=33 data-nosnippet>33</a>    /// Wrapped in `SecretString` so `Debug`/logging never leaks it by
-<a href=#34 id=34 data-nosnippet>34</a>    /// accident (SECHRD-12) — exposed only via `.expose_secret()` at the
-<a href=#35 id=35 data-nosnippet>35</a>    /// `&amp;str` boundary where a pepper value is consumed.
-<a href=#36 id=36 data-nosnippet>36</a>    </span><span class="kw">pub </span>pepper: <span class="prelude-ty">Option</span>&lt;SecretString&gt;,
-<a href=#37 id=37 data-nosnippet>37</a>    <span class="doccomment">/// Previous pepper, kept **verify-only** while a pepper rotation drains
-<a href=#38 id=38 data-nosnippet>38</a>    /// (`AXIAM__AUTH__PEPPER_PREVIOUS`, §13.4 observation 3).
-<a href=#39 id=39 data-nosnippet>39</a>    ///
-<a href=#40 id=40 data-nosnippet>40</a>    /// Client-secret hashes are keyed by the pepper, and the `v2.hs256$` tag
-<a href=#41 id=41 data-nosnippet>41</a>    /// versions the *algorithm*, not the *key* — so without this, rotating
-<a href=#42 id=42 data-nosnippet>42</a>    /// `AXIAM__AUTH__PEPPER` permanently invalidates **every** client secret and
-<a href=#43 id=43 data-nosnippet>43</a>    /// every service account and OAuth2 client has to be re-issued in lockstep
-<a href=#44 id=44 data-nosnippet>44</a>    /// with the restart.
+<a href=#21 id=21 data-nosnippet>21</a>    <span class="doccomment">/// Trust an `X-Client-Certificate` request header as proof of device
+<a href=#22 id=22 data-nosnippet>22</a>    /// identity when the connection carries no TLS-verified client
+<a href=#23 id=23 data-nosnippet>23</a>    /// certificate. Default **`false`**.
+<a href=#24 id=24 data-nosnippet>24</a>    ///
+<a href=#25 id=25 data-nosnippet>25</a>    /// # Why this is off by default
+<a href=#26 id=26 data-nosnippet>26</a>    ///
+<a href=#27 id=27 data-nosnippet>27</a>    /// The header carries a PEM certificate, and a certificate is public data.
+<a href=#28 id=28 data-nosnippet>28</a>    /// `DeviceAuthService::authenticate` checks the fingerprint, the status,
+<a href=#29 id=29 data-nosnippet>29</a>    /// the expiry and the chain up to the tenant or organization CA — every one
+<a href=#30 id=30 data-nosnippet>30</a>    /// of which a *copy* of an enrolled device's certificate also satisfies.
+<a href=#31 id=31 data-nosnippet>31</a>    /// Nothing in that path proves the sender holds the private key, because
+<a href=#32 id=32 data-nosnippet>32</a>    /// nothing can: possession is proven by the TLS handshake, and on this path
+<a href=#33 id=33 data-nosnippet>33</a>    /// there was no handshake to prove it in.
+<a href=#34 id=34 data-nosnippet>34</a>    ///
+<a href=#35 id=35 data-nosnippet>35</a>    /// That is sound only while the header cannot originate with the client —
+<a href=#36 id=36 data-nosnippet>36</a>    /// i.e. a reverse proxy performs the mTLS handshake itself and
+<a href=#37 id=37 data-nosnippet>37</a>    /// unconditionally overwrites the header on every request it forwards.
+<a href=#38 id=38 data-nosnippet>38</a>    /// It stops being sound the moment the server is reachable by anything but
+<a href=#39 id=39 data-nosnippet>39</a>    /// that proxy, where anyone holding a copy of a device certificate
+<a href=#40 id=40 data-nosnippet>40</a>    /// authenticates as that device.
+<a href=#41 id=41 data-nosnippet>41</a>    ///
+<a href=#42 id=42 data-nosnippet>42</a>    /// Native mTLS is unaffected and always preferred: when rustls verified a
+<a href=#43 id=43 data-nosnippet>43</a>    /// client certificate on the connection, that certificate is authoritative
+<a href=#44 id=44 data-nosnippet>44</a>    /// and this setting is not consulted.
 <a href=#45 id=45 data-nosnippet>45</a>    ///
-<a href=#46 id=46 data-nosnippet>46</a>    /// Set this to the outgoing value for the duration of a rotation. Secrets
-<a href=#47 id=47 data-nosnippet>47</a>    /// hashed under it still verify, and each one is transparently rewritten
-<a href=#48 id=48 data-nosnippet>48</a>    /// under the new pepper the first time its owner authenticates, so the
-<a href=#49 id=49 data-nosnippet>49</a>    /// rotation drains itself. Unset it once the fleet has drained; nothing is
-<a href=#50 id=50 data-nosnippet>50</a>    /// ever *written* under this key.
-<a href=#51 id=51 data-nosnippet>51</a>    ///
-<a href=#52 id=52 data-nosnippet>52</a>    /// It does **not** apply to Argon2id password peppering, which has its own
-<a href=#53 id=53 data-nosnippet>53</a>    /// migration story — only to client-secret hashing.
-<a href=#54 id=54 data-nosnippet>54</a>    </span><span class="kw">pub </span>pepper_previous: <span class="prelude-ty">Option</span>&lt;SecretString&gt;,
-<a href=#55 id=55 data-nosnippet>55</a>    <span class="doccomment">/// Minimum password length for policy enforcement.
-<a href=#56 id=56 data-nosnippet>56</a>    </span><span class="kw">pub </span>min_password_length: usize,
-<a href=#57 id=57 data-nosnippet>57</a>    <span class="doccomment">/// 256-bit AES-GCM key for encrypting TOTP secrets at rest.
-<a href=#58 id=58 data-nosnippet>58</a>    /// `None` disables MFA enrollment. Set programmatically (not from config files).
-<a href=#59 id=59 data-nosnippet>59</a>    </span><span class="attr">#[serde(skip)]
-<a href=#60 id=60 data-nosnippet>60</a>    </span><span class="kw">pub </span>mfa_encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
-<a href=#61 id=61 data-nosnippet>61</a>    <span class="doccomment">/// 256-bit AES-GCM key for encrypting federation client secrets at rest.
-<a href=#62 id=62 data-nosnippet>62</a>    /// `None` means federation config create/update will fail at runtime.
-<a href=#63 id=63 data-nosnippet>63</a>    /// Set programmatically from `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` (not from
-<a href=#64 id=64 data-nosnippet>64</a>    /// config files). Federation is optional — absence is warned, not fatal.
-<a href=#65 id=65 data-nosnippet>65</a>    </span><span class="attr">#[serde(skip)]
-<a href=#66 id=66 data-nosnippet>66</a>    </span><span class="kw">pub </span>federation_encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
-<a href=#67 id=67 data-nosnippet>67</a>    <span class="doccomment">/// 256-bit AES-GCM key that seals an OPAQUE exchange's server state
-<a href=#68 id=68 data-nosnippet>68</a>    /// between its two messages, on both the login and the registration path.
+<a href=#46 id=46 data-nosnippet>46</a>    /// Set it to `true` only if all of the following hold, and say so in your
+<a href=#47 id=47 data-nosnippet>47</a>    /// runbook:
+<a href=#48 id=48 data-nosnippet>48</a>    ///
+<a href=#49 id=49 data-nosnippet>49</a>    /// 1. TLS (and the client-certificate handshake) terminates at a proxy you
+<a href=#50 id=50 data-nosnippet>50</a>    ///    operate;
+<a href=#51 id=51 data-nosnippet>51</a>    /// 2. that proxy sets `X-Client-Certificate` from the certificate **it**
+<a href=#52 id=52 data-nosnippet>52</a>    ///    verified, on every request, overwriting anything the client sent;
+<a href=#53 id=53 data-nosnippet>53</a>    /// 3. nothing else can reach this server's listener.
+<a href=#54 id=54 data-nosnippet>54</a>    </span><span class="kw">pub </span>trust_forwarded_client_cert: bool,
+<a href=#55 id=55 data-nosnippet>55</a>    <span class="doccomment">/// Access token lifetime in seconds (default: 900 = 15 minutes).
+<a href=#56 id=56 data-nosnippet>56</a>    </span><span class="kw">pub </span>access_token_lifetime_secs: u64,
+<a href=#57 id=57 data-nosnippet>57</a>    <span class="doccomment">/// Refresh token lifetime in seconds (default: 2_592_000 = 30 days).
+<a href=#58 id=58 data-nosnippet>58</a>    </span><span class="kw">pub </span>refresh_token_lifetime_secs: u64,
+<a href=#59 id=59 data-nosnippet>59</a>    <span class="doccomment">/// Authorization code lifetime in seconds (default: 600 = 10 minutes).
+<a href=#60 id=60 data-nosnippet>60</a>    </span><span class="kw">pub </span>auth_code_lifetime_secs: u64,
+<a href=#61 id=61 data-nosnippet>61</a>    <span class="doccomment">/// JWT issuer (`iss` claim).
+<a href=#62 id=62 data-nosnippet>62</a>    </span><span class="kw">pub </span>jwt_issuer: String,
+<a href=#63 id=63 data-nosnippet>63</a>    <span class="doccomment">/// OIDC issuer base URL (e.g. "https://auth.example.com"). Used for
+<a href=#64 id=64 data-nosnippet>64</a>    /// OIDC discovery endpoint URLs. Falls back to `jwt_issuer` if unset.
+<a href=#65 id=65 data-nosnippet>65</a>    </span><span class="kw">pub </span>oauth2_issuer_url: String,
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="doccomment">/// Extra browser origins this deployment will hand a **federation SSO
+<a href=#67 id=67 data-nosnippet>67</a>    /// handoff code** to (`AXIAM__AUTH__SSO_SPA_ORIGINS`; a list, set the same
+<a href=#68 id=68 data-nosnippet>68</a>    /// way as `AXIAM__SERVER__CORS_ALLOWED_ORIGINS`).
 <a href=#69 id=69 data-nosnippet>69</a>    ///
-<a href=#70 id=70 data-nosnippet>70</a>    /// `None` means the OPAQUE endpoints answer `503`, whatever the org or
-<a href=#71 id=71 data-nosnippet>71</a>    /// tenant policy says. That is deliberate: silently falling back to
-<a href=#72 id=72 data-nosnippet>72</a>    /// password login when the key is missing would turn a misconfiguration
-<a href=#73 id=73 data-nosnippet>73</a>    /// into an undetectable downgrade of a security control an operator
-<a href=#74 id=74 data-nosnippet>74</a>    /// believes is on.
-<a href=#75 id=75 data-nosnippet>75</a>    ///
-<a href=#76 id=76 data-nosnippet>76</a>    /// Deliberately its own key rather than a reuse of
-<a href=#77 id=77 data-nosnippet>77</a>    /// [`Self::mfa_encryption_key`]: the two rotate on different schedules, and
-<a href=#78 id=78 data-nosnippet>78</a>    /// sharing one would couple an OPAQUE outage to an unrelated TOTP
-<a href=#79 id=79 data-nosnippet>79</a>    /// rotation. Set from `AXIAM__AUTH__OPAQUE_SESSION_KEY` (not from config
-<a href=#80 id=80 data-nosnippet>80</a>    /// files).
-<a href=#81 id=81 data-nosnippet>81</a>    ///
-<a href=#82 id=82 data-nosnippet>82</a>    /// Rotating this is cheap — it invalidates exchanges in flight and nothing
-<a href=#83 id=83 data-nosnippet>83</a>    /// else. Contrast [`Self::opaque_setup_key`], which is the expensive one.
-<a href=#84 id=84 data-nosnippet>84</a>    </span><span class="attr">#[serde(skip)]
-<a href=#85 id=85 data-nosnippet>85</a>    </span><span class="kw">pub </span>opaque_session_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
-<a href=#86 id=86 data-nosnippet>86</a>    <span class="doccomment">/// 256-bit AES-GCM key that encrypts each tenant's OPAQUE server key
-<a href=#87 id=87 data-nosnippet>87</a>    /// material — the OPRF seed and the long-term AKE key pair — at rest.
-<a href=#88 id=88 data-nosnippet>88</a>    ///
-<a href=#89 id=89 data-nosnippet>89</a>    /// `None` means the OPAQUE endpoints answer `503`, for the same reason as
-<a href=#90 id=90 data-nosnippet>90</a>    /// above.
-<a href=#91 id=91 data-nosnippet>91</a>    ///
-<a href=#92 id=92 data-nosnippet>92</a>    /// This is a **separate key from [`Self::opaque_session_key`] on purpose**,
-<a href=#93 id=93 data-nosnippet>93</a>    /// and the reason is what rotating each one costs. The session key seals
-<a href=#94 id=94 data-nosnippet>94</a>    /// 120 seconds of in-flight state and can be rotated on any schedule.
-<a href=#95 id=95 data-nosnippet>95</a>    /// This key protects data at rest: rotating it means re-encrypting every
-<a href=#96 id=96 data-nosnippet>96</a>    /// `opaque_server_setup` row, and **losing** it means every registration
-<a href=#97 id=97 data-nosnippet>97</a>    /// record in every tenant becomes unopenable and the whole estate needs a
-<a href=#98 id=98 data-nosnippet>98</a>    /// password reset. Sharing one key would put the cheap rotation and the
-<a href=#99 id=99 data-nosnippet>99</a>    /// catastrophic one on the same schedule, which is how an operator ends up
-<a href=#100 id=100 data-nosnippet>100</a>    /// doing neither. Set from `AXIAM__AUTH__OPAQUE_SETUP_KEY`.
-<a href=#101 id=101 data-nosnippet>101</a>    </span><span class="attr">#[serde(skip)]
-<a href=#102 id=102 data-nosnippet>102</a>    </span><span class="kw">pub </span>opaque_setup_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
-<a href=#103 id=103 data-nosnippet>103</a>    <span class="doccomment">/// When `true`, access tokens decoded without an `aud` claim are treated as
-<a href=#104 id=104 data-nosnippet>104</a>    /// `axiam:user`. Enables a back-compat window during the Phase 4 rollout
-<a href=#105 id=105 data-nosnippet>105</a>    /// while pre-Phase-4 tokens are still circulating. Default: `true`.
-<a href=#106 id=106 data-nosnippet>106</a>    </span><span class="attr">#[serde(default = <span class="string">"default_true"</span>)]
-<a href=#107 id=107 data-nosnippet>107</a>    </span><span class="kw">pub </span>allow_missing_aud_as_user: bool,
-<a href=#108 id=108 data-nosnippet>108</a>    <span class="doccomment">/// When `true` (default), all auth cookies are marked `Secure` and are
-<a href=#109 id=109 data-nosnippet>109</a>    /// therefore sent only over HTTPS. Set `AXIAM__AUTH__COOKIE_SECURE=false`
-<a href=#110 id=110 data-nosnippet>110</a>    /// **only** in local HTTP development (e.g. http://localhost) — **never**
-<a href=#111 id=111 data-nosnippet>111</a>    /// in production or staging (D-18).
-<a href=#112 id=112 data-nosnippet>112</a>    </span><span class="attr">#[serde(default = <span class="string">"default_true"</span>)]
-<a href=#113 id=113 data-nosnippet>113</a>    </span><span class="kw">pub </span>cookie_secure: bool,
-<a href=#114 id=114 data-nosnippet>114</a>    <span class="doccomment">/// MFA challenge token lifetime in seconds (default: 300 = 5 minutes).
-<a href=#115 id=115 data-nosnippet>115</a>    </span><span class="kw">pub </span>mfa_challenge_lifetime_secs: u64,
-<a href=#116 id=116 data-nosnippet>116</a>    <span class="doccomment">/// Issuer name shown in authenticator apps.
-<a href=#117 id=117 data-nosnippet>117</a>    </span><span class="kw">pub </span>totp_issuer: String,
-<a href=#118 id=118 data-nosnippet>118</a>    <span class="doccomment">/// Max consecutive failed login attempts before lockout (default: 5).
-<a href=#119 id=119 data-nosnippet>119</a>    </span><span class="kw">pub </span>max_failed_login_attempts: u32,
-<a href=#120 id=120 data-nosnippet>120</a>    <span class="doccomment">/// Initial lockout duration in seconds (default: 900 = 15 min).
-<a href=#121 id=121 data-nosnippet>121</a>    </span><span class="kw">pub </span>lockout_duration_secs: u64,
-<a href=#122 id=122 data-nosnippet>122</a>    <span class="doccomment">/// Exponential backoff multiplier for repeated lockouts (default: 2.0).
-<a href=#123 id=123 data-nosnippet>123</a>    </span><span class="kw">pub </span>lockout_backoff_multiplier: f64,
-<a href=#124 id=124 data-nosnippet>124</a>    <span class="doccomment">/// Maximum lockout duration in seconds (default: 3600 = 1 hour).
-<a href=#125 id=125 data-nosnippet>125</a>    </span><span class="kw">pub </span>max_lockout_duration_secs: u64,
-<a href=#126 id=126 data-nosnippet>126</a>    <span class="doccomment">/// Grace period in hours during which PendingVerification users
-<a href=#127 id=127 data-nosnippet>127</a>    /// can still log in (default: 24). Set to 0 to disable.
-<a href=#128 id=128 data-nosnippet>128</a>    </span><span class="kw">pub </span>email_verification_grace_period_hours: u32,
-<a href=#129 id=129 data-nosnippet>129</a>    <span class="doccomment">/// Password reset token expiry in hours (default: 1).
-<a href=#130 id=130 data-nosnippet>130</a>    </span><span class="kw">pub </span>password_reset_token_expiry_hours: u32,
-<a href=#131 id=131 data-nosnippet>131</a>    <span class="doccomment">/// WebAuthn Relying Party ID (typically the domain name,
-<a href=#132 id=132 data-nosnippet>132</a>    /// e.g. "auth.example.com").
-<a href=#133 id=133 data-nosnippet>133</a>    </span><span class="kw">pub </span>webauthn_rp_id: String,
-<a href=#134 id=134 data-nosnippet>134</a>    <span class="doccomment">/// WebAuthn Relying Party origin
-<a href=#135 id=135 data-nosnippet>135</a>    /// (e.g. "https://auth.example.com").
-<a href=#136 id=136 data-nosnippet>136</a>    </span><span class="kw">pub </span>webauthn_rp_origin: String,
-<a href=#137 id=137 data-nosnippet>137</a>    <span class="doccomment">/// WebAuthn Relying Party display name.
-<a href=#138 id=138 data-nosnippet>138</a>    </span><span class="kw">pub </span>webauthn_rp_name: String,
-<a href=#139 id=139 data-nosnippet>139</a>    <span class="doccomment">/// CQ-B14: Pre-parsed Ed25519 signing key. Populated once at startup via
-<a href=#140 id=140 data-nosnippet>140</a>    /// `resolve_keys()`. When `Some`, token-issue functions skip PEM re-parsing.
-<a href=#141 id=141 data-nosnippet>141</a>    /// When `None`, they fall back to parsing from `jwt_private_key_pem`.
-<a href=#142 id=142 data-nosnippet>142</a>    </span><span class="attr">#[serde(skip)]
-<a href=#143 id=143 data-nosnippet>143</a>    </span><span class="kw">pub </span>jwt_encoding_key: <span class="prelude-ty">Option</span>&lt;Arc&lt;EncodingKey&gt;&gt;,
-<a href=#144 id=144 data-nosnippet>144</a>    <span class="doccomment">/// CQ-B14: Pre-parsed Ed25519 verification key. Populated once at startup via
-<a href=#145 id=145 data-nosnippet>145</a>    /// `resolve_keys()`. When `Some`, token-verify functions skip PEM re-parsing.
-<a href=#146 id=146 data-nosnippet>146</a>    /// When `None`, they fall back to parsing from `jwt_public_key_pem`.
-<a href=#147 id=147 data-nosnippet>147</a>    </span><span class="attr">#[serde(skip)]
-<a href=#148 id=148 data-nosnippet>148</a>    </span><span class="kw">pub </span>jwt_decoding_key: <span class="prelude-ty">Option</span>&lt;Arc&lt;DecodingKey&gt;&gt;,
-<a href=#149 id=149 data-nosnippet>149</a>    <span class="doccomment">/// PERF-01: Consecutive HIBP failures/timeouts before the process-wide
-<a href=#150 id=150 data-nosnippet>150</a>    /// `HibpBreaker` trips open (default: 5). Overridable via
-<a href=#151 id=151 data-nosnippet>151</a>    /// `AXIAM__AUTH__HIBP_BREAKER_THRESHOLD`.
-<a href=#152 id=152 data-nosnippet>152</a>    </span><span class="kw">pub </span>hibp_breaker_threshold: u32,
-<a href=#153 id=153 data-nosnippet>153</a>    <span class="doccomment">/// PERF-01: Cooldown in seconds the `HibpBreaker` stays open before
-<a href=#154 id=154 data-nosnippet>154</a>    /// allowing a half-open probe request (default: 30). Overridable via
-<a href=#155 id=155 data-nosnippet>155</a>    /// `AXIAM__AUTH__HIBP_BREAKER_COOLDOWN_SECS`.
-<a href=#156 id=156 data-nosnippet>156</a>    </span><span class="kw">pub </span>hibp_breaker_cooldown_secs: u64,
-<a href=#157 id=157 data-nosnippet>157</a>    <span class="doccomment">/// B1: Maximum number of Argon2id hash/verify operations allowed to run
-<a href=#158 id=158 data-nosnippet>158</a>    /// concurrently, enforced by the process-wide `crypto_semaphore` shared
-<a href=#159 id=159 data-nosnippet>159</a>    /// across the login, password-change, password-reset and PKI crypto paths.
-<a href=#160 id=160 data-nosnippet>160</a>    ///
-<a href=#161 id=161 data-nosnippet>161</a>    /// Each in-flight Argon2id operation allocates a ~19 MiB memory arena
-<a href=#162 id=162 data-nosnippet>162</a>    /// (OWASP params m=19456), so unbounded concurrency is an unauthenticated
-<a href=#163 id=163 data-nosnippet>163</a>    /// memory-DoS vector: the login benchmark pegged 2 cores and reached
-<a href=#164 id=164 data-nosnippet>164</a>    /// ~970 MiB RSS ≈ 50 concurrent × 19 MiB arenas, against a 1024 MiB
-<a href=#165 id=165 data-nosnippet>165</a>    /// container cap. This permit count bounds peak concurrent arenas.
-<a href=#166 id=166 data-nosnippet>166</a>    ///
-<a href=#167 id=167 data-nosnippet>167</a>    /// `0` means "auto" and resolves to `min(available_parallelism, 4)` at
-<a href=#168 id=168 data-nosnippet>168</a>    /// semaphore-construction time (see [`AuthConfig::resolved_max_concurrent_hashes`]).
-<a href=#169 id=169 data-nosnippet>169</a>    /// Override via `AXIAM__AUTH__MAX_CONCURRENT_HASHES`.
-<a href=#170 id=170 data-nosnippet>170</a>    </span><span class="kw">pub </span>max_concurrent_hashes: usize,
-<a href=#171 id=171 data-nosnippet>171</a>    <span class="doccomment">/// B1: How long (in seconds) a request waits to acquire a crypto-hash
-<a href=#172 id=172 data-nosnippet>172</a>    /// permit before giving up and returning a `ServiceUnavailable` (HTTP 503)
-<a href=#173 id=173 data-nosnippet>173</a>    /// backpressure error, instead of queueing unboundedly and adding to
-<a href=#174 id=174 data-nosnippet>174</a>    /// tail latency. Default: 5. Override via
-<a href=#175 id=175 data-nosnippet>175</a>    /// `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS`.
-<a href=#176 id=176 data-nosnippet>176</a>    </span><span class="kw">pub </span>hash_acquire_timeout_secs: u64,
-<a href=#177 id=177 data-nosnippet>177</a>    <span class="doccomment">/// I6: TTL, in seconds, of the process-local **session-validation cache**.
-<a href=#178 id=178 data-nosnippet>178</a>    ///
-<a href=#179 id=179 data-nosnippet>179</a>    /// `0` (the default) disables the cache entirely — every authenticated
-<a href=#180 id=180 data-nosnippet>180</a>    /// request performs its own SurrealDB read to confirm the session behind the
-<a href=#181 id=181 data-nosnippet>181</a>    /// access token's `jti` still exists (D-15 / REQ-7). A non-zero value lets
-<a href=#182 id=182 data-nosnippet>182</a>    /// repeated requests inside the window reuse the last positive answer.
-<a href=#183 id=183 data-nosnippet>183</a>    ///
-<a href=#184 id=184 data-nosnippet>184</a>    /// Override via `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`.
-<a href=#185 id=185 data-nosnippet>185</a>    ///
-<a href=#186 id=186 data-nosnippet>186</a>    /// # What it buys and what it costs
-<a href=#187 id=187 data-nosnippet>187</a>    ///
-<a href=#188 id=188 data-nosnippet>188</a>    /// The read it removes is the reason the D7 decision cache helped gRPC
-<a href=#189 id=189 data-nosnippet>189</a>    /// authorization checks 13.1× but REST checks only 5% in benchmark run 4:
-<a href=#190 id=190 data-nosnippet>190</a>    /// the decision cache elides the *authorization* round-trips, this one
-<a href=#191 id=191 data-nosnippet>191</a>    /// elides the *authentication* round-trip, and the gRPC surface never had
-<a href=#192 id=192 data-nosnippet>192</a>    /// the latter.
-<a href=#193 id=193 data-nosnippet>193</a>    ///
-<a href=#194 id=194 data-nosnippet>194</a>    /// The cost is a bounded revocation window. Every session-deleting path in
-<a href=#195 id=195 data-nosnippet>195</a>    /// `SurrealSessionRepository` invalidates the cache in the same call, so on
-<a href=#196 id=196 data-nosnippet>196</a>    /// a **single replica** a logout takes effect immediately. Across **two or
-<a href=#197 id=197 data-nosnippet>197</a>    /// more replicas** there is no invalidation channel, so a session revoked on
-<a href=#198 id=198 data-nosnippet>198</a>    /// replica A stays acceptable on replicas B…N for at most this many
-<a href=#199 id=199 data-nosnippet>199</a>    /// seconds — the same trade-off, and the same reasoning, as
-<a href=#200 id=200 data-nosnippet>200</a>    /// `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Session *expiry* is not
-<a href=#201 id=201 data-nosnippet>201</a>    /// affected: cached entries carry the row's own `expires_at` and are
-<a href=#202 id=202 data-nosnippet>202</a>    /// rejected exactly on time regardless of the TTL.
-<a href=#203 id=203 data-nosnippet>203</a>    ///
-<a href=#204 id=204 data-nosnippet>204</a>    /// Suggested starting point when enabling: `5`, matching the decision
-<a href=#205 id=205 data-nosnippet>205</a>    /// cache's default.
-<a href=#206 id=206 data-nosnippet>206</a>    </span><span class="kw">pub </span>session_validation_cache_ttl_secs: u64,
-<a href=#207 id=207 data-nosnippet>207</a>}
-<a href=#208 id=208 data-nosnippet>208</a>
-<a href=#209 id=209 data-nosnippet>209</a><span class="kw">impl </span>AuthConfig {
-<a href=#210 id=210 data-nosnippet>210</a>    <span class="doccomment">/// Effective issuer for JWT `iss` claims and OIDC discovery.
-<a href=#211 id=211 data-nosnippet>211</a>    ///
-<a href=#212 id=212 data-nosnippet>212</a>    /// Returns `oauth2_issuer_url` when set, falling back to
-<a href=#213 id=213 data-nosnippet>213</a>    /// `jwt_issuer`. Trailing slashes are stripped so that the
-<a href=#214 id=214 data-nosnippet>214</a>    /// OIDC discovery `issuer` exactly matches token `iss` claims
-<a href=#215 id=215 data-nosnippet>215</a>    /// (OIDC Core §2 requires an exact string match).
-<a href=#216 id=216 data-nosnippet>216</a>    </span><span class="kw">pub fn </span>effective_issuer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>str {
-<a href=#217 id=217 data-nosnippet>217</a>        <span class="kw">if </span><span class="self">self</span>.oauth2_issuer_url.is_empty() {
-<a href=#218 id=218 data-nosnippet>218</a>            <span class="self">self</span>.jwt_issuer.trim_end_matches(<span class="string">'/'</span>)
-<a href=#219 id=219 data-nosnippet>219</a>        } <span class="kw">else </span>{
-<a href=#220 id=220 data-nosnippet>220</a>            <span class="self">self</span>.oauth2_issuer_url.trim_end_matches(<span class="string">'/'</span>)
-<a href=#221 id=221 data-nosnippet>221</a>        }
-<a href=#222 id=222 data-nosnippet>222</a>    }
-<a href=#223 id=223 data-nosnippet>223</a>
-<a href=#224 id=224 data-nosnippet>224</a>    <span class="doccomment">/// CQ-B14: Parse Ed25519 keys from PEM once and cache in `Arc`.
-<a href=#225 id=225 data-nosnippet>225</a>    ///
-<a href=#226 id=226 data-nosnippet>226</a>    /// Call this once at startup after loading config from environment.
-<a href=#227 id=227 data-nosnippet>227</a>    /// After this returns `Ok(())`, all token functions skip per-call PEM
-<a href=#228 id=228 data-nosnippet>228</a>    /// parsing and use the cached keys instead.
-<a href=#229 id=229 data-nosnippet>229</a>    </span><span class="kw">pub fn </span>resolve_keys(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), String&gt; {
-<a href=#230 id=230 data-nosnippet>230</a>        <span class="kw">let </span>enc = EncodingKey::from_ed_pem(<span class="self">self</span>.jwt_private_key_pem.as_bytes())
-<a href=#231 id=231 data-nosnippet>231</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT private key PEM: {e}"</span>))<span class="question-mark">?</span>;
-<a href=#232 id=232 data-nosnippet>232</a>        <span class="kw">let </span>dec = DecodingKey::from_ed_pem(<span class="self">self</span>.jwt_public_key_pem.as_bytes())
-<a href=#233 id=233 data-nosnippet>233</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT public key PEM: {e}"</span>))<span class="question-mark">?</span>;
-<a href=#234 id=234 data-nosnippet>234</a>        <span class="self">self</span>.jwt_encoding_key = <span class="prelude-val">Some</span>(Arc::new(enc));
-<a href=#235 id=235 data-nosnippet>235</a>        <span class="self">self</span>.jwt_decoding_key = <span class="prelude-val">Some</span>(Arc::new(dec));
-<a href=#236 id=236 data-nosnippet>236</a>        <span class="prelude-val">Ok</span>(())
-<a href=#237 id=237 data-nosnippet>237</a>    }
-<a href=#238 id=238 data-nosnippet>238</a>
-<a href=#239 id=239 data-nosnippet>239</a>    <span class="doccomment">/// B1: Resolve `max_concurrent_hashes` (0 = auto) to a concrete permit
-<a href=#240 id=240 data-nosnippet>240</a>    /// count for the crypto semaphore.
-<a href=#241 id=241 data-nosnippet>241</a>    ///
-<a href=#242 id=242 data-nosnippet>242</a>    /// Auto (`0`) resolves to `min(available_parallelism, 4)`: bound by the
-<a href=#243 id=243 data-nosnippet>243</a>    /// core count so Argon2id (a CPU-bound operation) does not oversubscribe
-<a href=#244 id=244 data-nosnippet>244</a>    /// cores, and capped at 4 so peak concurrent ~19 MiB arenas stay well
-<a href=#245 id=245 data-nosnippet>245</a>    /// under typical container memory caps. A non-zero value is used verbatim
-<a href=#246 id=246 data-nosnippet>246</a>    /// (a `0` after resolution is impossible — it would be a zero-permit
-<a href=#247 id=247 data-nosnippet>247</a>    /// semaphore that deadlocks all hashing, so it is clamped to 1).
-<a href=#248 id=248 data-nosnippet>248</a>    </span><span class="kw">pub fn </span>resolved_max_concurrent_hashes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-<a href=#249 id=249 data-nosnippet>249</a>        <span class="kw">match </span><span class="self">self</span>.max_concurrent_hashes {
-<a href=#250 id=250 data-nosnippet>250</a>            <span class="number">0 </span>=&gt; std::thread::available_parallelism()
-<a href=#251 id=251 data-nosnippet>251</a>                .map(|n| n.get().min(<span class="number">4</span>))
-<a href=#252 id=252 data-nosnippet>252</a>                .unwrap_or(<span class="number">4</span>),
-<a href=#253 id=253 data-nosnippet>253</a>            n =&gt; n.max(<span class="number">1</span>),
-<a href=#254 id=254 data-nosnippet>254</a>        }
-<a href=#255 id=255 data-nosnippet>255</a>    }
-<a href=#256 id=256 data-nosnippet>256</a>}
-<a href=#257 id=257 data-nosnippet>257</a>
-<a href=#258 id=258 data-nosnippet>258</a><span class="kw">impl </span>Default <span class="kw">for </span>AuthConfig {
-<a href=#259 id=259 data-nosnippet>259</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-<a href=#260 id=260 data-nosnippet>260</a>        <span class="self">Self </span>{
-<a href=#261 id=261 data-nosnippet>261</a>            jwt_private_key_pem: String::new(),
-<a href=#262 id=262 data-nosnippet>262</a>            jwt_public_key_pem: String::new(),
-<a href=#263 id=263 data-nosnippet>263</a>            access_token_lifetime_secs: <span class="number">900</span>,
-<a href=#264 id=264 data-nosnippet>264</a>            refresh_token_lifetime_secs: <span class="number">2_592_000</span>,
-<a href=#265 id=265 data-nosnippet>265</a>            auth_code_lifetime_secs: <span class="number">600</span>,
-<a href=#266 id=266 data-nosnippet>266</a>            jwt_issuer: <span class="string">"axiam"</span>.into(),
-<a href=#267 id=267 data-nosnippet>267</a>            oauth2_issuer_url: String::new(),
-<a href=#268 id=268 data-nosnippet>268</a>            pepper: <span class="prelude-val">None</span>,
-<a href=#269 id=269 data-nosnippet>269</a>            pepper_previous: <span class="prelude-val">None</span>,
-<a href=#270 id=270 data-nosnippet>270</a>            min_password_length: <span class="number">12</span>,
-<a href=#271 id=271 data-nosnippet>271</a>            mfa_encryption_key: <span class="prelude-val">None</span>,
-<a href=#272 id=272 data-nosnippet>272</a>            opaque_session_key: <span class="prelude-val">None</span>,
-<a href=#273 id=273 data-nosnippet>273</a>            opaque_setup_key: <span class="prelude-val">None</span>,
-<a href=#274 id=274 data-nosnippet>274</a>            federation_encryption_key: <span class="prelude-val">None</span>,
-<a href=#275 id=275 data-nosnippet>275</a>            allow_missing_aud_as_user: <span class="bool-val">true</span>,
-<a href=#276 id=276 data-nosnippet>276</a>            cookie_secure: <span class="bool-val">true</span>,
-<a href=#277 id=277 data-nosnippet>277</a>            mfa_challenge_lifetime_secs: <span class="number">300</span>,
-<a href=#278 id=278 data-nosnippet>278</a>            totp_issuer: <span class="string">"AXIAM"</span>.into(),
-<a href=#279 id=279 data-nosnippet>279</a>            max_failed_login_attempts: <span class="number">5</span>,
-<a href=#280 id=280 data-nosnippet>280</a>            lockout_duration_secs: <span class="number">900</span>,
-<a href=#281 id=281 data-nosnippet>281</a>            lockout_backoff_multiplier: <span class="number">2.0</span>,
-<a href=#282 id=282 data-nosnippet>282</a>            max_lockout_duration_secs: <span class="number">3600</span>,
-<a href=#283 id=283 data-nosnippet>283</a>            email_verification_grace_period_hours: <span class="number">24</span>,
-<a href=#284 id=284 data-nosnippet>284</a>            password_reset_token_expiry_hours: <span class="number">1</span>,
-<a href=#285 id=285 data-nosnippet>285</a>            webauthn_rp_id: <span class="string">"localhost"</span>.into(),
-<a href=#286 id=286 data-nosnippet>286</a>            webauthn_rp_origin: <span class="string">"http://localhost:8090"</span>.into(),
-<a href=#287 id=287 data-nosnippet>287</a>            webauthn_rp_name: <span class="string">"AXIAM"</span>.into(),
-<a href=#288 id=288 data-nosnippet>288</a>            jwt_encoding_key: <span class="prelude-val">None</span>,
-<a href=#289 id=289 data-nosnippet>289</a>            jwt_decoding_key: <span class="prelude-val">None</span>,
-<a href=#290 id=290 data-nosnippet>290</a>            hibp_breaker_threshold: <span class="number">5</span>,
-<a href=#291 id=291 data-nosnippet>291</a>            hibp_breaker_cooldown_secs: <span class="number">30</span>,
-<a href=#292 id=292 data-nosnippet>292</a>            <span class="comment">// B1: 0 = auto → min(available_parallelism, 4) at construction.
-<a href=#293 id=293 data-nosnippet>293</a>            </span>max_concurrent_hashes: <span class="number">0</span>,
-<a href=#294 id=294 data-nosnippet>294</a>            hash_acquire_timeout_secs: <span class="number">5</span>,
-<a href=#295 id=295 data-nosnippet>295</a>            <span class="comment">// I6: opt-in. 0 = no session-validation cache (today's behaviour).
-<a href=#296 id=296 data-nosnippet>296</a>            </span>session_validation_cache_ttl_secs: <span class="number">0</span>,
-<a href=#297 id=297 data-nosnippet>297</a>        }
-<a href=#298 id=298 data-nosnippet>298</a>    }
-<a href=#299 id=299 data-nosnippet>299</a>}
+<a href=#70 id=70 data-nosnippet>70</a>    /// # Why this exists
+<a href=#71 id=71 data-nosnippet>71</a>    ///
+<a href=#72 id=72 data-nosnippet>72</a>    /// SAML and Apple return by cross-site form POST, so the session cookies
+<a href=#73 id=73 data-nosnippet>73</a>    /// cannot be set on that response. AXIAM instead mints a single-use handoff
+<a href=#74 id=74 data-nosnippet>74</a>    /// code and redirects the browser to the SPA with it — and that code is a
+<a href=#75 id=75 data-nosnippet>75</a>    /// bearer credential for a session. The redirect target therefore may not
+<a href=#76 id=76 data-nosnippet>76</a>    /// be whatever the caller of the *unauthenticated* login-start endpoint
+<a href=#77 id=77 data-nosnippet>77</a>    /// asked for: on those two protocols the identity provider never sees the
+<a href=#78 id=78 data-nosnippet>78</a>    /// SPA `redirect_uri`, so its own registered-redirect allowlist is not
+<a href=#79 id=79 data-nosnippet>79</a>    /// there to reject an attacker's host.
+<a href=#80 id=80 data-nosnippet>80</a>    ///
+<a href=#81 id=81 data-nosnippet>81</a>    /// The default is empty, which means **the origin of
+<a href=#82 id=82 data-nosnippet>82</a>    /// [`effective_issuer`](Self::effective_issuer) only**. That is the right
+<a href=#83 id=83 data-nosnippet>83</a>    /// default rather than a restrictive one: the endpoint a SAML IdP or Apple
+<a href=#84 id=84 data-nosnippet>84</a>    /// posts to is itself built from `effective_issuer`, so a deployment whose
+<a href=#85 id=85 data-nosnippet>85</a>    /// SPA is served from that origin — the shape `docker/nginx.conf` and the
+<a href=#86 id=86 data-nosnippet>86</a>    /// deployment guides describe, and the only shape in which
+<a href=#87 id=87 data-nosnippet>87</a>    /// `SameSite=Strict` session cookies work same-origin — needs no entry
+<a href=#88 id=88 data-nosnippet>88</a>    /// here at all.
+<a href=#89 id=89 data-nosnippet>89</a>    ///
+<a href=#90 id=90 data-nosnippet>90</a>    /// Set it when the SPA is served from a different host than the API (for
+<a href=#91 id=91 data-nosnippet>91</a>    /// example `https://app.example.com` against `https://api.example.com`).
+<a href=#92 id=92 data-nosnippet>92</a>    /// Values are compared as **origins**: scheme, host and port, with the path
+<a href=#93 id=93 data-nosnippet>93</a>    /// ignored. It has no effect on the OIDC and OAuth2 flows, whose
+<a href=#94 id=94 data-nosnippet>94</a>    /// `redirect_uri` is registered at the provider and checked there.
+<a href=#95 id=95 data-nosnippet>95</a>    </span><span class="kw">pub </span>sso_spa_origins: Vec&lt;String&gt;,
+<a href=#96 id=96 data-nosnippet>96</a>    <span class="doccomment">/// Optional pepper prepended to passwords before Argon2id verification.
+<a href=#97 id=97 data-nosnippet>97</a>    /// Wrapped in `SecretString` so `Debug`/logging never leaks it by
+<a href=#98 id=98 data-nosnippet>98</a>    /// accident (SECHRD-12) — exposed only via `.expose_secret()` at the
+<a href=#99 id=99 data-nosnippet>99</a>    /// `&amp;str` boundary where a pepper value is consumed.
+<a href=#100 id=100 data-nosnippet>100</a>    </span><span class="kw">pub </span>pepper: <span class="prelude-ty">Option</span>&lt;SecretString&gt;,
+<a href=#101 id=101 data-nosnippet>101</a>    <span class="doccomment">/// Previous pepper, kept **verify-only** while a pepper rotation drains
+<a href=#102 id=102 data-nosnippet>102</a>    /// (`AXIAM__AUTH__PEPPER_PREVIOUS`, §13.4 observation 3).
+<a href=#103 id=103 data-nosnippet>103</a>    ///
+<a href=#104 id=104 data-nosnippet>104</a>    /// Client-secret hashes are keyed by the pepper, and the `v2.hs256$` tag
+<a href=#105 id=105 data-nosnippet>105</a>    /// versions the *algorithm*, not the *key* — so without this, rotating
+<a href=#106 id=106 data-nosnippet>106</a>    /// `AXIAM__AUTH__PEPPER` permanently invalidates **every** client secret and
+<a href=#107 id=107 data-nosnippet>107</a>    /// every service account and OAuth2 client has to be re-issued in lockstep
+<a href=#108 id=108 data-nosnippet>108</a>    /// with the restart.
+<a href=#109 id=109 data-nosnippet>109</a>    ///
+<a href=#110 id=110 data-nosnippet>110</a>    /// Set this to the outgoing value for the duration of a rotation. Secrets
+<a href=#111 id=111 data-nosnippet>111</a>    /// hashed under it still verify, and each one is transparently rewritten
+<a href=#112 id=112 data-nosnippet>112</a>    /// under the new pepper the first time its owner authenticates, so the
+<a href=#113 id=113 data-nosnippet>113</a>    /// rotation drains itself. Unset it once the fleet has drained; nothing is
+<a href=#114 id=114 data-nosnippet>114</a>    /// ever *written* under this key.
+<a href=#115 id=115 data-nosnippet>115</a>    ///
+<a href=#116 id=116 data-nosnippet>116</a>    /// It does **not** apply to Argon2id password peppering, which has its own
+<a href=#117 id=117 data-nosnippet>117</a>    /// migration story — only to client-secret hashing.
+<a href=#118 id=118 data-nosnippet>118</a>    </span><span class="kw">pub </span>pepper_previous: <span class="prelude-ty">Option</span>&lt;SecretString&gt;,
+<a href=#119 id=119 data-nosnippet>119</a>    <span class="doccomment">/// Minimum password length for policy enforcement.
+<a href=#120 id=120 data-nosnippet>120</a>    </span><span class="kw">pub </span>min_password_length: usize,
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="doccomment">/// 256-bit AES-GCM key for encrypting TOTP secrets at rest.
+<a href=#122 id=122 data-nosnippet>122</a>    /// `None` disables MFA enrollment. Set programmatically (not from config files).
+<a href=#123 id=123 data-nosnippet>123</a>    </span><span class="attr">#[serde(skip)]
+<a href=#124 id=124 data-nosnippet>124</a>    </span><span class="kw">pub </span>mfa_encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
+<a href=#125 id=125 data-nosnippet>125</a>    <span class="doccomment">/// 256-bit AES-GCM key for encrypting federation client secrets at rest.
+<a href=#126 id=126 data-nosnippet>126</a>    /// `None` means federation config create/update will fail at runtime.
+<a href=#127 id=127 data-nosnippet>127</a>    /// Set programmatically from `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` (not from
+<a href=#128 id=128 data-nosnippet>128</a>    /// config files). Federation is optional — absence is warned, not fatal.
+<a href=#129 id=129 data-nosnippet>129</a>    </span><span class="attr">#[serde(skip)]
+<a href=#130 id=130 data-nosnippet>130</a>    </span><span class="kw">pub </span>federation_encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
+<a href=#131 id=131 data-nosnippet>131</a>    <span class="doccomment">/// 256-bit AES-GCM key that seals an OPAQUE exchange's server state
+<a href=#132 id=132 data-nosnippet>132</a>    /// between its two messages, on both the login and the registration path.
+<a href=#133 id=133 data-nosnippet>133</a>    ///
+<a href=#134 id=134 data-nosnippet>134</a>    /// `None` means the OPAQUE endpoints answer `503`, whatever the org or
+<a href=#135 id=135 data-nosnippet>135</a>    /// tenant policy says. That is deliberate: silently falling back to
+<a href=#136 id=136 data-nosnippet>136</a>    /// password login when the key is missing would turn a misconfiguration
+<a href=#137 id=137 data-nosnippet>137</a>    /// into an undetectable downgrade of a security control an operator
+<a href=#138 id=138 data-nosnippet>138</a>    /// believes is on.
+<a href=#139 id=139 data-nosnippet>139</a>    ///
+<a href=#140 id=140 data-nosnippet>140</a>    /// Deliberately its own key rather than a reuse of
+<a href=#141 id=141 data-nosnippet>141</a>    /// [`Self::mfa_encryption_key`]: the two rotate on different schedules, and
+<a href=#142 id=142 data-nosnippet>142</a>    /// sharing one would couple an OPAQUE outage to an unrelated TOTP
+<a href=#143 id=143 data-nosnippet>143</a>    /// rotation. Set from `AXIAM__AUTH__OPAQUE_SESSION_KEY` (not from config
+<a href=#144 id=144 data-nosnippet>144</a>    /// files).
+<a href=#145 id=145 data-nosnippet>145</a>    ///
+<a href=#146 id=146 data-nosnippet>146</a>    /// Rotating this is cheap — it invalidates exchanges in flight and nothing
+<a href=#147 id=147 data-nosnippet>147</a>    /// else. Contrast [`Self::opaque_setup_key`], which is the expensive one.
+<a href=#148 id=148 data-nosnippet>148</a>    </span><span class="attr">#[serde(skip)]
+<a href=#149 id=149 data-nosnippet>149</a>    </span><span class="kw">pub </span>opaque_session_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="doccomment">/// 256-bit AES-GCM key that encrypts each tenant's OPAQUE server key
+<a href=#151 id=151 data-nosnippet>151</a>    /// material — the OPRF seed and the long-term AKE key pair — at rest.
+<a href=#152 id=152 data-nosnippet>152</a>    ///
+<a href=#153 id=153 data-nosnippet>153</a>    /// `None` means the OPAQUE endpoints answer `503`, for the same reason as
+<a href=#154 id=154 data-nosnippet>154</a>    /// above.
+<a href=#155 id=155 data-nosnippet>155</a>    ///
+<a href=#156 id=156 data-nosnippet>156</a>    /// This is a **separate key from [`Self::opaque_session_key`] on purpose**,
+<a href=#157 id=157 data-nosnippet>157</a>    /// and the reason is what rotating each one costs. The session key seals
+<a href=#158 id=158 data-nosnippet>158</a>    /// 120 seconds of in-flight state and can be rotated on any schedule.
+<a href=#159 id=159 data-nosnippet>159</a>    /// This key protects data at rest: rotating it means re-encrypting every
+<a href=#160 id=160 data-nosnippet>160</a>    /// `opaque_server_setup` row, and **losing** it means every registration
+<a href=#161 id=161 data-nosnippet>161</a>    /// record in every tenant becomes unopenable and the whole estate needs a
+<a href=#162 id=162 data-nosnippet>162</a>    /// password reset. Sharing one key would put the cheap rotation and the
+<a href=#163 id=163 data-nosnippet>163</a>    /// catastrophic one on the same schedule, which is how an operator ends up
+<a href=#164 id=164 data-nosnippet>164</a>    /// doing neither. Set from `AXIAM__AUTH__OPAQUE_SETUP_KEY`.
+<a href=#165 id=165 data-nosnippet>165</a>    </span><span class="attr">#[serde(skip)]
+<a href=#166 id=166 data-nosnippet>166</a>    </span><span class="kw">pub </span>opaque_setup_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
+<a href=#167 id=167 data-nosnippet>167</a>    <span class="doccomment">/// When `true`, access tokens decoded without an `aud` claim are treated as
+<a href=#168 id=168 data-nosnippet>168</a>    /// `axiam:user`. Enables a back-compat window during the Phase 4 rollout
+<a href=#169 id=169 data-nosnippet>169</a>    /// while pre-Phase-4 tokens are still circulating. Default: `true`.
+<a href=#170 id=170 data-nosnippet>170</a>    </span><span class="attr">#[serde(default = <span class="string">"default_true"</span>)]
+<a href=#171 id=171 data-nosnippet>171</a>    </span><span class="kw">pub </span>allow_missing_aud_as_user: bool,
+<a href=#172 id=172 data-nosnippet>172</a>    <span class="doccomment">/// When `true` (default), all auth cookies are marked `Secure` and are
+<a href=#173 id=173 data-nosnippet>173</a>    /// therefore sent only over HTTPS. Set `AXIAM__AUTH__COOKIE_SECURE=false`
+<a href=#174 id=174 data-nosnippet>174</a>    /// **only** in local HTTP development (e.g. http://localhost) — **never**
+<a href=#175 id=175 data-nosnippet>175</a>    /// in production or staging (D-18).
+<a href=#176 id=176 data-nosnippet>176</a>    </span><span class="attr">#[serde(default = <span class="string">"default_true"</span>)]
+<a href=#177 id=177 data-nosnippet>177</a>    </span><span class="kw">pub </span>cookie_secure: bool,
+<a href=#178 id=178 data-nosnippet>178</a>    <span class="doccomment">/// MFA challenge token lifetime in seconds (default: 300 = 5 minutes).
+<a href=#179 id=179 data-nosnippet>179</a>    </span><span class="kw">pub </span>mfa_challenge_lifetime_secs: u64,
+<a href=#180 id=180 data-nosnippet>180</a>    <span class="doccomment">/// Issuer name shown in authenticator apps.
+<a href=#181 id=181 data-nosnippet>181</a>    </span><span class="kw">pub </span>totp_issuer: String,
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="doccomment">/// Max consecutive failed login attempts before lockout (default: 5).
+<a href=#183 id=183 data-nosnippet>183</a>    </span><span class="kw">pub </span>max_failed_login_attempts: u32,
+<a href=#184 id=184 data-nosnippet>184</a>    <span class="doccomment">/// Initial lockout duration in seconds (default: 900 = 15 min).
+<a href=#185 id=185 data-nosnippet>185</a>    </span><span class="kw">pub </span>lockout_duration_secs: u64,
+<a href=#186 id=186 data-nosnippet>186</a>    <span class="doccomment">/// Exponential backoff multiplier for repeated lockouts (default: 2.0).
+<a href=#187 id=187 data-nosnippet>187</a>    </span><span class="kw">pub </span>lockout_backoff_multiplier: f64,
+<a href=#188 id=188 data-nosnippet>188</a>    <span class="doccomment">/// Maximum lockout duration in seconds (default: 3600 = 1 hour).
+<a href=#189 id=189 data-nosnippet>189</a>    </span><span class="kw">pub </span>max_lockout_duration_secs: u64,
+<a href=#190 id=190 data-nosnippet>190</a>    <span class="doccomment">/// Grace period in hours during which PendingVerification users
+<a href=#191 id=191 data-nosnippet>191</a>    /// can still log in (default: 24). Set to 0 to disable.
+<a href=#192 id=192 data-nosnippet>192</a>    </span><span class="kw">pub </span>email_verification_grace_period_hours: u32,
+<a href=#193 id=193 data-nosnippet>193</a>    <span class="doccomment">/// Password reset token expiry in hours (default: 1).
+<a href=#194 id=194 data-nosnippet>194</a>    </span><span class="kw">pub </span>password_reset_token_expiry_hours: u32,
+<a href=#195 id=195 data-nosnippet>195</a>    <span class="doccomment">/// WebAuthn Relying Party ID (typically the domain name,
+<a href=#196 id=196 data-nosnippet>196</a>    /// e.g. "auth.example.com").
+<a href=#197 id=197 data-nosnippet>197</a>    </span><span class="kw">pub </span>webauthn_rp_id: String,
+<a href=#198 id=198 data-nosnippet>198</a>    <span class="doccomment">/// WebAuthn Relying Party origin
+<a href=#199 id=199 data-nosnippet>199</a>    /// (e.g. "https://auth.example.com").
+<a href=#200 id=200 data-nosnippet>200</a>    </span><span class="kw">pub </span>webauthn_rp_origin: String,
+<a href=#201 id=201 data-nosnippet>201</a>    <span class="doccomment">/// WebAuthn Relying Party display name.
+<a href=#202 id=202 data-nosnippet>202</a>    </span><span class="kw">pub </span>webauthn_rp_name: String,
+<a href=#203 id=203 data-nosnippet>203</a>    <span class="doccomment">/// CQ-B14: Pre-parsed Ed25519 signing key. Populated once at startup via
+<a href=#204 id=204 data-nosnippet>204</a>    /// `resolve_keys()`. When `Some`, token-issue functions skip PEM re-parsing.
+<a href=#205 id=205 data-nosnippet>205</a>    /// When `None`, they fall back to parsing from `jwt_private_key_pem`.
+<a href=#206 id=206 data-nosnippet>206</a>    </span><span class="attr">#[serde(skip)]
+<a href=#207 id=207 data-nosnippet>207</a>    </span><span class="kw">pub </span>jwt_encoding_key: <span class="prelude-ty">Option</span>&lt;Arc&lt;EncodingKey&gt;&gt;,
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="doccomment">/// CQ-B14: Pre-parsed Ed25519 verification key. Populated once at startup via
+<a href=#209 id=209 data-nosnippet>209</a>    /// `resolve_keys()`. When `Some`, token-verify functions skip PEM re-parsing.
+<a href=#210 id=210 data-nosnippet>210</a>    /// When `None`, they fall back to parsing from `jwt_public_key_pem`.
+<a href=#211 id=211 data-nosnippet>211</a>    </span><span class="attr">#[serde(skip)]
+<a href=#212 id=212 data-nosnippet>212</a>    </span><span class="kw">pub </span>jwt_decoding_key: <span class="prelude-ty">Option</span>&lt;Arc&lt;DecodingKey&gt;&gt;,
+<a href=#213 id=213 data-nosnippet>213</a>    <span class="doccomment">/// PERF-01: Consecutive HIBP failures/timeouts before the process-wide
+<a href=#214 id=214 data-nosnippet>214</a>    /// `HibpBreaker` trips open (default: 5). Overridable via
+<a href=#215 id=215 data-nosnippet>215</a>    /// `AXIAM__AUTH__HIBP_BREAKER_THRESHOLD`.
+<a href=#216 id=216 data-nosnippet>216</a>    </span><span class="kw">pub </span>hibp_breaker_threshold: u32,
+<a href=#217 id=217 data-nosnippet>217</a>    <span class="doccomment">/// PERF-01: Cooldown in seconds the `HibpBreaker` stays open before
+<a href=#218 id=218 data-nosnippet>218</a>    /// allowing a half-open probe request (default: 30). Overridable via
+<a href=#219 id=219 data-nosnippet>219</a>    /// `AXIAM__AUTH__HIBP_BREAKER_COOLDOWN_SECS`.
+<a href=#220 id=220 data-nosnippet>220</a>    </span><span class="kw">pub </span>hibp_breaker_cooldown_secs: u64,
+<a href=#221 id=221 data-nosnippet>221</a>    <span class="doccomment">/// B1: Maximum number of Argon2id hash/verify operations allowed to run
+<a href=#222 id=222 data-nosnippet>222</a>    /// concurrently, enforced by the process-wide `crypto_semaphore` shared
+<a href=#223 id=223 data-nosnippet>223</a>    /// across the login, password-change, password-reset and PKI crypto paths.
+<a href=#224 id=224 data-nosnippet>224</a>    ///
+<a href=#225 id=225 data-nosnippet>225</a>    /// Each in-flight Argon2id operation allocates a ~19 MiB memory arena
+<a href=#226 id=226 data-nosnippet>226</a>    /// (OWASP params m=19456), so unbounded concurrency is an unauthenticated
+<a href=#227 id=227 data-nosnippet>227</a>    /// memory-DoS vector: the login benchmark pegged 2 cores and reached
+<a href=#228 id=228 data-nosnippet>228</a>    /// ~970 MiB RSS ≈ 50 concurrent × 19 MiB arenas, against a 1024 MiB
+<a href=#229 id=229 data-nosnippet>229</a>    /// container cap. This permit count bounds peak concurrent arenas.
+<a href=#230 id=230 data-nosnippet>230</a>    ///
+<a href=#231 id=231 data-nosnippet>231</a>    /// `0` means "auto" and resolves to `min(available_parallelism, 4)` at
+<a href=#232 id=232 data-nosnippet>232</a>    /// semaphore-construction time (see [`AuthConfig::resolved_max_concurrent_hashes`]).
+<a href=#233 id=233 data-nosnippet>233</a>    /// Override via `AXIAM__AUTH__MAX_CONCURRENT_HASHES`.
+<a href=#234 id=234 data-nosnippet>234</a>    </span><span class="kw">pub </span>max_concurrent_hashes: usize,
+<a href=#235 id=235 data-nosnippet>235</a>    <span class="doccomment">/// B1: How long (in seconds) a request waits to acquire a crypto-hash
+<a href=#236 id=236 data-nosnippet>236</a>    /// permit before giving up and returning a `ServiceUnavailable` (HTTP 503)
+<a href=#237 id=237 data-nosnippet>237</a>    /// backpressure error, instead of queueing unboundedly and adding to
+<a href=#238 id=238 data-nosnippet>238</a>    /// tail latency. Default: 5. Override via
+<a href=#239 id=239 data-nosnippet>239</a>    /// `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS`.
+<a href=#240 id=240 data-nosnippet>240</a>    </span><span class="kw">pub </span>hash_acquire_timeout_secs: u64,
+<a href=#241 id=241 data-nosnippet>241</a>    <span class="doccomment">/// I6: TTL, in seconds, of the process-local **session-validation cache**.
+<a href=#242 id=242 data-nosnippet>242</a>    ///
+<a href=#243 id=243 data-nosnippet>243</a>    /// `0` (the default) disables the cache entirely — every authenticated
+<a href=#244 id=244 data-nosnippet>244</a>    /// request performs its own SurrealDB read to confirm the session behind the
+<a href=#245 id=245 data-nosnippet>245</a>    /// access token's `jti` still exists (D-15 / REQ-7). A non-zero value lets
+<a href=#246 id=246 data-nosnippet>246</a>    /// repeated requests inside the window reuse the last positive answer.
+<a href=#247 id=247 data-nosnippet>247</a>    ///
+<a href=#248 id=248 data-nosnippet>248</a>    /// Override via `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`.
+<a href=#249 id=249 data-nosnippet>249</a>    ///
+<a href=#250 id=250 data-nosnippet>250</a>    /// # What it buys and what it costs
+<a href=#251 id=251 data-nosnippet>251</a>    ///
+<a href=#252 id=252 data-nosnippet>252</a>    /// The read it removes is the reason the D7 decision cache helped gRPC
+<a href=#253 id=253 data-nosnippet>253</a>    /// authorization checks 13.1× but REST checks only 5% in benchmark run 4:
+<a href=#254 id=254 data-nosnippet>254</a>    /// the decision cache elides the *authorization* round-trips, this one
+<a href=#255 id=255 data-nosnippet>255</a>    /// elides the *authentication* round-trip, and the gRPC surface never had
+<a href=#256 id=256 data-nosnippet>256</a>    /// the latter.
+<a href=#257 id=257 data-nosnippet>257</a>    ///
+<a href=#258 id=258 data-nosnippet>258</a>    /// The cost is a bounded revocation window. Every session-deleting path in
+<a href=#259 id=259 data-nosnippet>259</a>    /// `SurrealSessionRepository` invalidates the cache in the same call, so on
+<a href=#260 id=260 data-nosnippet>260</a>    /// a **single replica** a logout takes effect immediately. Across **two or
+<a href=#261 id=261 data-nosnippet>261</a>    /// more replicas** there is no invalidation channel, so a session revoked on
+<a href=#262 id=262 data-nosnippet>262</a>    /// replica A stays acceptable on replicas B…N for at most this many
+<a href=#263 id=263 data-nosnippet>263</a>    /// seconds — the same trade-off, and the same reasoning, as
+<a href=#264 id=264 data-nosnippet>264</a>    /// `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Session *expiry* is not
+<a href=#265 id=265 data-nosnippet>265</a>    /// affected: cached entries carry the row's own `expires_at` and are
+<a href=#266 id=266 data-nosnippet>266</a>    /// rejected exactly on time regardless of the TTL.
+<a href=#267 id=267 data-nosnippet>267</a>    ///
+<a href=#268 id=268 data-nosnippet>268</a>    /// Suggested starting point when enabling: `5`, matching the decision
+<a href=#269 id=269 data-nosnippet>269</a>    /// cache's default.
+<a href=#270 id=270 data-nosnippet>270</a>    </span><span class="kw">pub </span>session_validation_cache_ttl_secs: u64,
+<a href=#271 id=271 data-nosnippet>271</a>}
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a><span class="kw">impl </span>AuthConfig {
+<a href=#274 id=274 data-nosnippet>274</a>    <span class="doccomment">/// Effective issuer for JWT `iss` claims and OIDC discovery.
+<a href=#275 id=275 data-nosnippet>275</a>    ///
+<a href=#276 id=276 data-nosnippet>276</a>    /// Returns `oauth2_issuer_url` when set, falling back to
+<a href=#277 id=277 data-nosnippet>277</a>    /// `jwt_issuer`. Trailing slashes are stripped so that the
+<a href=#278 id=278 data-nosnippet>278</a>    /// OIDC discovery `issuer` exactly matches token `iss` claims
+<a href=#279 id=279 data-nosnippet>279</a>    /// (OIDC Core §2 requires an exact string match).
+<a href=#280 id=280 data-nosnippet>280</a>    </span><span class="kw">pub fn </span>effective_issuer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>str {
+<a href=#281 id=281 data-nosnippet>281</a>        <span class="kw">if </span><span class="self">self</span>.oauth2_issuer_url.is_empty() {
+<a href=#282 id=282 data-nosnippet>282</a>            <span class="self">self</span>.jwt_issuer.trim_end_matches(<span class="string">'/'</span>)
+<a href=#283 id=283 data-nosnippet>283</a>        } <span class="kw">else </span>{
+<a href=#284 id=284 data-nosnippet>284</a>            <span class="self">self</span>.oauth2_issuer_url.trim_end_matches(<span class="string">'/'</span>)
+<a href=#285 id=285 data-nosnippet>285</a>        }
+<a href=#286 id=286 data-nosnippet>286</a>    }
+<a href=#287 id=287 data-nosnippet>287</a>
+<a href=#288 id=288 data-nosnippet>288</a>    <span class="doccomment">/// CQ-B14: Parse Ed25519 keys from PEM once and cache in `Arc`.
+<a href=#289 id=289 data-nosnippet>289</a>    ///
+<a href=#290 id=290 data-nosnippet>290</a>    /// Call this once at startup after loading config from environment.
+<a href=#291 id=291 data-nosnippet>291</a>    /// After this returns `Ok(())`, all token functions skip per-call PEM
+<a href=#292 id=292 data-nosnippet>292</a>    /// parsing and use the cached keys instead.
+<a href=#293 id=293 data-nosnippet>293</a>    </span><span class="kw">pub fn </span>resolve_keys(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), String&gt; {
+<a href=#294 id=294 data-nosnippet>294</a>        <span class="kw">let </span>enc = EncodingKey::from_ed_pem(<span class="self">self</span>.jwt_private_key_pem.as_bytes())
+<a href=#295 id=295 data-nosnippet>295</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT private key PEM: {e}"</span>))<span class="question-mark">?</span>;
+<a href=#296 id=296 data-nosnippet>296</a>        <span class="kw">let </span>dec = DecodingKey::from_ed_pem(<span class="self">self</span>.jwt_public_key_pem.as_bytes())
+<a href=#297 id=297 data-nosnippet>297</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT public key PEM: {e}"</span>))<span class="question-mark">?</span>;
+<a href=#298 id=298 data-nosnippet>298</a>        <span class="self">self</span>.jwt_encoding_key = <span class="prelude-val">Some</span>(Arc::new(enc));
+<a href=#299 id=299 data-nosnippet>299</a>        <span class="self">self</span>.jwt_decoding_key = <span class="prelude-val">Some</span>(Arc::new(dec));
+<a href=#300 id=300 data-nosnippet>300</a>        <span class="prelude-val">Ok</span>(())
+<a href=#301 id=301 data-nosnippet>301</a>    }
+<a href=#302 id=302 data-nosnippet>302</a>
+<a href=#303 id=303 data-nosnippet>303</a>    <span class="doccomment">/// B1: Resolve `max_concurrent_hashes` (0 = auto) to a concrete permit
+<a href=#304 id=304 data-nosnippet>304</a>    /// count for the crypto semaphore.
+<a href=#305 id=305 data-nosnippet>305</a>    ///
+<a href=#306 id=306 data-nosnippet>306</a>    /// Auto (`0`) resolves to `min(available_parallelism, 4)`: bound by the
+<a href=#307 id=307 data-nosnippet>307</a>    /// core count so Argon2id (a CPU-bound operation) does not oversubscribe
+<a href=#308 id=308 data-nosnippet>308</a>    /// cores, and capped at 4 so peak concurrent ~19 MiB arenas stay well
+<a href=#309 id=309 data-nosnippet>309</a>    /// under typical container memory caps. A non-zero value is used verbatim
+<a href=#310 id=310 data-nosnippet>310</a>    /// (a `0` after resolution is impossible — it would be a zero-permit
+<a href=#311 id=311 data-nosnippet>311</a>    /// semaphore that deadlocks all hashing, so it is clamped to 1).
+<a href=#312 id=312 data-nosnippet>312</a>    </span><span class="kw">pub fn </span>resolved_max_concurrent_hashes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="kw">match </span><span class="self">self</span>.max_concurrent_hashes {
+<a href=#314 id=314 data-nosnippet>314</a>            <span class="number">0 </span>=&gt; std::thread::available_parallelism()
+<a href=#315 id=315 data-nosnippet>315</a>                .map(|n| n.get().min(<span class="number">4</span>))
+<a href=#316 id=316 data-nosnippet>316</a>                .unwrap_or(<span class="number">4</span>),
+<a href=#317 id=317 data-nosnippet>317</a>            n =&gt; n.max(<span class="number">1</span>),
+<a href=#318 id=318 data-nosnippet>318</a>        }
+<a href=#319 id=319 data-nosnippet>319</a>    }
+<a href=#320 id=320 data-nosnippet>320</a>}
+<a href=#321 id=321 data-nosnippet>321</a>
+<a href=#322 id=322 data-nosnippet>322</a><span class="kw">impl </span>Default <span class="kw">for </span>AuthConfig {
+<a href=#323 id=323 data-nosnippet>323</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#324 id=324 data-nosnippet>324</a>        <span class="self">Self </span>{
+<a href=#325 id=325 data-nosnippet>325</a>            jwt_private_key_pem: String::new(),
+<a href=#326 id=326 data-nosnippet>326</a>            jwt_public_key_pem: String::new(),
+<a href=#327 id=327 data-nosnippet>327</a>            <span class="comment">// Fail closed: a forwarded certificate is trusted only where an
+<a href=#328 id=328 data-nosnippet>328</a>            // operator has asserted a proxy terminates mTLS and overwrites the
+<a href=#329 id=329 data-nosnippet>329</a>            // header. See the field docs for what that assertion costs if wrong.
+<a href=#330 id=330 data-nosnippet>330</a>            </span>trust_forwarded_client_cert: <span class="bool-val">false</span>,
+<a href=#331 id=331 data-nosnippet>331</a>            access_token_lifetime_secs: <span class="number">900</span>,
+<a href=#332 id=332 data-nosnippet>332</a>            refresh_token_lifetime_secs: <span class="number">2_592_000</span>,
+<a href=#333 id=333 data-nosnippet>333</a>            auth_code_lifetime_secs: <span class="number">600</span>,
+<a href=#334 id=334 data-nosnippet>334</a>            jwt_issuer: <span class="string">"axiam"</span>.into(),
+<a href=#335 id=335 data-nosnippet>335</a>            oauth2_issuer_url: String::new(),
+<a href=#336 id=336 data-nosnippet>336</a>            sso_spa_origins: Vec::new(),
+<a href=#337 id=337 data-nosnippet>337</a>            pepper: <span class="prelude-val">None</span>,
+<a href=#338 id=338 data-nosnippet>338</a>            pepper_previous: <span class="prelude-val">None</span>,
+<a href=#339 id=339 data-nosnippet>339</a>            min_password_length: <span class="number">12</span>,
+<a href=#340 id=340 data-nosnippet>340</a>            mfa_encryption_key: <span class="prelude-val">None</span>,
+<a href=#341 id=341 data-nosnippet>341</a>            opaque_session_key: <span class="prelude-val">None</span>,
+<a href=#342 id=342 data-nosnippet>342</a>            opaque_setup_key: <span class="prelude-val">None</span>,
+<a href=#343 id=343 data-nosnippet>343</a>            federation_encryption_key: <span class="prelude-val">None</span>,
+<a href=#344 id=344 data-nosnippet>344</a>            allow_missing_aud_as_user: <span class="bool-val">true</span>,
+<a href=#345 id=345 data-nosnippet>345</a>            cookie_secure: <span class="bool-val">true</span>,
+<a href=#346 id=346 data-nosnippet>346</a>            mfa_challenge_lifetime_secs: <span class="number">300</span>,
+<a href=#347 id=347 data-nosnippet>347</a>            totp_issuer: <span class="string">"AXIAM"</span>.into(),
+<a href=#348 id=348 data-nosnippet>348</a>            max_failed_login_attempts: <span class="number">5</span>,
+<a href=#349 id=349 data-nosnippet>349</a>            lockout_duration_secs: <span class="number">900</span>,
+<a href=#350 id=350 data-nosnippet>350</a>            lockout_backoff_multiplier: <span class="number">2.0</span>,
+<a href=#351 id=351 data-nosnippet>351</a>            max_lockout_duration_secs: <span class="number">3600</span>,
+<a href=#352 id=352 data-nosnippet>352</a>            email_verification_grace_period_hours: <span class="number">24</span>,
+<a href=#353 id=353 data-nosnippet>353</a>            password_reset_token_expiry_hours: <span class="number">1</span>,
+<a href=#354 id=354 data-nosnippet>354</a>            webauthn_rp_id: <span class="string">"localhost"</span>.into(),
+<a href=#355 id=355 data-nosnippet>355</a>            webauthn_rp_origin: <span class="string">"http://localhost:8090"</span>.into(),
+<a href=#356 id=356 data-nosnippet>356</a>            webauthn_rp_name: <span class="string">"AXIAM"</span>.into(),
+<a href=#357 id=357 data-nosnippet>357</a>            jwt_encoding_key: <span class="prelude-val">None</span>,
+<a href=#358 id=358 data-nosnippet>358</a>            jwt_decoding_key: <span class="prelude-val">None</span>,
+<a href=#359 id=359 data-nosnippet>359</a>            hibp_breaker_threshold: <span class="number">5</span>,
+<a href=#360 id=360 data-nosnippet>360</a>            hibp_breaker_cooldown_secs: <span class="number">30</span>,
+<a href=#361 id=361 data-nosnippet>361</a>            <span class="comment">// B1: 0 = auto → min(available_parallelism, 4) at construction.
+<a href=#362 id=362 data-nosnippet>362</a>            </span>max_concurrent_hashes: <span class="number">0</span>,
+<a href=#363 id=363 data-nosnippet>363</a>            hash_acquire_timeout_secs: <span class="number">5</span>,
+<a href=#364 id=364 data-nosnippet>364</a>            <span class="comment">// I6: opt-in. 0 = no session-validation cache (today's behaviour).
+<a href=#365 id=365 data-nosnippet>365</a>            </span>session_validation_cache_ttl_secs: <span class="number">0</span>,
+<a href=#366 id=366 data-nosnippet>366</a>        }
+<a href=#367 id=367 data-nosnippet>367</a>    }
+<a href=#368 id=368 data-nosnippet>368</a>}
 </code></pre></div></section></main></body></html>

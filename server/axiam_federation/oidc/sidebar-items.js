@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["unverified_issuer_of"],"struct":["AuthorizationUrl","FederationCallbackResult","IdTokenClaims","OidcDiscoveryDocument","OidcFederationService"]};
+window.SIDEBAR_ITEMS = {"fn":["unverified_issuer_of"],"struct":["AuthorizationUrl","FederationCallbackResult","IdTokenClaims","OidcDiscoveryDocument","OidcFederationService","VerifiedIdToken"]};

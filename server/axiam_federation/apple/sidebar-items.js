@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["APPLE_AUDIENCE","CLIENT_SECRET_TTL_SECS"],"fn":["mint_client_secret","validate_apple_identifier"]};

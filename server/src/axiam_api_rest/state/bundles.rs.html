@@ -239,24 +239,30 @@
 <a href=#239 id=239 data-nosnippet>239</a>    <span class="kw">pub </span>federation_config_repo: SurrealFederationConfigRepository&lt;C&gt;,
 <a href=#240 id=240 data-nosnippet>240</a>    <span class="kw">pub </span>federation_link_repo: SurrealFederationLinkRepository&lt;C&gt;,
 <a href=#241 id=241 data-nosnippet>241</a>    <span class="kw">pub </span>federation_login_state_repo: SurrealFederationLoginStateRepository&lt;C&gt;,
-<a href=#242 id=242 data-nosnippet>242</a>    <span class="kw">pub </span>assertion_replay_repo: SurrealAssertionReplayRepository&lt;C&gt;,
-<a href=#243 id=243 data-nosnippet>243</a>    <span class="doccomment">/// `None` when `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` is unset — the
-<a href=#244 id=244 data-nosnippet>244</a>    /// OIDC federation encryption key is baked into `OidcFederationService`
-<a href=#245 id=245 data-nosnippet>245</a>    /// at construction, so absence is resolved once at startup rather than
-<a href=#246 id=246 data-nosnippet>246</a>    /// per-request (identical fail-closed error at the 4 call sites).
-<a href=#247 id=247 data-nosnippet>247</a>    </span><span class="kw">pub </span>oidc_federation_service: <span class="prelude-ty">Option</span>&lt;OidcFederationServiceT&lt;C&gt;&gt;,
-<a href=#248 id=248 data-nosnippet>248</a>    <span class="doccomment">/// Constructed unconditionally (SamlFederationService::new needs no
-<a href=#249 id=249 data-nosnippet>249</a>    /// encryption key) — but the FIELD itself stays `#[cfg(feature = "saml")]`
-<a href=#250 id=250 data-nosnippet>250</a>    /// gated. Why: `axiam_federation::saml` only exists when
-<a href=#251 id=251 data-nosnippet>251</a>    /// axiam-federation's OWN `saml` Cargo feature is on, and
-<a href=#252 id=252 data-nosnippet>252</a>    /// axiam-api-rest's `saml` feature intentionally forwards to it so
-<a href=#253 id=253 data-nosnippet>253</a>    /// `cargo build -p axiam-server --no-default-features` can still build
-<a href=#254 id=254 data-nosnippet>254</a>    /// without the `samael`/`libxml2` dependency chain (documented escape
-<a href=#255 id=255 data-nosnippet>255</a>    /// hatch for hosts with an incompatible system libxml2 — see
-<a href=#256 id=256 data-nosnippet>256</a>    /// `axiam-server/src/main.rs`'s `--dump-openapi` doc comment and
-<a href=#257 id=257 data-nosnippet>257</a>    /// `axiam-api-rest/Cargo.toml`). Un-gating this field would force
-<a href=#258 id=258 data-nosnippet>258</a>    /// `axiam-federation/saml` on unconditionally and break that hatch.
-<a href=#259 id=259 data-nosnippet>259</a>    </span><span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
-<a href=#260 id=260 data-nosnippet>260</a>    </span><span class="kw">pub </span>saml_federation_service: SamlFederationServiceT&lt;C&gt;,
-<a href=#261 id=261 data-nosnippet>261</a>}
+<a href=#242 id=242 data-nosnippet>242</a>    <span class="doccomment">/// Single-use, 60-second codes that turn a cross-site SSO return (SAML,
+<a href=#243 id=243 data-nosnippet>243</a>    /// Apple's `response_mode=form_post`) into a same-site session issuance
+<a href=#244 id=244 data-nosnippet>244</a>    /// without weakening `SameSite=Strict` on the session cookies. Here rather
+<a href=#245 id=245 data-nosnippet>245</a>    /// than with the session repositories because the only thing that mints or
+<a href=#246 id=246 data-nosnippet>246</a>    /// redeems one is a federation callback.
+<a href=#247 id=247 data-nosnippet>247</a>    </span><span class="kw">pub </span>sso_handoff_code_repo: SurrealSsoHandoffCodeRepository&lt;C&gt;,
+<a href=#248 id=248 data-nosnippet>248</a>    <span class="kw">pub </span>assertion_replay_repo: SurrealAssertionReplayRepository&lt;C&gt;,
+<a href=#249 id=249 data-nosnippet>249</a>    <span class="doccomment">/// `None` when `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` is unset — the
+<a href=#250 id=250 data-nosnippet>250</a>    /// OIDC federation encryption key is baked into `OidcFederationService`
+<a href=#251 id=251 data-nosnippet>251</a>    /// at construction, so absence is resolved once at startup rather than
+<a href=#252 id=252 data-nosnippet>252</a>    /// per-request (identical fail-closed error at the 4 call sites).
+<a href=#253 id=253 data-nosnippet>253</a>    </span><span class="kw">pub </span>oidc_federation_service: <span class="prelude-ty">Option</span>&lt;OidcFederationServiceT&lt;C&gt;&gt;,
+<a href=#254 id=254 data-nosnippet>254</a>    <span class="doccomment">/// Constructed unconditionally (SamlFederationService::new needs no
+<a href=#255 id=255 data-nosnippet>255</a>    /// encryption key) — but the FIELD itself stays `#[cfg(feature = "saml")]`
+<a href=#256 id=256 data-nosnippet>256</a>    /// gated. Why: `axiam_federation::saml` only exists when
+<a href=#257 id=257 data-nosnippet>257</a>    /// axiam-federation's OWN `saml` Cargo feature is on, and
+<a href=#258 id=258 data-nosnippet>258</a>    /// axiam-api-rest's `saml` feature intentionally forwards to it so
+<a href=#259 id=259 data-nosnippet>259</a>    /// `cargo build -p axiam-server --no-default-features` can still build
+<a href=#260 id=260 data-nosnippet>260</a>    /// without the `samael`/`libxml2` dependency chain (documented escape
+<a href=#261 id=261 data-nosnippet>261</a>    /// hatch for hosts with an incompatible system libxml2 — see
+<a href=#262 id=262 data-nosnippet>262</a>    /// `axiam-server/src/main.rs`'s `--dump-openapi` doc comment and
+<a href=#263 id=263 data-nosnippet>263</a>    /// `axiam-api-rest/Cargo.toml`). Un-gating this field would force
+<a href=#264 id=264 data-nosnippet>264</a>    /// `axiam-federation/saml` on unconditionally and break that hatch.
+<a href=#265 id=265 data-nosnippet>265</a>    </span><span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
+<a href=#266 id=266 data-nosnippet>266</a>    </span><span class="kw">pub </span>saml_federation_service: SamlFederationServiceT&lt;C&gt;,
+<a href=#267 id=267 data-nosnippet>267</a>}
 </code></pre></div></section></main></body></html>

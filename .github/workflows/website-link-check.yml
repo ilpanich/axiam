@@ -40,7 +40,7 @@ jobs:
     name: SDK links resolve and stay on-domain
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check every SDK link
         run: python3 scripts/check-website-links.py

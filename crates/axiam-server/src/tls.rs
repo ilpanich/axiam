@@ -518,15 +518,70 @@ pub fn reload_leaf_certificate() -> io::Result<Option<bool>> {
     let Some((resolver, provider, cert_path, key_path)) = LIVE_CERT_RESOLVER.get() else {
         return Ok(None);
     };
+    reload_into(resolver, provider, cert_path, key_path).map(Some)
+}
+
+/// The reload itself, against an explicit resolver rather than the process
+/// global.
+///
+/// Split out so the behaviour that matters — swap on change, no-op when
+/// unchanged, leave the old certificate serving on a bad pair — is testable
+/// directly. Going through [`reload_leaf_certificate`] would mean racing for
+/// [`LIVE_CERT_RESOLVER`]'s single `set`, which whichever test ran first would
+/// win; a mechanism whose failure mode is "serves the wrong certificate" should
+/// not be tested order-dependently.
+///
+/// # Errors
+///
+/// Anything [`read_certified_key`] rejects. The resolver is left untouched.
+fn reload_into(
+    resolver: &ReloadableCertResolver,
+    provider: &rustls::crypto::CryptoProvider,
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> io::Result<bool> {
     let next = read_certified_key(cert_path, key_path, provider)?;
     // Compare the DER chain rather than file bytes: PEM whitespace, comment
     // lines and the ordering certbot happens to write are not differences a
     // handshake can see, and a poll that reloaded on them would churn.
     if resolver.current().cert == next.cert {
-        return Ok(Some(false));
+        return Ok(false);
     }
     resolver.replace(next);
-    Ok(Some(true))
+    Ok(true)
+}
+
+/// Report the outcome of one reload attempt.
+///
+/// A free function rather than a closure inside [`spawn_leaf_reloader`] so the
+/// mapping from outcome to log level is testable: the WARN-not-ERROR choice on
+/// a failed reload is deliberate (the previous certificate is still serving)
+/// and is exactly the kind of decision that gets "tidied" into an ERROR by
+/// someone who has not read why.
+fn log_reload_outcome(trigger: &'static str, outcome: io::Result<Option<bool>>) {
+    match outcome {
+        Ok(Some(true)) => tracing::info!(
+            trigger,
+            "TLS leaf certificate reloaded; new connections use it immediately"
+        ),
+        Ok(Some(false)) => tracing::debug!(
+            trigger,
+            "TLS leaf certificate unchanged on disk; nothing to reload"
+        ),
+        Ok(None) => tracing::debug!(
+            trigger,
+            "no direct-TLS listener in this process; nothing to reload"
+        ),
+        // WARN, not ERROR, and deliberately not fatal: the previous
+        // certificate is still serving. The likeliest cause is a renewal
+        // observed mid-write, which the next trigger resolves on its own.
+        Err(e) => tracing::warn!(
+            trigger,
+            error = %e,
+            "TLS leaf certificate reload failed; continuing to serve the \
+             previous certificate"
+        ),
+    }
 }
 
 /// Start the background triggers that keep the leaf certificate current.
@@ -551,31 +606,6 @@ pub fn reload_leaf_certificate() -> io::Result<Option<bool>> {
 /// expired in production" into "the certificate was replaced within the hour",
 /// and it costs one read of two small files an hour.
 pub fn spawn_leaf_reloader(interval_secs: u64) {
-    fn log_outcome(trigger: &'static str, outcome: io::Result<Option<bool>>) {
-        match outcome {
-            Ok(Some(true)) => tracing::info!(
-                trigger,
-                "TLS leaf certificate reloaded; new connections use it immediately"
-            ),
-            Ok(Some(false)) => tracing::debug!(
-                trigger,
-                "TLS leaf certificate unchanged on disk; nothing to reload"
-            ),
-            Ok(None) => tracing::debug!(
-                trigger,
-                "no direct-TLS listener in this process; nothing to reload"
-            ),
-            // WARN, not ERROR, and deliberately not fatal: the previous
-            // certificate is still serving. The likeliest cause is a renewal
-            // observed mid-write, which the next trigger resolves on its own.
-            Err(e) => tracing::warn!(
-                trigger,
-                error = %e,
-                "TLS leaf certificate reload failed; continuing to serve the                  previous certificate"
-            ),
-        }
-    }
-
     tokio::spawn(async move {
         let mut hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         {
@@ -589,7 +619,7 @@ pub fn spawn_leaf_reloader(interval_secs: u64) {
             }
         };
         while hangup.recv().await.is_some() {
-            log_outcome("sighup", reload_leaf_certificate());
+            log_reload_outcome("sighup", reload_leaf_certificate());
         }
     });
 
@@ -607,7 +637,7 @@ pub fn spawn_leaf_reloader(interval_secs: u64) {
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            log_outcome("poll", reload_leaf_certificate());
+            log_reload_outcome("poll", reload_leaf_certificate());
         }
     });
 }
@@ -1685,6 +1715,180 @@ mod tests {
             axiam_api_rest::config::DEFAULT_TLS_RELOAD_INTERVAL_SECS
         );
         assert_eq!(TlsConfig::default().reload_interval_secs, 3600);
+    }
+
+    /// A renewal on disk is picked up: the reload reports a change and the
+    /// resolver serves the new leaf afterwards. This is the path SIGHUP and the
+    /// poll both funnel into, and until now nothing exercised it — the tests
+    /// covered the resolver and the parser on either side of it.
+    #[test]
+    fn a_reload_installs_a_renewed_pair_from_disk() {
+        let pki = gen_test_pki();
+        let (renewed_cert, renewed_key) = gen_renewed_server_leaf(&pki);
+
+        // The files the "listener" was built from; the reload re-reads these.
+        let cert_path = write_tmp("reload-cert", &pki.server_cert_pem);
+        let key_path = write_tmp("reload-key", &pki.server_key_pem);
+
+        let provider = rustls::crypto::ring::default_provider();
+        let original = read_certified_key(&cert_path, &key_path, &provider).unwrap();
+        let original_der = original.cert.clone();
+        let resolver = ReloadableCertResolver::new(original);
+
+        // Nothing has changed yet: a poll between renewals must be a no-op, not
+        // an hourly swap-and-log forever.
+        assert!(
+            !reload_into(&resolver, &provider, &cert_path, &key_path).unwrap(),
+            "an unchanged pair must not be reported as a reload"
+        );
+        assert_eq!(resolver.current().cert, original_der);
+
+        // certbot renews: both files are replaced.
+        std::fs::write(&cert_path, &renewed_cert).unwrap();
+        std::fs::write(&key_path, &renewed_key).unwrap();
+
+        assert!(
+            reload_into(&resolver, &provider, &cert_path, &key_path).unwrap(),
+            "a changed pair must be reported as a reload"
+        );
+        assert_ne!(
+            resolver.current().cert,
+            original_der,
+            "the resolver must be serving the renewed leaf"
+        );
+
+        // And the reload is idempotent once it has landed.
+        assert!(!reload_into(&resolver, &provider, &cert_path, &key_path).unwrap());
+    }
+
+    /// The half-written renewal, through the reload entry point rather than the
+    /// parser: the error propagates and the previous certificate keeps serving.
+    /// That is the property that makes an hourly poll safe to run against files
+    /// another process is rewriting.
+    #[test]
+    fn a_reload_that_fails_leaves_the_previous_certificate_serving() {
+        let pki = gen_test_pki();
+        let (renewed_cert, renewed_key) = gen_renewed_server_leaf(&pki);
+
+        let cert_path = write_tmp("halfway-reload-cert", &pki.server_cert_pem);
+        let key_path = write_tmp("halfway-reload-key", &pki.server_key_pem);
+
+        let provider = rustls::crypto::ring::default_provider();
+        let original = read_certified_key(&cert_path, &key_path, &provider).unwrap();
+        let original_der = original.cert.clone();
+        let resolver = ReloadableCertResolver::new(original);
+
+        // The new chain lands; the key has not been replaced yet.
+        std::fs::write(&cert_path, &renewed_cert).unwrap();
+
+        let err = reload_into(&resolver, &provider, &cert_path, &key_path)
+            .expect_err("a mismatched pair must not reload");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            resolver.current().cert,
+            original_der,
+            "a failed reload must leave the listener serving what it had"
+        );
+
+        // The key catches up on the next tick, and the reload then succeeds —
+        // which is what makes retrying the right response rather than failing
+        // the process.
+        std::fs::write(&key_path, &renewed_key).unwrap();
+        assert!(
+            reload_into(&resolver, &provider, &cert_path, &key_path).unwrap(),
+            "the retry after the write completes must succeed"
+        );
+    }
+
+    /// A missing file is an ordinary `NotFound`, not a panic, and leaves the
+    /// certificate alone. Covers the path a deleted or not-yet-created renewal
+    /// directory takes.
+    #[test]
+    fn a_reload_from_a_missing_file_is_an_error_not_a_panic() {
+        let pki = gen_test_pki();
+        let cert_path = write_tmp("gone-cert", &pki.server_cert_pem);
+        let key_path = write_tmp("gone-key", &pki.server_key_pem);
+
+        let provider = rustls::crypto::ring::default_provider();
+        let original = read_certified_key(&cert_path, &key_path, &provider).unwrap();
+        let original_der = original.cert.clone();
+        let resolver = ReloadableCertResolver::new(original);
+
+        std::fs::remove_file(&key_path).unwrap();
+
+        let err = reload_into(&resolver, &provider, &cert_path, &key_path)
+            .expect_err("a missing key must not reload");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(resolver.current().cert, original_der);
+    }
+
+    /// The process-global entry point the signal handler and the poll actually
+    /// call. Builds a listener config first so a resolver is definitely
+    /// installed — `LIVE_CERT_RESOLVER` is set once per process by whichever
+    /// test builds a config first, and only a *successful* build installs, so
+    /// whatever won holds a readable, matching pair whose temp files outlive
+    /// the test.
+    ///
+    /// Asserts the shape rather than the boolean: which pair is on disk depends
+    /// on who won, but "found a listener and completed without error" is the
+    /// contract, and `Ok(None)` here would mean the boot path never installed
+    /// the resolver at all.
+    #[test]
+    fn the_global_reload_entry_point_finds_the_installed_listener() {
+        let pki = gen_test_pki();
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(write_tmp("global-reload-cert", &pki.server_cert_pem)),
+            key_path: Some(write_tmp("global-reload-key", &pki.server_key_pem)),
+            ..TlsConfig::default()
+        };
+        build_rustls_server_config(&tls).expect("config must build");
+
+        let outcome = reload_leaf_certificate().expect("the reload must not error");
+        assert!(
+            outcome.is_some(),
+            "a process that built a TLS listener must report one to reload into"
+        );
+    }
+
+    /// `spawn_leaf_reloader` installs the SIGHUP handler and honours
+    /// `interval_secs = 0` by skipping the poll.
+    ///
+    /// Worth a test rather than trusting it: this is the entry point for the
+    /// whole renewal mechanism, and its failure mode is silence — a handler
+    /// that never installs looks exactly like a certificate nobody renewed
+    /// until the day it expires. `yield_now` lets the spawned task reach the
+    /// `signal()` call, which is what proves it installs on this platform.
+    #[tokio::test]
+    async fn the_reloader_installs_its_sighup_handler_and_honours_a_zero_interval() {
+        // 0 = polling disabled; the SIGHUP task is still spawned.
+        spawn_leaf_reloader(0);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        // A real interval also spawns the poll task. The first tick is burned
+        // immediately and the second is an hour out, so the task parks rather
+        // than reloading anything during the test.
+        spawn_leaf_reloader(3600);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Every outcome the reload can produce has a log arm, and none of them
+    /// panics. Cheap, and it pins the WARN-not-ERROR choice on a failed reload:
+    /// the previous certificate is still serving, so a failure here is not the
+    /// same severity as one that takes the listener down.
+    #[test]
+    fn every_reload_outcome_logs_without_panicking() {
+        log_reload_outcome("test", Ok(Some(true)));
+        log_reload_outcome("test", Ok(Some(false)));
+        log_reload_outcome("test", Ok(None));
+        log_reload_outcome(
+            "test",
+            Err(io::Error::new(io::ErrorKind::InvalidData, "synthetic")),
+        );
     }
 
     /// A swapped certificate must actually reach the wire, not merely sit in

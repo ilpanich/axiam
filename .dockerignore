@@ -10,9 +10,14 @@ frontend/dist/
 .git/
 .gitignore
 
-# Deployment configs (not needed inside the image)
+# Deployment configs (not needed inside the image), except the one file the
+# frontend image actually needs. This negation is coupled by name to
+# `COPY docker/nginx.conf.template` in docker/Dockerfile.frontend: rename the
+# template and the file silently leaves the build context, so the COPY fails
+# with `"/docker/nginx.conf.template": not found` — and only in the Release
+# workflow, since CI merely hadolints the Dockerfiles instead of building them.
 docker/
-!docker/nginx.conf
+!docker/nginx.conf.template
 k8s/
 
 # SDKs and dev docs

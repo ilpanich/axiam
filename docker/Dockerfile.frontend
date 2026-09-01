@@ -125,6 +125,20 @@ USER 0
 # anchor for AXIAM_BACKEND_CA. Named explicitly rather than relied on as a
 # transitive of the base image: the template references that path in every
 # rendering, so a base image that stopped shipping it would break `nginx -t`.
+#
+# DL3018 (pin versions in apk add) is intentionally ignored, for the reason
+# .hadolint.yaml already gives for its apt sibling DL3008 and for the DL3017
+# `apk upgrade` on this same line: versions float within a digest-pinned base so
+# the build picks up security patches, and Alpine rotates old versions out of
+# the index, so a pin breaks rebuilds rather than making them reproducible.
+#
+# It is a worse idea here than in the general case. This package IS the trust
+# store: pinning it freezes the set of trusted roots, so a root revoked upstream
+# stays trusted and a newly added one never arrives. Pinning would also
+# contradict the `apk upgrade` it is chained to, whose entire purpose is to pull
+# the patched versions the upstream image lags behind. The D-06 Trivy
+# HIGH/CRITICAL gate is the backstop that proves the result is clean.
+# hadolint ignore=DL3018
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
 
 # Copy built assets from builder

@@ -32,3 +32,13 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    groups:
+      # github/codeql-action/* are sub-actions of one release: init writes the
+      # configuration file that analyze and upload-sarif read back, and they
+      # refuse a file stamped with a different version. Split across separate
+      # PRs they land at different versions and the CodeQL jobs fail with
+      # "Loaded a configuration file for version X, but running version Y".
+      # Keep every sub-action in a single PR so they move in lockstep.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"

@@ -499,7 +499,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | Max `/oauth2/device_authorization` requests per minute per IP (default `12`). |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | Max `/api/v1/device/verify` + `/device/decide` requests per minute per IP (default `10`). Bounded by the user-code brute-force assertion in `RateLimitConfig::validate`. |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | Max `/scim/v2/*` requests per minute per IP (default `600`). One bucket spans the whole SCIM surface — Users, Groups and the discovery endpoints, reads and writes alike. Sized as the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (also 600/min): a privileged M2M provisioning client whose real cost is Argon2id. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
-| `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy hops to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0` — set to `1` behind a single ingress/nginx). |
+| `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy **entries** to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0`). It is **the number of proxies in front of the server minus one** — see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) before setting it. Both shipped topologies have exactly one proxy, so `0` is correct for them. |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
 | `AXIAM__RATE_LIMIT__PROFILE` | Deployment posture preset: `internet` (default — the shipped values above, unchanged) \| `gateway` \| `mesh`. Sets the machine-traffic family (key mode, token/introspect/revoke/authz, and the gRPC authz ceiling) coherently in one variable; never changes the human endpoints. See [Sizing your rate limits](rate-limit-sizing.md). |
 | `AXIAM__RATE_LIMIT__SHARED` | Enables (`on`, default) or disables (`off`) the cross-replica shared counter. `off` is a **single-replica escape hatch**: it skips the shared layer entirely (no state, no store call, no flusher) and leaves the per-replica in-memory `Governor` as the sole limiter. Do not set `off` behind an HPA/multiple replicas — it re-opens the N× effective-limit multiplication the shared counter exists to close. |
@@ -522,6 +522,54 @@ generous 100/s bucket):
 > security caveats that come with per-client keying. The shipped defaults are
 > tuned for a small internet-facing deployment and are known to be too strict
 > for a NAT'd M2M fleet.
+
+### Deriving `TRUSTED_HOPS`
+
+Get this wrong and per-IP limiting silently stops working — in the direction
+that hurts, since every client collapses into one bucket and one attacker's
+flood exhausts the allowance everybody shares. `/auth/login` is keyed per-IP and
+never per-principal precisely so that an attacker cannot lock a victim out;
+collapsed, it does exactly that.
+
+The rule follows from one fact about how proxies write the header:
+
+> A proxy appends **the address it received the request from**, not its own.
+> nginx's `proxy_add_x_forwarded_for` is `$http_x_forwarded_for, $remote_addr`;
+> Caddy's `reverse_proxy` and ingress-nginx behave identically.
+
+So the **nearest** proxy never appears in the header the server reads — it is
+the socket peer. Therefore:
+
+> **`TRUSTED_HOPS` = (number of reverse proxies between the client and the
+> server) − 1**, i.e. the number of *proxy* addresses that actually appear in
+> the `X-Forwarded-For` the server receives.
+
+| Topology | Header the server sees | Value |
+|---|---|---|
+| Direct, no proxy | *(absent)* → `peer_addr()` | `0` |
+| `k8s/ingress.yml` — ingress-nginx → server | `<client>` | **`0`** |
+| Compose/Pi — Caddy → server | `<client>` | **`0`** |
+| Caddy → frontend nginx → server | `<client>, <caddy>` | **`1`** |
+| CDN → ingress → server | `<client>, <cdn-edge>` | **`1`** |
+| Cloud L7 LB → ingress → mesh sidecar → server | `<client>, <lb>, <ingress>` | **`2`** |
+
+Behind exactly one appending proxy, `0` selects the real client **whether or not
+the client sends a forged `X-Forwarded-For`** — the proxy appends the real peer
+to the right of the forgery and the extractor reads from the right. That
+property is why `0` is the shipped default rather than merely a convenient one.
+
+Setting the value to the proxy *count* instead makes
+`trusted_hops >= hops.len()`; the extractor then discards the header entirely
+and keys on `peer_addr()` — the proxy's own address. Earlier revisions of this
+document advised exactly that, and it produced the failure the extractor exists
+to prevent. Both shipped topologies now set the value explicitly
+(`docker-compose.prod.yml`, `k8s/server/configmap.yml`) with the derivation in a
+comment, because a value that is correct by accident is one nobody re-derives
+when they add a load balancer.
+
+**Verify it rather than trusting it.** From two source addresses on different
+networks, hammer a per-IP endpoint past its budget. If the second address is
+throttled the moment the first is, the value is wrong.
 
 ### `AXIAM__RATE_LIMIT__KEY` — NAT'd-fleet key configurability (D8)
 
@@ -682,11 +730,12 @@ AXIAM supports two TLS patterns (ASVS V9.1.2/V9.1.3). Both enforce TLS 1.3 as
 the minimum negotiated version; TLS 1.3 cipher suites are all ASVS-approved, so
 no manual cipher-suite list is required.
 
-**1. Proxy-terminated TLS (recommended, default).** The server binds plaintext
+**1. Proxy-terminated TLS (the default).** The server binds plaintext
 on `:8090` and an ingress controller / load balancer / reverse proxy terminates
 TLS in front of it (this is how the Kubernetes manifests and
-`docker-compose.prod.yml` are wired — see the ingress `TLS secretName` at the
-top of this document). Configure the proxy to require TLS 1.3, e.g. for Nginx:
+`docker-compose.prod.yml` are wired out of the box — see the ingress
+`TLS secretName` at the top of this document). Configure the proxy to require
+TLS 1.3, e.g. for Nginx:
 
 ```nginx
 ssl_protocols TLSv1.3;
@@ -712,11 +761,82 @@ restricted to **TLS 1.3 only**:
 | `AXIAM__SERVER__TLS__CERT_PATH` | Path to the PEM certificate chain (leaf first). |
 | `AXIAM__SERVER__TLS__KEY_PATH` | Path to the PEM private key (PKCS#8, PKCS#1, or SEC1). |
 
+| `AXIAM__SERVER__TLS__RELOAD_INTERVAL_SECS` | How often to re-read the pair and pick up a renewal, in seconds (default `3600`, `0` disables). |
+| `AXIAM__SERVER__TLS__CLIENT_AUTH` | Native client-certificate policy: `off` (default), `optional`, `required`. |
+| `AXIAM__SERVER__TLS__CLIENT_CA_PATH` | PEM bundle used to verify client certificates. Required when `CLIENT_AUTH` is not `off`. |
+
 When `ENABLED` is `true`, both paths are mandatory and must point at readable,
 well-formed PEM files — the server **fails fast at startup** (it never falls back
 to plaintext) on a missing path, an unreadable/malformed file, an empty
 certificate chain, or a certificate/key mismatch. Mount the cert and key as
 secret volumes; never commit key material to git.
+
+**Certificate renewal.** rustls resolves the certificate per handshake but reads
+nothing from disk, so without help the leaf a server boots with is the leaf it
+serves forever — which matters the moment an ACME client is involved, since
+Let's Encrypt issues for 90 days and renews at 60. AXIAM re-reads the pair on
+**`SIGHUP`** and on the `RELOAD_INTERVAL_SECS` poll, and installs it behind a
+slot rustls consults per handshake: the next connection uses the new
+certificate, with no restart and no dropped request.
+
+Send `SIGHUP` from your ACME deploy hook; that is immediate. The poll is the
+safety net for the case that actually happens — a hook nobody wired up, or a
+runtime that does not forward signals — and an hourly `stat` of two files costs
+nothing. A reload that finds an unreadable or mismatched pair (certbot writes
+the chain and the key as two separate operations, so a poll will occasionally
+catch one mid-write) logs a warning, **leaves the previous certificate
+serving**, and retries on the next tick.
+
+**3. Both, on one listener.** Terminating TLS in the server does not mean giving
+up an edge proxy. The topology
+[`claude_dev/public-backend-tls-design.md`](../../claude_dev/public-backend-tls-design.md)
+documents — and that the Raspberry Pi runbook builds — keeps a proxy at the
+public port routing by path, and has it speak **TLS to the backend** rather than
+cleartext:
+
+```
+client ──443/TLS──> edge ──┬── /                            ──> frontend (SPA)
+                           └── /api, /oauth2, /.well-known ──TLS──> axiam-server
+```
+
+That is the same path split `k8s/ingress.yml` has always used. The gain over
+pattern 1 is that no password, bearer token or session cookie crosses the
+internal network in cleartext, and the gain over routing everything through the
+frontend's nginx is one fewer hop — which is also what makes `TRUSTED_HOPS = 0`
+correct (see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops)).
+
+`docker/nginx.conf.template` renders the frontend's upstream from
+`AXIAM_BACKEND_ORIGIN` / `AXIAM_BACKEND_SNI` / `AXIAM_BACKEND_CA`, so the same
+image talks to a plaintext backend (dev, E2E) or a TLS one. Certificate
+verification is **always on** in every rendering and there is deliberately no
+setting that disables it — a backend certificate that does not verify is a
+misconfiguration to fix.
+
+### Client certificates through a proxy
+
+`AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` (default **`false`**) controls whether
+an `X-Client-Certificate` header is accepted as device identity when the
+connection carries no TLS-verified client certificate.
+
+Leave it off unless all three of these hold:
+
+1. TLS and the client-certificate handshake terminate at a proxy you operate;
+2. that proxy sets `X-Client-Certificate` from the certificate **it** verified,
+   on every request, overwriting whatever the client sent;
+3. nothing else can reach the server's listener.
+
+The reason it is off by default: a certificate is public data, and the header
+path checks the fingerprint, status, expiry and chain — every one of which a
+*copy* of an enrolled device's certificate also satisfies. Only a TLS handshake
+proves possession of the private key, and on that path there was none. So the
+header authenticates whoever can set it. Where the server is reachable by
+anything but that proxy, that is an authentication bypass.
+
+**Native mTLS is unaffected and always preferred.** When rustls verified a
+client certificate on the connection, that certificate is authoritative and this
+setting is never consulted. If you have IoT devices and an edge that terminates
+TLS, give the devices a route that is *not* terminated — a TCP-passthrough
+Service, or a second hostname — rather than turning this on.
 
 ## Network policies
 

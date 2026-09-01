@@ -81,6 +81,18 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "p",
         text: "By default the server binds plaintext and expects an ingress or proxy to terminate TLS 1.3 in front of it. To terminate inside the process instead, set `AXIAM__SERVER__TLS__ENABLED` with a certificate and key path; the listener then binds with rustls restricted to TLS 1.3 only, and fails fast at startup on a missing, unreadable or mismatched pair rather than falling back to plaintext.",
       },
+      {
+        type: "p",
+        text: "The two are not alternatives. The supported topology keeps an edge proxy on the public port routing by path — the SPA at `/`, and `/api`, `/oauth2` and `/.well-known` to the server — and has that proxy speak **TLS to the server** rather than cleartext, so no password, bearer token or session cookie crosses the internal network in the clear. That is the same path split the shipped Kubernetes ingress has always used, and collapsing to one proxy hop is what makes the default `AXIAM__RATE_LIMIT__TRUSTED_HOPS` of `0` correct.",
+      },
+      {
+        type: "p",
+        text: "**Renewal takes no restart.** rustls resolves the certificate per handshake but reads nothing from disk, so a server would otherwise serve its boot certificate forever — which matters as soon as an ACME client is involved. The server re-reads the pair on `SIGHUP` (send it from your deploy hook) and on an hourly poll, and swaps it into a slot rustls consults per handshake. A reload that finds a half-written or mismatched pair keeps the previous certificate serving and retries.",
+      },
+      {
+        type: "warn",
+        text: "`AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` is **off** by default and should stay off unless a proxy you operate performs the mTLS handshake itself and overwrites `X-Client-Certificate` on every request. A certificate is public data and the header path cannot prove possession of the private key, so wherever anything else can reach the listener, a copy of an enrolled device's certificate authenticates as that device. Native mTLS — a certificate rustls verified on the connection — is unaffected and always wins.",
+      },
       { type: "h", id: "sizing-guides", text: "Sizing, measured" },
       {
         type: "p",
@@ -903,7 +915,7 @@ export const OPERATE_PAGES: DocPage[] = [
           [
             "Proxy hop count is accurate",
             "`AXIAM__RATE_LIMIT__TRUSTED_HOPS`",
-            "Every client shares one apparent address, per-IP limits become meaningless, and one abusive caller throttles everybody.",
+            "Every client shares one apparent address, per-IP limits become meaningless, and one abusive caller throttles everybody. It is the number of proxies in front of the server **minus one** — a proxy appends the address it received from, so the nearest one is the socket peer and never appears in the header. One proxy means `0`, the default.",
           ],
         ],
       },
@@ -1186,7 +1198,7 @@ export const OPERATE_PAGES: DocPage[] = [
         items: [
           "`AXIAM__DB__URL` takes a bare `host:port`, **not** a URL scheme. The engine resolves a scheme as a hostname and fails.",
           "Rate limits appearing not to apply across replicas: the shared counter is write-behind, so cross-replica enforcement is eventual. Check the limiter's own log lines.",
-          "Limits applying to everyone at once: `AXIAM__RATE_LIMIT__TRUSTED_HOPS` is unset behind a proxy, so every client looks like the proxy's IP.",
+          "Limits applying to everyone at once: `AXIAM__RATE_LIMIT__TRUSTED_HOPS` does not match the hop count, so every client looks like the proxy's IP. Too high collapses the header the same way too low does — it is proxies minus one, and one proxy means 0.",
         ],
       },
       { type: "h", id: "auth-issues", text: "Authentication problems" },

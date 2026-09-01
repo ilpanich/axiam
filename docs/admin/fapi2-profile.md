@@ -320,9 +320,16 @@ and `warn`/`error` for registrations that cannot work. That is where to look
 when onboarding fails.
 
 Note that the `X-Client-Certificate` proxy header — which the IoT device-auth
-path accepts when TLS terminates upstream — is **not** accepted here, and there
-is no setting that enables it. A client credential must not be assertable by
-anything that can set a header.
+path can accept when TLS terminates upstream, and only when an operator has
+explicitly set `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` — is **not** accepted
+here, and there is no setting that enables it. A client credential must not be
+assertable by anything that can set a header.
+
+The same reasoning is why that device-auth setting now defaults to off: a
+certificate is public data, so a header carrying one identifies whoever can set
+the header rather than whoever holds the key. On the FAPI path that was never
+allowed; on the device path it was allowed and is now opt-in. See
+[Deployment § Client certificates through a proxy](../deployment/README.md#client-certificates-through-a-proxy).
 
 ---
 

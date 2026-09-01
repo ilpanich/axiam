@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta08] - 2026-09-01
+
+### Added
+
+- Raft-backed Vault, a scoped server token, and loopback binds
+
+- Template the frontend's backend upstream so it can speak TLS
+
+- Hot-reload the TLS leaf certificate, so ACME renewal needs no restart
+
+- "Sign in with X" buttons, the SSO callback route, and the admin fields
+
+- The public login-provider surface — buttons, OAuth2, handoff codes
+
+- The OAuth2 variant, PKCE, Apple secrets and templated issuers
+
+- Provider kinds, the OAuth2 variant, inheritance and claim mapping
+
+### Changed
+
+- Keep argon2 0.6 out of the wasm getrandom trap
+
+- Migrate password hashing to the argon2 0.6 API
+
+- Cover the reload mechanism, not just the pieces either side of it
+
+- Say what the reload poll actually compares
+
+- Six threats for the publicly exposed backend
+
+- The path-split topology, TLS renewal, Raft, and the TRUSTED_HOPS off-by-one
+
+- Rewrite the Pi runbook for the new topology, a real Vault and the buttons
+
+- The public backend, its own TLS, and the hop that broke the limiter
+
+- Bump the minor-patch group across 1 directory with 5 updates
+
+- Cite the archived Phase 25 plan by path instead of linking it
+
+- Drop response-derived values from assertion messages entirely
+
+- Bump argon2 from 0.5.3 to 0.6.0
+
+- Bump docker/setup-buildx-action from 4.2.0 to 4.3.0
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump the minor-patch group in /frontend with 10 updates
+
+- Bump actions/checkout from 4 to 7
+
+- Bump hadolint/hadolint-action from 3.4.0 to 3.5.0
+
+- Stop assertion messages printing cookies and response bodies
+
+- Cover the OAuth2 failure paths, the handoff repo and the icon field
+
+- Name the four login-provider operations in the §12.2 map
+
+- Threat model, contract 1.37, roadmap and the icon design
+
+- Design the "Sign in with X" login providers
+
+- Record the beta07 website pass against its plans
+
+- Re-verify the docs section and stamp it at 1.0.0-beta07
+
+- Link the normative docs the site never pointed at
+
+- A passkey is a factor, and lockout reads the tenant's policy
+
+- Bring the PKI pages up to the tenant-CA and trust-anchor model
+
+- Cover the management API, and correct the REST conventions
+
+- Document organization-level principals
+
+- Announce the beta phase, and stop calling beta future
+
+- Regenerate the API index and contract anchors at beta07
+
+### Fixed
+
+- Record why the trust-store package is not version-pinned (DL3018)
+
+- Stop trusting a forwarded client certificate by default
+
+- TRUSTED_HOPS is proxies minus one, not proxies
+
+- Confine handoff redirects to this deployment, and follow inheritance at the SAML ACS
+
 ## [1.0.0-beta07] - 2026-08-30
 
 ### Changed

@@ -19,12 +19,14 @@ services:
   # deployment the secret provider is Vault, and `axiam-server` below depends on
   # it being healthy.
   #
-  # This runs Vault with the `file` storage backend and a real (self-signed)
-  # TLS listener, which is close enough to production to exercise the parts that
-  # differ from dev mode — sealing, unsealing, persistent storage, TLS. It is
-  # still NOT a production Vault, and the difference that matters is auto-unseal:
-  # a real deployment uses a cloud KMS or transit seal so a restart does not
-  # need a human with unseal keys. See docs/deployment/vault.md.
+  # This runs Vault with Raft (integrated storage) and a real (self-signed) TLS
+  # listener, which is close enough to production to exercise the parts that
+  # differ from dev mode — sealing, unsealing, persistent storage, TLS, and a
+  # read-only scoped token for the server rather than root. It is still NOT a
+  # production Vault, and the single difference that matters is auto-unseal: a
+  # real deployment uses a cloud KMS or transit seal so a restart does not need
+  # a human with unseal keys, whereas `just prod-up` unseals from a key it left
+  # on this disk. See docs/deployment/vault.md §5.3 and docker/vault/vault.hcl.
   #
   # `just prod-up` runs the init/unseal ceremony and seeds AXIAM's keys.
   vault:
@@ -37,7 +39,12 @@ services:
       VAULT_API_ADDR: "https://vault:8200"
       VAULT_CACERT: "/vault/tls/ca.pem"
     volumes:
-      - vault-data:/vault/file
+      # Raft (integrated storage) — see docker/vault/vault.hcl for why, and for
+      # what an existing `file`-backend stack should do. That stack's old
+      # `vault-data` volume is deliberately NOT reused or deleted here: it still
+      # holds the only copy of its secrets, and silently pointing Raft at it
+      # would produce a node that refuses to start rather than a migration.
+      - vault-raft-data:/vault/data
       # Config is bind-mounted from the repository rather than living in a
       # named volume: it is not a secret, it should be reviewable in git, and
       # editing it should not require exec'ing into a container.
@@ -87,10 +94,19 @@ services:
     #   dockerfile: docker/Dockerfile.server
     container_name: axiam-server
     ports:
-      # SEC-016: 8090 is published for local dev/testing only.
-      # In production (k8s), the server is ClusterIP-only — remove this mapping.
-      - "8090:8090"   # REST API — local-testing only; unpublish in production k8s
-      - "50051:50051" # gRPC — local-testing only; unpublish in production k8s
+      # Bound to the LOOPBACK interface, not 0.0.0.0.
+      #
+      # These used to publish on every interface, which on a machine with a
+      # port-forward or a permissive firewall put the API and the gRPC listener
+      # straight on the internet with no edge in front — and therefore with
+      # X-Forwarded-For honoured from anyone who cared to send one. The
+      # documented topology puts Caddy in front (see
+      # claude_dev/public-backend-tls-design.md §2), so the only thing that needs
+      # to reach these is a process on this host.
+      #
+      # In production (k8s) the server is ClusterIP-only — remove these mappings.
+      - "127.0.0.1:8090:8090"   # REST API — reached by the edge proxy on this host
+      - "127.0.0.1:50051:50051" # gRPC — never published to the internet (SEC-003)
     # NOTE on naming: load_config() in crates/axiam-server/src/main.rs calls
     # `.with_prefix("AXIAM").separator("__")` without `.prefix_separator(_)`,
     # so config-rs 0.15 uses `__` as BOTH the prefix separator and the nested
@@ -166,10 +182,52 @@ services:
       AXIAM__AUTH__VAULT_CA_CERT_PATH: "/etc/axiam/vault-tls/ca.pem"
       AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?JWT private key missing - run 'just prod-up' instead of raw docker compose}"
       AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?JWT public key missing - run 'just prod-up' instead of raw docker compose}"
+      # -- Rate-limit keying -------------------------------------------------
+      #
+      # trusted_hops = (reverse proxies between the client and the server) - 1,
+      # because a proxy appends the address it received FROM, so the nearest
+      # proxy is the socket peer and never appears in X-Forwarded-For.
+      #
+      # This topology has exactly ONE proxy in front of /api — the edge (Caddy)
+      # routes /api, /oauth2 and /.well-known straight here, the same split
+      # k8s/ingress.yml has always used — so the value is 0.
+      #
+      # It is set explicitly even though 0 is the built-in default. The previous
+      # topology sent /api through the frontend's nginx as well, which made two
+      # proxies and made 0 WRONG: the extractor then selected the edge's own
+      # address for every request on the internet, collapsing every per-IP limit
+      # — /auth/login included — into one global bucket. Anyone who reintroduces
+      # a hop needs to see a number here to change, not a default to rediscover.
+      # See claude_dev/public-backend-tls-design.md §4.
+      #
+      # Read via std::env::var directly, NOT through the AXIAM__-prefixed config
+      # layer, but the name is the same either way.
+      AXIAM__RATE_LIMIT__TRUSTED_HOPS: "${AXIAM__RATE_LIMIT__TRUSTED_HOPS:-0}"
+      # -- Direct TLS (opt-in) -----------------------------------------------
+      #
+      # Off by default, which keeps this file working for anyone terminating TLS
+      # at a proxy and speaking plaintext to the backend. Set AXIAM_TLS_ENABLED=true
+      # and mount a certificate at ./.secrets/server-tls to have the backend
+      # terminate its own TLS 1.3 — what the Pi deployment does, so no cleartext
+      # credential crosses the Docker network. The leaf is re-read on SIGHUP and
+      # hourly, so an ACME renewal needs no restart.
+      AXIAM__SERVER__TLS__ENABLED: "${AXIAM_TLS_ENABLED:-false}"
+      AXIAM__SERVER__TLS__CERT_PATH: "/etc/axiam/server-tls/fullchain.pem"
+      AXIAM__SERVER__TLS__KEY_PATH: "/etc/axiam/server-tls/privkey.pem"
+      # Client-certificate policy for native mTLS. `optional` lets one listener
+      # serve both the edge proxy (which presents none) and IoT devices reaching
+      # the backend directly (which do). Leave `off` if you enrol no devices.
+      AXIAM__SERVER__TLS__CLIENT_AUTH: "${AXIAM_TLS_CLIENT_AUTH:-off}"
       RUST_LOG: "${RUST_LOG:-axiam=info}"
     volumes:
       # A6: read-only CA bundle for verifying the broker certificate.
       - ./.secrets/broker-tls:/etc/axiam/broker-tls:ro
+      # The server's own TLS leaf, when AXIAM_TLS_ENABLED=true. Mounted
+      # read-only and unconditionally: an empty directory is harmless while TLS
+      # is off, and a bind mount that only exists in one branch is a bind mount
+      # somebody forgets. On the Pi this is where the certbot deploy hook
+      # installs the renewed Let's Encrypt leaf.
+      - ./.secrets/server-tls:/etc/axiam/server-tls:ro
       # Trust anchor for Vault's listener — the server reads every secret over
       # this connection before it can serve anything, so it must be mounted.
       - ./.secrets/vault-tls:/etc/axiam/vault-tls:ro
@@ -208,10 +266,27 @@ services:
     #   context: ..
     #   dockerfile: docker/Dockerfile.frontend
     container_name: axiam-frontend
+    environment:
+      # How this nginx reaches the backend. Defaults reproduce the plaintext
+      # behaviour the image has always had, so nothing changes for a stack that
+      # leaves AXIAM_TLS_ENABLED off. With the backend terminating its own TLS,
+      # set AXIAM_BACKEND_ORIGIN=https://axiam-server:8090 and AXIAM_BACKEND_SNI
+      # to the name the backend's certificate is issued for — verification is
+      # always on and there is no way to turn it off.
+      #
+      # On the documented Pi topology nothing routes through here at all: the
+      # edge claims /api, /oauth2 and /.well-known before this container sees
+      # them, and this serves the SPA only. These stay wired anyway because the
+      # dev stack, the E2E suite and anyone reaching the container directly go
+      # through these blocks.
+      AXIAM_BACKEND_ORIGIN: "${AXIAM_BACKEND_ORIGIN:-http://axiam-server:8090}"
+      AXIAM_BACKEND_SNI: "${AXIAM_BACKEND_SNI:-axiam-server}"
+      AXIAM_BACKEND_CA: "${AXIAM_BACKEND_CA:-/etc/ssl/certs/ca-certificates.crt}"
     ports:
-      # Host port 8081 keeps :80 free for a local HTTPS reverse proxy (Caddy).
-      # Point Caddy with: caddy reverse-proxy --from https://localhost --to :8081
-      - "8081:8080"
+      # Loopback only, for the same reason as axiam-server above: the edge
+      # proxy on this host is the only thing that should reach it. Host port
+      # 8081 keeps :80 and :443 free for that proxy.
+      - "127.0.0.1:8081:8080"
     depends_on:
       - axiam-server
     restart: unless-stopped
@@ -304,11 +379,12 @@ services:
 volumes:
   surrealdb-data:
   rabbitmq-data:
-  # Vault's `file` backend. Losing this volume loses every secret AXIAM stores
-  # there — including the OPAQUE setup key, which means a password reset for
-  # every user in every tenant. Back it up, or use a storage backend that is
-  # backed up for you.
-  vault-data:
+  # Vault's Raft (integrated storage) data. Losing this volume loses every
+  # secret AXIAM stores there — including the OPAQUE setup key, which means a
+  # password reset for every user in every tenant. Back it up with
+  # `vault operator raft snapshot save`, which is consistent and can be taken
+  # while Vault is running; copying the directory under a live process is not.
+  vault-raft-data:
 
 networks:
   axiam-network:

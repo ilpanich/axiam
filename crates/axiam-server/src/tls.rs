@@ -21,7 +21,10 @@ use axiam_api_rest::config::{ClientAuth, TlsConfig};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::danger::ClientCertVerifier;
-use rustls::server::{ServerSessionMemoryCache, WebPkiClientVerifier};
+use rustls::server::{
+    ClientHello, ResolvesServerCert, ServerSessionMemoryCache, WebPkiClientVerifier,
+};
+use rustls::sign::CertifiedKey;
 use rustls::{RootCertStore, ServerConfig};
 
 /// Number of resumption entries kept in the in-process session cache.
@@ -326,6 +329,290 @@ pub fn reload_trust_anchors(pem: &str) -> io::Result<Option<usize>> {
 }
 
 // ---------------------------------------------------------------------------
+// Hot-reloadable leaf certificate
+// ---------------------------------------------------------------------------
+
+/// Read the configured certificate chain and private key and prove they match.
+///
+/// Shared by the boot path and every reload, so a certificate that would be
+/// rejected at startup is rejected identically at 3am when certbot replaces it
+/// — the alternative being two subtly different parsers and a renewal that
+/// installs something the next boot refuses.
+///
+/// # Errors
+///
+/// A missing or unreadable file (`NotFound`/`PermissionDenied`), a PEM the
+/// parser rejects, an empty chain, or a key that does not match the leaf's
+/// public key.
+fn read_certified_key(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+    provider: &rustls::crypto::CryptoProvider,
+) -> io::Result<CertifiedKey> {
+    // Open the files explicitly so a missing/unreadable path yields a clean
+    // io::Error (NotFound / PermissionDenied) before any PEM parsing. Cert and
+    // key are parsed via rustls-pki-types' `PemObject` trait directly —
+    // rustls-pemfile is unmaintained (RUSTSEC-2025-0134) and is a thin wrapper
+    // over this same code.
+    let cert_file = File::open(cert_path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("failed to open TLS cert file {}: {e}", cert_path.display()),
+        )
+    })?;
+    let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(cert_file)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "failed to parse TLS certificates from {}: {e}",
+                    cert_path.display()
+                ),
+            )
+        })?;
+    if cert_chain.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("no certificates found in {}", cert_path.display()),
+        ));
+    }
+
+    let key_file = File::open(key_path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("failed to open TLS key file {}: {e}", key_path.display()),
+        )
+    })?;
+    let key = PrivateKeyDer::from_pem_reader(key_file).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to read a TLS private key from {}: {e}",
+                key_path.display()
+            ),
+        )
+    })?;
+
+    // `from_der` loads the key through the provider and compares its SPKI with
+    // the leaf's, which is the check that makes a half-written renewal — the
+    // new chain beside the old key — fail here rather than at a client's
+    // handshake.
+    CertifiedKey::from_der(cert_chain, key, provider).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid TLS certificate/key pair: {e}"),
+        )
+    })
+}
+
+/// A [`ResolvesServerCert`] whose certificate can be replaced while the server
+/// is listening.
+///
+/// # Why this exists
+///
+/// rustls consults the resolver on every handshake but reads nothing from disk;
+/// `with_single_cert` installs an immutable `SingleCertAndKey` and actix binds
+/// the resulting config for the process's life. So the leaf a server started
+/// with is the leaf it serves forever.
+///
+/// That is fine for a certificate an operator installs by hand and lives with
+/// for a year. It is not fine for ACME: Let's Encrypt issues for 90 days,
+/// clients renew at 60, and the only remedy without this type is to restart the
+/// process every couple of months — which for an identity provider means
+/// dropping in-flight requests and re-reading every secret out of Vault on a
+/// schedule, to work around a `Vec<u8>` that could have been swapped.
+///
+/// The shape deliberately mirrors [`ReloadableClientCertVerifier`]: an
+/// `ArcSwap` consulted on the hot path, replaced wholesale by a reload that has
+/// already done all of its fallible work. There is one mechanism for "TLS
+/// material changed while we were running", not two.
+#[derive(Debug)]
+pub struct ReloadableCertResolver {
+    current: ArcSwap<CertifiedKey>,
+}
+
+impl ReloadableCertResolver {
+    /// Start serving `initial`.
+    pub fn new(initial: CertifiedKey) -> Self {
+        Self {
+            current: ArcSwap::from_pointee(initial),
+        }
+    }
+
+    /// Swap in `next`, returning the certificate that was replaced.
+    ///
+    /// Infallible by construction: every way this can fail — unreadable file,
+    /// malformed PEM, mismatched pair — has already happened (or not) in
+    /// [`read_certified_key`]. A caller that reaches this point holds a
+    /// certificate rustls has already accepted, so the listener cannot be left
+    /// serving nothing.
+    pub fn replace(&self, next: CertifiedKey) -> Arc<CertifiedKey> {
+        self.current.swap(Arc::new(next))
+    }
+
+    /// The certificate currently being served.
+    pub fn current(&self) -> Arc<CertifiedKey> {
+        self.current.load_full()
+    }
+}
+
+impl ResolvesServerCert for ReloadableCertResolver {
+    fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        // Deliberately ignores SNI, exactly as `SingleCertAndKey` does: this
+        // listener serves one deployment on one name. Returning the certificate
+        // regardless of the name offered is what lets a client connecting to
+        // `127.0.0.1` with an overridden SNI (how the edge proxy reaches the
+        // backend on the loopback bind) complete the handshake against the
+        // public leaf.
+        Some(self.current.load_full())
+    }
+}
+
+/// The live resolver, the provider to rebuild with, and where to re-read from.
+///
+/// A process-global for the same reason [`LIVE_VERIFIER`] is one: there is a
+/// single TLS listener per process, and the signal handler and poll task that
+/// trigger a reload run outside anything holding the `ServerConfig` actix
+/// built. Set once, during [`build_rustls_server_config`].
+#[allow(clippy::type_complexity)]
+static LIVE_CERT_RESOLVER: std::sync::OnceLock<(
+    Arc<ReloadableCertResolver>,
+    Arc<rustls::crypto::CryptoProvider>,
+    std::path::PathBuf,
+    std::path::PathBuf,
+)> = std::sync::OnceLock::new();
+
+fn install_reloadable_resolver(
+    resolver: Arc<ReloadableCertResolver>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    cert_path: std::path::PathBuf,
+    key_path: std::path::PathBuf,
+) {
+    // `set` fails only if called twice, which means a second listener was
+    // built. The first one is the one actix is serving on.
+    let _ = LIVE_CERT_RESOLVER.set((resolver, provider, cert_path, key_path));
+}
+
+/// Re-read the configured certificate and key and install them on the live
+/// listener, without a restart.
+///
+/// Returns `Ok(None)` when this process has no TLS listener — a plaintext
+/// deployment behind a terminating proxy. That is not a failure: there is
+/// nothing to reload into, and saying so lets a `SIGHUP` handler log "no TLS
+/// listener" rather than an error an operator would go looking for.
+///
+/// Returns `Ok(Some(false))` when the files parsed but are byte-identical to
+/// what is already being served, so a poll that fires between renewals stays
+/// silent instead of logging a reload an hour, forever.
+///
+/// # Errors
+///
+/// Anything [`read_certified_key`] rejects. **The live certificate is left
+/// unchanged in that case** — the new pair is fully read, parsed and
+/// consistency-checked before anything is swapped, so a renewal caught
+/// half-written (certbot writes the chain and the key as two separate
+/// operations) fails this call and is retried on the next tick rather than
+/// taking the listener down.
+pub fn reload_leaf_certificate() -> io::Result<Option<bool>> {
+    let Some((resolver, provider, cert_path, key_path)) = LIVE_CERT_RESOLVER.get() else {
+        return Ok(None);
+    };
+    let next = read_certified_key(cert_path, key_path, provider)?;
+    // Compare the DER chain rather than file bytes: PEM whitespace, comment
+    // lines and the ordering certbot happens to write are not differences a
+    // handshake can see, and a poll that reloaded on them would churn.
+    if resolver.current().cert == next.cert {
+        return Ok(Some(false));
+    }
+    resolver.replace(next);
+    Ok(Some(true))
+}
+
+/// Start the background triggers that keep the leaf certificate current.
+///
+/// Spawns, on the ambient tokio runtime:
+///
+/// * a `SIGHUP` listener — the conventional operator hook, and what an ACME
+///   `--deploy-hook` sends. Immediate.
+/// * a `stat` poll every `interval_secs`, skipped entirely when that is `0`.
+///
+/// Both funnel into [`reload_leaf_certificate`], which is a no-op when the
+/// certificate on disk is the one already being served. Calling this on a
+/// plaintext deployment is harmless: the reload reports "no TLS listener" and
+/// the tasks idle.
+///
+/// # Why both, and why the poll is not the only one
+///
+/// The signal is the correct mechanism and takes effect within milliseconds.
+/// It is also the one that silently does not happen: a deploy hook nobody
+/// wired up, a container runtime that does not forward signals to PID 1, an
+/// operator who renews by hand. The poll is what turns "the certificate
+/// expired in production" into "the certificate was replaced within the hour",
+/// and it is an hourly `stat` of two files.
+pub fn spawn_leaf_reloader(interval_secs: u64) {
+    fn log_outcome(trigger: &'static str, outcome: io::Result<Option<bool>>) {
+        match outcome {
+            Ok(Some(true)) => tracing::info!(
+                trigger,
+                "TLS leaf certificate reloaded; new connections use it immediately"
+            ),
+            Ok(Some(false)) => tracing::debug!(
+                trigger,
+                "TLS leaf certificate unchanged on disk; nothing to reload"
+            ),
+            Ok(None) => tracing::debug!(
+                trigger,
+                "no direct-TLS listener in this process; nothing to reload"
+            ),
+            // WARN, not ERROR, and deliberately not fatal: the previous
+            // certificate is still serving. The likeliest cause is a renewal
+            // observed mid-write, which the next trigger resolves on its own.
+            Err(e) => tracing::warn!(
+                trigger,
+                error = %e,
+                "TLS leaf certificate reload failed; continuing to serve the                  previous certificate"
+            ),
+        }
+    }
+
+    tokio::spawn(async move {
+        let mut hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not install a SIGHUP handler; TLS certificate reload                      is available only through the periodic poll"
+                );
+                return;
+            }
+        };
+        while hangup.recv().await.is_some() {
+            log_outcome("sighup", reload_leaf_certificate());
+        }
+    });
+
+    if interval_secs == 0 {
+        tracing::info!(
+            "TLS certificate reload polling is disabled              (server.tls.reload_interval_secs = 0); SIGHUP still reloads"
+        );
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        // The first tick fires immediately and would re-read the certificate
+        // the boot path just read. Burn it.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            log_outcome("poll", reload_leaf_certificate());
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Hot-reloadable client trust anchors
 // ---------------------------------------------------------------------------
 
@@ -565,51 +852,6 @@ pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
         )
     })?;
 
-    // Open the files explicitly so a missing/unreadable path yields a clean
-    // io::Error (NotFound / PermissionDenied) before any PEM parsing. Cert and
-    // key are parsed via rustls-pki-types' `PemObject` trait directly —
-    // rustls-pemfile is unmaintained (RUSTSEC-2025-0134) and is a thin wrapper
-    // over this same code.
-    let cert_file = File::open(cert_path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("failed to open TLS cert file {}: {e}", cert_path.display()),
-        )
-    })?;
-    let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(cert_file)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "failed to parse TLS certificates from {}: {e}",
-                    cert_path.display()
-                ),
-            )
-        })?;
-    if cert_chain.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("no certificates found in {}", cert_path.display()),
-        ));
-    }
-
-    let key_file = File::open(key_path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("failed to open TLS key file {}: {e}", key_path.display()),
-        )
-    })?;
-    let key = PrivateKeyDer::from_pem_reader(key_file).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "failed to read a TLS private key from {}: {e}",
-                key_path.display()
-            ),
-        )
-    })?;
-
     // TLS 1.3 only (ASVS V9.1.2). ring provider selected explicitly.
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = ServerConfig::builder_with_provider(provider.clone())
@@ -647,12 +889,24 @@ pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
         builder.with_client_cert_verifier(reloadable.clone() as Arc<dyn ClientCertVerifier>);
     install_reloadable_verifier(reloadable, Arc::clone(&provider));
 
-    let mut config = builder.with_single_cert(cert_chain, key).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid TLS certificate/key pair: {e}"),
-        )
-    })?;
+    // The leaf. Read, parsed and proven to match its key here, then installed
+    // behind an `ArcSwap` so a renewal can replace it without a restart.
+    //
+    // This is what `with_single_cert` does internally — `CertifiedKey::from_der`
+    // followed by `with_cert_resolver(SingleCertAndKey::from(..))` (rustls
+    // 0.23.43 `src/server/builder.rs:65-72`) — with the immutable
+    // `SingleCertAndKey` swapped for a resolver that can be reloaded. The error
+    // text is unchanged so the failure an operator sees for a mismatched pair
+    // is the one it has always been.
+    let certified = read_certified_key(cert_path, key_path, &provider)?;
+    let resolver = Arc::new(ReloadableCertResolver::new(certified));
+    install_reloadable_resolver(
+        Arc::clone(&resolver),
+        Arc::clone(&provider),
+        cert_path.clone(),
+        key_path.clone(),
+    );
+    let mut config = builder.with_cert_resolver(resolver as Arc<dyn ResolvesServerCert>);
 
     // ALPN (B2/G8): h2 + http/1.1. This is not configurable — `http2 = false`
     // was rejected above because actix re-prepends h2 regardless.
@@ -897,6 +1151,9 @@ mod tests {
 
     struct TestPki {
         ca_pem: String,
+        /// The CA's own key, so a test can issue a *second* server leaf and
+        /// exercise a renewal against the same trust anchor.
+        ca_key_pem: String,
         server_cert_pem: String,
         server_key_pem: String,
         client_cert_pem: String,
@@ -930,6 +1187,7 @@ mod tests {
 
         TestPki {
             ca_pem: ca_cert.pem(),
+            ca_key_pem: ca_key.serialize_pem(),
             server_cert_pem: server_cert.pem(),
             server_key_pem: server_key.serialize_pem(),
             client_cert_pem: client_cert.pem(),
@@ -1299,6 +1557,185 @@ mod tests {
 
         let name = ServerName::try_from("localhost").unwrap();
         rustls::ClientConnection::new(Arc::new(config), name).expect("client connection")
+    }
+
+    // ---------------------------------------------------------------------
+    // Hot-reloadable leaf certificate
+    // ---------------------------------------------------------------------
+
+    /// Generate a second server leaf from the same CA, so a swap is
+    /// distinguishable from the original while both stay verifiable by the
+    /// client. This is what an ACME renewal looks like from rustls' side: a
+    /// different certificate for the same name.
+    fn gen_renewed_server_leaf(pki: &TestPki) -> (String, String) {
+        let ca_key = KeyPair::from_pem(&pki.ca_key_pem).unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+        let key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        params.is_ca = IsCa::NoCa;
+        let cert = params.signed_by(&key, &issuer).unwrap();
+        (cert.pem(), key.serialize_pem())
+    }
+
+    fn certified_from_pem(cert_pem: &str, key_pem: &str) -> CertifiedKey {
+        let provider = rustls::crypto::ring::default_provider();
+        read_certified_key(
+            &write_tmp("ck-cert", cert_pem),
+            &write_tmp("ck-key", key_pem),
+            &provider,
+        )
+        .expect("a matching pair must load")
+    }
+
+    /// The resolver serves what it was built with, and serves the replacement
+    /// after a swap. This is the whole contract; everything else is plumbing.
+    #[test]
+    fn resolver_serves_the_replacement_after_a_swap() {
+        let pki = gen_test_pki();
+        let (renewed_cert, renewed_key) = gen_renewed_server_leaf(&pki);
+
+        let original = certified_from_pem(&pki.server_cert_pem, &pki.server_key_pem);
+        let original_der = original.cert.clone();
+        let resolver = ReloadableCertResolver::new(original);
+        assert_eq!(resolver.current().cert, original_der);
+
+        let renewed = certified_from_pem(&renewed_cert, &renewed_key);
+        let renewed_der = renewed.cert.clone();
+        let previous = resolver.replace(renewed);
+
+        assert_eq!(
+            previous.cert, original_der,
+            "replace must hand back the certificate it displaced"
+        );
+        assert_eq!(resolver.current().cert, renewed_der);
+        assert_ne!(
+            original_der, renewed_der,
+            "the test PKI must actually produce two different leaves"
+        );
+    }
+
+    /// A renewal caught mid-write — certbot writes `fullchain.pem` and
+    /// `privkey.pem` as two separate operations, so a poll can observe the new
+    /// chain beside the old key — must be rejected, and must leave the previous
+    /// certificate serving rather than taking the listener down.
+    #[test]
+    fn half_written_renewal_is_rejected_and_leaves_the_old_cert_serving() {
+        let pki = gen_test_pki();
+        let (renewed_cert, _renewed_key) = gen_renewed_server_leaf(&pki);
+
+        let original = certified_from_pem(&pki.server_cert_pem, &pki.server_key_pem);
+        let original_der = original.cert.clone();
+        let resolver = ReloadableCertResolver::new(original);
+
+        // The new chain with the OLD key: exactly the half-updated pair.
+        let provider = rustls::crypto::ring::default_provider();
+        let err = read_certified_key(
+            &write_tmp("halfway-cert", &renewed_cert),
+            &write_tmp("halfway-key", &pki.server_key_pem),
+            &provider,
+        )
+        .expect_err("a mismatched pair must not load");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("invalid TLS certificate/key pair"),
+            "got: {err}"
+        );
+
+        assert_eq!(
+            resolver.current().cert,
+            original_der,
+            "a failed reload must not disturb the certificate being served"
+        );
+    }
+
+    /// `read_certified_key` is the single parser for the boot path and every
+    /// reload, so a certificate that boots must reload and vice versa. Pinned
+    /// because two parsers is how a renewal installs something the next restart
+    /// refuses.
+    #[test]
+    fn the_boot_path_and_the_reload_path_accept_the_same_pair() {
+        let pki = gen_test_pki();
+        let cert_path = write_tmp("shared-cert", &pki.server_cert_pem);
+        let key_path = write_tmp("shared-key", &pki.server_key_pem);
+
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some(cert_path.clone()),
+            key_path: Some(key_path.clone()),
+            ..TlsConfig::default()
+        };
+        build_rustls_server_config(&tls).expect("the boot path must accept this pair");
+
+        let provider = rustls::crypto::ring::default_provider();
+        read_certified_key(&cert_path, &key_path, &provider)
+            .expect("the reload path must accept the same pair");
+    }
+
+    /// The default is an hour, and `0` is the documented way to turn polling
+    /// off. Pinned because the value reaches operators through the docs site
+    /// and a silent change to either would strand them.
+    #[test]
+    fn reload_interval_defaults_to_one_hour() {
+        assert_eq!(
+            TlsConfig::default().reload_interval_secs,
+            axiam_api_rest::config::DEFAULT_TLS_RELOAD_INTERVAL_SECS
+        );
+        assert_eq!(TlsConfig::default().reload_interval_secs, 3600);
+    }
+
+    /// A swapped certificate must actually reach the wire, not merely sit in
+    /// the `ArcSwap`. Drives two real TLS 1.3 handshakes against one
+    /// `ServerConfig` — the same object actix binds for the process's life —
+    /// and asserts the client is presented the renewed leaf on the second.
+    #[test]
+    fn a_swapped_certificate_is_served_on_the_next_handshake() {
+        let pki = gen_test_pki();
+        let (renewed_cert, renewed_key) = gen_renewed_server_leaf(&pki);
+
+        let original = certified_from_pem(&pki.server_cert_pem, &pki.server_key_pem);
+        let original_der = original.cert.clone();
+        let resolver = Arc::new(ReloadableCertResolver::new(original));
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = Arc::new(
+            ServerConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::clone(&resolver) as Arc<dyn ResolvesServerCert>),
+        );
+
+        let presented = |config: &Arc<ServerConfig>| -> Vec<CertificateDer<'static>> {
+            let mut server: rustls::Connection = rustls::ServerConnection::new(Arc::clone(config))
+                .unwrap()
+                .into();
+            let mut client: rustls::Connection = make_client(&pki, false).into();
+            drive_handshake(&mut client, &mut server).expect("handshake must complete");
+            client
+                .peer_certificates()
+                .expect("the client must have been presented a chain")
+                .to_vec()
+        };
+
+        assert_eq!(
+            presented(&config),
+            original_der,
+            "the first handshake must present the boot certificate"
+        );
+
+        let renewed = certified_from_pem(&renewed_cert, &renewed_key);
+        let renewed_der = renewed.cert.clone();
+        resolver.replace(renewed);
+
+        assert_eq!(
+            presented(&config),
+            renewed_der,
+            "the handshake after a swap must present the renewed certificate,              with no rebuild of the ServerConfig and no restart"
+        );
     }
 
     #[test]

@@ -99,6 +99,16 @@ pub enum ClientAuth {
     Required,
 }
 
+/// Default [`TlsConfig::reload_interval_secs`]: one hour.
+///
+/// Chosen against the renewal cadence it exists to catch, not against how fast
+/// a change could be noticed. Let's Encrypt issues for 90 days and ACME clients
+/// renew at 60, so the window between "a new certificate is on disk" and "the
+/// old one stops being accepted" is thirty days. An hourly poll closes it with
+/// four orders of magnitude to spare, and is rare enough that the `stat` never
+/// shows up anywhere.
+pub const DEFAULT_TLS_RELOAD_INTERVAL_SECS: u64 = 3600;
+
 /// Direct-TLS configuration for the REST API listener.
 ///
 /// TLS is **opt-in**: the default (`enabled = false`) preserves the plaintext
@@ -153,6 +163,30 @@ pub struct TlsConfig {
     /// material when `cert_path` is set, and is otherwise required for the
     /// feature to do anything.
     pub client_ca_bundle_path: Option<PathBuf>,
+    /// How often, in seconds, to re-`stat` [`Self::cert_path`] and
+    /// [`Self::key_path`] and reload the leaf certificate when either has
+    /// changed. `0` disables polling. Default `3600`.
+    ///
+    /// # Why this exists
+    ///
+    /// rustls resolves the server's certificate per handshake, but the pair is
+    /// read from disk exactly once unless something re-reads it. An ACME client
+    /// renewing a 90-day Let's Encrypt certificate at day 60 therefore has no
+    /// effect on a running server, and the listener serves an expired
+    /// certificate on day 90.
+    ///
+    /// `SIGHUP` is the primary, immediate trigger and is what an ACME deploy
+    /// hook should send. This poll is the safety net for the case that actually
+    /// happens in the field: the hook was never wired up, or the process runs
+    /// under something that does not forward signals, and nobody finds out
+    /// until the certificate expires. An hourly `stat` of two files costs
+    /// nothing.
+    ///
+    /// A poll can observe a half-updated pair — certbot writes the chain and
+    /// the key as two operations — so a reload that fails to produce a matching
+    /// pair leaves the previous certificate serving and is retried on the next
+    /// tick. See `axiam_server::tls::reload_leaf_certificate`.
+    pub reload_interval_secs: u64,
 }
 
 impl Default for TlsConfig {
@@ -165,6 +199,7 @@ impl Default for TlsConfig {
             client_auth: ClientAuth::Off,
             client_ca_path: None,
             client_ca_bundle_path: None,
+            reload_interval_secs: DEFAULT_TLS_RELOAD_INTERVAL_SECS,
         }
     }
 }

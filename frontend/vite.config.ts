@@ -56,7 +56,7 @@ const backendProxy = {
   // Every backend MFA endpoint lives under `/auth/mfa/` (`enroll`, `confirm`,
   // `verify`, `setup/enroll`, `setup/confirm` — see `server.rs`), so requiring
   // a delimiter loses none of them. This is F-02 again, in the proxy the E2E
-  // job actually runs against rather than in `docker/nginx.conf`.
+  // job actually runs against rather than in `docker/nginx.conf.template`.
   // Regression test: `frontend/e2e/matrix/spa-routing.spec.ts`.
   "^/auth/(login|logout|refresh|register|change-password|resend-verification|mfa)(/|\\?|$)":
     {

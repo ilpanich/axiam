@@ -1,3 +1,37 @@
+# AXIAM frontend nginx — rendered at container start by the stock nginx
+# entrypoint (`/docker-entrypoint.d/20-envsubst-on-templates.sh`), which
+# envsubsts `/etc/nginx/templates/*.template` into `/etc/nginx/conf.d/`.
+#
+# `NGINX_ENVSUBST_FILTER=^AXIAM_` is set in docker/Dockerfile.frontend so ONLY
+# `AXIAM_`-prefixed names are substituted. Without it, envsubst would also
+# replace nginx's own runtime variables — `$host`, `$remote_addr`,
+# `$proxy_add_x_forwarded_for`, `$scheme`, `$uri` — with the empty string
+# wherever a same-named environment variable happened to exist, which is a
+# failure that shows up as mysteriously blank proxy headers rather than as an
+# error.
+#
+# Two knobs, both with defaults that reproduce the previous plaintext behaviour
+# exactly, so the dev stack and the E2E suite are unaffected:
+#
+#   AXIAM_BACKEND_ORIGIN  scheme://host:port of axiam-server.
+#                         Default http://axiam-server:8090.
+#                         Set https://... where the backend terminates its own
+#                         TLS (claude_dev/public-backend-tls-design.md §5).
+#   AXIAM_BACKEND_SNI     the name to send as SNI and to verify the backend
+#                         certificate against. Only consulted for an https
+#                         origin. Default `axiam-server`; on a deployment where
+#                         the backend carries the public Let's Encrypt leaf,
+#                         set it to the public hostname, because that is the
+#                         name the certificate is actually issued for.
+#   AXIAM_BACKEND_CA      PEM trust anchors for the backend certificate.
+#                         Defaults to the system bundle, which is correct for a
+#                         publicly-issued leaf. Point it at a private CA bundle
+#                         if you issue the backend certificate yourself.
+#
+# There is deliberately no way to turn verification off. A backend certificate
+# that does not verify is a misconfiguration to fix, not a check to disable, and
+# an escape hatch here would be the first thing reached for at 3am.
+
 server {
     listen 8080;
     server_name _;
@@ -68,11 +102,25 @@ server {
 
     # Proxy API requests to the backend (match both /api and /api/*)
     location /api {
-        proxy_pass http://axiam-server:8090;
+        proxy_pass ${AXIAM_BACKEND_ORIGIN};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # A forwarded client certificate is only worth anything when the
+        # forwarder verified it, and this one did not: nginx here terminates
+        # server-auth TLS at most. Clearing it stops a client from asserting a
+        # device identity by setting the header itself. The backend refuses it
+        # anyway unless AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT is on; this is
+        # the other half of that defence, so neither has to be the only one.
+        proxy_set_header X-Client-Certificate "";
+        # Applied only when AXIAM_BACKEND_ORIGIN is https://; inert otherwise.
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${AXIAM_BACKEND_SNI};
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 3;
+        proxy_ssl_trusted_certificate ${AXIAM_BACKEND_CA};
+        proxy_ssl_protocols TLSv1.3;
     }
 
     # SEC-016: Proxy OAuth2 endpoints to the backend.
@@ -96,11 +144,25 @@ server {
     # adding proxy_set_header alone does NOT suppress header inheritance, but
     # explicit repetition prevents silent regressions on future header additions).
     location /oauth2/ {
-        proxy_pass http://axiam-server:8090;
+        proxy_pass ${AXIAM_BACKEND_ORIGIN};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # A forwarded client certificate is only worth anything when the
+        # forwarder verified it, and this one did not: nginx here terminates
+        # server-auth TLS at most. Clearing it stops a client from asserting a
+        # device identity by setting the header itself. The backend refuses it
+        # anyway unless AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT is on; this is
+        # the other half of that defence, so neither has to be the only one.
+        proxy_set_header X-Client-Certificate "";
+        # Applied only when AXIAM_BACKEND_ORIGIN is https://; inert otherwise.
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${AXIAM_BACKEND_SNI};
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 3;
+        proxy_ssl_trusted_certificate ${AXIAM_BACKEND_CA};
+        proxy_ssl_protocols TLSv1.3;
         add_header X-Frame-Options "DENY" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -111,11 +173,25 @@ server {
 
     # SEC-016: Proxy OIDC/OAuth2 discovery endpoints (/.well-known/*) to the backend.
     location /.well-known {
-        proxy_pass http://axiam-server:8090;
+        proxy_pass ${AXIAM_BACKEND_ORIGIN};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # A forwarded client certificate is only worth anything when the
+        # forwarder verified it, and this one did not: nginx here terminates
+        # server-auth TLS at most. Clearing it stops a client from asserting a
+        # device identity by setting the header itself. The backend refuses it
+        # anyway unless AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT is on; this is
+        # the other half of that defence, so neither has to be the only one.
+        proxy_set_header X-Client-Certificate "";
+        # Applied only when AXIAM_BACKEND_ORIGIN is https://; inert otherwise.
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${AXIAM_BACKEND_SNI};
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 3;
+        proxy_ssl_trusted_certificate ${AXIAM_BACKEND_CA};
+        proxy_ssl_protocols TLSv1.3;
         add_header X-Frame-Options "DENY" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;

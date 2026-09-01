@@ -5,7 +5,7 @@ import type { ProviderKind } from "@/services/federation";
  *
  * # Why these are local rather than fetched
  *
- * `docker/nginx.conf` serves the SPA under
+ * `docker/nginx.conf.template` serves the SPA under
  * `default-src 'self'; img-src 'self' data:`. A remote logo URL is therefore
  * blocked — **silently**, with no console error a user would see, leaving a
  * button with a missing image. Inline SVG is the one form that is guaranteed to

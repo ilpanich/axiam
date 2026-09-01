@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 axiam-core = { workspace = true }
-argon2 = { workspace = true }
+argon2 = { workspace = true, features = ["alloc", "getrandom", "password-hash"] }
 jsonwebtoken = { workspace = true }
 totp-rs = { workspace = true }
 rand = { workspace = true }

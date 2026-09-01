@@ -163,9 +163,15 @@ pub struct TlsConfig {
     /// material when `cert_path` is set, and is otherwise required for the
     /// feature to do anything.
     pub client_ca_bundle_path: Option<PathBuf>,
-    /// How often, in seconds, to re-`stat` [`Self::cert_path`] and
-    /// [`Self::key_path`] and reload the leaf certificate when either has
-    /// changed. `0` disables polling. Default `3600`.
+    /// How often, in seconds, to re-read [`Self::cert_path`] and
+    /// [`Self::key_path`] and install the leaf certificate when it differs from
+    /// the one being served. `0` disables polling. Default `3600`.
+    ///
+    /// The comparison is on the parsed DER chain, not on file metadata: an
+    /// mtime can change without the certificate changing (a `touch`, a
+    /// re-render of an identical file) and — worse — can fail to change when
+    /// the content does. Comparing what will actually be served costs one file
+    /// read an hour and cannot be fooled either way.
     ///
     /// # Why this exists
     ///
@@ -179,7 +185,7 @@ pub struct TlsConfig {
     /// hook should send. This poll is the safety net for the case that actually
     /// happens in the field: the hook was never wired up, or the process runs
     /// under something that does not forward signals, and nobody finds out
-    /// until the certificate expires. An hourly `stat` of two files costs
+    /// until the certificate expires. Reading two small files an hour costs
     /// nothing.
     ///
     /// A poll can observe a half-updated pair — certbot writes the chain and

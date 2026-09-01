@@ -781,8 +781,10 @@ certificate, with no restart and no dropped request.
 
 Send `SIGHUP` from your ACME deploy hook; that is immediate. The poll is the
 safety net for the case that actually happens — a hook nobody wired up, or a
-runtime that does not forward signals — and an hourly `stat` of two files costs
-nothing. A reload that finds an unreadable or mismatched pair (certbot writes
+runtime that does not forward signals — and re-reading two small files an hour
+costs nothing. The comparison is on the parsed certificate chain rather than on
+file metadata, because an mtime can change without the certificate changing and
+can fail to change when it does. A reload that finds an unreadable or mismatched pair (certbot writes
 the chain and the key as two separate operations, so a poll will occasionally
 catch one mid-write) logs a warning, **leaves the previous certificate
 serving**, and retries on the next tick.

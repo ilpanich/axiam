@@ -549,7 +549,7 @@ pub fn reload_leaf_certificate() -> io::Result<Option<bool>> {
 /// wired up, a container runtime that does not forward signals to PID 1, an
 /// operator who renews by hand. The poll is what turns "the certificate
 /// expired in production" into "the certificate was replaced within the hour",
-/// and it is an hourly `stat` of two files.
+/// and it costs one read of two small files an hour.
 pub fn spawn_leaf_reloader(interval_secs: u64) {
     fn log_outcome(trigger: &'static str, outcome: io::Result<Option<bool>>) {
         match outcome {

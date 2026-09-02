@@ -388,7 +388,13 @@ async fn finish_attested_registration_rejects_unattested_state_token_purpose() {
     let tenant = Uuid::new_v4();
     let user = Uuid::new_v4();
     let (_ccr, unattested_token) = svc
-        .start_registration(tenant, Uuid::new_v4(), user, "alice")
+        .start_registration(
+            tenant,
+            Uuid::new_v4(),
+            user,
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .unwrap();
 
@@ -532,7 +538,13 @@ async fn unattested_token_is_denied_when_the_policy_tightened_mid_ceremony() {
     let user_id = Uuid::new_v4();
 
     let (_ccr, token) = svc
-        .start_registration(tenant_id, Uuid::new_v4(), user_id, "alice")
+        .start_registration(
+            tenant_id,
+            Uuid::new_v4(),
+            user_id,
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .expect("unattested start succeeds under mode: none");
 

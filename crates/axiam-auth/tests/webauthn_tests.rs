@@ -133,7 +133,13 @@ fn new_rejects_invalid_rp_origin() {
 async fn start_registration_produces_challenge_and_token() {
     let svc = WebauthnService::new(empty_repo(), config(true)).unwrap();
     let (_ccr, token) = svc
-        .start_registration(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "alice")
+        .start_registration(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .expect("registration should start");
     assert!(!token.is_empty());
@@ -143,7 +149,13 @@ async fn start_registration_produces_challenge_and_token() {
 async fn start_registration_without_encryption_key_errors() {
     let svc = WebauthnService::new(empty_repo(), config(false)).unwrap();
     let res = svc
-        .start_registration(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "alice")
+        .start_registration(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await;
     assert!(res.is_err());
 }
@@ -174,7 +186,13 @@ async fn finish_registration_rejects_tenant_mismatch() {
     let tenant = Uuid::new_v4();
     let user = Uuid::new_v4();
     let (_ccr, token) = svc
-        .start_registration(tenant, Uuid::new_v4(), user, "alice")
+        .start_registration(
+            tenant,
+            Uuid::new_v4(),
+            user,
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .unwrap();
     // Different tenant → decode succeeds, tenant check fails.
@@ -196,7 +214,13 @@ async fn finish_registration_rejects_user_mismatch() {
     let tenant = Uuid::new_v4();
     let user = Uuid::new_v4();
     let (_ccr, token) = svc
-        .start_registration(tenant, Uuid::new_v4(), user, "alice")
+        .start_registration(
+            tenant,
+            Uuid::new_v4(),
+            user,
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .unwrap();
     // Correct tenant, different caller user → user check fails.
@@ -223,7 +247,13 @@ async fn finish_registration_matching_tenant_and_user_fails_at_verification() {
     let tenant = Uuid::new_v4();
     let user = Uuid::new_v4();
     let (_ccr, token) = svc
-        .start_registration(tenant, Uuid::new_v4(), user, "alice")
+        .start_registration(
+            tenant,
+            Uuid::new_v4(),
+            user,
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .unwrap();
     let res = svc
@@ -322,7 +352,13 @@ async fn finish_authentication_rejects_wrong_purpose_token() {
     let svc = WebauthnService::new(empty_repo(), config(true)).unwrap();
     let tenant = Uuid::new_v4();
     let (_ccr, token) = svc
-        .start_registration(tenant, Uuid::new_v4(), Uuid::new_v4(), "alice")
+        .start_registration(
+            tenant,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .unwrap();
     let res = svc
@@ -347,7 +383,13 @@ async fn decode_state_token_rejects_issuer_mismatch() {
     let tenant = Uuid::new_v4();
     let user = Uuid::new_v4();
     let (_ccr, token) = svc_a
-        .start_registration(tenant, Uuid::new_v4(), user, "alice")
+        .start_registration(
+            tenant,
+            Uuid::new_v4(),
+            user,
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .unwrap();
 
@@ -381,7 +423,13 @@ async fn decode_state_token_rejects_wrong_encryption_key() {
     let tenant = Uuid::new_v4();
     let user = Uuid::new_v4();
     let (_ccr, token) = svc_a
-        .start_registration(tenant, Uuid::new_v4(), user, "alice")
+        .start_registration(
+            tenant,
+            Uuid::new_v4(),
+            user,
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .unwrap();
 

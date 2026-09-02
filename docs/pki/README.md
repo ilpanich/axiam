@@ -205,6 +205,27 @@ path "secret/metadata/axiam/ca-keys/*" {
 }
 ```
 
+**If you inherited the secret provider's token — the section above — these rules
+must be on _that_ token's policy**, and this is the one part of the arrangement
+that does not announce itself. The startup log says `custody=vault
+vault_inherited=true`, the server boots, the health check passes, every request
+is served, and the first CA generation answers:
+
+```
+Internal error: vault: https://vault:8200/v1/secret/data/axiam/ca-keys/<org>/<ca>
+answered 403 Forbidden on write — the token's policy is missing this rule: ...
+```
+
+Nothing earlier could have said so: no CA had been generated, so nothing had
+asked the token to write. AXIAM's own policy file
+[`docker/vault/axiam-policy.hcl`](../../docker/vault/axiam-policy.hcl) carries
+both halves — read-only on the startup secrets, writes confined to the CA
+prefix — and `just vault-policy` applies it. Vault evaluates policies per
+request, so a running deployment is repaired in place: no restart, no
+re-initialisation, no re-seed, and nothing already stored is touched.
+`just vault-status` reports the gap as `MISSING` before a CA generation reports
+it as a 403.
+
 Revocation deletes the Vault *metadata* path, not the data path: a KV v2 delete
 on the data path soft-deletes the latest version and leaves it readable by
 version number, which for a CA signing key is not deletion. A failure to reach

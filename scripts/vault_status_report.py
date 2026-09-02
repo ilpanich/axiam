@@ -22,14 +22,57 @@ EXPECTED = [
     "jwt_public_key_pem",
 ]
 
-# Everything AXIAM's runtime token is supposed to be able to do. The server only
-# ever GETs its secret: it never writes one, never lists the mount, and never
-# needs `sudo`. `deny` is not over-scope — it is strictly less than read.
+# What AXIAM's runtime token is supposed to be able to do on a path it is not
+# otherwise known to need. The server only ever GETs its startup secret: it
+# never writes one, never lists the mount, and never needs `sudo`. `deny` is not
+# over-scope — it is strictly less than read.
 ALLOWED_CAPABILITIES = frozenset({"read", "deny"})
 
 # `root` is called out separately because it is not "one capability too many":
 # it is every capability on every path, and it is the default in dev-mode Vault.
 ROOT_CAPABILITY = "root"
+
+# A CA key path is written at runtime, one secret per CA, so there is no real
+# path to ask about at the moment the question is worth asking. Vault answers
+# `sys/capabilities-self` about a REQUEST path, matching it against the policy's
+# globs, so any concrete path under the prefix reports what the real ones will
+# get. These two ids are not UUIDs precisely so that a reader of an audit log
+# can tell a capability probe from a CA that exists.
+CA_KEY_DATA_PROBE = "secret/data/axiam/ca-keys/probe/probe"
+CA_KEY_METADATA_PROBE = "secret/metadata/axiam/ca-keys/probe/probe"
+
+# Every path worth asking about, and what the policy in
+# docker/vault/axiam-policy.hcl grants on each.
+#
+# The CA-key entries are why this is a mapping rather than one global allow-set:
+# `create` on the startup-secret path would be over-scope, and its absence on
+# the CA-key path is a server that boots cleanly and then cannot generate a CA.
+# One posture cannot express both.
+EXPECTED_CAPABILITIES: dict[str, frozenset[str]] = {
+    "secret/data/axiam": frozenset({"read"}),
+    "secret/metadata/axiam": frozenset({"read"}),
+    CA_KEY_DATA_PROBE: frozenset({"create", "read", "update"}),
+    CA_KEY_METADATA_PROBE: frozenset({"delete"}),
+}
+
+# The body of the `sys/capabilities-self` request that fills the report in.
+PROBE_PATHS = list(EXPECTED_CAPABILITIES)
+
+# The subset whose absence is a warning rather than an error, because the
+# deployment it does not apply to is a real one: a deployment holding CA keys in
+# the database, or pointing `AXIAM__PKI__VAULT_TOKEN` at a second credential, is
+# correctly configured with nothing granted here.
+CA_KEY_PATHS = frozenset({CA_KEY_DATA_PROBE, CA_KEY_METADATA_PROBE})
+
+
+def expected_for(path: str) -> frozenset[str]:
+    """What this token should hold on `path`.
+
+    An unlisted path falls back to the read-only posture rather than to "no
+    expectation": someone querying an extra path wants to know if the token
+    reaches further than it should there too.
+    """
+    return EXPECTED_CAPABILITIES.get(path, frozenset({"read"}))
 
 
 def secret_presence(body: dict) -> dict[str, bool]:
@@ -75,9 +118,26 @@ def read_capabilities(body: dict) -> dict[str, list[str]]:
     }
 
 
-def excess_capabilities(caps: list[str]) -> list[str]:
-    """Capabilities on this path beyond the read-only posture T-180 asks for."""
-    return sorted(set(caps) - ALLOWED_CAPABILITIES)
+def excess_capabilities(caps: list[str], expected: frozenset[str] | None = None) -> list[str]:
+    """Capabilities on this path beyond what AXIAM asks for.
+
+    `expected` defaults to the read-only posture T-180 asks for, which is what
+    every path had before CA key custody could write to one of them.
+    """
+    allowed = ALLOWED_CAPABILITIES if expected is None else (expected | {"deny"})
+    return sorted(set(caps) - allowed)
+
+
+def missing_capabilities(caps: list[str], expected: frozenset[str]) -> list[str]:
+    """Capabilities AXIAM needs on this path and the token does not hold.
+
+    The other half of the scope question, and the half that was not asked until
+    a CA generation answered it with a 403. `root` holds everything, so nothing
+    is ever missing from it — over-scope is the finding there, not under-scope.
+    """
+    if ROOT_CAPABILITY in caps:
+        return []
+    return sorted(expected - set(caps))
 
 
 def is_root(per_path: dict[str, list[str]]) -> bool:
@@ -85,14 +145,30 @@ def is_root(per_path: dict[str, list[str]]) -> bool:
     return any(ROOT_CAPABILITY in caps for caps in per_path.values())
 
 
-def scope_findings(per_path: dict[str, list[str]]) -> list[tuple[str, list[str], list[str]]]:
-    """`(path, capabilities, excess)` per queried path, sorted by path."""
-    return [
-        (path, sorted(per_path[path]), excess_capabilities(per_path[path]))
-        for path in sorted(per_path)
-    ]
+def scope_findings(
+    per_path: dict[str, list[str]],
+) -> list[tuple[str, list[str], list[str], list[str]]]:
+    """`(path, capabilities, excess, missing)` per queried path, sorted by path."""
+    findings = []
+    for path in sorted(per_path):
+        caps = per_path[path]
+        expected = expected_for(path)
+        findings.append(
+            (
+                path,
+                sorted(caps),
+                excess_capabilities(caps, expected),
+                missing_capabilities(caps, expected),
+            )
+        )
+    return findings
 
 
 def is_over_scoped(per_path: dict[str, list[str]]) -> bool:
-    """True when any queried path grants more than `read`."""
-    return any(excess for _, _, excess in scope_findings(per_path))
+    """True when any queried path grants more than AXIAM asks for there."""
+    return any(excess for _, _, excess, _ in scope_findings(per_path))
+
+
+def is_under_scoped(per_path: dict[str, list[str]]) -> bool:
+    """True when any queried path grants less than AXIAM needs there."""
+    return any(missing for _, _, _, missing in scope_findings(per_path))

@@ -108,6 +108,42 @@ tls-certs:
     bash scripts/gen-broker-tls.sh
     bash scripts/gen-vault-tls.sh
 
+# (Re)write the `axiam` Vault policy from docker/vault/axiam-policy.hcl.
+#
+# `prod-up` already does this, so run it by hand for one reason: to REPAIR a
+# stack that is already up. Vault evaluates a policy per request rather than
+# freezing it into the token at issue time, so applying the current policy gives
+# the running server's existing token the capabilities it was missing —
+# immediately, with no restart, no re-init, no re-seed and no data loss.
+#
+# That is the fix for a CA generation that fails with
+#
+#   vault: .../secret/data/axiam/ca-keys/<org>/<ca> answered 403 Forbidden on
+#   write — the token's policy is missing this rule: ...
+#
+# on any stack first brought up by `just prod-up` at 1.0.0-beta09 or earlier,
+# whose policy granted read on the deployment secrets and nothing on the CA
+# prefix. Nothing already in Vault or the database is touched.
+#
+#   just vault-policy            # the Compose stack, using its own root token
+#   VAULT_ADDR=... VAULT_TOKEN=... just vault-policy   # any other Vault
+vault-policy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SECRETS_DIR="docker/.secrets"
+    VAULT_STATE="$SECRETS_DIR/vault-init.json"
+    # Default to the Compose stack's own credentials so the repair is one word.
+    # A VAULT_ADDR/VAULT_TOKEN already in the environment wins, which is how the
+    # same recipe reaches a real deployment.
+    if [[ -z "${VAULT_TOKEN:-}" && -s "$VAULT_STATE" ]]; then
+        export VAULT_TOKEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["root_token"])' "$VAULT_STATE")"
+        export VAULT_ADDR="${VAULT_ADDR:-https://127.0.0.1:8200}"
+        export VAULT_CACERT="${VAULT_CACERT:-$PWD/$SECRETS_DIR/vault-tls/ca.pem}"
+    fi
+    : "${VAULT_ADDR:?VAULT_ADDR is required (no docker/.secrets/vault-init.json to fall back on)}"
+    : "${VAULT_TOKEN:?VAULT_TOKEN is required — it needs update on sys/policies/acl/axiam}"
+    bash scripts/vault-policy.sh
+
 # Stop the development Vault (its data is in-memory and goes with it).
 vault-down:
     docker compose -f docker/docker-compose.dev.yml --profile vault down vault
@@ -117,10 +153,15 @@ vault-down:
 #
 # The dev Vault runs on a fixed ROOT token on purpose, so the scope block below
 # will always report OVER-SCOPED here. That is the point: the same recipe, run
-# against a real Vault with the read-only policy from docs/deployment/vault.md
-# §5.4, prints `ok` — so the line is a check rather than decoration. Nothing is
-# `--strict` here; a production check that should FAIL on an over-scoped token
-# adds it (see §5.4).
+# against a real Vault carrying docker/vault/axiam-policy.hcl, prints `ok` — so
+# the line is a check rather than decoration. Nothing is `--strict` here; a
+# production check that should FAIL on an over-scoped token adds it (see §5.4).
+#
+# The report also names any capability the token is MISSING, which is the half
+# that catches a token that reads its startup secret fine and cannot write a CA
+# signing key. The CA-key paths asked about are probes, not real CAs: Vault
+# answers `capabilities-self` about a request path, matching it against the
+# policy's globs, so a path that will never exist reports what the real ones get.
 vault-status:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -132,9 +173,13 @@ vault-status:
     # for the length of one command. A Vault that will not answer it (an older
     # version, a policy without `sys/capabilities-self`) leaves the file empty
     # and the reporter says "not checked" rather than failing.
+    #
+    # The path list comes from the reporter itself, so a path it expects and a
+    # path the recipe asks about cannot drift into reporting `(none)` for a
+    # correctly configured token.
     curl -fsS --header "X-Vault-Token: ${TOKEN}" \
         --request POST \
-        --data '{"paths":["secret/data/axiam","secret/metadata/axiam"]}' \
+        --data "$(python3 scripts/vault-status.py --print-paths)" \
         "${VAULT_ADDR_LOCAL}/v1/sys/capabilities-self" > "$CAPS" || true
     curl -fsS --header "X-Vault-Token: ${TOKEN}" \
         "${VAULT_ADDR_LOCAL}/v1/secret/data/axiam" \
@@ -458,25 +503,23 @@ prod-up:
     JWT_PUBLIC_KEY_PEM="$AXIAM__AUTH__JWT_PUBLIC_KEY_PEM" \
         bash scripts/vault-seed.sh
 
-    # The server gets a READ-ONLY token scoped to one path, not root.
+    # The server gets a NARROWLY SCOPED token, not root.
     #
     # It used to get the root token straight out of vault-init.json, which meant
     # the credential sitting in `docker inspect` output and in the server's
     # environment could read, write and delete every secret in the Vault, revoke
     # tokens, and mount new engines. Nothing in axiam-server wants any of that:
-    # it reads secret/axiam once at boot and never writes. `just vault-status`
-    # reports anything wider as OVER-SCOPED, and until now it was reporting that
-    # about this stack every single time.
+    # it reads secret/axiam once at boot and never writes it, and it writes one
+    # secret per CA under secret/axiam/ca-keys/ and nowhere else.
     #
-    # The policy is the one in docs/deployment/vault.md §5.4, written here so the
-    # local stack and the documented production ceremony cannot drift.
-    echo "→ Writing the read-only 'axiam' policy and issuing a scoped token"
-    AXIAM_POLICY='path "secret/data/axiam" { capabilities = ["read"] }
-    path "secret/metadata/axiam" { capabilities = ["read"] }'
-    curl -sS --cacert "$VAULT_CACERT" -H "X-Vault-Token: $VAULT_TOKEN" \
-        --request PUT \
-        --data "$(python3 -c 'import json,sys; print(json.dumps({"policy": sys.stdin.read()}))' <<< "$AXIAM_POLICY")" \
-        "$VAULT_ADDR/v1/sys/policies/acl/axiam" > /dev/null
+    # That second half was missing until 1.0.0-beta09, and the stack it produced
+    # booted perfectly and then answered the first CA generation with a 403 —
+    # because CA key custody inherits this very token when no AXIAM__PKI__VAULT_*
+    # pair is set. docker/vault/axiam-policy.hcl now holds the whole policy, and
+    # docs/deployment/vault.md §5.4 quotes that file, so the local stack and the
+    # documented production ceremony cannot drift apart.
+    echo "→ Writing the 'axiam' policy and issuing a scoped token"
+    bash scripts/vault-policy.sh
 
     # Renewable and periodic: the server holds it for the life of the container
     # and a restart re-runs this recipe, so a 768h period is a bound on how long

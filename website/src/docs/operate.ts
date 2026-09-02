@@ -295,9 +295,9 @@ export const OPERATE_PAGES: DocPage[] = [
             body: "Without it, every restart — a node drain, an upgrade, an OOM kill — leaves Vault sealed and AXIAM unable to start until three people are woken up. This is the single most important production step, and the one most often deferred.",
           },
           {
-            title: "Create a read-only, single-path policy",
-            body: "A leaked AXIAM token must not be a key to the rest of your Vault.",
-            code: "vault policy write axiam - <<'EOF'\npath \"secret/data/axiam\"     { capabilities = [\"read\"] }\npath \"secret/metadata/axiam\" { capabilities = [\"read\"] }\nEOF",
+            title: "Create a narrowly scoped policy",
+            body: "A leaked AXIAM token must not be a key to the rest of your Vault. Read-only on the startup secrets — the server reads them once at boot and never writes them — plus writes confined to the CA-key prefix, which is where organization CA signing keys are created at runtime. Omit the second half and the server boots, serves every request, and then refuses the first CA generation with a 403. The policy ships as `docker/vault/axiam-policy.hcl`; `scripts/vault-policy.sh` applies it, to a running deployment as safely as to a new one.",
+            code: "vault policy write axiam docker/vault/axiam-policy.hcl\n\n# path \"secret/data/axiam\"                   { capabilities = [\"read\"] }\n# path \"secret/metadata/axiam\"               { capabilities = [\"read\"] }\n# path \"secret/data/axiam/ca-keys/*\"         { capabilities = [\"create\", \"read\", \"update\"] }\n# path \"secret/metadata/axiam/ca-keys/*\"     { capabilities = [\"delete\"] }",
           },
           {
             title: "Seed the secrets",

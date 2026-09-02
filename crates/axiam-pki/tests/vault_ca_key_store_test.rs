@@ -115,12 +115,40 @@ async fn a_refused_write_names_the_policy_rather_than_the_status_alone() {
         .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("403"), "{msg}");
-    assert!(msg.contains("policy"), "{msg}");
+    // Not just the word "policy": the rule itself, as HCL, addressed to the
+    // mount and prefix THIS deployment configured. An operator who has moved
+    // either must not be handed the defaults.
+    assert!(
+        msg.contains(&format!(
+            r#"path "secret/data/{PREFIX}/*" {{ capabilities = ["create", "read", "update"] }}"#
+        )),
+        "{msg}"
+    );
+    assert!(msg.contains("just vault-policy"), "{msg}");
     assert!(
         !msg.contains(TOKEN),
         "the token must never reach an error: {msg}"
     );
     assert!(!msg.contains(PEM), "nor the key: {msg}");
+}
+
+#[tokio::test]
+async fn a_sealed_vault_is_not_reported_as_a_policy_problem() {
+    // A 503 is Vault sealed, not a missing capability. Printing an ACL rule
+    // under one sends the reader to a file where the answer is not.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    let err = store_for(&server)
+        .store(Uuid::new_v4(), Uuid::new_v4(), PEM)
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("503"), "{msg}");
+    assert!(!msg.contains("capabilities"), "{msg}");
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +332,15 @@ async fn a_refused_delete_is_reported() {
         .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("403"), "{msg}");
+    // Revocation deletes the *metadata* path, so the rule quoted is the
+    // metadata one — a reader handed the data rule here would grant a
+    // capability that does not fix anything.
+    assert!(
+        msg.contains(&format!(
+            r#"path "secret/metadata/{PREFIX}/*" {{ capabilities = ["delete"] }}"#
+        )),
+        "{msg}"
+    );
     assert!(!msg.contains(TOKEN), "{msg}");
 }
 

@@ -276,6 +276,50 @@ impl VaultCaKeyStore {
             locator.trim_matches('/'),
         )
     }
+
+    /// The message for a Vault call that failed, with the policy stanza spelled
+    /// out when the failure was an authorization one.
+    ///
+    /// Worth the extra code for one reason: the operator reading this line is
+    /// looking at a server that booted cleanly, passed its health check and
+    /// served every other request. Nothing in the startup log said the token
+    /// could not do this, because nothing had asked it to yet. Telling them
+    /// which capability is missing and on which path — as HCL they can paste —
+    /// is the difference between a five-minute fix and an afternoon spent
+    /// deciding whether Vault, the mount, the prefix or the token is at fault.
+    ///
+    /// A 403 is the only status that gets the stanza. A 503 (sealed) or a 500
+    /// is not a policy problem, and printing an ACL rule under one would send
+    /// the reader somewhere the answer is not.
+    fn policy_hint(
+        &self,
+        status: reqwest::StatusCode,
+        url: &str,
+        operation: &str,
+        section: &str,
+        capabilities: &[&str],
+    ) -> String {
+        let base = format!("vault: {url} answered {status} on {operation}");
+        if status != reqwest::StatusCode::FORBIDDEN {
+            return base;
+        }
+        let caps = capabilities
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{base} — the token's policy is missing this rule:\n\n  \
+             path \"{mount}/{section}/{prefix}/*\" {{ capabilities = [{caps}] }}\n\n\
+             CA signing keys are written at runtime, one secret per CA, so this is \
+             separate from the read-only rule on the deployment's startup secrets. \
+             The full policy is docker/vault/axiam-policy.hcl; `just vault-policy` \
+             applies it. Vault evaluates policies per request, so the running \
+             server picks the change up with no restart and no re-initialisation.",
+            mount = self.config.mount.trim_matches('/'),
+            prefix = self.config.prefix.trim_matches('/'),
+        )
+    }
 }
 
 impl CaKeyStore for VaultCaKeyStore {
@@ -309,10 +353,12 @@ impl CaKeyStore for VaultCaKeyStore {
                 })?;
 
             if !response.status().is_success() {
-                return Err(AxiamError::Internal(format!(
-                    "vault: {url} answered {} on write — check the token's policy \
-                     has create and update on this path",
-                    response.status()
+                return Err(AxiamError::Internal(self.policy_hint(
+                    response.status(),
+                    &url,
+                    "write",
+                    "data",
+                    &["create", "read", "update"],
                 )));
             }
 
@@ -353,10 +399,12 @@ impl CaKeyStore for VaultCaKeyStore {
                 )));
             }
             if !response.status().is_success() {
-                return Err(AxiamError::Internal(format!(
-                    "vault: {url} answered {} on read — check the token's policy \
-                     has read on this path",
-                    response.status()
+                return Err(AxiamError::Internal(self.policy_hint(
+                    response.status(),
+                    &url,
+                    "read",
+                    "data",
+                    &["create", "read", "update"],
                 )));
             }
 
@@ -405,9 +453,12 @@ impl CaKeyStore for VaultCaKeyStore {
             {
                 return Ok(());
             }
-            Err(AxiamError::Internal(format!(
-                "vault: {url} answered {} on delete",
-                response.status()
+            Err(AxiamError::Internal(self.policy_hint(
+                response.status(),
+                &url,
+                "delete",
+                "metadata",
+                &["delete"],
             )))
         })
     }

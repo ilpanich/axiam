@@ -149,11 +149,13 @@ secrets, then starts the server.
 just prod-up
 ```
 
-It runs **Raft (integrated) storage** and gives the server a **read-only token
-scoped to `secret/axiam`**, not the root token — the same two things §5 asks a
-production deployment for, so that the local stack and the documented ceremony
-cannot quietly drift apart. Seeding uses its own credential, because the seeding
-token and the serving token were never the same thing (§5.4).
+It runs **Raft (integrated) storage** and gives the server a **token scoped to
+`secret/axiam`** — read-only on the deployment's startup secrets, and able to
+write only under `secret/axiam/ca-keys/` — not the root token. The same two
+things §5 asks a production deployment for, and applied from the same file
+(`docker/vault/axiam-policy.hcl`), so that the local stack and the documented
+ceremony cannot quietly drift apart. Seeding uses its own credential, because
+the seeding token and the serving token were never the same thing (§5.4).
 
 Exactly **one** thing about this stack is deliberately not production, and it is
 the important one:
@@ -307,20 +309,65 @@ production.
 
 ### 5.4 Enable KV v2 and create AXIAM's policy
 
+The policy lives in [`docker/vault/axiam-policy.hcl`](../../docker/vault/axiam-policy.hcl)
+so that the file quoted here, the file `just prod-up` applies, and the file the
+server is actually checked against are one file:
+
 ```bash
 vault secrets enable -path=secret -version=2 kv
 
-vault policy write axiam - <<'EOF'
-# Read-only, and scoped to exactly one path. A leaked AXIAM token must not be a
-# key to the rest of your Vault.
-path "secret/data/axiam" {
-  capabilities = ["read"]
-}
-path "secret/metadata/axiam" {
-  capabilities = ["read"]
-}
-EOF
+VAULT_ADDR=https://vault.example:8200 VAULT_TOKEN=<root> \
+    scripts/vault-policy.sh          # or: vault policy write axiam docker/vault/axiam-policy.hcl
 ```
+
+It grants two different things, and the difference is the point:
+
+```hcl
+# The deployment's fixed startup secrets. READ ONLY — the server reads this path
+# once at boot and never writes it. A leaked AXIAM token must not be a key to
+# the rest of your Vault, nor a way to REPLACE the JWT signing key.
+path "secret/data/axiam"     { capabilities = ["read"] }
+path "secret/metadata/axiam" { capabilities = ["read"] }
+
+# Organization CA signing keys, written at runtime — one secret per CA. Nothing
+# here is known at deployment time, so nothing is seeded; AXIAM creates each
+# secret itself when a CA is generated and deletes it on revocation.
+path "secret/data/axiam/ca-keys/*"     { capabilities = ["create", "read", "update"] }
+path "secret/metadata/axiam/ca-keys/*" { capabilities = ["delete"] }
+```
+
+**The second half is not optional if you generate CAs**, and its absence is the
+most confusing failure this document has ever described, because everything
+looks right: the server boots, reports `secret provider ready provider=vault`,
+passes its health check, and serves every request. Then the first CA generation
+answers
+
+```
+Internal error: vault: https://vault:8200/v1/secret/data/axiam/ca-keys/<org>/<ca>
+answered 403 Forbidden on write — the token's policy is missing this rule: ...
+```
+
+because CA key custody **inherits `AXIAM__AUTH__VAULT_ADDR` and
+`AXIAM__AUTH__VAULT_TOKEN`** when no `AXIAM__PKI__VAULT_*` pair is set — the
+intended arrangement for the overwhelmingly common case of one Vault. See
+[CA key custody](../pki/README.md#ca-key-custody).
+
+Two ways out, and the first is the default for a reason:
+
+- **One token, two scopes** — the policy above. The token stays read-only on
+  everything that matters and can write only under `ca-keys/`.
+- **Two tokens** — leave this policy read-only, put the CA-key rules in a
+  policy of their own, and hand the server the second token as
+  `AXIAM__PKI__VAULT_TOKEN`. Worth it when PKI keys live in a different Vault,
+  or when you want the two credentials revocable independently. Both tokens then
+  sit in the same process environment, so the security gain is separability, not
+  isolation.
+
+Either can be applied to a **running** deployment. Vault evaluates a policy on
+every request rather than freezing it into the token when the token is issued,
+so re-writing the policy repairs the server's existing token in place — no
+restart, no re-initialisation, no re-seed, and nothing already stored is
+touched. On the Compose stack that is `just vault-policy`.
 
 #### Checking that the policy is the one actually in force (T-180)
 
@@ -333,11 +380,33 @@ it holds is allowed to do and says so:
   token scope (T-180):
     ok           secret/data/axiam: read
     ok           secret/metadata/axiam: read
+    ok           secret/data/axiam/ca-keys/probe/probe: create, read, update
+    ok           secret/metadata/axiam/ca-keys/probe/probe: delete
 ```
 
-Anything beyond `read` is reported as `OVER-SCOPED` with the reason. The scope
-report comes from `sys/capabilities-self`, so it reflects the token in hand
-rather than the policy you believe is attached to it; capabilities are not
+The report reads both directions. A path granting more than AXIAM asks for is
+`OVER-SCOPED` with the reason; one granting less is `MISSING`, naming the
+capabilities it lacks:
+
+```
+  token scope (T-180):
+    ok           secret/data/axiam: read
+    MISSING      secret/data/axiam/ca-keys/probe/probe: (none)  (needs create, read, update)
+```
+
+That second line is what a stack looks like right up until its first CA
+generation, and asking for it is why the check is worth running before you need
+it. It is a warning rather than an error because one correct deployment produces
+it: CA keys in the database, or held by a separate `AXIAM__PKI__VAULT_TOKEN`.
+
+The `ca-keys/probe/probe` paths are probes, not CAs. Vault answers
+`sys/capabilities-self` about a *request* path, matching it against the policy's
+globs, so a path that will never exist reports exactly what the real ones get —
+and the ids are deliberately not UUIDs, so an audit log reader can tell a
+capability probe from a CA.
+
+The scope report comes from `sys/capabilities-self`, so it reflects the token in
+hand rather than the policy you believe is attached to it; capabilities are not
 secrets and are printed in full, while secret values still never are.
 
 To make it fail rather than warn — in a deployment smoke test, say — add
@@ -345,7 +414,7 @@ To make it fail rather than warn — in a deployment smoke test, say — add
 
 ```sh
 curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" -X POST \
-    --data '{"paths":["secret/data/axiam","secret/metadata/axiam"]}' \
+    --data "$(python3 scripts/vault-status.py --print-paths)" \
     "$VAULT_ADDR/v1/sys/capabilities-self" > caps.json
 curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/axiam" \
     | python3 scripts/vault-status.py --capabilities caps.json --strict
@@ -357,7 +426,8 @@ and failing on it would train everyone to ignore the check.
 
 The seeding token is a different, short-lived credential — it needs
 `create`/`update` on `secret/data/axiam` and is not the token the server runs
-with. Do not widen the server's policy to seed.
+with. Do not widen the server's policy to seed: the CA-key rules above are the
+only writes it should ever hold, and they reach nothing the seeder touches.
 
 ### 5.5 Seed the secrets
 
@@ -525,6 +595,8 @@ over your PKCS#11 library and select it in
 |---|---|
 | `secret provider configuration is invalid: AXIAM__AUTH__SECRET_PROVIDER=...` | Typo in the provider name. Valid values are `env`, `file`, `vault`. Refused rather than defaulted, on purpose. |
 | `secret provider ... could not be initialised: vault: ... answered 403` | The token's policy does not grant `read` on `secret/data/axiam`. See §5.4. |
+| `vault: .../secret/data/axiam/ca-keys/<org>/<ca> answered 403 Forbidden on write` — everything else works | The policy grants the startup-secret rules and not the CA-key ones, so the server boots and serves but cannot store a CA signing key. Apply [`docker/vault/axiam-policy.hcl`](../../docker/vault/axiam-policy.hcl) — `just vault-policy` on the Compose stack. It takes effect on the next request: **no restart, no re-init, no re-seed, nothing already stored is lost.** `just vault-status` reports the same thing as `MISSING` before you hit it. See §5.4. |
+| `vault: ... answered 403 Forbidden on read` for a CA that used to work | Same cause seen from the other side — the write succeeded under a wider policy that has since been narrowed. The key is still in Vault; restore `read` on `secret/data/axiam/ca-keys/*`. |
 | `... answered 503` | Vault is sealed. See §5.3 — if this happened after a restart, you need auto-unseal. |
 | Vault restart-loops with `Error initializing storage of type raft: failed to create fsm: failed to open bolt file: open /vault/data/vault.db: permission denied` | The Raft volume is owned by `root` and Vault runs as `vault`. Compose fixes this with the `vault-data-perms` service (§4); if you removed it, or you mount `/vault/data` from the host, `chown -R 100:1000` the directory. In Kubernetes this is `fsGroup: 1000` on the pod. |
 | `chown: /vault/config: Read-only file system`, then `Could not chown /vault/config` | Cosmetic. The image entrypoint chowns `/vault/config` on every start and that mount is read-only on purpose. Set `SKIP_CHOWN=true` (both the Compose stack and `k8s/vault/statefulset.yml` do). It is never the reason Vault failed to start — look further down the log. |

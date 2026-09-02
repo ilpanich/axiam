@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- CA generation refused with `403 Forbidden` on a Vault-backed deployment
+
+  The Vault policy `just prod-up` wrote — and the one documented as the
+  production ceremony — granted `read` on `secret/data/axiam` and nothing on
+  `secret/data/axiam/ca-keys/*`, where CA key custody writes one secret per CA.
+  Since custody inherits `AXIAM__AUTH__VAULT_ADDR` / `_TOKEN` when no
+  `AXIAM__PKI__VAULT_*` pair is set, every such stack booted cleanly, served
+  every request, and then refused its first organization CA.
+
+  The policy now lives in `docker/vault/axiam-policy.hcl` — one file, applied by
+  `scripts/vault-policy.sh`, quoted by the docs and asserted against by the
+  status reporter's tests. `just vault-policy` applies it to a **running**
+  deployment: Vault evaluates policies per request, so nothing needs restarting,
+  re-initialising or re-seeding, and nothing already stored is lost.
+
+### Changed
+
+- `just vault-status` reports missing capabilities, not only excess ones
+
+  It probed two paths and called anything beyond `read` over-scoped, so a token
+  that could not write a CA signing key reported `ok`. It now probes the CA-key
+  paths too, knows what each path is supposed to grant, and prints `MISSING`
+  with the capabilities a token lacks.
+
+- A refused Vault call names the policy rule it needs
+
+  A `403` from CA key custody now prints the missing stanza as HCL, addressed to
+  the mount and prefix that deployment configured. Other statuses are unchanged:
+  a sealed Vault is not a policy problem and is not reported as one.
+
 ## [1.0.0-beta09] - 2026-09-02
 
 ### Changed

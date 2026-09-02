@@ -12,8 +12,13 @@ misconfiguration visible instead of silent. Pass the response body of
 
     POST /v1/sys/capabilities-self   {"paths": ["secret/data/axiam", ...]}
 
-as `--capabilities FILE` and this script says whether the token is the
-read-only, single-path credential `docs/deployment/vault.md` §5.4 describes.
+as `--capabilities FILE` and this script says whether the token matches the
+policy in `docker/vault/axiam-policy.hcl`. It reports both directions: a token
+that reaches further than AXIAM asks for, and — since 1.0.0-beta10 — one that
+does not reach far enough, which is what a stack looks like right up until its
+first CA generation answers with a 403. `--print-paths` emits the request body
+that fills this in, so the path list lives here and not in the caller.
+
 Capabilities are not secrets — unlike the KV fields, they are printed in full.
 
 The decision logic lives in `vault_status_report.py` so it can be unit-tested;
@@ -25,7 +30,9 @@ import json
 import sys
 
 from vault_status_report import (
+    CA_KEY_PATHS,
     EXPECTED,
+    PROBE_PATHS,
     is_root,
     read_capabilities,
     scope_findings,
@@ -54,18 +61,34 @@ def print_secrets(body: dict) -> list[str]:
 
 
 def print_scope(per_path: dict[str, list[str]]) -> bool:
-    """Print the token's scope. Returns True if anything exceeds read-only."""
+    """Print the token's scope. Returns True if any path grants too much.
+
+    Reports both directions. Over-scope is the security finding T-180 asked
+    for; under-scope is the *functional* one, and it is the reason a stack can
+    boot cleanly, serve every request, and then answer the first CA generation
+    with a 403 nothing in the startup log predicted.
+    """
     if not per_path:
         print("\n  token scope: Vault returned no per-path capabilities — not checked.")
         return False
 
     print("\n  token scope (T-180):")
     over_scoped = False
-    for path, caps, excess in scope_findings(per_path):
+    under_scoped_ca_keys = False
+    for path, caps, excess, missing in scope_findings(per_path):
         if excess:
             over_scoped = True
-        mark = "OVER-SCOPED" if excess else "ok         "
-        print(f"    {mark}  {path}: {', '.join(caps) or '(none)'}")
+            mark = "OVER-SCOPED"
+        elif missing:
+            if path in CA_KEY_PATHS:
+                under_scoped_ca_keys = True
+            mark = "MISSING    "
+        else:
+            mark = "ok         "
+        line = f"    {mark}  {path}: {', '.join(caps) or '(none)'}"
+        if missing and not excess:
+            line += f"  (needs {', '.join(missing)})"
+        print(line)
 
     if over_scoped:
         print()
@@ -76,15 +99,29 @@ def print_scope(per_path: dict[str, list[str]]) -> bool:
             )
         else:
             print(
-                "  WARNING: this token has more than `read` on AXIAM's KV path.\n"
-                "           The server only ever reads its secret; a token that can\n"
-                "           also write one turns a leak into a way to REPLACE the\n"
-                "           JWT signing key rather than merely to read it."
+                "  WARNING: this token reaches further than AXIAM asks for on one of\n"
+                "           the paths above. The server only ever reads its startup\n"
+                "           secret; a token that can also write one turns a leak into\n"
+                "           a way to REPLACE the JWT signing key rather than merely\n"
+                "           to read it."
             )
         print(
-            "           Fix: the read-only policy in docs/deployment/vault.md §5.4.\n"
+            "           Fix: the policy in docker/vault/axiam-policy.hcl —\n"
+            "           `just vault-policy`, or docs/deployment/vault.md §5.4.\n"
             "           Expected on the dev-mode Vault `just vault-up` starts — it\n"
             "           uses a fixed root token on purpose. Never in production."
+        )
+
+    if under_scoped_ca_keys:
+        print(
+            "\n  NOTE: this token cannot write organization CA signing keys. That is\n"
+            "        correct ONLY if CA keys live in the database\n"
+            "        (AXIAM__PKI__CA_KEY_STORE=database) or a separate\n"
+            "        AXIAM__PKI__VAULT_TOKEN holds them. Otherwise CA generation\n"
+            "        will fail with `403 Forbidden on write` — apply the policy in\n"
+            "        docker/vault/axiam-policy.hcl (`just vault-policy`). It takes\n"
+            "        effect immediately; Vault evaluates policies per request, so\n"
+            "        nothing needs restarting or re-initialising."
         )
     return over_scoped
 
@@ -101,12 +138,25 @@ def main() -> int:
         "only secret presence is reported.",
     )
     parser.add_argument(
+        "--print-paths",
+        action="store_true",
+        help="Print the JSON body for a Vault `sys/capabilities-self` request and "
+        "exit. The caller does the I/O, so the path list stays in one place.",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Exit non-zero when the token holds more than `read` on AXIAM's path. "
         "Off by default so the dev-mode root token does not fail the recipe.",
     )
     args = parser.parse_args()
+
+    if args.print_paths:
+        # Emitted rather than duplicated in the `just` recipe: a probe path that
+        # drifts from the one the report expects reports `(none)` for a token
+        # that is perfectly configured.
+        print(json.dumps({"paths": PROBE_PATHS}))
+        return 0
 
     try:
         body = json.load(sys.stdin)

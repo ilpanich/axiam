@@ -167,6 +167,15 @@ the important one:
 
 `just prod-clean` removes that file along with the volume it describes.
 
+One implementation detail is worth knowing before you read `docker ps` and
+wonder: a second, short-lived container — `axiam-vault-data-perms` — runs
+immediately before Vault and exits. `hashicorp/vault` runs as the unprivileged
+`vault` user and the image does not contain `/vault/data`, so Docker creates
+that path itself when the Raft volume is first mounted, owned by `root`. Vault
+cannot write its bolt file into a root-owned directory and fails to start (§8).
+That container hands the directory over and does nothing else; it is the Compose
+equivalent of the `fsGroup: 1000` that `k8s/vault/statefulset.yml` relies on.
+
 ### 4.1 Migrating a stack that predates Raft
 
 Earlier revisions of `docker/vault/vault.hcl` used the `file` backend at
@@ -517,6 +526,8 @@ over your PKCS#11 library and select it in
 | `secret provider configuration is invalid: AXIAM__AUTH__SECRET_PROVIDER=...` | Typo in the provider name. Valid values are `env`, `file`, `vault`. Refused rather than defaulted, on purpose. |
 | `secret provider ... could not be initialised: vault: ... answered 403` | The token's policy does not grant `read` on `secret/data/axiam`. See §5.4. |
 | `... answered 503` | Vault is sealed. See §5.3 — if this happened after a restart, you need auto-unseal. |
+| Vault restart-loops with `Error initializing storage of type raft: failed to create fsm: failed to open bolt file: open /vault/data/vault.db: permission denied` | The Raft volume is owned by `root` and Vault runs as `vault`. Compose fixes this with the `vault-data-perms` service (§4); if you removed it, or you mount `/vault/data` from the host, `chown -R 100:1000` the directory. In Kubernetes this is `fsGroup: 1000` on the pod. |
+| `chown: /vault/config: Read-only file system`, then `Could not chown /vault/config` | Cosmetic. The image entrypoint chowns `/vault/config` on every start and that mount is read-only on purpose. Set `SKIP_CHOWN=true` (both the Compose stack and `k8s/vault/statefulset.yml` do). It is never the reason Vault failed to start — look further down the log. |
 | OPAQUE endpoints return `503` | One or both OPAQUE keys are absent. `just vault-status`, or check the startup warning naming which half is missing. |
 | `... must be 64 hex characters` | A secret in Vault is truncated or not hex. Caught at startup deliberately, rather than at the first login that needs it. |
 | Startup succeeds but a key is silently absent | Check the `secret provider ready` log line names the provider you expect. `env` is the default and a typo in `AXIAM__AUTH__SECRET_PROVIDER` would have been refused — but an unset variable falls back to `env` quietly by design. |

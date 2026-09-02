@@ -923,6 +923,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
     /// and [`Self::finish_registration_for_policy`]; the two ceremony-specific
     /// methods remain public for tests and for callers that have already
     /// resolved the ceremony themselves.
+    #[allow(clippy::too_many_arguments)] // the ceremony's own five parameters plus the four policy/metadata inputs the dispatch needs; grouping them into a struct would move the naming problem, not remove it — the same trade-off the two methods above already make.
     pub async fn start_registration_for_policy<M: AttestationMetadataSource>(
         &self,
         tenant_id: Uuid,

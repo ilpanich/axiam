@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta09] - 2026-09-02
+
+### Changed
+
+- Pin the tenant a check is evaluated in
+
+- Allow the ninth argument on start_registration_for_policy
+
+- Regenerate the OpenAPI spec for the WebAuthn policy field
+
+- Port the grpc 1.83.1 bump from #407 to unblock CI
+
+- Gate that every COPY source survives .dockerignore
+
+- Bump google.golang.org/grpc
+
+### Fixed
+
+- The effective-access preview evaluated in the wrong tenant
+
+- Refresh against the tenant the caller lives in
+
+- A scope grant inherits down the resource hierarchy
+
+- The remaining test callsites the last pass missed
+
+- The three gates the first push missed
+
+- Make user verification a policy instead of a hard-coded constant
+
+- An unscoped role assignment grants tenant-wide, not nothing
+
+- Let Vault write its Raft volume in the prod Compose stack
+
+- Bump x/net and x/text past the CVEs this PR surfaced
+
+- Keep nginx.conf.template in the frontend build context
+
 ## [1.0.0-beta08] - 2026-09-01
 
 ### Added

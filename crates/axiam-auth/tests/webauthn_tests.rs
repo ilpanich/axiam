@@ -13,6 +13,7 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::webauthn_credential::{
     CreateWebauthnCredential, WebauthnCredential, WebauthnCredentialType,
 };
+use axiam_core::models::webauthn_policy::WebauthnUserVerification;
 use axiam_core::repository::WebauthnCredentialRepository;
 use chrono::Utc;
 use uuid::Uuid;
@@ -257,7 +258,12 @@ async fn finish_registration_rejects_garbage_token() {
 async fn start_authentication_without_credentials_errors() {
     let svc = WebauthnService::new(empty_repo(), config(true)).unwrap();
     let res = svc
-        .start_authentication(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4())
+        .start_authentication(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            WebauthnUserVerification::Preferred,
+        )
         .await;
     assert!(res.is_err());
 }
@@ -271,7 +277,12 @@ async fn start_authentication_with_undecryptable_credentials_errors() {
     };
     let svc = WebauthnService::new(repo, config(true)).unwrap();
     let res = svc
-        .start_authentication(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4())
+        .start_authentication(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            WebauthnUserVerification::Preferred,
+        )
         .await;
     assert!(res.is_err());
 }

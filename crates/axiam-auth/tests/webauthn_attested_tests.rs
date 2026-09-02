@@ -37,7 +37,9 @@ use axiam_auth::webauthn::WebauthnService;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::mds::MdsEntry;
 use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredential};
-use axiam_core::models::webauthn_policy::{AttestationMode, WebauthnAttestationPolicy};
+use axiam_core::models::webauthn_policy::{
+    AttestationMode, WebauthnAttestationPolicy, WebauthnUserVerification,
+};
 use axiam_core::repository::{
     AttestationMetadataSource, AttestationRootMaterial, WebauthnCredentialRepository,
 };
@@ -453,6 +455,7 @@ async fn mode_none_routes_to_the_unattested_ceremony() {
             Uuid::new_v4(),
             "alice",
             &policy,
+            WebauthnUserVerification::Preferred,
             &EmptyMetadata,
             &cache,
         )
@@ -477,6 +480,7 @@ async fn non_none_mode_routes_to_the_attested_ceremony() {
             Uuid::new_v4(),
             "alice",
             &policy,
+            WebauthnUserVerification::Preferred,
             &OneRootMetadata,
             &cache,
         )
@@ -504,6 +508,7 @@ async fn non_none_mode_with_no_metadata_fails_closed_through_the_router() {
             Uuid::new_v4(),
             "alice",
             &policy,
+            WebauthnUserVerification::Preferred,
             &EmptyMetadata,
             &cache,
         )

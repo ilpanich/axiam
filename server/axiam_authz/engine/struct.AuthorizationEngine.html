@@ -13,12 +13,12 @@
 <li>Validate scope if specified</li>
 <li>Default deny</li>
 </ol>
-</div></details><h2 id="implementations" class="section-header">Implementations<a href="#implementations" class="anchor">§</a></h2><div id="implementations-list"><details class="toggle implementors-toggle" open><summary><section id="impl-AuthorizationEngine%3CR,+P,+Res,+S,+G%3E" class="impl"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#210-952">Source</a><a href="#impl-AuthorizationEngine%3CR,+P,+Res,+S,+G%3E" class="anchor">§</a><h3 class="code-header">impl&lt;R, P, Res, S, G&gt; <a class="struct" href="struct.AuthorizationEngine.html" title="struct axiam_authz::engine::AuthorizationEngine">AuthorizationEngine</a>&lt;R, P, Res, S, G&gt;<div class="where">where
+</div></details><h2 id="implementations" class="section-header">Implementations<a href="#implementations" class="anchor">§</a></h2><div id="implementations-list"><details class="toggle implementors-toggle" open><summary><section id="impl-AuthorizationEngine%3CR,+P,+Res,+S,+G%3E" class="impl"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#279-1098">Source</a><a href="#impl-AuthorizationEngine%3CR,+P,+Res,+S,+G%3E" class="anchor">§</a><h3 class="code-header">impl&lt;R, P, Res, S, G&gt; <a class="struct" href="struct.AuthorizationEngine.html" title="struct axiam_authz::engine::AuthorizationEngine">AuthorizationEngine</a>&lt;R, P, Res, S, G&gt;<div class="where">where
     R: RoleRepository,
     P: PermissionRepository,
     Res: ResourceRepository,
     S: ScopeRepository,
-    G: GroupRepository,</div></h3></section></summary><div class="impl-items"><details class="toggle method-toggle" open><summary><section id="method.new" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#231-249">Source</a><h4 class="code-header">pub fn <a href="#method.new" class="fn">new</a>(
+    G: GroupRepository,</div></h3></section></summary><div class="impl-items"><details class="toggle method-toggle" open><summary><section id="method.new" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#300-318">Source</a><h4 class="code-header">pub fn <a href="#method.new" class="fn">new</a>(
     role_repo: R,
     permission_repo: P,
     resource_repo: Res,
@@ -35,7 +35,7 @@ broadcaster – are absent by default and added with
 <a href="struct.AuthorizationEngine.html#method.with_invalidation_broadcaster" title="method axiam_authz::engine::AuthorizationEngine::with_invalidation_broadcaster"><code>Self::with_invalidation_broadcaster</code></a>. Absent means every check is
 evaluated from the datastore, which is the conservative default: §11.2
 rule 6 bans decision caching unless a deployment opts into it.</p>
-</div></details><details class="toggle method-toggle" open><summary><section id="method.with_batch_config" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#256-264">Source</a><h4 class="code-header">pub fn <a href="#method.with_batch_config" class="fn">with_batch_config</a>(
+</div></details><details class="toggle method-toggle" open><summary><section id="method.with_batch_config" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#325-333">Source</a><h4 class="code-header">pub fn <a href="#method.with_batch_config" class="fn">with_batch_config</a>(
     self,
     strategy: <a class="enum" href="../config/enum.BatchStrategy.html" title="enum axiam_authz::config::BatchStrategy">BatchStrategy</a>,
     batch_max_concurrency: <a class="primitive" href="https://doc.rust-lang.org/1.98.0/std/primitive.usize.html">usize</a>,
@@ -43,12 +43,12 @@ rule 6 bans decision caching unless a deployment opts into it.</p>
 Consumed builder style so existing <code>new(..)</code> call sites are unaffected;
 <code>axiam-server</code> calls this once per engine from <code>AuthzConfig</code>. Neither
 value changes decisions or result order — only DB scheduling.</p>
-</div></details><details class="toggle method-toggle" open><summary><section id="method.with_decision_cache" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#272-275">Source</a><h4 class="code-header">pub fn <a href="#method.with_decision_cache" class="fn">with_decision_cache</a>(self, cache: <a class="struct" href="https://doc.rust-lang.org/1.98.0/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;<a class="struct" href="../decision_cache/struct.DecisionCache.html" title="struct axiam_authz::decision_cache::DecisionCache">DecisionCache</a>&gt;) -&gt; Self</h4></section></summary><div class="docblock"><p>Attach a shared <a href="../decision_cache/struct.DecisionCache.html" title="struct axiam_authz::decision_cache::DecisionCache"><code>DecisionCache</code></a> to this engine (D7). Consumed builder
+</div></details><details class="toggle method-toggle" open><summary><section id="method.with_decision_cache" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#341-344">Source</a><h4 class="code-header">pub fn <a href="#method.with_decision_cache" class="fn">with_decision_cache</a>(self, cache: <a class="struct" href="https://doc.rust-lang.org/1.98.0/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;<a class="struct" href="../decision_cache/struct.DecisionCache.html" title="struct axiam_authz::decision_cache::DecisionCache">DecisionCache</a>&gt;) -&gt; Self</h4></section></summary><div class="docblock"><p>Attach a shared <a href="../decision_cache/struct.DecisionCache.html" title="struct axiam_authz::decision_cache::DecisionCache"><code>DecisionCache</code></a> to this engine (D7). Consumed builder
 style so existing <code>new(..)</code> call sites are unaffected. <code>axiam-server</code>
 calls this only when <code>AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true</code>, and
 passes the <strong>same</strong> <code>Arc&lt;DecisionCache&gt;</code> to every engine (REST, gRPC,
 AMQP) so a REST-triggered invalidation is seen by all read paths.</p>
-</div></details><details class="toggle method-toggle" open><summary><section id="method.with_invalidation_broadcaster" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#286-292">Source</a><h4 class="code-header">pub fn <a href="#method.with_invalidation_broadcaster" class="fn">with_invalidation_broadcaster</a>(
+</div></details><details class="toggle method-toggle" open><summary><section id="method.with_invalidation_broadcaster" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#355-361">Source</a><h4 class="code-header">pub fn <a href="#method.with_invalidation_broadcaster" class="fn">with_invalidation_broadcaster</a>(
     self,
     broadcaster: <a class="struct" href="https://doc.rust-lang.org/1.98.0/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;dyn <a class="trait" href="../invalidation/trait.InvalidationBroadcaster.html" title="trait axiam_authz::invalidation::InvalidationBroadcaster">InvalidationBroadcaster</a>&gt;,
 ) -&gt; Self</h4></section></summary><div class="docblock"><p>Attach a cross-replica <a href="../invalidation/trait.InvalidationBroadcaster.html" title="trait axiam_authz::invalidation::InvalidationBroadcaster"><code>InvalidationBroadcaster</code></a> (§4.2). Consumed
@@ -59,7 +59,7 @@ calls this only when <strong>both</strong>
 called, <a href="struct.AuthorizationEngine.html#method.invalidate_tenant" title="method axiam_authz::engine::AuthorizationEngine::invalidate_tenant"><code>Self::invalidate_tenant</code></a> / <a href="struct.AuthorizationEngine.html#method.invalidate_subject" title="method axiam_authz::engine::AuthorizationEngine::invalidate_subject"><code>Self::invalidate_subject</code></a>
 behave exactly as before (local-only, infallible) and the documented
 TTL-bounded multi-replica staleness applies unchanged.</p>
-</div></details><details class="toggle method-toggle" open><summary><section id="method.invalidate_tenant" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#306-309">Source</a><h4 class="code-header">pub async fn <a href="#method.invalidate_tenant" class="fn">invalidate_tenant</a>(&amp;self, tenant_id: <a class="struct" href="https://docs.rs/uuid/1.26.0/uuid/struct.Uuid.html" title="struct uuid::Uuid">Uuid</a>) -&gt; AxiamResult&lt;<a class="primitive" href="https://doc.rust-lang.org/1.98.0/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Immediately drop every cached decision for <code>tenant_id</code>, <strong>locally and
+</div></details><details class="toggle method-toggle" open><summary><section id="method.invalidate_tenant" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#375-378">Source</a><h4 class="code-header">pub async fn <a href="#method.invalidate_tenant" class="fn">invalidate_tenant</a>(&amp;self, tenant_id: <a class="struct" href="https://docs.rs/uuid/1.26.0/uuid/struct.Uuid.html" title="struct uuid::Uuid">Uuid</a>) -&gt; AxiamResult&lt;<a class="primitive" href="https://doc.rust-lang.org/1.98.0/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Immediately drop every cached decision for <code>tenant_id</code>, <strong>locally and
 on every other replica</strong>. No local effect when no cache is attached.
 Called by the REST mutation handlers for coarse, access-narrowing
 changes whose affected-subject set isn’t known without a query (grant
@@ -69,7 +69,7 @@ resource reparent/delete).</p>
 <p>Only when a broadcaster is attached and the broadcast could <strong>not</strong> be
 confirmed by the broker — see <a href="struct.AuthorizationEngine.html#method.broadcast" title="method axiam_authz::engine::AuthorizationEngine::broadcast"><code>Self::broadcast</code></a>. With no broadcaster
 (the default) this is infallible.</p>
-</div></details><details class="toggle method-toggle" open><summary><section id="method.invalidate_subject" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#320-326">Source</a><h4 class="code-header">pub async fn <a href="#method.invalidate_subject" class="fn">invalidate_subject</a>(
+</div></details><details class="toggle method-toggle" open><summary><section id="method.invalidate_subject" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#389-395">Source</a><h4 class="code-header">pub async fn <a href="#method.invalidate_subject" class="fn">invalidate_subject</a>(
     &amp;self,
     tenant_id: <a class="struct" href="https://docs.rs/uuid/1.26.0/uuid/struct.Uuid.html" title="struct uuid::Uuid">Uuid</a>,
     subject_id: <a class="struct" href="https://docs.rs/uuid/1.26.0/uuid/struct.Uuid.html" title="struct uuid::Uuid">Uuid</a>,
@@ -80,7 +80,7 @@ exactly one subject’s effective permissions change (user role
 unassign/assign, group membership add/remove).</p>
 <h5 id="errors-1"><a class="doc-anchor" href="#errors-1">§</a>Errors</h5>
 <p>As <a href="struct.AuthorizationEngine.html#method.invalidate_tenant" title="method axiam_authz::engine::AuthorizationEngine::invalidate_tenant"><code>Self::invalidate_tenant</code></a>.</p>
-</div></details><details class="toggle method-toggle" open><summary><section id="method.check_access" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#376-393">Source</a><h4 class="code-header">pub async fn <a href="#method.check_access" class="fn">check_access</a>(
+</div></details><details class="toggle method-toggle" open><summary><section id="method.check_access" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#445-462">Source</a><h4 class="code-header">pub async fn <a href="#method.check_access" class="fn">check_access</a>(
     &amp;self,
     request: &amp;<a class="struct" href="../types/struct.AccessRequest.html" title="struct axiam_authz::types::AccessRequest">AccessRequest</a>,
 ) -&gt; AxiamResult&lt;<a class="enum" href="../types/enum.AccessDecision.html" title="enum axiam_authz::types::AccessDecision">AccessDecision</a>&gt;</h4></section></summary><div class="docblock"><p>Evaluate whether the subject can perform the requested action.</p>
@@ -88,7 +88,7 @@ unassign/assign, group membership add/remove).</p>
 optional scope lookup, batched grants). For batches that repeat the same
 subject/resource, prefer <a href="struct.AuthorizationEngine.html#method.check_access_batch" title="method axiam_authz::engine::AuthorizationEngine::check_access_batch"><code>Self::check_access_batch</code></a>, which resolves the
 shared lookups once.</p>
-</div></details><details class="toggle method-toggle" open><summary><section id="method.check_access_batch" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#552-560">Source</a><h4 class="code-header">pub async fn <a href="#method.check_access_batch" class="fn">check_access_batch</a>(
+</div></details><details class="toggle method-toggle" open><summary><section id="method.check_access_batch" class="method"><a class="src rightside" href="../../src/axiam_authz/engine.rs.html#664-672">Source</a><h4 class="code-header">pub async fn <a href="#method.check_access_batch" class="fn">check_access_batch</a>(
     &amp;self,
     requests: &amp;[<a class="struct" href="../types/struct.AccessRequest.html" title="struct axiam_authz::types::AccessRequest">AccessRequest</a>],
 ) -&gt; AxiamResult&lt;<a class="struct" href="https://doc.rust-lang.org/1.98.0/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="enum" href="../types/enum.AccessDecision.html" title="enum axiam_authz::types::AccessDecision">AccessDecision</a>&gt;&gt;</h4></section></summary><div class="docblock"><p>Evaluate an ordered batch of authorization checks.</p>

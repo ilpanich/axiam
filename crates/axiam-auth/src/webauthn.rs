@@ -1884,12 +1884,18 @@ mod tests {
         let svc = registration_service();
         let (tenant_id, org_id, user_id) = ids();
 
+        // `Required` is passed deliberately: it is the value the library sets on
+        // its own, so anything other than `Required` coming back out would be
+        // the residency amendment having disturbed user verification — which is
+        // what the last assertion is for. The policy's own effect on this field
+        // is covered by
+        // `the_registration_challenge_carries_the_policy_to_the_browser`.
         let ccr = tokio_test_block_on(svc.start_registration(
             tenant_id,
             org_id,
             user_id,
             "alice",
-            WebauthnUserVerification::Preferred,
+            WebauthnUserVerification::Required,
         ))
         .expect("registration starts")
         .0;
@@ -1907,7 +1913,6 @@ mod tests {
             selection.require_resident_key,
             "the WebAuthn L1 spelling must agree with the L2 one"
         );
-        // Widened in exactly one dimension: UV is still what the library set.
         assert_eq!(
             selection.user_verification,
             UserVerificationPolicy::Required,

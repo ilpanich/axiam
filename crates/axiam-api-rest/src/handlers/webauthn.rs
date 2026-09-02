@@ -2,7 +2,9 @@
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_core::models::webauthn_credential::WebauthnCredentialType;
-use axiam_core::repository::{MdsRepository, SettingsRepository, WebauthnAttestationPolicyRepository};
+use axiam_core::repository::{
+    MdsRepository, SettingsRepository, WebauthnAttestationPolicyRepository,
+};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;

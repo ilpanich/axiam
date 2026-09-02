@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta08",
-    "x-axiam-spec-digest": "sha256:afdaecfe9c22a378df7995506dc3537b4758549a595b5ff702ade659223026f6"
+    "x-axiam-spec-digest": "sha256:f05a1b516cc4a1d6c14adc40e75030fd188d3b0711ccdeddc3c2d5b3c79242a1"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -16967,6 +16967,7 @@
           "notification",
           "opaque",
           "privacy",
+          "webauthn",
           "created_at",
           "updated_at"
         ],
@@ -17016,6 +17017,9 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "webauthn": {
+            "$ref": "#/components/schemas/WebauthnPolicy"
           }
         }
       },
@@ -17335,6 +17339,10 @@
           },
           "require_uppercase": {
             "type": "boolean"
+          },
+          "webauthn_user_verification": {
+            "type": "string",
+            "example": "preferred"
           }
         }
       },
@@ -17838,6 +17846,12 @@
           "require_uppercase": {
             "type": [
               "boolean",
+              "null"
+            ]
+          },
+          "webauthn_user_verification": {
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -19458,6 +19472,20 @@
           "session_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "WebauthnPolicy": {
+        "type": "object",
+        "description": "WebAuthn ceremony policy.\n\nOne field today. It is a struct rather than a bare field on\n[`SecuritySettings`] so that the next WebAuthn control has an obvious home,\nand so the admin UI can group them.\n\nThe *attestation* policy is deliberately not here: it lives in\n[`crate::models::webauthn_policy::WebauthnAttestationPolicy`], is\ntenant-only, and cannot join this model because AAGUID allow/block lists\nhave no \"more restrictive than\" ordering to validate an override against.\nUser verification does, so it can.",
+        "required": [
+          "webauthn_user_verification"
+        ],
+        "properties": {
+          "webauthn_user_verification": {
+            "type": "string",
+            "description": "How hard the authenticator must prove *who* is present.\n\nApplies to enrolment and to second-factor authentication. Usernameless\nsign-in is held to `required` whatever this says — see\n[`WebauthnUserVerification`].",
+            "example": "preferred"
           }
         }
       },

@@ -247,4 +247,45 @@ impl<C: Connection> ScopeRepository for SurrealScopeRepository<C> {
             .collect::<Result<Vec<_>, DbError>>()
             .map_err(Into::into)
     }
+
+    /// One query for the whole ancestor chain, rather than one per level.
+    ///
+    /// The engine calls this on every scoped authorization check with the
+    /// target resource plus its ancestors, so a per-resource loop would put a
+    /// query per hierarchy level on the hottest path in the system. `IN` over a
+    /// bound array keeps the predicate a plain field comparison, which is what
+    /// lets an index serve it — the same reasoning as the `has_role` and
+    /// `grants` lookups in the role and permission repositories.
+    async fn list_by_resources(
+        &self,
+        tenant_id: Uuid,
+        resource_ids: &[Uuid],
+    ) -> AxiamResult<Vec<Scope>> {
+        if resource_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let tenant_id_str = tenant_id.to_string();
+        let resource_id_strs: Vec<String> = resource_ids.iter().map(Uuid::to_string).collect();
+
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM scope \
+                 WHERE tenant_id = $tenant_id AND resource_id IN $resource_ids \
+                 ORDER BY created_at ASC",
+            )
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("resource_ids", resource_id_strs))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<ScopeRowWithId> = result.take(0).map_err(DbError::from)?;
+
+        rows.into_iter()
+            .map(|row| row.try_into_scope())
+            .collect::<Result<Vec<_>, DbError>>()
+            .map_err(Into::into)
+    }
 }

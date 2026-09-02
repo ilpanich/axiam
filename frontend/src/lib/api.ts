@@ -130,7 +130,25 @@ api.interceptors.response.use(
         // 401 into a forced logout. `org_id` is deliberately NOT sent — the
         // handler derives it from the tenant record and ignores whatever the
         // client claims (NEW-1).
-        const tenantId = useAuthStore.getState().user?.tenant_id;
+        // The tenant the caller LIVES IN, not the one it is acting on.
+        //
+        // The server consumes the refresh token with
+        // `consume_by_token_hash(tenant_id, hash)` — the session row is keyed
+        // by tenant — and an organization-level administrator's session lives
+        // in the organization's own tenant. `user.tenant_id` follows whichever
+        // tenant the admin has selected, so once a tenant was selected this
+        // posted the child tenant, no session was found there, and the refresh
+        // failed. The replay below then 401'd too and the session was cleared:
+        // working normally, then thrown back to the login page a quarter of an
+        // hour in, which is exactly when the access token first ages out.
+        //
+        // `principal_tenant_id` is the field that says which tenant that is,
+        // and `services/opaque.ts` already reads it the same way for the same
+        // reason. It falls back to `tenant_id`, which is the same value for
+        // every ordinary principal and for an organization-level one that has
+        // not switched.
+        const authUser = useAuthStore.getState().user;
+        const tenantId = authUser?.principal_tenant_id ?? authUser?.tenant_id;
         if (!tenantId) {
           // No tenant means no session to rotate; refreshing would only 400.
           throw error;

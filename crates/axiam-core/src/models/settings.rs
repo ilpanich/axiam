@@ -13,6 +13,7 @@ use crate::error::{AxiamError, AxiamResult};
 use crate::models::opaque::{
     OpaqueKsf, OpaqueMode, OpaqueSuite, opaque_ksf_is_at_least, opaque_suite_is_at_least,
 };
+use crate::models::webauthn_policy::{WebauthnUserVerification, user_verification_is_at_least};
 
 // -----------------------------------------------------------------------
 // Sub-policy structs
@@ -116,6 +117,28 @@ pub struct OpaquePolicy {
     pub opaque_ksf: OpaqueKsf,
 }
 
+/// WebAuthn ceremony policy.
+///
+/// One field today. It is a struct rather than a bare field on
+/// [`SecuritySettings`] so that the next WebAuthn control has an obvious home,
+/// and so the admin UI can group them.
+///
+/// The *attestation* policy is deliberately not here: it lives in
+/// [`crate::models::webauthn_policy::WebauthnAttestationPolicy`], is
+/// tenant-only, and cannot join this model because AAGUID allow/block lists
+/// have no "more restrictive than" ordering to validate an override against.
+/// User verification does, so it can.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct WebauthnPolicy {
+    /// How hard the authenticator must prove *who* is present.
+    ///
+    /// Applies to enrolment and to second-factor authentication. Usernameless
+    /// sign-in is held to `required` whatever this says — see
+    /// [`WebauthnUserVerification`].
+    #[schema(value_type = String, example = "preferred")]
+    pub webauthn_user_verification: WebauthnUserVerification,
+}
+
 // -----------------------------------------------------------------------
 // Scope enum
 // -----------------------------------------------------------------------
@@ -167,6 +190,7 @@ pub struct SecuritySettings {
     pub notification: NotificationPolicy,
     pub opaque: OpaquePolicy,
     pub privacy: PrivacyPolicy,
+    pub webauthn: WebauthnPolicy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -214,6 +238,9 @@ pub struct TenantSettingsOverride {
     pub opaque_ksf: Option<OpaqueKsf>,
     // Privacy
     pub deletion_grace_period_days: Option<u32>,
+    // WebAuthn
+    #[schema(value_type = Option<String>)]
+    pub webauthn_user_verification: Option<WebauthnUserVerification>,
 }
 
 impl TenantSettingsOverride {
@@ -273,6 +300,11 @@ pub struct SetOrgSettings {
     #[serde(default = "default_deletion_grace_period_days")]
     #[schema(example = 30)]
     pub deletion_grace_period_days: u32,
+    // WebAuthn — defaulted so a client written before the field lands on
+    // `preferred`, which is also what an un-migrated row decodes to.
+    #[serde(default)]
+    #[schema(value_type = String, example = "preferred")]
+    pub webauthn_user_verification: WebauthnUserVerification,
 }
 
 /// The erasure grace window a deployment gets when nothing says otherwise.
@@ -335,6 +367,14 @@ pub fn system_defaults() -> SetOrgSettings {
         opaque_ksf: OpaqueKsf::Argon2id,
         // Privacy — the value the erasure handler used to hard-code.
         deletion_grace_period_days: default_deletion_grace_period_days(),
+        // WebAuthn — `preferred` accepts a security key whether or not it has
+        // a PIN, and records which happened. `required` would refuse every
+        // PIN-less authenticator at enrolment, which reads to the user as
+        // "AXIAM does not support my YubiKey" rather than as a policy.
+        // Usernameless sign-in does not rely on this default: it requires user
+        // verification unconditionally, because there the key is the only
+        // factor (see `WebauthnUserVerification`).
+        webauthn_user_verification: WebauthnUserVerification::Preferred,
     }
 }
 
@@ -509,6 +549,11 @@ pub fn effective_settings(
             deletion_grace_period_days: tenant_override
                 .deletion_grace_period_days
                 .unwrap_or(org.privacy.deletion_grace_period_days),
+        },
+        webauthn: WebauthnPolicy {
+            webauthn_user_verification: tenant_override
+                .webauthn_user_verification
+                .unwrap_or(org.webauthn.webauthn_user_verification),
         },
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -696,6 +741,15 @@ pub fn clamp_overrides_to_org(
     {
         overrides.opaque_ksf = None;
         cleared.push("opaque_ksf");
+    }
+
+    // WebAuthn user verification, on the same ordering
+    // `validate_tenant_override` uses.
+    if overrides.webauthn_user_verification.is_some_and(|uv| {
+        !user_verification_is_at_least(uv, org.webauthn.webauthn_user_verification)
+    }) {
+        overrides.webauthn_user_verification = None;
+        cleared.push("webauthn_user_verification");
     }
 
     cleared
@@ -906,6 +960,21 @@ pub fn validate_tenant_override(
         ));
     }
 
+    // --- WebAuthn user verification: tighten-only ---
+    //
+    // `required` > `preferred` > `discouraged`. A tenant handling regulated
+    // data may demand a PIN where the organization only asks for one; it may
+    // not quietly stop asking where the organization insists.
+    if let Some(uv) = overrides.webauthn_user_verification
+        && !user_verification_is_at_least(uv, org.webauthn.webauthn_user_verification)
+    {
+        violations.push(format!(
+            "webauthn_user_verification: tenant value {} is less restrictive than \
+             org baseline {}",
+            uv, org.webauthn.webauthn_user_verification,
+        ));
+    }
+
     if !violations.is_empty() {
         return Err(AxiamError::Validation {
             message: format!(
@@ -1095,6 +1164,11 @@ pub fn diff_against_org(
             org.privacy.deletion_grace_period_days,
             tenant.privacy.deletion_grace_period_days
         ),
+        webauthn_user_verification: diff!(
+            webauthn_user_verification,
+            org.webauthn.webauthn_user_verification,
+            tenant.webauthn.webauthn_user_verification
+        ),
     }
 }
 
@@ -1146,6 +1220,9 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
         },
         privacy: PrivacyPolicy {
             deletion_grace_period_days: input.deletion_grace_period_days,
+        },
+        webauthn: WebauthnPolicy {
+            webauthn_user_verification: input.webauthn_user_verification,
         },
         created_at: now,
         updated_at: now,
@@ -1739,6 +1816,138 @@ mod tests {
 
         input.deletion_grace_period_days = MAX_DELETION_GRACE_PERIOD_DAYS;
         assert!(validate_org_settings(&input).is_ok());
+    }
+
+    // -------------------------------------------------------------------
+    // WebAuthn user verification
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn user_verification_defaults_to_preferred_so_a_pinless_security_key_enrols() {
+        // The bug this setting exists for: `webauthn-rs` hard-codes
+        // `UserVerificationPolicy::Required` on the passkey ceremony, so a
+        // YubiKey with no PIN — which can only ever set the UP bit, never UV —
+        // was refused at `finish_registration` with "The user verified bit is
+        // not set, and required by policy". Defaulting to `required` here would
+        // reproduce that for every new deployment.
+        assert_eq!(
+            system_defaults().webauthn_user_verification,
+            WebauthnUserVerification::Preferred,
+        );
+    }
+
+    #[test]
+    fn user_verification_is_ranked_by_strictness_not_declaration_order() {
+        use WebauthnUserVerification::{Discouraged, Preferred, Required};
+        assert!(user_verification_is_at_least(Required, Discouraged));
+        assert!(user_verification_is_at_least(Required, Preferred));
+        assert!(user_verification_is_at_least(Preferred, Discouraged));
+        // Equal is "at least", which is what lets a tenant restate the
+        // baseline without the write being rejected.
+        assert!(user_verification_is_at_least(Preferred, Preferred));
+        assert!(!user_verification_is_at_least(Preferred, Required));
+        assert!(!user_verification_is_at_least(Discouraged, Preferred));
+    }
+
+    #[test]
+    fn a_tenant_may_demand_user_verification_the_org_only_prefers() {
+        let org = org_settings();
+        let overrides = TenantSettingsOverride {
+            webauthn_user_verification: Some(WebauthnUserVerification::Required),
+            ..Default::default()
+        };
+        assert!(validate_tenant_override(&org, &overrides).is_ok());
+
+        let merged = effective_settings(&org, &overrides, Uuid::nil(), Uuid::nil());
+        assert_eq!(
+            merged.webauthn.webauthn_user_verification,
+            WebauthnUserVerification::Required,
+        );
+    }
+
+    #[test]
+    fn a_tenant_may_not_stop_requiring_user_verification_the_org_requires() {
+        let mut org = org_settings();
+        org.webauthn.webauthn_user_verification = WebauthnUserVerification::Required;
+        let overrides = TenantSettingsOverride {
+            webauthn_user_verification: Some(WebauthnUserVerification::Discouraged),
+            ..Default::default()
+        };
+        let err = validate_tenant_override(&org, &overrides)
+            .expect_err("relaxing the org baseline must be refused");
+        assert!(
+            err.to_string().contains("webauthn_user_verification"),
+            "the error must name the offending field: {err}",
+        );
+    }
+
+    #[test]
+    fn raising_the_org_baseline_clears_a_tenant_override_it_has_overtaken() {
+        // The org moves from `preferred` to `required`; a tenant that had
+        // pinned `preferred` must not keep it. Clearing rather than rewriting
+        // is what makes the tenant track the baseline from now on.
+        let mut org = org_settings();
+        org.webauthn.webauthn_user_verification = WebauthnUserVerification::Required;
+        let mut overrides = TenantSettingsOverride {
+            webauthn_user_verification: Some(WebauthnUserVerification::Preferred),
+            ..Default::default()
+        };
+        let cleared = clamp_overrides_to_org(&org, &mut overrides);
+        assert_eq!(cleared, vec!["webauthn_user_verification"]);
+        assert_eq!(overrides.webauthn_user_verification, None);
+    }
+
+    #[test]
+    fn a_stricter_tenant_override_survives_a_raised_org_baseline() {
+        let org = org_settings(); // preferred
+        let mut overrides = TenantSettingsOverride {
+            webauthn_user_verification: Some(WebauthnUserVerification::Required),
+            ..Default::default()
+        };
+        let cleared = clamp_overrides_to_org(&org, &mut overrides);
+        assert!(cleared.is_empty(), "cleared: {cleared:?}");
+        assert_eq!(
+            overrides.webauthn_user_verification,
+            Some(WebauthnUserVerification::Required),
+        );
+    }
+
+    #[test]
+    fn user_verification_round_trips_through_the_sparse_diff() {
+        let org = org_settings();
+        let mut tenant = org.clone();
+        tenant.webauthn.webauthn_user_verification = WebauthnUserVerification::Required;
+
+        let diff = diff_against_org(&org, &tenant);
+        assert_eq!(
+            diff.webauthn_user_verification,
+            Some(WebauthnUserVerification::Required),
+        );
+
+        let merged = effective_settings(&org, &diff, Uuid::nil(), Uuid::nil());
+        assert_eq!(
+            merged.webauthn.webauthn_user_verification,
+            WebauthnUserVerification::Required,
+        );
+    }
+
+    #[test]
+    fn user_verification_survives_its_string_form_in_both_directions() {
+        // The DB column stores the `Display` form and parses it back; a
+        // spelling that did not round-trip would silently decode to the
+        // default, which for this field means a policy quietly relaxing.
+        for uv in [
+            WebauthnUserVerification::Discouraged,
+            WebauthnUserVerification::Preferred,
+            WebauthnUserVerification::Required,
+        ] {
+            let parsed: WebauthnUserVerification = uv
+                .to_string()
+                .parse()
+                .expect("the Display form must parse back");
+            assert_eq!(parsed, uv);
+        }
+        assert!("sometimes".parse::<WebauthnUserVerification>().is_err());
     }
 
     #[test]

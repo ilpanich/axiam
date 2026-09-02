@@ -2,7 +2,9 @@
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_core::models::webauthn_credential::WebauthnCredentialType;
-use axiam_core::repository::{MdsRepository, WebauthnAttestationPolicyRepository};
+use axiam_core::repository::{
+    MdsRepository, SettingsRepository, WebauthnAttestationPolicyRepository,
+};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -256,6 +258,16 @@ pub async fn start_registration<C: Connection + Clone>(
         .await?
         .unwrap_or_default();
 
+    // The user-verification policy is read from the same tenant, for the same
+    // reason as the attestation policy above: the policy that governs a
+    // credential is the policy of the tenant the credential is stored in.
+    let user_verification = state
+        .settings_repo
+        .get_effective_settings(user.org_id, scope)
+        .await?
+        .webauthn
+        .webauthn_user_verification;
+
     let (challenge, state_token) = state
         .webauthn
         .webauthn_service
@@ -265,6 +277,7 @@ pub async fn start_registration<C: Connection + Clone>(
             user.user_id,
             &user_name,
             &policy,
+            user_verification,
             &state.webauthn.attestation_metadata_source,
             &state.webauthn.attestation_ca_cache,
         )
@@ -461,10 +474,20 @@ pub async fn start_authentication<C: Connection + Clone>(
         .decode_mfa_challenge_ids(&body.challenge_token)
         .map_err(|e| AxiamApiError(e.into()))?;
 
+    // Second-factor authentication follows the tenant's policy. Relaxing it
+    // cannot relax a credential already enrolled under `required` — see
+    // `axiam_auth::webauthn`'s module docs.
+    let user_verification = state
+        .settings_repo
+        .get_effective_settings(org_id, tenant_id)
+        .await?
+        .webauthn
+        .webauthn_user_verification;
+
     let (challenge, state_token) = state
         .webauthn
         .webauthn_service
-        .start_authentication(tenant_id, org_id, user_id)
+        .start_authentication(tenant_id, org_id, user_id, user_verification)
         .await?;
 
     Ok(HttpResponse::Ok().json(StartAuthenticationResponse {

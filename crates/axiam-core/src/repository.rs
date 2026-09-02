@@ -731,6 +731,35 @@ pub trait ScopeRepository: Send + Sync {
         tenant_id: Uuid,
         resource_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Scope>>> + Send;
+
+    /// Every scope on any of `resource_ids`, in one call.
+    ///
+    /// The authorization engine needs the scopes of a resource **and of its
+    /// ancestors** on every scoped check, because a scope grant inherits down
+    /// the resource hierarchy. Fetching them one resource at a time would put
+    /// a per-level query on the hot path of the thing AXIAM does most.
+    ///
+    /// The default implementation fans out over [`Self::list_by_resource`], so
+    /// an existing implementor keeps working unchanged and a test double needs
+    /// no new code. A datastore-backed implementor should override it with a
+    /// single query — `SurrealScopeRepository` does.
+    ///
+    /// Order is not specified across resources; callers that need "nearest
+    /// ancestor wins" must impose it themselves from the resource order they
+    /// already hold.
+    fn list_by_resources(
+        &self,
+        tenant_id: Uuid,
+        resource_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<Vec<Scope>>> + Send {
+        async move {
+            let mut all = Vec::new();
+            for id in resource_ids {
+                all.extend(self.list_by_resource(tenant_id, *id).await?);
+            }
+            Ok(all)
+        }
+    }
 }
 
 pub trait ServiceAccountRepository: Send + Sync {

@@ -29,15 +29,60 @@ services:
   # on this disk. See docs/deployment/vault.md §5.3 and docker/vault/vault.hcl.
   #
   # `just prod-up` runs the init/unseal ceremony and seeds AXIAM's keys.
+
+  # One-shot init: hand /vault/data to the non-root vault user (100:1000), the
+  # same problem and the same shape as surrealdb-init below. Docker creates a
+  # named volume's mount point owned by root when the path is absent from the
+  # image — and hashicorp/vault ships /vault/config, /vault/file and
+  # /vault/logs, but no /vault/data. Vault then cannot create its Raft bolt file
+  # and dies on every start, which `restart: unless-stopped` turns into a loop:
+  #
+  #     Error initializing storage of type raft: failed to create fsm:
+  #     failed to open bolt file: open /vault/data/vault.db: permission denied
+  #
+  # In Kubernetes `fsGroup: 1000` does this for us (k8s/vault/statefulset.yml);
+  # Compose has no equivalent. Running Vault itself as root so its entrypoint
+  # could chown would be the other way out, and would hand the one process that
+  # holds every secret in the stack privileges it otherwise never needs.
+  #
+  # Runs on the Vault image rather than busybox because it is already pulled and
+  # it can name the account instead of hardcoding its uid. Idempotent.
+  vault-data-perms:
+    image: hashicorp/vault:1.20
+    container_name: axiam-vault-data-perms
+    user: root
+    # The image entrypoint would start a server; this container only touches
+    # permissions.
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R vault:vault /vault/data && chmod 700 /vault/data"]
+    volumes:
+      - vault-raft-data:/vault/data
+    # A root container with no reason to reach anything.
+    network_mode: "none"
+    # Must not restart: Vault waits for this to exit 0, exactly once.
+    restart: "no"
+
   vault:
     image: hashicorp/vault:1.20
     container_name: axiam-vault
     cap_add:
       - IPC_LOCK
+    depends_on:
+      # /vault/data must belong to the unprivileged `vault` user before Vault
+      # starts — see the vault-data-perms service above for why.
+      vault-data-perms:
+        condition: service_completed_successfully
     environment:
       VAULT_ADDR: "https://127.0.0.1:8200"
       VAULT_API_ADDR: "https://vault:8200"
       VAULT_CACERT: "/vault/tls/ca.pem"
+      # The image entrypoint chowns /vault/config on every start. That mount
+      # is read-only here, deliberately, so the attempt fails and logs a burst
+      # of "Read-only file system" errors and a "Could not chown" warning that
+      # have nothing to do with any real problem — and sit directly above the
+      # one line that does. Ownership is already correct and Vault only reads
+      # the config. k8s/vault/statefulset.yml sets the same variable.
+      SKIP_CHOWN: "true"
     volumes:
       # Raft (integrated storage) — see docker/vault/vault.hcl for why, and for
       # what an existing `file`-backend stack should do. That stack's old

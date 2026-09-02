@@ -78,6 +78,10 @@ fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedPrincipal {
     AuthenticatedPrincipal {
         subject_id: user_id,
         tenant_id,
+        // An ordinary tenant principal: the tenant it acts on is the one it
+        // lives in, and it has not been verified as organization-level.
+        principal_tenant_id: tenant_id,
+        organization_level: false,
         org_id: Uuid::nil(),
         is_machine: false,
         claims,
@@ -108,6 +112,8 @@ fn make_machine(tenant_id: Uuid, service_account_id: Uuid) -> AuthenticatedPrinc
     AuthenticatedPrincipal {
         subject_id: service_account_id,
         tenant_id,
+        principal_tenant_id: tenant_id,
+        organization_level: false,
         org_id: Uuid::nil(),
         is_machine: true,
         claims,
@@ -347,6 +353,101 @@ async fn batch_override_without_check_as_returns_403() {
         status_code(&result),
         403,
         "batch override without authz:check_as must return 403"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// (e2) The tenant the check is evaluated in
+// ---------------------------------------------------------------------------
+
+/// Records the [`AccessRequest`] it was handed, so a test can assert *what was
+/// asked* rather than only what came back. Allows everything: the decision is
+/// not the subject here.
+#[derive(Default)]
+struct RecordingAuthzChecker {
+    seen: std::sync::Mutex<Vec<AccessRequest>>,
+}
+
+impl AuthzChecker for RecordingAuthzChecker {
+    fn check_access<'a>(
+        &'a self,
+        request: &'a AccessRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>> {
+        self.seen.lock().unwrap().push(request.clone());
+        Box::pin(async move { Ok(AccessDecision::Allow) })
+    }
+}
+
+/// The reported defect: an organization-level administrator with a tenant
+/// selected in the admin UI got `no roles assigned` from the effective-access
+/// preview, for rule sets that were correct.
+///
+/// `AuthenticatedPrincipal::tenant_id` is the tenant being **acted upon** —
+/// what the active-tenant header resolved to. It used to be the raw
+/// `tenant_id` claim, i.e. the caller's own, so the engine was asked about the
+/// organization's tenant, where the subject has no role assignments at all and
+/// evaluation stops at step 1.
+#[tokio::test]
+async fn a_check_is_evaluated_in_the_tenant_being_acted_upon() {
+    let org_scope = Uuid::new_v4();
+    let acting_on = Uuid::new_v4();
+    let subject = Uuid::new_v4();
+
+    // An organization-level caller: living in the organization's tenant,
+    // acting on one of its tenants.
+    let mut caller = make_user(org_scope, Uuid::new_v4());
+    caller.tenant_id = acting_on;
+    caller.principal_tenant_id = org_scope;
+    caller.organization_level = true;
+
+    let recorder = Arc::new(RecordingAuthzChecker::default());
+    let authz: AuthzData = web::Data::new(recorder.clone() as Arc<dyn AuthzChecker>);
+    let state = make_state(setup_db().await);
+
+    let result = check_access(
+        caller,
+        authz,
+        state,
+        web::Json(CheckAccessBody {
+            action: "sites:read".into(),
+            resource_id: Uuid::new_v4(),
+            scope: None,
+            subject_id: Some(subject),
+        }),
+    )
+    .await;
+    assert_eq!(status_code(&result), 200);
+
+    let seen = recorder.seen.lock().unwrap();
+    // Two requests: the `authz:check_as` guard, then the check itself.
+    let checked = seen
+        .iter()
+        .find(|r| r.action == "sites:read")
+        .expect("the requested check must reach the engine");
+    assert_eq!(
+        checked.tenant_id, acting_on,
+        "the check must be evaluated in the tenant being acted upon, not the \
+         one the caller lives in",
+    );
+    assert_eq!(
+        checked.subject_id, subject,
+        "the checked-as subject, not the caller",
+    );
+
+    // And the guard reads the CALLER's grants, which for an organization-level
+    // principal live in its own tenant. With a fixed `SubjectScope::Tenant` it
+    // looked for `authz:check_as` in the tenant being acted upon and would
+    // refuse a caller that holds it.
+    let guard = seen
+        .iter()
+        .find(|r| r.action == "authz:check_as")
+        .expect("the check_as guard must run");
+    assert_eq!(
+        guard.subject_scope,
+        axiam_authz::types::SubjectScope::Organization {
+            tenant_id: org_scope
+        },
     );
 }
 

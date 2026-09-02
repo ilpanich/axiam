@@ -60,6 +60,86 @@ Existing passkeys registered before you turn attestation on are **never**
 affected — see [Compliance report](#compliance-report) for how already-registered
 credentials are treated.
 
+## User verification: which authenticators can enrol at all
+
+This is a **separate** control from the attestation policy on the rest of this
+page, and it is the one that decides whether a security key with no PIN
+configured can be enrolled.
+
+WebAuthn distinguishes two things an authenticator can prove:
+
+| Bit | Name | Means | A PIN-less YubiKey |
+|---|---|---|---|
+| `UP` | User **presence** | a human is at the authenticator (a touch) | sets it |
+| `UV` | User **verification** | *which* human — a PIN, fingerprint, or face | cannot set it |
+
+Up to and including `1.0.0-beta08`, AXIAM required `UV` unconditionally, because
+the `webauthn-rs` library hard-codes it. Enrolling a security key with no PIN
+failed with:
+
+```json
+{"error":"authentication_failed",
+ "message":"Authentication failed: WebAuthn registration failed: \
+            The user verified bit is not set, and required by policy"}
+```
+
+The "policy" it named existed nowhere an operator could see or change. It is now
+a real setting.
+
+### The setting
+
+`webauthn_user_verification` lives in security settings — an **organization**
+baseline that every tenant inherits and may only make **stricter**:
+
+```
+PUT /api/v1/organizations/{org_id}/settings
+{ ..., "webauthn_user_verification": "preferred" }
+
+PUT /api/v1/tenants/{tenant_id}/settings
+{ "webauthn_user_verification": "required" }     # tightening: accepted
+{ "webauthn_user_verification": "discouraged" }  # relaxing: 400
+```
+
+| Value | Enrolment | Use |
+|---|---|---|
+| `discouraged` | No verification requested | The key is unambiguously a second factor behind a password |
+| `preferred` **(default)** | Requested, accepted either way, and what happened is recorded | Supporting security keys generally, PIN-protected or not |
+| `required` | A key that cannot verify is refused | A WebAuthn credential may stand alone as a login factor |
+
+The order for the tighten-only rule is `required` > `preferred` > `discouraged`.
+Raising the organization baseline past a tenant's override clears that override,
+so the tenant tracks the new baseline — the same behaviour as every other
+setting here.
+
+### Two ceremonies do not follow it
+
+* **Usernameless (passwordless) sign-in always requires user verification**,
+  whatever this is set to. There the credential is the only factor, so without
+  `UV` mere possession of the token is a complete login. The practical
+  consequence: a PIN-less security key **enrols and works as a second factor**,
+  and **cannot be used for passwordless sign-in**. Give the key a PIN if you
+  want that.
+* **Attested registration always requires user verification**, because
+  `webauthn-rs` imposes it on the attested ceremony and AXIAM does not override
+  it. A tenant with any attestation `mode` other than `none` has already opted
+  into the strict path — see [the passkey
+  caveat](#the-passkey-caveat--read-this-before-enabling-anything) — and a
+  PIN-less key does not enrol there.
+
+### Nothing already enrolled is weakened
+
+`webauthn-rs` records the policy a credential was **registered** under and
+requires `UV` at authentication whenever either that stored policy or the
+current one says `required`. Every credential enrolled before this change was
+enrolled under the old hard-coded `required`, so it keeps demanding
+verification for the rest of its life no matter what the setting becomes. The
+policy governs new enrolments.
+
+The default is `preferred` rather than `required` because nobody chose
+`required` — it was a library constant, and backfilling it would have preserved
+the bug rather than an intent. If your deployment wants the strict posture, set
+`required` at the organization and you lose nothing you had.
+
 ## Policy fields
 
 Each tenant has at most one attestation policy row

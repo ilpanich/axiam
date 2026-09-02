@@ -176,10 +176,22 @@ pub async fn check_access<C: Connection + Clone>(
     let resource_id = body.resource_id;
 
     // T-15-01: subject_id override requires authz:check_as; T-15-03: tenant_id
-    // is always user.tenant_id (never from body).
+    // is always resolved from the caller's token and the active-tenant header,
+    // never from the body.
+    //
+    // The guard reads the caller's OWN grants, so it goes through
+    // `subject_scope()` — an organization-level administrator's roles live in
+    // the organization's tenant, not in the one being acted upon, and
+    // `check_subject`'s fixed `SubjectScope::Tenant` would look for them in the
+    // wrong place and refuse a caller that does hold the permission.
     let effective_subject = if let Some(sid) = body.subject_id {
         RequirePermission::new("authz:check_as", user.tenant_id)
-            .check_subject(user.tenant_id, user.subject_id, authz.get_ref().as_ref())
+            .check_subject_from(
+                user.tenant_id,
+                user.subject_scope(),
+                user.subject_id,
+                authz.get_ref().as_ref(),
+            )
             .await?;
         // T-15-04: audit every cross-subject query before returning.
         append_check_as_audit(
@@ -197,8 +209,21 @@ pub async fn check_access<C: Connection + Clone>(
     };
 
     let access_req = AccessRequest {
+        // The tenant being acted upon — the one the admin UI has selected, for
+        // an organization-level caller. Reading the caller's own tenant here
+        // evaluated every preview against the organization's tenant, where the
+        // subject has no assignments at all: the answer was `no roles assigned`
+        // however correct the rule set was.
         tenant_id: user.tenant_id,
-        subject_scope: SubjectScope::Tenant,
+        // Whose grants to read, and from where. A checked-as subject is an
+        // ordinary member of the tenant being acted upon, so `Tenant`. The
+        // caller checking their own access keeps their own scope, which for an
+        // organization-level principal names the tenant their roles live in.
+        subject_scope: if body.subject_id.is_some() {
+            SubjectScope::Tenant
+        } else {
+            user.subject_scope()
+        },
         subject_id: effective_subject,
         action: body.action,
         resource_id,
@@ -246,7 +271,12 @@ pub async fn batch_check_access<C: Connection + Clone>(
     let has_override = body.checks.iter().any(|c| c.subject_id.is_some());
     if has_override {
         RequirePermission::new("authz:check_as", user.tenant_id)
-            .check_subject(user.tenant_id, user.subject_id, authz.get_ref().as_ref())
+            .check_subject_from(
+                user.tenant_id,
+                user.subject_scope(),
+                user.subject_id,
+                authz.get_ref().as_ref(),
+            )
             .await?;
     }
 
@@ -260,6 +290,10 @@ pub async fn batch_check_access<C: Connection + Clone>(
     let tenant_id = user.tenant_id;
     let actor_id = user.subject_id;
     let actor_kind = user.actor_type();
+    // Same rule as the single check: a checked-as subject belongs to the tenant
+    // being acted upon; the caller checking their own access keeps their own
+    // scope.
+    let caller_scope = user.subject_scope();
 
     let mut access_requests = Vec::with_capacity(body.checks.len());
     for check in body.checks {
@@ -282,7 +316,11 @@ pub async fn batch_check_access<C: Connection + Clone>(
 
         access_requests.push(AccessRequest {
             tenant_id,
-            subject_scope: SubjectScope::Tenant,
+            subject_scope: if check.subject_id.is_some() {
+                SubjectScope::Tenant
+            } else {
+                caller_scope
+            },
             subject_id: effective_subject,
             action: check.action,
             resource_id,

@@ -1387,3 +1387,666 @@ async fn the_batch_path_applies_deny_override_identically() {
     assert_eq!(batched[0], AccessDecision::Allow);
     assert!(matches!(batched[1], AccessDecision::DeniedByRule(_)));
 }
+
+// ---------------------------------------------------------------------------
+// Reported regression: a role reaching a subject only through a group, with
+// everything resource-scoped, then with every scope removed.
+// ---------------------------------------------------------------------------
+//
+// Reproduces an operator report verbatim: build a resource hierarchy, create
+// permissions, put them on a new role scoped to the top resource's default
+// scope, assign that role to a group the user belongs to (scoped to the same
+// resource) — and get no grant at any level. Then remove every scope and still
+// get nothing.
+//
+// The two halves are separate tests because they failed for different reasons,
+// and only one of them was a bug.
+
+/// The scoped half. This is the configuration the operator described, and it
+/// resolves — so a `no_grant` here is about the *action string*, not the
+/// group, the hierarchy or the scope.
+#[tokio::test]
+async fn a_group_role_scoped_to_the_top_resource_grants_down_the_hierarchy() {
+    let (db, tenant_id, user_id) = setup().await;
+
+    // A three-level hierarchy: the operator's "top element" and two below it.
+    let top = create_resource(&db, tenant_id, "platform", None).await;
+    let middle = create_resource(&db, tenant_id, "platform/billing", Some(top)).await;
+    let leaf = create_resource(&db, tenant_id, "platform/billing/invoices", Some(middle)).await;
+
+    let group_repo = SurrealGroupRepository::new(db.clone());
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+
+    // "default scope" on the top resource.
+    let default_scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: top,
+            name: "default".into(),
+            description: "default scope".into(),
+        })
+        .await
+        .unwrap();
+
+    let group = group_repo
+        .create(CreateGroup {
+            tenant_id,
+            name: "platform-team".into(),
+            description: "platform team".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    group_repo
+        .add_member(tenant_id, user_id, group.id)
+        .await
+        .unwrap();
+
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "platform-operator".into(),
+            description: "operates the platform".into(),
+            // Not global: the operator scoped it to a resource instead.
+            is_global: false,
+        })
+        .await
+        .unwrap();
+
+    let perm = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "invoices:read".into(),
+            description: "read invoices".into(),
+        })
+        .await
+        .unwrap();
+
+    // The permission constrained to the top resource's default scope.
+    perm_repo
+        .grant_to_role_with_scopes(tenant_id, role.id, perm.id, vec![default_scope.id])
+        .await
+        .unwrap();
+
+    role_repo
+        .assign_to_group(tenant_id, group.id, role.id, AssignmentScope::resource(top))
+        .await
+        .unwrap();
+
+    let engine = make_engine(&db);
+    let check = |resource_id| AccessRequest {
+        tenant_id,
+        subject_scope: SubjectScope::Tenant,
+        subject_id: user_id,
+        action: "invoices:read".into(),
+        resource_id,
+        scope: None,
+    };
+
+    // The top resource itself, and both levels below it: a resource-scoped
+    // assignment cascades downward.
+    for (label, resource_id) in [("top", top), ("middle", middle), ("leaf", leaf)] {
+        assert_eq!(
+            engine.check_access(&check(resource_id)).await.unwrap(),
+            AccessDecision::Allow,
+            "the group-inherited role must reach the {label} resource",
+        );
+    }
+
+    // And the action really is the discriminator: the same subject, the same
+    // resource, one character different in the action, is a no-grant. This is
+    // the trap the report fell into — the preview panel's action box defaults
+    // to `read`, which is not the permission's name.
+    let mut wrong_action = check(top);
+    wrong_action.action = "read".into();
+    assert_eq!(
+        engine.check_access(&wrong_action).await.unwrap(),
+        AccessDecision::Deny("no permission grants action 'read'".into()),
+    );
+}
+
+/// The unscoped half — the real defect.
+///
+/// The operator then removed every scope, which is the documented way to say
+/// "everywhere": `AssignmentScope`'s `resource_id: None` is defined as "assigns
+/// the role globally — every resource in reach", and `RoleAssignment`'s as
+/// "the role was assigned globally (no resource scope)".
+///
+/// It granted nothing, anywhere, silently — `applicable_role_ids` accepted an
+/// unscoped assignment only when the *role* carried `is_global`, so an
+/// unscoped assignment of an ordinary role matched no resource at all. Not a
+/// narrower grant: no grant, with a "no applicable roles for this resource"
+/// that reads as if the resource were at fault.
+#[tokio::test]
+async fn an_unscoped_group_assignment_reaches_every_resource_in_the_tenant() {
+    let (db, tenant_id, user_id) = setup().await;
+
+    let top = create_resource(&db, tenant_id, "platform", None).await;
+    let leaf = create_resource(&db, tenant_id, "platform/invoices", Some(top)).await;
+    let unrelated = create_resource(&db, tenant_id, "warehouse", None).await;
+
+    let group_repo = SurrealGroupRepository::new(db.clone());
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+
+    let group = group_repo
+        .create(CreateGroup {
+            tenant_id,
+            name: "platform-team".into(),
+            description: "platform team".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    group_repo
+        .add_member(tenant_id, user_id, group.id)
+        .await
+        .unwrap();
+
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "platform-operator".into(),
+            description: "operates the platform".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+
+    let perm = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "invoices:read".into(),
+            description: "read invoices".into(),
+        })
+        .await
+        .unwrap();
+
+    // No scope on the grant, and no resource on the assignment.
+    perm_repo
+        .grant_to_role(tenant_id, role.id, perm.id)
+        .await
+        .unwrap();
+    role_repo
+        .assign_to_group(tenant_id, group.id, role.id, AssignmentScope::global())
+        .await
+        .unwrap();
+
+    let engine = make_engine(&db);
+    for (label, resource_id) in [("top", top), ("leaf", leaf), ("unrelated", unrelated)] {
+        assert_eq!(
+            engine
+                .check_access(&AccessRequest {
+                    tenant_id,
+                    subject_scope: SubjectScope::Tenant,
+                    subject_id: user_id,
+                    action: "invoices:read".into(),
+                    resource_id,
+                    scope: None,
+                })
+                .await
+                .unwrap(),
+            AccessDecision::Allow,
+            "an unscoped assignment must reach the {label} resource",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scope inheritance down the resource hierarchy
+// ---------------------------------------------------------------------------
+//
+// Characterisation first: these record what the engine does TODAY for a grant
+// scoped to a scope that lives on an ancestor resource. A scope belongs to
+// exactly one resource (`Scope::resource_id`) and scope names are unique per
+// resource, so an ancestor's scope and a descendant's are always different
+// rows with different ids — which is what makes this a real question rather
+// than a naming coincidence.
+
+/// A grant scoped to the TOP resource's scope, checked at the top resource
+/// naming that same scope. The base case: this must work, and does.
+#[tokio::test]
+async fn a_scoped_grant_matches_its_own_scope_on_its_own_resource() {
+    let (db, tenant_id, user_id) = setup().await;
+    let top = create_resource(&db, tenant_id, "platform", None).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let top_scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: top,
+            name: "default".into(),
+            description: "default scope".into(),
+        })
+        .await
+        .unwrap();
+
+    grant_user_role_permission_with_scopes(
+        &db,
+        tenant_id,
+        user_id,
+        "platform-operator",
+        "invoices:read",
+        top,
+        vec![top_scope.id],
+    )
+    .await;
+
+    let engine = make_engine(&db);
+    assert_eq!(
+        engine
+            .check_access(&AccessRequest {
+                tenant_id,
+                subject_scope: SubjectScope::Tenant,
+                subject_id: user_id,
+                action: "invoices:read".into(),
+                resource_id: top,
+                scope: Some("default".into()),
+            })
+            .await
+            .unwrap(),
+        AccessDecision::Allow,
+    );
+}
+
+/// The reported case: the same grant, checked at a CHILD resource that has its
+/// own scope. The child's scope is a different row with a different id, so the
+/// grant's `scope_ids` does not contain it.
+#[tokio::test]
+async fn a_scope_on_an_ancestor_reaches_a_child_resources_own_scope() {
+    let (db, tenant_id, user_id) = setup().await;
+    let top = create_resource(&db, tenant_id, "platform", None).await;
+    let child = create_resource(&db, tenant_id, "platform/billing", Some(top)).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let top_scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: top,
+            name: "default".into(),
+            description: "top scope".into(),
+        })
+        .await
+        .unwrap();
+    scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: child,
+            name: "invoices".into(),
+            description: "child scope".into(),
+        })
+        .await
+        .unwrap();
+
+    grant_user_role_permission_with_scopes(
+        &db,
+        tenant_id,
+        user_id,
+        "platform-operator",
+        "invoices:read",
+        top,
+        vec![top_scope.id],
+    )
+    .await;
+
+    let engine = make_engine(&db);
+    assert_eq!(
+        engine
+            .check_access(&AccessRequest {
+                tenant_id,
+                subject_scope: SubjectScope::Tenant,
+                subject_id: user_id,
+                action: "invoices:read".into(),
+                resource_id: child,
+                scope: Some("invoices".into()),
+            })
+            .await
+            .unwrap(),
+        AccessDecision::Allow,
+        "a grant on an ancestor's scope must reach a descendant's scopes",
+    );
+}
+
+/// The same grant, checked at the child with NO scope named. The resource
+/// hierarchy alone should carry it.
+#[tokio::test]
+async fn a_scoped_grant_reaches_a_child_resource_when_no_scope_is_named() {
+    let (db, tenant_id, user_id) = setup().await;
+    let top = create_resource(&db, tenant_id, "platform", None).await;
+    let child = create_resource(&db, tenant_id, "platform/billing", Some(top)).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let top_scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: top,
+            name: "default".into(),
+            description: "top scope".into(),
+        })
+        .await
+        .unwrap();
+
+    grant_user_role_permission_with_scopes(
+        &db,
+        tenant_id,
+        user_id,
+        "platform-operator",
+        "invoices:read",
+        top,
+        vec![top_scope.id],
+    )
+    .await;
+
+    let engine = make_engine(&db);
+    assert_eq!(
+        engine
+            .check_access(&AccessRequest {
+                tenant_id,
+                subject_scope: SubjectScope::Tenant,
+                subject_id: user_id,
+                action: "invoices:read".into(),
+                resource_id: child,
+                scope: None,
+            })
+            .await
+            .unwrap(),
+        AccessDecision::Allow,
+    );
+}
+
+/// A scope name that exists on the ancestor but not on the resource being
+/// checked. `resolve_scope` only looks at the target resource's own scopes.
+#[tokio::test]
+async fn a_scope_name_defined_only_on_an_ancestor_resolves_at_a_descendant() {
+    let (db, tenant_id, user_id) = setup().await;
+    let top = create_resource(&db, tenant_id, "platform", None).await;
+    let child = create_resource(&db, tenant_id, "platform/billing", Some(top)).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let top_scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: top,
+            name: "default".into(),
+            description: "top scope".into(),
+        })
+        .await
+        .unwrap();
+
+    grant_user_role_permission_with_scopes(
+        &db,
+        tenant_id,
+        user_id,
+        "platform-operator",
+        "invoices:read",
+        top,
+        vec![top_scope.id],
+    )
+    .await;
+
+    let engine = make_engine(&db);
+    assert_eq!(
+        engine
+            .check_access(&AccessRequest {
+                tenant_id,
+                subject_scope: SubjectScope::Tenant,
+                subject_id: user_id,
+                action: "invoices:read".into(),
+                resource_id: child,
+                scope: Some("default".into()),
+            })
+            .await
+            .unwrap(),
+        AccessDecision::Allow,
+        "a scope inherited from an ancestor must resolve at a descendant",
+    );
+}
+
+/// The guard on the widening: a grant scoped to a scope on an **unrelated**
+/// resource must still match nothing here.
+///
+/// Inheritance follows the resource hierarchy, so "the grant's scope is not one
+/// of mine" cannot be read as "therefore unconstrained" — that would turn every
+/// scoped grant in the tenant into a wildcard everywhere else.
+#[tokio::test]
+async fn a_scope_on_an_unrelated_resource_grants_nothing_here() {
+    let (db, tenant_id, user_id) = setup().await;
+    let target = create_resource(&db, tenant_id, "platform", None).await;
+    let unrelated = create_resource(&db, tenant_id, "warehouse", None).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let unrelated_scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: unrelated,
+            name: "stock".into(),
+            description: "unrelated scope".into(),
+        })
+        .await
+        .unwrap();
+    scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: target,
+            name: "default".into(),
+            description: "target scope".into(),
+        })
+        .await
+        .unwrap();
+
+    // The role is assigned globally, so only the grant's scope constrains it.
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "warehouse-operator".into(),
+            description: "warehouse".into(),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+    let perm = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "invoices:read".into(),
+            description: "read invoices".into(),
+        })
+        .await
+        .unwrap();
+    perm_repo
+        .grant_to_role_with_scopes(tenant_id, role.id, perm.id, vec![unrelated_scope.id])
+        .await
+        .unwrap();
+    role_repo
+        .assign_to_user(tenant_id, user_id, role.id, AssignmentScope::global())
+        .await
+        .unwrap();
+
+    let engine = make_engine(&db);
+    assert_eq!(
+        engine
+            .check_access(&AccessRequest {
+                tenant_id,
+                subject_scope: SubjectScope::Tenant,
+                subject_id: user_id,
+                action: "invoices:read".into(),
+                resource_id: target,
+                scope: Some("default".into()),
+            })
+            .await
+            .unwrap(),
+        AccessDecision::Deny("no permission grants action 'invoices:read'".into()),
+        "a scope on an unrelated resource must not become a wildcard here",
+    );
+}
+
+/// Scoping still bites on the scope's OWN resource: a grant on one scope does
+/// not reach a sibling scope of the same resource. Inheritance is downward
+/// only.
+#[tokio::test]
+async fn a_scoped_grant_does_not_reach_a_sibling_scope_on_the_same_resource() {
+    let (db, tenant_id, user_id) = setup().await;
+    let top = create_resource(&db, tenant_id, "platform", None).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let billing = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: top,
+            name: "billing".into(),
+            description: "billing".into(),
+        })
+        .await
+        .unwrap();
+    scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: top,
+            name: "payroll".into(),
+            description: "payroll".into(),
+        })
+        .await
+        .unwrap();
+
+    grant_user_role_permission_with_scopes(
+        &db,
+        tenant_id,
+        user_id,
+        "billing-operator",
+        "records:read",
+        top,
+        vec![billing.id],
+    )
+    .await;
+
+    let engine = make_engine(&db);
+    assert_eq!(
+        engine
+            .check_access(&AccessRequest {
+                tenant_id,
+                subject_scope: SubjectScope::Tenant,
+                subject_id: user_id,
+                action: "records:read".into(),
+                resource_id: top,
+                scope: Some("payroll".into()),
+            })
+            .await
+            .unwrap(),
+        AccessDecision::Deny("no permission grants action 'records:read'".into()),
+    );
+}
+
+/// Deny inherits the same way, which is the "if not explicitly denied" half of
+/// the rule: a deny scoped on an ancestor masks the whole subtree beneath it,
+/// beating an allow granted lower down.
+#[tokio::test]
+async fn a_deny_scoped_on_an_ancestor_masks_a_descendants_scopes() {
+    let (db, tenant_id, user_id) = setup().await;
+    let top = create_resource(&db, tenant_id, "platform", None).await;
+    let child = create_resource(&db, tenant_id, "platform/billing", Some(top)).await;
+
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    let top_scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: top,
+            name: "default".into(),
+            description: "top scope".into(),
+        })
+        .await
+        .unwrap();
+    let child_scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: child,
+            name: "invoices".into(),
+            description: "child scope".into(),
+        })
+        .await
+        .unwrap();
+
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let perm = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "invoices:read".into(),
+            description: "read invoices".into(),
+        })
+        .await
+        .unwrap();
+
+    // Allow on the child's own scope ...
+    let allow_role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "child-allow".into(),
+            description: "allow".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    perm_repo
+        .grant_to_role_with_scopes(tenant_id, allow_role.id, perm.id, vec![child_scope.id])
+        .await
+        .unwrap();
+    role_repo
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            allow_role.id,
+            AssignmentScope::resource(child),
+        )
+        .await
+        .unwrap();
+
+    // ... and a deny on the ancestor's scope.
+    let deny_role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "top-deny".into(),
+            description: "deny".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    perm_repo
+        .grant_to_role_with_effect(
+            tenant_id,
+            deny_role.id,
+            perm.id,
+            vec![top_scope.id],
+            PermissionEffect::Deny,
+        )
+        .await
+        .unwrap();
+    role_repo
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            deny_role.id,
+            AssignmentScope::resource(top),
+        )
+        .await
+        .unwrap();
+
+    let engine = make_engine(&db);
+    let decision = engine
+        .check_access(&AccessRequest {
+            tenant_id,
+            subject_scope: SubjectScope::Tenant,
+            subject_id: user_id,
+            action: "invoices:read".into(),
+            resource_id: child,
+            scope: Some("invoices".into()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(decision, AccessDecision::DeniedByRule(_)),
+        "an ancestor-scoped deny must reach the descendant's scopes too, got {decision:?}",
+    );
+}

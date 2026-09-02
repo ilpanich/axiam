@@ -533,6 +533,22 @@ async fn resolve_active_tenant(
     target: Uuid,
     tenants: Option<&Arc<dyn TenantScopeResolver>>,
 ) -> Result<Uuid, AxiamApiError> {
+    resolve_active_tenant_for(user.principal_tenant_id, target, tenants).await
+}
+
+/// The body of [`resolve_active_tenant`], keyed on the caller's home tenant
+/// rather than on a whole [`AuthenticatedUser`].
+///
+/// Both principal extractors resolve organization scope, and they must resolve
+/// it identically: the check that the caller's own tenant really is the
+/// organization scope is the only thing standing between "acting on another
+/// tenant" and "asserting another tenant's grants". One implementation, two
+/// callers, no room for the two to drift.
+async fn resolve_active_tenant_for(
+    home_tenant_id: Uuid,
+    target: Uuid,
+    tenants: Option<&Arc<dyn TenantScopeResolver>>,
+) -> Result<Uuid, AxiamApiError> {
     let deny = |reason: &str| -> AxiamApiError {
         AxiamError::AuthorizationDenied {
             reason: reason.to_string(),
@@ -548,7 +564,7 @@ async fn resolve_active_tenant(
         ));
     };
 
-    let Some(home) = tenants.resolve(user.principal_tenant_id).await else {
+    let Some(home) = tenants.resolve(home_tenant_id).await else {
         return Err(deny("the caller's own tenant could not be resolved"));
     };
     if !home.is_organization {
@@ -766,7 +782,29 @@ pub struct AuthenticatedPrincipal {
     /// user token, the service-account id for a machine token. Both are the
     /// token's `sub`, and both are what role assignments are keyed on.
     pub subject_id: Uuid,
+    /// The tenant being **acted upon** — same meaning as
+    /// [`AuthenticatedUser::tenant_id`], and resolved the same way.
+    ///
+    /// This used to be the raw `tenant_id` claim, i.e. the caller's *own*
+    /// tenant, while the field of the same name on `AuthenticatedUser` meant
+    /// the tenant being acted upon. Two extractors, one field name, two
+    /// meanings — and the authorization-check endpoints read this one. For an
+    /// organization-level administrator with a tenant selected in the admin UI,
+    /// every effective-access preview was therefore evaluated against the
+    /// organization's own tenant: the subject has no role assignments there, so
+    /// the answer was always `no roles assigned`, for rule sets that were
+    /// correct.
     pub tenant_id: Uuid,
+    /// The tenant the caller's own record and grants live in.
+    ///
+    /// The organization tenant for an organization-level principal, the same as
+    /// [`Self::tenant_id`] for everyone else. This is the one the session row
+    /// is in, which is why the revocation check reads it and not `tenant_id`.
+    pub principal_tenant_id: Uuid,
+    /// Whether [`Self::principal_tenant_id`] was **verified** to be the
+    /// organization's reserved scope — set only by [`resolve_active_tenant`],
+    /// exactly as on [`AuthenticatedUser`].
+    pub organization_level: bool,
     pub org_id: Uuid,
     /// `true` when the caller authenticated as a machine (`aud = axiam:m2m`).
     /// Handlers use this for audit attribution, not for authorization — RBAC
@@ -782,6 +820,21 @@ impl AuthenticatedPrincipal {
             axiam_core::models::audit::ActorType::ServiceAccount
         } else {
             axiam_core::models::audit::ActorType::User
+        }
+    }
+
+    /// How the authorization engine should read **this caller's own** grants.
+    ///
+    /// Same rule and same justification as
+    /// [`AuthenticatedUser::subject_scope`]: the claim can never be made on the
+    /// strength of request input, only on the tenant lookup that verified it.
+    pub fn subject_scope(&self) -> SubjectScope {
+        if self.organization_level {
+            SubjectScope::Organization {
+                tenant_id: self.principal_tenant_id,
+            }
+        } else {
+            SubjectScope::Tenant
         }
     }
 }
@@ -837,6 +890,9 @@ fn extract_principal(req: &HttpRequest) -> Result<AuthenticatedPrincipal, AxiamA
     Ok(AuthenticatedPrincipal {
         subject_id,
         tenant_id,
+        // Equal until `from_request` applies the active-tenant header.
+        principal_tenant_id: tenant_id,
+        organization_level: false,
         org_id,
         is_machine,
         claims: validated,
@@ -852,9 +908,24 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
         let validator = req
             .app_data::<web::Data<Arc<dyn SessionValidator>>>()
             .map(|d| d.get_ref().clone());
+        let tenants = req
+            .app_data::<web::Data<Arc<dyn TenantScopeResolver>>>()
+            .map(|d| d.get_ref().clone());
+        let reach = req
+            .app_data::<web::Data<Arc<dyn PrincipalReachResolver>>>()
+            .map(|d| d.get_ref().clone());
+        // Read while `req` is still borrowed, and drop a malformed value rather
+        // than refusing it — same rule as `AuthenticatedUser`: it names a
+        // tenant that cannot exist, so the request falls back to the caller's
+        // own and is denied by RBAC like any other over-reach.
+        let requested_tenant = req
+            .headers()
+            .get(ACTIVE_TENANT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| Uuid::parse_str(v.trim()).ok());
 
         Box::pin(async move {
-            let principal = principal_result?;
+            let mut principal = principal_result?;
 
             // A user token reaching these endpoints must satisfy exactly the
             // same session-revocation rule it would on any other route
@@ -862,6 +933,13 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
             // a machine token has no session row, so there is nothing to
             // revoke — revocation for machines is disabling the account,
             // which the token-issuing path checks.
+            //
+            // Against the *principal's* tenant, and BEFORE the active tenant is
+            // applied below. The two are equal at this point; the ordering is
+            // what keeps them equal here, because resolving the active tenant
+            // first would look the session up in the tenant the request asked
+            // to act on and find none. `AuthenticatedUser` is ordered the same
+            // way for the same reason.
             if !principal.is_machine
                 && let Some(validator) = validator
             {
@@ -871,7 +949,7 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
                     }
                 })?;
                 if !validator
-                    .is_session_active(principal.tenant_id, session_id)
+                    .is_session_active(principal.principal_tenant_id, session_id)
                     .await
                 {
                     return Err(AxiamError::AuthenticationFailed {
@@ -880,6 +958,36 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
                     .into());
                 }
             }
+
+            // Organization scope, resolved exactly as `AuthenticatedUser` does
+            // — the same helper, the same reach check, the same refusal when
+            // the caller's own tenant is not the organization scope. Without
+            // this the authorization-check endpoints were the one guarded
+            // surface that could not see which tenant the admin UI was pointed
+            // at.
+            if let Some(target) = requested_tenant.filter(|t| *t != principal.principal_tenant_id) {
+                principal.tenant_id = resolve_active_tenant_for(
+                    principal.principal_tenant_id,
+                    target,
+                    tenants.as_ref(),
+                )
+                .await?;
+                if let Some(reach) = reach
+                    && let Some(reach) = reach
+                        .reach(principal.principal_tenant_id, principal.subject_id)
+                        .await
+                    && !reach.includes(target)
+                {
+                    return Err(AxiamError::AuthorizationDenied {
+                        reason: "this account's roles do not reach the requested tenant".into(),
+                        action: None,
+                        resource_id: None,
+                    }
+                    .into());
+                }
+                principal.organization_level = true;
+            }
+
             Ok(principal)
         })
     }
@@ -1183,16 +1291,15 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
         }
     }
 
-    fn caller_in(tenant_id: Uuid, org_id: Uuid) -> AuthenticatedUser {
-        use axiam_auth::token::{AccessTokenClaims, SubjectKind, ValidatedClaims};
+    /// Real claims for a caller. The resolver reads none of them — it decides
+    /// from the home tenant id and the resolver alone — but both principal
+    /// types carry the claims they were built from, so they have to be real.
+    fn claims_for(user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> ValidatedClaims {
+        use axiam_auth::token::{AccessTokenClaims, SubjectKind};
         use chrono::Utc;
 
-        let user_id = Uuid::new_v4();
         let now = Utc::now().timestamp();
-        // `resolve_active_tenant` reads none of these — it decides from
-        // `principal_tenant_id` and the resolver alone — but `AuthenticatedUser`
-        // carries the claims it was built from, so they have to be real.
-        let claims = ValidatedClaims(AccessTokenClaims {
+        ValidatedClaims(AccessTokenClaims {
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
             org_id: org_id.to_string(),
@@ -1208,7 +1315,12 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             ext_exchange: None,
             cnf: None,
             ext: None,
-        });
+        })
+    }
+
+    fn caller_in(tenant_id: Uuid, org_id: Uuid) -> AuthenticatedUser {
+        let user_id = Uuid::new_v4();
+        let claims = claims_for(user_id, tenant_id, org_id);
         AuthenticatedUser {
             user_id,
             tenant_id,
@@ -1249,6 +1361,116 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             .await
             .expect("an organization principal may act on its own organization's tenant");
         assert_eq!(resolved, tenant);
+    }
+
+    /// The two extractors must decide organization scope by the same rule.
+    ///
+    /// `AuthenticatedPrincipal` used to make no such decision at all: it read
+    /// the raw `tenant_id` claim and stopped, so the authorization-check
+    /// endpoints — the only ones that use it — could not see which tenant the
+    /// admin UI was pointed at. Every effective-access preview run by an
+    /// organization-level administrator was therefore evaluated against the
+    /// organization's own tenant, where the subject being asked about has no
+    /// role assignments, and came back `no roles assigned` however correct the
+    /// rule set was.
+    ///
+    /// Both extractors now call `resolve_active_tenant_for`. This asserts the
+    /// shared entry point accepts the same case `resolve_active_tenant` does,
+    /// so a future change cannot fix one caller and leave the other behind.
+    #[actix_rt::test]
+    async fn both_extractors_resolve_the_active_tenant_by_the_same_rule() {
+        let org = Uuid::new_v4();
+        let org_scope = Uuid::new_v4();
+        let tenant = Uuid::new_v4();
+        let tenants = Arc::new(FakeTenants(vec![
+            (
+                org_scope,
+                TenantScope {
+                    organization_id: org,
+                    is_organization: true,
+                },
+            ),
+            (
+                tenant,
+                TenantScope {
+                    organization_id: org,
+                    is_organization: false,
+                },
+            ),
+        ])) as Arc<dyn TenantScopeResolver>;
+
+        let via_user = resolve_active_tenant(&caller_in(org_scope, org), tenant, Some(&tenants))
+            .await
+            .expect("the user extractor's path");
+        let via_principal = resolve_active_tenant_for(org_scope, tenant, Some(&tenants))
+            .await
+            .expect("the principal extractor's path");
+        assert_eq!(via_user, via_principal);
+        assert_eq!(via_principal, tenant);
+    }
+
+    /// ...and refuses the same case, too. A shared helper that only agreed on
+    /// the allow would be worse than two.
+    #[actix_rt::test]
+    async fn the_shared_resolver_refuses_a_tenant_principal_the_same_way() {
+        let org = Uuid::new_v4();
+        let home = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let tenants = Arc::new(FakeTenants(vec![
+            (
+                home,
+                TenantScope {
+                    organization_id: org,
+                    is_organization: false,
+                },
+            ),
+            (
+                other,
+                TenantScope {
+                    organization_id: org,
+                    is_organization: false,
+                },
+            ),
+        ])) as Arc<dyn TenantScopeResolver>;
+
+        assert!(
+            resolve_active_tenant_for(home, other, Some(&tenants))
+                .await
+                .is_err(),
+            "only an organization-level principal may act on another tenant",
+        );
+    }
+
+    /// A principal's own grants are read from the tenant it lives in, not the
+    /// one it is acting on — and the claim is only made once the tenant lookup
+    /// has verified it.
+    #[test]
+    fn a_principals_subject_scope_names_the_tenant_its_grants_live_in() {
+        let org_scope = Uuid::new_v4();
+        let acting_on = Uuid::new_v4();
+        let mut principal = AuthenticatedPrincipal {
+            subject_id: Uuid::new_v4(),
+            tenant_id: acting_on,
+            principal_tenant_id: org_scope,
+            organization_level: false,
+            org_id: Uuid::new_v4(),
+            is_machine: false,
+            claims: claims_for(Uuid::new_v4(), org_scope, Uuid::new_v4()),
+        };
+
+        // Not yet verified as organization-level: an ordinary tenant principal,
+        // whatever the other fields say.
+        assert_eq!(principal.subject_scope(), SubjectScope::Tenant);
+
+        principal.organization_level = true;
+        assert_eq!(
+            principal.subject_scope(),
+            SubjectScope::Organization {
+                tenant_id: org_scope
+            },
+            "an organization principal's roles live in its own tenant, not the \
+             one it selected",
+        );
     }
 
     /// A tenant principal has exactly one tenant. Asking for another is asking

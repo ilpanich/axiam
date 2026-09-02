@@ -37,7 +37,9 @@ use axiam_auth::webauthn::WebauthnService;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::mds::MdsEntry;
 use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredential};
-use axiam_core::models::webauthn_policy::{AttestationMode, WebauthnAttestationPolicy};
+use axiam_core::models::webauthn_policy::{
+    AttestationMode, WebauthnAttestationPolicy, WebauthnUserVerification,
+};
 use axiam_core::repository::{
     AttestationMetadataSource, AttestationRootMaterial, WebauthnCredentialRepository,
 };
@@ -386,7 +388,13 @@ async fn finish_attested_registration_rejects_unattested_state_token_purpose() {
     let tenant = Uuid::new_v4();
     let user = Uuid::new_v4();
     let (_ccr, unattested_token) = svc
-        .start_registration(tenant, Uuid::new_v4(), user, "alice")
+        .start_registration(
+            tenant,
+            Uuid::new_v4(),
+            user,
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .unwrap();
 
@@ -453,6 +461,7 @@ async fn mode_none_routes_to_the_unattested_ceremony() {
             Uuid::new_v4(),
             "alice",
             &policy,
+            WebauthnUserVerification::Preferred,
             &EmptyMetadata,
             &cache,
         )
@@ -477,6 +486,7 @@ async fn non_none_mode_routes_to_the_attested_ceremony() {
             Uuid::new_v4(),
             "alice",
             &policy,
+            WebauthnUserVerification::Preferred,
             &OneRootMetadata,
             &cache,
         )
@@ -504,6 +514,7 @@ async fn non_none_mode_with_no_metadata_fails_closed_through_the_router() {
             Uuid::new_v4(),
             "alice",
             &policy,
+            WebauthnUserVerification::Preferred,
             &EmptyMetadata,
             &cache,
         )
@@ -527,7 +538,13 @@ async fn unattested_token_is_denied_when_the_policy_tightened_mid_ceremony() {
     let user_id = Uuid::new_v4();
 
     let (_ccr, token) = svc
-        .start_registration(tenant_id, Uuid::new_v4(), user_id, "alice")
+        .start_registration(
+            tenant_id,
+            Uuid::new_v4(),
+            user_id,
+            "alice",
+            WebauthnUserVerification::Preferred,
+        )
         .await
         .expect("unattested start succeeds under mode: none");
 

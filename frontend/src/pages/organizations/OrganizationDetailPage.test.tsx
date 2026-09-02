@@ -33,6 +33,7 @@ const baseSettings: SetOrgSettings = {
   opaque_suite: "ristretto255_sha512",
   opaque_ksf: "argon2id",
   deletion_grace_period_days: 30,
+  webauthn_user_verification: "preferred",
 };
 
 describe("shouldSeedForm (init-once guard)", () => {

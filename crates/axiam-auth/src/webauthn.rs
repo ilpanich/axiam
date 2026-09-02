@@ -40,6 +40,48 @@
 //! hybrid (phone-as-authenticator) flows, not just `direct_required`. State
 //! this plainly wherever it is documented for admins/users — do not describe
 //! the wire value as `indirect`.
+//!
+//! ## User verification is a policy, not a constant
+//!
+//! `webauthn-rs` hard-codes `UserVerificationPolicy::Required` on both passkey
+//! ceremonies. A security key with no PIN configured can prove *presence* (the
+//! `UP` bit) but never *verification* (`UV`), so every such authenticator was
+//! refused at the finish step with `UserNotVerified` — surfaced to the user as
+//! "The user verified bit is not set, and required by policy", naming a policy
+//! that existed nowhere an operator could see or change it.
+//!
+//! The tenant's effective [`WebauthnUserVerification`] now drives it, and is
+//! applied in **two** places per ceremony, because they answer different
+//! questions:
+//!
+//! 1. The **challenge** sent to the browser (`userVerification`), which decides
+//!    whether the client prompts for a PIN at all;
+//! 2. The **ceremony state**, which is what `finish_*` checks the returned `UV`
+//!    bit against. Amending only the challenge would leave a browser that does
+//!    not ask facing a server that rejects the answer.
+//!
+//! See [`restamp_user_verification`] for how (2) is done and why.
+//!
+//! Two ceremonies deliberately do **not** follow the setting:
+//!
+//! * **Usernameless (discoverable) sign-in** keeps upstream's `Required`. There
+//!   the credential is the only factor, so without `UV` mere possession of the
+//!   token is a complete login. A PIN-less key can therefore be a second factor
+//!   but not a passwordless one — it enrols, and passwordless sign-in with it
+//!   does not work.
+//! * **Attested registration** keeps upstream's `Required`, which
+//!   `start_attested_passkey_registration` imposes and this module does not
+//!   override. A tenant that has turned attestation on has already opted into
+//!   the strict path — it excludes synchronised authenticators and hybrid flows
+//!   too, per the section above — and a PIN-less key does not enrol there.
+//!
+//! **No existing credential is weakened by any of this.** `webauthn-rs` stores
+//! the registration-time policy on the credential and enforces `UV` at
+//! authentication whenever *either* the stored policy or the current one says
+//! `Required`. Every credential enrolled before this change was enrolled under
+//! the hard-coded `Required`, so it keeps demanding user verification for the
+//! rest of its life whatever the setting later becomes. The policy governs new
+//! enrolments.
 
 use axiam_core::error::AxiamResult;
 use axiam_core::models::mds::MdsEntry;
@@ -48,7 +90,7 @@ use axiam_core::models::webauthn_credential::{
 };
 use axiam_core::models::webauthn_policy::{
     AttestationCandidate, AttestationDecision, AttestationDenyReason, AttestationMode,
-    WebauthnAttestationPolicy, evaluate,
+    WebauthnAttestationPolicy, WebauthnUserVerification, evaluate,
 };
 use axiam_core::repository::{AttestationMetadataSource, WebauthnCredentialRepository};
 use base64::Engine;
@@ -60,7 +102,7 @@ use url::Url;
 use uuid::Uuid;
 use webauthn_rs::Webauthn;
 use webauthn_rs::prelude::*;
-use webauthn_rs_proto::ResidentKeyRequirement;
+use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
 
 use crate::config::AuthConfig;
 use crate::error::AuthError;
@@ -140,12 +182,18 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
     ///
     /// Returns the challenge JSON for the browser **and** a JWT state
     /// token that must be forwarded to [`finish_registration`].
+    ///
+    /// `user_verification` is the tenant's effective policy (module docs, "User
+    /// verification is a policy, not a constant"). It is applied to both the
+    /// challenge and the ceremony state; `finish_registration` needs no
+    /// equivalent parameter because the state token carries the decision.
     pub async fn start_registration(
         &self,
         tenant_id: Uuid,
         org_id: Uuid,
         user_id: Uuid,
         username: &str,
+        user_verification: WebauthnUserVerification,
     ) -> AxiamResult<(CreationChallengeResponse, String)> {
         // Fetch existing credentials to exclude from re-registration.
         let existing = self
@@ -170,9 +218,19 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             .map_err(|e| AuthError::WebauthnRegistration(e.to_string()))?;
 
         require_discoverable_credential(&mut ccr);
+        set_registration_user_verification(&mut ccr, user_verification);
 
-        let state_token =
-            self.encode_state_token(user_id, tenant_id, org_id, "webauthn_register", &reg_state)?;
+        let mut state_json = serde_json::to_value(&reg_state)
+            .map_err(|e| AuthError::Crypto(format!("serialize state: {e}")))?;
+        restamp_user_verification(&mut state_json, "rs", user_verification)?;
+
+        let state_token = self.encode_state_token_json(
+            user_id,
+            tenant_id,
+            org_id,
+            "webauthn_register",
+            state_json,
+        )?;
 
         Ok((ccr, state_token))
     }
@@ -250,11 +308,21 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
     ///
     /// Returns the challenge JSON for the browser **and** a JWT state
     /// token that must be forwarded to [`finish_authentication`].
+    ///
+    /// This is the **second-factor** ceremony: the user is already known, so
+    /// `user_verification` follows the tenant's policy. The usernameless
+    /// ceremony ([`Self::start_discoverable_authentication`]) does not, and the
+    /// module docs say why.
+    ///
+    /// Relaxing the policy here cannot relax an existing credential:
+    /// `webauthn-rs` also consults the policy the credential was *registered*
+    /// under, and demands `UV` if either says `Required`.
     pub async fn start_authentication(
         &self,
         tenant_id: Uuid,
         org_id: Uuid,
         user_id: Uuid,
+        user_verification: WebauthnUserVerification,
     ) -> AxiamResult<(RequestChallengeResponse, String)> {
         let existing = self
             .credential_repo
@@ -275,17 +343,23 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             return Err(AuthError::WebauthnNoCredentials.into());
         }
 
-        let (rcr, auth_state) = self
+        let (mut rcr, auth_state) = self
             .webauthn
             .start_passkey_authentication(&passkeys)
             .map_err(|e| AuthError::WebauthnAuthentication(e.to_string()))?;
 
-        let state_token = self.encode_state_token(
+        rcr.public_key.user_verification = wire_user_verification(user_verification);
+
+        let mut state_json = serde_json::to_value(&auth_state)
+            .map_err(|e| AuthError::Crypto(format!("serialize state: {e}")))?;
+        restamp_user_verification(&mut state_json, "ast", user_verification)?;
+
+        let state_token = self.encode_state_token_json(
             user_id,
             tenant_id,
             org_id,
             "webauthn_authenticate",
-            &auth_state,
+            state_json,
         )?;
 
         Ok((rcr, state_token))
@@ -849,6 +923,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
     /// and [`Self::finish_registration_for_policy`]; the two ceremony-specific
     /// methods remain public for tests and for callers that have already
     /// resolved the ceremony themselves.
+    #[allow(clippy::too_many_arguments)] // the ceremony's own five parameters plus the four policy/metadata inputs the dispatch needs; grouping them into a struct would move the naming problem, not remove it — the same trade-off the two methods above already make.
     pub async fn start_registration_for_policy<M: AttestationMetadataSource>(
         &self,
         tenant_id: Uuid,
@@ -856,14 +931,19 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         user_id: Uuid,
         username: &str,
         policy: &WebauthnAttestationPolicy,
+        user_verification: WebauthnUserVerification,
         metadata: &M,
         ca_cache: &crate::attestation::AttestationCaCache,
     ) -> AxiamResult<(CreationChallengeResponse, String)> {
         if policy.mode == AttestationMode::None {
             return self
-                .start_registration(tenant_id, org_id, user_id, username)
+                .start_registration(tenant_id, org_id, user_id, username, user_verification)
                 .await;
         }
+
+        // The attested ceremony ignores `user_verification` — it is
+        // `start_attested_passkey_registration` that requires UV, and this
+        // module does not override it. See the module docs.
 
         let ca_list = ca_cache
             .get_or_build(metadata, policy.allowed_aaguids.as_deref())
@@ -1003,6 +1083,104 @@ fn require_discoverable_credential(ccr: &mut CreationChallengeResponse) {
     selection.require_resident_key = true;
 }
 
+/// AXIAM's policy value as the wire enum `webauthn-rs` speaks.
+///
+/// `Discouraged_DO_NOT_USE` carries upstream's warning in its name; the name is
+/// about the *default*, not about the variant being unusable. AXIAM never
+/// selects it on its own — it is reachable only when an operator sets
+/// `discouraged` explicitly, which is exactly the case upstream's docs describe
+/// as legitimate: a token that is unambiguously a second factor.
+fn wire_user_verification(uv: WebauthnUserVerification) -> UserVerificationPolicy {
+    match uv {
+        WebauthnUserVerification::Discouraged => UserVerificationPolicy::Discouraged_DO_NOT_USE,
+        WebauthnUserVerification::Preferred => UserVerificationPolicy::Preferred,
+        WebauthnUserVerification::Required => UserVerificationPolicy::Required,
+    }
+}
+
+/// Set `userVerification` on a **registration** challenge.
+///
+/// Pairs with [`restamp_user_verification`]: this half decides whether the
+/// browser prompts, that half decides what the server accepts. Setting one
+/// without the other is the failure mode this function exists to avoid.
+fn set_registration_user_verification(
+    ccr: &mut CreationChallengeResponse,
+    uv: WebauthnUserVerification,
+) {
+    ccr.public_key
+        .authenticator_selection
+        .get_or_insert_with(Default::default)
+        .user_verification = wire_user_verification(uv);
+}
+
+/// The key holding [`UserVerificationPolicy`] inside a serialized ceremony
+/// state, for each of the two states AXIAM re-stamps.
+const CEREMONY_POLICY_KEY: &str = "policy";
+
+/// Re-stamp the user-verification policy inside a **serialized** ceremony
+/// state.
+///
+/// ## Why it is done this way
+///
+/// The policy that `finish_passkey_registration` and
+/// `finish_passkey_authentication` check the returned `UV` bit against lives in
+/// the ceremony state, not in the challenge — and `webauthn-rs` 0.5.5 offers no
+/// way to choose it: `start_passkey_registration` and
+/// `start_passkey_authentication` both hard-code
+/// `UserVerificationPolicy::Required` and expose no builder. The state's field
+/// is `pub(crate)`, so it cannot be assigned either.
+///
+/// It *is* serializable, though — this crate already enables
+/// `danger-allow-state-serialisation` and already round-trips these states
+/// through `serde_json` on their way into the state-token JWT (and the attested
+/// path already edits one at this level, to re-insert the current `ca_list`).
+/// So the substitution happens in the serialization that was going to happen
+/// anyway, and costs nothing extra.
+///
+/// The alternative was to drop to `webauthn-rs-core` and rebuild the ceremony
+/// by hand, which means owning upstream's extension set, algorithm list and
+/// residency handling forever — a much larger surface to get quietly wrong than
+/// one enum field.
+///
+/// ## Why it fails loudly
+///
+/// This depends on upstream's private serialization shape, so it verifies that
+/// shape instead of assuming it: an absent `policy` key, or a value that is not
+/// one of the three spellings, is an error rather than a silent no-op. A silent
+/// no-op is the dangerous outcome — the ceremony would fall back to upstream's
+/// `Required` and a tenant that had set `discouraged` would see registrations
+/// rejected with no explanation. `the_upstream_state_shape_is_the_one_we_patch`
+/// in the tests below pins the same assumption against the real library.
+fn restamp_user_verification(
+    state: &mut JsonValue,
+    holder: &str,
+    uv: WebauthnUserVerification,
+) -> Result<(), AuthError> {
+    let policy = state
+        .get_mut(holder)
+        .and_then(|inner| inner.get_mut(CEREMONY_POLICY_KEY))
+        .ok_or_else(|| {
+            AuthError::Crypto(format!(
+                "WebAuthn ceremony state has no `{holder}.{CEREMONY_POLICY_KEY}` field — \
+                 the webauthn-rs state shape changed"
+            ))
+        })?;
+
+    // `webauthn-rs-proto` serializes `UserVerificationPolicy` as one of exactly
+    // these three strings, and `WebauthnUserVerification` renders the same
+    // three. Checking the value we are replacing catches a rename in either.
+    let current = policy.as_str().unwrap_or_default();
+    if !matches!(current, "required" | "preferred" | "discouraged") {
+        return Err(AuthError::Crypto(format!(
+            "WebAuthn ceremony state holds an unrecognised user-verification \
+             policy `{current}` — the webauthn-rs state shape changed"
+        )));
+    }
+
+    *policy = JsonValue::String(uv.to_string());
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1035,7 +1213,6 @@ mod tests {
     use axiam_core::error::AxiamResult;
     use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredential};
     use serde_json::json;
-    use webauthn_rs_proto::UserVerificationPolicy;
 
     // The Ed25519 pair the rest of this crate's tests use.
     const PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n-----END PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
@@ -1120,6 +1297,148 @@ mod tests {
             Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
             Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
         )
+    }
+
+    // -- user verification -------------------------------------------------
+
+    /// The canary for [`restamp_user_verification`].
+    ///
+    /// Everything about the user-verification fix rests on two things this
+    /// crate does not own: that `start_passkey_registration` puts its
+    /// `UserVerificationPolicy` at `rs.policy` in the serialized state, and
+    /// that the enum's wire spellings are the three AXIAM writes. Both are
+    /// upstream's private business and could change in a patch release. If
+    /// either does, this test fails and says so — rather than the re-stamp
+    /// silently doing nothing and every tenant quietly falling back to
+    /// `required`, which is the bug this whole change is about.
+    #[test]
+    fn the_upstream_state_shape_is_the_one_we_patch() {
+        let svc = registration_service();
+        let (u, _, _) = ids();
+        let (_, reg_state) = svc
+            .webauthn
+            .start_passkey_registration(u, "user", "user", None)
+            .expect("a registration challenge needs no authenticator");
+
+        let json = serde_json::to_value(&reg_state).expect("state serializes");
+        assert_eq!(
+            json.get("rs").and_then(|rs| rs.get("policy")),
+            Some(&JsonValue::String("required".into())),
+            "webauthn-rs no longer hard-codes `required` at rs.policy; \
+             restamp_user_verification must be revisited",
+        );
+    }
+
+    #[test]
+    fn restamping_replaces_the_policy_and_the_result_still_deserializes() {
+        let svc = registration_service();
+        let (u, _, _) = ids();
+        let (_, reg_state) = svc
+            .webauthn
+            .start_passkey_registration(u, "user", "user", None)
+            .expect("a registration challenge needs no authenticator");
+
+        let mut json = serde_json::to_value(&reg_state).expect("state serializes");
+        restamp_user_verification(&mut json, "rs", WebauthnUserVerification::Preferred)
+            .expect("the shape is the one this crate patches");
+
+        // Round-tripping through the real type is the part that matters: a
+        // spelling webauthn-rs cannot parse would make every finish_* call fail
+        // at state decode instead of honouring the policy.
+        let restamped: PasskeyRegistration =
+            serde_json::from_value(json).expect("the patched state is still a PasskeyRegistration");
+        let reserialized = serde_json::to_value(&restamped).expect("state serializes");
+        assert_eq!(
+            reserialized.get("rs").and_then(|rs| rs.get("policy")),
+            Some(&JsonValue::String("preferred".into())),
+        );
+    }
+
+    #[test]
+    fn every_policy_value_survives_the_round_trip() {
+        let svc = registration_service();
+        let (u, _, _) = ids();
+
+        for uv in [
+            WebauthnUserVerification::Discouraged,
+            WebauthnUserVerification::Preferred,
+            WebauthnUserVerification::Required,
+        ] {
+            let (_, reg_state) = svc
+                .webauthn
+                .start_passkey_registration(u, "user", "user", None)
+                .expect("a registration challenge needs no authenticator");
+            let mut json = serde_json::to_value(&reg_state).expect("state serializes");
+            restamp_user_verification(&mut json, "rs", uv).expect("shape");
+            let back: PasskeyRegistration = serde_json::from_value(json).expect("round trip");
+            let out = serde_json::to_value(&back).expect("state serializes");
+            assert_eq!(
+                out.get("rs").and_then(|rs| rs.get("policy")),
+                Some(&JsonValue::String(uv.to_string())),
+                "{uv} did not survive",
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_without_the_policy_field_is_an_error_not_a_silent_no_op() {
+        let mut json = json!({"rs": {"challenge": "abc"}});
+        let err = restamp_user_verification(&mut json, "rs", WebauthnUserVerification::Preferred)
+            .expect_err("a missing policy field must be refused");
+        assert!(
+            matches!(err, AuthError::Crypto(ref m) if m.contains("rs.policy")),
+            "the error must name the field it looked for, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn a_state_with_an_unrecognised_policy_is_an_error() {
+        // Guards the other half: the key is where we expect but the enum has
+        // been respelled upstream.
+        let mut json = json!({"ast": {"policy": "when_convenient"}});
+        let err = restamp_user_verification(&mut json, "ast", WebauthnUserVerification::Required)
+            .expect_err("an unrecognised policy must be refused");
+        assert!(
+            matches!(err, AuthError::Crypto(ref m) if m.contains("when_convenient")),
+            "the error must quote what it found, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn the_registration_challenge_carries_the_policy_to_the_browser() {
+        // The other half of the pair: the state decides what the server
+        // accepts, this decides whether the browser asks for a PIN at all.
+        let svc = registration_service();
+        let (u, _, _) = ids();
+        let (mut ccr, _) = svc
+            .webauthn
+            .start_passkey_registration(u, "user", "user", None)
+            .expect("a registration challenge needs no authenticator");
+
+        set_registration_user_verification(&mut ccr, WebauthnUserVerification::Preferred);
+        assert_eq!(
+            ccr.public_key
+                .authenticator_selection
+                .as_ref()
+                .expect("start_passkey_registration always sets authenticatorSelection")
+                .user_verification,
+            UserVerificationPolicy::Preferred,
+        );
+    }
+
+    #[test]
+    fn discouraged_maps_to_the_variant_upstream_named_do_not_use() {
+        // Upstream's name warns against `discouraged` as a *default*. AXIAM
+        // never picks it on its own; it is reachable only when an operator sets
+        // it. Asserted so the mapping cannot be quietly "fixed" to Preferred.
+        assert_eq!(
+            wire_user_verification(WebauthnUserVerification::Discouraged),
+            UserVerificationPolicy::Discouraged_DO_NOT_USE,
+        );
+        assert_eq!(
+            wire_user_verification(WebauthnUserVerification::Required),
+            UserVerificationPolicy::Required,
+        );
     }
 
     // -- construction ------------------------------------------------------
@@ -1566,9 +1885,21 @@ mod tests {
         let svc = registration_service();
         let (tenant_id, org_id, user_id) = ids();
 
-        let ccr = tokio_test_block_on(svc.start_registration(tenant_id, org_id, user_id, "alice"))
-            .expect("registration starts")
-            .0;
+        // `Required` is passed deliberately: it is the value the library sets on
+        // its own, so anything other than `Required` coming back out would be
+        // the residency amendment having disturbed user verification — which is
+        // what the last assertion is for. The policy's own effect on this field
+        // is covered by
+        // `the_registration_challenge_carries_the_policy_to_the_browser`.
+        let ccr = tokio_test_block_on(svc.start_registration(
+            tenant_id,
+            org_id,
+            user_id,
+            "alice",
+            WebauthnUserVerification::Required,
+        ))
+        .expect("registration starts")
+        .0;
 
         let selection = ccr
             .public_key
@@ -1583,7 +1914,6 @@ mod tests {
             selection.require_resident_key,
             "the WebAuthn L1 spelling must agree with the L2 one"
         );
-        // Widened in exactly one dimension: UV is still what the library set.
         assert_eq!(
             selection.user_verification,
             UserVerificationPolicy::Required,

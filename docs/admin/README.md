@@ -199,13 +199,48 @@ POST /api/v1/permissions
 { "action": "billing:manage", "description": "Manage billing configuration" }
 ```
 
-To grant a permission to a role (optionally scoped to specific resources via
+To grant a permission to a role (optionally narrowed to specific scopes via
 `scope_ids`):
 
 ```
 POST /api/v1/roles/{role_id}/permissions
 { "permission_id": "<uuid>", "scope_ids": [] }
 ```
+
+An empty `scope_ids` is a **wildcard**: the grant covers the whole resource,
+every scope on it, and every scope of every descendant.
+
+### Scopes inherit down the resource hierarchy
+
+A scope belongs to exactly one resource, so a scope on a parent and a scope on
+its child are always different records — even when they share a name, and the
+auto-seeded name embeds the resource id precisely so they usually do not.
+
+A grant naming a scope constrains **the resource that scope lives on**, and is
+inherited whole below it:
+
+* On the scope's own resource, only that scope is granted. A grant on
+  `billing` does not reach `payroll` beside it.
+* On any **descendant** resource, the grant applies to every scope there. There
+  is no per-scope constraint below the level the scope was written at, because
+  there is nothing to match it against — the descendant's scopes are different
+  records.
+* A scope name asked for at a resource that does not define it resolves against
+  that resource's ancestors, nearest first. Only a name found nowhere in the
+  lineage is refused.
+* A scope on an **unrelated** resource grants nothing here. Inheritance follows
+  the hierarchy; it is not "any scope I do not recognise imposes no limit".
+
+Denies inherit by exactly the same rule, which is what makes a scoped deny on a
+parent an effective way to carve a subtree out of a broad grant.
+
+> **Upgrade note.** Up to and including `1.0.0-beta08`, a grant naming a scope
+> matched only that exact scope record, so it reached no descendant resource at
+> all — a scoped grant on a parent granted nothing below it, and a check naming
+> a scope the resource inherited was refused with "scope not found on resource".
+> Grants written under that behaviour become effective further down the tree on
+> upgrade. Review any grant with a non-empty `scope_ids` whose role is assigned
+> at or above a branch point.
 
 There are two independent ways for a grant to reach every resource, and it is
 worth being precise about which one you are using:

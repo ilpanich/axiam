@@ -145,24 +145,61 @@ fn global_role_ids(assignments: &[RoleAssignment]) -> Vec<Uuid> {
         .collect()
 }
 
-/// Whether a single grant applies to `action` under `requested_scope_id`.
+/// Whether a single grant applies to `action` under `scopes`.
 ///
-/// Wildcard grants (empty `scope_ids`) match any requested scope; otherwise the
-/// requested scope must be present in the grant's scope list. When no scope is
-/// requested, an action match is sufficient.
+/// Three ways a grant's scope constraint is satisfied:
+///
+/// 1. **No scope was requested.** An action match is sufficient.
+/// 2. **The grant is a wildcard** (empty `scope_ids`). It matches any scope.
+/// 3. **The grant names the requested scope**, or names a scope that the
+///    requested one *inherits from* — see below.
 ///
 /// **The wildcard rule is what makes a resource-level deny stronger than a
 /// scope-level one** (B1 design §2.3): a deny with no scopes matches every
 /// request for that action regardless of the scope named, so it masks the
-/// action entirely. A scoped deny masks only the scopes it names.
-fn grant_applies(grant: &PermissionGrant, action: &str, requested_scope_id: Option<Uuid>) -> bool {
+/// action entirely. A scoped deny masks only the scopes it names, and the
+/// scopes those inherit to.
+///
+/// ## Scope inheritance
+///
+/// A [`Scope`](axiam_core::models::scope::Scope) belongs to exactly one
+/// resource, and scope names are unique per resource — the auto-seeded name
+/// even embeds the resource id. So a scope on a parent resource and a scope on
+/// its child are *always* different rows with different ids, and matching by id
+/// alone meant a grant scoped on a parent constrained that parent and reached
+/// nothing below it. Not a narrower grant below: no grant at all, answered with
+/// "no permission grants action", which reads as if the permission were
+/// missing.
+///
+/// A grant scoped to a scope on an **ancestor** of the resource being checked
+/// therefore imposes no scope constraint at that resource: it covers every
+/// scope there, and every descendant, until a deny says otherwise. Scope
+/// granularity applies to the resource the scope lives on; below it, the grant
+/// is inherited whole. `ScopeContext::inherited` is that set of ancestor scope
+/// ids, and it is why this takes a context rather than a bare id.
+///
+/// Two consequences worth naming, because they are not symmetric:
+///
+/// * On the scope's **own** resource the constraint still bites — a grant on
+///   `billing` does not reach `payroll` on that same resource. The existing
+///   `scoped_permission_denies_wrong_scope` case is exactly this and is
+///   unchanged.
+/// * A grant scoped to a scope on an **unrelated** resource still matches
+///   nothing here, because that scope is in neither the requested id nor the
+///   inherited set.
+fn grant_applies(grant: &PermissionGrant, action: &str, scopes: &ScopeContext) -> bool {
     if grant.permission.action != action {
         return false;
     }
-    match requested_scope_id {
-        Some(scope_id) => grant.scope_ids.is_empty() || grant.scope_ids.contains(&scope_id),
-        None => true,
-    }
+    let Some(requested) = scopes.requested else {
+        return true;
+    };
+    grant.scope_ids.is_empty()
+        || grant.scope_ids.contains(&requested)
+        || grant
+            .scope_ids
+            .iter()
+            .any(|id| scopes.inherited.contains(id))
 }
 
 /// Outcome of evaluating the applicable grants (B1).
@@ -198,7 +235,7 @@ fn evaluate_grants(
     unique_role_ids: &[Uuid],
     grants_by_role: &HashMap<Uuid, Vec<PermissionGrant>>,
     action: &str,
-    requested_scope_id: Option<Uuid>,
+    scopes: &ScopeContext,
 ) -> GrantOutcome {
     let mut saw_allow = false;
     for role_id in unique_role_ids {
@@ -206,7 +243,7 @@ fn evaluate_grants(
             continue;
         };
         for grant in grants {
-            if !grant_applies(grant, action, requested_scope_id) {
+            if !grant_applies(grant, action, scopes) {
                 continue;
             }
             if grant.effect.is_deny() {
@@ -513,10 +550,11 @@ where
             ));
         }
 
-        // 4. Resolve the requested scope to an ID (if specified).
-        let requested_scope_id = match self.resolve_scope(request).await? {
-            ScopeResolution::None => None,
-            ScopeResolution::Resolved(id) => Some(id),
+        // 4. Resolve the requested scope against the resource's lineage. The
+        //    ancestors fetched in step 2 are reused, so inheritance costs no
+        //    extra hierarchy walk.
+        let scopes = match self.resolve_scope(request, &ancestors).await? {
+            ScopeResolution::Resolved(ctx) => ctx,
             ScopeResolution::NotFound(deny) => return Ok(deny),
         };
 
@@ -531,29 +569,71 @@ where
             .await?;
 
         Ok(decision_for(
-            evaluate_grants(
-                &unique_role_ids,
-                &grants_by_role,
-                &request.action,
-                requested_scope_id,
-            ),
+            evaluate_grants(&unique_role_ids, &grants_by_role, &request.action, &scopes),
             &request.action,
         ))
     }
 
-    /// Resolve the request's optional scope name to a scope ID on the target
-    /// resource. Shared by [`Self::check_access`] and the batch path.
-    async fn resolve_scope(&self, request: &AccessRequest) -> AxiamResult<ScopeResolution> {
+    /// Resolve the request's optional scope name against the target resource
+    /// **and its ancestors**, and collect the ancestor scope ids that grants
+    /// may be inherited from. Shared by [`Self::check_access`] and the batch
+    /// path.
+    ///
+    /// `ancestors` must be nearest-first, which is what
+    /// `ResourceRepository::get_ancestors` returns and what makes name
+    /// resolution well-defined: the resource's own scope wins over an
+    /// ancestor's of the same name, and a nearer ancestor over a further one.
+    /// Without a defined order a name that appears twice in a lineage would
+    /// resolve arbitrarily, and an authorization answer that depends on row
+    /// order is not an answer.
+    ///
+    /// Resolving against ancestors at all is the second half of scope
+    /// inheritance ([`grant_applies`] is the first). A scope lives on one
+    /// resource, so a caller asking about a scope its parent defines used to
+    /// get "scope not found on resource" — a refusal phrased as if the request
+    /// were malformed, for a scope the resource does in fact inherit.
+    ///
+    /// One query for the whole lineage, not one per level: this is on the hot
+    /// path of every scoped check.
+    async fn resolve_scope(
+        &self,
+        request: &AccessRequest,
+        ancestors: &[axiam_core::models::resource::Resource],
+    ) -> AxiamResult<ScopeResolution> {
         let Some(ref scope_name) = request.scope else {
-            return Ok(ScopeResolution::None);
+            return Ok(ScopeResolution::Resolved(ScopeContext::default()));
         };
+
+        // Nearest-first: the resource itself, then its ancestors in order.
+        let mut lineage = Vec::with_capacity(ancestors.len() + 1);
+        lineage.push(request.resource_id);
+        lineage.extend(ancestors.iter().map(|r| r.id));
+
         let scopes = self
             .scope_repo
-            .list_by_resource(request.tenant_id, request.resource_id)
-            .instrument(tracing::debug_span!("db.list_by_resource"))
+            .list_by_resources(request.tenant_id, &lineage)
+            .instrument(tracing::debug_span!("db.list_by_resources"))
             .await?;
-        match scopes.iter().find(|s| s.name == *scope_name) {
-            Some(s) => Ok(ScopeResolution::Resolved(s.id)),
+
+        let inherited: HashSet<Uuid> = scopes
+            .iter()
+            .filter(|s| s.resource_id != request.resource_id)
+            .map(|s| s.id)
+            .collect();
+
+        // `lineage` order decides, not the order the rows came back in.
+        let resolved = lineage.iter().find_map(|resource_id| {
+            scopes
+                .iter()
+                .find(|s| s.resource_id == *resource_id && s.name == *scope_name)
+                .map(|s| s.id)
+        });
+
+        match resolved {
+            Some(id) => Ok(ScopeResolution::Resolved(ScopeContext {
+                requested: Some(id),
+                inherited,
+            })),
             None => Ok(ScopeResolution::NotFound(AccessDecision::Deny(format!(
                 "scope '{}' not found on resource",
                 scope_name
@@ -726,7 +806,14 @@ where
         };
 
         // --- Coalesce round-trip 2: ancestors, once per (tenant, resource).
-        let mut ancestors_by_resource: HashMap<(Uuid, Uuid), HashSet<Uuid>> = HashMap::new();
+        //
+        //     Both the ordered list and the set are kept. The set answers "is
+        //     this assignment's resource an ancestor" (`applicable_role_ids`);
+        //     the order is what makes scope-name resolution deterministic —
+        //     nearest ancestor wins, and the single-check path promises the
+        //     same, so the two must agree.
+        let mut ancestors_by_resource: HashMap<(Uuid, Uuid), (Vec<Uuid>, HashSet<Uuid>)> =
+            HashMap::new();
         for req in requests.iter().filter(|r| has_roles(r)) {
             let key = (req.tenant_id, req.resource_id);
             if let std::collections::hash_map::Entry::Vacant(slot) =
@@ -741,7 +828,9 @@ where
                         resource_id = %req.resource_id
                     ))
                     .await?;
-                slot.insert(ancestors.iter().map(|r| r.id).collect());
+                let ordered: Vec<Uuid> = ancestors.iter().map(|r| r.id).collect();
+                let set: HashSet<Uuid> = ordered.iter().copied().collect();
+                slot.insert((ordered, set));
             }
         }
 
@@ -754,18 +843,26 @@ where
             .filter(|r| r.scope.is_some() && has_roles(r))
         {
             let key = (req.tenant_id, req.resource_id);
-            if let std::collections::hash_map::Entry::Vacant(slot) = scopes_by_resource.entry(key) {
-                let scopes = self
-                    .scope_repo
-                    .list_by_resource(req.tenant_id, req.resource_id)
-                    .instrument(tracing::debug_span!(
-                        "db.list_by_resource",
-                        tenant_id = %req.tenant_id,
-                        resource_id = %req.resource_id
-                    ))
-                    .await?;
-                slot.insert(scopes);
+            if scopes_by_resource.contains_key(&key) {
+                continue;
             }
+            // The resource AND its ancestors, because a scope grant inherits
+            // down the hierarchy — same rule and same single query as
+            // `resolve_scope` on the single-check path.
+            let mut lineage = vec![req.resource_id];
+            if let Some((ordered, _)) = ancestors_by_resource.get(&key) {
+                lineage.extend(ordered.iter().copied());
+            }
+            let scopes = self
+                .scope_repo
+                .list_by_resources(req.tenant_id, &lineage)
+                .instrument(tracing::debug_span!(
+                    "db.list_by_resources",
+                    tenant_id = %req.tenant_id,
+                    resource_id = %req.resource_id
+                ))
+                .await?;
+            scopes_by_resource.insert(key, scopes);
         }
 
         // --- Per-item: compute applicable roles from the shared lookups, and
@@ -776,7 +873,7 @@ where
             Decided(AccessDecision),
             NeedsGrants {
                 unique_role_ids: Vec<Uuid>,
-                requested_scope_id: Option<Uuid>,
+                scopes: ScopeContext,
             },
         }
 
@@ -849,8 +946,8 @@ where
             // `has_roles`, or by reordering this block above the
             // `assignments.is_empty()` check — a missed lookup here would
             // silently drop an ancestor-scoped DENY instead of failing loudly.
-            let empty_ancestors = HashSet::new();
-            let ancestor_ids = ancestors_by_resource
+            let empty_ancestors = (Vec::new(), HashSet::new());
+            let (ancestor_order, ancestor_ids) = ancestors_by_resource
                 .get(&(req.tenant_id, req.resource_id))
                 .unwrap_or(&empty_ancestors);
 
@@ -870,14 +967,36 @@ where
                 continue;
             }
 
-            // Resolve scope against the coalesced scope list (no I/O here).
-            let requested_scope_id = if let Some(ref scope_name) = req.scope {
-                let scopes = scopes_by_resource
+            // Resolve scope against the coalesced lineage scope list (no I/O
+            // here). Mirrors `resolve_scope` exactly, including nearest-first
+            // name resolution, so a batched decision stays byte-identical to
+            // the per-item one.
+            let scopes = if let Some(ref scope_name) = req.scope {
+                let lineage_scopes = scopes_by_resource
                     .get(&(req.tenant_id, req.resource_id))
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                match scopes.iter().find(|s| s.name == *scope_name) {
-                    Some(s) => Some(s.id),
+
+                let inherited: HashSet<Uuid> = lineage_scopes
+                    .iter()
+                    .filter(|s| s.resource_id != req.resource_id)
+                    .map(|s| s.id)
+                    .collect();
+
+                let resolved = std::iter::once(req.resource_id)
+                    .chain(ancestor_order.iter().copied())
+                    .find_map(|resource_id| {
+                        lineage_scopes
+                            .iter()
+                            .find(|s| s.resource_id == resource_id && s.name == *scope_name)
+                            .map(|s| s.id)
+                    });
+
+                match resolved {
+                    Some(id) => ScopeContext {
+                        requested: Some(id),
+                        inherited,
+                    },
                     None => {
                         pre.push(PreDecision::Decided(AccessDecision::Deny(format!(
                             "scope '{}' not found on resource",
@@ -887,7 +1006,7 @@ where
                     }
                 }
             } else {
-                None
+                ScopeContext::default()
             };
 
             for rid in &unique_role_ids {
@@ -906,7 +1025,7 @@ where
 
             pre.push(PreDecision::NeedsGrants {
                 unique_role_ids,
-                requested_scope_id,
+                scopes,
             });
         }
 
@@ -950,7 +1069,7 @@ where
                 PreDecision::Decided(d) => decisions.push(d),
                 PreDecision::NeedsGrants {
                     unique_role_ids,
-                    requested_scope_id,
+                    scopes,
                 } => {
                     // Same two helpers the single-check path uses, so the
                     // batch path's deny-override semantics and reason codes
@@ -967,12 +1086,7 @@ where
                         .get(&req.assignment_tenant_id())
                         .unwrap_or(&empty_role_grants);
                     decisions.push(decision_for(
-                        evaluate_grants(
-                            &unique_role_ids,
-                            tenant_grants,
-                            &req.action,
-                            requested_scope_id,
-                        ),
+                        evaluate_grants(&unique_role_ids, tenant_grants, &req.action, &scopes),
                         &req.action,
                     ));
                 }
@@ -983,24 +1097,43 @@ where
     }
 }
 
-/// Outcome of resolving an optional scope name to a scope ID.
+/// The scope facts a set of grants is evaluated against.
+///
+/// Built once per request from the target resource's lineage, and passed to
+/// [`grant_applies`] rather than a bare id, because a grant can satisfy the
+/// request either by naming the requested scope or by naming one the requested
+/// scope inherits from.
+#[derive(Debug, Clone, Default)]
+struct ScopeContext {
+    /// The scope the request named, resolved to an id. `None` means no scope
+    /// was requested, which no grant's scope list can fail to satisfy.
+    requested: Option<Uuid>,
+    /// Every scope id belonging to a **strict ancestor** of the target
+    /// resource. A grant naming one of these is inherited down to here.
+    ///
+    /// Empty when no scope was requested — it is only ever read in that case,
+    /// so populating it would be work for an answer nobody asks for.
+    inherited: HashSet<Uuid>,
+}
+
+/// Outcome of resolving an optional scope name against the target resource's
+/// lineage.
 enum ScopeResolution {
-    /// No scope was requested.
-    None,
-    /// Scope name resolved to this ID.
-    Resolved(Uuid),
-    /// Scope name was requested but does not exist on the resource — carries
-    /// the ready-made deny decision.
+    /// Resolved (or no scope was requested).
+    Resolved(ScopeContext),
+    /// Scope name was requested but exists neither on the resource nor on any
+    /// of its ancestors — carries the ready-made deny decision.
     NotFound(AccessDecision),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GrantOutcome, decision_for, evaluate_grants};
+    use super::{GrantOutcome, ScopeContext, decision_for, evaluate_grants};
     use crate::types::AccessDecision;
     use axiam_core::models::permission::{PermissionEffect, PermissionGrant};
     use chrono::Utc;
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use uuid::Uuid;
 
     fn grant_with(action: &str, effect: PermissionEffect, scope_ids: Vec<Uuid>) -> PermissionGrant {
@@ -1015,6 +1148,22 @@ mod tests {
             },
             scope_ids,
             effect,
+        }
+    }
+
+    /// A request that names no scope: every grant's scope list is satisfied.
+    fn unscoped() -> ScopeContext {
+        ScopeContext::default()
+    }
+
+    /// A request naming `id`, on a resource with no ancestors carrying scopes.
+    /// Scope *inheritance* has its own end-to-end cases in
+    /// `tests/authz_engine_test.rs`, where a real hierarchy exists; these unit
+    /// tests are about the matching rule at one resource.
+    fn scoped(id: Uuid) -> ScopeContext {
+        ScopeContext {
+            requested: Some(id),
+            inherited: HashSet::new(),
         }
     }
 
@@ -1058,7 +1207,7 @@ mod tests {
         let ids = vec![Uuid::new_v4(), matching];
 
         assert_eq!(
-            evaluate_grants(&ids, &map, "read", None),
+            evaluate_grants(&ids, &map, "read", &unscoped()),
             GrantOutcome::Allowed
         );
     }
@@ -1068,7 +1217,7 @@ mod tests {
         let (ids, map) = roles(vec![vec![allow("write")]]);
 
         assert_eq!(
-            evaluate_grants(&ids, &map, "read", None),
+            evaluate_grants(&ids, &map, "read", &unscoped()),
             GrantOutcome::NoGrant,
             "absence of a grant must not masquerade as an explicit deny — the \
              two mean opposite things to the caller"
@@ -1086,7 +1235,7 @@ mod tests {
     fn deny_beats_allow_on_the_same_role() {
         let (ids, map) = roles(vec![vec![allow("read"), deny("read")]]);
         assert_eq!(
-            evaluate_grants(&ids, &map, "read", None),
+            evaluate_grants(&ids, &map, "read", &unscoped()),
             GrantOutcome::DeniedByRule
         );
     }
@@ -1099,11 +1248,11 @@ mod tests {
         let allow_first = roles(vec![vec![allow("read")], vec![deny("read")]]);
 
         assert_eq!(
-            evaluate_grants(&deny_first.0, &deny_first.1, "read", None),
+            evaluate_grants(&deny_first.0, &deny_first.1, "read", &unscoped()),
             GrantOutcome::DeniedByRule
         );
         assert_eq!(
-            evaluate_grants(&allow_first.0, &allow_first.1, "read", None),
+            evaluate_grants(&allow_first.0, &allow_first.1, "read", &unscoped()),
             GrantOutcome::DeniedByRule,
             "an allow scanned before a deny must still lose to it"
         );
@@ -1122,7 +1271,7 @@ mod tests {
         // carries the allow.
         let (ids, map) = roles(vec![vec![deny("read")], vec![allow("read")]]);
         assert_eq!(
-            evaluate_grants(&ids, &map, "read", None),
+            evaluate_grants(&ids, &map, "read", &unscoped()),
             GrantOutcome::DeniedByRule
         );
     }
@@ -1138,7 +1287,7 @@ mod tests {
             vec![deny("read")],  // group-inherited
         ]);
         assert_eq!(
-            evaluate_grants(&ids, &map, "read", None),
+            evaluate_grants(&ids, &map, "read", &unscoped()),
             GrantOutcome::DeniedByRule
         );
     }
@@ -1149,11 +1298,11 @@ mod tests {
     fn a_deny_on_another_action_does_not_leak() {
         let (ids, map) = roles(vec![vec![allow("read"), deny("write")]]);
         assert_eq!(
-            evaluate_grants(&ids, &map, "read", None),
+            evaluate_grants(&ids, &map, "read", &unscoped()),
             GrantOutcome::Allowed
         );
         assert_eq!(
-            evaluate_grants(&ids, &map, "write", None),
+            evaluate_grants(&ids, &map, "write", &unscoped()),
             GrantOutcome::DeniedByRule
         );
     }
@@ -1173,9 +1322,9 @@ mod tests {
             deny("read"),
         ]]);
 
-        for scope in [None, Some(pii), Some(billing)] {
+        for scope in [unscoped(), scoped(pii), scoped(billing)] {
             assert_eq!(
-                evaluate_grants(&ids, &map, "read", scope),
+                evaluate_grants(&ids, &map, "read", &scope),
                 GrantOutcome::DeniedByRule,
                 "a resource-level deny is stronger than any scope-level allow"
             );
@@ -1193,11 +1342,11 @@ mod tests {
         ]]);
 
         assert_eq!(
-            evaluate_grants(&ids, &map, "read", Some(pii)),
+            evaluate_grants(&ids, &map, "read", &scoped(pii)),
             GrantOutcome::DeniedByRule
         );
         assert_eq!(
-            evaluate_grants(&ids, &map, "read", Some(billing)),
+            evaluate_grants(&ids, &map, "read", &scoped(billing)),
             GrantOutcome::Allowed,
             "a deny scoped to `pii` must not touch `billing`"
         );
@@ -1217,7 +1366,7 @@ mod tests {
         ]]);
 
         assert_eq!(
-            evaluate_grants(&ids, &map, "read", None),
+            evaluate_grants(&ids, &map, "read", &unscoped()),
             GrantOutcome::DeniedByRule
         );
     }
@@ -1271,8 +1420,12 @@ mod tests {
                 let (wide_ids, wide_map) = roles(vec![widened]);
 
                 for (action, scope) in requests {
-                    let before = evaluate_grants(&base_ids, &base_map, action, scope);
-                    let after = evaluate_grants(&wide_ids, &wide_map, action, scope);
+                    let ctx = match scope {
+                        Some(id) => scoped(id),
+                        None => unscoped(),
+                    };
+                    let before = evaluate_grants(&base_ids, &base_map, action, &ctx);
+                    let after = evaluate_grants(&wide_ids, &wide_map, action, &ctx);
 
                     if before != GrantOutcome::Allowed {
                         assert_ne!(

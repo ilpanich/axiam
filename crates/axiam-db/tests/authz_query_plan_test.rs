@@ -425,3 +425,45 @@ async fn ancestor_walk_does_not_scan() {
 
     assert_no_table_scan(&plan, "resource ancestor walk");
 }
+
+// ---------------------------------------------------------------------------
+// 5. scope — the lineage read behind scope inheritance
+// ---------------------------------------------------------------------------
+
+/// Every scoped authorization check now reads the scopes of the target
+/// resource **and its ancestors**, because a scope grant inherits down the
+/// hierarchy. That is one more query on the hottest path in the system, so it
+/// gets the same treatment as the `has_role` and `grants` reads above: `IN`
+/// over a bound array of ids, kept as a plain field comparison the composite
+/// index can serve.
+///
+/// The alternative — one `list_by_resource` per hierarchy level — would put a
+/// query per level on the same path, which is the N+1 shape I7(a) removed
+/// elsewhere.
+#[tokio::test]
+async fn lineage_scope_lookup_is_index_satisfied() {
+    let db = fresh_db().await;
+    let mut res = db
+        .query(
+            "SELECT meta::id(id) AS record_id, * FROM scope \
+             WHERE tenant_id = $tenant_id AND resource_id IN $resource_ids \
+             ORDER BY created_at ASC EXPLAIN",
+        )
+        .bind((
+            "tenant_id",
+            "22222222-2222-2222-2222-222222222222".to_string(),
+        ))
+        .bind((
+            "resource_ids",
+            vec![
+                "44444444-4444-4444-4444-444444444444".to_string(),
+                "55555555-5555-5555-5555-555555555555".to_string(),
+            ],
+        ))
+        .await
+        .unwrap();
+    let plan: Vec<Json> = res.take(0).unwrap();
+
+    assert_no_table_scan(&plan, "lineage scope lookup");
+    assert_uses_index(&plan, "idx_scope_resource_name", "lineage scope lookup");
+}

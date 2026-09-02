@@ -120,6 +120,22 @@ jobs:
       - name: Every config key is documented or exempt
         run: python3 scripts/check-config-key-coverage.py
 
+      # `.dockerignore` excludes docker/ wholesale and re-includes one file by
+      # name. e26e171 renamed that file and updated the COPY but not the
+      # negation, so the template left the build context while staying present
+      # and tracked in git -- invisible to every check that reads the worktree
+      # instead of the context. The hadolint steps in security-scan cannot see
+      # a context at all, and nothing else here builds an image, so the first
+      # build of the frontend image happens in release.yml on a version tag:
+      # both frontend legs of v1.0.0-beta08 died ~4s in on a one-word mismatch
+      # that had been sitting in main for hours. This gate asks the release
+      # build's question without a daemon or a build, so it runs on every
+      # commit rather than behind a path filter.
+      - name: Docker context gate self-test (fixtures)
+        run: python3 scripts/check-docker-context.py --self-test
+      - name: Every Dockerfile COPY source survives .dockerignore
+        run: python3 scripts/check-docker-context.py
+
   build:
     name: Build
     runs-on: ubuntu-latest

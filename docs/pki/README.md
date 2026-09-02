@@ -205,6 +205,22 @@ path "secret/metadata/axiam/ca-keys/*" {
 }
 ```
 
+**One glob covers both tiers.** A tenant signing CA is a `ca_certificate` row
+like any other — it carries a `tenant_id` and a `parent_ca_id`, and that is the
+whole difference — and `CaKeyStore::store` is keyed by `(organization_id,
+ca_id)` with no tenant segment. An organization root and every tenant
+intermediate beneath it therefore sit side by side under `<org_id>/`, and the
+rules above reach all of them. Leaf certificates need nothing here at all:
+their private keys are returned once at issuance and never stored, so
+`CertService` only ever *loads* a CA key to sign with.
+
+A `<org>/<tenant>/` layout would let one policy grant one tenant's CAs and not
+another's, and it was not chosen: it would make a CA's Vault path depend on a
+column that is NULL for every organization CA, and a locator that could no
+longer be rebuilt from the id alone. A deployment that wants per-tenant scoping
+gets it a level up, by setting `AXIAM__PKI__VAULT_PREFIX` per tenant and giving
+each its own token.
+
 **If you inherited the secret provider's token — the section above — these rules
 must be on _that_ token's policy**, and this is the one part of the arrangement
 that does not announce itself. The startup log says `custody=vault

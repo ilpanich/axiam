@@ -178,6 +178,43 @@ describe("response interceptor — silent refresh path", () => {
     expect(result.data).toBe("replayed");
   });
 
+  it("refreshes against the tenant the caller LIVES IN, not the one it acts on", async () => {
+    // The regression: an organization-level administrator with a child tenant
+    // selected. The session row is keyed by tenant and lives in the
+    // organization's own tenant, so posting the selected one finds no session,
+    // the refresh fails, the replay 401s, and the admin is thrown back to the
+    // login page a quarter of an hour in — exactly when the access token first
+    // ages out.
+    const ORG_TENANT_ID = "01a02475-00a5-7f01-ad53-000000000001";
+    useAuthStore.setState({
+      isAuthenticated: true,
+      user: {
+        id: "u1",
+        username: "root",
+        email: "root@axiam.dev",
+        permissions: [],
+        // Acting on the selected child tenant ...
+        tenant_id: TENANT_ID,
+        // ... but living in the organization's own tenant.
+        principal_tenant_id: ORG_TENANT_ID,
+      },
+    });
+
+    const postSpy = vi.spyOn(api, "post").mockResolvedValue({ data: {} } as AxiosResponse);
+    const replay = { data: "replayed", status: 200 };
+    const originalRequest = cfg({
+      url: "/api/v1/users",
+      adapter: () => Promise.resolve(replay as unknown as AxiosResponse),
+    });
+    const err = { config: originalRequest, response: { status: 401 } };
+    const result = (await resHandler.rejected(err)) as AxiosResponse;
+
+    expect(postSpy).toHaveBeenCalledWith("/api/v1/auth/refresh", {
+      tenant_id: ORG_TENANT_ID,
+    });
+    expect(result.data).toBe("replayed");
+  });
+
   it("does not refresh when the store has no tenant_id to send", async () => {
     // isAuthenticated without a hydrated user: refreshing would post a body the
     // server rejects with `missing field tenant_id`, and the 400 would then be

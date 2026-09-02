@@ -265,6 +265,10 @@ fn many_less_restrictive_overrides_are_rejected() {
         opaque_ksf: None,
         // check_max: a window longer than the org's is less restrictive.
         deletion_grace_period_days: Some(u32::MAX),
+        // WebAuthn UV: leave inherited, for the same reason as OPAQUE above.
+        // The org baseline here is `preferred`, and the one value below it
+        // (`discouraged`) has its own case in `models::settings::tests`.
+        webauthn_user_verification: None,
     };
     let err = validate_tenant_override(&org, &overrides)
         .unwrap_err()

@@ -18,6 +18,7 @@ import {
 } from "@/services/organizations";
 import { shouldSeedForm, computeIsDirty } from "./settingsForm";
 import { OpaquePolicyFields } from "@/components/OpaquePolicyFields";
+import type { WebauthnUserVerification } from "@/services/organizations";
 import { getApiErrorMessage } from "@/lib/apiError";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
@@ -1497,6 +1498,45 @@ function SettingsTab({
               ceiling is where GDPR Art. 12(3)&rsquo;s one-month deadline plus
               its two-month extension runs out; anything past 30 wants a reason
               recorded.
+            </p>
+          </div>
+        </div>
+
+        {/* WebAuthn */}
+        <div className="glass-card space-y-4">
+          <h3 className="text-base font-semibold text-foreground">WebAuthn</h3>
+          <div className="space-y-2">
+            <Label htmlFor="webauthn-user-verification">
+              User verification
+            </Label>
+            <select
+              id="webauthn-user-verification"
+              className="w-full rounded border border-white/20 bg-transparent px-3 py-2 text-sm"
+              value={merged.webauthn_user_verification}
+              onChange={(e) =>
+                setField(
+                  "webauthn_user_verification",
+                  e.target.value as WebauthnUserVerification,
+                )
+              }
+            >
+              <option value="discouraged">
+                Discouraged — do not ask for a PIN
+              </option>
+              <option value="preferred">
+                Preferred — ask, accept either way (default)
+              </option>
+              <option value="required">
+                Required — refuse keys that cannot verify
+              </option>
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Whether an authenticator must prove <em>who</em> is present, not
+              just that someone is. <strong>Required</strong> refuses every
+              security key with no PIN configured — those can only prove
+              presence. A tenant may raise this and not lower it. Usernameless
+              sign-in always requires verification whatever this says, because
+              there the key is the only factor.
             </p>
           </div>
         </div>

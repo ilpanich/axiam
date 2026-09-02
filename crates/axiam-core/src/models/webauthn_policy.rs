@@ -10,6 +10,12 @@
 //! comparator would have to be invented with no clear right answer. Org-level
 //! baselining of the attestation policy is deferred; this ships tenant-only
 //! for now (see the admin guide for the documented trade-off).
+//!
+//! [`WebauthnUserVerification`] below is the counter-example that shows the
+//! reasoning was about orderability and not about WebAuthn: it *is* totally
+//! ordered, so it lives in `SecuritySettings` with every other org-baselined,
+//! tenant-tightenable control, and only its type is declared here to keep the
+//! WebAuthn vocabulary in one place.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -44,6 +50,99 @@ pub enum AttestationMode {
 pub enum UnknownAaguidAction {
     Allow,
     Deny,
+}
+
+/// How hard the authenticator must prove *who* is present during a WebAuthn
+/// ceremony — the `userVerification` of the WebAuthn spec, and the `UV` bit of
+/// the authenticator data it produces.
+///
+/// User **presence** (the `UP` bit — a touch) says a human is at the
+/// authenticator. User **verification** (`UV`) says *which* human: a PIN, a
+/// fingerprint, a face. A YubiKey with no PIN configured can only ever prove
+/// presence, so it sets `UP` and clears `UV`.
+///
+/// The distinction is what makes this a policy rather than a constant, and the
+/// answer differs by what the credential is being used *for*:
+///
+/// * As a **second factor**, behind a password, presence is the property that
+///   matters: the password already established identity, and the token proves
+///   possession. Demanding `UV` here rejects every PIN-less security key for a
+///   guarantee the first factor already gave.
+/// * For **usernameless sign-in**, the credential is the only factor, so
+///   without `UV` mere possession of the token is a complete login. AXIAM
+///   therefore holds the discoverable-credential ceremony to
+///   [`Required`](Self::Required) regardless of this setting — see
+///   `axiam_auth::webauthn`.
+///
+/// Ordered by strictness for the org/tenant inheritance rule: a tenant may
+/// raise this, never lower it. See [`user_verification_is_at_least`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WebauthnUserVerification {
+    /// Do not ask for verification. The ceremony accepts a cleared `UV` bit and
+    /// actively tells the authenticator not to bother — appropriate only where
+    /// the token is unambiguously a second factor.
+    Discouraged,
+    /// Ask for verification, accept the credential either way, and record what
+    /// actually happened.
+    ///
+    /// The default. It is the only value under which both a PIN-protected and a
+    /// PIN-less security key enrol, which is what most deployments mean by
+    /// "support security keys". Whether `UV` was performed is still captured on
+    /// the credential, so requiring it later is a policy change rather than a
+    /// re-enrolment.
+    #[default]
+    Preferred,
+    /// Reject any ceremony whose `UV` bit is clear.
+    ///
+    /// The correct setting where a WebAuthn credential may stand alone as a
+    /// login factor. It excludes PIN-less security keys entirely — that is the
+    /// point of it, not a side effect.
+    Required,
+}
+
+impl WebauthnUserVerification {
+    /// Rank by strictness. Explicit rather than derived from declaration order,
+    /// so adding a variant forces a decision about where it sits — the same
+    /// reasoning as [`crate::models::opaque::OpaqueKsf`]'s ranking.
+    fn rank(self) -> u8 {
+        match self {
+            Self::Discouraged => 0,
+            Self::Preferred => 1,
+            Self::Required => 2,
+        }
+    }
+}
+
+impl std::fmt::Display for WebauthnUserVerification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Discouraged => write!(f, "discouraged"),
+            Self::Preferred => write!(f, "preferred"),
+            Self::Required => write!(f, "required"),
+        }
+    }
+}
+
+impl std::str::FromStr for WebauthnUserVerification {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "discouraged" => Ok(Self::Discouraged),
+            "preferred" => Ok(Self::Preferred),
+            "required" => Ok(Self::Required),
+            other => Err(format!("invalid WebAuthn user verification: {other}")),
+        }
+    }
+}
+
+/// True when `candidate` is at least as strict as `baseline`.
+pub fn user_verification_is_at_least(
+    candidate: WebauthnUserVerification,
+    baseline: WebauthnUserVerification,
+) -> bool {
+    candidate.rank() >= baseline.rank()
 }
 
 /// Per-tenant WebAuthn attestation policy (D5). One row per tenant; an

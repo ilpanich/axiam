@@ -20,6 +20,7 @@ import {
   settingsService,
   type SecuritySettings,
   type TenantSettingsOverride,
+  type WebauthnUserVerification,
 } from "@/services/settings";
 import {
   opaqueRelaxationWarning,
@@ -74,7 +75,26 @@ interface SettingsForm {
   opaque_mode: OpaqueMode;
   opaque_suite: OpaqueSuite;
   opaque_ksf: OpaqueKsf;
+  // WebAuthn
+  webauthn_user_verification: WebauthnUserVerification;
 }
+
+/**
+ * What each value actually does to a security key, in the terms an admin cares
+ * about. Named rather than inlined so the edit and read-only views cannot drift.
+ *
+ * The passwordless caveat is stated on every value because it is the one thing
+ * this control does *not* govern: usernameless sign-in always requires user
+ * verification, since there the key is the only factor.
+ */
+const WEBAUTHN_UV_HELP: Record<WebauthnUserVerification, string> = {
+  discouraged:
+    "Security keys enrol without a PIN prompt. Appropriate only where the key is always a second factor behind a password.",
+  preferred:
+    "A PIN is requested when the key supports one and accepted either way, so a YubiKey with no PIN configured still enrols. Whether verification happened is recorded on the credential.",
+  required:
+    "A key that cannot verify its user is refused at enrolment — this excludes every security key with no PIN configured.",
+};
 
 const SECS_PER_MIN = 60;
 const SECS_PER_DAY = 86_400;
@@ -105,6 +125,10 @@ function toForm(s: SecuritySettings): SettingsForm {
     email_verification_required: s.email.email_verification_required,
     default_cert_validity_days: s.certificate.default_cert_validity_days,
     admin_notifications_enabled: s.notification.admin_notifications_enabled,
+    // Optional on the wire so a server older than the field still types: fall
+    // back to the same `preferred` that server would apply anyway.
+    webauthn_user_verification:
+      s.webauthn?.webauthn_user_verification ?? "preferred",
     ...readOpaquePolicy(s),
   };
 }
@@ -131,6 +155,7 @@ function toOverride(f: SettingsForm): TenantSettingsOverride {
     opaque_mode: f.opaque_mode,
     opaque_suite: f.opaque_suite,
     opaque_ksf: f.opaque_ksf,
+    webauthn_user_verification: f.webauthn_user_verification,
   };
 }
 
@@ -685,6 +710,63 @@ export function SettingsPage() {
                 opaque_ksf: data.opaque_ksf,
               }}
             />
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <KeyRound size={18} className="text-primary" aria-hidden="true" />
+            <CardTitle className="text-base">WebAuthn</CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground mb-4">
+            How hard an authenticator must prove <em>who</em> is present. This
+            tenant inherits its organization's baseline and may only tighten it.
+          </p>
+          {editing ? (
+            <div className="space-y-2">
+              <Label htmlFor="tenant-webauthn-uv">User verification</Label>
+              <select
+                id="tenant-webauthn-uv"
+                className="w-full rounded border border-white/20 bg-transparent px-3 py-2 text-sm"
+                value={data.webauthn_user_verification}
+                onChange={(e) =>
+                  setFormOverrides((prev) => ({
+                    ...prev,
+                    webauthn_user_verification: e.target
+                      .value as WebauthnUserVerification,
+                  }))
+                }
+              >
+                <option value="discouraged">
+                  Discouraged — do not ask for a PIN
+                </option>
+                <option value="preferred">
+                  Preferred — ask, accept either way (default)
+                </option>
+                <option value="required">
+                  Required — refuse keys that cannot verify
+                </option>
+              </select>
+              <p className="text-xs text-muted-foreground">
+                {WEBAUTHN_UV_HELP[data.webauthn_user_verification]}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <p className="text-sm">
+                User verification:{" "}
+                <span className="font-medium">
+                  {data.webauthn_user_verification}
+                </span>
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {WEBAUTHN_UV_HELP[data.webauthn_user_verification]}
+              </p>
+            </div>
           )}
         </CardContent>
       </Card>

@@ -168,6 +168,20 @@ export interface PrivacyPolicy {
   deletion_grace_period_days: number;
 }
 
+/**
+ * How hard an authenticator must prove *who* is present during a WebAuthn
+ * ceremony. See `services/settings.ts` for the full explanation.
+ */
+export type WebauthnUserVerification = "discouraged" | "preferred" | "required";
+
+export interface WebauthnPolicy {
+  webauthn_user_verification: WebauthnUserVerification;
+}
+
+/** What the server applies when the field is absent. */
+export const DEFAULT_WEBAUTHN_USER_VERIFICATION: WebauthnUserVerification =
+  "preferred";
+
 /** The longest erasure grace window the server accepts (GDPR Art. 12(3)). */
 export const MAX_DELETION_GRACE_PERIOD_DAYS = 90;
 
@@ -190,6 +204,8 @@ export interface SecuritySettings {
   opaque: OpaquePolicy;
   /** Retention rules that apply after a subject asks to be erased. */
   privacy?: PrivacyPolicy;
+  /** Absent on a server older than the field; callers fall back to `preferred`. */
+  webauthn?: WebauthnPolicy;
   created_at: string;
   updated_at: string;
 }
@@ -232,6 +248,11 @@ export interface SetOrgSettings {
   // Privacy. Required here for the same reason: the PUT replaces the whole
   // row, and the server's default for an absent value is 30 days.
   deletion_grace_period_days: number;
+  // WebAuthn. Required for the same reason again, and here the consequence is
+  // the sharpest: the server's default for an absent value is `preferred`, so
+  // omitting it from a save would silently relax an organization that had set
+  // `required` — with nothing in the response to say so.
+  webauthn_user_verification: WebauthnUserVerification;
 }
 
 /** Flatten a nested SecuritySettings into the flat SetOrgSettings input. */
@@ -268,6 +289,10 @@ export function flattenOrgSettings(s: SecuritySettings): SetOrgSettings {
     // constant keeps the form control from rendering an empty number input.
     deletion_grace_period_days:
       s.privacy?.deletion_grace_period_days ?? DEFAULT_DELETION_GRACE_PERIOD_DAYS,
+    // Same guard once more. A server older than the WebAuthn block sends no
+    // `webauthn`, and the fallback is the value that server would itself apply.
+    webauthn_user_verification:
+      s.webauthn?.webauthn_user_verification ?? DEFAULT_WEBAUTHN_USER_VERIFICATION,
   };
 }
 

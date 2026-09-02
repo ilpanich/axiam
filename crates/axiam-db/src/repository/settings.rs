@@ -7,9 +7,11 @@ use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
     CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
     OpaquePolicy, PasswordPolicy, PrivacyPolicy, SecuritySettings, SetOrgSettings,
-    SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy, clamp_overrides_to_org,
-    diff_against_org, effective_settings, settings_from_org_input, system_defaults,
+    SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy, WebauthnPolicy,
+    clamp_overrides_to_org, diff_against_org, effective_settings, settings_from_org_input,
+    system_defaults,
 };
+use axiam_core::models::webauthn_policy::WebauthnUserVerification;
 use axiam_core::repository::SettingsRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -63,6 +65,10 @@ struct SettingsRow {
     // written before the migration has no such column and must still
     // deserialize. It resolves to the 30 days the erasure handler hard-coded.
     privacy_deletion_grace_days: Option<u32>,
+    // WebAuthn (V53). `Option` for the same reason again: a row written before
+    // the migration has no such column. It resolves to `preferred`, which is
+    // what the migration backfills.
+    webauthn_user_verification: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     // JSON-encoded `TenantSettingsOverride`; `None` for org rows.
     overrides_json: Option<String>,
@@ -115,6 +121,10 @@ struct SettingsRowWithId {
     // written before the migration has no such column and must still
     // deserialize. It resolves to the 30 days the erasure handler hard-coded.
     privacy_deletion_grace_days: Option<u32>,
+    // WebAuthn (V53). `Option` for the same reason again: a row written before
+    // the migration has no such column. It resolves to `preferred`, which is
+    // what the migration backfills.
+    webauthn_user_verification: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     overrides_json: Option<String>,
     // Timestamps
@@ -135,6 +145,26 @@ struct SettingsRowWithId {
 fn decode_privacy(days: Option<u32>) -> PrivacyPolicy {
     PrivacyPolicy {
         deletion_grace_period_days: days.unwrap_or(30),
+    }
+}
+
+/// Decode the WebAuthn policy column.
+///
+/// An absent or unparseable value falls back to the type's default,
+/// `preferred` — matching `decode_opaque` and `decode_privacy` above. The
+/// fallback direction is worth being explicit about: for this column the
+/// default is *less* strict than the strictest value, so a deployment that has
+/// set `required` and then somehow writes an unreadable value would silently
+/// relax. That cannot happen through the API — the column carries an `ASSERT`
+/// listing the three legal spellings, and `WebauthnUserVerification`'s
+/// `Display`/`FromStr` pair is asserted to round-trip in
+/// `axiam_core::models::settings::tests` — so the only reachable `None` here is
+/// the pre-migration row the migration is about to backfill.
+fn decode_webauthn(uv: Option<&str>) -> WebauthnPolicy {
+    WebauthnPolicy {
+        webauthn_user_verification: uv
+            .and_then(|v| v.parse::<WebauthnUserVerification>().ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -207,6 +237,7 @@ impl SettingsRowWithId {
                 self.opaque_ksf.as_deref(),
             ),
             privacy: decode_privacy(self.privacy_deletion_grace_days),
+            webauthn: decode_webauthn(self.webauthn_user_verification.as_deref()),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -243,6 +274,7 @@ opaque_mode = $opaque_mode, \
 opaque_suite = $opaque_suite, \
 opaque_ksf = $opaque_ksf, \
 privacy_deletion_grace_days = $privacy_deletion_grace_days, \
+webauthn_user_verification = $webauthn_user_verification, \
 overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
@@ -371,6 +403,10 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         bindings.push((
             "privacy_deletion_grace_days",
             BindValue::U32(settings.privacy.deletion_grace_period_days),
+        ));
+        bindings.push((
+            "webauthn_user_verification",
+            BindValue::Str(settings.webauthn.webauthn_user_verification.to_string()),
         ));
         bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
         bindings
@@ -550,6 +586,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
                 row.opaque_ksf.as_deref(),
             ),
             privacy: decode_privacy(row.privacy_deletion_grace_days),
+            webauthn: decode_webauthn(row.webauthn_user_verification.as_deref()),
             created_at: row.created_at,
             updated_at: row.updated_at,
         })

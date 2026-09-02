@@ -58,6 +58,23 @@ export interface PrivacyPolicy {
   deletion_grace_period_days: number;
 }
 
+/**
+ * How hard an authenticator must prove *who* is present during a WebAuthn
+ * ceremony — the WebAuthn `userVerification`.
+ *
+ * `required` refuses any security key that cannot set the UV bit, which
+ * includes every YubiKey with no PIN configured. `preferred` (the default)
+ * asks, accepts either answer, and records which happened.
+ *
+ * Usernameless sign-in always requires user verification whatever this says:
+ * there the credential is the only factor.
+ */
+export type WebauthnUserVerification = "discouraged" | "preferred" | "required";
+
+export interface WebauthnPolicy {
+  webauthn_user_verification: WebauthnUserVerification;
+}
+
 /** Fully-resolved security settings (nested) — GET /api/v1/settings. */
 export interface SecuritySettings {
   id: string;
@@ -81,6 +98,12 @@ export interface SecuritySettings {
    * 30-day default.
    */
   privacy?: PrivacyPolicy;
+  /**
+   * WebAuthn ceremony policy. Optional for the same reason as `privacy`: a
+   * server older than the field does not carry it, and callers fall back to
+   * the server's own `preferred` default.
+   */
+  webauthn?: WebauthnPolicy;
   created_at: string;
   updated_at: string;
 }
@@ -126,6 +149,8 @@ export interface TenantSettingsOverride {
   // Privacy — tighten-only means *shorter*: it is time spent holding data the
   // subject has already asked to have erased.
   deletion_grace_period_days?: number;
+  // WebAuthn — tighten-only on required > preferred > discouraged.
+  webauthn_user_verification?: WebauthnUserVerification;
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────

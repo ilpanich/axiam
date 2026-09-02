@@ -302,6 +302,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "federation_login_providers",
         sql: SCHEMA_V52,
     },
+    Migration {
+        version: 53,
+        name: "webauthn_user_verification_policy",
+        sql: SCHEMA_V53,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2955,6 +2960,39 @@ DEFINE INDEX IF NOT EXISTS idx_sso_handoff_code_hash ON TABLE sso_handoff_code \
     COLUMNS code_hash UNIQUE;
 DEFINE INDEX IF NOT EXISTS idx_sso_handoff_expires_at ON TABLE sso_handoff_code \
     COLUMNS expires_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v53 — WebAuthn user verification is a policy, not a constant
+// -----------------------------------------------------------------------
+//
+// `webauthn-rs` hard-codes `UserVerificationPolicy::Required` on the passkey
+// ceremony, so AXIAM refused every authenticator that cannot set the UV bit —
+// a YubiKey with no PIN configured, which can only ever prove *presence*. The
+// registration failed at the finish step with "The user verified bit is not
+// set, and required by policy", naming a policy no operator could see or
+// change because there was none.
+//
+// The DEFAULT is `preferred`, not `required`, and this is the one migration
+// here that does change existing behaviour: it accepts a PIN-less security key
+// where the old build rejected it. Backfilling `required` instead would have
+// preserved the bug rather than the intent — nobody chose that value, it was a
+// library constant. Whether UV actually happened is recorded per credential, so
+// a deployment that wants the strict posture sets `required` at the org and
+// loses nothing it had.
+//
+// Usernameless sign-in does not read this column: it requires user
+// verification unconditionally, because there the credential is the only
+// factor. See `axiam_core::models::webauthn_policy::WebauthnUserVerification`.
+
+const SCHEMA_V53: &str = "\
+DEFINE FIELD IF NOT EXISTS webauthn_user_verification ON TABLE \
+    security_settings TYPE string DEFAULT 'preferred' \
+    ASSERT $value IN ['discouraged', 'preferred', 'required'];
+-- DEFAULT only applies on write, so rows written before this migration need
+-- the value put there explicitly.
+UPDATE security_settings SET webauthn_user_verification = 'preferred' \
+    WHERE webauthn_user_verification = NONE;
 ";
 
 #[cfg(test)]

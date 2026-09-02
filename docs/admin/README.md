@@ -207,9 +207,24 @@ POST /api/v1/roles/{role_id}/permissions
 { "permission_id": "<uuid>", "scope_ids": [] }
 ```
 
-A role's `is_global` flag controls whether it applies tenant-wide or must be
-assigned per-resource; resource-scoped roles cascade to child resources in
-the hierarchy unless overridden.
+There are two independent ways for a grant to reach every resource, and it is
+worth being precise about which one you are using:
+
+* **The assignment names no resource.** It is tenant-wide — every resource in
+  the tenant, at every depth. This is what you get by assigning a role to a
+  user or group without picking a resource.
+* **The role carries `is_global`.** It applies everywhere *however* it is
+  assigned, including when the assignment does name a resource.
+
+An assignment that **does** name a resource reaches that resource and cascades
+to its descendants in the hierarchy, unless a deny overrides it.
+
+> **Upgrade note.** Up to and including `1.0.0-beta08`, an assignment naming no
+> resource granted nothing at all unless the role also carried `is_global` — the
+> write succeeded and the grant was inert. Assignments in that state become live
+> tenant-wide grants on upgrade. Review them before upgrading:
+> `GET /api/v1/roles/{role_id}/users` and `GET /api/v1/roles/{role_id}/groups`
+> report each assignment's `resource_id`, and a `null` there is one of them.
 
 ### Deny grants (`effect: "deny"`)
 

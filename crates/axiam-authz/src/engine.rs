@@ -73,8 +73,40 @@ where
 /// `resource_id`, returning the deduplicated list of applicable role IDs in
 /// first-seen order.
 ///
-/// A role applies when it is global, scoped directly to the target resource,
-/// or scoped to any ancestor of the target resource (hierarchy inheritance).
+/// An assignment applies when any of these holds:
+///
+/// * the **role** is global — it applies wherever it is assigned;
+/// * the **assignment** names no resource — it is tenant-wide;
+/// * the assignment names the target resource, or any ancestor of it
+///   (hierarchy inheritance).
+///
+/// ## The second rule used to be missing
+///
+/// An assignment with no `resource_id` was previously applicable only when the
+/// *role* also carried `is_global`, so assigning an ordinary role without
+/// naming a resource granted nothing, anywhere — silently. The write succeeded,
+/// the assignment was listed back, and every check against it answered "no
+/// applicable roles for this resource", which reads as though the resource were
+/// at fault rather than the assignment being inert.
+///
+/// That contradicted the meaning the model gives the field:
+/// [`AssignmentScope::global`](axiam_core::models::role::AssignmentScope::global)
+/// is named for it, `AssignmentScope::resource_id` is documented as "`None`
+/// assigns the role globally — every resource in reach", and
+/// [`RoleAssignment::resource_id`] as "`None` means the role was assigned
+/// globally". Three statements of the same intent, none of them implemented.
+///
+/// `is_global` keeps its own meaning and is not folded into this: it is a
+/// property of the *role*, so a global role applies even when the assignment
+/// does name a resource. The two are independent ways to say "everywhere", and
+/// this function honours both.
+///
+/// **Tenant-wide, not organization-wide.** [`global_role_ids`] — the
+/// cross-tenant-boundary path — is deliberately left alone: there an unscoped
+/// assignment still carries only when the role is global. Widening this rule
+/// would let an unscoped assignment in an organization's own tenant reach every
+/// tenant of that organization, which is a different and much larger claim than
+/// the one the field makes.
 fn applicable_role_ids(
     assignments: &[RoleAssignment],
     resource_id: Uuid,
@@ -85,10 +117,10 @@ fn applicable_role_ids(
         .iter()
         .filter(|a| {
             a.role.is_global
-                || a.resource_id == Some(resource_id)
-                || a.resource_id
-                    .map(|rid| ancestor_ids.contains(&rid))
-                    .unwrap_or(false)
+                || match a.resource_id {
+                    None => true,
+                    Some(rid) => rid == resource_id || ancestor_ids.contains(&rid),
+                }
         })
         .map(|a| a.role.id)
         .filter(|role_id| seen.insert(*role_id))

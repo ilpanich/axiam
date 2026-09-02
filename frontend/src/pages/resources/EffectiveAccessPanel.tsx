@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Loader2, Search, ShieldCheck, ShieldX } from "lucide-react";
 import { authzCheckService, type CheckAccessResult } from "@/services/authzCheck";
+import { permissionService } from "@/services/permissions";
 import type { Resource } from "@/services/resources";
 import type { User } from "@/services/users";
 import { usePermissions } from "@/hooks/usePermissions";
@@ -86,6 +87,26 @@ export function EffectiveAccessPanel({
   const [subjectLabel, setSubjectLabel] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [action, setAction] = useState("read");
+
+  // The tenant's real action vocabulary, for the Action box's suggestions.
+  //
+  // This list used to be four hard-coded strings — read/write/delete/admin —
+  // which is a plausible vocabulary and not necessarily *this* tenant's. An
+  // admin who had just created `invoices:read` saw a datalist offering `read`,
+  // typed it, and got "No grant" on a rule set that was in fact correct. The
+  // preview then looked broken while the only thing wrong was the question.
+  //
+  // Failure here is deliberately silent: the field stays free text, so a
+  // permissions read the caller is not allowed to make costs suggestions, not
+  // the panel.
+  const { data: permissions } = useQuery({
+    queryKey: ["permissions", "actions"],
+    queryFn: () => permissionService.list(),
+    retry: false,
+  });
+  const knownActions = Array.from(
+    new Set((permissions ?? []).map((p) => p.action)),
+  ).sort();
   const [scope, setScope] = useState("");
   const [result, setResult] = useState<CheckAccessResult | null>(null);
   const [error, setError] = useState("");
@@ -212,11 +233,17 @@ export function EffectiveAccessPanel({
                 placeholder="read"
               />
               <datalist id="eap-action-options">
-                <option value="read" />
-                <option value="write" />
-                <option value="delete" />
-                <option value="admin" />
+                {knownActions.map((a) => (
+                  <option key={a} value={a} />
+                ))}
               </datalist>
+              {knownActions.length > 0 && !knownActions.includes(action.trim()) && (
+                <p className="text-xs text-muted-foreground">
+                  No permission in this tenant has the action{" "}
+                  <code>{action.trim() || "(empty)"}</code>. A check for it can
+                  only come back &ldquo;No grant&rdquo;.
+                </p>
+              )}
             </div>
             <div className="space-y-2">
               <Label htmlFor="eap-scope">Scope (optional)</Label>

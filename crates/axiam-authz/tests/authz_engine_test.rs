@@ -1387,3 +1387,209 @@ async fn the_batch_path_applies_deny_override_identically() {
     assert_eq!(batched[0], AccessDecision::Allow);
     assert!(matches!(batched[1], AccessDecision::DeniedByRule(_)));
 }
+
+// ---------------------------------------------------------------------------
+// Reported regression: a role reaching a subject only through a group, with
+// everything resource-scoped, then with every scope removed.
+// ---------------------------------------------------------------------------
+//
+// Reproduces an operator report verbatim: build a resource hierarchy, create
+// permissions, put them on a new role scoped to the top resource's default
+// scope, assign that role to a group the user belongs to (scoped to the same
+// resource) — and get no grant at any level. Then remove every scope and still
+// get nothing.
+//
+// The two halves are separate tests because they failed for different reasons,
+// and only one of them was a bug.
+
+/// The scoped half. This is the configuration the operator described, and it
+/// resolves — so a `no_grant` here is about the *action string*, not the
+/// group, the hierarchy or the scope.
+#[tokio::test]
+async fn a_group_role_scoped_to_the_top_resource_grants_down_the_hierarchy() {
+    let (db, tenant_id, user_id) = setup().await;
+
+    // A three-level hierarchy: the operator's "top element" and two below it.
+    let top = create_resource(&db, tenant_id, "platform", None).await;
+    let middle = create_resource(&db, tenant_id, "platform/billing", Some(top)).await;
+    let leaf = create_resource(&db, tenant_id, "platform/billing/invoices", Some(middle)).await;
+
+    let group_repo = SurrealGroupRepository::new(db.clone());
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+
+    // "default scope" on the top resource.
+    let default_scope = scope_repo
+        .create(CreateScope {
+            tenant_id,
+            resource_id: top,
+            name: "default".into(),
+            description: "default scope".into(),
+        })
+        .await
+        .unwrap();
+
+    let group = group_repo
+        .create(CreateGroup {
+            tenant_id,
+            name: "platform-team".into(),
+            description: "platform team".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    group_repo
+        .add_member(tenant_id, user_id, group.id)
+        .await
+        .unwrap();
+
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "platform-operator".into(),
+            description: "operates the platform".into(),
+            // Not global: the operator scoped it to a resource instead.
+            is_global: false,
+        })
+        .await
+        .unwrap();
+
+    let perm = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "invoices:read".into(),
+            description: "read invoices".into(),
+        })
+        .await
+        .unwrap();
+
+    // The permission constrained to the top resource's default scope.
+    perm_repo
+        .grant_to_role_with_scopes(tenant_id, role.id, perm.id, vec![default_scope.id])
+        .await
+        .unwrap();
+
+    role_repo
+        .assign_to_group(tenant_id, group.id, role.id, AssignmentScope::resource(top))
+        .await
+        .unwrap();
+
+    let engine = make_engine(&db);
+    let check = |resource_id| AccessRequest {
+        tenant_id,
+        subject_scope: SubjectScope::Tenant,
+        subject_id: user_id,
+        action: "invoices:read".into(),
+        resource_id,
+        scope: None,
+    };
+
+    // The top resource itself, and both levels below it: a resource-scoped
+    // assignment cascades downward.
+    for (label, resource_id) in [("top", top), ("middle", middle), ("leaf", leaf)] {
+        assert_eq!(
+            engine.check_access(&check(resource_id)).await.unwrap(),
+            AccessDecision::Allow,
+            "the group-inherited role must reach the {label} resource",
+        );
+    }
+
+    // And the action really is the discriminator: the same subject, the same
+    // resource, one character different in the action, is a no-grant. This is
+    // the trap the report fell into — the preview panel's action box defaults
+    // to `read`, which is not the permission's name.
+    let mut wrong_action = check(top);
+    wrong_action.action = "read".into();
+    assert_eq!(
+        engine.check_access(&wrong_action).await.unwrap(),
+        AccessDecision::Deny("no permission grants action 'read'".into()),
+    );
+}
+
+/// The unscoped half — the real defect.
+///
+/// The operator then removed every scope, which is the documented way to say
+/// "everywhere": `AssignmentScope`'s `resource_id: None` is defined as "assigns
+/// the role globally — every resource in reach", and `RoleAssignment`'s as
+/// "the role was assigned globally (no resource scope)".
+///
+/// It granted nothing, anywhere, silently — `applicable_role_ids` accepted an
+/// unscoped assignment only when the *role* carried `is_global`, so an
+/// unscoped assignment of an ordinary role matched no resource at all. Not a
+/// narrower grant: no grant, with a "no applicable roles for this resource"
+/// that reads as if the resource were at fault.
+#[tokio::test]
+async fn an_unscoped_group_assignment_reaches_every_resource_in_the_tenant() {
+    let (db, tenant_id, user_id) = setup().await;
+
+    let top = create_resource(&db, tenant_id, "platform", None).await;
+    let leaf = create_resource(&db, tenant_id, "platform/invoices", Some(top)).await;
+    let unrelated = create_resource(&db, tenant_id, "warehouse", None).await;
+
+    let group_repo = SurrealGroupRepository::new(db.clone());
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+
+    let group = group_repo
+        .create(CreateGroup {
+            tenant_id,
+            name: "platform-team".into(),
+            description: "platform team".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    group_repo
+        .add_member(tenant_id, user_id, group.id)
+        .await
+        .unwrap();
+
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "platform-operator".into(),
+            description: "operates the platform".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+
+    let perm = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: "invoices:read".into(),
+            description: "read invoices".into(),
+        })
+        .await
+        .unwrap();
+
+    // No scope on the grant, and no resource on the assignment.
+    perm_repo
+        .grant_to_role(tenant_id, role.id, perm.id)
+        .await
+        .unwrap();
+    role_repo
+        .assign_to_group(tenant_id, group.id, role.id, AssignmentScope::global())
+        .await
+        .unwrap();
+
+    let engine = make_engine(&db);
+    for (label, resource_id) in [("top", top), ("leaf", leaf), ("unrelated", unrelated)] {
+        assert_eq!(
+            engine
+                .check_access(&AccessRequest {
+                    tenant_id,
+                    subject_scope: SubjectScope::Tenant,
+                    subject_id: user_id,
+                    action: "invoices:read".into(),
+                    resource_id,
+                    scope: None,
+                })
+                .await
+                .unwrap(),
+            AccessDecision::Allow,
+            "an unscoped assignment must reach the {label} resource",
+        );
+    }
+}

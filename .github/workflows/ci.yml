@@ -136,6 +136,17 @@ jobs:
       - name: Every Dockerfile COPY source survives .dockerignore
         run: python3 scripts/check-docker-context.py
 
+      # The Vault seeder's one invariant -- a secret already present is never
+      # regenerated -- was unit-tested from the day it was written, and the
+      # tests ran nowhere. They still passed while the shell around them turned
+      # every failed read into "the Vault is empty", which is how a live stack
+      # had `opaque_setup_key` rotated underneath it and answered every login
+      # with "AES-GCM decrypt: aead::Error" from then on. Cost of running them:
+      # about fifteen seconds, no toolchain. Cost of not: a password reset for
+      # every user in every tenant.
+      - name: Vault seeder never overwrites an existing secret
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' --verbose
+
   build:
     name: Build
     runs-on: ubuntu-latest

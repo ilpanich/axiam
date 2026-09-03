@@ -672,8 +672,14 @@ Add to `~/axiam-up.sh`, before `just prod-up`:
 export AXIAM__AUTH__VAULT_TOKEN="$(cat docker/.secrets/vault-server-token)"
 ```
 
-`prod-up` only mints its own token when it ran the init; with `VAULT_TOKEN`
-already exported it will not re-do the ceremony.
+`prod-up` re-runs the whole Vault ceremony on **every** invocation — it unseals,
+waits for the node to become active, re-seeds, rewrites the policy and issues a
+fresh scoped token — and then overrides `AXIAM__AUTH__VAULT_TOKEN` with that
+token. That is safe rather than merely tolerable: seeding preserves every
+existing secret and refuses to write at all when it cannot read what is there
+(`docs/deployment/vault.md` §5.5), and the policy write is idempotent. Exporting
+`AXIAM__AUTH__VAULT_TOKEN` in `~/axiam-up.sh` still works — it is what a raw
+`docker compose` needs — but it does not suppress the ceremony.
 
 ### 7.4 Prove the scope is what you think it is
 
@@ -1084,6 +1090,7 @@ In this order:
 | Certificate expired on a running server | The deploy hook never fired. | `sudo certbot renew --dry-run`; check `/etc/letsencrypt/renewal-hooks/deploy/axiam.sh` is executable and mode 700. The hourly poll should have caught it — check `AXIAM__SERVER__TLS__RELOAD_INTERVAL_SECS` is not `0`. |
 | Everyone rate-limited at once | `TRUSTED_HOPS` too high for your hop count. | §6.3. One proxy means `0`. |
 | Whole site 502 after a reboot | Vault came back sealed. | Configure auto-unseal (§7.1). Until then, unseal by hand with three shares. |
+| Login answers `500` — `Cryptography error: AES-GCM decrypt: aead::Error` — after a `just prod-up` on a stack that worked | A key in Vault no longer matches the one the datastore was sealed with. The commonest cause was the seeder reading a Vault that had been unsealed but had not yet taken leadership, treating the refused read as an empty Vault, and minting a full set of new keys over the live ones. The seeder now refuses instead, and `prod-up` waits for an active node. | The old key is almost certainly still in Vault — KV v2 keeps ten versions. `docs/deployment/vault.md` §8.1 has the `vault kv metadata get` / `vault kv patch` recovery, which needs no password resets. |
 | Caddy never gets a certificate | Port 80 unreachable, or DuckDNS points at the wrong IP. | Test from outside the LAN; otherwise DNS-01 (§4.4). |
 | `/health` returns the SPA HTML | Working as designed (§2). | Probe on the loopback (§8). |
 | Passkey enrolment fails with 401 | `AXIAM_WEBAUTHN_RP_ORIGIN` does not match the address bar. | Set it to `https://axiam-iam.duckdns.org` and restart. |

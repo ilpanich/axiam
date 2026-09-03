@@ -301,7 +301,7 @@ export const OPERATE_PAGES: DocPage[] = [
           },
           {
             title: "Seed the secrets",
-            body: "The seeding script **never regenerates a secret that already exists**, so re-running it after adding a key or after a restore is safe. That behaviour is unit-tested, precisely because getting it wrong would mean a password reset for every user.",
+            body: "The seeding script **never regenerates a secret that already exists**, so re-running it after adding a key or after a restore is safe. It also refuses to write at all when it cannot read what is already there — a sealed Vault, a node that has been unsealed but has not yet taken leadership, a revoked token — because a refused read is not a statement that the Vault is empty, and treating it as one costs a password reset for every user. Both properties are tested against a Vault that misbehaves in each of those ways.",
             code: "scripts/vault-seed.sh",
           },
           {

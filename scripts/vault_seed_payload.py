@@ -18,8 +18,28 @@ talking to Vault — and this does the one decision that carries real risk.
 
 Re-running the seeder is something an operator will do — after adding a key,
 after a restore, by accident. It must be safe.
+
+# Why the read is interpreted here too
+
+`build()` only preserves what it is *told* exists, so the guarantee above is
+worth exactly as much as the read that feeds it. The shell used to collapse
+every failed read — a sealed or standby Vault, a revoked token, a TLS error, a
+truncated body — into `{}`, which `build()` cannot tell apart from an empty
+Vault and answers by minting a full set of new keys. A read that fails and a
+write that then succeeds is all it takes to rotate `opaque_setup_key` under a
+live datastore, and the only symptom is every login answering
+
+    Cryptography error: AES-GCM decrypt: aead::Error
+
+[`interpret_read`] therefore lives here, next to the rule it protects: only an
+HTTP 200 (or a 404, which is Vault stating positively that the path holds
+nothing) may reach `build()`. Anything else aborts without writing.
+
+The version it returns is sent back as KV v2's `cas`, so even a correct read
+followed by somebody else's write cannot be overwritten blindly.
 """
 
+import argparse
 import json
 import os
 import secrets
@@ -128,16 +148,151 @@ def build(existing_fields, env, keygen=generate_ed25519_keypair):
     return out, minted
 
 
-def main() -> int:
-    raw = sys.argv[1] if len(sys.argv) > 1 else "{}"
+class SeedAbort(Exception):
+    """The read cannot be trusted, so nothing may be written.
+
+    Raised instead of falling back to an empty view of the Vault. Every
+    instance of this is a case where minting would be indistinguishable from
+    seeding a fresh deployment, and would silently rotate keys under a live
+    datastore.
+    """
+
+
+def interpret_read(http_status, body_text):
+    """Turn a KV v2 read into `(existing_fields, cas_version)`.
+
+    `http_status` is the numeric status of `GET <mount>/data/<path>`; `0` is
+    the conventional "the request never got an answer" (curl's `%{http_code}`
+    for a connection or TLS failure).
+
+    Only two statuses are a statement about the *contents* of the path:
+
+    - **200** — the path holds data. The fields are preserved and the write is
+      pinned to the version that was read.
+    - **404** — Vault is telling us positively that there is nothing to read.
+      For a path that never existed there is no metadata and the write is
+      pinned to version 0 ("create only"); for one whose latest version was
+      deleted, the metadata still carries the version to build on.
+
+    Everything else — 403 from a revoked or under-scoped token, 503 from a
+    sealed Vault, 500 from a node that has been unsealed but has not yet become
+    active, 0 from a TLS failure — says nothing about the contents, and is
+    raised as [`SeedAbort`].
+    """
+    if http_status not in (200, 404):
+        raise SeedAbort(
+            f"Vault answered HTTP {http_status or '(no response)'} to the read of "
+            "the existing secret. That is not a statement that the path is "
+            "empty, so seeding would mint a fresh set of keys over whatever is "
+            "actually there — refusing.\n"
+            "  503 = sealed, 500 = unsealed but not yet the active node, "
+            "403 = the token is revoked or lacks read on this path, "
+            "(no response) = the address or the CA bundle is wrong."
+        )
+
     try:
-        existing = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        existing = {}
-    fields = (existing.get("data") or {}).get("data") or {}
+        body = json.loads(body_text or "{}")
+    except json.JSONDecodeError as exc:
+        raise SeedAbort(
+            f"Vault's reply to the read was not JSON ({exc}). Refusing to treat "
+            "an unreadable answer as an empty Vault."
+        ) from exc
+
+    data = body.get("data") or {}
+    metadata = data.get("metadata") or {}
+    version = metadata.get("version")
+
+    if http_status == 404:
+        # No data either way; the version, when present, is what a deleted
+        # latest version leaves behind and is what `cas` must build on.
+        return {}, int(version) if isinstance(version, int) else 0
+
+    fields = data.get("data")
+    if not isinstance(fields, dict):
+        raise SeedAbort(
+            "Vault answered 200 but the reply carried no `data.data` object. "
+            "Refusing to treat a shape we do not recognise as an empty Vault."
+        )
+    if not isinstance(version, int):
+        raise SeedAbort(
+            "Vault answered 200 but the reply carried no `data.metadata.version`. "
+            "Without it the write cannot be pinned to the version that was read, "
+            "and an unpinned write is how secrets get overwritten."
+        )
+    return fields, version
+
+
+def assert_preserved(existing_fields, out, overwritable=()):
+    """Fail loudly if `build()` replaced a value that was already there.
+
+    Belt and braces over the property the unit tests already assert: it costs
+    nothing, and it runs on the operator's machine rather than in CI, which is
+    where an accident would actually be paid for. `overwritable` names the
+    fields whose replacement the caller has decided is intended — only ever the
+    JWT pair, and only in the two cases `main` documents.
+    """
+    clobbered = [
+        name
+        for name, value in existing_fields.items()
+        if value and name not in overwritable and name in out and out[name] != value
+    ]
+    if clobbered:
+        raise SeedAbort(
+            "Refusing to write: the payload would replace secrets that already "
+            "exist in Vault — " + ", ".join(sorted(clobbered)) + ". This is a bug "
+            "in the seeder, not an operator error; nothing has been written."
+        )
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Build the KV v2 payload that seeds AXIAM's secrets.",
+    )
+    parser.add_argument(
+        "--http-status",
+        type=int,
+        required=True,
+        help="numeric status of the GET that produced BODY (0 = no response)",
+    )
+    parser.add_argument(
+        "body",
+        nargs="?",
+        default="",
+        help="raw body of the KV v2 read",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        fields, cas = interpret_read(args.http_status, args.body)
+    except SeedAbort as exc:
+        sys.stderr.write(f"✗ {exc}\n")
+        return 1
 
     out, minted = build(fields, os.environ)
-    print(json.dumps({"data": out}))
+
+    # The JWT pair has two documented, intended replacement paths — a keypair
+    # supplied by the caller (how `just prod-up` moves the one it generated on
+    # disk into Vault), and a stored pair that is only half there, which is
+    # replaced wholesale because a private key from one pair beside a public key
+    # from another verifies nothing. Everything else — the eight keys and the
+    # pepper — has no such path, and a payload that would replace one is a bug
+    # in this file rather than an operator error.
+    supplied = any(os.environ.get(name.upper()) for name in PEM_NAMES)
+    stored_pair_complete = all(fields.get(name) for name in PEM_NAMES)
+    overwritable = PEM_NAMES if (supplied or not stored_pair_complete) else ()
+
+    try:
+        assert_preserved(fields, out, overwritable=overwritable)
+    except SeedAbort as exc:
+        sys.stderr.write(f"✗ {exc}\n")
+        return 1
+
+    # `cas` makes the write conditional on the version that was read: 0 creates
+    # the path and fails if it exists, N updates it and fails if anything wrote
+    # in between. A read this script trusted can still be stale by the time the
+    # write lands, and a blind overwrite of ten secrets is not something to
+    # leave to timing.
+    print(json.dumps({"options": {"cas": cas}, "data": out}))
     sys.stderr.write(
         "→ Minting: " + ", ".join(minted) + "\n"
         if minted

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `just prod-up` could rotate every Vault secret on a running stack
+
+  The seeder's one invariant — a secret already present is never regenerated —
+  was enforced by a pure function that has always been correct, behind a shell
+  line that was not: `curl --fail ... || echo '{}'` turned *every* failed read
+  into "the Vault is empty". Vault with Raft storage returns from `sys/unseal`
+  while the node is still a standby contending for leadership, and `prod-up`
+  seeded immediately after unsealing — so on a restart-driven run the read could
+  be refused, a full set of new keys minted, and the write land moments later
+  over the live ones. It reported `→ Seeded` and exited 0. From then on every
+  login answered `500` with
+
+      Cryptography error: AES-GCM decrypt: aead::Error
+
+  because `opaque_setup_key` no longer opened the OPAQUE records the datastore
+  held. A revoked or write-only token produced the same outcome deterministically.
+
+  `scripts/vault-seed.sh` now waits for an **active** node (not merely a
+  listening or unsealed one), passes the read's HTTP status to the payload
+  builder so that only `200` or `404` may be read as a statement about the
+  contents, and pins the write with KV v2's `cas` to the version it read.
+  Anything else stops the seeder with nothing written. `just prod-up` waits for
+  `sys/health` to answer `200` after unsealing, before it seeds.
+
+  A replaced key is usually recoverable: KV v2 keeps ten versions, and
+  `docs/deployment/vault.md` §8.1 has the `vault kv patch` restore, which costs
+  no password resets.
+
+### Changed
+
+- The Vault seeder's tests now run in CI
+
+  `scripts/test_vault_seed_payload.py` guarded "a password reset for every user
+  in every tenant" and ran nowhere. It is now part of the Architecture
+  Invariants job, alongside a new `scripts/test_vault_seed_shell.py` that drives
+  the real script against a Vault answering `500`, `503`, `403` and `404`, and
+  asserts on what was written rather than on an exit code.
+
 ## [1.0.0-beta10] - 2026-09-03
 
 ### Changed

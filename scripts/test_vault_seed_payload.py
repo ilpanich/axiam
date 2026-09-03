@@ -4,9 +4,22 @@
 Run: python3 -m unittest discover -s scripts -p 'test_*.py'
 """
 
+import contextlib
+import io
+import json
+import os
 import unittest
+from unittest import mock
 
-from vault_seed_payload import KEY_NAMES, PEM_NAMES, build
+from vault_seed_payload import (
+    KEY_NAMES,
+    PEM_NAMES,
+    SeedAbort,
+    assert_preserved,
+    build,
+    interpret_read,
+    main,
+)
 
 
 class PreservesExistingSecrets(unittest.TestCase):
@@ -195,6 +208,179 @@ class CoversEverySecretTheServerReads(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotEqual(a[name], b[name])
         self.assertNotEqual(a["auth_pepper"], b["auth_pepper"])
+
+
+class ARefusedReadIsNeverAnEmptyVault(unittest.TestCase):
+    """The regression that cost a live deployment every one of its keys.
+
+    `build()` cannot tell "the Vault is empty" from "the read failed" — both
+    arrive as `{}` — so the distinction has to be made before it is called. It
+    used to be made by `curl --fail || echo '{}'`, which is to say not at all:
+    a Vault that answered 500 because it had been unsealed a moment earlier and
+    had not yet taken leadership produced a full set of freshly minted keys, a
+    successful write over the real ones, and a `→ Seeded` on the way out. The
+    only symptom was every login answering, from then on,
+
+        Cryptography error: AES-GCM decrypt: aead::Error
+    """
+
+    OK_BODY = json.dumps(
+        {"data": {"data": {"opaque_setup_key": "keep"}, "metadata": {"version": 7}}}
+    )
+
+    def test_a_populated_read_is_preserved_and_pinned_to_its_version(self):
+        fields, cas = interpret_read(200, self.OK_BODY)
+        self.assertEqual(fields, {"opaque_setup_key": "keep"})
+        self.assertEqual(cas, 7)
+
+    def test_a_standby_node_aborts_rather_than_minting(self):
+        # HTTP 500 "local node not active but active cluster node not found" —
+        # what Raft-backed Vault answers between `sys/unseal` returning and the
+        # node winning leadership, which is exactly where `just prod-up` used
+        # to seed.
+        with self.assertRaises(SeedAbort):
+            interpret_read(500, '{"errors":["local node not active"]}')
+
+    def test_a_sealed_vault_aborts_rather_than_minting(self):
+        with self.assertRaises(SeedAbort):
+            interpret_read(503, '{"errors":["Vault is sealed"]}')
+
+    def test_a_revoked_or_underscoped_token_aborts_rather_than_minting(self):
+        # A token with write but not read on the path is the deterministic
+        # version of this bug: the read fails, the write succeeds.
+        with self.assertRaises(SeedAbort):
+            interpret_read(403, '{"errors":["permission denied"]}')
+
+    def test_no_answer_at_all_aborts_rather_than_minting(self):
+        # curl reports `000` for a connection refused or a TLS trust failure.
+        with self.assertRaises(SeedAbort):
+            interpret_read(0, "")
+
+    def test_a_body_that_is_not_json_aborts(self):
+        with self.assertRaises(SeedAbort):
+            interpret_read(200, "<html>proxy error</html>")
+
+    def test_a_200_without_a_data_object_aborts(self):
+        with self.assertRaises(SeedAbort):
+            interpret_read(200, '{"data":{"metadata":{"version":1}}}')
+
+    def test_a_200_without_a_version_aborts(self):
+        # Without it the write cannot be pinned, and an unpinned write is how
+        # secrets get overwritten.
+        with self.assertRaises(SeedAbort):
+            interpret_read(200, '{"data":{"data":{},"metadata":{}}}')
+
+    def test_the_abort_message_names_the_status(self):
+        with self.assertRaises(SeedAbort) as caught:
+            interpret_read(503, "{}")
+        self.assertIn("503", str(caught.exception))
+
+
+class AFourOhFourIsAPositiveStatement(unittest.TestCase):
+    """404 is the one failure status that *is* about the contents."""
+
+    def test_a_path_that_never_existed_is_created_with_cas_zero(self):
+        fields, cas = interpret_read(404, '{"errors":[]}')
+        self.assertEqual(fields, {})
+        # cas 0 means "create, and fail if anything is already there".
+        self.assertEqual(cas, 0)
+
+    def test_a_deleted_latest_version_builds_on_the_version_it_left(self):
+        body = json.dumps(
+            {"data": {"data": None, "metadata": {"version": 4, "deletion_time": "now"}}}
+        )
+        fields, cas = interpret_read(404, body)
+        self.assertEqual(fields, {})
+        self.assertEqual(cas, 4)
+
+    def test_an_empty_body_is_tolerated(self):
+        self.assertEqual(interpret_read(404, ""), ({}, 0))
+
+
+class TheWriteIsPinnedToTheReadThroughMain(unittest.TestCase):
+    """`main()` is what `vault-seed.sh` actually calls."""
+
+    def _run(self, status, body, env=None):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, env or {}, clear=False):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = main(["--http-status", str(status), body])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_good_read_emits_a_cas_pinned_payload(self):
+        body = json.dumps(
+            {"data": {"data": {"opaque_setup_key": "keep"}, "metadata": {"version": 3}}}
+        )
+        code, stdout, _ = self._run(200, body)
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["options"]["cas"], 3)
+        self.assertEqual(payload["data"]["opaque_setup_key"], "keep")
+
+    def test_a_refused_read_exits_non_zero_and_emits_no_payload(self):
+        # `vault-seed.sh` runs under `set -e`, so a non-zero exit here is what
+        # stops the write from happening at all.
+        code, stdout, stderr = self._run(503, '{"errors":["Vault is sealed"]}')
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("503", stderr)
+
+    def test_replacing_half_a_stored_jwt_pair_is_still_allowed(self):
+        # `build()` replaces an incomplete pair wholesale on purpose, so the
+        # clobber guard must not mistake it for the accident it exists to catch.
+        body = json.dumps(
+            {
+                "data": {
+                    "data": {"opaque_setup_key": "keep", "jwt_private_key_pem": "lonely"},
+                    "metadata": {"version": 1},
+                }
+            }
+        )
+        code, stdout, _ = self._run(200, body)
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout)
+        self.assertNotEqual(payload["data"]["jwt_private_key_pem"], "lonely")
+        self.assertEqual(payload["data"]["opaque_setup_key"], "keep")
+
+    def test_a_complete_stored_jwt_pair_is_protected_when_none_is_supplied(self):
+        # Nothing should replace it, and the guard is armed in case something
+        # one day tries to.
+        body = json.dumps(
+            {
+                "data": {
+                    "data": {
+                        "jwt_private_key_pem": "keep-priv",
+                        "jwt_public_key_pem": "keep-pub",
+                    },
+                    "metadata": {"version": 1},
+                }
+            }
+        )
+        code, stdout, _ = self._run(200, body, env={"JWT_PRIVATE_KEY_PEM": "", "JWT_PUBLIC_KEY_PEM": ""})
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout)["data"]["jwt_private_key_pem"], "keep-priv")
+
+
+class NothingAlreadyThereIsEverReplaced(unittest.TestCase):
+    """Belt and braces over `build()`, checked on the operator's machine."""
+
+    def test_an_untouched_payload_passes(self):
+        existing = {"opaque_setup_key": "keep"}
+        assert_preserved(existing, {"opaque_setup_key": "keep", "mfa_encryption_key": "new"})
+
+    def test_a_replaced_secret_is_refused(self):
+        with self.assertRaises(SeedAbort) as caught:
+            assert_preserved({"opaque_setup_key": "keep"}, {"opaque_setup_key": "clobbered"})
+        self.assertIn("opaque_setup_key", str(caught.exception))
+
+    def test_a_deliberately_supplied_jwt_key_is_allowed_through(self):
+        # The one intended overwrite: `just prod-up` moving an on-disk keypair
+        # into Vault.
+        assert_preserved(
+            {"jwt_private_key_pem": "old"},
+            {"jwt_private_key_pem": "from-disk"},
+            overwritable=("jwt_private_key_pem",),
+        )
 
 
 if __name__ == "__main__":

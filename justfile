@@ -495,6 +495,31 @@ prod-up:
             "$VAULT_ADDR/v1/sys/unseal" > /dev/null
     fi
 
+    # Unsealed is NOT ready. With Raft storage `sys/unseal` returns while the
+    # node is still a standby contending for leadership, and every request in
+    # that window — the seeder's read included — is refused. Seeding through it
+    # is what silently rotated `opaque_setup_key` under a live datastore and
+    # left every login answering "AES-GCM decrypt: aead::Error"; the seeder now
+    # refuses rather than mints, and this wait is why it does not have to.
+    #
+    # `sys/health` needs no token and says exactly this: 200 active, 429
+    # standby, 501 uninitialised, 503 sealed. Only 200 can serve a write.
+    echo "→ Waiting for Vault to become the active node"
+    VAULT_ACTIVE=0
+    for _ in $(seq 1 60); do
+        if [[ "$(curl -sS --cacert "$VAULT_CACERT" -o /dev/null \
+                    -w '%{http_code}' "$VAULT_ADDR/v1/sys/health" 2>/dev/null || true)" == "200" ]]; then
+            VAULT_ACTIVE=1
+            break
+        fi
+        sleep 1
+    done
+    if [[ "$VAULT_ACTIVE" -ne 1 ]]; then
+        echo "✗ Vault never became active. Nothing was seeded and nothing was" >&2
+        echo "  overwritten. Check: docker logs axiam-vault" >&2
+        exit 1
+    fi
+
     # Seeding runs with the root token: it needs create/update on
     # secret/data/axiam, which the server's policy deliberately does not have.
     # The seeding credential and the serving credential are two different

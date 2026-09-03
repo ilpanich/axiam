@@ -444,6 +444,25 @@ after adding a key, or after a restore, is safe. That behaviour is unit-tested
 (`scripts/test_vault_seed_payload.py`) precisely because getting it wrong would
 mean a password reset for every user.
 
+That guarantee rests on the read, so the read is treated as the load-bearing
+step it is:
+
+- It **waits for an active node**, not merely a listening or unsealed one.
+  Vault with Raft storage returns from `sys/unseal` while the node is still a
+  standby contending for leadership, and every request in that window is
+  refused. `sys/health` answers 200 only when the node can actually serve.
+- Only **HTTP 200 or 404** may reach the payload builder. A 403 from a revoked
+  or under-scoped token, a 503 from a sealed Vault, a 500 from a standby node,
+  a TLS failure — none of these say the path is empty, and the seeder now stops
+  rather than minting a fresh set of keys over whatever is there.
+- The write is **pinned with KV v2's `cas`** to the version that was read, so
+  even a correct read that has gone stale cannot be overwritten blindly.
+
+`scripts/test_vault_seed_shell.py` drives the real script against a Vault that
+misbehaves in each of those ways and asserts on what was written, because the
+failure this prevents lived in the shell around a correct pure function, not in
+the function.
+
 ### 5.6 Authenticate AXIAM — prefer Kubernetes auth over a static token
 
 A static token in `k8s/server/secret.yml` works and is what the manifests ship
@@ -603,3 +622,38 @@ over your PKCS#11 library and select it in
 | OPAQUE endpoints return `503` | One or both OPAQUE keys are absent. `just vault-status`, or check the startup warning naming which half is missing. |
 | `... must be 64 hex characters` | A secret in Vault is truncated or not hex. Caught at startup deliberately, rather than at the first login that needs it. |
 | Startup succeeds but a key is silently absent | Check the `secret provider ready` log line names the provider you expect. `env` is the default and a typo in `AXIAM__AUTH__SECRET_PROVIDER` would have been refused — but an unset variable falls back to `env` quietly by design. |
+| Every login answers `500` with `Cryptography error: AES-GCM decrypt: aead::Error`, on a deployment that worked yesterday | A key in Vault no longer matches the one the datastore was sealed with — `opaque_setup_key` for OPAQUE logins, `mfa_encryption_key` at the TOTP step. The data is fine; the key is wrong. **The old key is almost certainly still in Vault**: KV v2 keeps the last 10 versions. See §8.1. |
+
+### 8.1 Recovering a key that was replaced
+
+KV v2 is versioned, and a replaced secret is not a lost one. Ten versions are
+kept by default, so the key the datastore was sealed with is still there unless
+it has been overwritten ten times since.
+
+Find the version that still holds the working key:
+
+```sh
+export VAULT_ADDR=https://vault.example:8200
+vault kv metadata get secret/axiam          # every version and when it was written
+vault kv get -version=<n> secret/axiam      # the fields as they were then
+```
+
+Compare `opaque_setup_key` across versions — the one that changed on the day
+logins broke is the boundary. Then put the working value back **without
+disturbing anything that legitimately changed since**:
+
+```sh
+OLD=$(vault kv get -version=<n> -field=opaque_setup_key secret/axiam)
+vault kv patch secret/axiam opaque_setup_key="$OLD"
+```
+
+`patch` rather than `put`: it updates one field and leaves the rest of the
+current version alone. Restart the server so it re-reads its secrets, and the
+existing OPAQUE records open again — no password reset for anybody.
+
+If every kept version carries the same wrong key, the original is gone. There is
+no cryptographic recovery: every affected user needs a password reset (OPAQUE),
+and every affected TOTP enrolment has to be redone (`mfa_encryption_key`).
+Restoring a Raft snapshot taken before the overwrite is the only other route —
+`just vault-status` will not tell you, because it reports presence and never
+values.

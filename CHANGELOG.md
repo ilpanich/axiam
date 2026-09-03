@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta10] - 2026-09-03
+
+### Changed
+
+- Grant the server's Vault token the CA-key writes it needs (#412)
+
+- Bump qs
+
+- `just vault-status` reports missing capabilities, not only excess ones
+
+  It probed two paths and called anything beyond `read` over-scoped, so a token
+  that could not write a CA signing key reported `ok`. It now probes the CA-key
+  paths too, knows what each path is supposed to grant, and prints `MISSING`
+  with the capabilities a token lacks.
+
+- A refused Vault call names the policy rule it needs
+
+  A `403` from CA key custody now prints the missing stanza as HCL, addressed to
+  the mount and prefix that deployment configured. Other statuses are unchanged:
+  a sealed Vault is not a policy problem and is not reported as one.
+
 ### Fixed
 
 - CA generation refused with `403 Forbidden` on a Vault-backed deployment
@@ -23,21 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status reporter's tests. `just vault-policy` applies it to a **running**
   deployment: Vault evaluates policies per request, so nothing needs restarting,
   re-initialising or re-seeding, and nothing already stored is lost.
-
-### Changed
-
-- `just vault-status` reports missing capabilities, not only excess ones
-
-  It probed two paths and called anything beyond `read` over-scoped, so a token
-  that could not write a CA signing key reported `ok`. It now probes the CA-key
-  paths too, knows what each path is supposed to grant, and prints `MISSING`
-  with the capabilities a token lacks.
-
-- A refused Vault call names the policy rule it needs
-
-  A `403` from CA key custody now prints the missing stanza as HCL, addressed to
-  the mount and prefix that deployment configured. Other statuses are unchanged:
-  a sealed Vault is not a policy problem and is not reported as one.
 
 ## [1.0.0-beta09] - 2026-09-02
 

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `scripts/mass-tag.sh` now regenerates each SDK's CONTRACT §27 management
+  surface after re-vendoring the spec into it, instead of copying the artifacts
+  and leaving the code derived from them behind. A release that carries schema
+  changes — as v1.0.0-beta09 did, with the WebAuthn user-verification policy —
+  previously tagged every SDK with a surface its own `§27 management surface
+  drift-check` rejects. Only the Swift, C and C++ SDKs surfaced it, because
+  they are the only three whose drift-check runs on a tag push; the other eight
+  gate that job to `pull_request` and published a stale surface.
+
 ## [1.0.0-beta10] - 2026-09-03
 
 ### Changed

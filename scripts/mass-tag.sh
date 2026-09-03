@@ -108,6 +108,32 @@
 # tagged. Tag the platform first (its own bump re-stamps the spec), then the
 # SDKs. A partial run like `--repos axiam-go-sdk` on a stale clone fails loudly
 # instead of vendoring a version nobody is releasing.
+#
+# AND THE CODE GENERATED FROM THAT SPEC IS REGENERATED (regen_sdk_management).
+# Re-vendoring alone is not enough, and believing otherwise is what shipped a
+# broken beta09. Each SDK derives its CONTRACT §27 management surface from the
+# vendored management-registry.json and openapi.json, and every SDK's CI has a
+# "§27 management surface drift-check" job that fails when the committed surface
+# and those inputs disagree. A release that copies a spec carrying schema
+# changes but does not re-run the generator therefore tags a tree its own CI
+# rejects.
+#
+# That is not hypothetical. 1.0.0-beta09 re-vendored a spec carrying the
+# WebAuthn user-verification policy (SecuritySettings.webauthn, required, plus
+# webauthn_user_verification on the settings requests). Eight SDKs happened to
+# be current because a contract pull request had regenerated them days earlier;
+# axiam-swift-sdk, axiam-c-sdk and axiam-cplusplus-sdk had not been, so all
+# three went red on the tag — and stayed red through beta10, because a pure
+# version bump changes nothing and the broken tree simply carried forward.
+# Worse, only axiam-c-sdk's CI runs on branches at all: the C++ and Swift
+# workflows fire on tags and pull requests only, so for those two the failure
+# was undiscoverable before the release it broke.
+#
+# The old note on regen_management_registry said a version bump moves no SDK's
+# generated surface. That is true of a bump in isolation and false of a release,
+# which also re-vendors every schema change accumulated since the previous tag.
+# The distinction is invisible at the call site, so the generator now runs
+# unconditionally and reports "already current" in the common case.
 # Each SDK's release workflow asserts the pushed tag equals the manifest
 # version; the bump above is what makes that assertion pass.
 #
@@ -599,8 +625,11 @@ restamp_openapi_digest() {
 # rather than substituted, because that is the file's contract -- its $comment
 # says "GENERATED ... Do not edit by hand".
 #
-# The operation and namespace counts do not change on a version bump, so no
-# SDK's generated surface moves; only the two metadata fields do.
+# The operation and namespace counts do not change on a version BUMP, so this
+# call alone moves no SDK's generated surface -- only the two metadata fields.
+# Do not read that as "a release moves no generated surface": the release also
+# re-vendors the spec, schema changes and all, which is precisely what
+# regen_sdk_management exists to absorb.
 regen_management_registry() {
   local file="sdks/management-registry.json" gen="scripts/gen-management-registry.py"
   [[ -f "$file" && -f "$gen" ]] || return 0
@@ -671,6 +700,121 @@ revendor_spec_artifacts() {
   fi
 }
 
+# The command that regenerates a repo's CONTRACT §27 management surface from its
+# vendored management-registry.json and openapi.json, echoed for repo $1; empty
+# for a repo that has no such surface. Run from inside the repo's directory.
+#
+# A `case` rather than an associative array on purpose: nothing else in this
+# script needs bash 4, and the release operator's shell is not ours to choose.
+#
+# Every SDK repo is listed, including the ones whose answer is "the same as
+# everybody else", so the table can be read against SDK_REPOS and a repo that
+# is missing from it is a visible hole rather than a silent skip. The three
+# odd spellings are load-bearing: axiam-rust-sdk keeps its generator under
+# tools/, axiam-swift-sdk under a capitalised Scripts/, and the Go and
+# TypeScript generators are written in their own languages rather than Python.
+sdk_management_generator() {
+  case "$1" in
+    axiam-rust-sdk)        printf 'python3 tools/gen_management.py' ;;
+    axiam-typescript-sdk)  printf 'node scripts/gen-management.mjs' ;;
+    axiam-go-sdk)          printf 'go run ./internal/cmd/genmanagement' ;;
+    axiam-swift-sdk)       printf 'python3 Scripts/gen_management.py' ;;
+    axiam-python-sdk|axiam-java-sdk|axiam-csharp-sdk|axiam-php-sdk|\
+    axiam-kotlin-sdk|axiam-c-sdk|axiam-cplusplus-sdk)
+                           printf 'python3 scripts/gen_management.py' ;;
+    *)                     printf '' ;;
+  esac
+}
+
+# Echo one "<path>\t<checksum>" line per dirty path in the working tree, sorted.
+#
+# Used to bracket a generator run so only what THAT run wrote is staged. `git
+# diff` cannot answer this: earlier steps of the same release (the re-vendor,
+# the version rewrites) have already dirtied files, and an operator may have
+# unrelated local edits that a release must not sweep into its commit. Content
+# is checksummed rather than trusted to porcelain status, so a generated file
+# that was ALREADY modified before the run is still detected when the generator
+# changes it again.
+dirty_manifest() {
+  git status --porcelain=v1 -uall 2>/dev/null | sed 's/^...//' | sort -u |
+    while IFS= read -r pth; do
+      [[ -n "$pth" ]] || continue
+      if [[ -f "$pth" ]]; then
+        printf '%s\t%s\n' "$pth" "$(cksum <"$pth")"
+      else
+        printf '%s\tabsent\n' "$pth"
+      fi
+    done
+}
+
+# Regenerate repo $1's §27 management surface from the artifacts just
+# re-vendored into it, and stage whatever that produced.
+#
+# Runs from inside the repo's directory. Populates BUMP_FILES.
+#
+# A missing generator means "this repo has no generated surface" and is a quiet
+# skip. A generator that is present but cannot RUN is fatal: the alternative is
+# tagging a tree whose own CI will reject it, which is the failure this function
+# was added to prevent, and a release that silently skips its only correctness
+# step is worse than one that stops and asks for a toolchain. So `go run` needs
+# Go on PATH and the TypeScript generator needs node -- on the machine that cuts
+# releases, which already needs git, gpg and python3.
+regen_sdk_management() {
+  local repo="$1" gen
+  gen="$(sdk_management_generator "$repo")"
+  [[ -n "$gen" ]] || return 0
+
+  # The generator's own path must exist (a file for the Python and node
+  # generators, a package directory for `go run`). Its interpreter is checked
+  # separately so the two failures read differently. Both are fatal: the table
+  # above says this repo HAS a generated surface, so a clone that cannot
+  # produce one is a broken clone, not a repo to skip past.
+  local genfile="${gen##* }"
+  [[ -e "$genfile" ]] ||
+    die "$repo: $genfile is missing, so its §27 management surface cannot be
+     regenerated. Either the clone is incomplete, or the generator moved and
+     sdk_management_generator() in this script still points at the old path."
+
+  if $DRY_RUN; then
+    printf '      [dry-run] §27 surface: regenerate via %s\n' "$gen"
+    return 0
+  fi
+
+  local tool="${gen%% *}"
+  command -v "$tool" >/dev/null 2>&1 ||
+    die "$repo needs '$tool' to regenerate its §27 management surface ($gen).
+     Install it, or the tag would carry a surface its own drift-check rejects."
+
+  local before after
+  before="$(dirty_manifest)"
+  # shellcheck disable=SC2086  # the table's commands are ours, and word-split
+  # is how a multi-word command line becomes argv here.
+  $gen >/dev/null || die "$gen failed in $repo; its §27 surface would be left stale"
+  after="$(dirty_manifest)"
+
+  # The SYMMETRIC difference, not just what is new. A generated file that was
+  # stale before the run and correct after it is clean afterwards, so it leaves
+  # the dirty set entirely -- looking only at what "after" gained would miss
+  # exactly the repair this function exists to make. `uniq -u` keeps the lines
+  # that appear in one manifest and not the other, in either direction; a path
+  # whose checksum merely changed contributes two such lines, hence `sort -u`.
+  local touched
+  touched="$( { printf '%s\n' "$before"; printf '%s\n' "$after"; } |
+              grep -v '^$' | sort | uniq -u | cut -f1 | sort -u )"
+  if [[ -z "$touched" ]]; then
+    printf '      §27 surface: already current\n'
+    return 0
+  fi
+
+  local f count=0
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    BUMP_FILES+=("$f")
+    count=$((count + 1))
+  done <<<"$touched"
+  printf '      §27 surface: regenerated from the re-vendored spec (%d file(s))\n' "$count"
+}
+
 bump_versions() {
   local repo="$1" version="$2" old
   BUMP_FILES=()
@@ -687,6 +831,13 @@ bump_versions() {
   # from. The platform repo is skipped: it is the source.
   if [[ "$repo" != "$PLATFORM_REPO" && "$repo" != "$OPAQUE_TARGET" ]]; then
     revendor_spec_artifacts "$version"
+    # MUST follow the re-vendor: it regenerates FROM the artifacts that call
+    # just wrote. Unconditional rather than gated on whether the re-vendor
+    # reported a change, because the surface can also be stale from a merge
+    # that moved the artifacts without regenerating -- which is how beta09
+    # went out. "Did this release change the spec" is not the question; "does
+    # the committed surface match the spec being tagged" is.
+    regen_sdk_management "$repo"
   fi
 
   case "$repo" in

@@ -79,6 +79,12 @@ fn test_auth_config() -> AuthConfig {
         .into(),
         access_token_lifetime_secs: 900,
         jwt_issuer: "https://axiam.test".into(),
+        // R-3: since the deployment-origin rule applies to all four federated
+        // start paths (not only the cross-site two), a fixture whose SPA is on
+        // a different origin than the issuer has to name it — exactly what a
+        // real split-origin deployment does. Naming it here also keeps this
+        // suite honest about the migration the change asks of operators.
+        sso_spa_origins: vec!["https://spa.example.test".into()],
         federation_encryption_key: Some(TEST_FED_ENC_KEY),
         ..AuthConfig::default()
     }
@@ -1832,6 +1838,225 @@ async fn a_config_from_another_tenant_cannot_be_started() {
             "org_slug": a.org_slug,
             "federation_config_id": created["id"],
             "redirect_uri": "https://spa.example.test/auth/sso/callback",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+// ---------------------------------------------------------------------------
+// R-3 — the same rule on the OIDC and OAuth2 start paths
+// ---------------------------------------------------------------------------
+
+/// An `AuthConfig` whose only configured SPA origin is the issuer's.
+///
+/// The shipped same-origin topology. `test_auth_config` names
+/// `https://spa.example.test` as an extra origin because most of this suite
+/// drives a split-origin fixture; these tests need the *default* posture to
+/// assert what an unlisted origin gets.
+fn same_origin_auth_config() -> AuthConfig {
+    AuthConfig {
+        sso_spa_origins: Vec::new(),
+        ..test_auth_config()
+    }
+}
+
+/// R-3: the deployment-origin rule now governs the OIDC start path too.
+///
+/// Until this change the OIDC path applied only the scheme check and leaned on
+/// the provider's registered-redirect comparison. That comparison is real, but
+/// it is only as strict as each provider's registration hygiene — several
+/// accept wildcard or prefix registrations — and it is a control AXIAM neither
+/// owns nor can inspect. The rule the server *does* own is now uniform across
+/// all four start operations, with the provider's check behind it as a second,
+/// independent layer.
+///
+/// Covers the wiring, in the five shapes the remediation plan §4 names; the
+/// decision itself is unit-tested in `handlers::federation_login`.
+#[actix_rt::test]
+async fn an_oidc_login_may_not_name_a_foreign_redirect_target() {
+    let f = setup("oidc-origin").await;
+    let auth = same_origin_auth_config();
+    let app = test_app!(f.db.clone(), auth.clone());
+
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "oidc-origin-admin",
+        json!({
+            "provider": "Google",
+            "provider_kind": "google",
+            "protocol": "OidcConnect",
+            "metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+            "client_id": "cid",
+            "client_secret": "secret",
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+    let config_id = created["id"].as_str().unwrap().to_string();
+
+    let start = |redirect_uri: &str| {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/oidc/start")
+            .set_json(json!({
+                "org_slug": f.org_slug,
+                "tenant_slug": f.tenant_slug,
+                "federation_config_id": config_id,
+                "redirect_uri": redirect_uri,
+            }))
+            .to_request()
+    };
+
+    // 1. An origin this deployment does not own is refused, and the refusal
+    //    names the knob — because the operator, not the caller, is who can fix
+    //    it.
+    let resp = test::call_service(&app, start("https://attacker.example/catch")).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.to_string().contains("SSO_SPA_ORIGINS"),
+        "the refusal must name the knob an operator would need: {body}"
+    );
+
+    // 2. Same host, different port. Origins compare scheme+host+port, so this
+    //    is a different party; a host-only comparison would have let it past,
+    //    and on a shared host a second port is a second application.
+    let resp = test::call_service(&app, start("https://axiam.test:8443/auth/sso/callback")).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(status, 400, "a port is part of the origin: {body}");
+    assert!(body.to_string().contains("SSO_SPA_ORIGINS"), "{body}");
+
+    // 3. The deployment's own origin gets past this check. It fails later, on
+    //    the IdP metadata fetch, which is the point: the origin is no longer
+    //    what stops it.
+    let resp = test::call_service(&app, start("https://axiam.test/auth/sso/callback")).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        !body.to_string().contains("SSO_SPA_ORIGINS"),
+        "the deployment's own origin must not be refused: {status} {body}"
+    );
+
+    // 4. An origin the operator listed in AXIAM__AUTH__SSO_SPA_ORIGINS gets
+    //    past it too — the documented migration for a split-origin deployment.
+    let split = AuthConfig {
+        sso_spa_origins: vec!["https://app.example.test".into()],
+        ..same_origin_auth_config()
+    };
+    let split_app = test_app!(f.db.clone(), split);
+    let resp = test::call_service(&split_app, start("https://app.example.test/cb")).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        !body.to_string().contains("SSO_SPA_ORIGINS"),
+        "a configured origin must be accepted: {status} {body}"
+    );
+
+    // 5. Resolution still comes first: an unknown organization answers the
+    //    uniform 401 and never reveals that a redirect_uri check exists (D-22).
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/federation/oidc/start")
+        .set_json(json!({
+            "org_slug": "no-such-org-at-all",
+            "federation_config_id": config_id,
+            "redirect_uri": "https://attacker.example/catch",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+/// R-3, the OAuth2 half. Same five shapes; see the OIDC test above for why the
+/// provider's own registered-redirect check is a second layer rather than the
+/// only one.
+#[actix_rt::test]
+async fn an_oauth2_login_may_not_name_a_foreign_redirect_target() {
+    let f = setup("oauth2-origin").await;
+    let auth = same_origin_auth_config();
+    let app = test_app!(f.db.clone(), auth.clone());
+
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "oauth2-origin-admin",
+        json!({
+            "provider": "GitHub",
+            "provider_kind": "github",
+            "protocol": "OAuth2",
+            "client_id": "gh-client",
+            "client_secret": "gh-secret",
+            "authorization_endpoint": "https://github.example/login/oauth/authorize",
+            "token_endpoint": "https://github.example/token",
+            "userinfo_endpoint": "https://github.example/user",
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+    let config_id = created["id"].as_str().unwrap().to_string();
+
+    let start = |redirect_uri: &str| {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/oauth2/start")
+            .set_json(json!({
+                "org_slug": f.org_slug,
+                "tenant_slug": f.tenant_slug,
+                "federation_config_id": config_id,
+                "redirect_uri": redirect_uri,
+            }))
+            .to_request()
+    };
+
+    let resp = test::call_service(&app, start("https://attacker.example/catch")).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.to_string().contains("SSO_SPA_ORIGINS"),
+        "the refusal must name the knob an operator would need: {body}"
+    );
+
+    let resp = test::call_service(&app, start("https://axiam.test:8443/cb")).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(status, 400, "a port is part of the origin: {body}");
+
+    // The issuer's own origin builds a real authorize URL: this path needs no
+    // network, so it reaches 200 rather than merely getting past the check.
+    let resp = test::call_service(&app, start("https://axiam.test/auth/sso/callback")).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(
+        status, 200,
+        "the deployment's own origin must be served: {body}"
+    );
+
+    let split = AuthConfig {
+        sso_spa_origins: vec!["https://app.example.test".into()],
+        ..same_origin_auth_config()
+    };
+    let split_app = test_app!(f.db.clone(), split);
+    let resp = test::call_service(&split_app, start("https://app.example.test/cb")).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(status, 200, "a configured origin must be accepted: {body}");
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/federation/oauth2/start")
+        .set_json(json!({
+            "org_slug": "no-such-org-at-all",
+            "federation_config_id": config_id,
+            "redirect_uri": "https://attacker.example/catch",
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;

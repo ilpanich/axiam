@@ -90,8 +90,24 @@ pub struct AuthConfig {
     /// Set it when the SPA is served from a different host than the API (for
     /// example `https://app.example.com` against `https://api.example.com`).
     /// Values are compared as **origins**: scheme, host and port, with the path
-    /// ignored. It has no effect on the OIDC and OAuth2 flows, whose
-    /// `redirect_uri` is registered at the provider and checked there.
+    /// ignored — so `https://app.example.com` does not admit
+    /// `https://app.example.com:8443`.
+    ///
+    /// # Since R-3: all four flows, not two
+    ///
+    /// This used to have no effect on the OIDC and OAuth2 flows, whose
+    /// `redirect_uri` is registered at the provider and checked there. It now
+    /// governs those two as well. The provider's check is a real control, but
+    /// only as strict as each provider's registration hygiene — several accept
+    /// wildcard or prefix registrations — and it is not a control AXIAM owns or
+    /// can inspect; it stays as a second, independent layer behind this one.
+    ///
+    /// **This is the one thing R-3 can break.** A deployment whose SPA lives on
+    /// an origin other than the issuer's, signing in through OIDC or OAuth2
+    /// providers, worked without this variable and now needs it — the same
+    /// requirement the SAML and Apple flows have imposed since beta08. The
+    /// shipped same-origin topology needs nothing. The `400` names this
+    /// variable, so the failure says what to set.
     pub sso_spa_origins: Vec<String>,
     /// Optional pepper prepended to passwords before Argon2id verification.
     /// Wrapped in `SecretString` so `Debug`/logging never leaks it by

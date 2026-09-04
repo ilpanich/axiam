@@ -209,6 +209,12 @@ fn test_auth_config() -> AuthConfig {
         jwt_public_key_pem: public_key,
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
+        // R-3: since the deployment-origin rule applies to all four federated
+        // start paths (not only the cross-site two), a fixture whose SPA is on
+        // a different origin than the issuer has to name it — exactly what a
+        // real split-origin deployment does. Naming it here also keeps this
+        // suite honest about the migration the change asks of operators.
+        sso_spa_origins: vec!["https://spa.example.com".into()],
         federation_encryption_key: Some(TEST_FED_ENC_KEY),
         ..AuthConfig::default()
     }

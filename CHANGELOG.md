@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The deployment-origin rule now guards every federated sign-in start, not two of four
+
+  `validate_redirect_uri` accepts any absolute `https://` URL, and until now that
+  was the only server-side rule on the OIDC and plain-OAuth2 federation start
+  paths. The argument for leaving it there was that the identity provider is
+  handed the same `redirect_uri` and compares it against its registered set. It
+  does — but that backstop is only as strict as each provider's registration
+  hygiene, and several providers accept wildcard or prefix registrations. It is
+  also a control AXIAM does not own and cannot inspect. The rule the server
+  *does* own — `require_deployment_spa_origin`, added at beta08 for the SAML and
+  Apple flows, where the provider never sees the SPA URI at all — is now applied
+  uniformly to all four start operations and at the session mint. The provider's
+  own check remains, as a second and independent layer.
+
+  **This can break one class of deployment.** If your SPA is served from an
+  origin other than your issuer's *and* you sign in through OIDC or plain-OAuth2
+  providers, those flows now answer `400` until you set
+  `AXIAM__AUTH__SSO_SPA_ORIGINS` to the SPA's origin. That is the same
+  requirement the SAML and Apple flows have imposed since beta08, the `400` names
+  the variable, and the shipped same-origin topology needs nothing. Origins are
+  compared as scheme + host + port, so a different port on the same host is a
+  different origin and must be listed.
+
+  The `TODO(T19.14)` that proposed a per-`FederationConfig` registered-redirect
+  allowlist is retired rather than carried over: the deployment-origin rule
+  already answers where a code may go, and a second list to keep in sync is a
+  second place to get wrong.
+
+  `sdks/CONTRACT.md` §12.1 rule 12a widened accordingly (contract 1.39) —
+  additive and restrictive server-side only, exactly as 12a itself was. **No SDK
+  code changes**: an SDK that passes the deployment's own callback URL is
+  unaffected.
+
+  Narrows T-219. `claude_dev/remediation-plan-2026-09-04.md` R-3.
+
 ## [1.0.0-beta11] - 2026-09-04
 
 ### Changed

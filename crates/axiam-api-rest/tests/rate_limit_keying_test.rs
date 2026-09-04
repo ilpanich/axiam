@@ -371,6 +371,23 @@ async fn the_old_off_by_one_advice_collapses_every_client_into_one_bucket() {
 // R-4 — a discarded X-Forwarded-For is observable (narrows T-212/T-233)
 // ---------------------------------------------------------------------------
 
+/// Serializes the three counter tests below.
+///
+/// `axiam_rate_limit_xff_discarded_total` is one process-wide atomic, and
+/// these tests measure a delta across one extraction. Without this, a test
+/// reading `before`, extracting, and reading `after` can have another test's
+/// increment land in between — which is not hypothetical: it is what turned
+/// this suite red on CI while it passed locally, four runs in six once the
+/// interleaving was forced.
+///
+/// A `std::sync::Mutex` rather than a `tokio` one on purpose: `#[actix_web::test]`
+/// bodies are futures driven to completion on one thread, and the guard is held
+/// across no await point that could yield to another test.
+fn counter_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// The fallback above is correct and stays. What R-4 adds is that it is no
 /// longer *silent*.
 ///
@@ -379,11 +396,15 @@ async fn the_old_off_by_one_advice_collapses_every_client_into_one_bucket() {
 /// shared one bucket, and nothing in any log said so. The symptom is "the rate
 /// limit is mysteriously strict", which an operator fixes by raising the limit.
 ///
-/// These assert on **deltas**, not absolute values: the counter is
-/// process-global and every test in this binary shares it, so only the change
-/// across one extraction is a meaningful measurement.
+/// These assert on **deltas**, not absolute values, and they take
+/// [`counter_lock`] first: the counter is process-global, `cargo test` runs
+/// these on threads of one process, and a read-modify-read across another
+/// test's increment is exactly the interleaving that made this suite fail on
+/// CI and pass locally. A test guarding an observability signal must not have
+/// an intermittent failure of its own.
 #[actix_web::test]
 async fn a_discarded_xff_is_counted() {
+    let _guard = counter_lock();
     let extractor = XForwardedForKeyExtractor::with_trusted_hops(3);
     let before = xff_metrics::xff_discarded();
 
@@ -407,6 +428,7 @@ async fn a_discarded_xff_is_counted() {
 /// look identical to a misconfiguration and mean nothing.
 #[actix_web::test]
 async fn a_trusted_xff_is_not_counted() {
+    let _guard = counter_lock();
     let extractor = XForwardedForKeyExtractor::with_trusted_hops(1);
     let before = xff_metrics::xff_discarded();
 
@@ -429,6 +451,7 @@ async fn a_trusted_xff_is_not_counted() {
 /// it would bury the signal under every direct request the deployment serves.
 #[actix_web::test]
 async fn a_request_with_no_xff_is_not_counted() {
+    let _guard = counter_lock();
     let extractor = XForwardedForKeyExtractor::with_trusted_hops(3);
     let before = xff_metrics::xff_discarded();
 

@@ -298,6 +298,11 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "p",
         text: "AXIAM's own gRPC interceptor refuses `jkt`-bound tokens, because a Tonic interceptor sees neither the HTTP method nor the URI a DPoP proof is bound to. That is the server's limitation and should not be copied: an SDK guarding a real endpoint knows both, so it can and should verify the proof.",
       },
+      { type: "h", id: "publishing", text: "Publishing gRPC outside the mesh" },
+      {
+        type: "p",
+        text: "The listener binds loopback in Compose and ClusterIP in Kubernetes. That is a default rather than a prohibition — it may be published, but only through the same edge as REST, on 443, path-matched, and as an allowlist of the services you actually want reachable. A bare port-forward is not a supported shape: without a proxy appending the real peer, a client keys its own rate-limit bucket and no setting repairs it. [Production hardening](#/docs/hardening#grpc) has the rule, the `AXIAM__GRPC__STRICT_REVOCATION` recommendation and the certificate-reload caveat.",
+      },
       { type: "h", id: "codegen", text: "Generating your own stubs" },
       {
         type: "p",

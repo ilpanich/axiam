@@ -1279,48 +1279,51 @@ docker logs axiam-server 2>&1 | grep -i 'grpc.*TLS'
 # not:  gRPC TLS is DISABLED — set AXIAM__GRPC_TLS_CERT_PATH + …
 ```
 
-**One honest caveat.** The REST listener is TLS 1.3 *only*, because
-`crates/axiam-server/src/tls.rs` builds its own rustls `ServerConfig` restricted
-to that version. The gRPC listener is not: tonic 0.14's `ServerTlsConfig` exposes
-no protocol-version knob, so that leg is TLS 1.3-capable but 1.2-negotiable, and
-forcing it would mean hand-rolling the accept loop. On this topology the only
-client of that leg is Caddy, on loopback, and it negotiates 1.3. The public half
-of the connection is Caddy's own TLS — pin that instead if you want the guarantee
-end to end, with `protocols tls1.3` inside the `tls` directive of §4.3. It
-applies to the whole site, browsers included — every browser released since late
-2018 speaks TLS 1.3, so the practical cost is nil.
+**Both listeners are TLS 1.3 only** (since beta12 / R-1). They were not always:
+the gRPC leg used to be 1.3-*capable* but 1.2-negotiable, because tonic's
+`ServerTlsConfig` exposed no protocol-version knob. It no longer terminates TLS
+— the listener does the handshake itself over `tokio-rustls` and hands tonic an
+already-encrypted stream — so the same `with_protocol_versions(&[&TLS13])` pin
+the REST listener has always had now applies here too. Nothing to configure and
+nothing to work around.
 
-### 14.5 Renewal: the hook needs a fourth step
+Pinning `protocols tls1.3` inside the `tls` directive of §4.3 is still worth
+doing, for a different reason: that governs the **public** half of the
+connection, which is Caddy's own TLS and has nothing to do with either backend
+listener. It applies to the whole site, browsers included — every browser
+released since late 2018 speaks TLS 1.3, so the practical cost is nil.
 
-The REST listener re-reads its certificate on `SIGHUP` and hourly. **The gRPC
-listener does neither.** `server.rs` reads both PEM files once, at startup, hands
-them to tonic, and there is no reload path and no poll anywhere in that crate.
-Left alone, the gRPC leg keeps serving the old leaf after certbot renews at day
-60 and starts failing handshakes at day 90 — while REST keeps working. That is
-the worst version of this failure, because it presents as a gRPC bug.
+### 14.5 Renewal: nothing extra to do (since beta12)
 
-So when gRPC TLS is on, the deploy hook of §4.5 must restart the container.
-Replace its step 3 with:
+**`SIGHUP` now covers both listeners.** Until beta12 it did not: `server.rs`
+read both PEM files once at startup and handed them to tonic, with no reload
+path and no poll anywhere in that crate, so the gRPC leg kept serving the old
+leaf after certbot renewed at day 60 and started failing handshakes at day 90 —
+while REST kept working, which made it present as a gRPC bug. This section
+therefore carried a fourth hook step that restarted the container.
+
+R-1 removed the need for it. The gRPC listener resolves its leaf through the
+**same** `ReloadableCertResolver` the REST listener uses, because both are
+pointed at the same two files (that is the topology this guide sets up — "there
+is no second certificate and there must not be", §14.4). One `SIGHUP` reaches
+both, as does the hourly poll. The deploy hook of §4.5 needs **no gRPC-specific
+step**:
 
 ```bash
-# 3. Tell the server. REST re-reads the pair on SIGHUP and installs it behind an
-#    ArcSwap that rustls consults per handshake — no restart, no dropped request.
+# 3. Tell the server. Both listeners re-read the pair on SIGHUP and install it
+#    behind an ArcSwap that rustls consults per handshake — no restart, no
+#    dropped request, on REST and on gRPC alike.
 docker kill -s HUP axiam-server 2>/dev/null || true
-
-# 4. gRPC only (§14). The tonic listener reads its PEM once at startup and has no
-#    reload path, so the renewed leaf reaches it through a restart and only
-#    through a restart. That is ~15 seconds of downtime every 60 days, at a
-#    moment you control, against a gRPC listener that otherwise expires
-#    silently. Delete this line if you turn AXIAM__GRPC_TLS_* back off.
-docker restart axiam-server >/dev/null 2>&1 || true
 ```
 
-Keep the `SIGHUP` even though the restart makes it redundant: removing the
-restart line then leaves a correct hook behind rather than a broken one.
+If your hook still carries the `docker restart axiam-server` line from an
+earlier edition of this guide, it is now redundant rather than wrong: delete it
+and save yourself ~15 seconds of downtime every 60 days. If you would rather not
+touch a hook that works, leaving it costs only that.
 
-Rehearse it — `sudo /etc/letsencrypt/renewal-hooks/deploy/axiam.sh`, then re-run
-the §14.7 call. A hook whose new step has never run is the same trap the note in
-§4.5 warns about.
+Rehearse whatever you end up with — `sudo /etc/letsencrypt/renewal-hooks/deploy/axiam.sh`,
+then re-run the §14.7 call. A hook whose steps have never run is the same trap
+the note in §4.5 warns about.
 
 ### 14.6 The two settings this changes
 
@@ -1377,7 +1380,7 @@ Four failures worth recognising on sight:
 | `Unauthenticated` / missing-or-invalid authorization header | No bearer token, the wrong prefix (it must be `Bearer `), or an expired one. |
 | A protocol error mentioning `text/html` | The path is not in the §14.3 allowlist — a typo in the service name, or Caddy was never reloaded. You reached the SPA. |
 | `ResourceExhausted` | The bucket for that method's family (§14.1). Check *which* family before raising anything. |
-| `Unavailable`, or a bare 502 from Caddy | The client's own leg is fine; Caddy could not dial the backend. Either the listener came up in plaintext (grep the `DISABLED` line, §14.4) or its leaf is stale because the hook has no step 4 (§14.5). `journalctl -u caddy -n 50` names which. |
+| `Unavailable`, or a bare 502 from Caddy | The client's own leg is fine; Caddy could not dial the backend. Either the listener came up in plaintext (grep the `DISABLED` line, §14.4) or, on a deployment predating beta12, its leaf is stale (§14.5). `journalctl -u caddy -n 50` names which. |
 
 Then re-run the §6.3 per-IP check. Adding a route is exactly the kind of
 topology change that section says to re-verify after, and gRPC now shares the
@@ -1433,7 +1436,7 @@ In this order:
 | Passkey enrolment fails with 401 | `AXIAM_WEBAUTHN_RP_ORIGIN` does not match the address bar. | Set it to `https://axiam-iam.duckdns.org` and restart. |
 | `docker compose` refuses to start | Raw `docker compose` without the environment `prod-up` builds. | Use `~/axiam-up.sh`, or `just prod-down` / `just prod-clean`. |
 | gRPC call returns HTML, or a protocol error naming `text/html` | The path is not in the §14.3 allowlist, or Caddy was not reloaded. The SPA handler answered. | Check the service name character for character, `caddy validate`, reload. |
-| gRPC fails TLS while REST is fine, ~60 days after the last renewal | The gRPC listener reads its certificate once at startup and has no reload path; the deploy hook has no step 4. | §14.5, then `docker restart axiam-server` once by hand. |
+| gRPC fails TLS while REST is fine, ~60 days after the last renewal | A server predating beta12: the gRPC listener read its certificate once at startup and had no reload path. Since R-1 both listeners share one reloadable resolver and one `SIGHUP` renews both. | Upgrade, or `docker restart axiam-server` once by hand; §14.5. |
 | `docker logs axiam-server` says `gRPC TLS is DISABLED` although the variables are set | The name. It is `AXIAM__GRPC_TLS_CERT_PATH`, not `AXIAM__GRPC__TLS__CERT_PATH`, and the wrong name is silently ignored. | §14.4. Both variables, or neither. |
 | One gRPC client throttles every other client | Per-IP buckets and a shared NAT or egress address — or a topology where nothing appends `X-Forwarded-For`. | §14.6 for sizing; §14.2 if you forwarded a port at 50051 instead of routing through Caddy. |
 

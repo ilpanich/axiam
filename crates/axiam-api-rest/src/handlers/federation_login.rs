@@ -413,38 +413,63 @@ fn origin_of(uri: &str) -> Option<String> {
     origin.is_tuple().then(|| origin.ascii_serialization())
 }
 
-/// Refuse a handoff redirect target that is not an origin this deployment owns.
+/// Refuse a federated-login redirect target that is not an origin this
+/// deployment owns.
+///
+/// Applied by **all four** start operations — SAML, Apple, OIDC and OAuth2 —
+/// and again at each mint. It was scoped to the two cross-site flows when it
+/// was written at beta08; R-3 generalised it
+/// (`claude_dev/remediation-plan-2026-09-04.md` §4).
 ///
 /// # Why this is not `validate_redirect_uri`
 ///
 /// [`validate_redirect_uri`] checks the *scheme* only — any `https://` host on
-/// the internet passes it, and its own `TODO(T19.14)` says so. On the OIDC and
-/// OAuth2 flows that is backstopped by the identity provider, which is handed
-/// the same `redirect_uri` and compares it against its registered set before it
-/// will redirect anything anywhere.
+/// the internet passes it. That is the cheap first check, not the rule.
 ///
-/// The two cross-site flows have no such backstop **by construction**: a SAML
-/// IdP is pointed at [`saml_acs_url`] and Apple at
+/// # Why it applies to every flow, not only the cross-site two
+///
+/// The two cross-site flows have no provider-side backstop **by construction**:
+/// a SAML IdP is pointed at [`saml_acs_url`] and Apple at
 /// [`server_form_callback_url`], both AXIAM's own endpoints, so the provider
 /// never sees the SPA URI and never validates it. AXIAM alone decides where the
 /// browser goes next — and it goes there carrying a handoff code, which
 /// [`sso_handoff_public`] will exchange for session cookies for whoever
 /// presents it.
 ///
-/// Without this check, anyone could call the unauthenticated login-start
-/// endpoint with `redirect_uri = https://attacker.example/`, lure a victim
-/// through their own real IdP, and read a working session credential out of
-/// their access log. The 60-second TTL, the single use, the hash-only storage
-/// and `Referrer-Policy: no-referrer` are all irrelevant when the attacker *is*
-/// the redirect destination. This is the same rule the OAuth2 authorization
-/// server already applies to its own `redirect_uri` (threat model T-52), and
-/// threat model T-219 for the handoff mechanism.
+/// On the OIDC and OAuth2 paths the provider *is* handed the same
+/// `redirect_uri` and does compare it against its registered set. The argument
+/// for leaving those paths on the scheme-only check was that this backstops
+/// them. It does — but only as strictly as each provider's registration hygiene
+/// allows, and several providers accept wildcard or prefix registrations. More
+/// to the point, it is a control AXIAM does not own and cannot inspect: nothing
+/// on this side can tell whether a given tenant's provider was registered
+/// tightly. The rule the server *does* own is uniform across the four flows,
+/// and the provider's check is then a second, independent layer rather than the
+/// only one.
+///
+/// Without this check on the cross-site flows, anyone could call the
+/// unauthenticated login-start endpoint with
+/// `redirect_uri = https://attacker.example/`, lure a victim through their own
+/// real IdP, and read a working session credential out of their access log. The
+/// 60-second TTL, the single use, the hash-only storage and
+/// `Referrer-Policy: no-referrer` are all irrelevant when the attacker *is* the
+/// redirect destination. This is the same rule the OAuth2 authorization server
+/// already applies to its own `redirect_uri` (threat model T-52), and threat
+/// model T-219 for the handoff mechanism.
+///
+/// # What is deliberately not here
+///
+/// A per-`FederationConfig` registered-redirect allowlist — the original
+/// `TODO(T19.14)`. The deployment-origin rule already says where a code may go,
+/// and a second list to keep in sync is a second place to get wrong.
 ///
 /// The allowed set is the origin of `AuthConfig::effective_issuer()` — which
 /// the ACS and form-callback URLs are themselves built from, so it cannot be
 /// wrong in a deployment where these flows work at all — plus anything the
 /// operator adds in [`AuthConfig::sso_spa_origins`], for a deployment that
-/// serves the SPA from a different host than the API.
+/// serves the SPA from a different host than the API. Comparison is by
+/// **origin**, so `https://app.example.com` and `https://app.example.com:8443`
+/// are different targets: a port is part of who you are talking to.
 pub(crate) fn require_deployment_spa_origin<C: Connection + Clone>(
     state: &AppState<C>,
     redirect_uri: &str,
@@ -481,9 +506,9 @@ fn require_spa_origin(
     // can fix it — and because the alternative is a sign-in that fails at its
     // last hop with nothing to go on.
     Err(validation_err(
-        "redirect_uri must be on this deployment's own origin for SAML and Apple \
-         sign-in; add the SPA's origin to AXIAM__AUTH__SSO_SPA_ORIGINS if it is \
-         served from a different host than the API",
+        "redirect_uri must be on an origin this deployment owns; add the SPA's \
+         origin to AXIAM__AUTH__SSO_SPA_ORIGINS if it is served from a different \
+         host than the API",
     ))
 }
 
@@ -720,6 +745,12 @@ pub async fn oauth2_start_public<C: Connection + Clone>(
              start the flow at the endpoint its protocol names",
         ));
     }
+
+    // R-3: the same deployment-origin rule the SAML and Apple paths apply.
+    // See `require_deployment_spa_origin` for why the provider's own
+    // registered-redirect check is a second layer rather than the only one.
+    // After resolution, so an unknown slug still answers the uniform 401.
+    require_deployment_spa_origin(&app_state, &b.redirect_uri)?;
 
     let service = oidc_service(&app_state)?;
     let state = random_base64url();

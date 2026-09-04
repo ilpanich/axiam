@@ -1,5 +1,82 @@
 # Remediation plan — the residuals the beta08…beta11 threat-model wave left open
 
+> **EXECUTED — R-1, 2026-09-04.** The gRPC listener terminates TLS itself.
+> `start_grpc_server` takes a `GrpcTls` value (`Plaintext | Rustls(Arc<ServerConfig>)`)
+> instead of reading `AXIAM__GRPC_TLS_*` and building a tonic `ServerTlsConfig`;
+> it binds its own `TcpListener`, completes each handshake with `tokio-rustls` in
+> `crates/axiam-api-grpc/src/tls_incoming.rs`, and hands tonic an already-encrypted
+> stream through `serve_with_incoming`. The composition root builds the
+> configuration (`axiam_server::tls::grpc_tls_from_env` →
+> `build_grpc_rustls_server_config`), because `ReloadableCertResolver` is layer 8
+> and the gRPC crate is layer 6; `scripts/check-crate-layering.py` passes
+> unchanged. `LIVE_CERT_RESOLVER`'s single `OnceLock` slot became a list, and a
+> new `shared_resolver` returns the **same** resolver for a cert/key pair already
+> registered — so on the documented one-leaf topology both listeners hold one
+> resolver and one `SIGHUP` renews both, and a two-leaf deployment gets a second
+> registered entry rather than a second unreloaded path. `spawn_leaf_reloader` is
+> now idempotent, since either listener can be the only one with TLS on. The
+> configuration pins `with_protocol_versions(&[&TLS13])` and ALPN `h2`. The flat
+> env names, the panic-on-unreadable behaviour and the `gRPC server TLS enabled` /
+> `gRPC TLS is DISABLED` log lines are unchanged; the panic tests moved to
+> `axiam-server` with the read.
+>
+> All five tests §2 names are in: the renewal mid-flight (with the pre-swap
+> connection still usable), a TLS 1.2 client refused, the peer address reaching
+> `GrpcTrustedHopsKeyExtractor` through a real `Connected::connect_info()`, a
+> 64-connection half-open flood not blocking a well-behaved client, and plaintext
+> mode unchanged — plus, on the server side, one reload covering every registered
+> leaf, the shared-resolver identity asserted by pointer, TLS 1.3 + ALPN asserted
+> on the built config, and the two boot panics. The tonic `Connected`
+> implementation for `tokio_rustls::server::TlsStream` was verified first, as §2
+> requires: it exists at `tonic-0.14.6/src/transport/server/conn.rs:106` under
+> `tls-connect-info` (which `tls-ring` enables), yields
+> `TlsConnectInfo<TcpConnectInfo>`, and tonic's non-TLS `ServerIo::Io` path
+> inserts exactly that type — the extractor's existing second arm, so the key
+> extraction needed no change. `tls-ring` therefore stays on the tonic dependency,
+> documented in the manifest.
+>
+> Docs: `public-backend-tls-design.md` §13.3/§13.4, Pi runbook §14.4/§14.5 and its
+> troubleshooting rows, the native-TLS bench overlay comment, `CHANGELOG.md`.
+> Threat model: T-234 → **Mitigated** (open 17 → 16, deployment diagram 6 → 5),
+> T-233's and T-214's TLS clauses rewritten, in `Axiam.json`,
+> `threat-model-stride.md` and `threat-modeling-and-security.md`. The website was
+> **not** regenerated: `website-security-beta11-update-plan.md` has not run yet,
+> and §9 step 3 says to leave it to that plan.
+
+> **EXECUTED — R-3, 2026-09-04.** The deployment-origin rule now guards every
+> federated start operation, not two of four. `require_deployment_spa_origin` is
+> called on `oidc_start_public` (`federation.rs`) and `oauth2_start_public`
+> (`federation_login.rs`), after workspace and config resolution so an unknown
+> slug still answers the uniform `401`, and at the mint —
+> `issue_sso_session`, which is where every OIDC and OAuth2 sign-in issues its
+> cookies, mirroring the re-check `mint_handoff_and_redirect` already did. The
+> `TODO(T19.14)` and the "deferred" sentence above it are gone, and
+> `validate_redirect_uri`'s doc says why the per-config allowlist it proposed is
+> superseded rather than postponed. The refusal message no longer says "for SAML
+> and Apple sign-in", because it is no longer true.
+>
+> Tests: two integration tests (`an_oidc_login_may_not_name_a_foreign_redirect_target`,
+> `an_oauth2_login_may_not_name_a_foreign_redirect_target`) covering all five
+> shapes §4 names — an off-origin URI refused with `400` naming the knob, a
+> same-host different-port URI refused (origin, not host), the issuer origin
+> accepted, an `SSO_SPA_ORIGINS`-listed origin accepted, and an unknown
+> organization still `401`. The decision itself was already unit-tested in
+> `handlers::federation_login`, port case included. Nineteen existing tests in
+> three files went red on the change and were fixed by setting
+> `sso_spa_origins` in their fixtures — which is precisely the migration the
+> change asks of a split-origin deployment, so the suite now exercises it.
+>
+> Compatibility, docs and model: `CHANGELOG.md` under **Changed** naming
+> `AXIAM__AUTH__SSO_SPA_ORIGINS`; `AuthConfig::sso_spa_origins`' own doc, which
+> said the rule had no effect on OIDC and OAuth2; `federation-sso-login-design.md`
+> (the paragraph that deferred this to T19.14); the website's configuration row,
+> whose text had become factually wrong; `sdks/CONTRACT.md` §12.1 rule 12a widened
+> to all four start operations, contract **1.39**, additive and restrictive
+> server-side only with no SDK code changes. T-219's mitigation rewritten in
+> `Axiam.json`, `threat-model-stride.md` and `threat-modeling-and-security.md`;
+> status unchanged (already Mitigated), so no count moves. T-147 keeps no list of
+> contract amendments, so there was nothing to add there.
+
 > **EXECUTED — R-4, R-5, R-6, R-7, 2026-09-04.** The "small hardenings" PR §1
 > item 4 asks for. No threat changes status; T-216 stays **Open** on purpose,
 > because R-7 adds a check and not a seal.

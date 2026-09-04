@@ -5,16 +5,33 @@
 //! `start_grpc_server` serves forever, so each boot test races it against a
 //! short timeout: all of the synchronous setup (rate-limit layers, service
 //! registration, transport limits, TLS branch selection) executes before the
-//! server parks on `serve()`, which is exactly the code we want to cover.
+//! server parks on its accept loop, which is exactly the code we want to cover.
+//!
+//! # What moved out of here in R-1
+//!
+//! The two "a set-but-unreadable path must panic at boot" tests used to live
+//! here, because `start_grpc_server` read `AXIAM__GRPC_TLS_CERT_PATH` /
+//! `_KEY_PATH` itself. It no longer does — the composition root reads them and
+//! passes a [`GrpcTls`] value, because building a config that shares the REST
+//! listener's certificate resolver is only possible in the crate that owns the
+//! resolver. Those tests moved with the behaviour, to
+//! `axiam-server`'s `tls` module, along with new coverage for the resolver
+//! being genuinely shared. Nothing about the guarantee changed: a typo is
+//! still a failed boot.
+//!
+//! What is tested here instead is that both listener modes come up. The TLS
+//! mode's *behaviour* — a renewal mid-flight, a TLS 1.2 client refused, the
+//! peer address reaching the rate limiter, a handshake flood — is covered by
+//! the unit tests in `src/tls_incoming.rs`, which can drive the accept loop
+//! directly.
 
 use std::net::SocketAddr;
-use std::sync::OnceLock;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 use axiam_api_grpc::GrpcConfig;
 use axiam_api_grpc::middleware::rate_limit::{GrpcSharedRateLimitLayer, build_grpc_governor_layer};
-use axiam_api_grpc::start_grpc_server;
+use axiam_api_grpc::{GrpcTls, start_grpc_server};
 use axiam_auth::config::AuthConfig;
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
@@ -41,31 +58,32 @@ type TestEngine = AuthorizationEngine<
 const PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n-----END PRIVATE KEY-----";
 const PUB_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n-----END PUBLIC KEY-----";
 
-/// Generates a throwaway self-signed leaf (CN=localhost) at test runtime,
-/// used ONLY to drive `start_grpc_server`'s TLS-enabled branch
-/// (AXIAM__GRPC_TLS_CERT_PATH / KEY_PATH set) — not a real credential.
-/// Runtime-generated (rather than a hard-coded PEM literal) so static
-/// secret scanners don't flag it.
-fn test_tls_pki() -> (String, String) {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+/// A TLS 1.3-only server configuration over a throwaway self-signed leaf
+/// (CN=localhost), generated at test runtime rather than written as a PEM
+/// literal (which static secret scanners flag). Not a real credential.
+///
+/// Shaped like what `axiam_server::tls::build_grpc_rustls_server_config`
+/// hands the listener in production — that function cannot be called from
+/// here, since `axiam-server` is layer 8 and this crate is layer 6.
+fn test_tls_config() -> Arc<rustls::ServerConfig> {
+    // Mirrors axiam-server's main(): both `ring` and `aws-lc-rs` are linked
+    // transitively, so nothing may resolve the process-default provider
+    // implicitly. Selecting one explicitly is what the production builder does.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .expect("generate self-signed test cert");
-    (cert.cert.pem(), cert.signing_key.serialize_pem())
-}
+    let cert = rustls::pki_types::CertificateDer::from(generated.cert.der().to_vec());
+    let key = rustls::pki_types::PrivateKeyDer::try_from(generated.signing_key.serialize_der())
+        .expect("serialize the test key to DER");
 
-// ---------------------------------------------------------------------------
-// Global env-mutation lock — `AXIAM__GRPC_TLS_CERT_PATH` / `KEY_PATH` are
-// process-global, so the plaintext-mode and TLS-mode boot tests (which set
-// opposite states) must not race within this test binary. Mirrors the
-// `env_lock`/`env_guard` pattern in axiam-api-rest/tests/bootstrap_test.rs.
-// ---------------------------------------------------------------------------
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    env_lock().lock().await
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3 must be configurable")
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key)
+        .expect("the generated pair must build a server config");
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Arc::new(config)
 }
 
 use axiam_test_support::test_password;
@@ -151,9 +169,11 @@ fn reactor_admin_args(
     )
 }
 
-#[tokio::test]
-async fn start_grpc_server_boots_in_plaintext_mode() {
-    let _guard = env_guard().await;
+/// Everything `start_grpc_server` needs that these boot tests do not vary,
+/// so the two mode tests below differ in exactly one argument — the [`GrpcTls`]
+/// value — and a reader can see that that is the only difference.
+#[allow(clippy::type_complexity)]
+async fn boot(tls: GrpcTls) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (db, user_repo) = setup().await;
     let engine = make_engine(&db);
     let (reactor_engine, reactor_repo, reactor_audit_repo, reactor_routing_invalidator) =
@@ -164,14 +184,9 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
         grpc_authz_per_sec: 100,
         ..GrpcConfig::default()
     };
-    // Ensure the TLS branch is NOT taken.
-    unsafe {
-        std::env::remove_var("AXIAM__GRPC_TLS_CERT_PATH");
-        std::env::remove_var("AXIAM__GRPC_TLS_KEY_PATH");
-    }
-
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let server = start_grpc_server(
+
+    start_grpc_server(
         addr,
         engine,
         user_repo,
@@ -196,250 +211,66 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
         std::sync::Arc::new(axiam_auth::lockout::StaticLockoutPolicy(
             axiam_auth::lockout::policy_from_config(&test_auth_config()),
         )),
-    );
+        tls,
+    )
+    .await
+}
 
+/// Plan §2 test 5 — plaintext mode is unchanged by R-1.
+///
+/// This arm still goes straight through `Router::serve(addr)`: tonic binds,
+/// tonic sets `TCP_NODELAY`, nothing in `tls_incoming` runs. The E2E suite and
+/// every benchmark that is not the native-TLS overlay depend on that, so it is
+/// asserted rather than assumed.
+#[tokio::test]
+async fn start_grpc_server_boots_in_plaintext_mode() {
     // The server serves indefinitely; time out once all setup has run and it
-    // has parked on `serve()`. A timeout (not a completion) is the success
-    // signal that boot reached the serving state without erroring.
-    let result = tokio::time::timeout(Duration::from_millis(400), server).await;
+    // has parked on its accept loop. A timeout (not a completion) is the
+    // success signal that boot reached the serving state without erroring.
+    let result = tokio::time::timeout(Duration::from_millis(400), boot(GrpcTls::Plaintext)).await;
     assert!(
         result.is_err(),
         "server unexpectedly returned before timeout: {result:?}"
     );
 }
 
-/// TLS-enabled boot path (REQ-15 AC-1): with both `AXIAM__GRPC_TLS_CERT_PATH`
-/// and `AXIAM__GRPC_TLS_KEY_PATH` pointing at readable PEM files, the server
-/// must take the `ServerTlsConfig` branch (reads the cert/key files, builds
-/// the `Identity`, wires it into the builder) and park on `serve()` exactly
-/// like the plaintext path — same race-against-timeout technique as above.
+/// TLS-enabled boot path (REQ-15 AC-1 / R-1): given a `GrpcTls::Rustls`
+/// configuration, the listener must bind, stand up its own accept loop, and
+/// park exactly like the plaintext path — same race-against-timeout technique.
+///
+/// Where the pre-R-1 version of this test set two environment variables, this
+/// one passes a value: reading the environment is the composition root's job
+/// now, and `axiam-server`'s tests cover it.
 #[tokio::test]
 async fn start_grpc_server_boots_in_tls_mode() {
-    // Mirror axiam-server's main(): tonic's `ServerTlsConfig` resolves the
-    // process-level rustls `CryptoProvider`, but with both `ring` (tonic's
-    // "tls-ring" feature) and `aws-lc-rs` linked transitively, rustls refuses
-    // to auto-select one. Installing `ring` explicitly is what
-    // axiam-server/tests/grpc_tls_crypto_provider.rs proves fixes the
-    // real panic-on-handshake bug; idempotent across tests in this binary.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let _guard = env_guard().await;
-    let (db, user_repo) = setup().await;
-    let engine = make_engine(&db);
-    let (reactor_engine, reactor_repo, reactor_audit_repo, reactor_routing_invalidator) =
-        reactor_admin_args(&db);
-    let grpc_config = GrpcConfig {
-        host: "127.0.0.1".into(),
-        port: 0,
-        grpc_authz_per_sec: 100,
-        ..GrpcConfig::default()
-    };
-
-    let dir = std::env::temp_dir();
-    let cert_path = dir.join(format!("axiam-grpc-test-cert-{}.pem", uuid::Uuid::new_v4()));
-    let key_path = dir.join(format!("axiam-grpc-test-key-{}.pem", uuid::Uuid::new_v4()));
-    let (cert_pem, key_pem) = test_tls_pki();
-    std::fs::write(&cert_path, cert_pem).unwrap();
-    std::fs::write(&key_path, key_pem).unwrap();
-
-    // SAFETY: serialized by `env_guard()` above — no other test in this
-    // binary observes or mutates these two vars concurrently.
-    unsafe {
-        std::env::set_var("AXIAM__GRPC_TLS_CERT_PATH", &cert_path);
-        std::env::set_var("AXIAM__GRPC_TLS_KEY_PATH", &key_path);
-    }
-
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let server = start_grpc_server(
-        addr,
-        engine,
-        user_repo,
-        test_auth_config(),
-        &grpc_config,
-        db.clone(),
-        16,
-        // A4/J10: strict revocation off — the shipped default posture.
-        None,
-        reactor_engine,
-        reactor_repo,
-        reactor_audit_repo,
-        reactor_routing_invalidator,
-        // SEC-101: the test double's transport can dispatch.
-        true,
-        // B1: in production this is a clone of `AppState`'s process-wide gate;
-        // these tests only need the boot path to accept one.
-        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-        // In production this resolves the tenant's configured
-        // `max_failed_login_attempts` from the settings store; the boot path
-        // only needs to accept a source.
-        std::sync::Arc::new(axiam_auth::lockout::StaticLockoutPolicy(
-            axiam_auth::lockout::policy_from_config(&test_auth_config()),
-        )),
-    );
-
-    let result = tokio::time::timeout(Duration::from_millis(400), server).await;
-
-    unsafe {
-        std::env::remove_var("AXIAM__GRPC_TLS_CERT_PATH");
-        std::env::remove_var("AXIAM__GRPC_TLS_KEY_PATH");
-    }
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
+    let result = tokio::time::timeout(
+        Duration::from_millis(400),
+        boot(GrpcTls::Rustls(test_tls_config())),
+    )
+    .await;
     assert!(
         result.is_err(),
         "TLS-mode server unexpectedly returned before timeout: {result:?}"
     );
 }
 
-/// Drop guard that always clears the two TLS env vars and removes any temp
-/// PEM files, even when the test body panics (as the two tests below
-/// deliberately do) — otherwise a panicking test would leak state into
-/// whichever test in this binary runs next.
-struct TlsEnvCleanup {
-    cert_path: std::path::PathBuf,
-    key_path: std::path::PathBuf,
-}
-
-impl Drop for TlsEnvCleanup {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("AXIAM__GRPC_TLS_CERT_PATH");
-            std::env::remove_var("AXIAM__GRPC_TLS_KEY_PATH");
+/// A `GrpcTls` value is cloneable, because the composition root builds one and
+/// the listener task takes it by value.
+///
+/// Trivial, and worth one line: `Arc<ServerConfig>` is what makes it cheap, and
+/// someone replacing it with an owned `ServerConfig` would make every clone a
+/// full copy of the certificate resolver's handle graph — and, worse, would
+/// stop the two listeners sharing one resolver.
+#[test]
+fn grpc_tls_is_cheaply_cloneable() {
+    let tls = GrpcTls::Rustls(test_tls_config());
+    let clone = tls.clone();
+    match (tls, clone) {
+        (GrpcTls::Rustls(a), GrpcTls::Rustls(b)) => {
+            assert!(Arc::ptr_eq(&a, &b), "cloning must share the configuration");
         }
-        let _ = std::fs::remove_file(&self.cert_path);
-        let _ = std::fs::remove_file(&self.key_path);
+        _ => panic!("clone must preserve the variant"),
     }
-}
-
-/// REQ-15 AC-1 defensive check: if `AXIAM__GRPC_TLS_CERT_PATH` is set but the
-/// file isn't readable, the server must fail loudly at boot (a `panic!` with
-/// a clear message) rather than silently falling back to plaintext or
-/// producing an opaque I/O error deep in tonic's transport stack.
-#[tokio::test]
-#[should_panic(expected = "AXIAM__GRPC_TLS_CERT_PATH set but file not readable")]
-async fn start_grpc_server_panics_when_cert_file_unreadable() {
-    let _guard = env_guard().await;
-    let (db, user_repo) = setup().await;
-    let engine = make_engine(&db);
-    let (reactor_engine, reactor_repo, reactor_audit_repo, reactor_routing_invalidator) =
-        reactor_admin_args(&db);
-    let grpc_config = GrpcConfig {
-        host: "127.0.0.1".into(),
-        port: 0,
-        grpc_authz_per_sec: 100,
-        ..GrpcConfig::default()
-    };
-
-    let dir = std::env::temp_dir();
-    let missing_cert = dir.join(format!(
-        "axiam-grpc-missing-cert-{}.pem",
-        uuid::Uuid::new_v4()
-    ));
-    let key_path = dir.join(format!("axiam-grpc-test-key-{}.pem", uuid::Uuid::new_v4()));
-    let (_cert_pem, key_pem) = test_tls_pki();
-    std::fs::write(&key_path, key_pem).unwrap();
-    let _cleanup = TlsEnvCleanup {
-        cert_path: missing_cert.clone(),
-        key_path: key_path.clone(),
-    };
-
-    // SAFETY: serialized by `env_guard()`.
-    unsafe {
-        std::env::set_var("AXIAM__GRPC_TLS_CERT_PATH", &missing_cert);
-        std::env::set_var("AXIAM__GRPC_TLS_KEY_PATH", &key_path);
-    }
-
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    // No timeout race here: the panic happens synchronously (before the
-    // function reaches any await point), so a direct `.await` observes it.
-    let _ = start_grpc_server(
-        addr,
-        engine,
-        user_repo,
-        test_auth_config(),
-        &grpc_config,
-        db.clone(),
-        16,
-        // A4/J10: strict revocation off — the shipped default posture.
-        None,
-        reactor_engine,
-        reactor_repo,
-        reactor_audit_repo,
-        reactor_routing_invalidator,
-        // SEC-101: the test double's transport can dispatch.
-        true,
-        // B1: in production this is a clone of `AppState`'s process-wide gate;
-        // these tests only need the boot path to accept one.
-        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-        std::sync::Arc::new(axiam_auth::lockout::StaticLockoutPolicy(
-            axiam_auth::lockout::policy_from_config(&test_auth_config()),
-        )),
-    )
-    .await;
-}
-
-/// Same defensive check for `AXIAM__GRPC_TLS_KEY_PATH` (checked second, after
-/// the cert path succeeds).
-#[tokio::test]
-#[should_panic(expected = "AXIAM__GRPC_TLS_KEY_PATH set but file not readable")]
-async fn start_grpc_server_panics_when_key_file_unreadable() {
-    let _guard = env_guard().await;
-    let (db, user_repo) = setup().await;
-    let engine = make_engine(&db);
-    let (reactor_engine, reactor_repo, reactor_audit_repo, reactor_routing_invalidator) =
-        reactor_admin_args(&db);
-    let grpc_config = GrpcConfig {
-        host: "127.0.0.1".into(),
-        port: 0,
-        grpc_authz_per_sec: 100,
-        ..GrpcConfig::default()
-    };
-
-    let dir = std::env::temp_dir();
-    let cert_path = dir.join(format!("axiam-grpc-test-cert-{}.pem", uuid::Uuid::new_v4()));
-    let missing_key = dir.join(format!(
-        "axiam-grpc-missing-key-{}.pem",
-        uuid::Uuid::new_v4()
-    ));
-    let (cert_pem, _key_pem) = test_tls_pki();
-    std::fs::write(&cert_path, cert_pem).unwrap();
-    let _cleanup = TlsEnvCleanup {
-        cert_path: cert_path.clone(),
-        key_path: missing_key.clone(),
-    };
-
-    // SAFETY: serialized by `env_guard()`.
-    unsafe {
-        std::env::set_var("AXIAM__GRPC_TLS_CERT_PATH", &cert_path);
-        std::env::set_var("AXIAM__GRPC_TLS_KEY_PATH", &missing_key);
-    }
-
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let _ = start_grpc_server(
-        addr,
-        engine,
-        user_repo,
-        test_auth_config(),
-        &grpc_config,
-        db.clone(),
-        16,
-        // A4/J10: strict revocation off — the shipped default posture.
-        None,
-        reactor_engine,
-        reactor_repo,
-        reactor_audit_repo,
-        reactor_routing_invalidator,
-        // SEC-101: the test double's transport can dispatch.
-        true,
-        // B1: in production this is a clone of `AppState`'s process-wide gate;
-        // these tests only need the boot path to accept one.
-        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
-        std::sync::Arc::new(axiam_auth::lockout::StaticLockoutPolicy(
-            axiam_auth::lockout::policy_from_config(&test_auth_config()),
-        )),
-    )
-    .await;
 }
 
 #[test]

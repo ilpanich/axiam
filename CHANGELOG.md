@@ -73,6 +73,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The gRPC listener terminates TLS itself: hot-reloadable certificate, TLS 1.3 only
+
+  Until now `start_grpc_server` read `AXIAM__GRPC_TLS_CERT_PATH` /
+  `AXIAM__GRPC_TLS_KEY_PATH` once at boot and handed the PEM to tonic's
+  `ServerTlsConfig`, which accepts neither a `rustls::ServerConfig` nor a
+  certificate resolver. Two consequences followed from that one API limit: the
+  leaf was fixed for the process's life, so an ACME renewal at day 60 reached
+  the gRPC listener only through a restart and a 90-day certificate expired in
+  place without one — while the REST listener beside it kept working, which made
+  the failure present as a gRPC bug — and the protocol version stayed at the
+  crate default, leaving TLS 1.2 negotiable where REST has been 1.3-only since
+  F-04.
+
+  The listener now accepts the TCP connection, completes the handshake with
+  `tokio-rustls`, and hands tonic an already-encrypted stream. The rustls
+  configuration is built by the composition root over the **same**
+  `ReloadableCertResolver` the REST listener serves from whenever both are
+  pointed at the same certificate and key — the documented topology — so one
+  `SIGHUP`, or one hourly poll, now renews both. A deployment that really does
+  point them at different files gets a second registered leaf, reloaded on the
+  same triggers.
+
+  **Nothing to change in a deployment.** The environment variables keep their
+  flat names and their panic-on-unreadable behaviour, and the `INFO`/`WARN`
+  lines an operator greps for are unchanged. The one step that becomes
+  unnecessary is the certbot deploy hook's container restart, documented for
+  gRPC-over-TLS deployments in the Raspberry Pi runbook §14.5: it is now
+  redundant rather than wrong, and removing it saves ~15 seconds of downtime
+  every 60 days. A gRPC client that could only speak TLS 1.2 would now be
+  refused; none is known, and the mesh clients on this path negotiate 1.3.
+
+  Terminating the handshake ourselves adds one denial-of-service surface — a
+  client that opens TCP and never speaks — bounded by 512 concurrent handshakes
+  taken with a non-blocking permit (so the accept loop is never starved) and a
+  10-second handshake timeout.
+
+  Closes T-234. Narrows T-233 (the TLS-version row is gone) and completes
+  T-214's gRPC clause. `claude_dev/remediation-plan-2026-09-04.md` R-1.
+
+- The deployment-origin rule now guards every federated sign-in start, not two of four
+
+  `validate_redirect_uri` accepts any absolute `https://` URL, and until now that
+  was the only server-side rule on the OIDC and plain-OAuth2 federation start
+  paths. The argument for leaving it there was that the identity provider is
+  handed the same `redirect_uri` and compares it against its registered set. It
+  does — but that backstop is only as strict as each provider's registration
+  hygiene, and several providers accept wildcard or prefix registrations. It is
+  also a control AXIAM does not own and cannot inspect. The rule the server
+  *does* own — `require_deployment_spa_origin`, added at beta08 for the SAML and
+  Apple flows, where the provider never sees the SPA URI at all — is now applied
+  uniformly to all four start operations and at the session mint. The provider's
+  own check remains, as a second and independent layer.
+
+  **This can break one class of deployment.** If your SPA is served from an
+  origin other than your issuer's *and* you sign in through OIDC or plain-OAuth2
+  providers, those flows now answer `400` until you set
+  `AXIAM__AUTH__SSO_SPA_ORIGINS` to the SPA's origin. That is the same
+  requirement the SAML and Apple flows have imposed since beta08, the `400` names
+  the variable, and the shipped same-origin topology needs nothing. Origins are
+  compared as scheme + host + port, so a different port on the same host is a
+  different origin and must be listed.
+
+  The `TODO(T19.14)` that proposed a per-`FederationConfig` registered-redirect
+  allowlist is retired rather than carried over: the deployment-origin rule
+  already answers where a code may go, and a second list to keep in sync is a
+  second place to get wrong.
+
+  `sdks/CONTRACT.md` §12.1 rule 12a widened accordingly (contract 1.39) —
+  additive and restrictive server-side only, exactly as 12a itself was. **No SDK
+  code changes**: an SDK that passes the deployment's own callback URL is
+  unaffected.
+
+  Narrows T-219. `claude_dev/remediation-plan-2026-09-04.md` R-3.
+
 - `ReactorAdminService` is rate-limited as administrative traffic, not as authz
 
   `GrpcMethodFamily::classify` maps unrecognised gRPC paths into the

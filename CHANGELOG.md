@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta11] - 2026-09-04
+
+### Changed
+
+- Publish gRPC through the edge, and pin the release
+
+- The Vault seeder's tests now run in CI
+
+  `scripts/test_vault_seed_payload.py` guarded "a password reset for every user
+  in every tenant" and ran nowhere. It is now part of the Architecture
+  Invariants job, alongside a new `scripts/test_vault_seed_shell.py` that drives
+  the real script against a Vault answering `500`, `503`, `403` and `404`, and
+  asserts on what was written rather than on an exit code.
+
 ### Fixed
+
+- Survive npm-registry outages and drop stale advisory suppressions
+
+- Regenerate each SDK's §27 surface when the spec is re-vendored
+
+- Stop `just prod-up` from rotating every Vault secret
 
 - `just prod-up` could rotate every Vault secret on a running stack
 
@@ -45,16 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drift-check` rejects. Only the Swift, C and C++ SDKs surfaced it, because
   they are the only three whose drift-check runs on a tag push; the other eight
   gate that job to `pull_request` and published a stale surface.
-
-### Changed
-
-- The Vault seeder's tests now run in CI
-
-  `scripts/test_vault_seed_payload.py` guarded "a password reset for every user
-  in every tenant" and ran nowhere. It is now part of the Architecture
-  Invariants job, alongside a new `scripts/test_vault_seed_shell.py` that drives
-  the real script against a Vault answering `500`, `503`, `403` and `404`, and
-  asserts on what was written rather than on an exit code.
 
 ## [1.0.0-beta10] - 2026-09-03
 

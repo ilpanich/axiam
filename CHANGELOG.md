@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The gRPC listener terminates TLS itself: hot-reloadable certificate, TLS 1.3 only
+
+  Until now `start_grpc_server` read `AXIAM__GRPC_TLS_CERT_PATH` /
+  `AXIAM__GRPC_TLS_KEY_PATH` once at boot and handed the PEM to tonic's
+  `ServerTlsConfig`, which accepts neither a `rustls::ServerConfig` nor a
+  certificate resolver. Two consequences followed from that one API limit: the
+  leaf was fixed for the process's life, so an ACME renewal at day 60 reached
+  the gRPC listener only through a restart and a 90-day certificate expired in
+  place without one — while the REST listener beside it kept working, which made
+  the failure present as a gRPC bug — and the protocol version stayed at the
+  crate default, leaving TLS 1.2 negotiable where REST has been 1.3-only since
+  F-04.
+
+  The listener now accepts the TCP connection, completes the handshake with
+  `tokio-rustls`, and hands tonic an already-encrypted stream. The rustls
+  configuration is built by the composition root over the **same**
+  `ReloadableCertResolver` the REST listener serves from whenever both are
+  pointed at the same certificate and key — the documented topology — so one
+  `SIGHUP`, or one hourly poll, now renews both. A deployment that really does
+  point them at different files gets a second registered leaf, reloaded on the
+  same triggers.
+
+  **Nothing to change in a deployment.** The environment variables keep their
+  flat names and their panic-on-unreadable behaviour, and the `INFO`/`WARN`
+  lines an operator greps for are unchanged. The one step that becomes
+  unnecessary is the certbot deploy hook's container restart, documented for
+  gRPC-over-TLS deployments in the Raspberry Pi runbook §14.5: it is now
+  redundant rather than wrong, and removing it saves ~15 seconds of downtime
+  every 60 days. A gRPC client that could only speak TLS 1.2 would now be
+  refused; none is known, and the mesh clients on this path negotiate 1.3.
+
+  Terminating the handshake ourselves adds one denial-of-service surface — a
+  client that opens TCP and never speaks — bounded by 512 concurrent handshakes
+  taken with a non-blocking permit (so the accept loop is never starved) and a
+  10-second handshake timeout.
+
+  Closes T-234. Narrows T-233 (the TLS-version row is gone) and completes
+  T-214's gRPC clause. `claude_dev/remediation-plan-2026-09-04.md` R-1.
+
 - The deployment-origin rule now guards every federated sign-in start, not two of four
 
   `validate_redirect_uri` accepts any absolute `https://` URL, and until now that

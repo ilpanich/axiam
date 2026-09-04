@@ -1266,6 +1266,99 @@ mod tests {
     // G8 — HTTP/2 tuning surface
     // ---------------------------------------------------------------------
 
+    /// Serializes the `Http2Tuning::load` tests.
+    ///
+    /// They mutate process environment, which every other test in this binary
+    /// shares. Two of them setting `AXIAM__SERVER__H2__*` concurrently would
+    /// read each other's values and fail intermittently.
+    fn h2_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Clears the two `server.h2` variables on the way out, whatever happened.
+    struct H2EnvCleanup;
+
+    impl Drop for H2EnvCleanup {
+        fn drop(&mut self) {
+            // SAFETY: every writer of these variables in this binary holds
+            // `h2_env_lock()`, which this guard is dropped underneath.
+            unsafe {
+                std::env::remove_var("AXIAM__SERVER__H2__INITIAL_STREAM_WINDOW_SIZE");
+                std::env::remove_var("AXIAM__SERVER__H2__INITIAL_CONNECTION_WINDOW_SIZE");
+            }
+        }
+    }
+
+    /// The loader reads the same `AXIAM__*` environment the rest of the config
+    /// does, with `__` as the separator.
+    ///
+    /// `validate()` is tested directly below, but nothing exercised the path an
+    /// operator actually takes to reach it — which is where the env prefix, the
+    /// `__` separator and the `server.h2` subtree name all have to agree. Any
+    /// one of them wrong and the knob silently does nothing: the server boots,
+    /// reports no error, and runs on actix's defaults while the operator
+    /// believes their window size is in force.
+    #[test]
+    fn h2_tuning_reads_window_sizes_from_the_environment() {
+        let _guard = h2_env_lock();
+        let _cleanup = H2EnvCleanup;
+        // SAFETY: serialized by `h2_env_lock()` above.
+        unsafe {
+            std::env::set_var("AXIAM__SERVER__H2__INITIAL_STREAM_WINDOW_SIZE", "65535");
+            std::env::set_var(
+                "AXIAM__SERVER__H2__INITIAL_CONNECTION_WINDOW_SIZE",
+                "1048576",
+            );
+        }
+
+        let tuning = Http2Tuning::load().expect("valid window sizes must load");
+        assert_eq!(tuning.initial_stream_window_size, Some(65_535));
+        assert_eq!(tuning.initial_connection_window_size, Some(1_048_576));
+        assert!(!tuning.is_default());
+    }
+
+    /// A window size HTTP/2 cannot express fails at **startup**, through
+    /// `load`, not at the first h2 handshake.
+    ///
+    /// That is the whole point of validating here: `h2::server::Builder`
+    /// asserts on the value and would panic inside a worker thread, where the
+    /// operator sees a dead request rather than a message naming their typo.
+    #[test]
+    fn h2_tuning_rejects_a_window_size_h2_cannot_express() {
+        let _guard = h2_env_lock();
+        let _cleanup = H2EnvCleanup;
+        // SAFETY: serialized by `h2_env_lock()` above.
+        unsafe {
+            std::env::set_var("AXIAM__SERVER__H2__INITIAL_STREAM_WINDOW_SIZE", "0");
+        }
+
+        let err = Http2Tuning::load().expect_err("zero is not a legal window size");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string().contains("initial_stream_window_size"),
+            "the error must name the key the operator set, got: {err}"
+        );
+    }
+
+    /// A value that is not a number at all is rejected the same way, rather
+    /// than being silently ignored back to the default.
+    #[test]
+    fn h2_tuning_rejects_a_value_that_is_not_a_number() {
+        let _guard = h2_env_lock();
+        let _cleanup = H2EnvCleanup;
+        // SAFETY: serialized by `h2_env_lock()` above.
+        unsafe {
+            std::env::set_var(
+                "AXIAM__SERVER__H2__INITIAL_CONNECTION_WINDOW_SIZE",
+                "one-megabyte",
+            );
+        }
+
+        let err = Http2Tuning::load().expect_err("a non-numeric window size must not load");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
     /// Unset means "never call the actix setter", i.e. today's behaviour.
     #[test]
     fn h2_tuning_defaults_to_untouched_actix_behaviour() {
@@ -1532,6 +1625,56 @@ mod tests {
         );
         assert!(!verifier.offer_client_auth());
         assert!(!verifier.client_auth_mandatory());
+    }
+
+    /// With no anchors installed, a presented certificate is **refused**.
+    ///
+    /// This `Anchors::None` arm is defence in depth: rustls should never reach
+    /// it while `offer_client_auth()` answers false, and the comment on it says
+    /// exactly that. "Should never" is precisely the property worth pinning —
+    /// if a rustls change ever routed a client certificate here, the difference
+    /// between refusing and accepting is the difference between a closed door
+    /// and an open one, and nothing else in the process would notice the flip.
+    /// The neighbouring tests cover the *state* (`offer_client_auth`,
+    /// `client_auth_mandatory`); this covers what the verifier actually does in
+    /// it.
+    ///
+    /// The two signature arms next to it (`verify_tls12_signature`,
+    /// `verify_tls13_signature`) are the same shape and cannot be reached from
+    /// a test: `DigitallySignedStruct::new` is private to rustls, so there is no
+    /// way to hand them an argument without completing a real handshake that,
+    /// by construction, never asks for a client signature here.
+    #[test]
+    fn an_empty_verifier_refuses_a_presented_certificate() {
+        use rustls::pki_types::UnixTime;
+
+        let verifier = ReloadableClientCertVerifier::empty(false);
+        // Never parsed: the None arm refuses before looking at the bytes, which
+        // is the point — there is nothing to validate it against.
+        let cert = CertificateDer::from(vec![0u8; 4]);
+
+        assert!(
+            verifier
+                .verify_client_cert(&cert, &[], UnixTime::now())
+                .is_err(),
+            "a certificate presented with no anchors installed must be refused, never accepted"
+        );
+    }
+
+    /// ...and the verifier still advertises a full signature-scheme set.
+    ///
+    /// An empty list here would make the handshake fail to *negotiate* rather
+    /// than fall through to the refusal above — a different and more confusing
+    /// failure for an operator to debug, and one that hides which control
+    /// actually fired.
+    #[test]
+    fn an_empty_verifier_still_advertises_signature_schemes() {
+        let verifier = ReloadableClientCertVerifier::empty(true);
+        assert!(
+            !verifier.supported_verify_schemes().is_empty(),
+            "an empty anchor set must still advertise the provider's schemes, or the \
+             handshake fails to negotiate instead of reaching the refusal path"
+        );
     }
 
     /// `mandatory` must not survive into the empty state.
@@ -2061,6 +2204,21 @@ mod tests {
         assert_eq!(resolver.current().cert, original_der);
     }
 
+    /// Serializes every test that touches the process-global leaf registry.
+    ///
+    /// `reload_leaf_certificate()` walks **every** registered pair, and the
+    /// registry is append-only for the life of the process — so a test that
+    /// deliberately breaks its own pair (to prove an unreadable leaf is
+    /// reported) is, for the duration, breaking the reload that any *other*
+    /// test is asserting succeeds. That is not hypothetical: without this,
+    /// `the_global_reload_entry_point_finds_the_installed_listener` failed
+    /// roughly one run in six, which is the worst kind of red — it looks like
+    /// the feature, not the harness.
+    fn leaf_registry_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// The process-global entry point the signal handler and the poll actually
     /// call. Builds a listener config first so a resolver is definitely
     /// registered; only a *successful* build registers, and `write_tmp` files
@@ -2073,6 +2231,7 @@ mod tests {
     /// a resolver at all.
     #[test]
     fn the_global_reload_entry_point_finds_the_installed_listener() {
+        let _registry = leaf_registry_lock();
         let pki = gen_test_pki();
         let tls = TlsConfig {
             enabled: true,
@@ -2439,6 +2598,7 @@ mod tests {
     /// handler calls, handshake again, and see the new leaf.
     #[test]
     fn a_renewal_on_disk_reaches_the_grpc_listener_without_a_restart() {
+        let _registry = leaf_registry_lock();
         let pki = gen_test_pki();
         let cert = write_tmp("grpc-wire-cert", &pki.server_cert_pem);
         let key = write_tmp("grpc-wire-key", &pki.server_key_pem);
@@ -2487,6 +2647,7 @@ mod tests {
     /// not the exotic one.
     #[test]
     fn one_unreadable_leaf_does_not_block_another_leafs_renewal() {
+        let _registry = leaf_registry_lock();
         let pki = gen_test_pki();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
@@ -2531,6 +2692,7 @@ mod tests {
     /// in the log and points somewhere else entirely.
     #[test]
     fn a_later_failure_does_not_mask_the_first() {
+        let _registry = leaf_registry_lock();
         let pki = gen_test_pki();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
@@ -2654,6 +2816,7 @@ mod tests {
     /// by a `OnceLock`, so this is the regression the list exists to prevent.
     #[test]
     fn one_reload_covers_every_registered_leaf() {
+        let _registry = leaf_registry_lock();
         let pki = gen_test_pki();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 

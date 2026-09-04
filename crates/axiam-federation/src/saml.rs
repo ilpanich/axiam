@@ -413,7 +413,7 @@ where
     ///   in tenant B, never in the organization tenant.
     ///
     /// See `claude_dev/federation-sso-login-design.md` §4.4 and threat-model
-    /// T-169. Every other argument behaves exactly as documented on
+    /// T-224. Every other argument behaves exactly as documented on
     /// [`handle_saml_response`](Self::handle_saml_response).
     pub async fn handle_saml_response_for(
         &self,

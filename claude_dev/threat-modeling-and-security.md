@@ -12,10 +12,61 @@
 >
 > ---
 >
-> ## Handoff — the website section is in step with this document
+> ## Handoff — this document and the website section
 >
-> **Status: published, source and section both current as of 2026-08-30
-> (`1.0.0-beta06`).**
+> **Status: source current as of 2026-09-04 (`1.0.0-beta11`, model 2.11.0). The
+> website section is behind it and is brought up by
+> [`website-security-beta11-update-plan.md`](website-security-beta11-update-plan.md),
+> which is the entry point for that pass.**
+>
+> **Beta08…beta11 wave (model 2.11.0).** Twenty-five threats enter the model,
+> bringing it to **236 threats, 219 mitigated / 17 open**, in three groups. Two of
+> them had been written into the STRIDE document at beta08 but never into the
+> Threat Dragon JSON, so the website has been rendering a model its own source
+> document had outgrown. The first is the public login-provider surface — the
+> unauthenticated providers listing that cannot distinguish an unknown organization
+> from an unconfigured one, the 60-second single-use handoff codes confined to the
+> deployment's own SPA origin, the plain-OAuth2 variant with its downgrade stated,
+> provider emails adopted only when affirmatively verified, Entra's templated
+> issuer, organization→tenant inheritance and the uploaded button icons
+> (T-218…T-225, on four new federation-diagram elements). The second is the
+> publicly exposed backend terminating its own TLS — the `TRUSTED_HOPS`
+> off-by-one, the unrouted health endpoints, the hot-reloaded leaf, the
+> forwarded-client-certificate header now off by default, the Vault seal, and the
+> cleartext container hop (T-212…T-217, on a new device actor and the renamed
+> proxy → server flow). The login-provider threats had been numbered T-163…T-170,
+> continuing the federation section's own sequence, which collided with numbers the
+> model already held for the OAuth2 single-use credentials and the SDK `cnf`
+> threats; they were renumbered T-218…T-225 on entering the model, and the four
+> code comments that cite them moved with them. The third group is new for
+> beta09…beta11 (T-226…T-236): an assignment naming no resource is tenant-wide
+> rather than inert, with the upgrade hazard that creates written down (T-226);
+> scoped grants inherit down the resource lineage without widening sideways or to
+> unrelated resources (T-227); the authorization-check endpoints resolve the acting
+> tenant through the same reach check as every other route, in one implementation
+> rather than two (T-228); WebAuthn user verification is a tightening-only security
+> setting, defaulting to `preferred`, that the usernameless path ignores and that
+> never weakens a credential enrolled under `required` (T-229, T-230); the Vault
+> seeder can no longer mistake a refused read for an empty Vault and mint fresh
+> keys over the live ones — a password reset for every user, caused by a restart
+> (T-231); the server's Vault policy is one checked file, and the token holds
+> read plus CA-key writes rather than read-only, which T-180 and T-216 now say
+> (T-232); gRPC may be published, but only through the same edge as REST and only
+> as a service allowlist, because a bare port-forward lets a client mint its own
+> rate-limit buckets (T-233); the gRPC certificate still cannot be hot-reloaded,
+> recorded **open** with the restart the runbook uses to bridge it (T-234); a
+> release regenerates each SDK's §27 surface from the spec it vendors (T-235); and
+> the dependency-audit gate tells a registry outage apart from a clean audit and
+> fails on a stale suppression (T-236). Nine existing entries gained
+> cross-referencing clauses (T-43, T-127, T-180, T-193, T-199, T-201, T-212,
+> T-214, T-216). The open register below loses T-118 — closed at beta03 but still
+> listed here — and gains T-216 and T-234; AXIAM's own request path still carries
+> no open Critical or High finding. The coverage tables are refreshed from the
+> model, and the prose under *How AXIAM defends each layer* gains the matching
+> paragraphs. **The website was not touched in this pass**: `npm run
+> gen:threat-model` was run only to confirm the model parses and yields these
+> numbers, and reverted. `src/security.ts`, `src/version.ts`, the generated files
+> and the Docs pages the same releases changed are the plan's job.
 >
 > **Beta05…beta06 wave (model 2.10.0).** Twelve new mitigated threats,
 > T-200…T-211, bring the model to **211 threats, 196 mitigated / 15 open** —
@@ -217,7 +268,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 211 threats** and a
+The system is verified against a **STRIDE threat model of 236 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices.
@@ -238,8 +289,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 211 |
-| Mitigated / Open | 196 / 15 |
+| Threats identified | 236 |
+| Mitigated / Open | 219 / 17 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -253,14 +304,14 @@ optimistic closed one.
 | Area | Threats | Open |
 |---|---|---|
 | System context | 29 | 2 |
-| Authentication & session management | 30 | 1 |
+| Authentication & session management | 32 | 1 |
 | OAuth2 / OIDC authorization server | 24 | 0 |
-| Federation (SAML SP & OIDC RP) | 23 | 1 |
-| Authorization engine (RBAC, hierarchy, scopes) | 23 | 0 |
+| Federation (SAML SP & OIDC RP) | 31 | 1 |
+| Authorization engine (RBAC, hierarchy, scopes) | 26 | 0 |
 | PKI, certificates & IoT device identity | 24 | 1 |
 | Audit, webhooks, email & notifications | 18 | 2 |
-| Deployment & platform (Kubernetes) | 15 | 4 |
-| Client SDKs & admin-UI integration surface | 25 | 4 |
+| Deployment & platform (Kubernetes) | 26 | 6 |
+| Client SDKs & admin-UI integration surface | 26 | 4 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
@@ -278,25 +329,25 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 51 | 3 |
-| Tampering | 42 | 1 |
+| Spoofing | 58 | 3 |
+| Tampering | 49 | 1 |
 | Repudiation | 5 | 0 |
-| Information disclosure | 54 | 7 |
-| Denial of service | 20 | 2 |
-| Elevation of privilege | 39 | 2 |
+| Information disclosure | 57 | 7 |
+| Denial of service | 22 | 3 |
+| Elevation of privilege | 45 | 3 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
-| Critical | 27 | 1 |
-| High | 98 | 7 |
-| Medium | 79 | 6 |
+| Critical | 28 | 1 |
+| High | 113 | 8 |
+| Medium | 88 | 7 |
 | Low | 7 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 15 still-open items are listed one by one in
+the weight the control carries. The 17 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -310,7 +361,7 @@ have to be re-established — nothing is assumed across a boundary.
 
 | Boundary | Separates | What must hold on every crossing |
 |---|---|---|
-| **Public Internet ↔ AXIAM** | Browsers, SDK callers, IoT devices, external IdPs | TLS 1.3, authentication, rate limiting, CSRF on cookie requests, input validation |
+| **Public Internet ↔ AXIAM** | Browsers, SDK callers, IoT devices, external IdPs | TLS 1.3 — terminated by the server itself on the documented topology — authentication, rate limiting keyed on a peer address derived by a stated rule, CSRF on cookie requests, input validation; forwarded headers (`X-Forwarded-For`, `X-Client-Certificate`) trusted only from a proxy the deployment runs |
 | **AXIAM ↔ data tier** | Application pods ↔ SurrealDB, RabbitMQ, Vault / Secrets | Private network, credentialed connections, TLS-only AMQP, parameterised queries, tenant scoping at the repository layer |
 | **Tenant ↔ tenant** | Every tenant's data from every other's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal; cross-tenant reach only as an explicit organization-scope claim — narrowable to named tenants per role assignment — verified to stay inside the caller's organization and reach |
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, HTTPS enforcement, response-size caps, HMAC signatures on deliveries |
@@ -374,6 +425,18 @@ have to be re-established — nothing is assumed across a boundary.
   sign-in demands a second factor — an abandoned, unconfirmed TOTP enrollment is
   dropped rather than silently promoted alongside it — and removing the last
   credential turns the requirement back off.
+- **User verification on a WebAuthn ceremony is a policy, not a library
+  constant.** `webauthn_user_verification` is an organization baseline every
+  tenant inherits and may only tighten — `required` > `preferred` >
+  `discouraged` — and it defaults to `preferred`, so a security key with no PIN
+  can be enrolled as a *second* factor and the server records whether
+  verification happened. Two ceremonies ignore the setting on purpose:
+  usernameless passkey sign-in keeps `required`, because there the credential is
+  the only factor and possession alone must never be a complete login, and
+  attested registration keeps the `required` the library imposes. A relaxed
+  setting weakens no existing credential — the policy a credential was enrolled
+  under is recorded and honoured for the rest of its life — and the setting is a
+  required field on the settings write, so a client cannot relax it by omission.
 - **Tokens**: access tokens are **EdDSA (Ed25519) JWTs**, 15 minutes long. The
   verifier pins the algorithm and never reads it from the token header, so
   `alg:none` and HMAC-key-confusion attacks are rejected outright. Refresh tokens
@@ -450,6 +513,23 @@ redundantly rather than at one chokepoint:
   offers a control the server would refuse. Existing assignments are untouched by
   the migration — an unrestricted grant stays unrestricted until an administrator
   narrows it.
+- **What a grant reaches is what the model says it reaches.** An assignment that
+  names no resource is tenant-wide — the meaning the field has always been
+  documented to carry, and one the engine had failed to honour, leaving such
+  grants silently inert and nudging administrators toward wider ones.
+  Tenant-wide, not organization-wide: an unscoped assignment in an organization's
+  own tenant does not reach its member tenants. A grant on a scope constrains the
+  resource that scope lives on and is inherited whole by everything beneath it,
+  with denies inheriting by the same rule — and it never widens sideways (a grant
+  on `billing` does not reach `payroll`) or to a scope on an unrelated resource,
+  both pinned by tests. Because the first of these turns previously dormant
+  assignments into live grants at upgrade, the upgrade note says how to find them
+  first.
+- **One acting-tenant resolution, for every extractor.** The organization-reach
+  check that lets an organization-level principal act on one of its tenants is
+  implemented once and shared by both request extractors, including the one the
+  authorization-check endpoints bind — a second copy of that check, or a path
+  without it, is exactly how a guard drifts on one route and not the others.
 - **Repository queries are tenant-scoped and parameterised.** Every SurrealQL
   statement uses bind parameters — no query is assembled by string concatenation of
   user input — and carries a `tenant_id` predicate. Cross-tenant graph edges are
@@ -546,6 +626,35 @@ against the classic federation attacks:
 - **Attribute-to-role mapping is an explicit, tenant-scoped allow-list** set by an
   AXIAM administrator; unmapped IdP attributes are discarded, so an IdP cannot
   self-assign privileged roles.
+- **The public login surface is designed for the fact that it is public.** The
+  providers listing a login page renders its buttons from is unauthenticated, and
+  it answers `200` with an empty list for an unknown organization exactly as for
+  a known one with nothing configured, so it cannot be used to enumerate which
+  organizations a deployment hosts; it returns only what a button needs, under
+  the same per-IP budget as the sign-in endpoints.
+- **Cross-site returns get a session through a handoff code that can only be
+  delivered home.** SAML and Apple return cross-site, where `SameSite=Strict`
+  cookies would not travel, so the return carries a 256-bit, single-use,
+  60-second code stored only as a hash and exchanged same-origin for the session.
+  Where that code may be delivered is not the caller's choice: the redirect is
+  confined to the deployment's own issuer origin plus any operator-named SPA
+  origin, compared as origins so a path, port or scheme cannot smuggle a second
+  host past it, and enforced at login start, at the mint and on the error
+  redirect — because on these two flows the identity provider never sees the SPA
+  URL, so nothing else would have checked it.
+- **The plain-OAuth2 variant states its downgrade instead of hiding it.**
+  Providers that issue no ID token (GitHub, Facebook) authenticate by a userinfo
+  call with no signature, `nonce` or `aud`. AXIAM refuses that protocol for every
+  provider that supports OIDC properly, makes server-side PKCE mandatory on it,
+  takes its three endpoints only from operator configuration — never from
+  anything the provider says at runtime — through the same SSRF guard as every
+  other fetch, and adopts an email address only when the provider affirmatively
+  marks it verified. A templated issuer such as Entra's `common` authority
+  requires an explicit list of accepted tenants, refused at write time and again
+  at sign-in without one, so "every Microsoft account on earth" can never be the
+  accidental default. An organization's provider inherited by its tenants
+  provisions the user in the *requesting* tenant, and an uploaded button icon is
+  raster-only and size-bounded before it is served to every visitor.
 
 ### PKI, certificates & device identity
 
@@ -639,6 +748,35 @@ against the classic federation attacks:
 - **TLS 1.3 is the minimum** for all external communication; HSTS is emitted; the
   optional in-process TLS listener is TLS 1.3-only and fails fast rather than
   falling back to plaintext.
+- **The backend can sit on the public origin, terminating its own TLS.** The
+  documented topology routes by path at the edge — the SPA at `/`, and `/api`,
+  `/oauth2` and `/.well-known` to the server over TLS 1.3 the server terminates —
+  which removed a proxy hop and the cleartext container-network leg that every
+  password and token used to cross. The leaf certificate is hot-reloaded on
+  `SIGHUP` and by an hourly poll, validated before it is swapped, so an ACME
+  renewal needs no restart; the health endpoints are deliberately not routed at
+  the edge; the rate-limit key follows a stated rule — `TRUSTED_HOPS` is proxies
+  *minus one*, with a per-topology table and tests — rather than the off-by-one
+  advice the documentation used to give; and a forwarded `X-Client-Certificate`
+  header is trusted **only** when an operator asserts that a proxy they run
+  performs the mTLS handshake — off by default, and stripped by the shipped edge
+  configurations either way, because a certificate is public data and a header
+  cannot prove possession of the key. gRPC may be published through the same
+  edge, as an allowlist of services, and never by a bare port-forward: without a
+  proxy appending the real peer, a client keys its own rate-limit bucket. The
+  gRPC listener's own certificate is not yet hot-reloadable, which the model
+  records as an open item together with the restart that bridges it.
+- **Vault is run as the production secret store it is.** Both shipped Vault
+  deployments use Raft storage; the server holds a scoped, periodic token whose
+  policy is one checked file — read on the startup secrets, writes confined to
+  the CA-key prefix — rather than the root token, and `just vault-status` reports
+  the capabilities the token lacks as well as the ones it should not have. The
+  seeder waits for an *active* node, treats only `200` and `404` as statements
+  about what the Vault holds, pins every write to the version it read, and
+  refuses any payload that would replace a stored secret — closing a path by
+  which a restart could silently rotate the OPAQUE setup key and reset every
+  password in every tenant. Auto-unseal remains the one production step AXIAM
+  cannot take for you.
 - **Secrets at rest** — MFA seeds, CA keys, OPAQUE OPRF seeds, federation and
   webhook and email secrets — are AES-256-GCM encrypted; passwords are
   Argon2id-hashed and client secrets are hashed under a **server-held key**, so a
@@ -724,6 +862,11 @@ against the classic federation attacks:
   §8b transport guard — `amqps://` only, no loopback exception, no plaintext
   fallback, no verification-skip switch — as a public, tested function and calls it
   in its own example transport.
+- **A release ships the surface it derives from the spec it vendors.** Tagging an
+  SDK re-vendors the contract, the OpenAPI document and the management registry
+  and then regenerates that SDK's §27 management surface from them, staging
+  exactly what the generator wrote; a missing generator stops the release rather
+  than tagging a tree the SDK's own drift-check would reject.
 
 ---
 
@@ -749,7 +892,9 @@ than taken on trust.
 Dependency and supply-chain security is gated in CI — `cargo audit`, `cargo deny`,
 Trivy filesystem/config scans and `npm audit` at a high threshold, with Dependabot
 across the workspace's ecosystems and each SDK repository, SHA-pinned GitHub
-Actions, and signed release provenance.
+Actions, and signed release provenance — and the gate tells a registry outage
+apart from a clean audit and fails on a suppression that no longer matches
+anything, so it cannot quietly be told what to ignore.
 
 ---
 
@@ -761,8 +906,8 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 16 of
-186. On the website this table is generated from the Threat Dragon model, so it
+Every threat the model does not record as mitigated, most severe first — 17 of
+236. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -778,13 +923,14 @@ each.
 | T-135 — Dependency-confusion or typosquatted SDK package | High | Integrator / developer · *Client SDKs & admin UI integration surface* |
 | T-146 — Long-lived client secret committed to a repository | High | SDK configuration (client secrets, CA bundles) · *Client SDKs & admin UI integration surface* |
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
+| T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
 | T-39 — Access token still valid after entitlement revocation | Medium | Token service EdDSA JWT + refresh rotation · *Authentication & session management* |
 | T-110 — Personal data over-collected into an immutable log | Medium | Audit middleware & service · *Audit, webhooks, email & notifications* |
-| T-118 — Audit trail deleted along with the tenant | Medium | `audit_log` (append-only, signed) · *Audit, webhooks, email & notifications* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-143 — Local JWT verification misses a revoked entitlement | Medium | SDK token verification (JWKS cache, iss/aud) · *Client SDKs & admin UI integration surface* |
+| T-234 — The gRPC TLS leaf expires because tonic reads it once at startup | Medium | AXIAM deployment (N replicas, HPA) · *Deployment & platform (Kubernetes)* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are
@@ -811,9 +957,11 @@ list read as a checklist — what to do about each, grouped by who does it.
   service is still yours.
 - **Run Vault in production mode, and treat its posture as your secret posture.**
   The production stacks default to Vault for every long-lived secret, which
-  concentrates all of them behind one KV path: give AXIAM a read-only token scoped
-  to that path, keep unseal keys and the root token offline, enable Vault's audit
-  device, and never run a dev-mode (in-memory, unsealed) Vault in production. For
+  concentrates all of them behind one KV path: give AXIAM a token carrying the
+  shipped policy and nothing more (`docker/vault/axiam-policy.hcl` — read on the
+  startup path, writes confined to the CA-key prefix — applied with `just
+  vault-policy` and checked with `just vault-status`), keep unseal keys and the
+  root token offline, enable Vault's audit device, and never run a dev-mode (in-memory, unsealed) Vault in production. For
   deployments without Vault, the manifests' `file` provider mounts every
   cryptographic secret as a file — prefer it over `AXIAM_*` environment variables,
   since a signing key in a ConfigMap or plain env var is effectively public within
@@ -831,6 +979,28 @@ list read as a checklist — what to do about each, grouped by who does it.
   sweep's last success, last failure and a computed `stalled` flag — alert on
   `status == "degraded"` so a silently stopped GDPR-erasure or certificate-expiry
   sweep is noticed, not only one that errors.
+- **Configure auto-unseal on Vault before you go live.** Without it every
+  restart leaves Vault sealed and the server crash-looping until a human with
+  enough shares arrives. A cloud KMS seal is the cheap answer; a transit seal
+  against a Vault you already run elsewhere is the other. A script that unseals
+  from shares kept on the same machine is not auto-unseal — it removes the seal
+  rather than automating it.
+- **Derive `AXIAM__RATE_LIMIT__TRUSTED_HOPS` for your own topology** — the
+  number of proxies in front of the server *minus one*. Too high and too low
+  both collapse every client into one rate-limit bucket, including on
+  `/auth/login`, which is keyed per IP precisely so an attacker cannot lock a
+  victim out. The shipped values are right for the shipped topologies and stop
+  being right the moment you add a load balancer or a CDN.
+- **Strip `X-Forwarded-For` and `X-Client-Certificate` at the edge**, and at
+  the firewall on any route that reaches the server without a proxy. Leave
+  `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` off unless a proxy you run performs
+  the mTLS handshake and overwrites that header on every request; devices that
+  need real mTLS get a route the edge does not terminate.
+- **Publish gRPC only through the edge, as an allowlist, or not at all.** A port
+  forwarded straight at the listener lets a client mint its own rate-limit bucket
+  per call, and no setting repairs that. If you enable the gRPC listener's TLS,
+  add the container restart to your certificate deploy hook: unlike the REST
+  listener, it reads its certificate once.
 - **Run SurrealDB on a persistent storage engine — `surrealkv:` or `rocksdb:`,
   never `memory:`.** This is a correctness control, not a durability preference.
   AXIAM's three single-use credentials — UMA permission tickets, RFC 8628 device
@@ -910,9 +1080,10 @@ list read as a checklist — what to do about each, grouped by who does it.
   regression or negative test.
 
 Everything in this document was last re-derived from source at
-**`1.0.0-alpha38`** on 2026-08-22; the handoff block at the top of this file says
-what that pass covered and what it changed. The website carries the same stamp,
-from a single constant in `website/src/version.ts`.
+**`1.0.0-beta11`** on 2026-09-04; the handoff block at the top of this file says
+what that pass covered and what it changed. The website carries its own stamp,
+from a single constant in `website/src/version.ts`, recording the release *its*
+Security section was last re-derived against; it moves when that section does.
 
 **Reporting a vulnerability.** If you find a security issue, please report it
 privately to the maintainers rather than opening a public issue, and give us a

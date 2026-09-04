@@ -4,7 +4,7 @@
 //! the SAML and Apple returns mints one, and redeeming it issues the cookies.
 //! Its whole security argument is single use, short life, and hash-only
 //! storage, so each of those gets a test rather than a comment. See
-//! `claude_dev/federation-sso-login-design.md` §5.2 and threat model T-164.
+//! `claude_dev/federation-sso-login-design.md` §5.2 and threat model T-219.
 
 use axiam_core::error::AxiamError;
 use axiam_core::repository::{SsoHandoffCode, SsoHandoffCodeRepository};

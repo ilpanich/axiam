@@ -438,7 +438,7 @@ fn origin_of(uri: &str) -> Option<String> {
 /// and `Referrer-Policy: no-referrer` are all irrelevant when the attacker *is*
 /// the redirect destination. This is the same rule the OAuth2 authorization
 /// server already applies to its own `redirect_uri` (threat model T-52), and
-/// threat model T-164 for the handoff mechanism.
+/// threat model T-219 for the handoff mechanism.
 ///
 /// The allowed set is the origin of `AuthConfig::effective_issuer()` — which
 /// the ACS and form-callback URLs are themselves built from, so it cannot be
@@ -1008,7 +1008,7 @@ pub async fn saml_acs_form_public<C: Connection + Clone>(
     // not reachable by a `get_by_id` scoped to `login_state.tenant_id`. Resolve
     // it the same way the start endpoint did, and hand the resolved config to
     // the service: the assertion-replay row is recorded under the config's
-    // tenant and the user is provisioned under the requesting one (T-169).
+    // tenant and the user is provisioned under the requesting one (T-224).
     let workspace = workspace_for_tenant(&state, login_state.tenant_id).await?;
     let resolved =
         resolve_config_for_login(&state, workspace, login_state.federation_config_id).await?;

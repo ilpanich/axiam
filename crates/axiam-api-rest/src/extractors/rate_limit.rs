@@ -116,6 +116,15 @@ impl KeyExtractor for XForwardedForKeyExtractor {
             // trusted at all (an attacker could otherwise rotate it to get a
             // fresh bucket per request via the old `hops[0]` fallback — SECHRD-03).
             // Fall through to peer_addr() below instead of indexing into XFF.
+            //
+            // R-4: no longer silently. Under a `trusted_hops` one too high this
+            // fires on every request and every client shares one bucket keyed on
+            // the proxy — the failure T-212 describes, which went unnoticed
+            // precisely because nothing said so. One WARN per process plus a
+            // counter; see `super::xff_metrics`.
+            if self.trusted_hops >= hops.len() {
+                super::xff_metrics::record_discarded_xff(hops.len(), self.trusted_hops);
+            }
         }
         req.peer_addr()
             .map(|addr| addr.ip())

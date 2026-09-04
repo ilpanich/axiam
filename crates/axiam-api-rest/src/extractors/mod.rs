@@ -6,3 +6,4 @@ pub mod client_info;
 pub mod rate_limit;
 pub mod scim_token;
 pub mod tenant;
+pub mod xff_metrics;

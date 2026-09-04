@@ -725,10 +725,28 @@ just vault-status
   token scope (T-180):
     ok           secret/data/axiam: read
     ok           secret/metadata/axiam: read
+
+  seal (T-216):
+    SHAMIR    no auto-unseal; every restart needs 3 of 5 key share(s),
+              entered by a human before AXIAM can serve a single login.
+              Not production. ...
 ```
 
 Anything beyond `read` is reported as `OVER-SCOPED`. If you see that, the server
 is still holding a token it should not have.
+
+The **Seal** section is the one this guide's readers should expect to see
+`SHAMIR` on, and it is telling the truth: a Pi with no cloud KMS in front of it
+has no auto-unseal, so a power cut means somebody types key shares before the
+first login succeeds. §7.1 already said so in prose; since beta12 the check says
+it too, which is the difference between a caveat in a document and a caveat you
+can assert on. AXIAM cannot close that gap — every Vault OSS seal needs a cloud
+KMS or a second Vault elsewhere — so what R-7 buys is that a deployment cannot
+drift into believing it has auto-unseal when it does not.
+
+A Vault that is **sealed right now** prints its own separate line. That is a
+state somebody is about to fix, not a statement about the seal type, and the
+report keeps them apart on purpose.
 
 ### 7.5 Back it up
 
@@ -1107,7 +1125,7 @@ connection at 256 in-flight calls.
 | `axiam.v1.UserInfoService` | `GetUserInfo` | identity — 500/s |
 | `axiam.v1.TokenService` | `ValidateToken`, `IntrospectToken` | identity — 500/s |
 | `axiam.v1.UserService` | `GetUser`, `ValidateCredentials` | admin — 10/s |
-| `axiam.v1.ReactorAdminService` | reactor CRUD, `ListReactorEvents` | authz — 100/s |
+| `axiam.v1.ReactorAdminService` | reactor CRUD, `ListReactorEvents` | admin — 10/s |
 
 Those are the shipped defaults. Identity derives as 5x the authz ceiling; the
 admin ceiling is an absolute 10/s that no profile raises (SEC-079), because
@@ -1120,14 +1138,19 @@ enumerated and a client needs `proto/axiam/v1/*.proto` or generated stubs. Keep
 it that way — a public reflection endpoint is a free map of your API, for the
 same reason `/health/jobs` is not routed (§2).
 
-One asymmetry to weigh before publishing: `ReactorAdminService` is an
-administrative surface sized like the hot path, because
-`GrpcMethodFamily::from_path` classifies everything it does not recognise as
-authz traffic (`middleware/rate_limit.rs`). Every one of its methods does check a
-permission — `reactors:list`, `reactors:create` and so on, against the same
-authorization engine REST uses, for the caller's own tenant — so the ceiling is
-not the only control. But a ceiling is not a permission either, which is why
-§14.3 publishes an allowlist rather than the whole `axiam.v1` package.
+`ReactorAdminService` was in the **authz** family until beta12: it fell through
+`GrpcMethodFamily::classify`'s catch-all, which puts anything unrecognised in the
+strictest *limited* family so a new service is throttled rather than unlimited.
+Safe as a default, wrong as an outcome — it meant an administrative surface was
+sized like the hot path at 100/s per IP, and *raised* by the `gateway` and `mesh`
+profiles, which move the authz ceiling for mesh capacity. R-5 named it
+explicitly, so it now sits in **admin** at the absolute 10/s no profile raises.
+
+Every one of its methods also checks a permission — `reactors:list`,
+`reactors:create` and so on, against the same authorization engine REST uses, for
+the caller's own tenant — so the ceiling was never the only control. But a
+ceiling is not a permission either, which is why §14.3 publishes an allowlist
+rather than the whole `axiam.v1` package.
 
 ### 14.2 Through the edge, never a second port-forward
 

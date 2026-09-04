@@ -21,29 +21,52 @@
 >
 > **Beta12 remediation pass (`remediation-plan-2026-09-04.md`).** The wave below
 > wrote down, in the model's own words, what it could not close. This pass is
-> those residuals. **R-1 has landed**: the gRPC listener no longer asks tonic to
-> terminate TLS — it completes each handshake with `tokio-rustls` and hands tonic
-> an already-encrypted stream — which lets it resolve its leaf through the *same*
-> `ReloadableCertResolver` the REST listener serves from, and lets the
-> configuration pin TLS 1.3. That closes **T-234** (the only *open* threat the
-> wave added) and removes the TLS-version caveat T-233 and T-214 both carried,
-> taking the model to **236 threats, 220 mitigated / 16 open**; the deployment
-> diagram goes from 6 open to 5. The open register below loses T-234 accordingly.
+> those residuals plus three small hardenings the same review found. **The whole
+> plan — R-1 through R-7 — has landed.** Only R-1 moves a count; every other
+> threat these touch was already Mitigated, except T-216, which stays **Open** on
+> purpose:
 >
-> **R-3 has landed** alongside it: the deployment-origin rule on a federated
-> `redirect_uri` now applies to all four start operations rather than the two
-> cross-site ones, so on the OIDC and plain-OAuth2 flows the identity provider's
-> registered-redirect comparison is a second, independent layer instead of the
-> only server-side check — narrowing **T-219** and retiring `TODO(T19.14)`, whose
-> per-config allowlist is superseded rather than deferred. Contract §12.1 rule
-> 12a widened to match (1.39), additive and restrictive server-side only, with no
-> SDK code changes. It asks one thing of one class of deployment: an SPA on an
-> origin other than the issuer's, signing in through OIDC or OAuth2, must set
-> `AXIAM__AUTH__SSO_SPA_ORIGINS` — the requirement the other two flows have
-> imposed since beta08. T-219 was already Mitigated, so no count moves with it.
->
-> The remaining items of that plan — R-2 and R-4…R-7 — are separate passes and
-> are not reflected here yet.
+> - **R-1**: the gRPC listener no longer asks tonic to terminate TLS — it
+>   completes each handshake with `tokio-rustls` and hands tonic an
+>   already-encrypted stream — which lets it resolve its leaf through the *same*
+>   `ReloadableCertResolver` the REST listener serves from, and lets the
+>   configuration pin TLS 1.3. That closes **T-234** (the only *open* threat the
+>   wave added) and removes the TLS-version caveat T-233 and T-214 both carried,
+>   taking the model to **236 threats, 220 mitigated / 16 open**; the deployment
+>   diagram goes from 6 open to 5. The open register below loses T-234
+>   accordingly.
+> - **R-2** closes the residual T-235 recorded, in all eleven SDK repositories:
+>   the §27 drift-check runs on tag pushes and the publish job depends on it, so
+>   a stale management surface fails before a version number is spent.
+> - **R-3**: the deployment-origin rule on a federated `redirect_uri` now applies
+>   to all four start operations rather than the two cross-site ones, so on the
+>   OIDC and plain-OAuth2 flows the identity provider's registered-redirect
+>   comparison is a second, independent layer instead of the only server-side
+>   check — narrowing **T-219** and retiring `TODO(T19.14)`, whose per-config
+>   allowlist is superseded rather than deferred. Contract §12.1 rule 12a widened
+>   to match (1.39), additive and restrictive server-side only, with no SDK code
+>   changes. It asks one thing of one class of deployment: an SPA on an origin
+>   other than the issuer's, signing in through OIDC or OAuth2, must set
+>   `AXIAM__AUTH__SSO_SPA_ORIGINS` — the requirement the other two flows have
+>   imposed since beta08.
+> - **R-4** makes a `TRUSTED_HOPS` misconfiguration observable. The fallback to
+>   the connection peer was correct and *silent*, and silence is how the
+>   off-by-one T-212 describes went unnoticed. Both listeners now warn once per
+>   process and count every discard
+>   (`axiam_rate_limit_xff_discarded_total`), and the boot log states the value
+>   and its derivation rule together. Narrows T-212 and T-233.
+> - **R-5** moves `ReactorAdminService` out of the authorization rate-limit
+>   family and into the administrative one, so an admin surface is no longer
+>   sized like — or raised with — the hot path. Closes the follow-up T-233
+>   named.
+> - **R-6** puts `/health/jobs` in the OpenAPI document. It is the endpoint an
+>   operator alerts on to learn a background sweep has stopped, and it existed
+>   in the server and in no generated document. Deliberately still not §27 SDK
+>   surface. Completes what T-213 relies on.
+> - **R-7** makes the Vault seal type checkable. AXIAM cannot configure
+>   auto-unseal; `just vault-status` can now say, in one line, that this
+>   deployment does not have it. **T-216 stays Open — the control is a check,
+>   not a seal.**
 >
 > **Beta08…beta11 wave (model 2.11.0).** Twenty-five threats enter the model,
 > bringing it to **236 threats, 219 mitigated / 17 open**, in three groups. Two of
@@ -803,7 +826,12 @@ against the classic federation attacks:
   deployments use Raft storage; the server holds a scoped, periodic token whose
   policy is one checked file — read on the startup secrets, writes confined to
   the CA-key prefix — rather than the root token, and `just vault-status` reports
-  the capabilities the token lacks as well as the ones it should not have. The
+  the capabilities the token lacks as well as the ones it should not have, and
+  names the **seal type**: `OK` for any auto-unseal, and for Shamir a plain "no
+  auto-unseal; every restart needs *t* of *n* key shares, not production". AXIAM
+  cannot configure auto-unseal — every Vault OSS seal needs a cloud KMS or a
+  second Vault elsewhere — so what this buys is that a deployment cannot drift
+  into believing it has one. The
   seeder waits for an *active* node, treats only `200` and `404` as statements
   about what the Vault holds, pins every write to the version it read, and
   refuses any payload that would replace a stored secret — closing a path by

@@ -104,6 +104,72 @@ pub(crate) fn trusted_hops_from_env() -> usize {
         .unwrap_or(0)
 }
 
+// ---------------------------------------------------------------------------
+// R-4 — visibility for a `TRUSTED_HOPS` misconfiguration (narrows T-212/T-233)
+// ---------------------------------------------------------------------------
+
+/// `axiam_rate_limit_xff_discarded_total{protocol="grpc"}`.
+static XFF_DISCARDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether the explanatory `WARN` has already been emitted this process.
+static XFF_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How many gRPC requests arrived with an `X-Forwarded-For` header that
+/// `trusted_hops` discarded, so the key came from the connection peer instead.
+///
+/// Metric name: `axiam_rate_limit_xff_discarded_total{protocol="grpc"}`. The
+/// REST listener keeps the identical counter under `{protocol="rest"}`
+/// (`axiam_api_rest::extractors::xff_metrics`); the two crates are siblings and
+/// neither may depend on the other, so the label is expressed as two counters
+/// an exporter renders as one labelled series.
+///
+/// **A non-zero value is not automatically a fault.** It is a fault when it
+/// tracks total request volume: that means the header is present on every
+/// request and trusted on none, i.e. `trusted_hops` is too high for this
+/// deployment's proxy count and every client shares one bucket.
+///
+/// # Why a counter and not a metrics crate
+///
+/// This workspace has no metrics facade. `axiam_db::metrics` and
+/// `axiam_amqp::reactor::metrics` are the pattern: a process-wide relaxed
+/// atomic, readable from tests and from a future `/metrics` endpoint, with the
+/// Prometheus name it will be exported under written down beside it.
+pub fn xff_discarded_total() -> u64 {
+    XFF_DISCARDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Record that a present `X-Forwarded-For` header was discarded because
+/// `trusted_hops` exceeded the hops available, and explain it once.
+///
+/// Called only on that path — a request with **no** header does not come
+/// through here, because a client with no proxy in front of it is not a
+/// misconfiguration and counting it would bury the signal.
+///
+/// The `WARN` is once per process on purpose: the condition fires on *every*
+/// request under a misconfiguration, so one line per request would be a log
+/// flood proportional to traffic, and the second line adds nothing the first
+/// did not say.
+fn record_discarded_xff(hops_seen: usize, trusted_hops: usize) {
+    use std::sync::atomic::Ordering;
+    XFF_DISCARDED.fetch_add(1, Ordering::Relaxed);
+
+    if !XFF_WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            protocol = "grpc",
+            hops_seen,
+            trusted_hops,
+            "X-Forwarded-For was DISCARDED and the rate-limit key fell back to the \
+             connection peer: the header carried {hops_seen} hop(s) but \
+             AXIAM__RATE_LIMIT__TRUSTED_HOPS is {trusted_hops}, which trusts them all. \
+             If this fires on every request, every client is sharing ONE bucket keyed \
+             on the proxy's address. The rule is trusted_hops = proxies - 1 \
+             (one proxy in front of the server means 0). Counted as \
+             axiam_rate_limit_xff_discarded_total{{protocol=\"grpc\"}}; logged once per \
+             process."
+        );
+    }
+}
+
 /// Extracts the gRPC caller's IP from `X-Forwarded-For`, falling back to the
 /// verified tonic connection peer address (`TcpConnectInfo`/
 /// `TlsConnectInfo<TcpConnectInfo>`).
@@ -148,6 +214,14 @@ impl KeyExtractor for GrpcTrustedHopsKeyExtractor {
             // trusted. Fall through to the verified peer address below
             // instead of indexing into XFF (SECHRD-03 — no `hops[0]`
             // fallback that would let a rotating XFF mint a fresh bucket).
+            //
+            // R-4: no longer silently. Under a `trusted_hops` one too high this
+            // fires on every request and every client shares one bucket keyed on
+            // the proxy — the failure T-212 describes, which went unnoticed
+            // precisely because nothing said so.
+            if self.trusted_hops >= hops.len() {
+                record_discarded_xff(hops.len(), self.trusted_hops);
+            }
         }
 
         grpc_peer_addr(req)
@@ -204,9 +278,21 @@ pub enum GrpcMethodFamily {
     /// cheap, and measured an order of magnitude faster than an authz check.
     IdentityRead,
     /// Administrative / user-management traffic: `axiam.v1.UserService`
-    /// (`GetUser`, `ValidateCredentials`). `ValidateCredentials` hashes a
+    /// (`GetUser`, `ValidateCredentials`) and `axiam.v1.ReactorAdminService`
+    /// (reactor CRUD, `ListReactorEvents`). `ValidateCredentials` hashes a
     /// password, so this family is deliberately NOT sized from read capacity —
     /// its ceiling is the absolute [`ADMIN_PER_SEC_DEFAULT`] (SEC-079).
+    ///
+    /// `ReactorAdminService` joined it in R-5. It used to fall through the
+    /// catch-all into [`Self::AuthzCheck`], which is the *strictest* family by
+    /// design but also the one the `gateway` and `mesh` profiles **raise** — so
+    /// an administrative surface was being sized like the hot path, at 100/s
+    /// per IP by default and more under a profile. It carries no Argon2 cost,
+    /// which is what `ADMIN_PER_SEC_DEFAULT` was sized for, but administrative
+    /// surfaces should not scale with authorization throughput either, and
+    /// 10/s per IP is generous for reactor administration. A fifth family with
+    /// its own knob is the alternative if `ListReactorEvents` ever needs more;
+    /// a benchmark should say so before it is added.
     Admin,
     /// Infrastructure probes: gRPC **reflection** and **health**. Their whole
     /// job is to answer during an incident, when the limited families are most
@@ -241,7 +327,12 @@ impl GrpcMethodFamily {
         }
         match path.split('/').nth(1).unwrap_or_default() {
             "axiam.v1.UserInfoService" | "axiam.v1.TokenService" => Self::IdentityRead,
-            "axiam.v1.UserService" => Self::Admin,
+            // R-5: `ReactorAdminService` is administrative traffic and is sized
+            // as such. Before this it reached the catch-all below and was
+            // throttled like `CheckAccess` — including being *raised* by the
+            // `gateway` and `mesh` profiles, which is not a thing an admin
+            // surface should inherit from authorization throughput.
+            "axiam.v1.UserService" | "axiam.v1.ReactorAdminService" => Self::Admin,
             // "axiam.v1.AuthorizationService" and everything else.
             _ => Self::AuthzCheck,
         }
@@ -1165,6 +1256,14 @@ mod tests {
             ("/axiam.v1.TokenService/IntrospectToken", IdentityRead),
             ("/axiam.v1.UserService/GetUser", Admin),
             ("/axiam.v1.UserService/ValidateCredentials", Admin),
+            // R-5: reactor administration is administrative traffic. Before
+            // this it fell through the catch-all into `AuthzCheck` — sized like
+            // the hot path at 100/s per IP, and *raised* by the `gateway` and
+            // `mesh` profiles, which is not something an admin surface should
+            // inherit from authorization throughput.
+            ("/axiam.v1.ReactorAdminService/ListReactorEvents", Admin),
+            ("/axiam.v1.ReactorAdminService/CreateReactor", Admin),
+            ("/axiam.v1.ReactorAdminService/DeleteReactor", Admin),
             ("/grpc.health.v1.Health/Check", Infra),
             ("/grpc.health.v1.Health/Watch", Infra),
             (
@@ -1178,6 +1277,84 @@ mod tests {
         ] {
             assert_eq!(GrpcMethodFamily::classify(path), expected, "{path}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // R-4 — a discarded X-Forwarded-For is observable (narrows T-212/T-233)
+    // -----------------------------------------------------------------------
+
+    /// Serializes the counter tests: the statics are process-global.
+    fn xff_metric_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The fallback stays; what R-4 adds is that it stops being silent.
+    ///
+    /// T-212 is an off-by-one nobody noticed: with `trusted_hops` one too high,
+    /// every client keyed to the proxy's address, the whole deployment shared
+    /// one bucket, and nothing in any log said so.
+    #[test]
+    fn a_discarded_xff_is_counted() {
+        let _guard = xff_metric_lock();
+        let extractor = GrpcTrustedHopsKeyExtractor::new(3);
+        let peer: SocketAddr = "203.0.113.42:1234".parse().unwrap();
+        let before = xff_discarded_total();
+
+        let req = req_with_xff_and_peer(Some("198.51.100.1"), peer);
+        let key = extractor
+            .extract(&req)
+            .expect("the peer is still extractable");
+
+        assert_eq!(key, peer.ip(), "the key must still be the verified peer");
+        assert_eq!(
+            xff_discarded_total() - before,
+            1,
+            "a header discarded by trusted_hops must be counted, or the one-bucket \
+             failure is visible only in an incident"
+        );
+    }
+
+    /// A header with enough hops is *used*, so nothing is discarded and nothing
+    /// is counted — otherwise the counter would track total traffic and mean
+    /// nothing.
+    #[test]
+    fn a_trusted_xff_is_not_counted() {
+        let _guard = xff_metric_lock();
+        let extractor = GrpcTrustedHopsKeyExtractor::new(1);
+        let peer: SocketAddr = "203.0.113.42:1234".parse().unwrap();
+        let before = xff_discarded_total();
+
+        let req = req_with_xff_and_peer(Some("198.51.100.1, 198.51.100.2"), peer);
+        let key = extractor.extract(&req).expect("the XFF hop is extractable");
+
+        assert_eq!(key, "198.51.100.1".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            xff_discarded_total(),
+            before,
+            "a header that was trusted and used is not a discard"
+        );
+    }
+
+    /// No header at all is not a misconfiguration — it is a client with no
+    /// proxy in front of it, reaching a listener that correctly keys on the
+    /// peer. Counting it would bury the signal.
+    #[test]
+    fn a_request_with_no_xff_is_not_counted() {
+        let _guard = xff_metric_lock();
+        let extractor = GrpcTrustedHopsKeyExtractor::new(3);
+        let peer: SocketAddr = "203.0.113.42:1234".parse().unwrap();
+        let before = xff_discarded_total();
+
+        let req = req_with_xff_and_peer(None, peer);
+        let key = extractor.extract(&req).expect("the peer is extractable");
+
+        assert_eq!(key, peer.ip());
+        assert_eq!(
+            xff_discarded_total(),
+            before,
+            "a client with no proxy is not a misconfiguration"
+        );
     }
 
     /// Fail-safe default: an unrecognized path lands in the STRICTEST limited

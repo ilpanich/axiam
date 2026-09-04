@@ -1214,6 +1214,36 @@ async fn main() -> std::io::Result<()> {
         "Rate-limit posture active"
     );
 
+    // R-4 (narrows T-212/T-233): the number AND the rule that derives it, in
+    // one line, next to the posture it shapes.
+    //
+    // `trusted_hops` decides which entry of `X-Forwarded-For` becomes the
+    // rate-limit key, on BOTH listeners — they read the same variable. One too
+    // high and the header is discarded on every request, every client keys on
+    // the proxy's address, and the whole deployment shares one bucket. That is
+    // T-212's off-by-one, and it went unnoticed because nothing said so. The
+    // extractors now warn and count when it happens
+    // (`axiam_rate_limit_xff_discarded_total`); this line is the other half —
+    // an operator reading boot logs sees the value in force and the rule
+    // together, and can check one against their own topology before any traffic
+    // arrives.
+    let trusted_hops: usize = std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    tracing::info!(
+        trusted_hops,
+        rule = "trusted_hops = proxies - 1",
+        implies_proxies = trusted_hops + 1,
+        metric = "axiam_rate_limit_xff_discarded_total",
+        "Rate-limit client-IP derivation: X-Forwarded-For is trusted for \
+         {trusted_hops} appended hop(s), i.e. this server expects {} proxy/proxies \
+         in front of it. Both listeners read the same value. If that count is \
+         wrong the header is discarded and every client keys on the peer — \
+         watch axiam_rate_limit_xff_discarded_total.",
+        trusted_hops + 1
+    );
+
     // §4 item 1 (security-analysis-2026-08-02): the bucket key for
     // `/oauth2/{token,introspect,revoke}` is derived from the raw form body
     // BEFORE the credential check, so under `AXIAM__RATE_LIMIT__KEY=client_id`

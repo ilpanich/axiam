@@ -175,3 +175,76 @@ fn every_openapi_path_is_registered() {
          {missing:#?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R-6 — `/health/jobs` is in the document (closes an omission T-213 relies on)
+// ---------------------------------------------------------------------------
+
+/// `/health/jobs` must appear in the generated OpenAPI document, with its
+/// response schema.
+///
+/// The endpoint has carried a `#[utoipa::path]` annotation and a route since
+/// T-129 and was listed in `paths(…)` by nothing — the same class of omission
+/// contract 1.36 recorded for `/auth/me`, `/auth/password/change` and
+/// `/admin/bootstrap`. It is what an operator alerts on to learn that a
+/// GDPR-erasure or certificate-expiry sweep has stopped running, and it existed
+/// in the server and in no generated document, so no SDK and no monitoring
+/// integration could find it.
+///
+/// The parity tests above would not have caught this on their own: Test A only
+/// walks `ROUTE_PERMISSION_MAP`, which an unauthenticated probe is not in, and
+/// Test B only checks the other direction. An omission in `paths(…)` is
+/// invisible to both, which is precisely why it survived.
+#[test]
+fn health_jobs_is_documented() {
+    let doc = api_doc();
+
+    let path = doc
+        .paths
+        .paths
+        .get("/health/jobs")
+        .expect("/health/jobs must be in the OpenAPI document (R-6)");
+    assert!(
+        path.get.is_some(),
+        "/health/jobs is a GET, and the document must say so"
+    );
+
+    // The envelope AND its element type: utoipa does not pull nested schemas in
+    // transitively from `paths`, so a document carrying `JobsHealthResponse`
+    // and not `JobStatus` would generate a client whose `jobs` array has no
+    // element type — which is worse than the endpoint being absent, because it
+    // looks complete.
+    let schemas = &doc
+        .components
+        .as_ref()
+        .expect("the document must carry components")
+        .schemas;
+    for schema in ["JobsHealthResponse", "JobStatus"] {
+        assert!(
+            schemas.contains_key(schema),
+            "{schema} must be in components.schemas, or a generated client \
+             cannot type the /health/jobs response"
+        );
+    }
+}
+
+/// Tagged `health`, alongside the two probes it belongs with.
+///
+/// A tag is what decides which section of a generated document — and which
+/// SDK namespace — an operation lands in, so an untagged or differently
+/// tagged probe is one an operator does not find where they look for it.
+#[test]
+fn health_jobs_shares_the_health_tag() {
+    let doc = api_doc();
+    let op = doc
+        .paths
+        .paths
+        .get("/health/jobs")
+        .and_then(|p| p.get.as_ref())
+        .expect("/health/jobs GET");
+    assert_eq!(
+        op.tags.as_deref(),
+        Some(&["health".to_string()][..]),
+        "/health/jobs belongs with /health and /ready"
+    );
+}

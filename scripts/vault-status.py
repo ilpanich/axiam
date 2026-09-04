@@ -21,6 +21,18 @@ that fills this in, so the path list lives here and not in the caller.
 
 Capabilities are not secrets — unlike the KV fields, they are printed in full.
 
+And, since R-7 (T-216), the **seal**. AXIAM cannot configure auto-unseal — every
+Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11`
+is Enterprise-only — but it can make the absence of one checkable, the way H-4
+made the token's scope checkable. Pass the body of the *unauthenticated*
+
+    GET /v1/sys/seal-status
+
+as `--seal-status FILE` and this script names the seal type, flags `shamir` as
+"every restart needs key shares, not production" with the `t`/`n` quorum from
+the response, and reports a Vault that is sealed right now as the separate state
+it is. A request that fails reports `unknown`, never `OK`.
+
 The decision logic lives in `vault_status_report.py` so it can be unit-tested;
 this file is the I/O half.
 """
@@ -36,6 +48,8 @@ from vault_status_report import (
     is_root,
     read_capabilities,
     scope_findings,
+    seal_findings,
+    seal_is_production_ready,
     secret_presence,
     unexpected_fields,
 )
@@ -126,6 +140,40 @@ def print_scope(per_path: dict[str, list[str]]) -> bool:
     return over_scoped
 
 
+def print_seal(body: dict | None) -> bool:
+    """Print the Seal section. Returns True when auto-unseal is confirmed.
+
+    R-7 (T-216). AXIAM cannot configure auto-unseal — every Vault OSS seal type
+    needs a cloud KMS or a second Vault, and `pkcs11` is Enterprise-only — but
+    it can make its absence checkable, exactly as H-4 made the token's scope
+    checkable for T-180. Before this, nothing in `just vault-status` reported
+    whether the Vault comes back sealed after a restart, which on Shamir means a
+    human with key shares before a single login can succeed.
+    """
+    print("\n  seal (T-216):")
+    for marker, line in seal_findings(body):
+        # Wrap continuation lines under the text, not under the marker, so the
+        # markers stay scannable in a column.
+        head, *rest = _wrapped(line)
+        print(f"    {marker:<8}  {head}")
+        for extra in rest:
+            print(f"              {extra}")
+    return seal_is_production_ready(body)
+
+
+def _wrapped(text: str, width: int = 66) -> list[str]:
+    """Greedy wrap, so a long finding does not run off a terminal."""
+    words = text.split()
+    lines: list[str] = [""]
+    for word in words:
+        candidate = f"{lines[-1]} {word}".strip()
+        if len(candidate) > width and lines[-1]:
+            lines.append(word)
+        else:
+            lines[-1] = candidate
+    return lines
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Report AXIAM secret presence (and optionally token scope) "
@@ -144,10 +192,19 @@ def main() -> int:
         "exit. The caller does the I/O, so the path list stays in one place.",
     )
     parser.add_argument(
+        "--seal-status",
+        metavar="FILE",
+        help="JSON body of a Vault `sys/seal-status` response (unauthenticated). "
+        "Without it, the seal is not reported at all — an absent section is "
+        "honest, an OK we did not verify is not.",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
-        help="Exit non-zero when the token holds more than `read` on AXIAM's path. "
-        "Off by default so the dev-mode root token does not fail the recipe.",
+        help="Exit non-zero when the token holds more than `read` on AXIAM's path, "
+        "or when auto-unseal is not confirmed. Off by default so the dev stack — "
+        "a root token on a Shamir Vault, both on purpose — does not turn every "
+        "local run red.",
     )
     args = parser.parse_args()
 
@@ -179,13 +236,24 @@ def main() -> int:
         else:
             over_scoped = print_scope(read_capabilities(caps_body))
 
+    # R-7: reported whenever the caller supplied a response, including one that
+    # would not parse — `seal_findings(None)` says `unknown`, never `OK`.
+    auto_unseal = True
+    if args.seal_status:
+        try:
+            with open(args.seal_status, encoding="utf-8") as fh:
+                seal_body = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            seal_body = None
+        auto_unseal = print_seal(seal_body)
+
     if missing:
         print(
             f"\n{len(missing)} secret(s) missing — run `just vault-seed` to mint them "
             "(or `just vault-up` for the dev-mode Vault)."
         )
         return 1
-    if over_scoped and args.strict:
+    if args.strict and (over_scoped or not auto_unseal):
         return 1
     return 0
 

@@ -77,6 +77,74 @@
 > status unchanged (already Mitigated), so no count moves. T-147 keeps no list of
 > contract amendments, so there was nothing to add there.
 
+> **EXECUTED — R-4, R-5, R-6, R-7, 2026-09-04.** The "small hardenings" PR §1
+> item 4 asks for. No threat changes status; T-216 stays **Open** on purpose,
+> because R-7 adds a check and not a seal.
+>
+> **R-4.** Both key extractors now emit one `WARN` per process on the first
+> discarded `X-Forwarded-For` — naming the hop count seen, the `trusted_hops` in
+> force and the rule — and increment
+> `axiam_rate_limit_xff_discarded_total{protocol="rest"|"grpc"}` on every one.
+> The fallback itself is untouched (SECHRD-03). A request with **no** header is
+> deliberately not counted, so the fault signal is the counter tracking request
+> volume rather than merely being non-zero. `main.rs` logs the value and the
+> derivation rule next to the rate-limit posture line. The counters follow the
+> house convention (`axiam_db::metrics`, `axiam_amqp::reactor::metrics`):
+> process-wide relaxed atomics with the Prometheus name documented beside them,
+> since this workspace has no metrics facade — the `protocol` label is two
+> counters an exporter joins, because the two crates are siblings and neither
+> may depend on the other. Tests on both extractors: header discarded → peer key
+> **and** the counter up by one; header trusted → counter unchanged; no header →
+> counter unchanged; plus the once-per-process latch.
+>
+> **R-5.** `"axiam.v1.ReactorAdminService" => Self::Admin`, the one-line fix the
+> plan prefers. The catch-all arm and its comment are unchanged. Family tables
+> updated in Pi runbook §14.1, `docs/deployment/rate-limit-sizing.md` §3.1,
+> `docs/deployment/README.md` and `docs/api/grpc.md`. Note for the CHANGELOG
+> reader, which is in it: an operator driving reactor CRUD over gRPC above 10/s
+> per IP is now throttled and should pin `AXIAM__GRPC__GRPC_ADMIN_PER_SEC`.
+>
+> **R-6.** `crate::health::jobs` added to `paths(…)`, `JobsHealthResponse` and
+> `JobStatus` to `components(schemas(…))`, `sdks/openapi.json` regenerated from
+> `--dump-openapi` on the SAML-off build the drift gate uses. Two tests assert
+> the path, its `GET`, both schemas and the `health` tag — the existing parity
+> tests could not have caught this, since Test A walks
+> `ROUTE_PERMISSION_MAP` (which an unauthenticated probe is not in) and Test B
+> only checks the other direction.
+>
+> One thing the plan did not anticipate: the §27 registry gate demands every
+> documented route be claimed by a namespace or excluded **with a reason**, and
+> `/health` and `/ready` are already `platform` operations. Adding `/health/jobs`
+> beside them would have grown the SDK surface, which §7 explicitly says must not
+> happen. It is therefore in `EXCLUDED_OPERATIONS`, and the reason is recorded
+> where the next person will read it: the two siblings answer a fixed one-word
+> liveness contract, this returns a variable inventory of a deployment's
+> background jobs — `public-backend-tls-design.md` §6's "free map of what a
+> deployment runs and what is currently broken in it" — and an SDK talks to the
+> edge none of the three is routed at. `operation_count` is unchanged at 155, so
+> **no SDK surface regenerates**, exactly as §7 says.
+>
+> **R-7.** `seal_findings` / `seal_is_production_ready` in
+> `vault_status_report.py`, `print_seal` in `vault-status.py`, and a
+> `--seal-status FILE` flag the `just vault-status` recipe fills from the
+> **unauthenticated** `sys/seal-status` — so it answers even when the token is
+> wrong and even when the Vault is sealed. Every auto-unseal type reads `OK`;
+> `shamir` reads `SHAMIR` with `t`/`n` quoted; an unrecognised type and a failed
+> request both read `unknown`, never `OK`; `sealed: true` is a separate line that
+> does not change the verdict. `--strict` fails on an unconfirmed auto-unseal;
+> `just vault-status` still does not pass it, so the dev stack's deliberate
+> root-token-on-Shamir does not turn every local run red. Ten new cases in
+> `scripts/test_vault_status.py`, which CI already runs through
+> `unittest discover`. Documented in `docs/deployment/vault.md` §5.3 (with the
+> `--strict` note) and Pi runbook §7.4.
+>
+> Threat model: T-212 and T-233 gain the R-4 clause, T-233 also has its
+> `ReactorAdminService` follow-up replaced by what landed, T-213 gains the R-6
+> clause, T-216 gains the R-7 clause and **stays Open**, and T-235's "Residual,
+> in the SDK repositories" sentence is replaced by the R-2 gate — in
+> `Axiam.json`, `threat-model-stride.md` and `threat-modeling-and-security.md`.
+> The website was **not** regenerated (§9 step 3).
+
 > **Who this is for.** A fresh Claude session (Opus 5) implementing the fixes
 > below. It is the entry point: read this, then §1 for the order, then one item
 > at a time. Each item names the threat it closes or narrows, the files, the

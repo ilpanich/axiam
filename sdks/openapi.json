@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta11",
-    "x-axiam-spec-digest": "sha256:2b3fe4381f8714882a7c159749f3262ea34f58d1e3aa2ef811b6d2e89a1758d3"
+    "x-axiam-spec-digest": "sha256:494f0119a0b76d04717069640614fb632caec32eddd3ee796bb107325e57f151"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -10289,6 +10289,28 @@
         }
       }
     },
+    "/health/jobs": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "`GET /health/jobs` — scheduled-job liveness (T-129).",
+        "description": "Always 200, including when a job is stalled, and that is deliberate. This\nis not a readiness gate: a stuck cleanup sweep is an operational problem,\nnot a reason to pull a healthy server out of the load balancer and send its\ntraffic to replicas running the same stuck code. Alert on\n`status == \"degraded\"`, or on a specific job's `stalled`.",
+        "operationId": "jobs",
+        "responses": {
+          "200": {
+            "description": "Scheduled-job status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobsHealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/oauth2/authorize": {
       "get": {
         "tags": [
@@ -13916,6 +13938,72 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "JobStatus": {
+        "type": "object",
+        "description": "The last-known outcome of one background sweep.\n\nT-129: a scheduled job that stops running is invisible. GDPR erasure and\ncertificate expiry are exactly the jobs whose *absence* is the incident —\nnothing errors, nothing 500s, deletions simply stop happening and the first\nsymptom is a regulator's question months later. Failures were already\nlogged, but a log line nobody greps for is not a control.",
+        "required": [
+          "name",
+          "consecutive_failures",
+          "stalled"
+        ],
+        "properties": {
+          "consecutive_failures": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Consecutive failures since the last success. Reset to 0 on success.",
+            "minimum": 0
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The last error text, for the operator who is now looking at this page\nwondering what went wrong."
+          },
+          "last_failure_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339 timestamp of the last run that returned an error."
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339 timestamp of the last run that completed without error."
+          },
+          "name": {
+            "type": "string",
+            "description": "Stable identifier for the sweep, e.g. `gdpr_purge`."
+          },
+          "stalled": {
+            "type": "boolean",
+            "description": "Whether the job has missed enough expected runs to be considered stuck.\n\nThe single field to build an alert on. Computed server-side rather than\nleft to the caller because the sweep interval is configuration the\ncaller does not have, and \"how long is too long\" is not a judgement a\ndashboard should be re-deriving from timestamps."
+          }
+        }
+      },
+      "JobsHealthResponse": {
+        "type": "object",
+        "description": "Response body for `GET /health/jobs`.",
+        "required": [
+          "status",
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobStatus"
+            }
+          },
+          "status": {
+            "type": "string",
+            "description": "`ok` when no job is stalled, `degraded` when at least one is."
           }
         }
       },

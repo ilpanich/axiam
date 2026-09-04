@@ -37,8 +37,9 @@ deployment env-var reference).
 Rate limiting is **per method family**, not server-wide:
 `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` sizes `AuthorizationService`,
 `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` sizes `UserInfoService` +
-`TokenService`, `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService`, and
-gRPC reflection/health share a fixed, deliberately generous 100/s bucket.
+`TokenService`, `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService` and
+`ReactorAdminService`, and gRPC reflection/health share a fixed,
+deliberately generous 100/s bucket.
 All three knobs are per second per client IP. Leaving
 `GRPC_IDENTITY_PER_SEC` unset derives it as 5x the authz ceiling; leaving
 `GRPC_ADMIN_PER_SEC` unset gives a flat 10/s in **every** posture, because

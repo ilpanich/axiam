@@ -7,9 +7,43 @@ DIR="${BENCH_CERTS_DIR:-$(dirname "$0")/../profiles/certs}"
 mkdir -p "$DIR"
 cd "$DIR"
 
+# Reuse existing material only while it is still VALID. This guard used to test
+# EXISTENCE alone, and the certs below are minted with `-days 30`, so they
+# simply went stale in place: on 2026-09-04 the CA and both leaves minted on
+# 2026-08-02 had expired three days earlier, and `bench-up` printed "certs
+# already exist in ..." and carried on regardless.
+#
+# The k6 matrix never notices, for the same reason it never noticed the missing
+# CA keyUsage documented below: every scenario passes BENCH_VERIFY_TLS=false
+# because it measures TLS cost, not trust. The SDK benches DO verify the chain
+# (each trusts this CA via BENCH_CA_CERT), so an expired CA takes the entire
+# p2/p3 SDK matrix down at its first HTTPS call with
+# "SSL peer certificate ... was not OK" — eleven languages failing identically,
+# which reads as eleven broken SDKs rather than one dead CA.
+#
+# -checkend takes a margin in seconds. Two days is comfortably longer than a
+# full matrix pass, so material cannot expire in the MIDDLE of one — the worst
+# version of this failure, where early cells are measurements and later ones
+# are TLS errors.
+CERT_MARGIN_SECS="${BENCH_CERT_MARGIN_SECS:-172800}"
+certs_still_valid() {
+  local f
+  for f in ca.crt server.crt client.crt; do
+    [ -f "$f" ] || return 1
+    openssl x509 -in "$f" -noout -checkend "$CERT_MARGIN_SECS" >/dev/null 2>&1 || return 1
+  done
+  # Chain-verify rather than trust three independent expiry checks: a partial
+  # regeneration leaves behind leaf certs signed by a CA that is no longer on
+  # disk: each file is individually in-date while the chain they form is broken.
+  openssl verify -CAfile ca.crt server.crt >/dev/null 2>&1 || return 1
+  openssl verify -CAfile ca.crt client.crt >/dev/null 2>&1 || return 1
+}
 if [ -f ca.crt ] && [ "${1:-}" != "--force" ]; then
-  echo "[gen-certs] certs already exist in $DIR (use --force to regenerate)"
-  exit 0
+  if certs_still_valid; then
+    echo "[gen-certs] certs already exist in $DIR and are valid (use --force to regenerate)"
+    exit 0
+  fi
+  echo "[gen-certs] certs in $DIR are expired, expiring within $((CERT_MARGIN_SECS / 86400))d, or no longer a valid chain — regenerating"
 fi
 
 echo "[gen-certs] generating test CA + server + client certs in $DIR"

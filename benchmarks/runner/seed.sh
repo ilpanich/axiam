@@ -264,7 +264,30 @@ seed_axiam() {
       TENANT_ID=$(echo "$body" | jq -r '.tenant_id // empty')
       TENANT_SLUG=$(echo "$body" | jq -r '.tenant_slug // "default"')
       ;;
-    409) echo "[seed/axiam] already bootstrapped — recovering tenant via admin login" ;;
+    409)
+      echo "[seed/axiam] already bootstrapped — recovering tenant via admin login"
+      # The bootstrap admin does NOT live in a tenant this script names. Both
+      # `tenant_name` and `tenant_slug` in the request above are accepted and
+      # then IGNORED (crates/axiam-api-rest/src/handlers/bootstrap.rs): the
+      # admin is created in the organization's own reserved scope, whose slug
+      # is `organization`, and the 201 response reports that back so the 201
+      # path never noticed.
+      #
+      # On the 409 path there is no response to read it from, and the
+      # pre-bootstrap placeholder `default` used to survive into the login
+      # below — which then named a tenant that does not exist and came back
+      # `authentication_failed / invalid credentials`: a wrong-password-shaped
+      # error for a correct password. That aborted every re-seed against a
+      # persisted `surrealdb-data` volume (i.e. the second and every later run
+      # on one machine), and `bench-dry-run` reported it as a FAIL that "would
+      # break the real matrix".
+      #
+      # Naming NO tenant — an empty `tenant_slug`, which `LoginRequest` reads
+      # as naming none — signs in at organization level, against exactly that
+      # reserved scope. Correct on both paths, needs no extra lookup, and the
+      # real slug comes back in the login response (recovered just below).
+      TENANT_SLUG=""
+      ;;
     *)
       echo "[seed/axiam] bootstrap failed (HTTP $code): $body"
       echo "  hint: the server must have AXIAM_BOOTSTRAP_ADMIN_EMAIL=$ADMIN_EMAIL set"
@@ -278,6 +301,17 @@ seed_axiam() {
     -d "{\"org_slug\":\"$ORG_SLUG\",\"tenant_slug\":\"$TENANT_SLUG\",\"username_or_email\":\"admin\",\"password\":\"$ADMIN_PW\"}")
   if ! awk -F'\t' '$6=="axiam_access"{f=1} END{exit !f}' "$JAR"; then
     echo "[seed/axiam] admin login failed (no session cookie): $login_body"; exit 1
+  fi
+  # Recover the organization tenant's real slug on the 409 path (see above).
+  # `LoginUserInfo.tenant_slug` is resolved server-side from the caller's own
+  # tenant_id and never from request input, so it is authoritative — and it is
+  # what every later login here and every k6 scenario (BENCH_TENANT_SLUG) has
+  # to use, including the bench USER login smoke check further down.
+  if [ -z "${TENANT_SLUG:-}" ]; then
+    TENANT_SLUG=$(echo "$login_body" | jq -r '.user.tenant_slug // empty')
+    [ -n "$TENANT_SLUG" ] || TENANT_SLUG=$(api GET /api/v1/auth/me | jq -r '.tenant_slug // empty')
+    [ -n "$TENANT_SLUG" ] || { echo "[seed/axiam] could not determine tenant_slug after admin login"; exit 1; }
+    echo "[seed/axiam] recovered tenant slug: $TENANT_SLUG"
   fi
   # Recover ids we may not have on a re-seed (bootstrap 409).
   [ -z "${TENANT_ID:-}" ] && TENANT_ID=$(echo "$login_body" | jq -r '.user.tenant_id // empty')

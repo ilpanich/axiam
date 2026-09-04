@@ -1,6 +1,8 @@
 # Running AXIAM on a Raspberry Pi 5 at `axiam-iam.duckdns.org`, with its own TLS and "Sign in with X"
 
-**Status:** operator runbook — rewritten 2026-09-01 against `1.0.0-beta07`.
+**Status:** operator runbook — rewritten 2026-09-01 against `1.0.0-beta07`;
+§14 (gRPC on the public edge) and the release pin added 2026-09-04 against
+`1.0.0-beta10`.
 **Audience:** one person deploying AXIAM on their own Pi, exercising federated
 login end to end against real identity providers.
 
@@ -25,9 +27,10 @@ file is how to build it; that file is why it is shaped this way.
 | Vault: `file` storage, unseal key beside the data | **Raft**, a real 5-of-3 Shamir init, auto-unseal before go-live, a **read-only** token for the server | §7 |
 | Sign-in: two `curl` calls by hand | **Click the button.** The SPA has the buttons and the callback route | §11 |
 | Google only | Google, GitHub, Facebook, Apple, Microsoft | §10 |
+| gRPC loopback-only, full stop | Loopback by default, **optionally published through the edge** on 443 | The services are authenticated now; SEC-003's reason for the blanket rule is gone. §14 |
 | Google redirect URI `…/login` | `https://axiam-iam.duckdns.org/auth/sso/callback` | There is a real callback route now |
 
-If you are upgrading a running Pi, read §14 before changing anything: the Vault
+If you are upgrading a running Pi, read §15 before changing anything: the Vault
 storage change is not automatic.
 
 ---
@@ -53,7 +56,8 @@ storage change is not automatic.
   DNS-01 (§4.4).
 - **Do not** forward 8090, 50051, 8200, 5671 or 15672. The compose file binds
   them to `127.0.0.1` so a mistake in the router UI cannot expose them, but do
-  not rely on that alone.
+  not rely on that alone. This holds even if you publish gRPC (§14): that route
+  arrives on 443 like everything else and 50051 stays loopback-bound.
 
 **Software on the Pi**
 
@@ -74,10 +78,26 @@ Microsoft Entra. Plus the repo:
 ```bash
 git clone https://github.com/ilpanich/axiam.git ~/axiam
 cd ~/axiam
+git checkout v1.0.0-beta10        # the current release — see below
 ```
 
 You do **not** need a Rust toolchain: `just prod-up` pulls released multi-arch
 images from `ghcr.io/ilpanich/axiam/*`.
+
+**Deploy a tag, not `main`.** `just prod-up` defaults `AXIAM_IMAGE_TAG` to the
+*workspace* version — it reads `version` out of the root `Cargo.toml` — and the
+images carry the released version with the leading `v` stripped
+(`.github/workflows/release.yml`: the tag `v1.0.0-beta10` publishes the image
+`1.0.0-beta10`, `linux/amd64` and `linux/arm64` under one manifest list). On a
+checked-out tag the two agree by construction. On `main` they agree only until
+someone bumps the version ahead of a release, and then compose fails on an image
+tag that was never published. That failure is the harmless outcome. The harmful
+one is the reverse: a working tree whose compose file, `.proto` files and
+`justfile` describe a build the running image is not.
+
+Pre-releases deliberately get **no** moving tags — no `latest`, no `1.0` — so
+there is nothing to drift under you. Upgrading later is `git checkout v<next>`
+followed by `~/axiam-up.sh`; check `CHANGELOG.md` between the two tags first.
 
 ---
 
@@ -100,9 +120,14 @@ images from `ghcr.io/ilpanich/axiam/*`.
                                          │
                                          ├── /api/*         ─┐
                                          ├── /oauth2/*      ─┼ 443/TLS 1.3 →
-                                         └── /.well-known/* ─┘ 127.0.0.1:8090
-                                                               axiam-server
-                                                               (same leaf)
+                                         ├── /.well-known/* ─┘ 127.0.0.1:8090
+                                         │                     axiam-server
+                                         │                     (same leaf)
+                                         │
+                                         └── /axiam.v1.*    ── HTTP/2 over TLS →
+                                             (optional, §14)   127.0.0.1:50051
+                                                               axiam-server gRPC
+                                                               (the same leaf again)
 
    /health, /ready, /health/jobs — NOT routed. Probe them on the loopback.
 ```
@@ -117,7 +142,8 @@ Four consequences that matter for everything below.
 
 2. **One proxy in front of the backend**, not two. This is what makes
    `TRUSTED_HOPS=0` correct; see §6.3, and do not change it without re-reading
-   that section.
+   that section. It has to stay one on the gRPC route too — that route exists
+   *because* of this property, not in spite of it (§14.2).
 
 3. **The backend terminates its own TLS.** Nothing on this host carries an
    AXIAM password or bearer token in cleartext, not even between containers.
@@ -250,7 +276,8 @@ EOF
 ```
 
 Note what is **absent**: no route to `/health`, `/ready` or `/health/jobs`.
-That is deliberate (§2).
+That is deliberate (§2). Also absent: gRPC. If you want it public, §14 adds one
+`handle` block to this file — do the rest of the guide first and come back.
 
 ### 4.4 If port 80 is blocked (DNS-01)
 
@@ -348,6 +375,10 @@ nothing else to schedule.
 > commonest cause of a certificate that expires on a running server. After the
 > first real renewal, `docker logs axiam-server | grep 'leaf certificate'`
 > should show `TLS leaf certificate reloaded`.
+
+> **If you publish gRPC (§14), this hook needs a fourth step.** The gRPC
+> listener has no SIGHUP path and no poll — it reads its certificate once, at
+> startup. §14.5 has the replacement.
 
 ---
 
@@ -1050,7 +1081,288 @@ that port, or do not publish the second hostname if you have no devices.
 
 ---
 
-## 14. Upgrading a Pi that ran the previous version of this guide
+## 14. Optional: gRPC on the public internet
+
+The gRPC listener is off the internet by default, and the default was not
+timidity: `docker-compose.prod.yml` binds 50051 to `127.0.0.1`, and
+`k8s/ingress.yml` records that its public route was removed under **SEC-003** —
+filed when `UserService` and `TokenService` had no authentication at all.
+
+That hole is closed. All five services are built with
+`with_interceptor(AuthInterceptor)` (`crates/axiam-api-grpc/src/server.rs`), so a
+call carrying no valid AXIAM access token is refused before it reaches a handler,
+and each service derives tenant and subject from the **verified** claims rather
+than from the request body. Publishing the surface is a defensible choice today.
+It is still a choice, and its shape matters more than the fact of it.
+
+### 14.1 What is on the wire, and what is not
+
+Five services, every method **unary** — nothing here holds a connection open.
+`Server::builder()` caps each call at a 4 MiB frame and 30 seconds, and each
+connection at 256 in-flight calls.
+
+| Service | Methods | Bucket, per source IP |
+| --- | --- | --- |
+| `axiam.v1.AuthorizationService` | `CheckAccess`, `BatchCheckAccess` | authz — 100/s |
+| `axiam.v1.UserInfoService` | `GetUserInfo` | identity — 500/s |
+| `axiam.v1.TokenService` | `ValidateToken`, `IntrospectToken` | identity — 500/s |
+| `axiam.v1.UserService` | `GetUser`, `ValidateCredentials` | admin — 10/s |
+| `axiam.v1.ReactorAdminService` | reactor CRUD, `ListReactorEvents` | authz — 100/s |
+
+Those are the shipped defaults. Identity derives as 5x the authz ceiling; the
+admin ceiling is an absolute 10/s that no profile raises (SEC-079), because
+`ValidateCredentials` runs a real Argon2id verification and that ceiling is a CPU
+guard on an online-guessing surface, not a throughput setting.
+
+**Not** on the wire: server reflection and the gRPC health service. `server.rs`
+registers exactly the five above and nothing else, so the listener cannot be
+enumerated and a client needs `proto/axiam/v1/*.proto` or generated stubs. Keep
+it that way — a public reflection endpoint is a free map of your API, for the
+same reason `/health/jobs` is not routed (§2).
+
+One asymmetry to weigh before publishing: `ReactorAdminService` is an
+administrative surface sized like the hot path, because
+`GrpcMethodFamily::from_path` classifies everything it does not recognise as
+authz traffic (`middleware/rate_limit.rs`). Every one of its methods does check a
+permission — `reactors:list`, `reactors:create` and so on, against the same
+authorization engine REST uses, for the caller's own tenant — so the ceiling is
+not the only control. But a ceiling is not a permission either, which is why
+§14.3 publishes an allowlist rather than the whole `axiam.v1` package.
+
+### 14.2 Through the edge, never a second port-forward
+
+The obvious way to publish gRPC is to forward a public port straight at 50051 and
+let the backend's own TLS terminate it. **Do not.** §13's closing hazard is the
+reason, and on this surface it is worse.
+
+`GrpcTrustedHopsKeyExtractor` reads `X-Forwarded-For` before it falls back to the
+verified connection peer, exactly as the REST extractor does. With no proxy in
+front, nothing appends the real peer to that header — so with `TRUSTED_HOPS=0` a
+client that sends a single-entry `X-Forwarded-For` of its own is keyed on the
+value **it chose**, and a value it varies per call is a fresh rate-limit bucket
+per call. Every ceiling in the table above becomes decorative.
+
+No setting closes that. For any `TRUSTED_HOPS = n`, a client that sends `n+1`
+entries selects the leftmost one it wrote; a client that sends fewer falls back
+to the peer address. The header is trustworthy only because a proxy *you* run
+appends to the right of whatever arrived (§6.3), and a direct port-forward has no
+such proxy.
+
+So gRPC goes through Caddy, on 443, beside everything else. That costs nothing
+you were keeping: Caddy already speaks HTTP/2 to the client, it re-encrypts to
+the backend's own gRPC listener, and it appends the real peer to
+`X-Forwarded-For` on this route exactly as it does on `/api`. `TRUSTED_HOPS`
+stays `0` and stays correct for **both** protocols — which is fortunate, because
+both sides read the one `AXIAM__RATE_LIMIT__TRUSTED_HOPS`
+(`trusted_hops_from_env` on the gRPC side, `XForwardedForKeyExtractor` on the
+REST side) and there is no way to give them different values.
+
+Two things this does not buy. **gRPC-Web**: nothing here translates it and AXIAM
+serves no grpc-web endpoint, so browsers keep using REST — that is what REST is
+for. **mTLS on the gRPC path**: same reason as §13, the handshake ends at Caddy,
+and the gRPC listener has no client-CA configuration at all (`ServerTlsConfig` is
+built with an identity and nothing else). gRPC clients authenticate with a bearer
+token, full stop.
+
+### 14.3 The Caddy route
+
+Add this to `/etc/caddy/Caddyfile`, **above** the `handle @api` block of §4.3 —
+`handle` blocks are evaluated in source order:
+
+```caddyfile
+	# gRPC, published one service at a time. Anything under /axiam.v1.*
+	# that is not listed here falls through to the SPA handler and gets
+	# HTML back: a confusing refusal, but a safe one.
+	@grpc path /axiam.v1.AuthorizationService/* /axiam.v1.UserInfoService/* /axiam.v1.TokenService/*
+	handle @grpc {
+		reverse_proxy https://127.0.0.1:50051 {
+			transport http {
+				# Same leaf, same real verification as the /api route.
+				# The name is overridden because we dial loopback.
+				tls_server_name axiam-iam.duckdns.org
+				# gRPC is HTTP/2 end to end. Pin it: HTTP/1.1 carries no
+				# trailers, and every RPC's status travels in a trailer.
+				versions 2
+			}
+		}
+	}
+```
+
+`sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy`
+— validate first, always: a Caddyfile that fails to load takes the SPA and the
+API down with it, not just the route you were adding.
+
+`versions 2` is belt and braces. Caddy's HTTP transport offers `1.1 2` by
+default and tonic's ALPN offers only `h2`, so the negotiation lands on HTTP/2
+either way; pinning it means a future default cannot quietly downgrade the one
+hop whose trailers carry every RPC's status. If your Caddy build rejects the
+sub-directive, `caddy validate` says so before you reload — drop the line and
+re-validate.
+
+**Publish only what a remote client needs.** The three services above are the
+read-side surface a service-mesh or SDK client actually calls. Add
+`/axiam.v1.UserService/*` only if something remote needs `GetUser` or
+`ValidateCredentials` — the latter is a password check, and publishing it puts an
+online guessing surface on the internet, held by a 10/s per-IP ceiling and the
+account lockout it accrues (both real, neither free). Add
+`/axiam.v1.ReactorAdminService/*` only if you administer reactors remotely; §14.1
+says why it is the one to think hardest about.
+
+Nothing else in §4.3 needs to move. `/axiam.v1.*` cannot collide with `/api/*`,
+`/oauth2/*` or `/.well-known/*`, and `encode zstd gzip` leaves these responses
+alone — Caddy's default encode matcher covers text and JSON content types, not
+`application/grpc`. The site-wide `request_header -X-Client-Certificate` and
+`-X-Real-IP` apply here too, which is what you want.
+
+### 14.4 Turning the listener's TLS on
+
+The gRPC listener has its **own** TLS switch, and it is not part of the
+`AXIAM__SERVER__TLS__*` family. `server.rs` reads two flat variables straight out
+of the process environment and enables TLS when **both** are set. Add them to the
+Pi override from §5.3:
+
+```bash
+cat > ~/axiam/docker/docker-compose.pi.yml <<'EOF'
+services:
+  axiam-server:
+    environment:
+      AXIAM__AUTH__JWT_ISSUER: "https://axiam-iam.duckdns.org"
+      AXIAM__AUTH__OAUTH2_ISSUER_URL: "https://axiam-iam.duckdns.org"
+      # gRPC TLS (§14). Both or neither: TLS is enabled only when both are
+      # set, and the server PANICS at startup if either names a file it
+      # cannot read. That is deliberate — a typo is a failed boot, never a
+      # listener that quietly came up in cleartext.
+      #
+      # These are the same two files the deploy hook (§4.5) installs for the
+      # REST listener. There is no second certificate and there must not be.
+      AXIAM__GRPC_TLS_CERT_PATH: "/etc/axiam/server-tls/fullchain.pem"
+      AXIAM__GRPC_TLS_KEY_PATH: "/etc/axiam/server-tls/privkey.pem"
+      # A listener anyone can reach should not honour a token for up to 15
+      # minutes after its session is gone. §14.6.
+      AXIAM__GRPC__STRICT_REVOCATION: "true"
+EOF
+```
+
+Note the underscores: `AXIAM__GRPC_TLS_CERT_PATH`, **not**
+`AXIAM__GRPC__TLS__CERT_PATH`. This pair predates the nested config surface and
+is read with `std::env::var`, so the `AXIAM__`-prefixed config layer never sees
+it and a wrong name is not an error — it is silence, and a plaintext listener.
+The log line is the only witness:
+
+```bash
+~/axiam-up.sh
+docker logs axiam-server 2>&1 | grep -i 'grpc.*TLS'
+# want: gRPC server TLS enabled (AXIAM__GRPC_TLS_CERT_PATH)
+# not:  gRPC TLS is DISABLED — set AXIAM__GRPC_TLS_CERT_PATH + …
+```
+
+**One honest caveat.** The REST listener is TLS 1.3 *only*, because
+`crates/axiam-server/src/tls.rs` builds its own rustls `ServerConfig` restricted
+to that version. The gRPC listener is not: tonic 0.14's `ServerTlsConfig` exposes
+no protocol-version knob, so that leg is TLS 1.3-capable but 1.2-negotiable, and
+forcing it would mean hand-rolling the accept loop. On this topology the only
+client of that leg is Caddy, on loopback, and it negotiates 1.3. The public half
+of the connection is Caddy's own TLS — pin that instead if you want the guarantee
+end to end, with `protocols tls1.3` inside the `tls` directive of §4.3. It
+applies to the whole site, browsers included — every browser released since late
+2018 speaks TLS 1.3, so the practical cost is nil.
+
+### 14.5 Renewal: the hook needs a fourth step
+
+The REST listener re-reads its certificate on `SIGHUP` and hourly. **The gRPC
+listener does neither.** `server.rs` reads both PEM files once, at startup, hands
+them to tonic, and there is no reload path and no poll anywhere in that crate.
+Left alone, the gRPC leg keeps serving the old leaf after certbot renews at day
+60 and starts failing handshakes at day 90 — while REST keeps working. That is
+the worst version of this failure, because it presents as a gRPC bug.
+
+So when gRPC TLS is on, the deploy hook of §4.5 must restart the container.
+Replace its step 3 with:
+
+```bash
+# 3. Tell the server. REST re-reads the pair on SIGHUP and installs it behind an
+#    ArcSwap that rustls consults per handshake — no restart, no dropped request.
+docker kill -s HUP axiam-server 2>/dev/null || true
+
+# 4. gRPC only (§14). The tonic listener reads its PEM once at startup and has no
+#    reload path, so the renewed leaf reaches it through a restart and only
+#    through a restart. That is ~15 seconds of downtime every 60 days, at a
+#    moment you control, against a gRPC listener that otherwise expires
+#    silently. Delete this line if you turn AXIAM__GRPC_TLS_* back off.
+docker restart axiam-server >/dev/null 2>&1 || true
+```
+
+Keep the `SIGHUP` even though the restart makes it redundant: removing the
+restart line then leaves a correct hook behind rather than a broken one.
+
+Rehearse it — `sudo /etc/letsencrypt/renewal-hooks/deploy/axiam.sh`, then re-run
+the §14.7 call. A hook whose new step has never run is the same trap the note in
+§4.5 warns about.
+
+### 14.6 The two settings this changes
+
+**`AXIAM__GRPC__STRICT_REVOCATION=true`.** By default the gRPC data plane
+validates a token's signature and expiry and stops there — the right trade for a
+mesh you own, and a documented one, not an oversight. It means a session revoked
+by logout, password change or admin sign-out keeps passing gRPC authorization
+until the access token expires: up to 15 minutes. REST re-checks on every
+request. On a listener the internet can reach, take REST's semantics. The cost on
+a single-replica Pi is one datastore read per call;
+`AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=5` turns most of them into a
+process-local cache hit, and since every session-deleting path invalidates that
+cache in the same call, a logout on a single replica still takes effect
+immediately. (Across replicas it would not — that is the cache's documented
+window, and this Pi has one replica.)
+
+**Per source IP is not per client.** Behind a NAT — an office, a mobile carrier,
+a cloud egress address — every client sharing an address shares the bucket. The
+gRPC limiter has no client identity to key on: both rate-limit layers are
+`Server::builder()`-wide and run *before* tonic resolves the caller's claims, the
+same structural reason REST keeps `/auth/login` per-IP. If you publish gRPC to a
+fleet behind one address, size it on purpose —
+`AXIAM__GRPC__GRPC_AUTHZ_PER_SEC`, or the `gateway` / `mesh` presets of
+`AXIAM__RATE_LIMIT__PROFILE`, which move the REST and gRPC families together.
+`docs/deployment/rate-limit-sizing.md` has the numbers.
+
+### 14.7 Prove it
+
+`grpcurl` needs the `.proto` files — there is no reflection to ask. A gRPC caller
+is a service, so get a token the way a service does, with the client-credentials
+grant:
+
+```bash
+# From anywhere, with the repo checked out at the tag you deployed.
+TOKEN=$(curl -fsS "https://axiam-iam.duckdns.org/oauth2/token?tenant_id=$TENANT_ID" \
+  -d grant_type=client_credentials \
+  -d "client_id=$CLIENT_ID" -d "client_secret=$CLIENT_SECRET" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+grpcurl -import-path proto -proto axiam/v1/authorization.proto \
+  -H "authorization: Bearer $TOKEN" \
+  -d "{\"tenant_id\":\"$TENANT_ID\",\"action\":\"read\",\"resource_id\":\"$RESOURCE_ID\"}" \
+  axiam-iam.duckdns.org:443 axiam.v1.AuthorizationService/CheckAccess
+```
+
+`subject_id` is omitted on purpose: over gRPC the field can only ever restate the
+caller, so an empty value means "the subject the verified token carries", and a
+non-empty one that disagrees with the token is refused (SEC-003).
+
+Four failures worth recognising on sight:
+
+| What you see | What it is |
+| --- | --- |
+| `Unauthenticated` / missing-or-invalid authorization header | No bearer token, the wrong prefix (it must be `Bearer `), or an expired one. |
+| A protocol error mentioning `text/html` | The path is not in the §14.3 allowlist — a typo in the service name, or Caddy was never reloaded. You reached the SPA. |
+| `ResourceExhausted` | The bucket for that method's family (§14.1). Check *which* family before raising anything. |
+| `Unavailable`, or a bare 502 from Caddy | The client's own leg is fine; Caddy could not dial the backend. Either the listener came up in plaintext (grep the `DISABLED` line, §14.4) or its leaf is stale because the hook has no step 4 (§14.5). `journalctl -u caddy -n 50` names which. |
+
+Then re-run the §6.3 per-IP check. Adding a route is exactly the kind of
+topology change that section says to re-verify after, and gRPC now shares the
+same `TRUSTED_HOPS` derivation.
+
+---
+
+## 15. Upgrading a Pi that ran the previous version of this guide
 
 In this order:
 
@@ -1071,10 +1383,12 @@ In this order:
    `https://axiam-iam.duckdns.org/auth/sso/callback`, replacing `…/login`.
 7. If you used proxy-terminated mTLS, read §13 — the header path is now off by
    default and will refuse.
+8. Nothing about gRPC changes on an upgrade: it stays loopback-bound unless you
+   go and publish it. §14 is new, opt-in, and independent of everything above.
 
 ---
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
@@ -1095,10 +1409,14 @@ In this order:
 | `/health` returns the SPA HTML | Working as designed (§2). | Probe on the loopback (§8). |
 | Passkey enrolment fails with 401 | `AXIAM_WEBAUTHN_RP_ORIGIN` does not match the address bar. | Set it to `https://axiam-iam.duckdns.org` and restart. |
 | `docker compose` refuses to start | Raw `docker compose` without the environment `prod-up` builds. | Use `~/axiam-up.sh`, or `just prod-down` / `just prod-clean`. |
+| gRPC call returns HTML, or a protocol error naming `text/html` | The path is not in the §14.3 allowlist, or Caddy was not reloaded. The SPA handler answered. | Check the service name character for character, `caddy validate`, reload. |
+| gRPC fails TLS while REST is fine, ~60 days after the last renewal | The gRPC listener reads its certificate once at startup and has no reload path; the deploy hook has no step 4. | §14.5, then `docker restart axiam-server` once by hand. |
+| `docker logs axiam-server` says `gRPC TLS is DISABLED` although the variables are set | The name. It is `AXIAM__GRPC_TLS_CERT_PATH`, not `AXIAM__GRPC__TLS__CERT_PATH`, and the wrong name is silently ignored. | §14.4. Both variables, or neither. |
+| One gRPC client throttles every other client | Per-IP buckets and a shared NAT or egress address — or a topology where nothing appends `X-Forwarded-For`. | §14.6 for sizing; §14.2 if you forwarded a port at 50051 instead of routing through Caddy. |
 
 ---
 
-## 16. Before you call this production
+## 17. Before you call this production
 
 - **Auto-unseal (§7.1).** If you skipped it, you do not have a production
   deployment — you have one that needs a human awake after every power cut. This
@@ -1109,10 +1427,17 @@ In this order:
   and not with the root token.
 - **Raft snapshots and `docker/.secrets/` are backed up off the device** (§7.5).
 - **Only 80 and 443 are forwarded.** Everything else is loopback-bound; keep it
-  that way.
+  that way — publishing gRPC (§14) does not change this, and if it did for you,
+  you published it the wrong way (§14.2).
 - **`certbot renew --dry-run` passes**, and you have seen
   `TLS leaf certificate reloaded` in the logs at least once.
+- **If gRPC is public (§14):** the log says `gRPC server TLS enabled`, the
+  deploy hook has its fourth step and has been run once by hand,
+  `AXIAM__GRPC__STRICT_REVOCATION` is `true`, and the Caddy allowlist names only
+  the services you meant to publish — not `axiam.v1.*`.
 - **Client secrets rotated** if any was ever pasted into a shell with history.
+- **You are running a released tag**, not `main`: `git describe --tags` names
+  the release whose images you pulled (§1).
 - **`k8s/`, not `docker-compose.prod.yml`, is the supported production path** —
   the compose file says so in its own header.
 - Consider putting the admin UI behind a VPN or Tailscale and exposing only what

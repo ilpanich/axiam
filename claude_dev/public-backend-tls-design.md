@@ -657,3 +657,95 @@ IoT devices should simply not publish the second hostname.
 * [x] `claude_dev/threat-model-stride.md`
 
 No existing test is weakened, skipped or quarantined for any of it.
+
+---
+
+## 13. Addendum (beta10): gRPC on the public edge
+
+Everything above concerns the REST surface. The gRPC listener stayed where
+SEC-003 left it — bound to `127.0.0.1` in Compose, ClusterIP-only in Kubernetes,
+with a comment in each place saying it is never published. This addendum records
+why that rule can now be relaxed, and the one shape in which relaxing it is
+sound.
+
+### 13.1 Why the blanket rule can go
+
+SEC-003 was filed when `UserService` and `TokenService` had **no
+authentication**: any peer that reached port 50051 could read a user in any
+tenant and brute-force credentials without accruing lockout. With that true, the
+only control left was reachability, so reachability carried the whole argument.
+
+It is no longer true. Every service on the listener is built with
+`with_interceptor(AuthInterceptor)`, each derives `(tenant_id, subject_id)` from
+the verified claims rather than the request body, `ValidateCredentials` accrues
+lockout, and introspection is scoped to the caller's own tenant (SEC-068). The
+listener also registers **no** reflection and **no** health service, so it cannot
+be enumerated. What remains is an authenticated API — the same posture the REST
+surface has, which §10 already argued is publishable behind the edge.
+
+So the rule becomes a default rather than a prohibition: loopback unless an
+operator deliberately publishes it, published only through the edge, and only
+the services they name.
+
+### 13.2 The rate-limit key is the whole argument for the shape
+
+There is an obvious cheaper topology — forward a public port straight at 50051
+and let the backend's own TLS terminate it — and it is unsound for a reason that
+has nothing to do with TLS.
+
+`GrpcTrustedHopsKeyExtractor` mirrors the REST extractor: it reads
+`X-Forwarded-For` first and falls back to the verified connection peer. §4's
+derivation makes that safe **because a proxy appends the real peer to the right**
+of whatever the client sent, and the extractor reads from the right. Remove the
+proxy and the premise goes with it: with `TRUSTED_HOPS = 0` a client that sends
+one XFF entry is keyed on a value it chose, and one it varies per call mints a
+bucket per call. The failure generalises — for `TRUSTED_HOPS = n`, `n+1`
+client-written entries select the leftmost, and fewer than `n+1` fall back to the
+peer — so no value of the knob repairs it. This is the same hazard §11.2 flags
+for the direct mTLS hostname, where it is bounded by that route existing for
+enrolled devices only; on a general-purpose gRPC API it would not be bounded at
+all.
+
+Hence: **gRPC is published through Caddy, on 443, path-matched, or not at all.**
+Caddy speaks HTTP/2 to the client and re-encrypts to the backend's own gRPC
+listener, so the hop count is one on both protocols and the single
+`TRUSTED_HOPS` variable they share stays correct for both — which matters,
+because `trusted_hops_from_env` and the REST extractor read the same name and
+cannot be given different values.
+
+### 13.3 What widens, and what is done about it
+
+| Widened | Mitigation |
+| --- | --- |
+| Five gRPC services become internet-reachable | All authenticated; the edge publishes a path **allowlist**, so `UserService` (which verifies passwords) and `ReactorAdminService` (administrative) stay unpublished unless an operator names them |
+| `ReactorAdminService` is rate-limited as authz traffic — `GrpcMethodFamily::from_path`'s catch-all arm | Per-method permission checks against the authorization engine still apply; the allowlist keeps it off the public edge by default. Reclassifying it is a candidate follow-up, not a prerequisite |
+| A revoked session keeps passing gRPC for up to 15 minutes (`strict_revocation` defaults false) | The runbook sets `AXIAM__GRPC__STRICT_REVOCATION=true` for a public listener, with the session-validation cache to pay for it |
+| Buckets are per source IP, and gRPC has no client identity at the layer that keys them | Documented sizing (`AXIAM__GRPC__GRPC_*_PER_SEC`, the `gateway`/`mesh` profiles); unchanged from the in-mesh case, but newly visible behind NAT |
+| The gRPC TLS leg is TLS 1.2-negotiable, unlike REST's 1.3-only listener | Its only client is Caddy on loopback, which negotiates 1.3; the public half is Caddy's TLS and can be pinned with `protocols tls1.3` |
+
+### 13.4 The renewal gap, named rather than papered over
+
+§3.2 argued the leaf had to become hot-reloadable so nobody would automate a
+restart loop. That work landed in `crates/axiam-server/src/tls.rs` and covers the
+**actix listener only**. `axiam-api-grpc`'s `start_grpc_server` reads
+`AXIAM__GRPC_TLS_CERT_PATH` / `_KEY_PATH` once, at startup, and hands the PEM to
+tonic's `ServerTlsConfig`; that crate contains no reload path and no poll.
+
+A gRPC listener that is public is therefore a listener whose certificate expires
+at day 90 while REST keeps working — the failure mode §3.2 exists to prevent,
+reintroduced on the other protocol. Two ways out:
+
+1. **Operational, and what the runbook does today.** The certbot deploy hook
+   restarts the container when gRPC TLS is on: ~15 seconds every 60 days, at a
+   scheduled moment, instead of a silent expiry.
+2. **Structural, and not done here.** Reloading tonic's certificate means
+   supplying rustls' `ServerConfig` directly, which tonic 0.14's
+   `ServerTlsConfig` does not accept — the same API limit that keeps this leg
+   from being TLS-1.3-only (`server.rs`'s module docs record both). It needs a
+   hand-rolled accept loop over `tokio-rustls` with the existing
+   `ReloadableCertResolver`, which would close the version gap and the reload gap
+   in one change.
+
+(2) is the right eventual answer, and it is a code change with its own tests
+rather than a documentation one. Until it exists, the restart is stated in the
+runbook rather than left for an operator to discover at day 90.

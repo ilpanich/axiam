@@ -151,7 +151,15 @@ services:
       #
       # In production (k8s) the server is ClusterIP-only — remove these mappings.
       - "127.0.0.1:8090:8090"   # REST API — reached by the edge proxy on this host
-      - "127.0.0.1:50051:50051" # gRPC — never published to the internet (SEC-003)
+      # gRPC stays on the loopback here too. SEC-003's blanket "never public"
+      # was written when these services had no authentication; they all carry
+      # the auth interceptor now, so a deployment MAY publish them — but only
+      # through the edge, path-matched, the way the runbook does it
+      # (claude_dev/rpi5-prod-google-federation-guide.md §14, and
+      # public-backend-tls-design.md §13 for why the shape is not optional).
+      # Forwarding a public port at this binding instead makes X-Forwarded-For
+      # client-writable and every per-IP gRPC ceiling decorative.
+      - "127.0.0.1:50051:50051" # gRPC — reached by the edge proxy on this host
     # NOTE on naming: load_config() in crates/axiam-server/src/main.rs calls
     # `.with_prefix("AXIAM").separator("__")` without `.prefix_separator(_)`,
     # so config-rs 0.15 uses `__` as BOTH the prefix separator and the nested

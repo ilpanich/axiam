@@ -12,8 +12,8 @@
 # Because the rustls listener is TLS-only (no plaintext side port), seeding also
 # goes over https — `just bench-seed` handles that (curl -k).
 #
-# D2 (native gRPC TLS): the tonic gRPC server (crates/axiam-api-grpc/src/server.rs)
-# independently supports in-process TLS via ServerTlsConfig, env-gated on
+# D2 (native gRPC TLS): the gRPC server (crates/axiam-api-grpc/src/server.rs)
+# independently supports in-process TLS, env-gated on
 # AXIAM__GRPC_TLS_CERT_PATH/AXIAM__GRPC_TLS_KEY_PATH (REQ-15 AC-1 / CQ-B20;
 # unrelated to this file's REST AXIAM__SERVER__TLS__* keys — separate listener,
 # separate config surface). Reuses the SAME throwaway server cert/key already
@@ -22,6 +22,11 @@
 # plaintext outlier. profiles/p2-tls13.env sets BENCH_GRPC_PLAINTEXT=false so
 # the k6 gRPC scenarios (authz_check_grpc.js / authz_batch_grpc.js) dial with
 # TLS to match. Default (this var unset) stays plaintext for every other profile.
+#
+# Since R-1 that listener terminates TLS itself over tokio-rustls rather than
+# through tonic's ServerTlsConfig, which makes it TLS 1.3-ONLY — the same pin
+# the REST listener above has. A p1-tls12-style gRPC cell is therefore no longer
+# expressible against this stack, which is the intended posture, not a gap.
 services:
   axiam-server:
     environment:

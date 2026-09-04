@@ -2,32 +2,47 @@
 //!
 //! CQ-B20: Server builder sets message-size limits, per-connection timeout,
 //! and concurrency limit to prevent resource exhaustion.
-//! TLS (REQ-15 AC-1): When `AXIAM__GRPC_TLS_CERT_PATH` and
-//! `AXIAM__GRPC_TLS_KEY_PATH` env vars are set, the server is configured with
-//! `ServerTlsConfig`; otherwise plaintext mode is used (suitable for in-mesh
-//! mutual-TLS handled at the sidecar/service-mesh layer).
+//!
+//! # TLS (REQ-15 AC-1, R-1 / T-234)
+//!
+//! This listener does **not** ask tonic to terminate TLS. It takes the
+//! already-built rustls configuration as a value — [`GrpcTls`] — and does the
+//! handshake itself in [`crate::tls_incoming`], handing tonic an
+//! already-encrypted stream through `serve_with_incoming`.
+//!
+//! That indirection is the whole point of the change, and it buys two things
+//! `tonic::transport::ServerTlsConfig` cannot express, because it accepts
+//! neither a `rustls::ServerConfig` nor a certificate resolver:
+//!
+//! - **the leaf can be replaced while the listener runs.** The configuration
+//!   this crate is handed carries `axiam-server`'s `ReloadableCertResolver`,
+//!   the same instance the REST listener serves from when both listen on the
+//!   same leaf, so one `SIGHUP` (or one hourly poll) renews both. Before this,
+//!   the gRPC leaf was fixed at boot and a 90-day ACME certificate expired in
+//!   place unless an operator restarted the container — the failure T-214
+//!   fixed for REST and T-234 recorded as still open for gRPC.
+//! - **TLS 1.3 only.** The configuration is built with
+//!   `with_protocol_versions(&[&rustls::version::TLS13])`, matching the REST
+//!   posture (ASVS V9.1.2). Under `ServerTlsConfig` the crate default left
+//!   TLS 1.2 negotiable, which is the caveat T-233 recorded.
+//!
+//! Who builds that configuration is not a free choice: `ReloadableCertResolver`
+//! lives in `axiam-server` (layer 8) and this crate is layer 6, so the value
+//! has to arrive from above (`scripts/check-crate-layering.py` enforces it).
+//! The composition root reads `AXIAM__GRPC_TLS_CERT_PATH` /
+//! `AXIAM__GRPC_TLS_KEY_PATH` — unchanged flat names, unchanged
+//! panic-on-unreadable, so a typo is still a failed boot — and passes
+//! [`GrpcTls::Rustls`] or [`GrpcTls::Plaintext`]. The `INFO`/`WARN` lines the
+//! Pi runbook §14.4 greps for (`gRPC server TLS enabled`,
+//! `gRPC TLS is DISABLED`) are still emitted from here, so which mode a
+//! listener came up in is still readable from this listener's own log.
 //!
 //! D2 (benchmark plan — native gRPC TLS termination): this is the same
 //! mechanism the p2-tls13 native-TLS bench overlay
 //! (`benchmarks/targets/axiam/docker-compose.native-tls.yml`) turns on,
 //! pointed at the SAME server cert/key files the REST listener uses
 //! (`crates/axiam-server/src/tls.rs` / `AXIAM__SERVER__TLS__CERT_PATH`+
-//! `KEY_PATH`) so the two protocols present identical PKI material. No new
-//! `TlsConfig`-style struct was introduced here — the existing flat
-//! `AXIAM__GRPC_TLS_CERT_PATH`/`KEY_PATH` env-var pair (already shipped in
-//! phase 11) is reused as-is per D2's "least invasive" guidance, rather than
-//! adding a parallel `AXIAM__GRPC__TLS__*` nested config surface.
-//!
-//! Caveat vs. the REST listener: `crates/axiam-server/src/tls.rs` builds a
-//! custom rustls `ServerConfig` restricted to TLS 1.3 only
-//! (`with_protocol_versions(&[&rustls::version::TLS13])`). Tonic 0.14's
-//! `ServerTlsConfig` (see `tonic::transport::server::tls`) does not expose a
-//! protocol-version knob — it always builds `rustls::ServerConfig::builder()`
-//! with the crate's default versions (TLS 1.2 negotiable in addition to 1.3).
-//! There is no way to force TLS-1.3-only through tonic's public API without
-//! hand-rolling the accept loop, which is out of scope here; the gRPC
-//! listener is TLS 1.3-*capable* (matching REST posture) but not TLS
-//! 1.3-*exclusive*.
+//! `KEY_PATH`) so the two protocols present identical PKI material.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,7 +57,7 @@ use axiam_core::repository::{
 use axiam_db::DbHandle;
 use surrealdb::Connection;
 use tokio::sync::Semaphore;
-use tonic::transport::{Identity, Server, ServerTlsConfig};
+use tonic::transport::Server;
 use uuid::Uuid;
 
 use crate::config::GrpcConfig;
@@ -61,6 +76,84 @@ use crate::services::{
     AuthorizationServiceImpl, ReactorAdminServiceImpl, TokenServiceImpl, UserInfoServiceImpl,
     UserServiceImpl,
 };
+use crate::tls_incoming::tls_incoming;
+
+/// How the gRPC listener terminates TLS, as decided by the composition root.
+///
+/// # Why a value rather than an env read
+///
+/// The certificate the listener serves must be replaceable while it runs, and
+/// the machinery that does that — `axiam_server::tls::ReloadableCertResolver`,
+/// the reload trigger it is registered with, and the `SIGHUP`/poll task that
+/// fires them — lives in `axiam-server`. That crate is layer 8; this one is
+/// layer 6, and `scripts/check-crate-layering.py` fails any build where an
+/// edge points the other way. So the configuration arrives already built, and
+/// the two listeners end up sharing one resolver instance instead of this
+/// crate growing its own second copy of the reload mechanism.
+///
+/// Reading the env vars stays with the composition root for the same reason:
+/// deciding TLS is on is a deployment fact, and the only place that can act on
+/// it — by building a config over the *same* leaf the REST listener resolved —
+/// is the place that already resolved it.
+///
+/// # Example
+///
+/// What `axiam-server`'s `main()` does. `grpc_tls_from_env` returns `None` when
+/// neither `AXIAM__GRPC_TLS_CERT_PATH` nor `AXIAM__GRPC_TLS_KEY_PATH` is set —
+/// the in-mesh posture, where a sidecar owns transport security — and panics
+/// when one is set but unreadable, because a listener that fell back to
+/// plaintext on a typo would serve cleartext on a port an operator believes is
+/// encrypted:
+///
+/// ```ignore
+/// // In axiam-server, which owns the reloadable certificate resolver:
+/// let tls = match axiam_server::tls::grpc_tls_from_env() {
+///     Some(config) => {
+///         // Idempotent — the REST bind calls this too, and either listener
+///         // can be the only one with TLS on.
+///         axiam_server::tls::spawn_leaf_reloader(reload_interval_secs);
+///         axiam_api_grpc::GrpcTls::Rustls(config)
+///     }
+///     None => axiam_api_grpc::GrpcTls::Plaintext,
+/// };
+///
+/// axiam_api_grpc::start_grpc_server(addr, /* ..., */ tls).await?;
+/// ```
+///
+/// A caller outside that crate — a test, or an embedding that manages its own
+/// PKI — can build the configuration itself; nothing here requires the
+/// resolver, only that whoever wants renewals without a restart uses one:
+///
+/// ```
+/// use std::sync::Arc;
+/// use axiam_api_grpc::GrpcTls;
+///
+/// # fn build(config: Arc<rustls::ServerConfig>) -> GrpcTls {
+/// let tls = GrpcTls::Rustls(config);
+/// # tls
+/// # }
+/// // ...or, for an in-mesh deployment behind a sidecar:
+/// let plaintext = GrpcTls::Plaintext;
+/// assert!(matches!(plaintext, GrpcTls::Plaintext));
+/// ```
+#[derive(Clone)]
+pub enum GrpcTls {
+    /// No transport security on this listener.
+    ///
+    /// The shipped default, and correct for an in-mesh deployment where a
+    /// sidecar terminates mutual TLS, or a loopback bind behind a terminating
+    /// reverse proxy. Emits the `gRPC TLS is DISABLED` warning the Pi runbook
+    /// §14.4 tells operators to grep for.
+    Plaintext,
+    /// Terminate TLS in-process with this rustls configuration.
+    ///
+    /// Expected to be TLS 1.3-only and to resolve its leaf through a reloadable
+    /// resolver; `axiam_server::tls::build_grpc_rustls_server_config` builds
+    /// exactly that. Nothing here enforces those properties — this crate cannot
+    /// see the resolver behind the config — which is why the builder that can
+    /// is the one the composition root calls.
+    Rustls(Arc<rustls::ServerConfig>),
+}
 
 /// Start the gRPC server with all registered services.
 ///
@@ -150,7 +243,11 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C, Rr, A>(
     // attacker used. `axiam_auth::lockout::SettingsLockoutPolicy` is that
     // resolver; `StaticLockoutPolicy` is the deployment-default fallback.
     lockout_policy: Arc<dyn axiam_auth::lockout::LockoutPolicySource>,
-) -> Result<(), tonic::transport::Error>
+    // R-1 / T-234 — how this listener terminates TLS, decided and built by the
+    // composition root. See [`GrpcTls`] for why it is a value and not an env
+    // read, and the module docs for what changed.
+    tls: GrpcTls,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     R: RoleRepository + 'static,
     P: PermissionRepository + 'static,
@@ -309,45 +406,60 @@ where
         .layer(shared_rate_limit_layer)
         .layer(tower::util::option_layer(strict_revocation_layer));
 
-    // REQ-15 AC-1 / CQ-B20: Env-gated TLS.
-    // Set AXIAM__GRPC_TLS_CERT_PATH and AXIAM__GRPC_TLS_KEY_PATH to enable.
-    let cert_path = std::env::var("AXIAM__GRPC_TLS_CERT_PATH").ok();
-    let key_path = std::env::var("AXIAM__GRPC_TLS_KEY_PATH").ok();
-    match (cert_path, key_path) {
-        (Some(cert_path), Some(key_path)) => {
-            let cert_pem = std::fs::read(&cert_path).unwrap_or_else(|e| {
-                panic!("AXIAM__GRPC_TLS_CERT_PATH set but file not readable at '{cert_path}': {e}")
-            });
-            let key_pem = std::fs::read(&key_path).unwrap_or_else(|e| {
-                panic!("AXIAM__GRPC_TLS_KEY_PATH set but file not readable at '{key_path}': {e}")
-            });
+    // R-1 / T-234: the services are registered once, and only *how the bytes
+    // arrive* differs between the two modes below. Before this change the whole
+    // `add_service` chain was written out twice, once per branch, which is how
+    // a service added to one arm and not the other becomes possible.
+    let router = builder
+        .add_service(authz_svc)
+        .add_service(user_svc)
+        .add_service(user_info_svc)
+        .add_service(token_svc)
+        .add_service(reactor_svc);
 
-            let identity = Identity::from_pem(cert_pem, key_pem);
-            let tls_config = ServerTlsConfig::new().identity(identity);
-            tracing::info!("gRPC server TLS enabled (AXIAM__GRPC_TLS_CERT_PATH)");
-            builder
-                .tls_config(tls_config)?
-                .add_service(authz_svc)
-                .add_service(user_svc)
-                .add_service(user_info_svc)
-                .add_service(token_svc)
-                .add_service(reactor_svc)
-                .serve(addr)
-                .await
+    match tls {
+        GrpcTls::Rustls(tls_config) => {
+            // Bound here rather than by `serve()` so the accept loop can be
+            // ours: tonic's `serve_with_incoming` consumes a stream of
+            // already-connected IO and never binds anything itself.
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            // The runbook greps for this exact line (§14.4), and the env-var
+            // name in it is the one whose typo is the usual cause of a
+            // plaintext listener an operator expected to be encrypted.
+            tracing::info!(
+                bind = %listener.local_addr().unwrap_or(addr),
+                tls_versions = "1.3",
+                reloadable_leaf = true,
+                max_concurrent_handshakes = crate::tls_incoming::MAX_CONCURRENT_HANDSHAKES,
+                "gRPC server TLS enabled (AXIAM__GRPC_TLS_CERT_PATH)"
+            );
+
+            // A listener that stops accepting must fail the server task, not
+            // return `Ok(())`. `serve_with_incoming` cannot tell us that
+            // itself — it treats an exhausted stream as a clean shutdown — so
+            // the accept loop reports an unrecoverable error out of band and
+            // this select turns it back into the error the caller expects.
+            let (fatal_tx, fatal_rx) = tokio::sync::oneshot::channel();
+            let incoming = tls_incoming(listener, tls_config, fatal_tx);
+            tokio::select! {
+                served = router.serve_with_incoming(incoming) => {
+                    served.map_err(Into::into)
+                }
+                Ok(accept_error) = fatal_rx => {
+                    Err(Box::new(accept_error) as Box<dyn std::error::Error + Send + Sync>)
+                }
+            }
         }
-        _ => {
+        GrpcTls::Plaintext => {
             tracing::warn!(
                 "gRPC TLS is DISABLED — set AXIAM__GRPC_TLS_CERT_PATH + \
                  AXIAM__GRPC_TLS_KEY_PATH to enable (acceptable for in-mesh deployments)"
             );
-            builder
-                .add_service(authz_svc)
-                .add_service(user_svc)
-                .add_service(user_info_svc)
-                .add_service(token_svc)
-                .add_service(reactor_svc)
-                .serve(addr)
-                .await
+            // Unchanged from before R-1, deliberately: tonic binds, sets
+            // TCP_NODELAY, and serves exactly as it always has. The E2E suite
+            // and every benchmark that is not the native-TLS overlay run
+            // through this arm.
+            router.serve(addr).await.map_err(Into::into)
         }
     }
 }

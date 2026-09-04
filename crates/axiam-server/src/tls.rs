@@ -2427,6 +2427,135 @@ mod tests {
         assert_eq!(config.alpn_protocols, vec![b"h2".to_vec()]);
     }
 
+    /// The claim R-1 makes, proven on the wire rather than by pointer identity:
+    /// a certificate renewed on disk reaches the **gRPC** listener's own
+    /// `ServerConfig`, with no rebuild and no restart.
+    ///
+    /// `both_listeners_on_one_leaf_share_one_resolver` above asserts the two
+    /// configurations hold the same resolver instance, which is the mechanism.
+    /// This asserts the consequence, which is what T-234 was actually about:
+    /// drive a real TLS 1.3 handshake against the gRPC config, write a renewed
+    /// pair over the same two files, call the global reload the `SIGHUP`
+    /// handler calls, handshake again, and see the new leaf.
+    #[test]
+    fn a_renewal_on_disk_reaches_the_grpc_listener_without_a_restart() {
+        let pki = gen_test_pki();
+        let cert = write_tmp("grpc-wire-cert", &pki.server_cert_pem);
+        let key = write_tmp("grpc-wire-key", &pki.server_key_pem);
+
+        let config =
+            Arc::new(build_grpc_rustls_server_config(&cert, &key).expect("the pair must build"));
+
+        let presented = |config: &Arc<ServerConfig>| -> Vec<CertificateDer<'static>> {
+            let mut server: rustls::Connection = rustls::ServerConnection::new(Arc::clone(config))
+                .unwrap()
+                .into();
+            let mut client: rustls::Connection = make_client(&pki, false).into();
+            drive_handshake(&mut client, &mut server).expect("handshake must complete");
+            client
+                .peer_certificates()
+                .expect("the client must have been presented a chain")
+                .to_vec()
+        };
+
+        let before = presented(&config);
+
+        // What certbot does at day 60: a different leaf, same CA, same paths.
+        let (renewed_cert_pem, renewed_key_pem) = gen_renewed_server_leaf(&pki);
+        std::fs::write(&cert, renewed_cert_pem).unwrap();
+        std::fs::write(&key, renewed_key_pem).unwrap();
+
+        // The entry point the SIGHUP handler and the hourly poll both call.
+        reload_leaf_certificate().expect("the reload must not error");
+
+        let after = presented(&config);
+        assert_ne!(
+            before, after,
+            "a renewal on disk must reach the gRPC listener's next handshake — \
+             this is T-234, and asserting it on the wire is the only way to know"
+        );
+    }
+
+    /// One unreadable leaf must not stop a leaf that *was* renewed from being
+    /// installed.
+    ///
+    /// The doc on `reload_leaf_certificate` promises exactly this — "the other
+    /// leaves are still attempted before the error is returned" — and it is the
+    /// difference between one half-written pair costing one listener its
+    /// renewal and costing both of them. certbot writes the chain and the key
+    /// as two operations, so catching a pair mid-write is the expected case,
+    /// not the exotic one.
+    #[test]
+    fn one_unreadable_leaf_does_not_block_another_leafs_renewal() {
+        let pki = gen_test_pki();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+        let good_cert = write_tmp("multi-good-cert", &pki.server_cert_pem);
+        let good_key = write_tmp("multi-good-key", &pki.server_key_pem);
+        let broken_cert = write_tmp("multi-broken-cert", &pki.server_cert_pem);
+        let broken_key = write_tmp("multi-broken-key", &pki.server_key_pem);
+
+        let good =
+            shared_resolver(&good_cert, &good_key, &provider).expect("register the good leaf");
+        let _broken = shared_resolver(&broken_cert, &broken_key, &provider)
+            .expect("register the second leaf");
+        let before = good.current().cert.clone();
+
+        // One pair renews; the other loses its key mid-write.
+        let (next_cert_pem, next_key_pem) = gen_renewed_server_leaf(&pki);
+        std::fs::write(&good_cert, next_cert_pem).unwrap();
+        std::fs::write(&good_key, next_key_pem).unwrap();
+        std::fs::remove_file(&broken_key).unwrap();
+
+        let err = reload_leaf_certificate()
+            .expect_err("an unreadable pair must be reported, not swallowed");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        assert_ne!(
+            good.current().cert,
+            before,
+            "the leaf that renewed cleanly must be installed even though another failed"
+        );
+
+        // Put it back, so a later test in this binary walking the registry does
+        // not trip over a pair this one broke on purpose.
+        std::fs::write(&broken_key, &pki.server_key_pem).unwrap();
+    }
+
+    /// Half a TLS configuration is treated as none.
+    ///
+    /// The runbook says both variables or neither, and half of one is far more
+    /// likely a typo than an intention — so it is plaintext, loudly (the
+    /// listener logs `gRPC TLS is DISABLED`), rather than a panic that stops a
+    /// deployment which never asked for TLS here. The panic is reserved for a
+    /// variable that IS set and names a file that cannot be read.
+    #[test]
+    fn one_grpc_tls_variable_alone_means_plaintext() {
+        let _lock = grpc_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pki = gen_test_pki();
+        let cert = write_tmp("grpc-half-cert", &pki.server_cert_pem);
+        let key = write_tmp("grpc-half-key", &pki.server_key_pem);
+
+        for (set_var, value) in [
+            (ENV_GRPC_TLS_CERT_PATH, cert.clone()),
+            (ENV_GRPC_TLS_KEY_PATH, key.clone()),
+        ] {
+            let _cleanup = GrpcEnvCleanup;
+            // SAFETY: serialized by `grpc_env_lock()` above.
+            unsafe {
+                std::env::remove_var(ENV_GRPC_TLS_CERT_PATH);
+                std::env::remove_var(ENV_GRPC_TLS_KEY_PATH);
+                std::env::set_var(set_var, &value);
+            }
+            assert!(
+                grpc_tls_from_env().is_none(),
+                "{set_var} alone must leave the listener in plaintext, not enable TLS"
+            );
+        }
+    }
+
     /// T-233 rests on "a typo is a failed boot".
     ///
     /// A listener that fell back to plaintext because a path was misspelled

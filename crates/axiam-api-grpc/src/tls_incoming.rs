@@ -121,9 +121,45 @@ pub(crate) fn tls_incoming(
     config: Arc<rustls::ServerConfig>,
     fatal: oneshot::Sender<io::Error>,
 ) -> impl Stream<Item = io::Result<TlsStream<TcpStream>>> + Send + 'static {
+    tls_incoming_with_bounds(
+        listener,
+        config,
+        fatal,
+        Bounds {
+            max_concurrent_handshakes: MAX_CONCURRENT_HANDSHAKES,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+        },
+    )
+}
+
+/// The two limits that contain the denial-of-service surface terminating TLS
+/// here introduces.
+///
+/// A parameter rather than a pair of constants read directly, so both bounds
+/// can be *exercised*: at their production values a test would need 512
+/// half-open connections and a ten-second wait to reach either, which is a test
+/// nobody runs and therefore a bound nobody has seen work. The production
+/// values are still [`MAX_CONCURRENT_HANDSHAKES`] and [`HANDSHAKE_TIMEOUT`],
+/// passed at the one call site above.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Bounds {
+    /// How many handshakes may be in flight at once; a connection arriving with
+    /// no permit free is dropped rather than queued.
+    pub(crate) max_concurrent_handshakes: usize,
+    /// How long one handshake may take before its connection is dropped and its
+    /// permit released.
+    pub(crate) handshake_timeout: Duration,
+}
+
+fn tls_incoming_with_bounds(
+    listener: TcpListener,
+    config: Arc<rustls::ServerConfig>,
+    fatal: oneshot::Sender<io::Error>,
+    bounds: Bounds,
+) -> impl Stream<Item = io::Result<TlsStream<TcpStream>>> + Send + 'static {
     let (ready_tx, ready_rx) = mpsc::channel::<TlsStream<TcpStream>>(READY_QUEUE_DEPTH);
 
-    tokio::spawn(accept_loop(listener, config, ready_tx, fatal));
+    tokio::spawn(accept_loop(listener, config, ready_tx, fatal, bounds));
 
     // `unfold` rather than a `ReceiverStream` so this crate does not need
     // tokio-stream as a non-dev dependency for one adapter.
@@ -143,9 +179,10 @@ async fn accept_loop(
     config: Arc<rustls::ServerConfig>,
     ready_tx: mpsc::Sender<TlsStream<TcpStream>>,
     fatal: oneshot::Sender<io::Error>,
+    bounds: Bounds,
 ) {
     let acceptor = TlsAcceptor::from(config);
-    let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES));
+    let permits = Arc::new(Semaphore::new(bounds.max_concurrent_handshakes));
 
     loop {
         let (tcp, peer) = match listener.accept().await {
@@ -177,8 +214,8 @@ async fn accept_loop(
         let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
             if !SHED_WARNED.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
-                    max_concurrent_handshakes = MAX_CONCURRENT_HANDSHAKES,
-                    handshake_timeout_secs = HANDSHAKE_TIMEOUT.as_secs(),
+                    max_concurrent_handshakes = bounds.max_concurrent_handshakes,
+                    handshake_timeout_secs = bounds.handshake_timeout.as_secs(),
                     "gRPC TLS handshake capacity is saturated; connections are being \
                      shed until in-flight handshakes complete or time out. This warning \
                      is logged once per process."
@@ -194,7 +231,7 @@ async fn accept_loop(
         tokio::spawn(async move {
             // Held for the whole handshake, released on every exit path.
             let _permit = permit;
-            match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+            match tokio::time::timeout(bounds.handshake_timeout, acceptor.accept(tcp)).await {
                 Ok(Ok(tls)) => {
                     // A closed receiver means tonic has stopped serving; the
                     // connection is dropped with it, which is correct.
@@ -206,7 +243,7 @@ async fn accept_loop(
                 Err(_) => {
                     tracing::debug!(
                         peer = %peer,
-                        timeout_secs = HANDSHAKE_TIMEOUT.as_secs(),
+                        timeout_ms = bounds.handshake_timeout.as_millis(),
                         "gRPC TLS handshake timed out"
                     );
                 }
@@ -357,18 +394,16 @@ mod tests {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         }
 
+        /// Unreachable by construction: the listener is TLS 1.3-only, so the
+        /// one TLS 1.2 client in this module is refused at version negotiation
+        /// — before any signature exists to verify. Required by the trait.
         fn verify_tls12_signature(
             &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            dss: &rustls::DigitallySignedStruct,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
         ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-            rustls::crypto::verify_tls12_signature(
-                message,
-                cert,
-                dss,
-                &self.provider.signature_verification_algorithms,
-            )
+            unreachable!("the listener under test never negotiates TLS 1.2")
         }
 
         fn verify_tls13_signature(
@@ -415,10 +450,46 @@ mod tests {
         resolver: Arc<dyn ResolvesServerCert>,
         listener: TcpListener,
     ) -> Arc<Mutex<Vec<TlsStream<TcpStream>>>> {
+        // Deliberately through `tls_incoming`, not `tls_incoming_with_bounds`:
+        // that is the entry point `start_grpc_server` calls, so it is the one
+        // that must be exercised. Only the two tests that need to *reach* a
+        // bound go through the inner function.
+        drive(tls_incoming, resolver, listener)
+    }
+
+    /// As above, with the two bounds set explicitly so a test can reach them
+    /// without 512 connections and a ten-second wait.
+    fn spawn_listener_with(
+        resolver: Arc<dyn ResolvesServerCert>,
+        listener: TcpListener,
+        bounds: Bounds,
+    ) -> Arc<Mutex<Vec<TlsStream<TcpStream>>>> {
+        drive(
+            move |listener, config, fatal| {
+                tls_incoming_with_bounds(listener, config, fatal, bounds)
+            },
+            resolver,
+            listener,
+        )
+    }
+
+    /// Consume an incoming stream, keeping every accepted connection alive.
+    ///
+    /// Holding them matters: a renewal must not be mistakable for a dropped
+    /// connection just because the test dropped the server side of it.
+    fn drive<F, S>(
+        build: F,
+        resolver: Arc<dyn ResolvesServerCert>,
+        listener: TcpListener,
+    ) -> Arc<Mutex<Vec<TlsStream<TcpStream>>>>
+    where
+        F: FnOnce(TcpListener, Arc<rustls::ServerConfig>, oneshot::Sender<io::Error>) -> S,
+        S: Stream<Item = io::Result<TlsStream<TcpStream>>> + Send + 'static,
+    {
         let accepted = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&accepted);
         let (fatal_tx, _fatal_rx) = oneshot::channel();
-        let mut incoming = Box::pin(tls_incoming(listener, server_config(resolver), fatal_tx));
+        let mut incoming = Box::pin(build(listener, server_config(resolver), fatal_tx));
         tokio::spawn(async move {
             while let Some(Ok(stream)) = incoming.next().await {
                 sink.lock().expect("accepted lock").push(stream);
@@ -627,6 +698,105 @@ mod tests {
         // about the accept loop not blocking, not about the shed path, and a
         // flood over the ceiling would shed the well-behaved client too.
         const { assert!(FLOOD < MAX_CONCURRENT_HANDSHAKES) };
+    }
+
+    /// A failed handshake drops **that connection only**.
+    ///
+    /// "One malformed ClientHello stops the listener" would be a one-packet
+    /// denial of service, so this is the property that matters most about the
+    /// error arm: the garbage connection dies, the accept loop does not, and
+    /// the very next well-behaved client is served.
+    #[tokio::test]
+    async fn a_failed_handshake_does_not_take_the_listener_down() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let resolver = Arc::new(SwappableResolver::new(test_leaf()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let _accepted = spawn_listener(resolver as Arc<dyn ResolvesServerCert>, listener);
+
+        // Not a ClientHello. rustls refuses it, and the handshake task takes
+        // the `Ok(Err(..))` arm.
+        let mut garbage = TokioTcpStream::connect(addr).await.expect("connect");
+        garbage
+            .write_all(b"this is not a TLS ClientHello\r\n\r\n")
+            .await
+            .expect("write");
+        let _ = garbage.flush().await;
+
+        let verifier = RecordingVerifier::new();
+        let served = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect(addr, client_config(verifier, &[&rustls::version::TLS13])),
+        )
+        .await;
+
+        assert!(
+            matches!(served, Ok(Ok(_))),
+            "a rejected handshake must not stop the accept loop, got {served:?}"
+        );
+    }
+
+    /// A client that opens TCP and never speaks releases its permit at the
+    /// timeout, so the listener recovers on its own.
+    ///
+    /// This is what makes the permit bound self-healing rather than a
+    /// one-way ratchet into permanent refusal. At the production
+    /// [`HANDSHAKE_TIMEOUT`] the test would take ten seconds; the bound is
+    /// injected so the *behaviour* can be exercised in milliseconds.
+    #[tokio::test]
+    async fn a_silent_client_releases_its_permit_at_the_timeout() {
+        let resolver = Arc::new(SwappableResolver::new(test_leaf()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let _accepted = spawn_listener_with(
+            resolver as Arc<dyn ResolvesServerCert>,
+            listener,
+            Bounds {
+                // Exactly one handshake at a time, so the silent client below
+                // holds the *only* permit and a second connection must wait for
+                // the timeout to release it.
+                max_concurrent_handshakes: 1,
+                handshake_timeout: Duration::from_millis(150),
+            },
+        );
+
+        let silent = TokioTcpStream::connect(addr).await.expect("connect");
+        // Let the accept loop take the permit for it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Now the pool is empty; this one is shed. That arm is the load-shed
+        // path, and shedding rather than queueing is what keeps the accept loop
+        // constant-cost under a flood.
+        let shed = tokio::time::timeout(
+            Duration::from_millis(80),
+            connect(
+                addr,
+                client_config(RecordingVerifier::new(), &[&rustls::version::TLS13]),
+            ),
+        )
+        .await;
+        assert!(
+            !matches!(shed, Ok(Ok(_))),
+            "with every permit held, a new connection must be shed rather than served"
+        );
+
+        // ...and once the silent client's permit times out, service resumes
+        // with no intervention.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect(
+                addr,
+                client_config(RecordingVerifier::new(), &[&rustls::version::TLS13]),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(recovered, Ok(Ok(_))),
+            "the timeout must release the permit and let the listener recover, got {recovered:?}"
+        );
+        drop(silent);
     }
 
     #[test]

@@ -43,6 +43,40 @@
 > **not** regenerated: `website-security-beta11-update-plan.md` has not run yet,
 > and §9 step 3 says to leave it to that plan.
 
+> **EXECUTED — R-3, 2026-09-04.** The deployment-origin rule now guards every
+> federated start operation, not two of four. `require_deployment_spa_origin` is
+> called on `oidc_start_public` (`federation.rs`) and `oauth2_start_public`
+> (`federation_login.rs`), after workspace and config resolution so an unknown
+> slug still answers the uniform `401`, and at the mint —
+> `issue_sso_session`, which is where every OIDC and OAuth2 sign-in issues its
+> cookies, mirroring the re-check `mint_handoff_and_redirect` already did. The
+> `TODO(T19.14)` and the "deferred" sentence above it are gone, and
+> `validate_redirect_uri`'s doc says why the per-config allowlist it proposed is
+> superseded rather than postponed. The refusal message no longer says "for SAML
+> and Apple sign-in", because it is no longer true.
+>
+> Tests: two integration tests (`an_oidc_login_may_not_name_a_foreign_redirect_target`,
+> `an_oauth2_login_may_not_name_a_foreign_redirect_target`) covering all five
+> shapes §4 names — an off-origin URI refused with `400` naming the knob, a
+> same-host different-port URI refused (origin, not host), the issuer origin
+> accepted, an `SSO_SPA_ORIGINS`-listed origin accepted, and an unknown
+> organization still `401`. The decision itself was already unit-tested in
+> `handlers::federation_login`, port case included. Nineteen existing tests in
+> three files went red on the change and were fixed by setting
+> `sso_spa_origins` in their fixtures — which is precisely the migration the
+> change asks of a split-origin deployment, so the suite now exercises it.
+>
+> Compatibility, docs and model: `CHANGELOG.md` under **Changed** naming
+> `AXIAM__AUTH__SSO_SPA_ORIGINS`; `AuthConfig::sso_spa_origins`' own doc, which
+> said the rule had no effect on OIDC and OAuth2; `federation-sso-login-design.md`
+> (the paragraph that deferred this to T19.14); the website's configuration row,
+> whose text had become factually wrong; `sdks/CONTRACT.md` §12.1 rule 12a widened
+> to all four start operations, contract **1.39**, additive and restrictive
+> server-side only with no SDK code changes. T-219's mitigation rewritten in
+> `Axiam.json`, `threat-model-stride.md` and `threat-modeling-and-security.md`;
+> status unchanged (already Mitigated), so no count moves. T-147 keeps no list of
+> contract amendments, so there was nothing to add there.
+
 > **Who this is for.** A fresh Claude session (Opus 5) implementing the fixes
 > below. It is the entry point: read this, then §1 for the order, then one item
 > at a time. Each item names the threat it closes or narrows, the files, the

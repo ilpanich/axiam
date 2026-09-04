@@ -433,9 +433,27 @@ config resolution, so an unknown slug still answers the uniform `401` rather tha
 being told which check it failed.
 
 This is the rule AXIAM's own OAuth2 authorization server already applies to its
-`redirect_uri` (threat model T-52). Extending the registered-redirect allowlist to
-the OIDC and OAuth2 federation paths as well remains T19.14's job; there the
-provider is still checking.
+`redirect_uri` (threat model T-52).
+
+**Widened by R-3 (2026-09-04) to all four start paths.** As written above the
+check was applied to the two cross-site flows only, on the argument that the OIDC
+and OAuth2 paths are backstopped by the provider's own registered-redirect
+comparison. They are — but that comparison is only as strict as each provider's
+registration hygiene, and several providers accept wildcard or prefix
+registrations. More to the point it is a control AXIAM neither owns nor can
+inspect: nothing on this side can tell whether a given tenant's provider was
+registered tightly. The rule the server *does* own is therefore uniform across
+the four flows, with the provider's check kept as a second, independent layer.
+
+The per-`FederationConfig` registered-redirect allowlist T19.14 proposed is
+**not** what landed, and the TODO is retired rather than carried: the
+deployment-origin rule already says where a code may go, and a second list to
+keep in sync with it is a second place to get wrong. The one cost is a
+compatibility note — a deployment whose SPA is on an origin other than the
+issuer's, signing in through OIDC or OAuth2, must now set
+`AXIAM__AUTH__SSO_SPA_ORIGINS`, which is the requirement SAML and Apple have
+imposed since this section was written. `sdks/CONTRACT.md` §12.1 rule 12a carries
+the wire-level statement (contract 1.39).
 
 **Alternatives considered and rejected.** `SameSite=Lax` on the session cookies
 would fix SAML and Apple and re-open the CSRF surface `Strict` was chosen to

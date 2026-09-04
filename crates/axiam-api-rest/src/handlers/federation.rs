@@ -1638,12 +1638,23 @@ pub(crate) fn random_base64url() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Validate that a redirect_uri is a well-formed absolute HTTPS (or HTTP
-/// localhost) URL.  This is a minimal open-redirect guard — a full
-/// per-config allowlist would require a schema change (deferred).
-// TODO(T19.14): tighten open-redirect protection — add a per-FederationConfig
-// registered redirect_uri allowlist (needs a schema column) instead of the
-// current scheme/host-only guard. Tracked for Phase 19.
+/// Validate that a `redirect_uri` is a well-formed absolute HTTPS (or HTTP
+/// localhost) URL.
+///
+/// This is the **first, cheap** check, not the whole rule. It answers "is this
+/// a URL a browser could be sent to at all", which is worth saying separately
+/// because the message a caller gets for `not-a-url` should not be the message
+/// they get for `wrong-origin`.
+///
+/// The rule that decides *where* a browser may be sent is
+/// [`federation_login::require_deployment_spa_origin`], and since R-3 every one
+/// of the four federated start operations applies it — SAML, Apple, OIDC and
+/// OAuth2 alike. The `TODO(T19.14)` that used to sit here proposed a
+/// per-`FederationConfig` registered-redirect allowlist instead; that is
+/// deliberately **not** what landed. A second list to keep in sync with the
+/// deployment-origin rule is a second place to get wrong, and the origin rule
+/// already answers the question the allowlist was for. See
+/// `claude_dev/remediation-plan-2026-09-04.md` §4.
 pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), AxiamApiError> {
     let parsed = url::Url::parse(uri).map_err(|_| {
         AxiamApiError(AxiamError::Validation {
@@ -1734,6 +1745,13 @@ pub(crate) async fn issue_sso_session<C: Connection + Clone>(
     user: &axiam_core::models::user::User,
     spa_redirect_uri: String,
 ) -> Result<HttpResponse, AxiamApiError> {
+    // R-3: checked again here, not only at login start — the same reason
+    // `mint_handoff_and_redirect` re-checks. This is the single point every
+    // OIDC and OAuth2 sign-in passes through, and a `federation_login_state`
+    // row written by an older binary, before the start-path check existed, must
+    // not be honoured by this one. It costs one URL parse per federated login.
+    super::federation_login::require_deployment_spa_origin(state, &spa_redirect_uri)?;
+
     // TODO(T19.15): resolve real org_id from the tenant instead of Uuid::nil().
     // SSO-provisioned access tokens currently carry an empty org_id claim.
     let auth_out = state
@@ -1809,7 +1827,8 @@ pub async fn oidc_start_public<C: Connection + Clone>(
     body: web::Json<OidcStartRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use super::federation_login::{
-        idp_redirect_uri_for, oidc_service, resolve_config_for_login, resolve_workspace,
+        idp_redirect_uri_for, oidc_service, require_deployment_spa_origin,
+        resolve_config_for_login, resolve_workspace,
     };
 
     let b = body.into_inner();
@@ -1841,6 +1860,21 @@ pub async fn oidc_start_public<C: Connection + Clone>(
              start the flow at the endpoint its protocol names",
         ));
     }
+
+    // R-3: the same deployment-origin rule the SAML and Apple paths apply.
+    //
+    // Until now this path relied on the provider's own registered-redirect
+    // check, which does see this URI and does compare it — but that backstop is
+    // only ever as strict as each provider's registration hygiene, and several
+    // accept wildcard or prefix registrations. It is also a control AXIAM does
+    // not own: nothing here can tell whether it was configured well. The rule
+    // the server *does* own should be uniform across all four start operations,
+    // and the provider's check remains as a second, independent layer.
+    //
+    // Placed after workspace and config resolution so that an unknown slug
+    // still answers the uniform 401 rather than being told which check it
+    // failed (D-22).
+    require_deployment_spa_origin(&app_state, &b.redirect_uri)?;
 
     // Generate server-side state + nonce (256 bits each).
     let state = random_base64url();

@@ -29,8 +29,21 @@
 > wave added) and removes the TLS-version caveat T-233 and T-214 both carried,
 > taking the model to **236 threats, 220 mitigated / 16 open**; the deployment
 > diagram goes from 6 open to 5. The open register below loses T-234 accordingly.
-> The remaining items of that plan — R-2…R-7 — are separate passes and are not
-> reflected here yet.
+>
+> **R-3 has landed** alongside it: the deployment-origin rule on a federated
+> `redirect_uri` now applies to all four start operations rather than the two
+> cross-site ones, so on the OIDC and plain-OAuth2 flows the identity provider's
+> registered-redirect comparison is a second, independent layer instead of the
+> only server-side check — narrowing **T-219** and retiring `TODO(T19.14)`, whose
+> per-config allowlist is superseded rather than deferred. Contract §12.1 rule
+> 12a widened to match (1.39), additive and restrictive server-side only, with no
+> SDK code changes. It asks one thing of one class of deployment: an SPA on an
+> origin other than the issuer's, signing in through OIDC or OAuth2, must set
+> `AXIAM__AUTH__SSO_SPA_ORIGINS` — the requirement the other two flows have
+> imposed since beta08. T-219 was already Mitigated, so no count moves with it.
+>
+> The remaining items of that plan — R-2 and R-4…R-7 — are separate passes and
+> are not reflected here yet.
 >
 > **Beta08…beta11 wave (model 2.11.0).** Twenty-five threats enter the model,
 > bringing it to **236 threats, 219 mitigated / 17 open**, in three groups. Two of
@@ -655,7 +668,12 @@ against the classic federation attacks:
   origin, compared as origins so a path, port or scheme cannot smuggle a second
   host past it, and enforced at login start, at the mint and on the error
   redirect — because on these two flows the identity provider never sees the SPA
-  URL, so nothing else would have checked it.
+  URL, so nothing else would have checked it. The **same rule governs the OIDC
+  and plain-OAuth2 flows**, where the provider does see the URL and does compare
+  it against its registered set: that comparison is only as strict as each
+  provider's registration hygiene, and it is not a control this deployment owns,
+  so it sits behind AXIAM's own rule as a second layer rather than in place of
+  it.
 - **The plain-OAuth2 variant states its downgrade instead of hiding it.**
   Providers that issue no ID token (GitHub, Facebook) authenticate by a userinfo
   call with no signature, `nonce` or `aud`. AXIAM refuses that protocol for every

@@ -6,21 +6,42 @@ Why this exists
 AXIAM suppresses a handful of RUSTSEC advisories, and it has to say so
 **twice**: ``cargo-deny`` reads ``[advisories].ignore`` from ``deny.toml``,
 while ``cargo-audit`` (via ``actions-rust-lang/audit``) reads its list from an
-``ignore:`` input in the CI workflow and ignores ``deny.toml`` entirely. The
-workflow already states the invariant in a comment:
+``ignore:`` input in the CI workflow and ignores ``deny.toml`` entirely.
+Nothing failed if the two drifted, and drift is silent in the direction that
+matters: an ID present in ``deny.toml`` but missing from the workflow leaves
+``cargo audit`` red for a reason nobody wrote down, while an ID present in the
+workflow and nowhere else means the *rationale* for suppressing it exists in no
+file at all.
 
-    Ignored advisories MUST stay in sync with deny.toml [advisories].ignore.
+The rationale lives in ``deny.toml``, which is the file with room for it.
 
-That comment was the whole enforcement mechanism. Nothing failed if the two
-drifted, and drift is silent in the direction that matters: an ID present in
-``deny.toml`` but missing from the workflow leaves ``cargo audit`` red for a
-reason nobody wrote down, while an ID present in the workflow but missing from
-``deny.toml`` means ``cargo deny`` is still gating on an advisory the team
-believes it has triaged -- or, worse, that the *rationale* for suppressing it
-exists in neither file.
+The lists are not equal, and requiring that they be was wrong
+------------------------------------------------------------
+This gate originally demanded set equality, which held right up until it
+didn't. The two tools do not examine the same set of crates:
 
-The rationale lives in ``deny.toml``, which is the file with room for it. This
-gate makes the workflow's list provably a mirror of it.
+* ``cargo-deny`` resolves the **feature graph**. A dependency declared
+  ``optional = true`` that no enabled feature activates is not in the graph, so
+  there is nothing for an ignore entry to match -- and cargo-deny reports the
+  unmatched entry as ``advisory-not-detected``, which the CI job escalates with
+  ``-D advisory-not-detected``.
+* ``cargo-audit`` reads **Cargo.lock**, which records optional dependencies
+  whether or not any feature ever pulls them in, so it still reports them.
+
+RUSTSEC-2023-0089 (atomic-polyfill) and RUSTSEC-2026-0235 (rkyv) live in that
+gap today: cargo-audit needs them suppressed, cargo-deny fails if they are.
+Equality is therefore unsatisfiable, and the honest invariant is containment
+plus an explicit declaration:
+
+1. Every ID in ``deny.toml``'s ``[advisories].ignore`` MUST appear in the
+   workflow's ``ignore:`` input. (cargo-audit sees a superset of cargo-deny's
+   crates, so anything cargo-deny suppresses, cargo-audit will hit too.)
+2. Every extra ID in the workflow MUST be declared in ``deny.toml`` as an
+   ``# audit-only: RUSTSEC-YYYY-NNNN -- reason`` comment. The declaration is
+   what keeps "the lists differ" from becoming indistinguishable from "the
+   lists drifted".
+3. A declaration must not be stale: an ``audit-only`` ID that is absent from
+   the workflow, or that also appears in ``ignore``, is an error.
 
 Exit codes: 0 in sync, 1 drifted, 2 could not run (deliberately not 0).
 """
@@ -42,6 +63,17 @@ CI_YAML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 CI_IGNORE_RE = re.compile(r"^\s*ignore:\s*(RUSTSEC-[\w,\-]+)\s*$", re.MULTILINE)
 
 ADVISORY_ID_RE = re.compile(r"^RUSTSEC-\d{4}-\d{4}$")
+
+# `# audit-only: RUSTSEC-YYYY-NNNN -- why`, anywhere in deny.toml. A comment
+# rather than a TOML key on purpose: deny.toml is parsed by cargo-deny, and a
+# key it does not know is a warning on every run of the job this gate protects.
+AUDIT_ONLY_RE = re.compile(
+    r"^\s*#\s*audit-only:\s*(RUSTSEC-\d{4}-\d{4})\b(.*)$", re.MULTILINE
+)
+
+# An audit-only entry without a reason is the failure mode this gate exists to
+# prevent, one indirection later. Long enough to be a sentence, not a shrug.
+MIN_REASON_CHARS = 20
 
 
 class GateError(Exception):
@@ -87,10 +119,21 @@ def ci_ignore_ids(text: str) -> list[str]:
     return [part.strip() for part in matches[0].split(",") if part.strip()]
 
 
+def audit_only_ids(text: str) -> dict[str, str]:
+    """Return {advisory id: reason} for deny.toml's `# audit-only:` declarations."""
+    found: dict[str, str] = {}
+    for ident, reason in AUDIT_ONLY_RE.findall(text):
+        if ident in found:
+            raise GateError(f"deny.toml declares {ident} audit-only more than once")
+        found[ident] = reason.strip().lstrip("-–—").strip()
+    return found
+
+
 def check(deny_text: str, ci_text: str) -> list[str]:
     """Return a list of human-readable problems; empty means in sync."""
     deny_ids = deny_ignore_ids(deny_text)
     ci_ids = ci_ignore_ids(ci_text)
+    audit_only = audit_only_ids(deny_text)
 
     problems = []
 
@@ -102,20 +145,48 @@ def check(deny_text: str, ci_text: str) -> list[str]:
         for ident in sorted(duplicates):
             problems.append(f"{label}: {ident} is listed more than once")
 
-    missing_from_ci = sorted(set(deny_ids) - set(ci_ids))
-    missing_from_deny = sorted(set(ci_ids) - set(deny_ids))
-
-    for ident in missing_from_ci:
+    # (1) Anything cargo-deny suppresses, cargo-audit must suppress too:
+    # cargo-audit reads Cargo.lock, a superset of the resolved feature graph, so
+    # it will hit every advisory cargo-deny does and then some.
+    for ident in sorted(set(deny_ids) - set(ci_ids)):
         problems.append(
             f"{ident} is ignored in deny.toml but NOT in ci.yml -- cargo audit "
             f"will fail on an advisory cargo deny considers triaged"
         )
-    for ident in missing_from_deny:
-        problems.append(
-            f"{ident} is ignored in ci.yml but NOT in deny.toml -- cargo deny "
-            f"will fail on it, and the rationale for suppressing it is written "
-            f"down nowhere"
-        )
+
+    # (2) The reverse direction is legal, but only when declared and explained.
+    for ident in sorted(set(ci_ids) - set(deny_ids)):
+        if ident not in audit_only:
+            problems.append(
+                f"{ident} is ignored in ci.yml but is neither in deny.toml's "
+                f"[advisories].ignore nor declared there as `# audit-only: "
+                f"{ident} -- <reason>` -- so the rationale for suppressing it "
+                f"is written down nowhere"
+            )
+        elif len(audit_only[ident]) < MIN_REASON_CHARS:
+            problems.append(
+                f"{ident} is declared audit-only in deny.toml without a real "
+                f"reason (got {audit_only[ident]!r}) -- say why cargo-audit "
+                f"sees it and cargo-deny does not"
+            )
+
+    # (3) A declaration that no longer describes reality is worse than none: it
+    # reads as triage that has already happened.
+    for ident in sorted(audit_only):
+        if not ADVISORY_ID_RE.match(ident):
+            problems.append(f"deny.toml: audit-only {ident!r} is not a RUSTSEC id")
+        if ident in deny_ids:
+            problems.append(
+                f"{ident} is declared audit-only in deny.toml AND listed in its "
+                f"[advisories].ignore -- it is one or the other; cargo deny "
+                f"fails the ignore entry under -D advisory-not-detected if the "
+                f"crate really is invisible to it"
+            )
+        elif ident not in ci_ids:
+            problems.append(
+                f"{ident} is declared audit-only in deny.toml but is not in "
+                f"ci.yml's ignore list -- a stale declaration; delete it"
+            )
 
     return problems
 
@@ -153,8 +224,48 @@ def self_test() -> int:
             1,
         ),
         (
-            "missing from deny.toml",
+            "extra in ci.yml, undeclared",
             deny(["RUSTSEC-2023-0071"]),
+            ci("RUSTSEC-2023-0071,RUSTSEC-2026-0258"),
+            1,
+        ),
+        (
+            "extra in ci.yml, declared audit-only with a reason",
+            "# audit-only: RUSTSEC-2026-0258 -- lockfile-only, not in the resolved graph\n"
+            + deny(["RUSTSEC-2023-0071"]),
+            ci("RUSTSEC-2023-0071,RUSTSEC-2026-0258"),
+            0,
+        ),
+        (
+            "audit-only declaration with no reason is rejected",
+            "# audit-only: RUSTSEC-2026-0258\n" + deny(["RUSTSEC-2023-0071"]),
+            ci("RUSTSEC-2023-0071,RUSTSEC-2026-0258"),
+            1,
+        ),
+        (
+            "audit-only declaration with a shrug for a reason is rejected",
+            "# audit-only: RUSTSEC-2026-0258 -- n/a\n" + deny(["RUSTSEC-2023-0071"]),
+            ci("RUSTSEC-2023-0071,RUSTSEC-2026-0258"),
+            1,
+        ),
+        (
+            "stale audit-only declaration (not in ci.yml)",
+            "# audit-only: RUSTSEC-2026-0258 -- lockfile-only, not in the resolved graph\n"
+            + deny(["RUSTSEC-2023-0071"]),
+            ci("RUSTSEC-2023-0071"),
+            1,
+        ),
+        (
+            "audit-only AND in deny.toml's ignore is contradictory",
+            "# audit-only: RUSTSEC-2026-0258 -- lockfile-only, not in the resolved graph\n"
+            + deny(["RUSTSEC-2023-0071", "RUSTSEC-2026-0258"]),
+            ci("RUSTSEC-2023-0071,RUSTSEC-2026-0258"),
+            1,
+        ),
+        (
+            "audit-only never excuses a deny.toml id missing from ci.yml",
+            "# audit-only: RUSTSEC-2026-0258 -- lockfile-only, not in the resolved graph\n"
+            + deny(["RUSTSEC-2023-0071", "RUSTSEC-2026-0194"]),
             ci("RUSTSEC-2023-0071,RUSTSEC-2026-0258"),
             1,
         ),
@@ -196,6 +307,11 @@ def self_test() -> int:
         ("no ignore: line in workflow", deny(["RUSTSEC-2023-0071"]), "jobs:\n"),
         ("two ignore: lines in workflow", deny(["RUSTSEC-2023-0071"]),
          ci("RUSTSEC-2023-0071") + ci("RUSTSEC-2023-0071")),
+        ("duplicate audit-only declaration",
+         "# audit-only: RUSTSEC-2026-0258 -- lockfile-only, not in the graph\n"
+         "# audit-only: RUSTSEC-2026-0258 -- lockfile-only, not in the graph\n"
+         + deny(["RUSTSEC-2023-0071"]),
+         ci("RUSTSEC-2023-0071,RUSTSEC-2026-0258")),
     ):
         try:
             check(deny_text, ci_text)
@@ -234,17 +350,22 @@ def main(argv: list[str]) -> int:
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         print(
-            "\nThe two lists must match. deny.toml is the file that carries the "
-            "rationale for each entry; add or remove the ID there first, then "
-            "mirror it into the cargo audit step's `ignore:` input.",
+            "\ndeny.toml is the file that carries the rationale for every "
+            "suppression. Add or remove the ID there first -- in "
+            "[advisories].ignore if cargo-deny sees the crate, or as an "
+            "`# audit-only: <ID> -- <reason>` comment if only cargo-audit does "
+            "-- then mirror it into the cargo audit step's `ignore:` input.",
             file=sys.stderr,
         )
         return 1
 
     ids = deny_ignore_ids(deny_text)
-    print(f"deny.toml and ci.yml agree on {len(ids)} ignored advisory(ies):")
+    audit_only = audit_only_ids(deny_text)
+    print(f"deny.toml and ci.yml agree on {len(ids) + len(audit_only)} suppression(s):")
     for ident in ids:
-        print(f"  {ident}")
+        print(f"  {ident}  (cargo-deny + cargo-audit)")
+    for ident in sorted(audit_only):
+        print(f"  {ident}  (cargo-audit only: {audit_only[ident]})")
     return 0
 
 

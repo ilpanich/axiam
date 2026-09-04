@@ -105,6 +105,13 @@ jobs:
       # nothing else. Drift is silent either way: an ID only in deny.toml
       # leaves cargo audit red for an unwritten reason, and an ID only in the
       # workflow means the rationale for suppressing it exists in no file.
+      #
+      # The gate checks containment, not equality, because the two tools do not
+      # see the same crates: cargo-deny resolves the feature graph, cargo-audit
+      # reads Cargo.lock. An optional dependency nothing enables is therefore
+      # invisible to one and reported by the other, and demanding equality asked
+      # for something unsatisfiable. Extra IDs on the cargo-audit side are legal
+      # when deny.toml declares them `# audit-only: <ID> -- <reason>`.
       - name: Ignore-list sync gate self-test (fixtures)
         run: python3 scripts/check-audit-ignore-sync.py --self-test
       - name: Advisory ignore-lists agree
@@ -198,49 +205,110 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxmlsec1-dev libxml2-dev
 
       # --- cargo audit ---
-      # Ignored advisories MUST stay in sync with deny.toml [advisories].ignore.
-      # cargo-audit (unlike cargo-deny) reads its ignore list from this input,
-      # not from deny.toml, so the same IDs are listed here with the same rationale:
+      # cargo-audit reads its ignore list from this input, not from deny.toml, so
+      # every suppression has to be repeated here. It is a SUPERSET of
+      # deny.toml [advisories].ignore, and that is deliberate rather than drift:
+      # cargo-audit reads Cargo.lock, while cargo-deny resolves the feature graph,
+      # so a dependency that is declared `optional = true` and never enabled is
+      # reported by the former and invisible to the latter. Entries marked
+      # "audit-only" below are exactly that case — putting them in deny.toml too
+      # would trip its `-D advisory-not-detected` gate. See the header comment in
+      # deny.toml for why that gate is set.
+      #
       #   RUSTSEC-2023-0071 — Marvin attack (rsa); no upstream fix, PGP-encryption path only.
       #   RUSTSEC-2025-0141 — bincode unmaintained; transitive via surrealdb-core, no CVE.
-      #   RUSTSEC-2023-0089 — atomic-polyfill unmaintained; transitive via surrealdb, no CVE.
-      #   RUSTSEC-2026-0194 — quick-xml DoS; transitive via samael (SAML), which pins ^0.37 (no >=0.41 path); SAML off by default.
-      #   RUSTSEC-2026-0195 — quick-xml DoS; transitive via samael (SAML), which pins ^0.37 (no >=0.41 path); SAML off by default.
-      #   RUSTSEC-2026-0235 — rkyv OOB read. NOT COMPILED INTO ANY AXIAM ARTIFACT: rkyv is an
-      #     `optional = true` dependency of rust_decimal behind its `rkyv` feature, and nothing in
-      #     our graph enables it. `cargo tree -i rkyv --target all --all-features` prints "nothing
-      #     to print", and rkyv appears zero times in the fully-resolved tree. cargo-audit reads
-      #     Cargo.lock, which records optional dependencies whether or not a feature ever pulls
-      #     them in, so this is a lockfile artifact rather than a reachable vulnerability — unlike
-      #     the entries above, which are real dependencies with a reachability argument.
-      #     Re-verify with the command above if rust_decimal's feature defaults ever change.
+      #   RUSTSEC-2023-0089 — atomic-polyfill unmaintained. AUDIT-ONLY: 1.0.3 sits in Cargo.lock
+      #     but is not in the resolved graph at all — `cargo tree -i atomic-polyfill --target all
+      #     --all-features` prints "nothing to print". Maintenance notice, no CVE.
+      #   RUSTSEC-2026-0235 — rkyv OOB read. AUDIT-ONLY, and NOT COMPILED INTO ANY AXIAM ARTIFACT:
+      #     rkyv is an `optional = true` dependency of rust_decimal behind that crate's `rkyv`
+      #     feature, and nothing in our graph enables it. `cargo tree -i rkyv --target all
+      #     --all-features` prints "nothing to print". A lockfile artifact rather than a reachable
+      #     vulnerability. Re-verify with that command if rust_decimal's feature defaults change.
       #   RUSTSEC-2026-0258 — h2 unbounded empty DATA frames (DoS). THIS ONE IS REACHABLE, unlike
       #     every entry above, and is ignored only because no fix exists to take. Two copies of h2
       #     resolve: the 0.4.x copy (reqwest/tonic/hyper) IS patched — Cargo.lock pins 0.4.16 — but
       #     `h2 0.3.27` arrives via actix-http <- actix-web/actix-governor and serves the REST
       #     listener, and the advisory patches >=0.4.16 only, with no 0.3.x backport
-      #     (`cargo update -p h2@0.3.27` locks 0 packages). actix-http 3.13.3 / actix-web 4.14.1
+      #     (`cargo update -p h2@0.3.27` locks 0 packages). actix-http 3.13.3 / actix-web 4.15.0
       #     are the newest releases and predate the 2026-08-17 advisory. Availability-only,
       #     upstream severity low. Drop this ID the moment actix-http ships on h2 0.4.
       #     Full reachability analysis and the interim operator mitigation: deny.toml.
+      #
+      # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml DoS pair) were here until
+      # samael 0.0.22 moved to quick-xml 0.41.0, which is the patched release for
+      # both. Nothing to suppress any more, so they are gone from both lists.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0235,RUSTSEC-2026-0258
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0235,RUSTSEC-2026-0258
 
       # --- cargo deny (advisories + licenses + bans + sources) ---
+      # `-D advisory-not-detected` promotes cargo-deny's "this ignore matched
+      # nothing" warning to a hard failure. Four suppressions had already gone
+      # stale under it and were warning on every run of this job for weeks —
+      # warnings scroll past, and a suppression keyed by advisory ID that outlives
+      # its crate is a blind spot waiting for that crate to come back. Failing the
+      # job is what makes them get deleted. `command-arguments` lands after the
+      # `check` subcommand, which is where this flag belongs.
       - name: cargo deny
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2
         with:
           command: check
           arguments: --all-features
+          command-arguments: -D advisory-not-detected
 
       # --- npm audit ---
+      # `npm audit` POSTs the lockfile to registry.npmjs.org's audit endpoint on
+      # every run, so its exit code conflates two unrelated facts: "this lockfile
+      # has a HIGH+ advisory" and "npm's audit service is down". Run 1118 on main
+      # was the second kind — the endpoint returned 503 for seven straight minutes
+      # and turned a clean merge red with no vulnerability anywhere in the tree
+      # (`npm ci` had reported "found 0 vulnerabilities" seconds earlier).
+      #
+      # The gate below is exactly as strict as before for the case that matters: a
+      # real HIGH/CRITICAL advisory still fails the job. It just refuses to fail on
+      # someone else's outage. The two are told apart by the SHAPE of the output
+      # rather than the exit code, because npm exits 1 for both — only a completed
+      # audit parses as JSON without an `error` key; an outage yields `{"error": …}`
+      # or nothing parseable at all. Ambiguity resolves towards failing the job.
+      #
+      # --fetch-retries/--fetch-timeout bound npm's own internal retry loop, which
+      # is what burned those seven minutes before giving up. Worst case here is
+      # ~3 attempts x ~60s plus 45s of backoff, and the run ends in a warning
+      # rather than a red X. A warning is the honest outcome: it is "we could not
+      # check", not "we checked and it was clean", and the next push re-checks.
       - name: npm audit
         working-directory: frontend
         run: |
+          set -euo pipefail
           npm ci --ignore-scripts
-          npm audit --audit-level=high
+
+          for attempt in 1 2 3; do
+            if npm audit --audit-level=high --json \
+                 --fetch-retries=1 --fetch-timeout=30000 >audit.json 2>audit.err; then
+              echo "npm audit: no advisories at or above 'high'."
+              exit 0
+            fi
+
+            # Only a completed audit parses as JSON without an `error` key; an
+            # outage yields {"error": …} or nothing parseable at all. Note the
+            # direction: anything that parses and is not an error object counts
+            # as a real report, so an unfamiliar npm schema fails the job rather
+            # than being waved through as an outage.
+            if jq -e 'has("error") | not' audit.json >/dev/null 2>&1; then
+              echo "::error::npm audit found advisories at or above 'high' in frontend/."
+              jq '.metadata.vulnerabilities // .' audit.json
+              npm audit --audit-level=high || true
+              exit 1
+            fi
+
+            echo "Attempt ${attempt}: npm returned no usable audit report."
+            cat audit.err || true
+            [ "${attempt}" -eq 3 ] || sleep $(( attempt * 15 ))
+          done
+
+          echo "::warning::npm audit SKIPPED — registry.npmjs.org returned no usable report after 3 attempts. This is an npm service outage, not a clean bill of health; the next run on this branch re-checks."
 
       # --- Hadolint Dockerfile lint ---
       - name: Hadolint server Dockerfile
@@ -307,10 +375,12 @@ jobs:
           exit-code: '0'
 
       # --- A6: AMQP transport posture is stated, not inherited ---
-      # Deliberately placed after every SARIF *producer* above. A failing step
-      # under `bash -e` skips the rest of the job, and the SARIF uploads below
-      # already report a missing file as an error — putting this check earlier
-      # would turn one real finding into five confusing ones.
+      # Kept after every SARIF *producer* above: a failing step under `bash -e`
+      # skips the rest of the job, so a check placed earlier reports its finding
+      # with no scan results next to it. The uploads below no longer ADD errors
+      # of their own in that case — they are guarded on the file existing, after
+      # run 1118 turned one npm-registry outage into five `Path does not exist`
+      # errors and buried the only line that said what had actually gone wrong.
       #
       # This requires TLS. AMQP is amqps://-only in every build profile, so a
       # stack that says otherwise does not fail a test — it fails to boot, and
@@ -322,28 +392,28 @@ jobs:
       # --- Upload all SARIF results to GitHub Security tab (D-07) ---
       - name: Upload hadolint server SARIF
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938  # v4
-        if: always()
+        if: always() && hashFiles('hadolint-server.sarif') != ''
         with:
           sarif_file: hadolint-server.sarif
           category: hadolint-server
 
       - name: Upload hadolint frontend SARIF
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938  # v4
-        if: always()
+        if: always() && hashFiles('hadolint-frontend.sarif') != ''
         with:
           sarif_file: hadolint-frontend.sarif
           category: hadolint-frontend
 
       - name: Upload trivy filesystem SARIF
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938  # v4
-        if: always()
+        if: always() && hashFiles('trivy-fs.sarif') != ''
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
       - name: Upload trivy config SARIF
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938  # v4
-        if: always()
+        if: always() && hashFiles('trivy-config.sarif') != ''
         with:
           sarif_file: trivy-config.sarif
           category: trivy-config

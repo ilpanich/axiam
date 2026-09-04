@@ -605,6 +605,7 @@ The `Security Scan` job failed on advisories published **after** the last green 
 **cargo-audit** (RUSTSEC, published 2026-06-29/30):
 - `RUSTSEC-2026-0193` — `ammonia` 4.1.2 mXSS: **real fix**, bumped to `ammonia 4.1.3` via `cargo update` (also modernizes its parser stack, dropping the phf/futf/mac chain).
 - `RUSTSEC-2026-0194` / `RUSTSEC-2026-0195` — `quick-xml` 0.37.5 two HIGH DoS: **unfixable transitively** (only fix is quick-xml ≥0.41, but the latest `samael` 0.0.21 still pins `quick-xml ^0.37.2`). Added both to `deny.toml` **and** the CI `cargo-audit` ignore list with justification (SAML/samael is opt-in and off by default; DoS-only; review date 2026-07-03), keeping the two ignore lists in sync.
+  - **Update (2026-09-04, T19.36):** no longer suppressed. `samael` 0.0.22 moved to `quick-xml` 0.41.0, which is the patched release for both advisories, so the pair was dropped from `deny.toml` and from the CI ignore list.
 
 **Trivy filesystem scan** (Go SDK, surfaced once cargo-audit passed and the job progressed): `golang.org/x/net v0.51.0` carried five HIGH CVEs (CVE-2026-25681/-27136/-33814/-39821/-42502). **Real fix**, bumped `golang.org/x/net` → `0.55.0` (pulling `x/sys 0.45.0`, `x/text 0.37.0`) via `go get` + `go mod tidy`; all Go SDK tests pass.
 
@@ -634,6 +635,18 @@ On a critical network-topology anomaly or an authentication-handshake timeout, t
 The backend implemented first-time SSO completely and the SPA had no way to reach it — no button, no callback route, and a federation service that only did CRUD (`claude_dev/rpi5-prod-google-federation-guide.md` §0). Close that, and the gaps that block the providers people actually ask for: a public providers-listing endpoint so a login page knows what to render; `FederationProtocol::OAuth2` for GitHub and Facebook, which issue no ID token; per-config scopes (Apple rejects the hard-coded `openid email profile`); server-minted Apple client secrets; templated-issuer support for Entra's `common` authority; organization→tenant inheritance of a federation config; a form-encoded SAML ACS a real IdP can post to; and single-use handoff codes so a cross-site SAML or Apple return can issue a session without weakening `SameSite=Strict`. Fix the two standing defects while in there: `attribute_map` was stored and read by nothing, and `allowed_algorithms` was hidden from OIDC in the admin UI. Design: `claude_dev/federation-sso-login-design.md`.
 
 **Commit**: `feat(federation): working "Sign in with X" login providers`
+
+### T19.36 — Security Scan: npm-registry outages and stale advisory suppressions ✓ RESOLVED
+Run 1118 on `main` turned red without a vulnerability anywhere in the tree: `npm audit` got HTTP 503 from `registry.npmjs.org`'s audit endpoint for seven minutes and exited 1, and because that step precedes the SARIF producers, four `Path does not exist` upload errors landed on top of the one line that said what had happened. Three fixes, plus one dependency bump:
+
+- **npm audit no longer fails on someone else's outage.** The step retries three times with backoff and tells "found advisories" apart from "could not reach the endpoint" by the *shape* of the output — npm exits 1 for both, but only a completed audit parses as JSON without an `error` key. A real HIGH/CRITICAL finding still fails the job; a sustained outage ends in a `::warning::` that says explicitly it is not a clean bill of health. `--fetch-retries`/`--fetch-timeout` bound npm's own retry loop, which is what burned the seven minutes.
+- **Four suppressions had gone stale** and were emitting `advisory-not-detected` on every run: `RUSTSEC-2026-0194`/`-0195` (fixed upstream — `samael` 0.0.22 moved to `quick-xml` 0.41.0) and `RUSTSEC-2023-0089`/`RUSTSEC-2026-0235` (not in the resolved feature graph at all). Removed from `deny.toml`, and the job now runs `-D advisory-not-detected` so the next one fails CI instead of scrolling past — an ignore is keyed by advisory ID, so one left behind after its crate leaves the graph silently re-suppresses that advisory if the crate ever returns.
+- **`check-audit-ignore-sync.py` demanded set equality, which had become unsatisfiable.** cargo-deny resolves the feature graph while cargo-audit reads `Cargo.lock`, so an optional dependency nothing enables is invisible to one and reported by the other. The gate now checks containment plus an explicit `# audit-only: <ID> — <reason>` declaration in `deny.toml`, which is what keeps "the lists differ" distinguishable from "the lists drifted".
+- **`chacha20` 0.10.1 was yanked** (reached via `rand` 0.10.2 ← actix-http/totp-rs); bumped to 0.10.2.
+
+Also guarded the four SARIF uploads on `hashFiles(…) != ''` so a failed producer no longer adds four errors of its own to a job that already has one.
+
+**Commit**: `fix(ci): survive npm-registry outages and drop stale advisory suppressions`
 
 ---
 
@@ -674,8 +687,8 @@ Generate the website to be deployed on github.io for the documentation. Produce 
 | Phase 16 | 3 | Docker, K8s, CD pipeline |
 | Phase 17 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 18 | 4 | Security, compliance, performance, docs |
-| Phase 19 | 25 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
+| Phase 19 | 26 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
 
-**Total: 102 tasks across 21 phases**
+**Total: 103 tasks across 21 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

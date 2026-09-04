@@ -4,6 +4,48 @@
 
 [advisories]
 # Advisory IDs to ignore. Every entry MUST carry id + reason + review date (D-02).
+#
+# THIS LIST IS DELIBERATELY SHORTER THAN THE cargo-audit ONE in
+# .github/workflows/ci.yml, and the difference is not drift. The two tools do not
+# look at the same set of crates:
+#
+#   * cargo-deny resolves the feature graph, so a dependency that is declared
+#     `optional = true` and never enabled simply is not there to match against.
+#   * cargo-audit reads Cargo.lock, which records optional dependencies whether
+#     or not any feature activates them, so it still reports them.
+#
+# Two advisories fall in that gap today — RUSTSEC-2023-0089 (atomic-polyfill) and
+# RUSTSEC-2026-0235 (rkyv). Both are lockfile artifacts: `cargo tree -i <crate>
+# --target all --all-features` prints "nothing to print" for each. They are
+# suppressed for cargo-audit, which needs it, and NOT here, which does not —
+# cargo-deny reports an unmatched ignore as `advisory-not-detected`, and this job
+# runs with `-D advisory-not-detected` so a suppression that has stopped applying
+# fails CI instead of accumulating.
+#
+# That escalation is the point: an ignore is keyed by advisory ID, not by version
+# or by crate, so one left behind after its crate leaves the graph would silently
+# re-suppress the same advisory if a future dependency ever pulled that crate back
+# in. Removing an entry the moment it stops matching is what keeps this list from
+# becoming a set of blind spots. Delete a stale entry; do not re-add it here to
+# quiet the build.
+#
+# The `audit-only:` lines below are the machine-readable half of that split, and
+# scripts/check-audit-ignore-sync.py enforces it: every ID in the workflow's
+# cargo-audit `ignore:` input must either appear in the `ignore` list here or be
+# declared audit-only right here, with a reason. A suppression cargo-audit is
+# given and nobody wrote down is the thing the gate exists to prevent.
+#
+# audit-only: RUSTSEC-2023-0089 — atomic-polyfill 1.0.3 is unmaintained (merged into
+#   embassy). It sits in Cargo.lock but is not in the resolved graph: `cargo tree -i
+#   atomic-polyfill --target all --all-features` prints "nothing to print". Maintenance
+#   notice, no CVE. Review: 2026-09-04. Drop when it leaves Cargo.lock.
+# audit-only: RUSTSEC-2026-0235 — rkyv 0.7.46, insufficient archive validation (OOB read
+#   via Rc/Arc). NEVER COMPILED INTO ANY AXIAM ARTIFACT: rkyv is an `optional = true`
+#   dependency of rust_decimal behind that crate's `rkyv` feature, and nothing in the
+#   AXIAM graph enables it — `cargo tree -i rkyv --target all --all-features` prints
+#   "nothing to print". A Cargo.lock artifact, not a reachable vulnerability. Review:
+#   2026-09-04. Re-verify with that command if rust_decimal's feature defaults change;
+#   drop this entry if rust_decimal moves to rkyv >=0.8.17.
 ignore = [
     # RUSTSEC-2023-0071: Marvin Attack — potential RSA key recovery through timing sidechannels.
     # Affects rsa 0.9.x via pgp 0.19.x (axiam-pki) and jsonwebtoken 10.x (surrealdb-core).
@@ -18,41 +60,13 @@ ignore = [
     # upgrades or removes bincode dependency.
     # Review date: 2026-06-04.
     { id = "RUSTSEC-2025-0141", reason = "Transitive dep via surrealdb-core; no upstream fix; unmaintained only (no CVE). Review: 2026-06-04" },
-    # RUSTSEC-2023-0089: atomic-polyfill v1.0.3 is unmaintained (functionality merged into embassy).
-    # Pulled in transitively via surrealdb crate; no direct AXIAM dependency; no upstream fix.
-    # Risk: maintenance only — no known exploitable CVE.
-    # Review date: 2026-06-04.
-    { id = "RUSTSEC-2023-0089", reason = "Transitive dep via surrealdb; no upstream fix; unmaintained only (no CVE). Review: 2026-06-04" },
-    # RUSTSEC-2026-0194: quick-xml quadratic run time when checking a start tag for duplicate attribute names (DoS).
-    # RUSTSEC-2026-0195: quick-xml unbounded namespace-declaration allocation in NsReader (memory-exhaustion DoS).
-    # Both affect quick-xml 0.37.x, pulled in transitively by samael (SAML SP) in axiam-federation.
-    # Solution: upgrade to quick-xml >=0.41.0 — NOT reachable: latest samael (0.0.21) still pins `quick-xml ^0.37.2`.
-    # Mitigated: samael/SAML is opt-in behind the `saml` feature and OFF by default (api-rest and axiam-server build
-    # with default-features = false); DoS-only, no key/data compromise. No direct AXIAM dependency on quick-xml.
-    # Review date: 2026-07-03. Re-evaluate when samael upstream bumps quick-xml to >=0.41.0.
-    { id = "RUSTSEC-2026-0194", reason = "Transitive via samael (quick-xml ^0.37, no >=0.41 path); SAML opt-in/off by default; DoS-only. Review: 2026-07-03" },
-    { id = "RUSTSEC-2026-0195", reason = "Transitive via samael (quick-xml ^0.37, no >=0.41 path); SAML opt-in/off by default; DoS-only. Review: 2026-07-03" },
-    # RUSTSEC-2026-0235: rkyv 0.7.46 — insufficient archive validation, out-of-bounds reads in
-    # archives containing Rc/Arc. Solution: upgrade to >=0.8.17.
-    # This one differs in kind from every entry above: the others are real dependencies carrying a
-    # reachability argument, whereas rkyv is NEVER COMPILED. It is an `optional = true` dependency
-    # of rust_decimal, gated behind that crate's `rkyv` feature, and nothing in the AXIAM graph
-    # enables it. Verified: `cargo tree -i rkyv --target all --all-features` reports "nothing to
-    # print", and rkyv occurs zero times in the fully-resolved tree. cargo-audit and cargo-deny
-    # both read Cargo.lock, which records optional dependencies regardless of whether any feature
-    # activates them, so the finding is a lockfile artifact and not a vulnerability in a shipped
-    # artifact. (rust_decimal 1.42.1 is current and still pins rkyv 0.7.x, so there is also no
-    # upgrade path — but that is beside the point here, since the code is not built.)
-    # Review date: 2026-08-04. Re-verify with the command above if rust_decimal's feature defaults
-    # change, or drop this entry if rust_decimal moves to rkyv >=0.8.17.
-    { id = "RUSTSEC-2026-0235", reason = "rkyv is optional in rust_decimal and no feature enables it — zero occurrences in the resolved tree, never compiled; Cargo.lock artifact only. Review: 2026-08-04" },
     # RUSTSEC-2026-0258: h2 accepts and queues empty DATA frames without limit; if streams are not
     # actively drained that grows memory without bound, or panics if the length overflows.
     # Upstream rates it LOW. Solution: upgrade to >=0.4.16.
     #
-    # READ THIS ENTRY DIFFERENTLY FROM EVERY ONE ABOVE. The others are never compiled
-    # (RUSTSEC-2026-0235), off by default (the quick-xml pair), or off the reachable path
-    # (RUSTSEC-2023-0071). This one IS reachable in a default AXIAM deployment. It is suppressed
+    # READ THIS ENTRY DIFFERENTLY FROM THE TWO ABOVE. Those are a timing side-channel off the
+    # reachable path (RUSTSEC-2023-0071) and an unmaintained-crate notice with no CVE behind it
+    # (RUSTSEC-2025-0141). This one IS reachable in a default AXIAM deployment. It is suppressed
     # only because there is no fix to take:
     #
     #   * Two copies of h2 resolve. The `h2 0.4.x` copy — reqwest / tonic / hyper — HAS been

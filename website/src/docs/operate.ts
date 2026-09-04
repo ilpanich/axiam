@@ -562,7 +562,11 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "This holds on the **proxy-terminated** path exactly as on the native listener, and that is a tightening. Where AXIAM terminates TLS, rustls already enforced the flag because the client-CA bundle is built from precisely the flagged anchors; where a proxy terminates and passes the certificate on — which is what the production compose file and the Kubernetes manifests do — nothing consulted it, so every CA in the organization was as good as every other and un-flagging one changed nothing. A deployment authenticating devices through a proxy with never-flagged CAs will start seeing refusals that name the reason. **Flag the CA.**",
+        text: "This holds on the **proxy-terminated** path exactly as on the native listener, and that is a tightening. Where AXIAM terminates TLS, rustls already enforced the flag because the client-CA bundle is built from precisely the flagged anchors; where a proxy terminates and passes the certificate on in a header, nothing consulted it, so every CA in the organization was as good as every other and un-flagging one changed nothing. A deployment authenticating devices that way with never-flagged CAs will start seeing refusals that name the reason. **Flag the CA.**",
+      },
+      {
+        type: "note",
+        text: "Since `1.0.0-beta08` that forwarded path is **opt-in and off**. `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` defaults to `false`, and the shipped edge configurations strip `X-Client-Certificate` on every route regardless — a certificate is public data, so a header cannot prove possession of the key. Devices that need real mTLS get a route the edge does not terminate. Turn the flag on only where a proxy **you run** performs the handshake and overwrites that header itself.",
       },
       {
         type: "table",
@@ -759,6 +763,10 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "p",
         text: "Wire these to the right probes and the difference matters operationally: a database blip should remove a replica from the load-balancer rotation, not restart it. Pointing liveness at `/ready` converts a transient dependency failure into a restart loop that makes the outage worse.",
+      },
+      {
+        type: "note",
+        text: "These three endpoints sit at the **server root**, not under `/api`, so a path-routing edge does not publish them — reach them from the internal network, which is where a probe and a monitoring scrape belong. Publishing them takes an explicit route the shipped configurations deliberately do not add. See [Docker & Kubernetes](#/docs/deploy#tls).",
       },
       { type: "h", id: "jobs", text: "Scheduled-job liveness" },
       {

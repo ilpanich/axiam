@@ -39,7 +39,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
           },
           {
             title: "An applicable allow grant permits the action",
-            body: "Grants apply through directly assigned roles, group-inherited roles, and roles assigned on any ancestor of the resource.",
+            body: "Grants apply through directly assigned roles, group-inherited roles, roles assigned on any ancestor of the resource, and assignments that name no resource at all — those are tenant-wide. See [How far a grant reaches](#/docs/rbac#reach).",
           },
           {
             title: "An applicable deny grant refuses it — and beats every allow",
@@ -264,7 +264,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
       { type: "h", id: "roles", text: "Roles" },
       {
         type: "p",
-        text: "A role is a named collection of permissions, assignable to users and to groups, and either global or bound to a specific resource. Three are seeded at bootstrap: `super-admin` (every permission), `admin` (all entity CRUD) and `viewer` (list and get only).",
+        text: "A role is a named collection of permissions, assignable to users and to groups. It may carry `is_global`, which makes it apply everywhere however it is assigned; separately, an assignment either names a resource or does not, and one that does not is tenant-wide. Three roles are seeded at bootstrap: `super-admin` (every permission), `admin` (all entity CRUD) and `viewer` (list and get only).",
       },
       {
         type: "api",

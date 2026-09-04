@@ -19,6 +19,19 @@
 > [`website-security-beta11-update-plan.md`](website-security-beta11-update-plan.md),
 > which is the entry point for that pass.**
 >
+> **Beta12 remediation pass (`remediation-plan-2026-09-04.md`).** The wave below
+> wrote down, in the model's own words, what it could not close. This pass is
+> those residuals. **R-1 has landed**: the gRPC listener no longer asks tonic to
+> terminate TLS — it completes each handshake with `tokio-rustls` and hands tonic
+> an already-encrypted stream — which lets it resolve its leaf through the *same*
+> `ReloadableCertResolver` the REST listener serves from, and lets the
+> configuration pin TLS 1.3. That closes **T-234** (the only *open* threat the
+> wave added) and removes the TLS-version caveat T-233 and T-214 both carried,
+> taking the model to **236 threats, 220 mitigated / 16 open**; the deployment
+> diagram goes from 6 open to 5. The open register below loses T-234 accordingly.
+> The remaining items of that plan — R-2…R-7 — are separate passes and are not
+> reflected here yet.
+>
 > **Beta08…beta11 wave (model 2.11.0).** Twenty-five threats enter the model,
 > bringing it to **236 threats, 219 mitigated / 17 open**, in three groups. Two of
 > them had been written into the STRIDE document at beta08 but never into the
@@ -53,8 +66,9 @@
 > read plus CA-key writes rather than read-only, which T-180 and T-216 now say
 > (T-232); gRPC may be published, but only through the same edge as REST and only
 > as a service allowlist, because a bare port-forward lets a client mint its own
-> rate-limit buckets (T-233); the gRPC certificate still cannot be hot-reloaded,
-> recorded **open** with the restart the runbook uses to bridge it (T-234); a
+> rate-limit buckets (T-233); the gRPC certificate could not be hot-reloaded, recorded
+> **open** with the restart the runbook used to bridge it — closed since, by R-1
+> above (T-234); a
 > release regenerates each SDK's §27 surface from the spec it vendors (T-235); and
 > the dependency-audit gate tells a registry outage apart from a clean audit and
 > fails on a stale suppression (T-236). Nine existing entries gained
@@ -764,8 +778,9 @@ against the classic federation attacks:
   cannot prove possession of the key. gRPC may be published through the same
   edge, as an allowlist of services, and never by a bare port-forward: without a
   proxy appending the real peer, a client keys its own rate-limit bucket. The
-  gRPC listener's own certificate is not yet hot-reloadable, which the model
-  records as an open item together with the restart that bridges it.
+  gRPC listener terminates its own TLS rather than delegating to tonic, which is
+  what lets it share the REST listener's reloadable certificate — one `SIGHUP`
+  renews both — and pin TLS 1.3 exclusively, as REST has always done.
 - **Vault is run as the production secret store it is.** Both shipped Vault
   deployments use Raft storage; the server holds a scoped, periodic token whose
   policy is one checked file — read on the startup secrets, writes confined to
@@ -930,7 +945,6 @@ each.
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-143 — Local JWT verification misses a revoked entitlement | Medium | SDK token verification (JWKS cache, iss/aud) · *Client SDKs & admin UI integration surface* |
-| T-234 — The gRPC TLS leaf expires because tonic reads it once at startup | Medium | AXIAM deployment (N replicas, HPA) · *Deployment & platform (Kubernetes)* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are
@@ -999,8 +1013,10 @@ list read as a checklist — what to do about each, grouped by who does it.
 - **Publish gRPC only through the edge, as an allowlist, or not at all.** A port
   forwarded straight at the listener lets a client mint its own rate-limit bucket
   per call, and no setting repairs that. If you enable the gRPC listener's TLS,
-  add the container restart to your certificate deploy hook: unlike the REST
-  listener, it reads its certificate once.
+  point it at the *same* certificate and key the REST listener uses — there is no
+  second certificate and there must not be — and your existing `SIGHUP` deploy
+  hook renews both. A hook carrying the container restart earlier releases needed
+  is now redundant; deleting it saves the downtime.
 - **Run SurrealDB on a persistent storage engine — `surrealkv:` or `rocksdb:`,
   never `memory:`.** This is a correctness control, not a durability preference.
   AXIAM's three single-use credentials — UMA permission tickets, RFC 8628 device

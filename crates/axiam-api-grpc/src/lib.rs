@@ -4,6 +4,7 @@ pub mod config;
 pub mod middleware;
 pub mod server;
 pub mod services;
+pub(crate) mod tls_incoming;
 
 /// Generated protobuf/gRPC types for the `axiam.v1` package.
 pub mod proto {
@@ -11,5 +12,5 @@ pub mod proto {
 }
 
 pub use config::GrpcConfig;
-pub use server::start_grpc_server;
+pub use server::{GrpcTls, start_grpc_server};
 pub use services::ReactorAdminServiceImpl;

@@ -11,6 +11,13 @@ rust-version.workspace = true
 axiam-core = { workspace = true }
 axiam-authz = { workspace = true }
 axiam-auth = { workspace = true }
+# `tls-ring` is still required after R-1, though tonic no longer terminates
+# TLS here. It is the only published feature that turns on tonic's `_tls-any`,
+# which gates BOTH the things this crate still needs from it: the `Connected`
+# impl for `tokio_rustls::server::TlsStream` (how the peer address reaches the
+# rate limiter — `transport/server/conn.rs:106`) and the `TlsConnectInfo` type
+# `middleware::rate_limit` reads it back out of. `tls-connect-info` alone
+# provides the impl but not the exported type.
 tonic = { workspace = true, features = ["tls-ring"] }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
@@ -42,6 +49,13 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 surrealdb = { workspace = true }
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
+# R-1 / T-234 — this listener terminates TLS itself rather than handing tonic a
+# `ServerTlsConfig`, which accepts neither a `rustls::ServerConfig` nor a
+# certificate resolver and therefore cannot express either a reloadable leaf or
+# a TLS-1.3-only pin. `rustls` appears in the PUBLIC api (`GrpcTls::Rustls`)
+# because the composition root, which owns the resolver, builds the config.
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
 
 [features]
 client = []
@@ -54,17 +68,15 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tokio = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }
-# Test-only: runtime-generates the self-signed TLS leaf cert/key used by the
-# TLS-enabled `start_grpc_server` boot test, instead of a hard-coded PEM
-# literal (avoids static secret-scanner false positives).
+# Test-only: runtime-generates the self-signed TLS leaves the round-trip tests
+# in tests/grpc_server_test.rs use (renewal mid-flight, a TLS 1.2 client
+# refused, the peer address recovered through TLS, a handshake flood), instead
+# of hard-coded PEM literals — which static secret scanners flag.
+#
+# rustls and tokio-rustls are no longer dev-dependencies: since R-1 the server
+# side depends on both directly (see [dependencies] above), and the client
+# halves of those tests use the same two crates.
 rcgen = { workspace = true }
-# Test-only: installs the process-level rustls CryptoProvider (mirrors
-# axiam-server's main()) so the TLS-enabled `start_grpc_server` boot test
-# doesn't hit "Could not automatically determine the process-level
-# CryptoProvider" — tonic's `ServerTlsConfig` resolves the default provider,
-# and two providers (ring + aws-lc-rs) are linked transitively with none
-# installed by default in a bare test binary.
-rustls = { workspace = true, features = ["ring"] }
 
 [build-dependencies]
 tonic-build = { workspace = true }

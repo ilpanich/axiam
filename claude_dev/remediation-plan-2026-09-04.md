@@ -1,5 +1,48 @@
 # Remediation plan — the residuals the beta08…beta11 threat-model wave left open
 
+> **EXECUTED — R-1, 2026-09-04.** The gRPC listener terminates TLS itself.
+> `start_grpc_server` takes a `GrpcTls` value (`Plaintext | Rustls(Arc<ServerConfig>)`)
+> instead of reading `AXIAM__GRPC_TLS_*` and building a tonic `ServerTlsConfig`;
+> it binds its own `TcpListener`, completes each handshake with `tokio-rustls` in
+> `crates/axiam-api-grpc/src/tls_incoming.rs`, and hands tonic an already-encrypted
+> stream through `serve_with_incoming`. The composition root builds the
+> configuration (`axiam_server::tls::grpc_tls_from_env` →
+> `build_grpc_rustls_server_config`), because `ReloadableCertResolver` is layer 8
+> and the gRPC crate is layer 6; `scripts/check-crate-layering.py` passes
+> unchanged. `LIVE_CERT_RESOLVER`'s single `OnceLock` slot became a list, and a
+> new `shared_resolver` returns the **same** resolver for a cert/key pair already
+> registered — so on the documented one-leaf topology both listeners hold one
+> resolver and one `SIGHUP` renews both, and a two-leaf deployment gets a second
+> registered entry rather than a second unreloaded path. `spawn_leaf_reloader` is
+> now idempotent, since either listener can be the only one with TLS on. The
+> configuration pins `with_protocol_versions(&[&TLS13])` and ALPN `h2`. The flat
+> env names, the panic-on-unreadable behaviour and the `gRPC server TLS enabled` /
+> `gRPC TLS is DISABLED` log lines are unchanged; the panic tests moved to
+> `axiam-server` with the read.
+>
+> All five tests §2 names are in: the renewal mid-flight (with the pre-swap
+> connection still usable), a TLS 1.2 client refused, the peer address reaching
+> `GrpcTrustedHopsKeyExtractor` through a real `Connected::connect_info()`, a
+> 64-connection half-open flood not blocking a well-behaved client, and plaintext
+> mode unchanged — plus, on the server side, one reload covering every registered
+> leaf, the shared-resolver identity asserted by pointer, TLS 1.3 + ALPN asserted
+> on the built config, and the two boot panics. The tonic `Connected`
+> implementation for `tokio_rustls::server::TlsStream` was verified first, as §2
+> requires: it exists at `tonic-0.14.6/src/transport/server/conn.rs:106` under
+> `tls-connect-info` (which `tls-ring` enables), yields
+> `TlsConnectInfo<TcpConnectInfo>`, and tonic's non-TLS `ServerIo::Io` path
+> inserts exactly that type — the extractor's existing second arm, so the key
+> extraction needed no change. `tls-ring` therefore stays on the tonic dependency,
+> documented in the manifest.
+>
+> Docs: `public-backend-tls-design.md` §13.3/§13.4, Pi runbook §14.4/§14.5 and its
+> troubleshooting rows, the native-TLS bench overlay comment, `CHANGELOG.md`.
+> Threat model: T-234 → **Mitigated** (open 17 → 16, deployment diagram 6 → 5),
+> T-233's and T-214's TLS clauses rewritten, in `Axiam.json`,
+> `threat-model-stride.md` and `threat-modeling-and-security.md`. The website was
+> **not** regenerated: `website-security-beta11-update-plan.md` has not run yet,
+> and §9 step 3 says to leave it to that plan.
+
 > **Who this is for.** A fresh Claude session (Opus 5) implementing the fixes
 > below. It is the entry point: read this, then §1 for the order, then one item
 > at a time. Each item names the threat it closes or narrows, the files, the

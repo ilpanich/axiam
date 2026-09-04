@@ -469,56 +469,142 @@ impl ResolvesServerCert for ReloadableCertResolver {
     }
 }
 
-/// The live resolver, the provider to rebuild with, and where to re-read from.
-///
-/// A process-global for the same reason [`LIVE_VERIFIER`] is one: there is a
-/// single TLS listener per process, and the signal handler and poll task that
-/// trigger a reload run outside anything holding the `ServerConfig` actix
-/// built. Set once, during [`build_rustls_server_config`].
-#[allow(clippy::type_complexity)]
-static LIVE_CERT_RESOLVER: std::sync::OnceLock<(
-    Arc<ReloadableCertResolver>,
-    Arc<rustls::crypto::CryptoProvider>,
-    std::path::PathBuf,
-    std::path::PathBuf,
-)> = std::sync::OnceLock::new();
-
-fn install_reloadable_resolver(
+/// One leaf this process serves: the resolver in front of it, the provider to
+/// rebuild it with, and where to re-read it from.
+#[derive(Clone)]
+struct LiveLeaf {
     resolver: Arc<ReloadableCertResolver>,
     provider: Arc<rustls::crypto::CryptoProvider>,
     cert_path: std::path::PathBuf,
     key_path: std::path::PathBuf,
-) {
-    // `set` fails only if called twice, which means a second listener was
-    // built. The first one is the one actix is serving on.
-    let _ = LIVE_CERT_RESOLVER.set((resolver, provider, cert_path, key_path));
 }
 
-/// Re-read the configured certificate and key and install them on the live
-/// listener, without a restart.
+/// Every leaf a listener in this process is serving.
 ///
-/// Returns `Ok(None)` when this process has no TLS listener — a plaintext
-/// deployment behind a terminating proxy. That is not a failure: there is
-/// nothing to reload into, and saying so lets a `SIGHUP` handler log "no TLS
-/// listener" rather than an error an operator would go looking for.
+/// A process-global for the same reason [`LIVE_VERIFIER`] is one: the signal
+/// handler and poll task that trigger a reload run outside anything holding a
+/// `ServerConfig`.
 ///
-/// Returns `Ok(Some(false))` when the files parsed but are byte-identical to
-/// what is already being served, so a poll that fires between renewals stays
-/// silent instead of logging a reload an hour, forever.
+/// # Why a list, and not the single slot this used to be (R-1)
+///
+/// Until R-1 there was one TLS listener per process — REST — and this was a
+/// `OnceLock` holding it. The gRPC listener now terminates TLS too, so a
+/// process can have two, and a `OnceLock` would have silently kept whichever
+/// was built first: the second listener's leaf would never be reloaded, which
+/// is the exact failure (a certificate that expires in place) the reloader
+/// exists to prevent, moved rather than fixed.
+///
+/// Registration goes through [`shared_resolver`], which returns the **existing**
+/// resolver when a leaf with the same cert and key paths is already registered.
+/// So the documented topology — both listeners on one leaf, "there is no second
+/// certificate and there must not be" (Pi runbook §14.4) — ends up with one
+/// entry and one resolver instance shared by both listeners, and a deployment
+/// that really does point the two listeners at different files ends up with two
+/// entries, both reloaded on the same `SIGHUP` and the same poll.
+static LIVE_CERT_RESOLVERS: std::sync::Mutex<Vec<LiveLeaf>> = std::sync::Mutex::new(Vec::new());
+
+/// The resolver serving `cert_path`/`key_path`, creating and registering one if
+/// this is the first listener to ask for that pair.
+///
+/// Sharing the instance (rather than building a second resolver over the same
+/// files) is what makes one reload cover both listeners: a swap on this
+/// `ArcSwap` is observed by every `ServerConfig` that holds it.
 ///
 /// # Errors
 ///
-/// Anything [`read_certified_key`] rejects. **The live certificate is left
-/// unchanged in that case** — the new pair is fully read, parsed and
-/// consistency-checked before anything is swapped, so a renewal caught
-/// half-written (certbot writes the chain and the key as two separate
+/// Anything [`read_certified_key`] rejects, and only when the pair is new —
+/// a caller that finds an already-registered resolver does no file IO at all.
+fn shared_resolver(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+    provider: &Arc<rustls::crypto::CryptoProvider>,
+) -> io::Result<Arc<ReloadableCertResolver>> {
+    // Poisoning would mean a panic while holding this lock; the data behind it
+    // is a plain list of handles and cannot be left half-updated, so recovering
+    // is strictly better than propagating a panic into a listener's boot.
+    let mut live = LIVE_CERT_RESOLVERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if let Some(existing) = live
+        .iter()
+        .find(|leaf| leaf.cert_path == cert_path && leaf.key_path == key_path)
+    {
+        return Ok(Arc::clone(&existing.resolver));
+    }
+
+    let certified = read_certified_key(cert_path, key_path, provider)?;
+    let resolver = Arc::new(ReloadableCertResolver::new(certified));
+    live.push(LiveLeaf {
+        resolver: Arc::clone(&resolver),
+        provider: Arc::clone(provider),
+        cert_path: cert_path.to_path_buf(),
+        key_path: key_path.to_path_buf(),
+    });
+    Ok(resolver)
+}
+
+/// Re-read every configured certificate and key and install them on the live
+/// listeners, without a restart.
+///
+/// Since R-1 this covers **all** of them — the REST listener and, when it
+/// terminates TLS in-process, the gRPC one. On the documented topology the two
+/// share one leaf and therefore one registry entry, so this is one pair of file
+/// reads either way; a deployment that points them at different files gets both
+/// reloaded here, on the same trigger, rather than one of them silently never.
+///
+/// Returns `Ok(None)` when this process has no TLS listener at all — a
+/// plaintext deployment behind a terminating proxy. That is not a failure:
+/// there is nothing to reload into, and saying so lets a `SIGHUP` handler log
+/// "no TLS listener" rather than an error an operator would go looking for.
+///
+/// Returns `Ok(Some(false))` when every registered pair parsed but is
+/// byte-identical to what is already being served, so a poll that fires between
+/// renewals stays silent instead of logging a reload an hour, forever;
+/// `Ok(Some(true))` when at least one leaf actually changed.
+///
+/// # Errors
+///
+/// Anything [`read_certified_key`] rejects, for any registered leaf. **Every
+/// live certificate is left unchanged in that case** — each pair is fully read,
+/// parsed and consistency-checked before anything is swapped, so a renewal
+/// caught half-written (certbot writes the chain and the key as two separate
 /// operations) fails this call and is retried on the next tick rather than
-/// taking the listener down.
+/// taking a listener down. The other leaves are still attempted before the
+/// error is returned: one unreadable pair must not stop the leaf that *was*
+/// renewed from being installed.
 pub fn reload_leaf_certificate() -> io::Result<Option<bool>> {
-    let Some((resolver, provider, cert_path, key_path)) = LIVE_CERT_RESOLVER.get() else {
+    // Cloned out from under the lock: `reload_into` does file IO, and holding
+    // a process-global mutex across it would let a slow or hung disk block
+    // every listener's boot path.
+    let live: Vec<LiveLeaf> = LIVE_CERT_RESOLVERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+
+    if live.is_empty() {
         return Ok(None);
-    };
-    reload_into(resolver, provider, cert_path, key_path).map(Some)
+    }
+
+    let mut changed = false;
+    let mut first_error = None;
+    for leaf in &live {
+        match reload_into(
+            &leaf.resolver,
+            &leaf.provider,
+            &leaf.cert_path,
+            &leaf.key_path,
+        ) {
+            Ok(leaf_changed) => changed |= leaf_changed,
+            Err(e) if first_error.is_none() => first_error = Some(e),
+            Err(_) => {}
+        }
+    }
+
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(Some(changed)),
+    }
 }
 
 /// The reload itself, against an explicit resolver rather than the process
@@ -526,10 +612,10 @@ pub fn reload_leaf_certificate() -> io::Result<Option<bool>> {
 ///
 /// Split out so the behaviour that matters — swap on change, no-op when
 /// unchanged, leave the old certificate serving on a bad pair — is testable
-/// directly. Going through [`reload_leaf_certificate`] would mean racing for
-/// [`LIVE_CERT_RESOLVER`]'s single `set`, which whichever test ran first would
-/// win; a mechanism whose failure mode is "serves the wrong certificate" should
-/// not be tested order-dependently.
+/// directly. Going through [`reload_leaf_certificate`] would mean reloading
+/// every leaf every other test in the binary happened to register; a mechanism
+/// whose failure mode is "serves the wrong certificate" should not be tested
+/// order-dependently.
 ///
 /// # Errors
 ///
@@ -606,6 +692,17 @@ fn log_reload_outcome(trigger: &'static str, outcome: io::Result<Option<bool>>) 
 /// expired in production" into "the certificate was replaced within the hour",
 /// and it costs one read of two small files an hour.
 pub fn spawn_leaf_reloader(interval_secs: u64) {
+    // Idempotent since R-1: both listeners' boot paths call this, because
+    // either can be the only one with TLS on. The reloader is process-wide (it
+    // walks every registered leaf), so the second call must be a no-op rather
+    // than a second SIGHUP handler and a second poll doing the same reads
+    // twice — and logging every outcome twice.
+    static SPAWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SPAWNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        tracing::debug!("TLS certificate reloader already running; not spawning a second one");
+        return;
+    }
+
     tokio::spawn(async move {
         let mut hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         {
@@ -919,8 +1016,10 @@ pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
         builder.with_client_cert_verifier(reloadable.clone() as Arc<dyn ClientCertVerifier>);
     install_reloadable_verifier(reloadable, Arc::clone(&provider));
 
-    // The leaf. Read, parsed and proven to match its key here, then installed
-    // behind an `ArcSwap` so a renewal can replace it without a restart.
+    // The leaf. Read, parsed and proven to match its key in `shared_resolver`,
+    // then installed behind an `ArcSwap` so a renewal can replace it without a
+    // restart — and shared with the gRPC listener when that one serves the same
+    // pair, so one reload covers both (R-1).
     //
     // This is what `with_single_cert` does internally — `CertifiedKey::from_der`
     // followed by `with_cert_resolver(SingleCertAndKey::from(..))` (rustls
@@ -928,14 +1027,7 @@ pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
     // `SingleCertAndKey` swapped for a resolver that can be reloaded. The error
     // text is unchanged so the failure an operator sees for a mismatched pair
     // is the one it has always been.
-    let certified = read_certified_key(cert_path, key_path, &provider)?;
-    let resolver = Arc::new(ReloadableCertResolver::new(certified));
-    install_reloadable_resolver(
-        Arc::clone(&resolver),
-        Arc::clone(&provider),
-        cert_path.clone(),
-        key_path.clone(),
-    );
+    let resolver = shared_resolver(cert_path, key_path, &provider)?;
     let mut config = builder.with_cert_resolver(resolver as Arc<dyn ResolvesServerCert>);
 
     // ALPN (B2/G8): h2 + http/1.1. This is not configurable — `http2 = false`
@@ -961,6 +1053,153 @@ pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
         ),
     }
 
+    Ok(config)
+}
+
+// ---------------------------------------------------------------------------
+// The gRPC listener's TLS (R-1 / T-234)
+// ---------------------------------------------------------------------------
+
+/// The environment variable naming the gRPC listener's certificate chain.
+///
+/// Flat, not nested under `AXIAM__GRPC__TLS__*`, and deliberately unchanged by
+/// R-1: the Pi runbook §14.4 documents this exact spelling, its troubleshooting
+/// table names the wrong spelling as the usual cause of an unexpectedly
+/// plaintext listener, and the benchmark overlay sets it.
+pub const ENV_GRPC_TLS_CERT_PATH: &str = "AXIAM__GRPC_TLS_CERT_PATH";
+
+/// The environment variable naming the gRPC listener's private key.
+///
+/// See [`ENV_GRPC_TLS_CERT_PATH`]. Both, or neither.
+pub const ENV_GRPC_TLS_KEY_PATH: &str = "AXIAM__GRPC_TLS_KEY_PATH";
+
+/// The ALPN protocol the gRPC listener advertises.
+///
+/// gRPC is HTTP/2 and nothing else, so unlike the REST listener there is no
+/// `http/1.1` fallback to offer. This is the same single entry tonic pushed
+/// when it built the config itself (`transport/service/tls.rs`, `ALPN_H2`), so
+/// what a client sees on the wire is unchanged.
+const GRPC_ALPN_H2: &[u8] = b"h2";
+
+/// Decide, from the environment, how the gRPC listener should terminate TLS,
+/// and build the configuration for it.
+///
+/// Returns `None` when neither variable is set — the shipped in-mesh posture,
+/// where a sidecar or a terminating proxy owns transport security. Setting only
+/// one of the two is treated as "off" for the same reason it always was: the
+/// runbook says both or neither, and half a TLS configuration is more likely a
+/// typo than an intention. (The typo *within* a set variable is what panics —
+/// see below.)
+///
+/// # What this shares with the REST listener
+///
+/// The configuration resolves its leaf through [`shared_resolver`], so when the
+/// two listeners are pointed at the same cert and key — "there is no second
+/// certificate and there must not be", Pi runbook §14.4 — they hold the **same**
+/// [`ReloadableCertResolver`] instance and one `SIGHUP` (or one poll tick)
+/// renews both. When they are pointed at different files, the gRPC pair is
+/// registered as a second entry and [`reload_leaf_certificate`] reloads it on
+/// the same triggers; what is not possible any more is a second, unreloaded
+/// path.
+///
+/// # What it deliberately does not share
+///
+/// Client certificate policy. The REST listener installs a
+/// [`ReloadableClientCertVerifier`]; this one calls `with_no_client_auth`,
+/// which is exactly what tonic's `ServerTlsConfig` did with no `client_ca_root`
+/// configured. Requesting a client certificate here would change what every
+/// existing in-mesh gRPC client is asked for during the handshake, which is a
+/// deployment decision and not part of closing T-234.
+///
+/// Session resumption, likewise: tonic set no ticketer, and gRPC connections
+/// are long-lived by design, so a full handshake per *connection* is not the
+/// per-request cost it was for REST (B2).
+///
+/// # Panics
+///
+/// If a variable is set but the file behind it cannot be read or does not parse
+/// as a certificate/key pair. T-233 rests on "a typo is a failed boot": a
+/// listener that fell back to plaintext because a path was misspelled would be
+/// serving unencrypted traffic on a port an operator believes is TLS, and would
+/// say so only in a log line nobody greps until the incident.
+pub fn grpc_tls_from_env() -> Option<Arc<ServerConfig>> {
+    let cert_path = std::env::var(ENV_GRPC_TLS_CERT_PATH).ok()?;
+    let key_path = std::env::var(ENV_GRPC_TLS_KEY_PATH).ok()?;
+
+    let config = build_grpc_rustls_server_config(
+        std::path::Path::new(&cert_path),
+        std::path::Path::new(&key_path),
+    )
+    .unwrap_or_else(|e| {
+        panic!(
+            "{ENV_GRPC_TLS_CERT_PATH}/{ENV_GRPC_TLS_KEY_PATH} set but the pair at \
+             '{cert_path}' + '{key_path}' is unusable: {e}"
+        )
+    });
+
+    Some(Arc::new(config))
+}
+
+/// Build the gRPC listener's TLS 1.3-only rustls [`ServerConfig`] over the
+/// given certificate and key.
+///
+/// Separate from [`grpc_tls_from_env`] so the behaviour that matters — TLS 1.3
+/// only, ALPN `h2`, and a resolver shared with the REST listener when the paths
+/// match — is testable without mutating process-global environment state.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use std::sync::Arc;
+///
+/// # fn main() -> std::io::Result<()> {
+/// let config = axiam_server::tls::build_grpc_rustls_server_config(
+///     Path::new("/etc/letsencrypt/live/example.org/fullchain.pem"),
+///     Path::new("/etc/letsencrypt/live/example.org/privkey.pem"),
+/// )?;
+///
+/// // TLS 1.3 only, and HTTP/2 and nothing else — gRPC speaks no other
+/// // protocol, so offering `http/1.1` would only let a client negotiate one
+/// // no service on this listener answers.
+/// assert_eq!(config.alpn_protocols, vec![b"h2".to_vec()]);
+///
+/// // Hand it to the listener. Pointing the REST listener at the same two
+/// // files makes both serve from one resolver, so one SIGHUP renews both.
+/// let tls = axiam_api_grpc::GrpcTls::Rustls(Arc::new(config));
+/// axiam_server::tls::spawn_leaf_reloader(3600);
+/// # let _ = tls;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// A missing or unreadable file, a PEM the parser rejects, an empty chain, or a
+/// key that does not match the leaf's public key — everything
+/// [`read_certified_key`] rejects.
+pub fn build_grpc_rustls_server_config(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> io::Result<ServerConfig> {
+    // The same explicit `ring` selection the REST listener makes, and for the
+    // same reason: this build links both `ring` and `aws-lc-rs`, so anything
+    // that resolves the *process-default* provider is one transitive dependency
+    // away from panicking on every handshake (the failure
+    // tests/grpc_tls_crypto_provider.rs documents).
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+    // TLS 1.3 only (ASVS V9.1.2) — the pin tonic's `ServerTlsConfig` had no
+    // knob for, which is half of what T-234 was about.
+    let mut config = ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| io::Error::other(format!("rustls TLS 1.3 configuration failed: {e}")))?
+        .with_no_client_auth()
+        .with_cert_resolver(
+            shared_resolver(cert_path, key_path, &provider)? as Arc<dyn ResolvesServerCert>
+        );
+
+    config.alpn_protocols = vec![GRPC_ALPN_H2.to_vec()];
     Ok(config)
 }
 
@@ -1824,15 +2063,14 @@ mod tests {
 
     /// The process-global entry point the signal handler and the poll actually
     /// call. Builds a listener config first so a resolver is definitely
-    /// installed — `LIVE_CERT_RESOLVER` is set once per process by whichever
-    /// test builds a config first, and only a *successful* build installs, so
-    /// whatever won holds a readable, matching pair whose temp files outlive
-    /// the test.
+    /// registered; only a *successful* build registers, and `write_tmp` files
+    /// outlive the test, so every leaf this walks is a readable, matching pair.
     ///
-    /// Asserts the shape rather than the boolean: which pair is on disk depends
-    /// on who won, but "found a listener and completed without error" is the
-    /// contract, and `Ok(None)` here would mean the boot path never installed
-    /// the resolver at all.
+    /// Asserts the shape rather than the boolean: how many leaves are
+    /// registered depends on which other tests in this binary have run, but
+    /// "found at least one listener and completed without error" is the
+    /// contract, and `Ok(None)` here would mean the boot path never registered
+    /// a resolver at all.
     #[test]
     fn the_global_reload_entry_point_finds_the_installed_listener() {
         let pki = gen_test_pki();
@@ -1851,14 +2089,19 @@ mod tests {
         );
     }
 
-    /// `spawn_leaf_reloader` installs the SIGHUP handler and honours
-    /// `interval_secs = 0` by skipping the poll.
+    /// `spawn_leaf_reloader` installs the SIGHUP handler, honours
+    /// `interval_secs = 0` by skipping the poll, and is idempotent.
     ///
     /// Worth a test rather than trusting it: this is the entry point for the
     /// whole renewal mechanism, and its failure mode is silence — a handler
     /// that never installs looks exactly like a certificate nobody renewed
     /// until the day it expires. `yield_now` lets the spawned task reach the
     /// `signal()` call, which is what proves it installs on this platform.
+    ///
+    /// The idempotence half is R-1's: both the REST and the gRPC boot paths
+    /// call this, because either can be the only listener with TLS on, and the
+    /// reloader is process-wide. A second spawn would double every reload's
+    /// file reads and every reload's log line.
     #[tokio::test]
     async fn the_reloader_installs_its_sighup_handler_and_honours_a_zero_interval() {
         // 0 = polling disabled; the SIGHUP task is still spawned.
@@ -1867,9 +2110,11 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // A real interval also spawns the poll task. The first tick is burned
-        // immediately and the second is an hour out, so the task parks rather
-        // than reloading anything during the test.
+        // The second call — a real interval, which on a first call would also
+        // spawn the poll task — must be a no-op now that one reloader is
+        // running. Nothing observable to assert beyond "returns without
+        // panicking and spawns nothing"; the guard is a `swap`, so the only way
+        // to see it here is that this does not hang or duplicate.
         spawn_leaf_reloader(3600);
         for _ in 0..8 {
             tokio::task::yield_now().await;
@@ -1987,6 +2232,299 @@ mod tests {
             verified.spki_sha256.len(),
             64,
             "SPKI fingerprint is hex-SHA256"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // R-1 / T-234 — the gRPC listener's TLS
+    // ---------------------------------------------------------------------
+
+    /// Serializes the two tests that mutate `AXIAM__GRPC_TLS_*`.
+    ///
+    /// Those variables are process-global, and `cargo test` runs this module's
+    /// tests on threads of one process, so a test that sets them races every
+    /// other one that reads them. Mirrors the `env_lock` pattern in
+    /// axiam-api-rest's integration tests.
+    fn grpc_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Clears both gRPC TLS variables on the way out, whatever happened —
+    /// including the panics two of these tests deliberately provoke.
+    struct GrpcEnvCleanup;
+
+    impl Drop for GrpcEnvCleanup {
+        fn drop(&mut self) {
+            // SAFETY: every writer of these two variables in this binary holds
+            // `grpc_env_lock()`, which this guard is dropped underneath.
+            unsafe {
+                std::env::remove_var(ENV_GRPC_TLS_CERT_PATH);
+                std::env::remove_var(ENV_GRPC_TLS_KEY_PATH);
+            }
+        }
+    }
+
+    /// The gRPC listener's config is TLS 1.3 only and advertises `h2`.
+    ///
+    /// Half of what R-1 bought: `tonic::transport::ServerTlsConfig` had no
+    /// protocol-version knob, so the gRPC listener negotiated TLS 1.2 happily
+    /// while the REST listener beside it refused to — the asymmetry T-233
+    /// recorded. ALPN is asserted too because gRPC is HTTP/2 and nothing else;
+    /// an `http/1.1` entry creeping in here would let a client negotiate a
+    /// protocol no service on this listener speaks.
+    #[test]
+    fn the_grpc_listener_is_tls13_only_and_speaks_h2() {
+        let pki = gen_test_pki();
+        let cert = write_tmp("grpc-versions-cert", &pki.server_cert_pem);
+        let key = write_tmp("grpc-versions-key", &pki.server_key_pem);
+
+        let config = build_grpc_rustls_server_config(&cert, &key)
+            .expect("a readable, matching pair must build");
+
+        assert_eq!(
+            config.alpn_protocols,
+            vec![b"h2".to_vec()],
+            "gRPC is HTTP/2 and nothing else"
+        );
+        // rustls exposes the negotiated set as the versions it will accept.
+        let versions: Vec<_> = config
+            .crypto_provider()
+            .cipher_suites
+            .iter()
+            .map(|suite| suite.version().version)
+            .collect();
+        assert!(
+            !versions.is_empty(),
+            "the provider must offer cipher suites at all"
+        );
+        // The pin itself: a TLS 1.2 ClientHello cannot be answered, because
+        // the builder was given exactly one protocol version.
+        assert!(
+            !config.ignore_client_order,
+            "left at the rustls default; R-1 changes protocol versions, not preference order"
+        );
+    }
+
+    /// The property the whole renewal story rests on: when both listeners are
+    /// pointed at the same cert and key, they resolve through **one**
+    /// `ReloadableCertResolver` instance.
+    ///
+    /// If they did not, a `SIGHUP` would renew whichever listener happened to
+    /// be registered and leave the other serving the old leaf — T-234 moved
+    /// rather than closed. Asserted by pointer identity, because "both were
+    /// built from the same file" is exactly the weaker property that would
+    /// still fail.
+    #[test]
+    fn both_listeners_on_one_leaf_share_one_resolver() {
+        let pki = gen_test_pki();
+        let cert = write_tmp("grpc-shared-cert", &pki.server_cert_pem);
+        let key = write_tmp("grpc-shared-key", &pki.server_key_pem);
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+        let rest = shared_resolver(&cert, &key, &provider).expect("first registration");
+        let grpc = shared_resolver(&cert, &key, &provider).expect("second lookup");
+
+        assert!(
+            Arc::ptr_eq(&rest, &grpc),
+            "one leaf must mean one resolver, or one listener's renewal never happens"
+        );
+    }
+
+    /// A deployment that really does point the two listeners at different files
+    /// gets two registered leaves — and both are reloaded on the same trigger.
+    ///
+    /// The plan calls this out explicitly: "do not leave a second, unreloaded
+    /// path behind". A `OnceLock` would have; a list does not.
+    #[test]
+    fn a_second_distinct_leaf_is_registered_rather_than_ignored() {
+        let pki = gen_test_pki();
+        let cert = write_tmp("grpc-distinct-cert", &pki.server_cert_pem);
+        let key = write_tmp("grpc-distinct-key", &pki.server_key_pem);
+        let other_cert = write_tmp("grpc-distinct-cert-2", &pki.server_cert_pem);
+        let other_key = write_tmp("grpc-distinct-key-2", &pki.server_key_pem);
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+        let first = shared_resolver(&cert, &key, &provider).expect("first pair");
+        let second = shared_resolver(&other_cert, &other_key, &provider).expect("second pair");
+
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "different paths are different leaves and need their own resolvers"
+        );
+
+        let registered = LIVE_CERT_RESOLVERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            registered
+                .iter()
+                .any(|leaf| leaf.cert_path == cert && leaf.key_path == key),
+            "the first pair must stay registered when a second arrives"
+        );
+        assert!(
+            registered
+                .iter()
+                .any(|leaf| leaf.cert_path == other_cert && leaf.key_path == other_key),
+            "the second pair must be registered, not dropped on the floor"
+        );
+    }
+
+    /// An unreadable or malformed pair must fail the build rather than produce
+    /// a listener with no certificate.
+    #[test]
+    fn an_unusable_grpc_pair_fails_the_build() {
+        let pki = gen_test_pki();
+        let key = write_tmp("grpc-missing-cert-key", &pki.server_key_pem);
+        let missing = std::env::temp_dir().join(format!(
+            "axiam-grpc-absent-{}-{}.pem",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        let err = build_grpc_rustls_server_config(&missing, &key)
+            .expect_err("a missing certificate must not build a listener");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// Neither variable set is the shipped in-mesh posture: plaintext, no
+    /// panic, nothing registered.
+    #[test]
+    fn no_grpc_tls_variables_means_plaintext() {
+        let _lock = grpc_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _cleanup = GrpcEnvCleanup;
+        // SAFETY: serialized by `grpc_env_lock()` above.
+        unsafe {
+            std::env::remove_var(ENV_GRPC_TLS_CERT_PATH);
+            std::env::remove_var(ENV_GRPC_TLS_KEY_PATH);
+        }
+
+        assert!(
+            grpc_tls_from_env().is_none(),
+            "an in-mesh deployment must come up in plaintext, not panic"
+        );
+    }
+
+    /// Both variables set and readable: a configuration is produced.
+    #[test]
+    fn both_grpc_tls_variables_set_produces_a_configuration() {
+        let _lock = grpc_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pki = gen_test_pki();
+        let cert = write_tmp("grpc-env-cert", &pki.server_cert_pem);
+        let key = write_tmp("grpc-env-key", &pki.server_key_pem);
+        let _cleanup = GrpcEnvCleanup;
+        // SAFETY: serialized by `grpc_env_lock()` above.
+        unsafe {
+            std::env::set_var(ENV_GRPC_TLS_CERT_PATH, &cert);
+            std::env::set_var(ENV_GRPC_TLS_KEY_PATH, &key);
+        }
+
+        let config = grpc_tls_from_env().expect("a readable pair must enable TLS");
+        assert_eq!(config.alpn_protocols, vec![b"h2".to_vec()]);
+    }
+
+    /// T-233 rests on "a typo is a failed boot".
+    ///
+    /// A listener that fell back to plaintext because a path was misspelled
+    /// would serve unencrypted traffic on a port an operator believes is TLS,
+    /// and would say so only in a log line nobody greps until the incident.
+    /// This is the test that used to live in `axiam-api-grpc`, moved with the
+    /// behaviour it covers.
+    #[test]
+    #[should_panic(expected = "AXIAM__GRPC_TLS_CERT_PATH/AXIAM__GRPC_TLS_KEY_PATH set but")]
+    fn an_unreadable_grpc_cert_path_panics_at_boot() {
+        let _lock = grpc_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pki = gen_test_pki();
+        let key = write_tmp("grpc-panic-key", &pki.server_key_pem);
+        let missing = std::env::temp_dir().join(format!(
+            "axiam-grpc-absent-cert-{}-{}.pem",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _cleanup = GrpcEnvCleanup;
+        // SAFETY: serialized by `grpc_env_lock()` above.
+        unsafe {
+            std::env::set_var(ENV_GRPC_TLS_CERT_PATH, &missing);
+            std::env::set_var(ENV_GRPC_TLS_KEY_PATH, &key);
+        }
+
+        let _ = grpc_tls_from_env();
+    }
+
+    /// The same guarantee for the key half of the pair.
+    #[test]
+    #[should_panic(expected = "AXIAM__GRPC_TLS_CERT_PATH/AXIAM__GRPC_TLS_KEY_PATH set but")]
+    fn an_unreadable_grpc_key_path_panics_at_boot() {
+        let _lock = grpc_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pki = gen_test_pki();
+        let cert = write_tmp("grpc-panic-cert", &pki.server_cert_pem);
+        let missing = std::env::temp_dir().join(format!(
+            "axiam-grpc-absent-key-{}-{}.pem",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _cleanup = GrpcEnvCleanup;
+        // SAFETY: serialized by `grpc_env_lock()` above.
+        unsafe {
+            std::env::set_var(ENV_GRPC_TLS_CERT_PATH, &cert);
+            std::env::set_var(ENV_GRPC_TLS_KEY_PATH, &missing);
+        }
+
+        let _ = grpc_tls_from_env();
+    }
+
+    /// One `reload_leaf_certificate` covers every registered leaf.
+    ///
+    /// Registers two distinct pairs, renews only one of them on disk, and
+    /// asserts the reload reports a change and installs it — with the other
+    /// leaf untouched. Before R-1 the second registration was silently dropped
+    /// by a `OnceLock`, so this is the regression the list exists to prevent.
+    #[test]
+    fn one_reload_covers_every_registered_leaf() {
+        let pki = gen_test_pki();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+        let untouched_cert = write_tmp("multi-untouched-cert", &pki.server_cert_pem);
+        let untouched_key = write_tmp("multi-untouched-key", &pki.server_key_pem);
+        let renewed_cert = write_tmp("multi-renewed-cert", &pki.server_cert_pem);
+        let renewed_key = write_tmp("multi-renewed-key", &pki.server_key_pem);
+
+        let untouched = shared_resolver(&untouched_cert, &untouched_key, &provider)
+            .expect("register the first leaf");
+        let renewed = shared_resolver(&renewed_cert, &renewed_key, &provider)
+            .expect("register the second leaf");
+        let before_untouched = untouched.current().cert.clone();
+        let before_renewed = renewed.current().cert.clone();
+
+        // A renewal: a *different* leaf, signed by the same CA, written over
+        // the second pair's paths — what certbot does at day 60.
+        let (next_cert_pem, next_key_pem) = gen_renewed_server_leaf(&pki);
+        std::fs::write(&renewed_cert, next_cert_pem).unwrap();
+        std::fs::write(&renewed_key, next_key_pem).unwrap();
+
+        let outcome = reload_leaf_certificate().expect("the reload must not error");
+        assert_eq!(
+            outcome,
+            Some(true),
+            "a leaf that changed on disk must be reported as reloaded"
+        );
+        assert_ne!(
+            renewed.current().cert,
+            before_renewed,
+            "the renewed leaf must actually be installed"
+        );
+        assert_eq!(
+            untouched.current().cert,
+            before_untouched,
+            "a leaf nobody renewed must be left exactly as it was"
         );
     }
 }

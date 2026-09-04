@@ -1897,6 +1897,9 @@ async fn main() -> std::io::Result<()> {
 
     // Build gRPC services and spawn server on a background task.
     let grpc_addr = config.grpc.bind_address();
+    // One knob for both listeners: the reloader walks every registered leaf,
+    // so a separate gRPC interval would be a number with nothing to control.
+    let config_tls_reload_interval_secs = config.server.tls.reload_interval_secs;
     let grpc_engine = {
         let engine = axiam_authz::AuthorizationEngine::new(
             role_repo.clone(),
@@ -2008,6 +2011,32 @@ async fn main() -> std::io::Result<()> {
             tenant_repo.clone(),
             axiam_auth::lockout::policy_from_config(&config.auth),
         ));
+    // R-1 / T-234 — the gRPC listener's TLS, built HERE rather than inside
+    // `axiam-api-grpc`, because the reloadable certificate resolver lives in
+    // this crate (layer 8) and that one is layer 6.
+    //
+    // Built before the REST listener's config (further down, at the bind) on
+    // purpose-free grounds — order does not matter. `shared_resolver` returns
+    // the SAME `ReloadableCertResolver` to whichever of the two asks second,
+    // whenever both name the same cert and key, which is the documented
+    // topology ("there is no second certificate and there must not be", Pi
+    // runbook §14.4). One `SIGHUP`, both listeners renewed.
+    //
+    // Panics on a set-but-unreadable path: T-233 rests on "a typo is a failed
+    // boot", because the alternative is a port an operator believes is TLS
+    // quietly serving plaintext.
+    let grpc_tls = match axiam_server::tls::grpc_tls_from_env() {
+        Some(config) => {
+            // The seam that lets an ACME renewal take effect without a
+            // restart. Called on BOTH listeners' paths since R-1 — either can
+            // be the only one with TLS on — and idempotent, so the REST bind
+            // calling it again below is a no-op.
+            axiam_server::tls::spawn_leaf_reloader(config_tls_reload_interval_secs);
+            axiam_api_grpc::GrpcTls::Rustls(config)
+        }
+        None => axiam_api_grpc::GrpcTls::Plaintext,
+    };
+
     tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
@@ -2025,6 +2054,7 @@ async fn main() -> std::io::Result<()> {
             grpc_reactor_dispatch_available,
             grpc_crypto_semaphore,
             grpc_lockout_policy,
+            grpc_tls,
         )
         .await
         {

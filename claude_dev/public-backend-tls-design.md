@@ -721,31 +721,57 @@ cannot be given different values.
 | `ReactorAdminService` is rate-limited as authz traffic — `GrpcMethodFamily::from_path`'s catch-all arm | Per-method permission checks against the authorization engine still apply; the allowlist keeps it off the public edge by default. Reclassifying it is a candidate follow-up, not a prerequisite |
 | A revoked session keeps passing gRPC for up to 15 minutes (`strict_revocation` defaults false) | The runbook sets `AXIAM__GRPC__STRICT_REVOCATION=true` for a public listener, with the session-validation cache to pay for it |
 | Buckets are per source IP, and gRPC has no client identity at the layer that keys them | Documented sizing (`AXIAM__GRPC__GRPC_*_PER_SEC`, the `gateway`/`mesh` profiles); unchanged from the in-mesh case, but newly visible behind NAT |
-| The gRPC TLS leg is TLS 1.2-negotiable, unlike REST's 1.3-only listener | Its only client is Caddy on loopback, which negotiates 1.3; the public half is Caddy's TLS and can be pinned with `protocols tls1.3` |
+| ~~The gRPC TLS leg is TLS 1.2-negotiable, unlike REST's 1.3-only listener~~ — **closed by R-1**, §13.4 | Both listeners are now TLS 1.3 only. The public half is still Caddy's TLS and is still worth pinning with `protocols tls1.3` |
 
-### 13.4 The renewal gap, named rather than papered over
+### 13.4 The renewal gap, closed (R-1, 2026-09-04)
 
 §3.2 argued the leaf had to become hot-reloadable so nobody would automate a
-restart loop. That work landed in `crates/axiam-server/src/tls.rs` and covers the
-**actix listener only**. `axiam-api-grpc`'s `start_grpc_server` reads
-`AXIAM__GRPC_TLS_CERT_PATH` / `_KEY_PATH` once, at startup, and hands the PEM to
-tonic's `ServerTlsConfig`; that crate contains no reload path and no poll.
+restart loop. That work landed in `crates/axiam-server/src/tls.rs` and covered
+the **actix listener only**. Until R-1, `axiam-api-grpc`'s `start_grpc_server`
+read `AXIAM__GRPC_TLS_CERT_PATH` / `_KEY_PATH` once, at startup, and handed the
+PEM to tonic's `ServerTlsConfig`; that crate contained no reload path and no
+poll. A public gRPC listener was therefore one whose certificate expired at day
+90 while REST kept working — the failure mode §3.2 exists to prevent,
+reintroduced on the other protocol. This edition of the document recorded two
+ways out, an operational one (a restart from the certbot deploy hook) and a
+structural one it described as "the right eventual answer, and not done here".
 
-A gRPC listener that is public is therefore a listener whose certificate expires
-at day 90 while REST keeps working — the failure mode §3.2 exists to prevent,
-reintroduced on the other protocol. Two ways out:
+**The structural one is what landed.** The gRPC listener no longer asks tonic
+to do TLS. It accepts the TCP connection, completes the handshake with
+`tokio-rustls`, and hands tonic an already-encrypted stream through
+`Server::serve_with_incoming` (`crates/axiam-api-grpc/src/tls_incoming.rs`).
+That closes both halves of the same API limit at once, exactly as anticipated:
 
-1. **Operational, and what the runbook does today.** The certbot deploy hook
-   restarts the container when gRPC TLS is on: ~15 seconds every 60 days, at a
-   scheduled moment, instead of a silent expiry.
-2. **Structural, and not done here.** Reloading tonic's certificate means
-   supplying rustls' `ServerConfig` directly, which tonic 0.14's
-   `ServerTlsConfig` does not accept — the same API limit that keeps this leg
-   from being TLS-1.3-only (`server.rs`'s module docs record both). It needs a
-   hand-rolled accept loop over `tokio-rustls` with the existing
-   `ReloadableCertResolver`, which would close the version gap and the reload gap
-   in one change.
+- **The leaf reloads.** The rustls `ServerConfig` is built by the composition
+  root (`axiam_server::tls::build_grpc_rustls_server_config`) over the *same*
+  `ReloadableCertResolver` the REST listener serves from, whenever both are
+  pointed at the same cert and key — which is the documented topology ("there
+  is no second certificate and there must not be", Pi runbook §14.4). One
+  `SIGHUP`, or one hourly poll, now renews both listeners. A deployment that
+  really does point them at different files gets a second registered leaf,
+  reloaded on the same triggers; what is no longer possible is a second,
+  unreloaded path.
+- **TLS 1.3 only.** The same `with_protocol_versions(&[&rustls::version::TLS13])`
+  pin the REST listener has had since F-04. The two protocols now present
+  identical PKI material *and* identical version posture.
 
-(2) is the right eventual answer, and it is a code change with its own tests
-rather than a documentation one. Until it exists, the restart is stated in the
-runbook rather than left for an operator to discover at day 90.
+Why the configuration is built above rather than inside `axiam-api-grpc`:
+`ReloadableCertResolver` lives in `axiam-server`, which is layer 8; the gRPC
+crate is layer 6, and `scripts/check-crate-layering.py` fails any edge pointing
+the other way. So `start_grpc_server` takes a `GrpcTls` value —
+`Plaintext | Rustls(Arc<ServerConfig>)` — and the crate that owns the resolver
+is the crate that builds the config. The flat env-var names and the
+panic-on-unreadable behaviour moved with the read and are otherwise unchanged;
+a typo is still a failed boot (T-233).
+
+**The one new surface, and its bound.** Doing the handshake ourselves means a
+client that opens TCP and then says nothing occupies server state. Each
+handshake runs in its own task and takes one of 512 permits with a
+*non-blocking* `try_acquire_owned`, so the accept loop's per-connection cost is
+constant however many half-open clients are in flight, and a permit is released
+after at most a 10-second handshake timeout. A failed handshake logs at `debug`
+and drops that connection only — "one malformed ClientHello stops the listener"
+would be a one-packet denial of service.
+
+The restart step the runbook carried (§14.5 step 4) is no longer needed. It is
+still harmless, and a deployment that has not updated its hook loses nothing.

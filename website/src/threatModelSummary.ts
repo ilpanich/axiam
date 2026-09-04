@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.10.0",
+ "version": "2.11.0",
  "diagramCount": 9,
- "total": 211,
- "open": 15,
- "mitigated": 196,
+ "total": 236,
+ "open": 17,
+ "mitigated": 219,
  "areas": [
   {
    "id": 0,
@@ -68,7 +68,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 1,
    "title": "Authentication & session management",
-   "total": 30,
+   "total": 32,
    "open": 1
   },
   {
@@ -80,13 +80,13 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 23,
+   "total": 31,
    "open": 1
   },
   {
    "id": 4,
    "title": "Authorization engine — RBAC, hierarchy & scopes",
-   "total": 23,
+   "total": 26,
    "open": 0
   },
   {
@@ -104,25 +104,25 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "total": 15,
-   "open": 4
+   "total": 26,
+   "open": 6
   },
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
-   "total": 25,
+   "total": 26,
    "open": 4
   }
  ],
  "categories": [
   {
    "name": "Spoofing",
-   "total": 51,
+   "total": 58,
    "open": 3
   },
   {
    "name": "Tampering",
-   "total": 42,
+   "total": 49,
    "open": 1
   },
   {
@@ -132,35 +132,35 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 54,
+   "total": 57,
    "open": 7
   },
   {
    "name": "Denial of service",
-   "total": 20,
-   "open": 2
+   "total": 22,
+   "open": 3
   },
   {
    "name": "Elevation of privilege",
-   "total": 39,
-   "open": 2
+   "total": 45,
+   "open": 3
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 27,
+   "total": 28,
    "open": 1
   },
   {
    "name": "High",
-   "total": 98,
-   "open": 7
+   "total": 113,
+   "open": 8
   },
   {
    "name": "Medium",
-   "total": 79,
-   "open": 6
+   "total": 88,
+   "open": 7
   },
   {
    "name": "Low",
@@ -247,7 +247,17 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "diagramId": 7,
    "area": "Deployment & platform (Kubernetes)",
    "element": "Secrets (Vault / K8s Secrets / ConfigMap)",
-   "residualRisk": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since H-4 it CHECKS rather than merely advises: just vault-status queries sys/capabilities-self and reports the capabilities the token in hand actually holds on AXIAM's KV path, flagging anything beyond read — and a root token as what it is — with --strict to make it a failure in a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists."
+   "residualRisk": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since H-4 it CHECKS rather than merely advises: just vault-status queries sys/capabilities-self and reports the capabilities the token in hand actually holds on AXIAM's KV path, flagging anything beyond read — and a root token as what it is — with --strict to make it a failure in a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists. Since 1.0.0-beta10 the token is no longer strictly read-only: it holds `read` on the startup path and `create`/`update` on `secret/data/axiam/ca-keys/*`, from the one policy file `docker/vault/axiam-policy.hcl`, and `just vault-status` reports missing capabilities as well as excess ones (T-232)."
+  },
+  {
+   "number": 216,
+   "title": "The unseal key sits on the same disk as the sealed data",
+   "category": "Elevation of privilege",
+   "severity": "High",
+   "diagramId": 7,
+   "area": "Deployment & platform (Kubernetes)",
+   "element": "Secrets (Vault / K8s Secrets / ConfigMap)",
+   "residualRisk": "Narrowed, not closed. `prod-up` now writes the read-only `axiam` policy from `docs/deployment/vault.md` §5.4 and issues a **scoped, periodic token** for the server, refusing to fall back to root if that fails; seeding keeps its own short-lived credential, because the seeding token and the serving token were never the same thing. Both the Compose stack and `k8s/vault/statefulset.yml` move from the `file` backend to **Raft**, which has a consistent backup story (`vault operator raft snapshot save`) and a migration path to three nodes that does not require a re-seed — a re-seed changes the OPAQUE setup key, i.e. a password reset for every user in every tenant. What remains **open** is auto-unseal, which cannot be closed from inside AXIAM: every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option whatever the hardware. `docs/deployment/vault.md` §5.3 and the Pi runbook §7.1 give the honest option table — GCP Cloud KMS at roughly $0.06 per key per month is the cheapest real answer — and state plainly that a deployment which configures none of them needs a human with three shares after every restart and is not production. A script that unseals from shares kept on the machine is explicitly **not** offered as an alternative: it removes the seal rather than automating it, and is strictly worse than Shamir because the shares are now in the one place an attacker already has. Two amendments since: the server's token is no longer strictly read-only — it holds `create`/`update` on the CA-key prefix, from the one policy file (T-232) — and the seeder that runs after unseal can no longer mistake a refused read for an empty Vault and mint fresh keys over the live ones (T-231). Vault itself runs unprivileged: the prod Compose stack chowns the Raft volume in a one-shot init container rather than running the process that holds every secret as root."
   },
   {
    "number": 9,
@@ -308,6 +318,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Client SDKs & admin UI integration surface",
    "element": "SDK token verification (JWKS cache, iss/aud)",
    "residualRisk": "Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should call gRPC introspection or CheckAccess rather than verifying locally."
+  },
+  {
+   "number": 234,
+   "title": "The gRPC TLS leaf expires because tonic reads it once at startup",
+   "category": "Denial of service",
+   "severity": "Medium",
+   "diagramId": 7,
+   "area": "Deployment & platform (Kubernetes)",
+   "element": "AXIAM deployment (N replicas, HPA)",
+   "residualRisk": "Open, with the residual bounded operationally. tonic 0.14's `ServerTlsConfig` does not accept a rustls `ServerConfig`, so the existing `ReloadableCertResolver` cannot be installed behind it; the structural fix is a hand-rolled accept loop over `tokio-rustls` using that resolver, which would close the reload gap and the TLS-version gap in one change and needs its own tests. Until it exists the runbook states the workaround rather than leaving it to be discovered at day 90: when gRPC TLS is on, the certbot deploy hook restarts the container — roughly fifteen seconds every sixty days, at a moment the operator controls — while keeping the REST listener's `SIGHUP` reload, so removing the restart later leaves a correct hook rather than a broken one. The exposure is opt-in twice over: the listener is loopback-bound unless published (T-233), and its TLS is off unless both paths are set. On the documented topology the only client of that leg is Caddy on loopback, which negotiates TLS 1.3, and the public half can be pinned with `protocols tls1.3`."
   },
   {
    "number": 161,

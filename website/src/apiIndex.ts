@@ -23,9 +23,9 @@ export interface ApiGroup {
 }
 
 /** The API version the document was exported from. */
-export const API_VERSION = "1.0.0-beta07";
-export const API_OPERATION_COUNT = 207;
-export const API_PATH_COUNT = 142;
+export const API_VERSION = "1.0.0-beta11";
+export const API_OPERATION_COUNT = 212;
+export const API_PATH_COUNT = 147;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -310,14 +310,44 @@ export const API_INDEX: ApiGroup[] = [
   "operations": [
    {
     "method": "POST",
+    "path": "/api/v1/auth/federation/handoff",
+    "summary": "Exchange a handoff code for session cookies.",
+    "public": true
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/auth/federation/oauth2/callback",
+    "summary": "Complete a plain-OAuth2 login.",
+    "public": true
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/auth/federation/oauth2/start",
+    "summary": "Begin a login through a plain-OAuth2 provider (GitHub, Facebook, or any configured `generic_oauth2`).",
+    "public": true
+   },
+   {
+    "method": "POST",
     "path": "/api/v1/auth/federation/oidc/callback",
     "summary": "Consumes the state row (single-use), runs the verified OIDC flow from plan 04-02 (nonce from DB — not caller-supplied), provisions or links the user, and returns Set-Cookie response (no token in body).",
     "public": true
    },
    {
     "method": "POST",
+    "path": "/api/v1/auth/federation/oidc/callback/form",
+    "summary": "The `response_mode=form_post` return, which Apple uses whenever `name` or `email` is requested.",
+    "public": true
+   },
+   {
+    "method": "POST",
     "path": "/api/v1/auth/federation/oidc/start",
     "summary": "Generates a server-side state+nonce pair, persists it in `federation_login_state` (10-min TTL), and returns the IdP authorization URL.",
+    "public": true
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/auth/federation/providers",
+    "summary": "Which \"Sign in with X\" buttons to render for a workspace.",
     "public": true
    },
    {

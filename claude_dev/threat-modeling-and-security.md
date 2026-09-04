@@ -19,6 +19,37 @@
 > [`website-security-beta11-update-plan.md`](website-security-beta11-update-plan.md),
 > which is the entry point for that pass.**
 >
+> **Beta12 remediation pass (`remediation-plan-2026-09-04.md`).** The wave below
+> wrote down, in the model's own words, what it could not close. This pass is
+> those residuals plus three small hardenings the same review found. **R-2,
+> R-4, R-5, R-6 and R-7 have landed.** No status changes and no counts move —
+> every threat they touch was already Mitigated, except T-216, which stays
+> **Open** on purpose:
+>
+> - **R-4** makes a `TRUSTED_HOPS` misconfiguration observable. The fallback to
+>   the connection peer was correct and *silent*, and silence is how the
+>   off-by-one T-212 describes went unnoticed. Both listeners now warn once per
+>   process and count every discard
+>   (`axiam_rate_limit_xff_discarded_total`), and the boot log states the value
+>   and its derivation rule together. Narrows T-212 and T-233.
+> - **R-5** moves `ReactorAdminService` out of the authorization rate-limit
+>   family and into the administrative one, so an admin surface is no longer
+>   sized like — or raised with — the hot path. Closes the follow-up T-233
+>   named.
+> - **R-6** puts `/health/jobs` in the OpenAPI document. It is the endpoint an
+>   operator alerts on to learn a background sweep has stopped, and it existed
+>   in the server and in no generated document. Deliberately still not §27 SDK
+>   surface. Completes what T-213 relies on.
+> - **R-7** makes the Vault seal type checkable. AXIAM cannot configure
+>   auto-unseal; `just vault-status` can now say, in one line, that this
+>   deployment does not have it. **T-216 stays Open — the control is a check,
+>   not a seal.**
+> - **R-2** closes the residual T-235 recorded, in all eleven SDK repositories:
+>   the §27 drift-check runs on tag pushes and the publish job depends on it, so
+>   a stale management surface fails before a version number is spent.
+>
+> R-1 and R-3 are separate passes.
+>
 > **Beta08…beta11 wave (model 2.11.0).** Twenty-five threats enter the model,
 > bringing it to **236 threats, 219 mitigated / 17 open**, in three groups. Two of
 > them had been written into the STRIDE document at beta08 but never into the
@@ -770,7 +801,12 @@ against the classic federation attacks:
   deployments use Raft storage; the server holds a scoped, periodic token whose
   policy is one checked file — read on the startup secrets, writes confined to
   the CA-key prefix — rather than the root token, and `just vault-status` reports
-  the capabilities the token lacks as well as the ones it should not have. The
+  the capabilities the token lacks as well as the ones it should not have, and
+  names the **seal type**: `OK` for any auto-unseal, and for Shamir a plain "no
+  auto-unseal; every restart needs *t* of *n* key shares, not production". AXIAM
+  cannot configure auto-unseal — every Vault OSS seal needs a cloud KMS or a
+  second Vault elsewhere — so what this buys is that a deployment cannot drift
+  into believing it has one. The
   seeder waits for an *active* node, treats only `200` and `404` as statements
   about what the Vault holds, pins every write to the version it read, and
   refuses any payload that would replace a stored secret — closing a path by

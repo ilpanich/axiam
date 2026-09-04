@@ -88,6 +88,20 @@ EXCLUDED_OPERATIONS: dict[tuple[str, str], str] = {
         "existence, performed once by a platform operator; there is no "
         "tenant-scoped client that could hold the credentials to call it"
     ),
+    ("GET", "/health/jobs"): (
+        "R-6 -- documented in openapi.json since it is an endpoint an operator "
+        "alerts on (T-129), but deliberately NOT §27 client surface. Its two "
+        "siblings /health and /ready ARE `platform` operations, so this is a "
+        "real distinction and not an oversight: they answer a fixed one-word "
+        "liveness/readiness contract, while this returns a variable inventory "
+        "of a deployment's background jobs -- names, last-run timestamps and "
+        "consecutive-failure counts. `public-backend-tls-design.md` §6 calls "
+        "that 'a free map of what a deployment runs and what is currently "
+        "broken in it', and decides that none of the three is routed at the "
+        "edge. An SDK talks to the edge, so a generated method for this would "
+        "be one no SDK client can reach, handing out that map if it ever "
+        "were. Operators scrape it from inside the network"
+    ),
     ("POST", "/api/v1/users/me/resend-verification"): (
         "§25 account lifecycle, not §27 management -- this is self-service on "
         "the caller's OWN record, the authenticated sibling of the excluded "

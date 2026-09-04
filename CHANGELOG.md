@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A `TRUSTED_HOPS` misconfiguration is now visible instead of silent
+
+  Both rate-limit key extractors discard `X-Forwarded-For` entirely when
+  `trusted_hops` is greater than or equal to the hops present, and key on the
+  connection peer instead. That fallback is correct and unchanged — it is what
+  stops a client rotating a single-hop header to mint a fresh bucket per request
+  (SECHRD-03). What was wrong is that it happened without a word: with
+  `trusted_hops` one too high, every client keys on the proxy's address, the
+  whole deployment shares one bucket, and the symptom is "the rate limit is
+  mysteriously strict" — which an operator fixes by raising the limit.
+
+  The first discard now logs one `WARN` naming the hop count seen, the
+  `trusted_hops` in force and the rule (`proxies − 1`), and every discard
+  increments `axiam_rate_limit_xff_discarded_total{protocol="rest"|"grpc"}`. A
+  non-zero counter is not automatically a fault; a counter that tracks total
+  request volume is. The boot log also states the value and the rule together,
+  next to the rate-limit posture line, so the number can be checked against a
+  topology before any traffic arrives.
+
+  A request with **no** header is not counted: a client with no proxy in front
+  of it is not a misconfiguration, and counting it would bury the signal.
+
+  Narrows T-212 and T-233. `claude_dev/remediation-plan-2026-09-04.md` R-4.
+
+- `just vault-status` reports the Vault's seal type
+
+  AXIAM cannot configure auto-unseal — every Vault OSS seal type needs a cloud
+  KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only — but it can
+  make the absence of one **checkable**, the way `just vault-status` already
+  makes the token's scope checkable. The report gains a **Seal** section from
+  the unauthenticated `sys/seal-status`: the type, `OK` for any auto-unseal
+  type, and for `shamir` a clearly worded "no auto-unseal; every restart needs
+  `t` of `n` key shares, not production" quoting the quorum from the response.
+
+  A Vault that is sealed *right now* gets its own line, because that is a state
+  somebody is about to fix rather than a statement about the configured seal. A
+  request that fails reports `unknown`, never `OK`. `--strict` now fails on an
+  unconfirmed auto-unseal as well as on an over-scoped token; `just
+  vault-status` still does not pass it, so the dev stack's root token on a
+  Shamir Vault — both deliberate — does not turn every local run red.
+
+  T-216 stays **open**: this is a check, not a seal.
+  `claude_dev/remediation-plan-2026-09-04.md` R-7.
+
+- `/health/jobs` is in the OpenAPI document
+
+  It has carried a `#[utoipa::path]` annotation and a route since T-129 and was
+  listed in `paths(…)` by nothing, so it existed in the server and in no
+  generated document — the same class of omission contract 1.36 recorded for
+  `/auth/me`, `/auth/password/change` and `/admin/bootstrap`. It is the endpoint
+  an operator alerts on to learn that a GDPR-erasure or certificate-expiry sweep
+  has stopped running.
+
+  It is documented but deliberately **not** §27 client surface: unlike `/health`
+  and `/ready`, which answer a fixed one-word contract, this returns a variable
+  inventory of a deployment's background jobs, and none of the three is routed
+  at the edge. The §27 operation count is unchanged, so **no SDK surface
+  regenerates**; the eleven SDKs re-vendor `openapi.json` at the next release as
+  they always do.
+
+  `claude_dev/remediation-plan-2026-09-04.md` R-6.
+
+### Changed
+
+- `ReactorAdminService` is rate-limited as administrative traffic, not as authz
+
+  `GrpcMethodFamily::classify` maps unrecognised gRPC paths into the
+  `AuthzCheck` family, so that adding a service without updating the classifier
+  fails safe (throttled) rather than open. Correct as a default; wrong as an
+  outcome for a service that *is* known. `ReactorAdminService` — reactor CRUD
+  and `ListReactorEvents` — was being sized like the hot path at 100/s per IP,
+  and **raised** by the `gateway` and `mesh` profiles, which exist to move mesh
+  authorization capacity.
+
+  It now maps to `Admin`, whose ceiling is the absolute
+  `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (10/s) that no profile raises. That is
+  stricter than its CPU profile demands — it carries no Argon2 cost — and
+  generous for reactor administration; an administrative surface that scales
+  with authorization throughput is the thing being fixed. Pin the knob, or open
+  a case with a benchmark, if `ListReactorEvents` needs more. The catch-all arm
+  is unchanged.
+
+  **Operators administering reactors over gRPC at more than 10 requests per
+  second per IP will now be throttled** and should pin
+  `AXIAM__GRPC__GRPC_ADMIN_PER_SEC`. The REST admin surface is unaffected.
+
+  Closes the follow-up T-233 names. `claude_dev/remediation-plan-2026-09-04.md` R-5.
+
 ## [1.0.0-beta11] - 2026-09-04
 
 ### Changed

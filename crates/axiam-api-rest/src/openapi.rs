@@ -20,6 +20,15 @@ use crate::handlers;
         // Health
         crate::health::health,
         crate::health::ready,
+        // R-6: `jobs` has carried a `#[utoipa::path]` annotation and a route
+        // since T-129 and was never listed here — the same class of omission
+        // contract 1.36 recorded for `/auth/me`, `/auth/password/change` and
+        // `/admin/bootstrap`. It is the endpoint an operator alerts on to learn
+        // that a GDPR-erasure or certificate-expiry sweep has stopped running,
+        // and it existed in the server and in no generated document. T-213
+        // relies on it being documented, because the document is where "not
+        // routed at the edge" is stated for it.
+        crate::health::jobs,
         // Bootstrap
         //
         // First-run only, and deliberately outside the §27 management
@@ -291,6 +300,11 @@ use crate::handlers;
         // Health
         crate::health::HealthResponse,
         crate::health::ReadyResponse,
+        // R-6, with `/health/jobs`. `JobStatus` is listed alongside its
+        // envelope because it is the element type of `JobsHealthResponse::jobs`
+        // and utoipa does not pull nested schemas in transitively from `paths`.
+        crate::health::JobsHealthResponse,
+        crate::health::JobStatus,
         // Auth
         handlers::auth::LoginRequest,
         handlers::auth::LoginSuccessResponse,

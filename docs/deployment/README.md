@@ -513,7 +513,7 @@ generous 100/s bucket):
 |---|---|
 | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | Max `axiam.v1.AuthorizationService` requests per second per IP (default `100`). |
 | `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | Max `axiam.v1.UserInfoService` + `axiam.v1.TokenService` requests per second per IP. Unset = 5x the authz ceiling (default `500`). |
-| `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | Max `axiam.v1.UserService` requests per second per IP. Unset = a flat `10` (600/min per IP) in **every** posture — `ValidateCredentials` is Argon2id-bound, so this is a CPU guard on online password guessing and is deliberately not derived from the read-sized authz ceiling (SEC-079). |
+| `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | Max `axiam.v1.UserService` + `axiam.v1.ReactorAdminService` requests per second per IP. Unset = a flat `10` (600/min per IP) in **every** posture — `ValidateCredentials` is Argon2id-bound, so this is a CPU guard on online password guessing and is deliberately not derived from the read-sized authz ceiling (SEC-079). `ReactorAdminService` joined this family in beta12: it is administrative traffic and should not be sized from, or raised with, authorization throughput. |
 | `AXIAM__GRPC__KEY` | Reserved for D8 parity; currently a no-op (the gRPC limiters are always per-IP — see [Sizing your rate limits § 5](rate-limit-sizing.md)). |
 
 > **Which numbers should you actually run?** See
@@ -570,6 +570,40 @@ when they add a load balancer.
 **Verify it rather than trusting it.** From two source addresses on different
 networks, hammer a per-IP endpoint past its budget. If the second address is
 throttled the moment the first is, the value is wrong.
+
+**And since beta12, the server tells you.** Two things changed, because "get
+this wrong and per-IP limiting silently stops working" had *silently* doing a
+lot of work:
+
+1. **A boot line states the value and the rule together**, next to the
+   rate-limit posture it shapes, so the number can be checked against your own
+   topology before any traffic arrives:
+
+   ```
+   INFO Rate-limit client-IP derivation: X-Forwarded-For is trusted for 0
+        appended hop(s), i.e. this server expects 1 proxy/proxies in front of it.
+        trusted_hops=0 rule="trusted_hops = proxies - 1" implies_proxies=1
+   ```
+
+2. **A discarded header is counted and warned about.** When a header is present
+   but `trusted_hops` discards it, the first occurrence logs one `WARN` naming
+   the hop count seen, the value in force and the rule, and every occurrence
+   increments
+   `axiam_rate_limit_xff_discarded_total{protocol="rest"|"grpc"}`.
+
+   A non-zero counter is not automatically a fault — a client sending its own
+   `X-Forwarded-For` to a server that correctly ignores it lands here too. It
+   **is** a fault when the counter tracks total request volume: that means the
+   header is discarded on every request, so every client is keying on the
+   proxy's address and the whole deployment shares one bucket. That is the
+   failure this section describes, and it is now visible on a dashboard rather
+   than only in an incident. The `WARN` is once per process, because the
+   condition fires on every request and one line each would be a log flood
+   proportional to traffic.
+
+   Both listeners read the same variable and emit the same signal under their
+   own `protocol` label, so a discrepancy between the two is a bug in this
+   server, not in your topology.
 
 ### `AXIAM__RATE_LIMIT__KEY` — NAT'd-fleet key configurability (D8)
 

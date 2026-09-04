@@ -14,6 +14,7 @@ use axiam_api_rest::config::rate_limit::RateLimitKeyMode;
 use axiam_api_rest::extractors::rate_limit::{
     ClientAwareKeyExtractor, RateLimitClientId, XForwardedForKeyExtractor,
 };
+use axiam_api_rest::extractors::xff_metrics;
 use std::net::{IpAddr, SocketAddr};
 
 /// Fixed loopback peer address representing the real (trusted) TCP peer —
@@ -363,5 +364,83 @@ async fn the_old_off_by_one_advice_collapses_every_client_into_one_bucket() {
         a, b,
         "two different clients must NOT share a key — they do here, which is \
          why trusted_hops = proxies - 1 rather than proxies"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R-4 — a discarded X-Forwarded-For is observable (narrows T-212/T-233)
+// ---------------------------------------------------------------------------
+
+/// The fallback above is correct and stays. What R-4 adds is that it is no
+/// longer *silent*.
+///
+/// T-212 is an off-by-one in `trusted_hops` that nobody noticed: with it one
+/// too high, every client keyed to the proxy's address, the whole deployment
+/// shared one bucket, and nothing in any log said so. The symptom is "the rate
+/// limit is mysteriously strict", which an operator fixes by raising the limit.
+///
+/// These assert on **deltas**, not absolute values: the counter is
+/// process-global and every test in this binary shares it, so only the change
+/// across one extraction is a meaningful measurement.
+#[actix_web::test]
+async fn a_discarded_xff_is_counted() {
+    let extractor = XForwardedForKeyExtractor::with_trusted_hops(3);
+    let before = xff_metrics::xff_discarded();
+
+    let req = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .insert_header(("X-Forwarded-For", "198.51.100.7"))
+        .to_srv_request();
+    let key = extractor.extract(&req).expect("key extraction succeeds");
+
+    assert_eq!(key, peer_ip(), "the key must still be the verified peer");
+    assert_eq!(
+        xff_metrics::xff_discarded() - before,
+        1,
+        "a header discarded by trusted_hops must be counted, or the one-bucket \
+         failure is visible only in an incident"
+    );
+}
+
+/// A header with enough hops is *used*, so nothing is discarded and nothing is
+/// counted. Without this, a counter that incremented on every request would
+/// look identical to a misconfiguration and mean nothing.
+#[actix_web::test]
+async fn a_trusted_xff_is_not_counted() {
+    let extractor = XForwardedForKeyExtractor::with_trusted_hops(1);
+    let before = xff_metrics::xff_discarded();
+
+    let req = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .insert_header(("X-Forwarded-For", "198.51.100.7, 198.51.100.8"))
+        .to_srv_request();
+    let key = extractor.extract(&req).expect("key extraction succeeds");
+
+    assert_eq!(key, "198.51.100.7".parse::<IpAddr>().unwrap());
+    assert_eq!(
+        xff_metrics::xff_discarded(),
+        before,
+        "a header that was trusted and used is not a discard"
+    );
+}
+
+/// No header at all is **not** a misconfiguration: it is a client with no proxy
+/// in front of it, reaching a server that correctly keys on the peer. Counting
+/// it would bury the signal under every direct request the deployment serves.
+#[actix_web::test]
+async fn a_request_with_no_xff_is_not_counted() {
+    let extractor = XForwardedForKeyExtractor::with_trusted_hops(3);
+    let before = xff_metrics::xff_discarded();
+
+    let req = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .to_srv_request();
+    let key = extractor.extract(&req).expect("key extraction succeeds");
+
+    assert_eq!(key, peer_ip());
+    assert_eq!(
+        xff_metrics::xff_discarded(),
+        before,
+        "a client with no proxy is not a misconfiguration"
     );
 }

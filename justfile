@@ -181,9 +181,17 @@ vault-status:
         --request POST \
         --data "$(python3 scripts/vault-status.py --print-paths)" \
         "${VAULT_ADDR_LOCAL}/v1/sys/capabilities-self" > "$CAPS" || true
+    # R-7 (T-216): the seal type. `sys/seal-status` is UNAUTHENTICATED, so this
+    # answers even when the token is wrong and even when the Vault is sealed —
+    # which is precisely the moment an operator wants to know which seal it is
+    # using. A failure leaves the file empty and the reporter says `unknown`,
+    # never `OK`.
+    SEAL="$(mktemp)"
+    trap 'rm -f "$CAPS" "$SEAL"' EXIT
+    curl -fsS "${VAULT_ADDR_LOCAL}/v1/sys/seal-status" > "$SEAL" || true
     curl -fsS --header "X-Vault-Token: ${TOKEN}" \
         "${VAULT_ADDR_LOCAL}/v1/secret/data/axiam" \
-        | python3 scripts/vault-status.py --capabilities "$CAPS"
+        | python3 scripts/vault-status.py --capabilities "$CAPS" --seal-status "$SEAL"
 
 # Stop development dependencies
 dev-down:

@@ -327,6 +327,15 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // Health probes
     "/health",
     "/ready",
+    // T-129 / R-6. Unauthenticated like the other two, for the reason
+    // `server.rs` gives at the route: it reports whether background sweeps are
+    // running and when they last succeeded — operational metadata about this
+    // server, not tenant data, the same category as `/ready` disclosing that
+    // the database is reachable. Listed here since R-6 put it in the OpenAPI
+    // document; before that the route existed and no parity check saw it.
+    // T-213 is why it must not be routed at the edge, which the document is
+    // where to say.
+    "/health/jobs",
     // OIDC discovery and token endpoints
     "/.well-known/openid-configuration",
     // UMA 2.0 discovery (X2). Public for the same reason as OIDC discovery:

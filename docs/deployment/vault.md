@@ -307,6 +307,34 @@ resulting deployment is one where **every restart needs a human with three
 shares**, and it should be described that way in your runbook rather than as
 production.
 
+**`just vault-status` now says which one you are running.** AXIAM cannot
+configure auto-unseal for you — everything above needs a cloud KMS, a second
+Vault, or an Enterprise licence — but since beta12 it stops being silent about
+the answer. The report gains a **Seal** section reading
+`sys/seal-status` (unauthenticated, so it answers even when your token is wrong
+and even when the Vault is sealed):
+
+```
+  seal (T-216):
+    SHAMIR    no auto-unseal; every restart needs 3 of 5 key share(s),
+              entered by a human before AXIAM can serve a single login.
+              Not production. docs/deployment/vault.md §5.3 has the option
+              table — GCP Cloud KMS at roughly $0.06 per key per month is
+              the cheapest real answer.
+```
+
+Any auto-unseal type from the table above reads `OK` instead. A Vault that is
+**sealed right now** gets its own separate line, because that is a state
+somebody is about to fix, not a statement about which seal is configured — and
+conflating the two would train an operator to ignore both. A `sys/seal-status`
+request that fails reports `unknown`, never `OK`: a check that could not reach
+Vault has learned nothing, and reporting the absence of bad news as good news is
+the failure this exists to remove.
+
+This is a **check, not a seal**. T-216 stays open; what changes is that its gap
+is now something a smoke test can assert on rather than something a runbook
+merely claims.
+
 ### 5.4 Enable KV v2 and create AXIAM's policy
 
 The policy lives in [`docker/vault/axiam-policy.hcl`](../../docker/vault/axiam-policy.hcl)
@@ -420,9 +448,15 @@ curl -fsS -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/axiam" \
     | python3 scripts/vault-status.py --capabilities caps.json --strict
 ```
 
-`just vault-status` deliberately does **not** pass `--strict`: the dev-mode
-Vault it points at runs on a fixed root token, so the warning there is expected
-and failing on it would train everyone to ignore the check.
+`--strict` now also fails when **auto-unseal is not confirmed** — a Shamir
+seal, a seal type the report does not recognise, or a `sys/seal-status` request
+that did not answer. Being sealed at that instant does not fail it: that is
+transient, and failing a correctly configured deployment for it would be noise.
+
+`just vault-status` deliberately does **not** pass `--strict`: the dev stack it
+points at runs a fixed root token on a Shamir Vault — both on purpose — so both
+findings are expected there, and failing on them would train everyone to ignore
+the check.
 
 The seeding token is a different, short-lived credential — it needs
 `create`/`update` on `secret/data/axiam` and is not the token the server runs

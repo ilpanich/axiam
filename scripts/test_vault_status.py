@@ -19,6 +19,8 @@ from vault_status_report import (
     is_under_scoped,
     read_capabilities,
     scope_findings,
+    seal_findings,
+    seal_is_production_ready,
     secret_presence,
     unexpected_fields,
 )
@@ -248,6 +250,131 @@ class PolicyFileAgreement(unittest.TestCase):
                 any(self._matches(rule, probe) for probe in PROBE_PATHS),
                 f"{rule} is granted by the policy but no probe path covers it",
             )
+
+
+class SealStatus(unittest.TestCase):
+    """R-7 (T-216) — the seal type is reported, and Shamir is flagged.
+
+    AXIAM cannot configure auto-unseal; what it can do is refuse to be silent
+    about its absence. These tests pin the two properties that make the check
+    worth having: every auto-unseal type reads as `OK`, and everything else —
+    Shamir, an unknown type, an unreachable Vault — reads as something an
+    operator has to look at.
+    """
+
+    @staticmethod
+    def _markers(body):
+        return [marker for marker, _ in seal_findings(body)]
+
+    @staticmethod
+    def _text(body):
+        return " ".join(line for _, line in seal_findings(body))
+
+    def test_every_auto_unseal_type_reports_ok(self):
+        for seal_type in ("awskms", "gcpckms", "azurekeyvault", "transit", "pkcs11"):
+            body = {"type": seal_type, "sealed": False, "initialized": True}
+            self.assertIn("OK", self._markers(body), seal_type)
+            self.assertTrue(seal_is_production_ready(body), seal_type)
+            self.assertIn(seal_type, self._text(body))
+
+    def test_shamir_is_flagged_with_its_quorum(self):
+        body = {"type": "shamir", "sealed": False, "initialized": True, "t": 3, "n": 5}
+        self.assertIn("SHAMIR", self._markers(body))
+        self.assertFalse(seal_is_production_ready(body))
+        text = self._text(body)
+        # The numbers matter: "needs key shares" is advice, "needs 3 of 5"
+        # is something an operator can plan a restart around.
+        self.assertIn("3 of 5", text)
+        self.assertIn("Not production", text)
+
+    def test_shamir_without_a_quorum_still_says_what_is_wrong(self):
+        # An older Vault, or a response without `t`/`n`. The finding must not
+        # degrade into "OK" just because two numbers are missing.
+        body = {"type": "shamir", "sealed": False, "initialized": True}
+        self.assertIn("SHAMIR", self._markers(body))
+        self.assertFalse(seal_is_production_ready(body))
+        self.assertIn("quorum of key shares", self._text(body))
+
+    def test_being_sealed_right_now_is_a_separate_line(self):
+        # A state, not a policy problem — and it must not turn a correctly
+        # configured auto-unseal Vault into a failure.
+        body = {"type": "awskms", "sealed": True, "initialized": True}
+        markers = self._markers(body)
+        self.assertIn("OK", markers)
+        self.assertIn("SEALED", markers)
+        self.assertTrue(
+            seal_is_production_ready(body),
+            "a temporarily sealed Vault with auto-unseal is still correctly configured",
+        )
+        self.assertIn("state, not a policy problem", self._text(body))
+
+    def test_a_failed_seal_status_request_reports_unknown_never_ok(self):
+        # The whole point of the check. Reporting the absence of bad news as
+        # good news is the failure mode it exists to remove.
+        self.assertEqual(self._markers(None), ["unknown"])
+        self.assertFalse(seal_is_production_ready(None))
+        self.assertNotIn("OK", self._markers(None))
+        self.assertIn("NOT confirmed", self._text(None))
+
+    def test_an_unrecognised_seal_type_is_unknown_rather_than_ok(self):
+        body = {"type": "something-new", "sealed": False, "initialized": True}
+        self.assertIn("unknown", self._markers(body))
+        self.assertFalse(seal_is_production_ready(body))
+
+    def test_a_missing_type_is_unknown_rather_than_ok(self):
+        for body in ({}, {"type": ""}, {"type": None}):
+            self.assertIn("unknown", self._markers(body), body)
+            self.assertFalse(seal_is_production_ready(body), body)
+
+    def test_an_uninitialised_vault_says_so_before_naming_the_seal(self):
+        body = {"type": "shamir", "sealed": True, "initialized": False, "t": 3, "n": 5}
+        markers = self._markers(body)
+        self.assertEqual(markers[0], "note", markers)
+        self.assertIn("NOT INITIALIZED", self._text(body))
+
+    def test_recovery_seal_is_noted_without_changing_the_verdict(self):
+        body = {
+            "type": "gcpckms",
+            "sealed": False,
+            "initialized": True,
+            "recovery_seal": True,
+        }
+        self.assertIn("OK", self._markers(body))
+        self.assertIn("note", self._markers(body))
+        self.assertTrue(seal_is_production_ready(body))
+        self.assertIn("recovery keys", self._text(body))
+
+
+class SealReportRendering(unittest.TestCase):
+    """The I/O half: `print_seal` must render every finding without raising."""
+
+    def test_every_shape_renders(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "vault_status_cli",
+            pathlib.Path(__file__).resolve().parent / "vault-status.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        import contextlib
+        import io
+
+        for body, expect_ready in (
+            ({"type": "awskms", "sealed": False, "initialized": True}, True),
+            ({"type": "shamir", "sealed": False, "initialized": True, "t": 3, "n": 5}, False),
+            ({"type": "shamir", "sealed": True, "initialized": False}, False),
+            (None, False),
+        ):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ready = module.print_seal(body)
+            self.assertEqual(ready, expect_ready, body)
+            self.assertIn("seal (T-216)", buf.getvalue())
+            # No line may run off a narrow terminal.
+            for line in buf.getvalue().splitlines():
+                self.assertLessEqual(len(line), 90, line)
 
 
 if __name__ == "__main__":

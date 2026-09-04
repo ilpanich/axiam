@@ -185,7 +185,7 @@ posture. The buckets are now split:
 |---|---|---|---|
 | authz-check | `axiam.v1.AuthorizationService` | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | 100/s |
 | identity-read | `axiam.v1.UserInfoService`, `axiam.v1.TokenService` | `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | 500/s (5x authz) |
-| admin | `axiam.v1.UserService` | `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | 10/s (absolute — see below) |
+| admin | `axiam.v1.UserService`, `axiam.v1.ReactorAdminService` | `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` | 10/s (absolute — see below) |
 | infrastructure | gRPC reflection (`grpc.reflection.*`), health (`grpc.health.*`) | *(none — fixed at 100/s)* | 100/s |
 
 Notes:
@@ -196,10 +196,24 @@ Notes:
   guessing and Argon2id CPU, not read throughput. It is therefore 10/s
   (600/min per IP) regardless of the posture: a `gateway`/`mesh` preset
   raising the authz ceiling for mesh capacity must not raise this one too.
-  The family contains only `GetUser` and `ValidateCredentials` — the
-  high-volume identity read is `GetUserInfo` on `UserInfoService`, which is
-  in the identity-read family and unaffected. Pin
-  `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` if your provisioning loop needs more.
+  The Argon2id method is `ValidateCredentials`; the family also holds
+  `GetUser` and, since beta12, the whole of `ReactorAdminService` (reactor
+  CRUD and `ListReactorEvents`). The high-volume identity read is
+  `GetUserInfo` on `UserInfoService`, which is in the identity-read family
+  and unaffected. Pin `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` if your
+  provisioning loop needs more.
+- **`ReactorAdminService` joined this family in beta12 (R-5).** It used to
+  fall through the classifier's catch-all into authz-check — the strictest
+  *limited* family, which is the right default for an unrecognised service
+  but the wrong home for a known administrative one: it meant reactor
+  administration was sized at 100/s per IP and *raised* by the
+  `gateway`/`mesh` presets, which exist to move mesh authorization capacity.
+  It carries no Argon2 cost, so 10/s is stricter than its CPU profile
+  demands; it is also generous for reactor administration, and an
+  administrative surface that scales with authorization throughput is the
+  thing being fixed. If `ListReactorEvents` ever needs more, pin
+  `AXIAM__GRPC__GRPC_ADMIN_PER_SEC`, or open a case for a fifth family with
+  a benchmark behind it.
 - **Reflection and health get a deliberately generous ceiling — but a
   finite one.** Their whole job is to answer during an incident, exactly
   when the other families are most likely to be saturated, and 100/s per IP

@@ -2522,6 +2522,42 @@ mod tests {
         std::fs::write(&broken_key, &pki.server_key_pem).unwrap();
     }
 
+    /// When two leaves fail, the **first** error is the one reported.
+    ///
+    /// `reload_leaf_certificate` keeps `first_error` and discards later ones on
+    /// purpose: an operator handed the second failure would go looking at the
+    /// wrong pair. The discard arm had no test, so nothing stopped a future
+    /// edit from making the *last* error win instead — which reads identically
+    /// in the log and points somewhere else entirely.
+    #[test]
+    fn a_later_failure_does_not_mask_the_first() {
+        let pki = gen_test_pki();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+        let a_cert = write_tmp("mask-a-cert", &pki.server_cert_pem);
+        let a_key = write_tmp("mask-a-key", &pki.server_key_pem);
+        let b_cert = write_tmp("mask-b-cert", &pki.server_cert_pem);
+        let b_key = write_tmp("mask-b-key", &pki.server_key_pem);
+
+        let _a = shared_resolver(&a_cert, &a_key, &provider).expect("register a");
+        let _b = shared_resolver(&b_cert, &b_key, &provider).expect("register b");
+
+        // Break both pairs the same way, so the only thing distinguishing the
+        // two errors is which one the function chose to keep.
+        std::fs::remove_file(&a_key).unwrap();
+        std::fs::remove_file(&b_key).unwrap();
+
+        let err = reload_leaf_certificate().expect_err("two broken pairs must report an error");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::NotFound,
+            "the reported error must still describe a missing key, not be swallowed"
+        );
+
+        std::fs::write(&a_key, &pki.server_key_pem).unwrap();
+        std::fs::write(&b_key, &pki.server_key_pem).unwrap();
+    }
+
     /// Half a TLS configuration is treated as none.
     ///
     /// The runbook says both variables or neither, and half of one is far more

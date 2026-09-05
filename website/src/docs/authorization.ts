@@ -39,7 +39,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
           },
           {
             title: "An applicable allow grant permits the action",
-            body: "Grants apply through directly assigned roles, group-inherited roles, and roles assigned on any ancestor of the resource.",
+            body: "Grants apply through directly assigned roles, group-inherited roles, roles assigned on any ancestor of the resource, and assignments that name no resource at all — those are tenant-wide. See [How far a grant reaches](#/docs/rbac#reach).",
           },
           {
             title: "An applicable deny grant refuses it — and beats every allow",
@@ -264,7 +264,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
       { type: "h", id: "roles", text: "Roles" },
       {
         type: "p",
-        text: "A role is a named collection of permissions, assignable to users and to groups, and either global or bound to a specific resource. Three are seeded at bootstrap: `super-admin` (every permission), `admin` (all entity CRUD) and `viewer` (list and get only).",
+        text: "A role is a named collection of permissions, assignable to users and to groups. It may carry `is_global`, which makes it apply everywhere however it is assigned; separately, an assignment either names a resource or does not, and one that does not is tenant-wide. Three roles are seeded at bootstrap: `super-admin` (every permission), `admin` (all entity CRUD) and `viewer` (list and get only).",
       },
       {
         type: "api",
@@ -325,6 +325,23 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
           { method: "PUT", path: "/api/v1/resources/{resource_id}/scopes/{scope_id}", summary: "Update a scope." },
           { method: "DELETE", path: "/api/v1/resources/{resource_id}/scopes/{scope_id}", summary: "Delete one." },
         ],
+      },
+      { type: "h", id: "reach", text: "How far a grant reaches" },
+      {
+        type: "p",
+        text: "There are two independent ways for a grant to reach everything, and it is worth being precise about which one you are using. **The assignment names no resource**: it is tenant-wide — every resource in the tenant, at every depth — which is what you get by assigning a role to a user or a group without picking a resource. **The role carries `is_global`**: it applies everywhere *however* it is assigned, including when the assignment does name a resource. An assignment that does name a resource reaches that resource and cascades to its descendants, unless a deny overrides it.",
+      },
+      {
+        type: "note",
+        text: "Tenant-wide is not organization-wide. An unscoped assignment made in an organization's own reserved scope reaches that scope, not the organization's member tenants — see [Organization-level principals](#/docs/organization-scope).",
+      },
+      {
+        type: "p",
+        text: "A grant naming a scope constrains **the resource that scope lives on**, and is inherited whole below it. On the scope's own resource only that scope is granted — a grant on `billing` does not reach `payroll` beside it. On any descendant resource the grant applies to every scope there, because the descendant's scopes are different records and there is nothing to match the name against. A scope name asked for at a resource that does not define it resolves against that resource's ancestors, nearest first, and only a name found nowhere in the lineage is refused. A scope on an unrelated resource grants nothing here: inheritance follows the hierarchy. Denies inherit by exactly the same rule, which is what makes a scoped deny on a parent an effective way to carve a subtree out of a broad grant.",
+      },
+      {
+        type: "warn",
+        text: `**Upgrade note.** Up to and including \`1.0.0-beta08\`, an assignment naming no resource granted nothing at all unless the role also carried \`is_global\` — the write succeeded and the grant was inert. Those assignments become live tenant-wide grants on upgrade. A scoped grant behaved likewise: it matched only that exact scope record and reached no descendant resource, so grants written under that behaviour become effective further down the tree. Review both before upgrading — \`GET /api/v1/roles/{role_id}/users\` and \`GET /api/v1/roles/{role_id}/groups\` report each assignment's \`resource_id\`, and a \`null\` there is one of them. The [administrator guide](${GH_BLOB}/docs/admin/README.md#assigning-roles) walks through finding them.`,
       },
       { type: "h", id: "org-actions", text: "Actions a role cannot carry into a tenant" },
       {
@@ -394,11 +411,17 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
         proseFirstCol: true,
         headers: ["Assignment", "Lives in", "Applies to"],
         rows: [
-          ["Global (`is_global`, no resource)", "organization scope", "Every resource in every tenant of the organization"],
+          ["Role is `is_global`", "organization scope", "Every resource in every tenant of the organization — this is the grant that carries across the boundary"],
+          ["Assignment names no resource (tenant-wide)", "organization scope", "Every resource in the organization scope, and only there — tenant-wide is not organization-wide"],
           ["Resource-scoped", "organization scope", "That resource, in the organization scope only"],
-          ["Global", "an ordinary tenant", "Every resource in that tenant"],
+          ["Role is `is_global`", "an ordinary tenant", "Every resource in that tenant"],
+          ["Assignment names no resource (tenant-wide)", "an ordinary tenant", "Every resource in that tenant"],
           ["Resource-scoped", "an ordinary tenant", "That resource and its descendants"],
         ],
+      },
+      {
+        type: "p",
+        text: "The first two rows are independent, and it is worth keeping them apart: `is_global` is a property of the **role** and applies however the role is assigned, including when the assignment does name a resource, while naming no resource is a property of the **assignment** and means tenant-wide. Only the first crosses a tenant boundary.",
       },
       {
         type: "p",
@@ -410,7 +433,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "Cross-tenant reach is an explicit claim, never an inference. The engine reads a subject's grants across a tenant boundary only under a `SubjectScope` claim that an ordinary tenant principal cannot express at all, produced in exactly one place after resolving the tenant record and confirming it is the organization's reserved scope. Revoking an organization-level role sweeps the decision cache in *every* tenant, not only the one the revocation happened in.",
+        text: "Cross-tenant reach is an explicit claim, never an inference. The engine reads a subject's grants across a tenant boundary only under a `SubjectScope` claim that an ordinary tenant principal cannot express at all, produced in exactly one place after resolving the tenant record and confirming it is the organization's reserved scope. The reach check that resolves which tenant a request acts on is likewise written once and shared by both request extractors, including the one the authorization-check endpoints bind — a second copy of it, or a path without it, is how a guard drifts on one route and not the others. Revoking an organization-level role sweeps the decision cache in *every* tenant, not only the one the revocation happened in.",
       },
       { type: "h", id: "org-actions", text: "Organization-level actions need an organization principal" },
       {

@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.10.0",
+ "version": "2.11.0",
  "diagramCount": 9,
- "total": 211,
- "open": 15,
- "mitigated": 196,
+ "total": 236,
+ "open": 16,
+ "mitigated": 220,
  "diagrams": [
   {
    "id": 0,
@@ -1172,7 +1172,25 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "Adding a TOTP authenticator made the next sign-in demand a second factor; adding a passkey or security key did not (W5-01). The mfa_enabled flag began life meaning “a confirmed TOTP secret exists” and was reused to mean “challenge this account” — two readings that agree only while TOTP is the sole factor. A WebAuthn-only account listed its credential on the profile page while a password alone still let the account straight in, and the disable-on-last-removal branch was unreachable because nothing had ever turned the flag on for such an account.",
-       "mitigation": "Fixed in 1.0.0-beta05: MfaMethodService::enable_after_enrollment runs when a WebAuthn registration completes, so a passkey is a factor from the moment it exists. The trap the fix had to avoid is pinned: every downstream reader tests mfa_enabled together with a stored TOTP secret, so setting the flag could have promoted an abandoned, unconfirmed TOTP enrollment into a live second factor — the pending secret is dropped rather than adopted, and an unconfirmed TOTP secret is never offered at sign-in. Removing the last passkey turns the requirement back off. Stated residual: if the flag write fails, the handler logs and continues, because the credential is already persisted and reporting the registration as failed would invite the user to register a second one."
+       "mitigation": "Fixed in 1.0.0-beta05: MfaMethodService::enable_after_enrollment runs when a WebAuthn registration completes, so a passkey is a factor from the moment it exists. The trap the fix had to avoid is pinned: every downstream reader tests mfa_enabled together with a stored TOTP secret, so setting the flag could have promoted an abandoned, unconfirmed TOTP enrollment into a live second factor — the pending secret is dropped rather than adopted, and an unconfirmed TOTP secret is never offered at sign-in. Removing the last passkey turns the requirement back off. Stated residual: if the flag write fails, the handler logs and continues, because the credential is already persisted and reporting the registration as failed would invite the user to register a second one. The user-verification policy those ceremonies run under became a tightening-only security setting in 1.0.0-beta09 (T-229, T-230)."
+      },
+      {
+       "number": 229,
+       "title": "A possession-only security key is accepted where possession alone must not be a complete login",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`webauthn-rs` hard-codes `UserVerificationPolicy::Required` on both passkey ceremonies, so a security key with no PIN — which can prove user *presence* but never user *verification* — was refused at the finish step against a policy that existed nowhere an operator could see or change, and the refusal read as a hardware fault because a PIN-protected key on the same account worked. Making user verification configurable is the right answer, and it opens the hazard this threat records: a relaxed policy applied indiscriminately would let a PIN-less key satisfy the usernameless sign-in path, where the credential is the only factor and mere possession of the token would then be a complete login; and a policy the browser is not told about leaves a browser that does not prompt facing a server that rejects the answer, or the reverse.",
+       "mitigation": "Fixed in 1.0.0-beta09. `webauthn_user_verification` is a security setting in the same hierarchical model as the OPAQUE and privacy settings: an organization baseline every tenant inherits and may only make stricter, ordered `required > preferred > discouraged` — it can join that model, unlike the attestation policy, because it is totally ordered, which is exactly what the tighten-only override check needs. The default is `preferred`, not `required`, because nobody chose `required`: it was a library constant, and backfilling it would have preserved the bug rather than an intent; `preferred` accepts a security key whether or not it has a PIN and records which happened, so tightening later is a policy change rather than a re-enrolment. Two ceremonies deliberately do not follow the setting: **usernameless sign-in keeps `required`**, so a PIN-less key is a working second factor and never a passwordless one, and attested registration keeps the `required` that `webauthn-rs` imposes, on a path that already excludes synchronised authenticators and hybrid flows. The policy is applied in both places it has to be — the challenge, which decides whether the browser prompts for a PIN, and the ceremony state, which decides what the server accepts — and because the state's policy field is private with no builder, it is re-stamped in the serialization this crate already performs on the way into the state-token JWT, failing loudly rather than silently if upstream's shape changes, with a test that pins that shape against the real library so a patch release cannot turn the re-stamp into a no-op. The organization and tenant settings requests carry the field in `openapi.json` and in the eleven SDKs' §27 management surfaces (T-235)."
+      },
+      {
+       "number": 230,
+       "title": "A relaxed user-verification policy silently weakens credentials enrolled under a stricter one",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A policy that governed how a credential is *used* rather than how it was *enrolled* would let an administrator downgrade every existing passkey at a stroke. The settings write that could do it is a `PUT` that replaces the whole row, so a client that simply omitted the new field would relax an organization that had set `required` without anyone choosing to — the quiet path by which a stricter posture is lost.",
+       "mitigation": "Fixed in 1.0.0-beta09. No existing credential is weakened: `webauthn-rs` records the policy a credential was registered under and demands user verification at authentication whenever *either* that or the current policy says `required`, so every credential enrolled before this change carries the old hard-coded `required` for the rest of its life and the setting governs new enrolments only. Schema v53 adds the column with `DEFAULT 'preferred'` and backfills rows that predate it. The admin UI sends the field explicitly on the organization settings `PUT`, and it is a required field in the request type on purpose — a test fixture that has to be updated is exactly the friction that buys. `docs/admin/authenticator-policies.md` states the ordering, the two ceremonies that ignore the setting, and the per-credential rule."
       }
      ],
      "open": 0
@@ -1370,7 +1388,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "A database disclosure exposes every password hash to offline attack at attacker-chosen cost.",
-       "mitigation": "Argon2id with OWASP-recommended parameters (m=19 MiB, t=2, p=1) and per-user salts makes bulk cracking expensive; policy enforces a 12-character minimum by default."
+       "mitigation": "Argon2id with OWASP-recommended parameters (m=19 MiB, t=2, p=1) and per-user salts makes bulk cracking expensive; policy enforces a 12-character minimum by default. The `argon2` crate moved to 0.6 in 1.0.0-beta08: the PHC string format is unchanged, the crate now draws the 16-byte salt from the OS RNG itself, and hashes written under 0.5 were verified to still verify."
       },
       {
        "number": 179,
@@ -1804,11 +1822,11 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 30,
+   "total": 32,
    "open": 1,
    "bySeverity": {
-    "High": 13,
-    "Medium": 12,
+    "High": 14,
+    "Medium": 13,
     "Critical": 3,
     "Low": 2
    }
@@ -2665,7 +2683,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning.",
+   "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config.",
    "width": 1438,
    "height": 808,
    "boundaries": [
@@ -2828,6 +2846,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "An ID token is an assertion to a client about a login, which an OIDC deployment distributes more widely and gives a longer life than an access token; a refresh token is a re-authentication credential. Either accepted as a subject token would let an artefact the partner considers low-risk buy an AXIAM credential.",
        "mitigation": "Both are refused by name at the subject_token_type check, and — since a caller can mislabel a token — again by shape: the ID-token-only claims nonce, at_hash, c_hash and s_hash, and typ headers or claims naming an ID or refresh token, are rejected even when the signature verifies."
+      },
+      {
+       "number": 223,
+       "title": "A templated issuer accepts every tenant of the provider",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Verified live: Entra ID's `common` authority publishes `issuer` as `https://login.microsoftonline.com/{tenantid}/v2.0` — the placeholder literally. Strict `iss` matching rejects every token, so supporting it at all means substituting the token's `tid`. Microsoft signs every tenant's tokens at `common` with the same keys, so \"accept whatever `tid` says\" means *every Microsoft account on earth may sign in here*.",
+       "mitigation": "Templated issuers are supported, and a config with one and an **empty** `allowed_issuer_tenants` is refused at create and update time — the message names both ways out (a tenant-specific authority, or a list of accepted tenants), because that configuration is occasionally intended and never intended by accident. The refusal is repeated at sign-in time, so a row written before the check existed cannot fall through to \"accept anyone\". The `tid` is read from the *unverified* payload solely to select which of a closed, operator-written set of issuer strings to require: it must parse as a UUID (otherwise a crafted value could substitute path segments), it must appear in the allow-list, and the signature check and the verified `iss` comparison both still run afterwards. It can never widen the accepted set."
       }
      ],
      "open": 0
@@ -3003,6 +3030,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A scope_map entry mapping to no scopes, an out-of-range token age, or an unknown subject_mapping value stored while token exchange is disabled becomes live the moment an administrator ticks the enable box — which is not where they expect to be told their configuration was wrong.",
        "mitigation": "The trust block is validated at the API edge on every write, whether or not it is enabled (only the non-empty-audience rule is conditional). On read, every hydration failure resolves towards the default, and enabled is read from its own column so a corrupt neighbouring column can never switch exchange on. A provider whose stored trust block fails validation is skipped at resolution time with a warning rather than being used."
+      },
+      {
+       "number": 225,
+       "title": "A custom button icon is stored content served to every login-page visitor",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A generic provider may carry an operator-uploaded icon, and that image is returned by the unauthenticated providers endpoint on every render of a login page. An SVG would be a document with its own parser in that position; an unbounded one would make every visitor download whatever an operator pasted.",
+       "mitigation": "Raster only — `image/png`, `image/jpeg`, `image/webp` — with `image/svg+xml` refused by name and the refusal saying why. Bounded to 16 KiB decoded, checked on the data URL's length first (so a multi-megabyte paste is rejected before anything walks it) and then on the decoded size; the admin UI crops to 64×64 in the browser, so what is uploaded is a few kilobytes and the source file never reaches the server. The value is only ever rendered as an `<img src>` under the SPA's `default-src 'self'; img-src 'self' data:` CSP. It is refused outright for the branded kinds, whose published sign-in-button rules require their own mark."
       }
      ],
      "open": 0
@@ -3057,6 +3093,108 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A SAML IdP certificate left in place after rotation or revocation keeps validating assertions signed by a key the IdP no longer controls.",
        "mitigation": "Certificate validity is checked at assertion-verification time, not only at configuration time, and expiry raises an admin notification through the compliance notification category."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "e4028335-ec1c-5586-8b2b-49dc66c2cb6a",
+     "kind": "process",
+     "x": 624,
+     "y": 74,
+     "w": 140,
+     "h": 140,
+     "name": "Public providers listing",
+     "lines": [
+      "Public",
+      "providers",
+      "listing"
+     ],
+     "description": "",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 218,
+       "title": "The login-page provider list enumerates organizations and tenants",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "`GET /api/v1/auth/federation/providers` has to be unauthenticated — its caller is a person at a login page — and it takes an organization slug. If it answered differently for a slug that exists and one that does not, it would be an organization-slug oracle, and knowing which organizations a deployment hosts is reconnaissance for every other attack on it.",
+       "mitigation": "An unknown organization or tenant and a known one with nothing configured return the **same** answer: `200` with an empty list. That is deliberately different from `oidc_start_public`, which answers `401` for a slug miss: there every failure is a `401`, so the answer carries nothing, whereas a *list* endpoint answering `401` for unknown and `200 []` for known-but-empty would be two-valued. The rate is bounded by the same `login_per_min` budget the sign-in endpoints use, through both the per-process governor and the shared limiter. The response body is a dedicated struct carrying only what a button needs — config id, provider kind, display name, protocol, and the operator's icon — rather than a narrowed admin response, so a field added to the admin surface cannot reach it by inheritance; an integration test asserts the body contains no client id, secret, metadata URL or endpoint."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "a0a5052d-6eca-5b6c-9ddd-2b3b6c284f89",
+     "kind": "process",
+     "x": 824,
+     "y": 74,
+     "w": 140,
+     "h": 140,
+     "name": "OAuth2 RP (userinfo variant)",
+     "lines": [
+      "OAuth2 RP",
+      "(userinfo",
+      "variant)"
+     ],
+     "description": "",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 220,
+       "title": "Authentication rests on a userinfo call with no verifiable assertion",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`FederationProtocol::OAuth2` exists because GitHub publishes no discovery document and issues no ID token, and Facebook's web flow returns only an access token to a confidential client. On that path there is no signature, no `nonce` and no `aud` — the whole assurance is \"the access token we just received works against the userinfo endpoint we configured\". That is a genuine downgrade from the OIDC path, and a downgrade nobody writes down is a downgrade nobody notices.",
+       "mitigation": "Stated explicitly in the module documentation, in the design doc (§3), in the admin UI (the protocol carries its own warning and its own badge colour), and here. Enforced rather than merely documented: `validate_protocol_for_kind` **refuses** this protocol for `google`, `microsoft`, `apple` and `generic_oidc`, so it cannot be selected for a provider that supports OIDC properly, and the refusal says why. PKCE (`S256`) is mandatory on this path rather than optional — it is the only replay protection left once `nonce` is gone — with the verifier generated server-side, stored in `federation_login_state`, and never returned to the client. `state` stays 256-bit, server-side and single-use. The token exchange is server-side with the encrypted client secret; nothing about it happens in the browser. Honest caveat, recorded in `crate::pkce`: a provider that *ignores* `code_challenge` gives us nothing for it, and no relying party can make a remote server verify something — GitHub has supported S256 since July 2025, and where a provider does not, the residual protection is the single-use state plus the confidential-client secret."
+      },
+      {
+       "number": 221,
+       "title": "A substituted userinfo endpoint is an authentication bypass",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "With no signature to check, whoever answers the userinfo request decides who signed in. An endpoint redirected to an attacker — by a plaintext URL, a redirect, a rebound DNS name, or a value derived at runtime from something the IdP said — is a complete authentication bypass with nothing to catch it.",
+       "mitigation": "The three OAuth2 endpoints are **explicit per config**, never derived from a discovery document or from anything the provider sends at runtime, and each is validated as absolute HTTPS (loopback excepted, for tests) at write time, by the same rule `validate_metadata_url` applies to the OIDC discovery URL. Every fetch goes through the shared `guarded_fetch` SSRF guard: HTTPS on every hop, resolve-and-pin against DNS rebinding, bounded redirects, and a 256 KiB response cap read as a running byte count. A `200` carrying `{\"error\": …}` is treated as the failure it is, rather than handed onward as an empty bearer token."
+      },
+      {
+       "number": 222,
+       "title": "A provider asserts an email nobody has proved they control",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "AXIAM keys account recovery, email verification and administrative notification on the address. An unverified address adopted as an identity is account takeover by whoever typed it into the provider first — and `GET https://api.github.com/user` returns `email: null` or an unverified address for a large share of accounts.",
+       "mitigation": "An address the provider does not affirmatively mark verified is **never** adopted on this path: `email_verified` must be truthy or the login is refused with `UnverifiedExternalEmail`, and absent, `null` and falsey all read as false. For GitHub the primary *verified* address comes from a second, mandatory call to the `/emails` resource — derived from the configured `userinfo_endpoint`, so GitHub Enterprise Server works too — and only a `primary && verified` entry is taken, because a verified non-primary address is somebody else's choice of which mailbox represents them. Where a provider offers no verification signal at all (Facebook's Graph API), the decision is the operator's and is written down where it can be audited: an `attribute_map` literal, `\"email_verified\": \"@true\"`. Refusing rather than provisioning without an address is deliberate — an account that cannot recover itself is not a better outcome than a clear failure. See design doc §5.3."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "3cb98d5d-ccdd-57f7-9c34-e5cb08d5b33a",
+     "kind": "process",
+     "x": 824,
+     "y": 284,
+     "w": 140,
+     "h": 140,
+     "name": "Federation config inheritance",
+     "lines": [
+      "Federation",
+      "config",
+      "inheritance"
+     ],
+     "description": "",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 224,
+       "title": "An inherited organization provider signs users into the wrong tenant",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A federation config may now live in the organization-scope tenant and be used by the organization's tenants. The config's tenant and the tenant being signed into are therefore different, and every place that previously said \"the tenant\" now has two candidates. Provisioning into the config's tenant would put every tenant's federated users in one shared tenant — an isolation failure with a benign-looking cause.",
+       "mitigation": "Visibility and provisioning are decided in one place each and are deliberately different: `effective_providers` decides which configs a tenant may use, and `provision_or_link_identity` is documented and tested to create the user and the link in the **requesting** tenant. A login resolves its config through the same `effective_providers` the buttons were rendered from, so a config that is disabled, not inheritable, or shadowed by a tenant override cannot be reached by posting its id. `FederationLink`'s `(tenant_id, federation_config_id, external_subject)` uniqueness still means one link per external identity per tenant — verified, not assumed — so one Google account signing into two tenants through one inherited config gets two AXIAM users, which is what tenant isolation requires. A tenant's own config of the same kind always shadows the inherited one, **including a disabled one**, so \"disable\" cannot come to mean \"re-enable the organization's\". The SAML assertion-consumer path is the one place where the two tenants both do real work and differently: `handle_saml_response_for` records the assertion-replay row under the **config's** tenant — a no-op for a config the requesting tenant owns, and strictly stronger for an inherited one, since an assertion spent in one tenant cannot then be spent in a sibling — while the user and the link are created in the **requesting** tenant like every other protocol. Both ACS entry points resolve the config through `effective_providers` first, exactly as the OIDC and OAuth2 callbacks do; loading it with a `get_by_id` scoped to the requesting tenant, as the ACS originally did, could not find an inherited config at all."
       }
      ],
      "open": 0
@@ -3290,13 +3428,115 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "SurrealQL",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "be826e94-7b03-5922-a02b-b3f09f0b03ff",
+     "path": "M199,317.7 L627.9,167.2",
+     "name": "list login providers",
+     "description": "",
+     "label": "list login providers (HTTPS, unauthenticated)",
+     "labelLines": [
+      "list login providers (HTTPS,",
+      "unauthenticated)"
+     ],
+     "lx": 413.5,
+     "ly": 242.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "a8e4a89b-05d8-5e08-94c5-70e7fc2932e1",
+     "path": "M199,135 L824,143.1",
+     "name": "userinfo response",
+     "description": "",
+     "label": "userinfo response (HTTPS)",
+     "labelLines": [
+      "userinfo response (HTTPS)"
+     ],
+     "lx": 511.5,
+     "ly": 139,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "aaf682f3-9e81-5764-83d7-a9a53e798847",
+     "path": "M843.9,192.9 L494.1,535.1",
+     "name": "userinfo fetch",
+     "description": "",
+     "label": "userinfo fetch (via guarded_fetch)",
+     "labelLines": [
+      "userinfo fetch (via guarded_fetch)"
+     ],
+     "lx": 669,
+     "ly": 364,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "HTTPS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "44226f03-37d0-500d-84b8-a594f933aee7",
+     "path": "M953.2,316.7 L1100.5,224",
+     "name": "resolve effective providers",
+     "description": "",
+     "label": "resolve effective providers",
+     "labelLines": [
+      "resolve effective providers"
+     ],
+     "lx": 1026.9,
+     "ly": 270.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (TLS)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "b0cf1693-6f8f-567b-b49e-4f2a5466e7d8",
+     "path": "M374,351.8 L199,346.3",
+     "name": "SSO handoff code",
+     "description": "",
+     "label": "SSO handoff code (redirect, 60 s, single use)",
+     "labelLines": [
+      "SSO handoff code (redirect, 60 s,",
+      "single use)"
+     ],
+     "lx": 286.5,
+     "ly": 349.1,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 219,
+       "title": "A handoff code is captured from a URL and redeemed first",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "AXIAM's session cookies are `SameSite=Strict`. SAML and Apple's `response_mode=form_post` both return **cross-site**, so cookies set on that response would not be sent on the navigation that follows. The mechanism that bridges it — a code in a redirect URL, exchanged same-origin — puts a session-bearing credential somewhere URLs go: browser history, and a `Referer` header.",
+       "mitigation": "The code is 256 bits from the same CSPRNG as `state`; only its SHA-256 hash is stored, so a database read yields nothing usable; it lives **60 seconds**, not the ten minutes a login state row gets, because it exists to survive exactly one redirect; and it is consumed atomically by the same `SELECT`+`DELETE` transaction pattern as `consume_by_state`, so a replay is refused with the same answer as an unknown code. It carries no token material at all — the session is minted from `user_id`/`tenant_id` at redemption, so a code that is never redeemed leaves no session behind. The redirect response sets `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and the SPA strips the parameter with `history.replaceState` before doing anything else.\n\n**Where the code may be delivered is the load-bearing part, and it is not the caller's choice.** `redirect_uri` reaches AXIAM on an *unauthenticated* start endpoint, and `validate_redirect_uri` checks its scheme only — every `https://` host on the internet passes it. The two cross-site flows have no provider-side backstop **by construction**: a SAML IdP is pointed at AXIAM's own ACS and Apple at AXIAM's own form-callback, so the provider never sees the SPA URI and never validates it — AXIAM alone decides where the browser goes next, carrying a credential the handoff endpoint will exchange for session cookies for whoever presents it. Without a check, anyone could start a login with `redirect_uri = https://attacker.example/`, lure a victim through the victim's own real IdP, and read a working session out of their access log; the 60-second TTL, the single use and the hash-only storage are all irrelevant when the attacker *is* the destination. `require_deployment_spa_origin` therefore confines the target to the **origin of** `AuthConfig::effective_issuer()` — the same value the ACS and form-callback URLs are built from, so it cannot be wrong where these flows work at all — plus anything an operator names in `AXIAM__AUTH__SSO_SPA_ORIGINS` for a separately hosted SPA. Compared as origins via `Url::origin`, so a userinfo prefix, a path, a port or a scheme cannot smuggle a second host past it. It is enforced at login start (a `400` naming the knob), again at the mint (so a state row written by an older binary is not honoured), and on the error redirect. It runs *after* workspace and config resolution, so an unknown slug still answers the uniform `401`. This is the rule T-52 already states for the OAuth2 authorization server's own `redirect_uri`.\n\n**Enforced on all four start paths since 1.0.0-beta12 (R-3), not only the cross-site two.** The OIDC and plain-OAuth2 paths were left on the scheme-only check because the identity provider *is* handed the same `redirect_uri` and *does* compare it against its registered set. That backstop is real and it stays — but it is only as strict as each provider's registration hygiene, and several providers accept wildcard or prefix registrations; more to the point it is a control AXIAM neither owns nor can inspect, so nothing on this side can tell whether a given tenant's provider was registered tightly. The rule the server owns is therefore uniform across the four flows, and on the OIDC and OAuth2 flows the provider's registered-redirect check is now a second, independent layer rather than the only one. The `TODO(T19.14)` that proposed a per-`FederationConfig` registered-redirect allowlist is retired rather than carried: the deployment-origin rule already answers where a code may go, and a second list to keep in sync is a second place to get wrong. `sdks/CONTRACT.md` §12.1 rule 12a widened to match (contract 1.39), additive and restrictive server-side only. One class of deployment must act: an SPA on an origin other than the issuer's, signing in through OIDC or OAuth2, needs `AXIAM__AUTH__SSO_SPA_ORIGINS` set — the requirement SAML and Apple have imposed since beta08, and the `400` names the variable.\n\nWeakening the session cookies to `SameSite=Lax` would have removed the need for any of this, and re-opened the CSRF surface `Strict` closes across every endpoint, permanently, to serve two flows. Residual risk accepted: an attacker who reads the URL inside 60 seconds *and* redeems before the legitimate SPA gets a session — and the legitimate user gets a visible failure, because the code is gone. That is the same trade the OAuth authorization code itself makes."
+      }
+     ],
+     "open": 0
     }
    ],
-   "total": 23,
+   "total": 31,
    "open": 1,
    "bySeverity": {
-    "High": 7,
-    "Medium": 10,
+    "High": 12,
+    "Medium": 13,
     "Critical": 4,
     "Low": 2
    }
@@ -3445,7 +3685,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "An organization-level principal selects the tenant it is acting in with the X-Axiam-Tenant header. Accepted unverified, that header would let organization scope cross organization boundaries too — which is the one isolation an organization is.",
-       "mitigation": "The header is verified to name a tenant inside the caller's own organization before any scope is derived, and the check fails closed: no tenant resolver registered means the header is refused (1.0.0-beta02). For an ordinary tenant principal the same header change is a 403 — CONTRACT §5.2 states the SDK-visible half: organization_level is derived server-side and response-only, and a tenant-switch helper may exist only where it is true."
+       "mitigation": "The header is verified to name a tenant inside the caller's own organization before any scope is derived, and the check fails closed: no tenant resolver registered means the header is refused (1.0.0-beta02). For an ordinary tenant principal the same header change is a 403 — CONTRACT §5.2 states the SDK-visible half: organization_level is derived server-side and response-only, and a tenant-switch helper may exist only where it is true. Since 1.0.0-beta09 the same resolution serves the `AuthenticatedPrincipal` extractor the authorization-check endpoints bind, through one implementation rather than a second copy (T-228)."
       },
       {
        "number": 202,
@@ -3464,6 +3704,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "GET /api/v1/organizations returned every organization in the deployment to any principal holding a super-admin role — a role seeded per tenant — so one customer’s tenant administrator could enumerate the name and slug of every other customer in the same installation. Inside one organization, GET /organizations/{id}/tenants showed the whole tenant roster to every holder of tenants:list (W5-03): names, slugs and creation dates of sibling workspaces that the isolation boundary exists to hide from a confined administrator.",
        "mitigation": "Fixed in 1.0.0-beta05: the organization listing returns the caller’s own organization and nothing else — the rule the by-id endpoint already applied. The tenant roster is filtered to the caller’s reach: a tenant administrator sees its own tenant, a restricted organization principal the tenants its assignments name (dangling ids silently dropped), an unrestricted one the whole roster — the reserved organization scope included, because an organization administrator acts on it and filtering it out server-side would put it beyond the API; the admin console drops it where offering it would be wrong. The permission question is asked in a tenant the caller actually reaches, so a confined account can read the one list that says which tenants it administers, and the cross-organization refusal is answered before the reach check so the error names the right reason instead of describing an organization that is not the caller’s."
+      },
+      {
+       "number": 228,
+       "title": "Two request extractors resolve the acting tenant separately, and one of them skips the reach check",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The authorization-check endpoints are the only ones that bind `AuthenticatedPrincipal` rather than `AuthenticatedUser`, and the two extractors had a field of the same name meaning different things: `AuthenticatedUser::tenant_id` is the tenant being acted upon, resolved from the `X-Axiam-Tenant` header through the organization-reach check (T-193, T-204), while `AuthenticatedPrincipal::tenant_id` was the raw claim — the caller's own tenant. The visible symptom was fail-closed: every effective-access preview an organization-level administrator ran was evaluated in the organization's own tenant, where the subject being asked about has no assignments, and answered `no roles assigned` against a correct rule set. The structural hazard is worse than the symptom. The reach check is the only thing standing between \"acting on another tenant\" and \"asserting another tenant's grants\", and a second copy of it — or, as here, a second extractor with none — is exactly how the guard drifts on one path and not the others. The handler also hard-coded `SubjectScope::Tenant`, which is right for a checked-as subject (an ordinary member of the tenant being acted upon) and wrong for an organization principal asking about its own access, whose roles live in its own tenant.",
+       "mitigation": "Fixed in 1.0.0-beta09. `AuthenticatedPrincipal` resolves the acting tenant exactly as `AuthenticatedUser` does — same header, same tenant lookup, same reach check, same refusal when the caller's own tenant is not the organization scope — through one implementation, `resolve_active_tenant_for`, keyed on the home tenant id, so there is one copy of the check and both extractors run it. The session-revocation check keeps reading the principal's own tenant and still runs before the header is applied, which is where the session row lives. Both call sites pick the subject scope rather than hard-coding it, and the `authz:check_as` guard reads the caller's grants through `subject_scope()` for the same reason — with the fixed scope it looked for the permission in the wrong tenant and would refuse a caller that holds it. Only `authz_check.rs` binds this extractor, so the blast radius was the two check endpoints; a regression test pins the tenant a check is evaluated in."
       }
      ],
      "open": 0
@@ -3605,6 +3854,24 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "1.0.0-beta05 adds tenant_scope to role assignments (schema 51 — additive, no backfill, every existing assignment stays unrestricted): an organization-level account can be confined to particular tenants of its organization. A restriction is only as strong as its weakest enforcement point — a path that forgot the filter (the batch engine, an organization-level endpoint that names no tenant, the X-Axiam-Tenant switch, the tenant roster) would leave a confined administrator estate-wide reach through that one door. Two subtleties invited exactly that: the batch path shares one cached assignment vector across items naming different tenants, and the filter must compare against the tenant being acted on rather than the tenant the grants live in — which for this principal is the organization tenant every time, making every restriction vacuous.",
        "mitigation": "tenant_scope_reaches is written once in axiam-core and read by every consumer, so the engine, /auth/me and the tenant listing cannot drift apart on the rule. Enforced at four sites: the engine’s single and batch paths (the batch filter applied per item against each request’s tenant), require_organization_principal (an action naming no tenant is refused to a restricted account, with a reason naming the restriction), require_organization_principal_for_tenant for organization actions that name one tenant, and the header resolver refusing X-Axiam-Tenant for any tenant outside the account’s reach. Holding no roles is Unrestricted rather than confined-to-nothing, so the permission check refuses for the right reason; one unrestricted assignment makes the whole set unrestricted; an empty scope cannot be created; accepted scopes are deduplicated and sorted so equal grants store identically. /auth/me reports reachable_tenant_ids and withholds the * wildcard from a restricted principal (CONTRACT §5.2.3, contract 1.35). Pinned by engine property tests, a 14-case REST suite and a dedicated E2E matrix principal."
+      },
+      {
+       "number": 226,
+       "title": "An upgrade turns dormant unscoped role assignments into live tenant-wide grants",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Before 1.0.0-beta09, assigning a role to a user or group without naming a resource granted nothing, anywhere, unless the role also carried `is_global`: the write succeeded, the assignment listed back correctly, and every check against it answered \"no applicable roles for this resource\" — which reads as though the resource were at fault rather than the assignment being inert. That contradicted the meaning the model gives the field in three places: `AssignmentScope::global()` is named for it, and both `AssignmentScope::resource_id` and `RoleAssignment::resource_id` document `None` as \"every resource in reach\". Two hazards follow. An operator who scoped a grant, saw no access, and removed the scope to widen it got the same refusal with nothing anywhere to say why — the pressure that produces global roles and over-broad grants. And once the engine honours the field, every assignment written into the inert state becomes a live tenant-wide grant at the moment of upgrade, with nobody having decided that.",
+       "mitigation": "Fixed in 1.0.0-beta09. `applicable_role_ids` now treats an assignment naming no resource as tenant-wide, which is what the field has always been documented to mean; `is_global` keeps its own, independent meaning as a property of the role, so a global role still applies even when the assignment does name a resource — two ways to say \"everywhere\", both honoured. Tenant-wide, not organization-wide: `global_role_ids`, the path an organization-level principal takes across a tenant boundary, is deliberately unchanged, so an unscoped assignment in an organization's own tenant does not reach every tenant of that organization, and the organization-scope tests pin that boundary. Two regression tests reproduce the report that found this, one per half; the scoped half already passed and is kept because it proves groups, hierarchy cascade and scoped grants were never the problem. The upgrade hazard is handled as an upgrade note in `docs/admin/README.md`: what changes, and how to find assignments sitting in the inert state so an administrator reviews them before the upgrade makes them live. The effective-access preview in the admin UI now lists the tenant's own permissions rather than a hard-coded read/write/delete/admin vocabulary, and says so when the action typed matches none of them, so an administrator debugging a grant is no longer offered an action that does not exist."
+      },
+      {
+       "number": 227,
+       "title": "Scope inheritance down the hierarchy widens a grant to sibling or unrelated resources",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A `Scope` belongs to exactly one resource and scope names are unique per resource — the auto-seeded name embeds the resource id precisely so two levels do not collide — so a parent's `billing` scope and a child's are always different records. Before 1.0.0-beta09 both halves of the engine compared them by id: `grant_applies` required the requested scope id to appear in the grant's `scope_ids`, so a grant written on a parent's scope matched nothing below it (reported as \"no permission grants action\", as though the permission were missing), and `resolve_scope` looked a name up only on the target resource, so asking about a scope the resource inherits was refused as malformed. Making scopes inherit down the lineage is the correct semantics, and it carries the hazard the fix has to avoid: reading \"the requested scope is not one of my scopes\" as \"therefore unconstrained\" would turn every scoped grant in the tenant into a wildcard on every other resource, and inheriting sideways would let a grant on `billing` reach `payroll` beside it. An authorization answer that depended on the order ancestors happen to be returned in would be a second, quieter defect.",
+       "mitigation": "Fixed in 1.0.0-beta09. A grant naming a scope constrains the resource that scope lives on, and below it the grant is inherited whole — every scope of every descendant — until a deny says otherwise; denies inherit by the same rule, which is what makes a scoped deny on a parent a way to carve a subtree out of a broad grant. Two things deliberately do not widen, each pinned by a test: on the scope's own resource the constraint still bites (a grant on `billing` does not reach `payroll`), and a scope on an unrelated resource still grants nothing. Name resolution is nearest-first over the lineage — the resource's own scope beats an ancestor's of the same name, a nearer ancestor beats a further one — and the batch path keeps that order alongside the id set it already had, because an authorization answer that depends on row order is not an answer. `ScopeRepository::list_by_resources` reads the whole lineage in one bound-array `IN` query, the same shape as the `has_role` and `grants` reads, and `lineage_scope_lookup_is_index_satisfied` pins that `idx_scope_resource_name` serves it, so the correct semantics did not buy an unindexed scan on the hot path. The coalesced batch path mirrors all of it, and `batched_decisions_match_per_item_decisions_across_scopes` holds the two paths to the same answers."
       }
      ],
      "open": 0
@@ -3946,11 +4213,11 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 23,
+   "total": 26,
    "open": 0,
    "bySeverity": {
     "Critical": 6,
-    "High": 10,
+    "High": 13,
     "Medium": 7
    }
   },
@@ -5355,7 +5622,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "description": "Runtime and platform view: ingress, replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Threats here are largely deployment responsibilities rather than application code.",
+   "description": "Runtime and platform view: the edge (ingress or reverse proxy), replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Since 1.0.0-beta08 the edge routes by path to a server that terminates its own TLS, and since 1.0.0-beta11 the gRPC listener may be published through the same edge. Threats here are largely deployment responsibilities rather than application code.",
    "width": 1448,
    "height": 848,
    "boundaries": [
@@ -5429,6 +5696,33 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 1
     },
     {
+     "id": "679db7b9-8d10-51ad-aff4-35b7abfee484",
+     "kind": "actor",
+     "x": 49,
+     "y": 354,
+     "w": 150,
+     "h": 80,
+     "name": "IoT device / service account",
+     "lines": [
+      "IoT device /",
+      "service account"
+     ],
+     "description": "",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 215,
+       "title": "A forwarded client certificate authenticates whoever can set the header",
+       "type": "Spoofing",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "`CertificateAuthenticated::extract` prefers the rustls-verified peer certificate and falls back to an `X-Client-Certificate` header when the connection carries none. `DeviceAuthService::authenticate` then checks the fingerprint, the status, the expiry, and the chain to the tenant or organization CA — every one of which a **copy** of an enrolled device's certificate also satisfies. A certificate is public data: it is handed out at enrollment, it appears in every handshake, and the certificates API returns it to anyone who may read it. Nothing on that path proves possession of the private key, and nothing can — possession is proven by a handshake, and on that path there was none. The fallback was sound only while the header could not originate with the client, i.e. while a trusted proxy terminated mTLS and overwrote it. It stops being sound the moment anything else can reach the listener, which is what exposing the backend does — and Caddy forwards client headers verbatim unless told otherwise.",
+       "mitigation": "Fixed in 1.0.0-beta08. `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` gates the fallback and defaults to **false**, so the header is consulted only where an operator asserts that a proxy they run performs the mTLS handshake and overwrites the header on every request. Native mTLS is unaffected and always preferred: a certificate rustls verified on the connection is authoritative and the setting is never consulted. Defence in depth rather than a single gate — the edge Caddyfile and `docker/nginx.conf.template` both strip `X-Client-Certificate` from inbound requests, so neither half has to be the only one. The FAPI2 client-credential path never accepted the header at all and still does not (`claude_dev/threat-model-stride.md` §5.3, X5.1): a client credential must not be assertable by anything that can set a header, and this brings the device path to the same standard. Devices that need real mTLS get a route the edge does not terminate — a second hostname or a TCP-passthrough Service — where rustls verifies the certificate itself."
+      }
+     ],
+     "open": 0
+    },
+    {
      "id": "fe65f1aa-1900-57d3-abb9-27b1b23182ba",
      "kind": "process",
      "x": 364,
@@ -5461,6 +5755,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The nginx config in the shipped admin-UI image used location /oauth2 — a prefix match that captured the SPA’s own /oauth2-clients route and answered a bare 404 before React was ever reached (F-02), so ProtectedRoute never ran and there was nothing to render or refuse. The vite preview proxy had the same shape, with /auth/mfa swallowing /auth/mfa-setup. The deeper defect: the fix had been made in the dev and preview proxies and never mirrored into the nginx config the image ships — and CI ran the E2E suite against vite preview, so the suite was green while the shipped artifact was broken. A route the proxy captures never reaches the permission layer, and no downstream permission assertion can tell “correctly refused” from “unreachable”.",
        "mitigation": "Fixed in 1.0.0-beta05: the nginx rule is narrowed to location /oauth2/ — all nine backend OAuth2 endpoints live under the slash-terminated prefix — and the preview regex gained the same boundary. The generalising guard is the spa-routing E2E matrix spec, which asserts every registered SPA route answers 200 text/html unauthenticated: a server-level check, run against the production image rather than the preview proxy, so the artifact being measured is the artifact being shipped."
+      },
+      {
+       "number": 212,
+       "title": "An unaccounted proxy hop collapses every per-IP rate limit into one bucket",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`XForwardedForKeyExtractor` selects `hops[len - 1 - trusted_hops]` and falls back to `peer_addr()` when `trusted_hops >= len`. Both the extractor's own doc comment and three documentation sites told operators to set `AXIAM__RATE_LIMIT__TRUSTED_HOPS` to the *number of trusted proxy hops* — \"1 behind a single ingress/nginx\". That is off by one: a proxy appends the address it received **from**, not its own, so the nearest proxy is the socket peer and never appears in the header. Following the advice behind one proxy makes `trusted_hops >= hops.len()`, the header is discarded, and every client on the internet keys to the proxy's address. The documented Compose topology hit the same failure from the other direction — it had **two** appending proxies with the default `0`, so the extractor selected the inner proxy's address for every request. Either way the effect is one global bucket, including on `/auth/login`, which is deliberately keyed per-IP and never per-principal precisely so an attacker cannot lock a victim out. Collapsed, it does exactly that: one attacker's flood exhausts the allowance every legitimate user shares.",
+       "mitigation": "Fixed in 1.0.0-beta08. The rule is stated as `trusted_hops = proxies − 1` with a derivation and a per-topology table in `crates/axiam-api-rest/src/extractors/rate_limit.rs`, `docs/deployment/README.md` and the docs site. Five tests in `rate_limit_keying_test.rs` pin the table, including a regression witness asserting that the old advice really does collapse two different clients onto one key. Structurally, the topology change removes the second hop, so both shipped deployments now have exactly one proxy and the default `0` is correct — and both set it **explicitly** anyway, with the derivation in a comment, because a value that is right by accident is one nobody re-derives when they add a load balancer. The gRPC listener shares the same variable and the same derivation, which is why publishing gRPC is sound only through the same proxy (T-233). Made **observable** in 1.0.0-beta12 (R-4), which is what the rest of this mitigation was missing: the fallback was correct and silent, and silence is how this off-by-one went unnoticed in the first place — every client keyed on the proxy, one bucket for the whole deployment, and the symptom reads as \"the rate limit is mysteriously strict\", which an operator fixes by raising the limit. Both extractors now emit one `WARN` per process on the first discard, naming the hop count seen, the `trusted_hops` in force and the rule, and increment `axiam_rate_limit_xff_discarded_total{protocol=\"rest\"|\"grpc\"}` on every one; the boot log states the value and the rule together next to the rate-limit posture line. A request with no header is deliberately not counted — a client with no proxy is not a misconfiguration, and counting it would bury the signal — so the fault condition is the counter tracking total request volume, which a dashboard can show."
       }
      ],
      "open": 0
@@ -5499,7 +5802,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "A transitive Rust or npm dependency with a known advisory ships in the image without anyone noticing.",
-       "mitigation": "CI runs cargo-audit, cargo-deny (advisories, licences, bans, sources) and npm audit at a high threshold, uploads SARIF, and Dependabot covers cargo, the frontend npm tree and GitHub Actions. Residual: the eleven SDK repositories are scanned separately and are not covered by this repository's CI (CI-03)."
+       "mitigation": "CI runs cargo-audit, cargo-deny (advisories, licences, bans, sources) and npm audit at a high threshold, uploads SARIF, and Dependabot covers cargo, the frontend npm tree and GitHub Actions. Residual: the eleven SDK repositories are scanned separately and are not covered by this repository's CI (CI-03). Since 1.0.0-beta11 the gate also fails on a stale suppression and tells a registry outage apart from a clean audit (T-236)."
       },
       {
        "number": 207,
@@ -5509,6 +5812,51 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Starting a second AXIAM process against the same SurrealDB took the first from healthy to 401 on every query within five seconds — permanently: still 401 after a 350-second window, and after the second process was removed (B-07). A rolling deployment does exactly this to every pod it has not replaced yet. Two independent causes: boot ran DEFINE USER OVERWRITE … PASSWORD on every start, and PASSWORD re-hashes with a fresh salt while SurrealDB signs root tokens against that hash, so each boot invalidated every token already issued; and the health check recognised only the WebSocket engine’s statement-level auth error while AXIAM runs the HTTP engine, whose transport-level 401 arrived looking like an ordinary query failure — so the reconnect loop never ran.",
        "mitigation": "Fixed in 1.0.0-beta05: boot reads the current token TTL from INFO FOR ROOT and skips the redefine when it already meets the configured value, with every unreadable case falling through to the redefine — wrong that way costs a redefine, wrong the other way would leave the TTL at the ~1h default while the re-signin task waits weeks. Health classification maps the HTTP engine’s 401/403 — matched narrowly on the status phrase, so a timeout or refused connection still gets ordinary retry rather than a pool rebuild on a blip — to Unhealthy, and reconnection swaps the pooled handles without a restart. Verified against the live stack: a second replica leaves login at 200 throughout, and a provoked credential invalidation recovers in tens of milliseconds with no caller-visible error."
+      },
+      {
+       "number": 213,
+       "title": "Path-routing at the edge makes the health endpoints internet-reachable",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "`/health`, `/ready` and `/health/jobs` are served at the **server root**, not under `/api/v1`. While the edge forwarded everything to the frontend's nginx — which proxies only `/api`, `/oauth2` and `/.well-known` — they were unreachable from outside by accident rather than by decision. Routing by path forces the decision, and the wrong answer is expensive: `/health/jobs` reports per-job scheduler state (names, last-run timestamps, consecutive-failure counts), which is a free map of what a deployment runs and what is currently broken in it, and `/ready` answers \"can this instance reach its datastore\", a cheap oracle for whether an attack on the datastore is working. Neither is rate-limited the way `/api` is, because neither was ever internet-facing.",
+       "mitigation": "Deliberately **not routed** at the edge. The Caddyfile in `claude_dev/rpi5-prod-google-federation-guide.md` §4.3 claims `/api`, `/oauth2` and `/.well-known` and nothing else, so `/health` falls through to the SPA route and returns `index.html` rather than the health payload. The probes that need them — the Docker healthcheck and the Kubernetes liveness/readiness probes — reach the server on the container or pod network, which is where a health probe belongs. The guide shows the loopback probe for an operator checking by hand. Documented since 1.0.0-beta12 (R-6): `/health/jobs` carried a `#[utoipa::path]` annotation and a route from the day it was written and was listed in `paths(…)` by nothing, so it existed in the server and in no generated document — which also meant this decision had nowhere canonical to be stated for it. It is in `sdks/openapi.json` now, under the `health` tag with its response schemas, and deliberately excluded from the §27 SDK surface with the reason recorded in `gen-management-registry.py`: unlike `/health` and `/ready`, which answer a fixed one-word contract, it returns a variable inventory of a deployment's background jobs, and an SDK talks to the edge this endpoint is not routed at."
+      },
+      {
+       "number": 214,
+       "title": "The TLS leaf expires because rustls binds it for the process's life",
+       "type": "Denial of service",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "rustls resolves the server certificate per handshake but reads nothing from disk: `with_single_cert` installed an immutable `SingleCertAndKey`, and actix binds the resulting config for the process's life. The certificate a server booted with was the certificate it served forever. Harmless for a leaf installed by hand once a year; a scheduled outage once an ACME client is involved, since Let's Encrypt issues for 90 days and clients renew at 60 — the renewed certificate lands on disk and changes nothing, and the listener starts failing every handshake on day 90. The only remedy was restarting an identity provider every couple of months, which drops in-flight requests and re-reads every secret out of Vault on a schedule.",
+       "mitigation": "Fixed in 1.0.0-beta08. `ReloadableCertResolver` holds the certificate in an `ArcSwap` that rustls consults per handshake, so a renewal takes effect on the next connection with no restart and no dropped request — the same mechanism `ReloadableClientCertVerifier` already used for trust anchors, rather than a second one. Two triggers, because they fail differently: `SIGHUP` (immediate, what an ACME deploy hook sends, and a signal actix-server does not claim) and an hourly `stat` poll (`AXIAM__SERVER__TLS__RELOAD_INTERVAL_SECS`) for the case that actually happens — a hook nobody wired up, or a runtime that does not forward signals. The swap is validated before it happens: a reload that finds an unreadable or mismatched pair leaves the previous certificate serving and retries, which is what makes a renewal observed mid-write (certbot writes the chain and the key as two operations) a logged warning instead of a dead listener. A test drives two real TLS 1.3 handshakes against one `ServerConfig` and asserts the client is presented the renewed leaf on the second. The mechanism covers both listeners since 1.0.0-beta12: the gRPC listener resolves its leaf through the same `ReloadableCertResolver` instance whenever both are pointed at the same pair, so one trigger renews both — see T-234, closed by R-1."
+      },
+      {
+       "number": 233,
+       "title": "A gRPC listener published by port-forward keys every rate limit on a header the client writes",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The gRPC listener is loopback-bound in Compose and ClusterIP-only in Kubernetes, a rule filed as SEC-003 when `UserService` and `TokenService` had no authentication at all. That is no longer true — every service is built with `with_interceptor(AuthInterceptor)`, derives tenant and subject from verified claims rather than the request body, `ValidateCredentials` accrues lockout, and neither reflection nor the health service is registered — so publishing the surface became a defensible choice, and the obvious cheap way to do it is unsound for a reason that has nothing to do with TLS. `GrpcTrustedHopsKeyExtractor` reads `X-Forwarded-For` before the verified connection peer, exactly as the REST extractor does (T-212); with no proxy appending the real peer, a client that sends one entry is keyed on a value it chose, and a value it varies per call mints a fresh bucket per call, so every ceiling becomes decorative. No value of `TRUSTED_HOPS` repairs it — for `n`, `n+1` client-written entries select the leftmost and fewer fall back to the peer — and both protocols read the one `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, so they cannot be given different values. Publishing the whole `axiam.v1` package would also put `ValidateCredentials`, a real Argon2id password check, and `ReactorAdminService`, an administrative surface rate-limited like the hot path, on the internet by default.",
+       "mitigation": "Recorded at 1.0.0-beta11. The bind stays loopback by default, and the blanket rule becomes a default rather than a prohibition: gRPC is published **through the edge on 443, path-matched, or not at all**. Caddy speaks HTTP/2 to the client, re-encrypts to the backend's own gRPC listener and appends the real peer, so the hop count is one on both protocols and the shared `TRUSTED_HOPS` stays correct for both. The documented route is an **allowlist** of services — `AuthorizationService`, `UserInfoService`, `TokenService` — so `UserService` and `ReactorAdminService` stay off the public edge unless an operator names them, with what each costs written beside the line that would add it; anything under `/axiam.v1.*` not listed falls through to the SPA handler and gets HTML back, a confusing refusal but a safe one. The site-wide stripping of `X-Client-Certificate` and `X-Real-IP` applies to the route. The listener's own TLS is enabled only when both `AXIAM__GRPC_TLS_CERT_PATH` and `_KEY_PATH` are set, and the server panics at startup if either names a file it cannot read — a typo is a failed boot, never a listener that quietly came up in cleartext. The runbook sets `AXIAM__GRPC__STRICT_REVOCATION=true` for a public listener so a revoked session does not keep passing for up to fifteen minutes, and states the per-IP-is-not-per-client sizing behind NAT. `claude_dev/public-backend-tls-design.md` §13 and the Pi runbook §14 carry the argument; `ReactorAdminService` left the authz rate-limit family in 1.0.0-beta12 (R-5): it fell through `GrpcMethodFamily::classify`'s catch-all, which puts an unrecognised path in the strictest *limited* family so a new service is throttled rather than unlimited — safe as a default, wrong as an outcome for an administrative surface, which was therefore sized like the hot path at 100/s per IP and raised by the `gateway` and `mesh` profiles. It now maps to `Admin`, whose ceiling is the absolute `ADMIN_PER_SEC_DEFAULT` (10/s) that no profile raises; the catch-all arm is unchanged. The listener's TLS was 1.3-capable but 1.2-negotiable when this was recorded, because tonic's `ServerTlsConfig` exposed no protocol-version knob; R-1 removed that limit and both listeners are TLS 1.3-only (T-234)."
+      },
+      {
+       "number": 234,
+       "title": "The gRPC TLS leaf expires because tonic reads it once at startup",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "T-214 made the REST listener's certificate hot-reloadable so that an ACME renewal would never need a restart. That work covers the actix listener only: `axiam-api-grpc`'s `start_grpc_server` reads `AXIAM__GRPC_TLS_CERT_PATH` / `_KEY_PATH` once, hands the PEM to tonic's `ServerTlsConfig`, and the crate contains no reload path and no poll. A gRPC listener that is public is therefore a listener whose certificate expires at day 90 while REST keeps working — the failure mode T-214 exists to prevent, reintroduced on the other protocol, and the worst version of it because it presents as a gRPC bug. The same API limit keeps that leg TLS 1.2-negotiable where the REST listener is 1.3-only.",
+       "mitigation": "Fixed in 1.0.0-beta12 (R-1). The gRPC listener no longer asks tonic to terminate TLS. `start_grpc_server` takes the rustls configuration as a value (`GrpcTls::Plaintext | Rustls(Arc<ServerConfig>)`), binds its own `TcpListener`, completes each handshake with `tokio-rustls`, and hands tonic an already-encrypted stream through `serve_with_incoming` — the hand-rolled accept loop this threat named as the structural fix, and it closes the reload gap and the TLS-version gap in the one change, as anticipated. The configuration is built by the composition root (`axiam_server::tls::build_grpc_rustls_server_config`), not by `axiam-api-grpc`: `ReloadableCertResolver` lives in `axiam-server` at layer 8 and the gRPC crate is layer 6, and `scripts/check-crate-layering.py` fails any edge pointing the other way. That builder resolves the leaf through `shared_resolver`, which returns the **same** resolver instance when both listeners name the same certificate and key — the documented topology, where there is no second certificate — so one `SIGHUP` or one hourly poll renews both; a deployment that really does point them at different files gets a second registered leaf reloaded on the same triggers, replacing the single-slot `OnceLock` that would have silently kept only the first. The configuration pins `with_protocol_versions(&[&rustls::version::TLS13])` and advertises ALPN `h2` alone, so the leg is TLS 1.3-**exclusive** rather than merely 1.3-capable. The flat env-var names and the panic-on-unreadable behaviour moved with the read and are unchanged: a typo is still a failed boot. Terminating the handshake here introduces one new denial-of-service surface — a client that opens TCP and never speaks — bounded by 512 concurrent handshakes taken with a non-blocking `try_acquire_owned` (so the accept loop is never starved, however many half-open clients are outstanding) and a 10-second handshake timeout that releases every permit; a failed or timed-out handshake logs at `debug` and drops that connection only, never the accept loop. Five tests carry it: a resolver swapped between two real handshakes against one running listener, with the connection established before the swap still usable after it; a TLS 1.2-only client refused rather than downgraded; a real TLS connection's peer address carried through `Connected::connect_info()` into the request extension and out of `GrpcTrustedHopsKeyExtractor` as the client's IP (verified against the pinned tonic before the code was written — had it come back `None` the limiter would have failed closed for everyone); sixty-four half-open connections not stopping a well-behaved client; and plaintext mode unchanged. On the server side, one reload covering every registered leaf, the shared-resolver identity asserted by pointer, and the boot panic for each half of an unreadable pair. The certbot deploy hook's container restart (Pi runbook §14.5) is now redundant rather than required."
+      },
+      {
+       "number": 236,
+       "title": "A registry outage or a stale suppression turns the dependency-audit gate into a rubber stamp",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The gate T-127 relies on failed in both directions at once. `npm audit` got `503` from the registry's audit endpoint, retried internally for seven minutes and exited `1` seconds after `npm ci` had reported zero vulnerabilities — a red job with no vulnerability anywhere in the tree, the kind of failure that teaches a team to re-run until green, and one that buried the line that explained it under four SARIF upload errors from producers that never ran. And four advisory suppressions had gone stale, emitting `advisory-not-detected` on every run: two for advisories already fixed upstream, two for crates no longer in the resolved feature graph at all. An ignore is keyed by advisory ID, not by version or crate, so one left behind after its crate leaves the graph silently re-suppresses that advisory if the crate ever comes back — a gate that has been quietly told what to ignore.",
+       "mitigation": "Fixed in 1.0.0-beta11. The npm audit step retries with backoff and tells \"found advisories\" apart from \"could not reach the endpoint\" by the shape of the output rather than the exit code — npm exits `1` for both, but only a completed audit parses as JSON without an `error` key. A real HIGH/CRITICAL finding still fails the job; anything parseable that is not an error object counts as a real report, so an unfamiliar schema fails rather than being waved through; and a sustained outage ends in a `::warning::` that says explicitly it is not a clean bill of health. `cargo-deny` now runs with `-D advisory-not-detected`, so the next stale entry fails CI instead of scrolling past, and the two ignore-lists are allowed to differ legitimately — cargo-deny resolves the feature graph while cargo-audit reads `Cargo.lock` — under a containment check that demands an explicit `# audit-only: <ID> — <reason>` declaration and rejects one that is missing, unreasoned, contradictory or stale, with seven self-test cases. The yanked `chacha20 0.10.1` was bumped, and the four SARIF uploads are guarded on the file existing so a failed producer stops adding its own errors on top of the one that matters. `scripts/check-docker-context.py` closes the neighbouring class of the same shape — a gate that reads the worktree while the artifact is built from a filtered context, which is how the beta08 release lost both frontend image legs — by asking, for every `COPY`/`ADD` in every Dockerfile, whether at least one tracked file both exists and survives `.dockerignore`, cross-checked file by file against BuildKit's real context export."
       }
      ],
      "open": 0
@@ -5667,10 +6015,37 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Open",
        "description": "With AXIAM__AUTH__SECRET_PROVIDER=vault the production default, all ten long-lived secrets — the JWT signing key, opaque_setup_key, the PKI, MFA, federation and email encryption keys, the password pepper, the GDPR pseudonym pepper and the AMQP signing key — sit behind one KV path. A Vault token with read on that path, or the unseal or root material, is equivalent to every one of them at once; a dev-mode Vault left in production holds them unsealed in memory.",
-       "mitigation": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since H-4 it CHECKS rather than merely advises: just vault-status queries sys/capabilities-self and reports the capabilities the token in hand actually holds on AXIAM's KV path, flagging anything beyond read — and a root token as what it is — with --strict to make it a failure in a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists."
+       "mitigation": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since H-4 it CHECKS rather than merely advises: just vault-status queries sys/capabilities-self and reports the capabilities the token in hand actually holds on AXIAM's KV path, flagging anything beyond read — and a root token as what it is — with --strict to make it a failure in a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists. Since 1.0.0-beta10 the token is no longer strictly read-only: it holds `read` on the startup path and `create`/`update` on `secret/data/axiam/ca-keys/*`, from the one policy file `docker/vault/axiam-policy.hcl`, and `just vault-status` reports missing capabilities as well as excess ones (T-232)."
+      },
+      {
+       "number": 216,
+       "title": "The unseal key sits on the same disk as the sealed data",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Open",
+       "description": "`just prod-up` initialises Vault with a single Shamir share and writes it, with the root token, to `docker/.secrets/vault-init.json` — the same disk as the sealed data. That is not Shamir's scheme with the shares stored badly; it is no seal at all, and anyone who can read the disk can unseal and then read every long-lived secret AXIAM has (the set enumerated in T-180). The stack also handed the server that **root token**, so a credential visible in `docker inspect` could read, write and delete every secret, revoke tokens and mount engines — for a process that reads one path once at boot and never writes. Both were acceptable while `docker-compose.prod.yml` was only ever a laptop stack; they stopped being acceptable when a deployment guide pointed a real domain at it.",
+       "mitigation": "Narrowed, not closed. `prod-up` now writes the read-only `axiam` policy from `docs/deployment/vault.md` §5.4 and issues a **scoped, periodic token** for the server, refusing to fall back to root if that fails; seeding keeps its own short-lived credential, because the seeding token and the serving token were never the same thing. Both the Compose stack and `k8s/vault/statefulset.yml` move from the `file` backend to **Raft**, which has a consistent backup story (`vault operator raft snapshot save`) and a migration path to three nodes that does not require a re-seed — a re-seed changes the OPAQUE setup key, i.e. a password reset for every user in every tenant. What remains **open** is auto-unseal, which cannot be closed from inside AXIAM: every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option whatever the hardware. `docs/deployment/vault.md` §5.3 and the Pi runbook §7.1 give the honest option table — GCP Cloud KMS at roughly $0.06 per key per month is the cheapest real answer — and state plainly that a deployment which configures none of them needs a human with three shares after every restart and is not production. A script that unseals from shares kept on the machine is explicitly **not** offered as an alternative: it removes the seal rather than automating it, and is strictly worse than Shamir because the shares are now in the one place an attacker already has. Two amendments since: the server's token is no longer strictly read-only — it holds `create`/`update` on the CA-key prefix, from the one policy file (T-232) — and the seeder that runs after unseal can no longer mistake a refused read for an empty Vault and mint fresh keys over the live ones (T-231). Vault itself runs unprivileged: the prod Compose stack chowns the Raft volume in a one-shot init container rather than running the process that holds every secret as root. Made **checkable** in 1.0.0-beta12 (R-7), the way H-4 made T-180's token scope checkable. `just vault-status` gains a Seal section from the unauthenticated `sys/seal-status` — so it answers even when the token is wrong and even when the Vault is sealed: it names the seal type, reads `OK` for any auto-unseal type, and for `shamir` says \"no auto-unseal; every restart needs t of n key shares, not production\" with the quorum quoted from the response. A Vault sealed at that instant gets its own line, because that is a state somebody is about to fix rather than a statement about the configured seal, and conflating the two would train an operator to ignore both; a request that fails reports `unknown`, never `OK`. `--strict` fails on an unconfirmed auto-unseal, and `just vault-status` still does not pass it so the dev stack's deliberate root-token-on-Shamir does not turn every local run red. **Status stays Open**: the control is a check, not a seal — nothing in this repository can configure auto-unseal, and R-7 does not pretend otherwise."
+      },
+      {
+       "number": 231,
+       "title": "A refused Vault read is indistinguishable from an empty Vault, and the seeder overwrites every live secret",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The seeder's one invariant — a secret already present is never regenerated — was enforced by `vault_seed_payload.build()`, a pure function that has always been correct and unit-tested, behind a shell line that was not: `curl --fail … || echo '{}'` turned every failed read into \"the Vault is empty\", and `build()` cannot tell the two apart. `just prod-up` supplied the failure on a plate: Vault with Raft storage returns from `sys/unseal` while the node is still a standby contending for leadership, every request in that window is refused, and the recipe seeded immediately after unsealing — so a restart-driven run aimed the read straight at it. A revoked or write-only token reached the same end deterministically. The outcome was a full set of freshly minted keys written over the live ones, a `→ Seeded` line and exit 0; from then on every login answered `500` with `AES-GCM decrypt: aead::Error`, because `opaque_setup_key` no longer opened the OPAQUE records the datastore held (`mfa_encryption_key` fails the same way at the TOTP step). That is a password reset for every user in every tenant, caused by a restart. Reproduced against a fake Vault answering `500` to the read.",
+       "mitigation": "Fixed in 1.0.0-beta11, in layers that each hold alone. `scripts/vault-seed.sh` waits for an **active** node — `sys/health` answering `200` — not merely a listening or unsealed one. The read's HTTP status reaches the payload builder: only `200` or `404` are statements about the contents of the path, `interpret_read` raises on everything else and the script exits non-zero with nothing written. The write is pinned with KV v2's `cas` to the version that was read — `0` to create, `N` to update — so even a stale-but-trusted read cannot clobber. `assert_preserved` refuses any payload that would replace a stored secret, with a carve-out only for the JWT pair's two documented replacement paths. `just prod-up` waits for `sys/health` to answer `200` after unsealing, before it seeds. `scripts/test_vault_seed_shell.py` drives the real script over real HTTP against a Vault answering `500`, `503`, `403` and `404` and asserts on what was written rather than on an exit code — eight of its twelve cases fail against the previous script — and both seeder test files now run in CI, which they never did: a well-tested pure function behind an untested boundary is exactly as safe as the boundary. Recovery for a deployment already hit: KV v2 keeps ten versions, and `docs/deployment/vault.md` §8.1 has the `vault kv patch` restore, which costs no password resets."
+      },
+      {
+       "number": 232,
+       "title": "The server's Vault policy is quoted in several places, and none of them is checked against what the server does",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The policy `just prod-up` wrote — and the one the production ceremony documented — granted `read` on `secret/data/axiam` and nothing on `secret/data/axiam/ca-keys/*`, where CA key custody writes one secret per CA. Because custody inherits `AXIAM__AUTH__VAULT_ADDR` / `_TOKEN` when no `AXIAM__PKI__VAULT_*` pair is set, every such stack booted cleanly, served every request, and refused its first organization CA with a `403`. A policy that is too narrow fails late and looks like a product bug, and the reflex fix — handing the server a broader token, or the root token — is precisely the failure T-180 and T-216 exist to prevent. A policy quoted in three documents and a recipe is one nobody re-derives, in either direction.",
+       "mitigation": "Fixed in 1.0.0-beta10. The policy lives in one file, `docker/vault/axiam-policy.hcl`: `read` on the startup path — the server reads it once at boot and never writes it — plus `create`, `read` and `update` confined to the CA-key prefix, and `delete` on that prefix's metadata so a custody migration can release a key. `scripts/vault-policy.sh` applies it, the docs quote it, and the status reporter's tests assert against it. One glob covers both CA tiers, because `CaKeyStore::store` is keyed by `(organization_id, ca_id)` with no tenant segment, so tenant intermediates land beside the organization root; `vault_pki` custody is deliberately not covered and now says so. `just vault-policy` applies it to a running deployment — Vault evaluates policies per request, so nothing is restarted, re-initialised or re-seeded and nothing already stored is lost. `just vault-status` reports **missing** capabilities as well as excess ones, so the misconfiguration is visible before it becomes a `403`, and a `403` from CA key custody prints the missing stanza as HCL addressed to the mount and prefix that deployment configured. The token is therefore no longer read-only, and T-180 and T-216 say so rather than repeating the older claim."
       }
      ],
-     "open": 1
+     "open": 2
     },
     {
      "id": "78160ffe-cb3f-5dbb-8852-1142ff0d92aa",
@@ -5722,19 +6097,29 @@ export const THREAT_MODEL: ThreatModel = {
     {
      "id": "39e44fbf-616d-5d6a-bef4-f851466a7e63",
      "path": "M434,234 L434,304",
-     "name": "proxied requests",
+     "name": "proxy → axiam-server",
      "description": "",
-     "label": "proxied requests (HTTP/2)",
+     "label": "proxy → axiam-server (TLS 1.3)",
      "labelLines": [
-      "proxied requests (HTTP/2)"
+      "proxy → axiam-server (TLS 1.3)"
      ],
      "lx": 434,
      "ly": 269,
      "bidirectional": false,
      "encrypted": true,
      "publicNetwork": false,
-     "protocol": "HTTP/2",
-     "threats": [],
+     "protocol": "TLS 1.3 (HTTP/1.1 or HTTP/2)",
+     "threats": [
+      {
+       "number": 217,
+       "title": "Credentials cross the internal network in cleartext",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`docker/nginx.conf` proxied to `http://axiam-server:8090`. Every password on its way to `/api/v1/auth/login`, every bearer token, every session cookie and every OAuth2 client secret crossed the container network in the clear, readable by anything that could join that bridge or read the host's network namespace — which on a single host also running an operator's other containers is not hypothetical. The project's own standard (\"TLS 1.3 minimum for all external communication\") was satisfied only by treating the container network as not external, which is exactly the assumption CONTRACT §8b already refused to make for AMQP, where `AXIAM__AMQP__ALLOW_PLAINTEXT` was **removed** rather than left as an escape hatch. The REST leg was held to a weaker standard than the message bus for no recorded reason.",
+       "mitigation": "Fixed in 1.0.0-beta08. `docker/nginx.conf` becomes a template whose upstream is rendered from `AXIAM_BACKEND_ORIGIN` / `AXIAM_BACKEND_SNI` / `AXIAM_BACKEND_CA`, and the documented topology points the edge at `https://` with the server terminating TLS 1.3 itself. Certificate verification is unconditional in every rendering: there is no `proxy_ssl_verify off` anywhere in the change and no documented setting that produces one, because a backend certificate that does not verify is a misconfiguration to fix and an escape hatch here is the first thing reached for at 3am. Defaults are unchanged, so the dev stack and the E2E suite keep the plaintext behaviour they rely on and reaching the frontend container directly keeps working."
+      }
+     ],
      "open": 0
     },
     {
@@ -5874,14 +6259,33 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "WSS",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "957d8f25-dba8-535f-b7ec-0f0987f377e6",
+     "path": "M177.9,354 L377.8,205.7",
+     "name": "device traffic",
+     "description": "",
+     "label": "device traffic (mTLS, or a forwarded certificate header)",
+     "labelLines": [
+      "device traffic (mTLS, or a forwarded",
+      "certificate header)"
+     ],
+     "lx": 277.8,
+     "ly": 279.9,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS (mTLS)",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 15,
-   "open": 4,
+   "total": 26,
+   "open": 5,
    "bySeverity": {
-    "High": 10,
-    "Medium": 4,
-    "Critical": 1
+    "High": 16,
+    "Critical": 2,
+    "Medium": 8
    }
   },
   {
@@ -6292,7 +6696,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "Eleven SDK repositories vendor openapi.json and the §27 management registry, and generate client surface from them. Without a content identity, a stale or altered copy is indistinguishable from a faithful one — and the failure mode is real: 1.0.0-beta02 itself shipped a spec whose digest described beta01, because the release flow rewrote info.version under an assumption the digest field had deliberately inverted.",
-       "mitigation": "Every OpenAPI export carries info.x-axiam-spec-digest, a SHA-256 over the document with that field absent, so two exports can be told apart and a vendored copy can be checked against the spec it claims to be (1.0.0-beta02). check-spec-digest.py recomputes the digest on every commit with no toolchain and no build, the SDK drift gate watches sdks/openapi.json itself, and the release script re-stamps the digest and regenerates the registry immediately after its version substitution — verified by replaying the release that broke (1.0.0-beta03)."
+       "mitigation": "Every OpenAPI export carries info.x-axiam-spec-digest, a SHA-256 over the document with that field absent, so two exports can be told apart and a vendored copy can be checked against the spec it claims to be (1.0.0-beta02). check-spec-digest.py recomputes the digest on every commit with no toolchain and no build, the SDK drift gate watches sdks/openapi.json itself, and the release script re-stamps the digest and regenerates the registry immediately after its version substitution — verified by replaying the release that broke (1.0.0-beta03). The digest tells an operator that the vendored spec moved; since 1.0.0-beta11 the release script also regenerates what each SDK derives from it (T-235)."
       },
       {
        "number": 210,
@@ -6302,6 +6706,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "CONTRACT §5.2, §5.2.2 and §5.2.3 told SDKs to switch the acting tenant by sending X-Tenant-ID — a header the server has never read (the extractor’s constant is X-Axiam-Tenant) — in eighteen places. The failure mode is silence, not a 4xx: an SDK following the contract to the letter sends a header nothing looks at, the request quietly acts on the principal’s own tenant, and the caller gets a successful response describing the wrong tenant’s data. §5.2.3’s rule that naming a tenant outside reachable_tenant_ids is refused could not be true as written, because nothing was read to refuse.",
        "mitigation": "Fixed in 1.0.0-beta06 (contract 1.36, closing #395): the three sections name X-Axiam-Tenant. §5 rule 2’s unconditional X-Tenant-ID is deliberately not renamed — folding a constructor-tenant header into the acting-tenant header would override the acting tenant on every request an organization-level principal made after switching, reintroducing the bug through its fix. It now carries a note that it exists for proxies, gateways and an SDK’s own §10 resource-server middleware, that AXIAM does not read it, and that it must not be renamed. The eleven contract-1.35 SDK fan-out PRs already implement the real header, so the correction lets them re-sync against a contract that agrees with them."
+      },
+      {
+       "number": 235,
+       "title": "A release tags an SDK whose generated management surface disagrees with the spec it vendors",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "`scripts/mass-tag.sh` copies `CONTRACT.md`, `openapi.json` and `management-registry.json` into every SDK clone as part of a release, so a tagged SDK ships the spec its server was tagged from (T-199). It did not re-run the generator that turns those documents into each SDK's CONTRACT §27 management surface, so a release carrying schema changes tagged eleven trees whose committed code disagreed with the artifacts sitting beside it. v1.0.0-beta09 was the worked example: it re-vendored a spec carrying the WebAuthn user-verification policy (T-229) and regenerated nothing. Only the Swift, C and C++ SDKs said so, because they are the only three whose `§27 management surface drift-check` runs on a tag push; the other eight gate that job — or, in the Rust and TypeScript SDKs, the whole test job — to `pull_request`, and published a surface missing the new policy with no signal at all. A pure version bump then carried the broken trees forward through beta10.",
+       "mitigation": "Fixed in 1.0.0-beta11. `mass-tag.sh` runs each SDK's generator immediately after the re-vendor and stages exactly what it wrote: the dirty set is recorded as path-plus-checksum before and after the call and compared as a symmetric difference, so an operator's unrelated local edit is never staged and a file that was stale before and correct after is recognised as repaired rather than missed. The generator table names all eleven repositories even where the answer is the common one, so a missing repository is a visible hole; a missing generator or interpreter is fatal rather than a skip, because tagging a tree the repository's own CI rejects is the failure this closes. The regeneration is unconditional — a surface can also be stale from a merge that moved the artifacts without regenerating, which is how beta09 went out — and prints \"already current\" in the common case. Verified against the live clones with a deliberately reverted surface in the C SDK, which was detected and exactly its six files staged. The repository-side gate closed in 1.0.0-beta12 (R-2), in all eleven SDK repositories: the §27 drift-check runs on tag pushes as well as pull requests, and the publish/release job lists it in `needs:`, so a stale surface fails *before* a version number is spent. Three shapes were found and fixed in place — six repositories had a dedicated job carrying `if: github.event_name == 'pull_request'` (dropped); Rust and TypeScript had the check as a step inside a `pull_request`-only test job (split into its own job, with the toolchain each generator needs); C, C++ and Swift already ran it on tags but their release job did not depend on it (one entry added to one list). Every generator was verified to detect drift locally — clean, perturbed, restored — rather than by pushing a deliberately red commit to eleven pull requests. Nothing else in any workflow changed."
       }
      ],
      "open": 0
@@ -6583,11 +6996,11 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 25,
+   "total": 26,
    "open": 4,
    "bySeverity": {
     "High": 14,
-    "Medium": 9,
+    "Medium": 10,
     "Critical": 2
    }
   }

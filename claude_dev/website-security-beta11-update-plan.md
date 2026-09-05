@@ -1,5 +1,96 @@
 # Website — the 1.0.0-beta11 security and docs catch-up pass
 
+> **EXECUTED 2026-09-04, at `1.0.0-beta11`.** Waves 0–4 were worked in order,
+> on `claude/website-security-beta11-82svdl`, in four commits. The website now
+> renders the model it is generated from: **236 threats, 219 mitigated / 17
+> open**, model 2.11.0. `SECURITY_VERIFIED_RELEASE` is `1.0.0-beta11` /
+> 2026-09-04 and moved in the same commit as the Security prose;
+> `DOCS_VERIFIED_RELEASE` is `1.0.0-beta11`, which was earned rather than
+> assumed — see Wave 4. What landed, in the order of §8:
+>
+> - **Wave 0.** `gen:threat-model` produced exactly the expected line — 9
+>   diagrams, 236 threats (219 mitigated, 17 open); `gen:api-index` picked up
+>   the four §12.1 login-provider operations, Apple's `form_post` return and the
+>   handoff exchange, at 212 operations / 147 paths; `gen:contract-anchors` was
+>   the predicted no-op at contract 1.38. The open register loses nothing and
+>   gains T-216 and T-234. No generated file was hand-edited, and re-running all
+>   three at the end produced an empty diff. The two cosmetic notes in §3 were
+>   both taken: the explorer's "over 186 threats" comment is now count-agnostic,
+>   and the mitigation node renders `pre-line`, which was verified in the built
+>   site (T-219's multi-paragraph mitigation no longer collapses).
+> - **Wave 1.** `security.ts` mirrored section by section against
+>   [`threat-modeling-and-security.md`](threat-modeling-and-security.md) — every
+>   row of §5's checklist. The three hedges are untouched, the shared-
+>   responsibility section and its generated register are intact, and the three
+>   bullets whose bold markers deliberately differ were left alone. No sentence
+>   was added that the source document does not make.
+> - **Wave 2.** Twelve of the fourteen Docs rows in §6. `authz` and `compliance`
+>   are unchanged, and deliberately: both entries were conditional ("if the page
+>   mentions the admin UI's preview", "if the page repeats the CI-gating
+>   sentence") and neither page carries the sentence in question. One §6 detail
+>   was wrong in the plan rather than in the site: the "Its port is published on
+>   loopback only" line on `troubleshooting` is about **Vault**, not gRPC, so it
+>   was left as written and the gRPC edge-only rule went to `hardening`,
+>   `deploy`, `grpc` and `configuration` instead. The two Vault signatures from
+>   `docs/deployment/vault.md` §8 were added as asked.
+> - **Wave 3.** The beta post keeps its text and gains a dated addendum; the
+>   "grew to 211 threats" sentence stays. Rendering its twelve threat links
+>   needed one change the plan did not anticipate — the news paragraph renderer
+>   emitted plain text, so it now runs the same `renderInline` the Docs and
+>   Security sections use. Each anchor was checked against the generated model
+>   rather than typed from §Appendix A. Phase 20 stays `ongoing` with an
+>   extended `focus`; nothing closed, no phase added.
+> - **Wave 4.** The full sweep, so the stamp is a statement about verification.
+>   It found four real errors, which is why the constant moved: `pki` claimed
+>   the forwarded-client-certificate path is "what the production compose file
+>   and the Kubernetes manifests do", which beta08 made opt-in, off, and
+>   stripped at the edge; `authz`'s precedence steps omitted the tenant-wide
+>   case beta09 created; and `rbac` and `concepts` both described a role as
+>   "either global or bound to a specific resource", conflating the role's
+>   `is_global` with the assignment's resource. One gap was filled rather than
+>   corrected — `observability` now says the three health endpoints are
+>   deliberately not routed at the edge.
+>
+> **Verification (§9).** `npm ci`, all three generators re-run to an empty diff,
+> `npm run build` (`tsc -b && vite build`) and `npm run lint` (oxlint) clean,
+> `scripts/check-doc-links.sh` OK at 182 links across 30 files, and
+> `docSectionsAreComplete()` returns no problems. The §9 grep for `211 threats|
+> 196 mitigated|15 open|beta06` outside `threatModel.ts` returns exactly one
+> line — the historical news sentence, which is the expected result.
+> `#/security/diagram/3/T-219` and `#/security/diagram/7/T-234` were opened in
+> the built site: both select their threat, with no console errors.
+>
+> **Rebased 2026-09-05 onto the post-remediation `main`.** The three PRs of
+> [`remediation-plan-2026-09-04.md`](remediation-plan-2026-09-04.md) — #418 (R-1),
+> #419 (R-3) and #420 (R-4…R-7) — merged after this pass was pushed, and this
+> branch was rebased onto them and **re-verified rather than replayed**. `git`
+> reported no conflict, which was the hazard: the staleness it could not see was
+> the point. Regenerating gave 236 threats / **220 mitigated / 16 open** (T-234
+> closed by R-1 and gone from the register), 213 operations across 148 paths
+> (`/health/jobs`, added by R-6), and contract **1.39** (R-3). The plan body was
+> itself brought forward on `main` in `90d0730f` while this branch was open;
+> that revision is kept here in preference to this pass's own edits to §4 and
+> §10, which said the same things less well. Re-mirrored by
+> hand, because no generator covers prose: the gRPC-certificate clause in
+> `security.ts` and on `hardening` (the listener now terminates its own TLS and
+> shares the REST leaf's reloadable resolver); the handoff-origin rule, which
+> R-3 extended from the two cross-site flows to **every** federated start path —
+> the `federation` page's "on these two flows" framing was wrong and no diff
+> would have flagged it; `just vault-status` naming the seal type (R-7); the
+> observable `TRUSTED_HOPS` misconfiguration on `deploy` and `hardening` (R-4);
+> and the news addendum's counts. `configuration.ts` needed no manual
+> resolution: this pass had only *verified* the `SSO_SPA_ORIGINS` row rather
+> than editing it, so R-3's rewrite of that row merged cleanly beside this
+> pass's `AXIAM__GRPC*` rows.
+>
+> **Left undone, deliberately.** Everything in §10 as it stood when this pass
+> ran — the gRPC certificate reload (T-234 was open and the site said so), the
+> TLS-1.3-only gRPC leg, `GET /health/jobs`'s absence from `sdks/openapi.json`,
+> the SDK repositories' own §27 drift-checks, and diagram aesthetics beyond the
+> generator's layout. No new node overlapped a label, so no model coordinates
+> were touched. The first three were closed by the remediation plan (R-1 and
+> R-6) and are reflected here as of the rebase above; the last two stand.
+
 > **Who this is for.** A fresh Claude session (Opus 5) tasked with bringing the
 > website's **Security** section, and the **Docs**, **News** and **Roadmap**
 > content the same releases touched, up to `1.0.0-beta11`. It is the entry point:

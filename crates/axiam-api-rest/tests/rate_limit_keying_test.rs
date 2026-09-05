@@ -31,6 +31,9 @@ fn peer_ip() -> IpAddr {
 /// fresh rate-limit bucket when trusted_hops >= hops.len().
 #[actix_web::test]
 async fn rate_limit_xff_rotation_rejected() {
+    // Discards the header on every iteration, so it moves the process-global
+    // discard counter and must serialize with the delta assertions below.
+    let _guard = counter_lock();
     // Single-hop XFF header (as an attacker directly hitting the server would
     // send, with no real trusted proxy in front of it) but trusted_hops is
     // configured for a proxy chain that never materializes — the classic
@@ -77,6 +80,8 @@ async fn rate_limit_xff_rotation_rejected() {
 /// attacker-controlled leftmost hop.
 #[actix_web::test]
 async fn insufficient_hops_falls_through_to_peer_addr_not_leftmost_hop() {
+    // Discards the header, so it moves the counter — see `counter_lock`.
+    let _guard = counter_lock();
     let extractor = XForwardedForKeyExtractor::with_trusted_hops(5);
 
     let req = TestRequest::get()
@@ -344,6 +349,8 @@ async fn three_proxies_need_two_trusted_hops() {
 /// it is asserted rather than described.
 #[actix_web::test]
 async fn the_old_off_by_one_advice_collapses_every_client_into_one_bucket() {
+    // Discards both headers, so it moves the counter — see `counter_lock`.
+    let _guard = counter_lock();
     // One proxy in front, told (wrongly) that there is one *entry* to skip.
     let extractor = XForwardedForKeyExtractor::with_trusted_hops(1);
 
@@ -371,7 +378,7 @@ async fn the_old_off_by_one_advice_collapses_every_client_into_one_bucket() {
 // R-4 — a discarded X-Forwarded-For is observable (narrows T-212/T-233)
 // ---------------------------------------------------------------------------
 
-/// Serializes the three counter tests below.
+/// Serializes every test in this file that touches the discard counter.
 ///
 /// `axiam_rate_limit_xff_discarded_total` is one process-wide atomic, and
 /// these tests measure a delta across one extraction. Without this, a test
@@ -383,6 +390,15 @@ async fn the_old_off_by_one_advice_collapses_every_client_into_one_bucket() {
 /// A `std::sync::Mutex` rather than a `tokio` one on purpose: `#[actix_web::test]`
 /// bodies are futures driven to completion on one thread, and the guard is held
 /// across no await point that could yield to another test.
+///
+/// It must be taken by every test that *moves* the counter, not only by the
+/// three that read it. `extract` calls `record_discarded_xff` on the
+/// discard branch, so the three tests above that assert on that branch —
+/// `rate_limit_xff_rotation_rejected` (5 discards),
+/// `insufficient_hops_falls_through_to_peer_addr_not_leftmost_hop` (1) and
+/// `the_old_off_by_one_advice_collapses_every_client_into_one_bucket` (2) —
+/// contribute eight increments between them. Locking only the readers left
+/// exactly the interleaving this lock was introduced to remove.
 fn counter_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())

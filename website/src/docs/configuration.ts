@@ -80,19 +80,24 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ["AXIAM__SERVER__PORT", "REST bind port (default 8090).", "8090"],
           [
             "AXIAM__GRPC__HOST",
-            "gRPC bind address (default 127.0.0.1, loopback-only). Set 0.0.0.0 to serve in-cluster.",
+            "gRPC bind address (default 127.0.0.1, loopback-only). Set 0.0.0.0 to serve in-cluster — but never port-forward it to the internet: publish gRPC through the same edge as REST, path-matched and as a service allowlist, or not at all. See [Production hardening](#/docs/hardening#grpc).",
             "0.0.0.0",
           ],
           ["AXIAM__GRPC__PORT", "gRPC bind port (default 50051).", "50051"],
           [
             "AXIAM__GRPC_TLS_CERT_PATH",
-            "PEM certificate for the gRPC listener. **Both this and the key must be set or gRPC serves plaintext** — acceptable in a mesh that provides its own transport security, and not otherwise. Note the single underscore after the prefix: these two are read directly rather than through the layered config.",
+            "PEM certificate for the gRPC listener. **Both this and the key must be set or gRPC serves plaintext** — acceptable in a mesh that provides its own transport security, and not otherwise. Note the **single** underscore after the prefix: these two are read with `std::env::var` rather than through the layered config, so the nested spelling `AXIAM__GRPC__TLS_CERT_PATH` is silently ignored and leaves you with a plaintext listener and no error.",
             "/etc/axiam/grpc/server.pem",
           ],
           [
             "AXIAM__GRPC_TLS_KEY_PATH",
             "Its private key. Set together with the certificate; the server logs a warning at startup whenever TLS is off.",
             "/etc/axiam/grpc/server.key",
+          ],
+          [
+            "AXIAM__GRPC__STRICT_REVOCATION",
+            "Check session revocation on every gRPC request rather than trusting the access token's lifetime (default `false`). With it off, a revoked session keeps passing gRPC until the token expires. Turn it **on** for a listener published through the edge, and pay for the extra lookup with the session-validation cache — pointed at the same repository instance the REST path uses, or the cache the REST invalidation hooks reach is not the one being read.",
+            "true",
           ],
           [
             "AXIAM__GRPC__GRPC_AUTHZ_PER_SEC",

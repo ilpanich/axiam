@@ -512,9 +512,9 @@ const CATEGORIES = present(CATEGORY_ORDER, ALL_THREATS.map((t) => t.type));
 /**
  * One lowercased haystack per threat, built once.
  *
- * The search runs on every keystroke over 186 threats whose mitigation text can
- * run to a paragraph; concatenating and lowercasing that on each pass is work
- * that never changes, so it is done here instead.
+ * The search runs on every keystroke over every threat in the model, whose
+ * mitigation text can run to several paragraphs; concatenating and lowercasing
+ * that on each pass is work that never changes, so it is done here instead.
  */
 const HAYSTACK = new Map<number, string>(
   ALL_THREATS.map((t) => [
@@ -703,7 +703,18 @@ function ThreatCard({
       <p style={{ margin: "0 0 8px", fontSize: 13.5, color: "#cbd5e1", lineHeight: 1.6 }}>
         {threat.description}
       </p>
-      <p style={{ margin: 0, fontSize: 13.5, color: "#94a3b8", lineHeight: 1.6 }}>
+      {/* `pre-line`: a few mitigations are written as several paragraphs in the
+          model and carry the blank lines to prove it; without this they render
+          as one wall of text. */}
+      <p
+        style={{
+          margin: 0,
+          fontSize: 13.5,
+          color: "#94a3b8",
+          lineHeight: 1.6,
+          whiteSpace: "pre-line",
+        }}
+      >
         <span
           style={{
             color: threat.status === "Mitigated" ? "#27c93f" : AMBER,

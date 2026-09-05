@@ -1,6 +1,8 @@
 import type { DocPage } from "./types";
 import { DOCS_VERIFIED_RELEASE } from "../version";
 
+const GH_BLOB = "https://github.com/ilpanich/axiam/blob/main";
+
 /**
  * "Operate" — running AXIAM rather than integrating with it.
  *
@@ -52,7 +54,7 @@ export const OPERATE_PAGES: DocPage[] = [
           [
             "50051",
             "gRPC",
-            "**Deliberately not routed through the Ingress.** Reachable only via the in-cluster ClusterIP service.",
+            "**Loopback / ClusterIP by default.** Publish it only through the edge on 443, path-matched and as an allowlist of services — never as a port-forward. See [Production hardening](#/docs/hardening#grpc).",
           ],
           ["5671", "AMQP", "In-cluster only, TLS-only (`amqps://`)."],
           ["8200", "Vault", "In-cluster only, TLS."],
@@ -84,6 +86,39 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "p",
         text: "The two are not alternatives. The supported topology keeps an edge proxy on the public port routing by path — the SPA at `/`, and `/api`, `/oauth2` and `/.well-known` to the server — and has that proxy speak **TLS to the server** rather than cleartext, so no password, bearer token or session cookie crosses the internal network in the clear. That is the same path split the shipped Kubernetes ingress has always used, and collapsing to one proxy hop is what makes the default `AXIAM__RATE_LIMIT__TRUSTED_HOPS` of `0` correct.",
+      },
+      {
+        type: "note",
+        text: "`/health`, `/ready` and `/health/jobs` are served at the server root rather than under `/api`, so a path-routing edge lands them on the SPA route and they are **deliberately not published**. The probes that need them — the Docker healthcheck, the Kubernetes liveness and readiness probes, your monitoring — reach the server directly on the internal network, which is where a health probe belongs.",
+      },
+      { type: "h", id: "trusted-hops", text: "Deriving `TRUSTED_HOPS`" },
+      {
+        type: "p",
+        text: "A proxy appends **the address it received the request from**, not its own — `proxy_add_x_forwarded_for` in nginx, the same in Caddy and ingress-nginx — so the nearest proxy never appears in the header the server reads; it is the socket peer. The rule that follows is one subtraction:",
+      },
+      {
+        type: "code",
+        caption: "the rule",
+        code: "AXIAM__RATE_LIMIT__TRUSTED_HOPS = (reverse proxies between client and server) − 1\n\n# equivalently: the number of *proxy* addresses in the X-Forwarded-For\n# header the server actually receives",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Proxies in front", "Header the server sees", "Correct value"],
+        rows: [
+          ["0 — direct", "*(absent)* → the connection peer", "`0`"],
+          ["1 — Caddy, or ingress-nginx, → server", "`<client>`", "**`0`** (the default)"],
+          ["2 — Caddy → nginx → server", "`<client>, <caddy>`", "**`1`**"],
+          ["3 — cloud LB → ingress → mesh → server", "`<client>, <lb>, <ingress>`", "**`2`**"],
+        ],
+      },
+      {
+        type: "warn",
+        text: "Setting it one too high is the failure this rule exists to prevent, and it is the value older documentation advised: behind a single proxy, `1` makes the extractor fall back to the peer address — the proxy — collapsing every client on the internet into one rate-limit bucket. That includes `/auth/login`, which is keyed per IP precisely so an attacker cannot lock a victim out. Too low collapses them the same way. A client that spoofs `X-Forwarded-For` is inert at the correct value, because the proxy appends the real peer to the right of whatever the client sent.",
+      },
+      {
+        type: "note",
+        text: "**You do not have to infer whether you got it right.** At startup the server states the topology it expects — the hop count, the rule and the number of proxies it implies — and when a header is present but discarded it warns once and increments `axiam_rate_limit_xff_discarded_total{protocol=\"rest\"|\"grpc\"}`. A non-zero counter is not automatically a fault: a client sending its own `X-Forwarded-For` to a server that correctly ignores it lands there too. It **is** a fault when the counter tracks total request volume, because that means every client is keying on the proxy's address and the deployment shares one bucket.",
       },
       {
         type: "p",
@@ -253,7 +288,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "AXIAM's actual requirement is small: a KV v2 secret whose fields carry those names. It does not care who runs Vault, whether it is HA, or how it is unsealed. If your organization already runs one, point `AXIAM__AUTH__VAULT_ADDR` at it, create the read-only policy, and skip the rest.",
+        text: "AXIAM's actual requirement is small: a KV v2 secret whose fields carry those names. It does not care who runs Vault, whether it is HA, or how it is unsealed. If your organization already runs one, point `AXIAM__AUTH__VAULT_ADDR` at it, apply the shipped policy, and skip the rest.",
       },
       { type: "h", id: "honesty", text: "What Vault does and does not defend against" },
       {
@@ -276,7 +311,11 @@ export const OPERATE_PAGES: DocPage[] = [
       { type: "h", id: "production", text: "Production: what cannot be automated" },
       {
         type: "p",
-        text: "The manifests under `k8s/vault/` deploy a single-node Vault with file storage — production-*shaped*, not production-*ready*. Most teams should run HashiCorp's Helm chart with Raft and three to five replicas, or use an existing Vault. Either way these steps are what AXIAM needs, and none of them is safe to automate.",
+        text: "The manifests under `k8s/vault/` deploy a single-node Vault with **Raft** storage — production-*shaped*, not production-*ready*, the gap being auto-unseal. Most teams should run HashiCorp's Helm chart with Raft and three to five replicas, or use an existing Vault. Either way these steps are what AXIAM needs, and none of them is safe to automate.",
+      },
+      {
+        type: "note",
+        text: "Both shipped Vault deployments use Raft. The Compose stack hands the Raft volume over in a one-shot `vault-data-perms` init container rather than running Vault as `root`: the image runs as the unprivileged `vault` user and does not contain `/vault/data`, so Docker creates that path owned by `root` on first mount and Vault cannot write its bolt file there. It is the Compose equivalent of the `fsGroup: 1000` the StatefulSet relies on. A stack that predates Raft is left intact rather than pointed at silently — see §4.1 of the deployment guide for the two ways forward.",
       },
       {
         type: "steps",
@@ -292,11 +331,11 @@ export const OPERATE_PAGES: DocPage[] = [
           },
           {
             title: "Configure auto-unseal before you go live",
-            body: "Without it, every restart — a node drain, an upgrade, an OOM kill — leaves Vault sealed and AXIAM unable to start until three people are woken up. This is the single most important production step, and the one most often deferred.",
+            body: "Without it, every restart — a node drain, an upgrade, an OOM kill — leaves Vault sealed and AXIAM unable to start until three people are woken up. This is the single most important production step, and the one most often deferred. AXIAM cannot do it for you — every Vault OSS seal type needs a cloud KMS, a second Vault or an Enterprise licence — but `just vault-status` now reads `sys/seal-status` and says which one you are running: any auto-unseal reads `OK`, Shamir says plainly that it is not production, a Vault sealed right now gets its own line, and a check that could not reach Vault reports `unknown` rather than `OK`. Pass `--strict` to `scripts/vault-status.py` and an unconfirmed auto-unseal becomes a non-zero exit, which is what makes it usable as a pre-go-live gate. `just vault-status` deliberately does **not** pass it, because the dev stack it also serves is Shamir by design.",
           },
           {
             title: "Create a narrowly scoped policy",
-            body: "A leaked AXIAM token must not be a key to the rest of your Vault. Read-only on the startup secrets — the server reads them once at boot and never writes them — plus writes confined to the CA-key prefix, which is where organization CA signing keys are created at runtime. Omit the second half and the server boots, serves every request, and then refuses the first CA generation with a 403. The policy ships as `docker/vault/axiam-policy.hcl`; `scripts/vault-policy.sh` applies it, to a running deployment as safely as to a new one.",
+            body: "A leaked AXIAM token must not be a key to the rest of your Vault. Read on the startup secrets — the server reads them once at boot and never writes them — plus writes confined to the CA-key prefix, which is where organization CA signing keys are created at runtime. Omit the second half and the server boots, serves every request, and then refuses the first CA generation with a 403, which prints the missing stanza as HCL. The policy ships as one file, `docker/vault/axiam-policy.hcl`, quoted here and applied by `scripts/vault-policy.sh` — `just vault-policy` on the Compose stack. Vault evaluates policies per request, so applying it to a running deployment takes effect on the next call: no restart, no re-init, no re-seed, and nothing already stored is lost. `just vault-status` reports **missing** capabilities as well as ones the token should not have, so the gap is visible before it becomes a 403.",
             code: "vault policy write axiam docker/vault/axiam-policy.hcl\n\n# path \"secret/data/axiam\"                   { capabilities = [\"read\"] }\n# path \"secret/metadata/axiam\"               { capabilities = [\"read\"] }\n# path \"secret/data/axiam/ca-keys/*\"         { capabilities = [\"create\", \"read\", \"update\"] }\n# path \"secret/metadata/axiam/ca-keys/*\"     { capabilities = [\"delete\"] }",
           },
           {
@@ -313,6 +352,10 @@ export const OPERATE_PAGES: DocPage[] = [
             body: "Use it for the policy and seeding steps, then revoke it. Generate a new one with the root-generation ceremony on the rare occasions you need one.",
           },
         ],
+      },
+      {
+        type: "note",
+        text: `**A replaced key is usually not a lost one.** KV v2 keeps the last ten versions, so if every login starts answering \`500\` with \`AES-GCM decrypt: aead::Error\` on a deployment that worked yesterday, the key the datastore was sealed with is still in Vault. \`vault kv metadata get\` finds the version, and \`vault kv patch\` puts that one field back without disturbing anything that legitimately changed since — no password reset for anybody. §8.1 of the [deployment guide](${GH_BLOB}/docs/deployment/vault.md) walks it through.`,
       },
       {
         type: "note",
@@ -402,7 +445,7 @@ export const OPERATE_PAGES: DocPage[] = [
           ["mfa_challenge_lifetime_secs", "How long an issued MFA challenge stays answerable."],
         ],
       },
-      { type: "h", id: "other", text: "Email, certificate & OPAQUE policy" },
+      { type: "h", id: "other", text: "Email, certificate, WebAuthn & OPAQUE policy" },
       {
         type: "table",
         headers: ["Field", "Meaning"],
@@ -411,10 +454,15 @@ export const OPERATE_PAGES: DocPage[] = [
           ["email_verification_grace_period_hours", "How long an unverified account keeps working before it does."],
           ["default_cert_validity_days", "Validity applied to issued certificates when none is requested."],
           ["max_cert_validity_days", "Ceiling on requested certificate validity."],
+          ["webauthn_user_verification", "`discouraged` | `preferred` | `required` — whether a WebAuthn ceremony must prove user *verification* and not only presence. Default `preferred`, ordered `required` > `preferred` > `discouraged` for the tighten-only rule. See [Passkeys & WebAuthn](#/docs/passkeys#uv-policy)."],
           ["opaque_mode", "`disabled` | `optional` | `required` — see [OPAQUE](#/docs/opaque)."],
           ["opaque_suite", "RFC 9807 ciphersuite. Default `ristretto255_sha512`."],
           ["opaque_ksf", "Client key-stretching function. Default `argon2id`; `scrypt` is the alternative."],
         ],
+      },
+      {
+        type: "note",
+        text: "The organization settings `PUT` replaces the whole row rather than merging into it, so send `webauthn_user_verification` explicitly on every write: omitting it silently relaxes an organization that had set `required`. The same applies to every other field on that endpoint.",
       },
       {
         type: "warn",
@@ -518,7 +566,11 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "This holds on the **proxy-terminated** path exactly as on the native listener, and that is a tightening. Where AXIAM terminates TLS, rustls already enforced the flag because the client-CA bundle is built from precisely the flagged anchors; where a proxy terminates and passes the certificate on — which is what the production compose file and the Kubernetes manifests do — nothing consulted it, so every CA in the organization was as good as every other and un-flagging one changed nothing. A deployment authenticating devices through a proxy with never-flagged CAs will start seeing refusals that name the reason. **Flag the CA.**",
+        text: "This holds on the **proxy-terminated** path exactly as on the native listener, and that is a tightening. Where AXIAM terminates TLS, rustls already enforced the flag because the client-CA bundle is built from precisely the flagged anchors; where a proxy terminates and passes the certificate on in a header, nothing consulted it, so every CA in the organization was as good as every other and un-flagging one changed nothing. A deployment authenticating devices that way with never-flagged CAs will start seeing refusals that name the reason. **Flag the CA.**",
+      },
+      {
+        type: "note",
+        text: "Since `1.0.0-beta08` that forwarded path is **opt-in and off**. `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` defaults to `false`, and the shipped edge configurations strip `X-Client-Certificate` on every route regardless — a certificate is public data, so a header cannot prove possession of the key. Devices that need real mTLS get a route the edge does not terminate. Turn the flag on only where a proxy **you run** performs the handshake and overwrites that header itself.",
       },
       {
         type: "table",
@@ -716,6 +768,10 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "p",
         text: "Wire these to the right probes and the difference matters operationally: a database blip should remove a replica from the load-balancer rotation, not restart it. Pointing liveness at `/ready` converts a transient dependency failure into a restart loop that makes the outage worse.",
       },
+      {
+        type: "note",
+        text: "These three endpoints sit at the **server root**, not under `/api`, so a path-routing edge does not publish them — reach them from the internal network, which is where a probe and a monitoring scrape belong. Publishing them takes an explicit route the shipped configurations deliberately do not add. See [Docker & Kubernetes](#/docs/deploy#tls).",
+      },
       { type: "h", id: "jobs", text: "Scheduled-job liveness" },
       {
         type: "p",
@@ -757,6 +813,15 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "warn",
         text: "The endpoint returns **200 even when degraded**, and that is deliberate. It is not a readiness gate: a stuck cleanup sweep is an operational problem, not a reason to pull a healthy server out of the load balancer and send its traffic to replicas running the same stuck code. Alert on `status` being `degraded`, or on a specific job's `stalled` — never wire this to a liveness probe.",
+      },
+      { type: "h", id: "ratelimit-signal", text: "Is the rate limiter keying on the right address?" },
+      {
+        type: "p",
+        text: "A `TRUSTED_HOPS` that does not match your topology collapses every client into one rate-limit bucket, including on `/auth/login`. That used to be invisible. Two signals now make it checkable: at startup the server states the hop count it is using, the rule behind it and the number of proxies that implies; and when a header is present but discarded it logs one `WARN` — once per process, so it cannot flood — and increments `axiam_rate_limit_xff_discarded_total{protocol=\"rest\"|\"grpc\"}`.",
+      },
+      {
+        type: "warn",
+        text: "**Alert on the ratio, not the raw counter.** A non-zero value is not automatically a fault: a client sending its own `X-Forwarded-For` to a server that correctly ignores it lands here too. It **is** a fault when the counter tracks total request volume, because that means the header is discarded on every request and the whole deployment shares one bucket. The rule is proxies **minus one** — see [Deriving `TRUSTED_HOPS`](#/docs/deploy#trusted-hops).",
       },
       { type: "h", id: "logs", text: "Logs" },
       {
@@ -866,8 +931,8 @@ export const OPERATE_PAGES: DocPage[] = [
           ],
           [
             "Vault auto-unseal is configured before go-live",
-            "Vault auto-unseal",
-            "Any restart leaves AXIAM unable to start until enough keyholders are woken up.",
+            "Vault auto-unseal — `just vault-status` names the seal type",
+            "Any restart leaves AXIAM unable to start until enough keyholders are woken up. AXIAM cannot configure this for you (every Vault OSS seal needs a cloud KMS or a second Vault), but `vault-status` now reports Shamir plainly rather than letting a deployment believe it has auto-unseal.",
           ],
           [
             "Vault trust anchor is set if it uses a private CA",
@@ -898,9 +963,19 @@ export const OPERATE_PAGES: DocPage[] = [
             "The default binds plaintext and assumes something in front of it terminates TLS. If nothing does, nothing warns you.",
           ],
           [
-            "gRPC is not publicly routed",
-            "Keep 50051 off the Ingress",
-            "It is an internal service surface. The shipped manifests deliberately keep it on the ClusterIP service only.",
+            "gRPC is loopback by default, and published only through the edge",
+            "Keep 50051 off the Ingress unless you publish it as an allowlist on 443",
+            "A port forwarded straight at the listener lets a client key its own rate-limit bucket — see [Publishing gRPC](#grpc) below. The shipped manifests keep it on the ClusterIP service only.",
+          ],
+          [
+            "Health endpoints are not routed at the edge",
+            "Leave `/health`, `/ready` and `/health/jobs` off the public path map",
+            "They sit at the server root rather than under `/api`, so publishing them takes an explicit route. Probes reach them on the internal network instead.",
+          ],
+          [
+            "Forwarded headers are stripped at the edge",
+            "Strip `X-Forwarded-For` and `X-Client-Certificate` at the proxy, and at the firewall on any route that reaches the server without one",
+            "The shipped edge configurations strip both. `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` stays off unless a proxy **you run** performs the mTLS handshake: a certificate is public data, so a header cannot prove possession of the key.",
           ],
           [
             "AMQP uses amqps://",
@@ -913,10 +988,28 @@ export const OPERATE_PAGES: DocPage[] = [
             "Empty disables cross-origin requests, which is the safe default — so the risk is over-broadening it, not forgetting it.",
           ],
           [
-            "Proxy hop count is accurate",
-            "`AXIAM__RATE_LIMIT__TRUSTED_HOPS`",
+            "Proxy hop count is accurate — and check the counter says so",
+            "`AXIAM__RATE_LIMIT__TRUSTED_HOPS`; alert on `axiam_rate_limit_xff_discarded_total` tracking request volume",
             "Every client shares one apparent address, per-IP limits become meaningless, and one abusive caller throttles everybody. It is the number of proxies in front of the server **minus one** — a proxy appends the address it received from, so the nearest one is the socket peer and never appears in the header. One proxy means `0`, the default.",
           ],
+        ],
+      },
+      { type: "h", id: "grpc", text: "Publishing gRPC outside the mesh" },
+      {
+        type: "p",
+        text: "The listener binds loopback in Compose and ClusterIP in Kubernetes, and that is now a **default rather than a prohibition**: every service on it is built behind the authenticating interceptor, derives its tenant and subject from verified claims rather than the request body, accrues lockout where it checks credentials, and registers no reflection and no health service, so it cannot be enumerated. What is left is an authenticated API with the same posture as REST.",
+      },
+      {
+        type: "warn",
+        text: "**Publish it through the edge on 443, path-matched, as an allowlist of services — or not at all. Never as a bare port-forward.** The gRPC rate-limit key mirrors the REST one: it reads `X-Forwarded-For` and falls back to the verified connection peer, which is sound only because a proxy appends the real peer to the right of whatever the client sent. Remove the proxy and the premise goes with it — a client that writes its own header mints a fresh bucket per call, and no value of `TRUSTED_HOPS` repairs it. Publishing through the same edge keeps the hop count one on both protocols, which matters because REST and gRPC read the same `TRUSTED_HOPS` variable and cannot be given different values.",
+      },
+      {
+        type: "list",
+        items: [
+          "**Name the services you publish.** The edge publishes a path allowlist, so the service that verifies passwords and the reactor administration service stay unpublished unless an operator adds them.",
+          "**Set `AXIAM__GRPC__STRICT_REVOCATION=true` for a public listener.** It defaults off, and with it off a revoked session keeps passing gRPC for up to the access token's lifetime. Pay for the extra lookup with the session-validation cache.",
+          "**Point the gRPC TLS paths at the same leaf the REST listener uses.** There is no second certificate and there must not be: the listener terminates its own TLS and shares the REST listener's reloadable resolver, so one `SIGHUP` — or the hourly poll — renews both, and it pins TLS 1.3 exclusively. A deploy hook that restarts the container for the gRPC leaf is now redundant; deleting it saves the downtime.",
+          "**Buckets are per source IP**, and gRPC has no client identity at the layer that keys them. That is unchanged from the in-mesh case but newly visible behind NAT — size with `AXIAM__GRPC__GRPC_*_PER_SEC` or the `gateway` profile.",
         ],
       },
       { type: "h", id: "identity", text: "Identity" },
@@ -1150,6 +1243,16 @@ export const OPERATE_PAGES: DocPage[] = [
             "Vault cannot be reached from the host to initialise or unseal it",
             "Its port is published on loopback only.",
             "Run the initialise, unseal and seed steps from the host, or publish the port where the tooling can reach it.",
+          ],
+          [
+            "Vault restart-loops on `failed to open bolt file: /vault/data/vault.db: permission denied`",
+            "The Raft volume is owned by `root` while Vault runs as the unprivileged `vault` user — the image does not contain `/vault/data`, so Docker creates it on first mount.",
+            "The Compose stack fixes this with the one-shot `vault-data-perms` service; if you removed it or you mount the path from the host, `chown -R 100:1000` it. In Kubernetes this is `fsGroup: 1000` on the pod.",
+          ],
+          [
+            "Every login answers `500` with `Cryptography error: AES-GCM decrypt: aead::Error`, on a deployment that worked yesterday",
+            "A key in Vault no longer matches the one the datastore was sealed with — `opaque_setup_key` for OPAQUE logins, `mfa_encryption_key` at the TOTP step. Most often a seeder that rotated it. The data is fine; the key is wrong.",
+            "The old key is almost certainly still there: KV v2 keeps the last ten versions. Find it with `vault kv metadata get`, put that one field back with `vault kv patch`, and restart — no password reset for anybody. §8.1 of the deployment guide walks it through.",
           ],
         ],
       },

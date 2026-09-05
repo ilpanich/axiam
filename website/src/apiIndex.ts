@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-beta11";
-export const API_OPERATION_COUNT = 212;
-export const API_PATH_COUNT = 147;
+export const API_OPERATION_COUNT = 213;
+export const API_PATH_COUNT = 148;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -1193,6 +1193,12 @@ export const API_INDEX: ApiGroup[] = [
     "method": "GET",
     "path": "/health",
     "summary": "",
+    "public": true
+   },
+   {
+    "method": "GET",
+    "path": "/health/jobs",
+    "summary": "Always 200, including when a job is stalled, and that is deliberate.",
     "public": true
    },
    {

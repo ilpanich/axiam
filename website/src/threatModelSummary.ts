@@ -56,8 +56,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.11.0",
  "diagramCount": 9,
  "total": 236,
- "open": 17,
- "mitigated": 219,
+ "open": 16,
+ "mitigated": 220,
  "areas": [
   {
    "id": 0,
@@ -105,7 +105,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
    "total": 26,
-   "open": 6
+   "open": 5
   },
   {
    "id": 8,
@@ -138,7 +138,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Denial of service",
    "total": 22,
-   "open": 3
+   "open": 2
   },
   {
    "name": "Elevation of privilege",
@@ -160,7 +160,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Medium",
    "total": 88,
-   "open": 7
+   "open": 6
   },
   {
    "name": "Low",
@@ -257,7 +257,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "diagramId": 7,
    "area": "Deployment & platform (Kubernetes)",
    "element": "Secrets (Vault / K8s Secrets / ConfigMap)",
-   "residualRisk": "Narrowed, not closed. `prod-up` now writes the read-only `axiam` policy from `docs/deployment/vault.md` §5.4 and issues a **scoped, periodic token** for the server, refusing to fall back to root if that fails; seeding keeps its own short-lived credential, because the seeding token and the serving token were never the same thing. Both the Compose stack and `k8s/vault/statefulset.yml` move from the `file` backend to **Raft**, which has a consistent backup story (`vault operator raft snapshot save`) and a migration path to three nodes that does not require a re-seed — a re-seed changes the OPAQUE setup key, i.e. a password reset for every user in every tenant. What remains **open** is auto-unseal, which cannot be closed from inside AXIAM: every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option whatever the hardware. `docs/deployment/vault.md` §5.3 and the Pi runbook §7.1 give the honest option table — GCP Cloud KMS at roughly $0.06 per key per month is the cheapest real answer — and state plainly that a deployment which configures none of them needs a human with three shares after every restart and is not production. A script that unseals from shares kept on the machine is explicitly **not** offered as an alternative: it removes the seal rather than automating it, and is strictly worse than Shamir because the shares are now in the one place an attacker already has. Two amendments since: the server's token is no longer strictly read-only — it holds `create`/`update` on the CA-key prefix, from the one policy file (T-232) — and the seeder that runs after unseal can no longer mistake a refused read for an empty Vault and mint fresh keys over the live ones (T-231). Vault itself runs unprivileged: the prod Compose stack chowns the Raft volume in a one-shot init container rather than running the process that holds every secret as root."
+   "residualRisk": "Narrowed, not closed. `prod-up` now writes the read-only `axiam` policy from `docs/deployment/vault.md` §5.4 and issues a **scoped, periodic token** for the server, refusing to fall back to root if that fails; seeding keeps its own short-lived credential, because the seeding token and the serving token were never the same thing. Both the Compose stack and `k8s/vault/statefulset.yml` move from the `file` backend to **Raft**, which has a consistent backup story (`vault operator raft snapshot save`) and a migration path to three nodes that does not require a re-seed — a re-seed changes the OPAQUE setup key, i.e. a password reset for every user in every tenant. What remains **open** is auto-unseal, which cannot be closed from inside AXIAM: every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option whatever the hardware. `docs/deployment/vault.md` §5.3 and the Pi runbook §7.1 give the honest option table — GCP Cloud KMS at roughly $0.06 per key per month is the cheapest real answer — and state plainly that a deployment which configures none of them needs a human with three shares after every restart and is not production. A script that unseals from shares kept on the machine is explicitly **not** offered as an alternative: it removes the seal rather than automating it, and is strictly worse than Shamir because the shares are now in the one place an attacker already has. Two amendments since: the server's token is no longer strictly read-only — it holds `create`/`update` on the CA-key prefix, from the one policy file (T-232) — and the seeder that runs after unseal can no longer mistake a refused read for an empty Vault and mint fresh keys over the live ones (T-231). Vault itself runs unprivileged: the prod Compose stack chowns the Raft volume in a one-shot init container rather than running the process that holds every secret as root. Made **checkable** in 1.0.0-beta12 (R-7), the way H-4 made T-180's token scope checkable. `just vault-status` gains a Seal section from the unauthenticated `sys/seal-status` — so it answers even when the token is wrong and even when the Vault is sealed: it names the seal type, reads `OK` for any auto-unseal type, and for `shamir` says \"no auto-unseal; every restart needs t of n key shares, not production\" with the quorum quoted from the response. A Vault sealed at that instant gets its own line, because that is a state somebody is about to fix rather than a statement about the configured seal, and conflating the two would train an operator to ignore both; a request that fails reports `unknown`, never `OK`. `--strict` fails on an unconfirmed auto-unseal, and `just vault-status` still does not pass it so the dev stack's deliberate root-token-on-Shamir does not turn every local run red. **Status stays Open**: the control is a check, not a seal — nothing in this repository can configure auto-unseal, and R-7 does not pretend otherwise."
   },
   {
    "number": 9,
@@ -318,16 +318,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Client SDKs & admin UI integration surface",
    "element": "SDK token verification (JWKS cache, iss/aud)",
    "residualRisk": "Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should call gRPC introspection or CheckAccess rather than verifying locally."
-  },
-  {
-   "number": 234,
-   "title": "The gRPC TLS leaf expires because tonic reads it once at startup",
-   "category": "Denial of service",
-   "severity": "Medium",
-   "diagramId": 7,
-   "area": "Deployment & platform (Kubernetes)",
-   "element": "AXIAM deployment (N replicas, HPA)",
-   "residualRisk": "Open, with the residual bounded operationally. tonic 0.14's `ServerTlsConfig` does not accept a rustls `ServerConfig`, so the existing `ReloadableCertResolver` cannot be installed behind it; the structural fix is a hand-rolled accept loop over `tokio-rustls` using that resolver, which would close the reload gap and the TLS-version gap in one change and needs its own tests. Until it exists the runbook states the workaround rather than leaving it to be discovered at day 90: when gRPC TLS is on, the certbot deploy hook restarts the container — roughly fifteen seconds every sixty days, at a moment the operator controls — while keeping the REST listener's `SIGHUP` reload, so removing the restart later leaves a correct hook rather than a broken one. The exposure is opt-in twice over: the listener is loopback-bound unless published (T-233), and its TLS is off unless both paths are set. On the documented topology the only client of that leg is Caddy on loopback, which negotiates TLS 1.3, and the public half can be pinned with `protocols tls1.3`."
   },
   {
    "number": 161,

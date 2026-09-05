@@ -536,7 +536,7 @@ export const POSTS: Post[] = [
       },
       {
         type: "p",
-        text: "Addendum, 4 September 2026: four releases on, the model is now 236 threats, 219 mitigated and 17 open. Two of the waves it grew by had been written into the STRIDE document at beta08 without ever reaching the Threat Dragon JSON, so the site spent three releases rendering a model its own source had outgrown; that gap is closed.",
+        text: "Addendum, 5 September 2026: four releases on, the model is now 236 threats, 220 mitigated and 16 open. Two of the waves it grew by had been written into the STRIDE document at beta08 without ever reaching the Threat Dragon JSON, so the site spent three releases rendering a model its own source had outgrown; that gap is closed.",
       },
       {
         type: "p",
@@ -544,7 +544,7 @@ export const POSTS: Post[] = [
       },
       {
         type: "p",
-        text: "Two of the new entries are recorded open rather than closed, which is the point of keeping the register honest: the unseal key sitting on the same disk as the sealed data ([T-216](#/security/diagram/7/T-216)), and the gRPC listener reading its certificate once at startup ([T-234](#/security/diagram/7/T-234)) — bridged by a restart in the deploy hook until it is fixed. Neither is on AXIAM's own request path, which still carries no open Critical or High finding.",
+        text: "One of the new entries is recorded open rather than closed, which is the point of keeping the register honest: the unseal key sitting on the same disk as the sealed data ([T-216](#/security/diagram/7/T-216)). A second, the gRPC listener reading its certificate once at startup ([T-234](#/security/diagram/7/T-234)), was published open and has since been closed — the listener now terminates its own TLS and shares the REST listener's reloadable certificate, so one `SIGHUP` renews both. Neither is on AXIAM's own request path, which still carries no open Critical or High finding.",
       },
       { type: "h", text: "Trying it, and telling us what breaks" },
       {

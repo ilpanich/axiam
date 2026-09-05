@@ -117,6 +117,10 @@ export const OPERATE_PAGES: DocPage[] = [
         text: "Setting it one too high is the failure this rule exists to prevent, and it is the value older documentation advised: behind a single proxy, `1` makes the extractor fall back to the peer address — the proxy — collapsing every client on the internet into one rate-limit bucket. That includes `/auth/login`, which is keyed per IP precisely so an attacker cannot lock a victim out. Too low collapses them the same way. A client that spoofs `X-Forwarded-For` is inert at the correct value, because the proxy appends the real peer to the right of whatever the client sent.",
       },
       {
+        type: "note",
+        text: "**You do not have to infer whether you got it right.** At startup the server states the topology it expects — the hop count, the rule and the number of proxies it implies — and when a header is present but discarded it warns once and increments `axiam_rate_limit_xff_discarded_total{protocol=\"rest\"|\"grpc\"}`. A non-zero counter is not automatically a fault: a client sending its own `X-Forwarded-For` to a server that correctly ignores it lands there too. It **is** a fault when the counter tracks total request volume, because that means every client is keying on the proxy's address and the deployment shares one bucket.",
+      },
+      {
         type: "p",
         text: "**Renewal takes no restart.** rustls resolves the certificate per handshake but reads nothing from disk, so a server would otherwise serve its boot certificate forever — which matters as soon as an ACME client is involved. The server re-reads the pair on `SIGHUP` (send it from your deploy hook) and on an hourly poll, and swaps it into a slot rustls consults per handshake. A reload that finds a half-written or mismatched pair keeps the previous certificate serving and retries.",
       },
@@ -327,7 +331,7 @@ export const OPERATE_PAGES: DocPage[] = [
           },
           {
             title: "Configure auto-unseal before you go live",
-            body: "Without it, every restart — a node drain, an upgrade, an OOM kill — leaves Vault sealed and AXIAM unable to start until three people are woken up. This is the single most important production step, and the one most often deferred.",
+            body: "Without it, every restart — a node drain, an upgrade, an OOM kill — leaves Vault sealed and AXIAM unable to start until three people are woken up. This is the single most important production step, and the one most often deferred. AXIAM cannot do it for you — every Vault OSS seal type needs a cloud KMS, a second Vault or an Enterprise licence — but `just vault-status` now reads `sys/seal-status` and says which one you are running: any auto-unseal reads `OK`, Shamir says plainly that it is not production, a Vault sealed right now gets its own line, and a check that could not reach Vault reports `unknown` rather than `OK`.",
           },
           {
             title: "Create a narrowly scoped policy",
@@ -918,8 +922,8 @@ export const OPERATE_PAGES: DocPage[] = [
           ],
           [
             "Vault auto-unseal is configured before go-live",
-            "Vault auto-unseal",
-            "Any restart leaves AXIAM unable to start until enough keyholders are woken up.",
+            "Vault auto-unseal — `just vault-status` names the seal type",
+            "Any restart leaves AXIAM unable to start until enough keyholders are woken up. AXIAM cannot configure this for you (every Vault OSS seal needs a cloud KMS or a second Vault), but `vault-status` now reports Shamir plainly rather than letting a deployment believe it has auto-unseal.",
           ],
           [
             "Vault trust anchor is set if it uses a private CA",
@@ -975,8 +979,8 @@ export const OPERATE_PAGES: DocPage[] = [
             "Empty disables cross-origin requests, which is the safe default — so the risk is over-broadening it, not forgetting it.",
           ],
           [
-            "Proxy hop count is accurate",
-            "`AXIAM__RATE_LIMIT__TRUSTED_HOPS`",
+            "Proxy hop count is accurate — and check the counter says so",
+            "`AXIAM__RATE_LIMIT__TRUSTED_HOPS`; alert on `axiam_rate_limit_xff_discarded_total` tracking request volume",
             "Every client shares one apparent address, per-IP limits become meaningless, and one abusive caller throttles everybody. It is the number of proxies in front of the server **minus one** — a proxy appends the address it received from, so the nearest one is the socket peer and never appears in the header. One proxy means `0`, the default.",
           ],
         ],
@@ -995,7 +999,7 @@ export const OPERATE_PAGES: DocPage[] = [
         items: [
           "**Name the services you publish.** The edge publishes a path allowlist, so the service that verifies passwords and the reactor administration service stay unpublished unless an operator adds them.",
           "**Set `AXIAM__GRPC__STRICT_REVOCATION=true` for a public listener.** It defaults off, and with it off a revoked session keeps passing gRPC for up to the access token's lifetime. Pay for the extra lookup with the session-validation cache.",
-          "**Add a container restart to your certificate deploy hook.** `AXIAM__GRPC_TLS_CERT_PATH` and `AXIAM__GRPC_TLS_KEY_PATH` are read **once, at startup** — the hot reload that covers the REST listener does not cover this one. The threat model records the gap as open (T-234) together with the restart that bridges it.",
+          "**Point the gRPC TLS paths at the same leaf the REST listener uses.** There is no second certificate and there must not be: the listener terminates its own TLS and shares the REST listener's reloadable resolver, so one `SIGHUP` — or the hourly poll — renews both, and it pins TLS 1.3 exclusively. A deploy hook that restarts the container for the gRPC leaf is now redundant; deleting it saves the downtime.",
           "**Buckets are per source IP**, and gRPC has no client identity at the layer that keys them. That is unchanged from the in-mesh case but newly visible behind NAT — size with `AXIAM__GRPC__GRPC_*_PER_SEC` or the `gateway` profile.",
         ],
       },

@@ -1018,7 +1018,11 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       },
       {
         type: "warn",
-        text: "**Where the code may be delivered is not the caller's choice.** On these two flows the provider never sees the SPA URL, so nothing else would have checked it, and an unchecked `redirect_uri` here is an authentication bypass rather than an open redirect. The target is confined to the deployment's own issuer origin plus anything an operator names in `AXIAM__AUTH__SSO_SPA_ORIGINS`. Comparison is by origin, not by prefix — a different port, a different scheme, a path suffix and a `https://host@attacker.example/` userinfo trick are all different origins — and the check runs at login start, again at the mint, and on the error redirect.",
+        text: "**Where the code may be delivered is not the caller's choice.** On the two cross-site flows the provider never sees the SPA URL, so nothing else would have checked it, and an unchecked `redirect_uri` there is an authentication bypass rather than an open redirect. The target is confined to the deployment's own issuer origin plus anything an operator names in `AXIAM__AUTH__SSO_SPA_ORIGINS`. Comparison is by origin, not by prefix — a different port, a different scheme, a path suffix and a `https://host@attacker.example/` userinfo trick are all different origins — and the check runs at login start, again at the mint, and on the error redirect.",
+      },
+      {
+        type: "note",
+        text: "**The same rule governs the OIDC and plain-OAuth2 flows**, where the provider *does* see the redirect URI and compares it against its registered set. That comparison stays, as a second layer — but it is only as strict as each provider's registration hygiene, several accept wildcard or prefix registrations, and it is not a control your deployment owns. So a split-origin deployment must name its SPA origin in `AXIAM__AUTH__SSO_SPA_ORIGINS` for **every** federated sign-in, not just SAML and Apple; the `400` names the variable when it does not.",
       },
       { type: "h", id: "inheritance", text: "Organization providers a tenant inherits" },
       {

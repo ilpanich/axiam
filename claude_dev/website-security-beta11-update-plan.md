@@ -60,11 +60,36 @@
 > `#/security/diagram/3/T-219` and `#/security/diagram/7/T-234` were opened in
 > the built site: both select their threat, with no console errors.
 >
-> **Left undone, deliberately.** Everything in §10 — the gRPC certificate reload
-> (T-234 stays open and the site says so), the TLS-1.3-only gRPC leg,
-> `GET /health/jobs`'s absence from `sdks/openapi.json`, the SDK repositories'
-> own §27 drift-checks, and diagram aesthetics beyond the generator's layout.
-> No new node overlapped a label, so no model coordinates were touched.
+> **Rebased 2026-09-05 onto the post-remediation `main`.** The three PRs of
+> [`remediation-plan-2026-09-04.md`](remediation-plan-2026-09-04.md) — #418 (R-1),
+> #419 (R-3) and #420 (R-4…R-7) — merged after this pass was pushed, and this
+> branch was rebased onto them and **re-verified rather than replayed**. `git`
+> reported no conflict, which was the hazard: the staleness it could not see was
+> the point. Regenerating gave 236 threats / **220 mitigated / 16 open** (T-234
+> closed by R-1 and gone from the register), 213 operations across 148 paths
+> (`/health/jobs`, added by R-6), and contract **1.39** (R-3). The plan body was
+> itself brought forward on `main` in `90d0730f` while this branch was open;
+> that revision is kept here in preference to this pass's own edits to §4 and
+> §10, which said the same things less well. Re-mirrored by
+> hand, because no generator covers prose: the gRPC-certificate clause in
+> `security.ts` and on `hardening` (the listener now terminates its own TLS and
+> shares the REST leaf's reloadable resolver); the handoff-origin rule, which
+> R-3 extended from the two cross-site flows to **every** federated start path —
+> the `federation` page's "on these two flows" framing was wrong and no diff
+> would have flagged it; `just vault-status` naming the seal type (R-7); the
+> observable `TRUSTED_HOPS` misconfiguration on `deploy` and `hardening` (R-4);
+> and the news addendum's counts. `configuration.ts` needed no manual
+> resolution: this pass had only *verified* the `SSO_SPA_ORIGINS` row rather
+> than editing it, so R-3's rewrite of that row merged cleanly beside this
+> pass's `AXIAM__GRPC*` rows.
+>
+> **Left undone, deliberately.** Everything in §10 as it stood when this pass
+> ran — the gRPC certificate reload (T-234 was open and the site said so), the
+> TLS-1.3-only gRPC leg, `GET /health/jobs`'s absence from `sdks/openapi.json`,
+> the SDK repositories' own §27 drift-checks, and diagram aesthetics beyond the
+> generator's layout. No new node overlapped a label, so no model coordinates
+> were touched. The first three were closed by the remediation plan (R-1 and
+> R-6) and are reflected here as of the rebase above; the last two stand.
 
 > **Who this is for.** A fresh Claude session (Opus 5) tasked with bringing the
 > website's **Security** section, and the **Docs**, **News** and **Roadmap**

@@ -340,7 +340,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
 | Threats identified | 236 |
-| Mitigated / Open | 219 / 17 |
+| Mitigated / Open | 220 / 16 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -360,7 +360,7 @@ optimistic closed one.
 | Authorization engine (RBAC, hierarchy, scopes) | 26 | 0 |
 | PKI, certificates & IoT device identity | 24 | 1 |
 | Audit, webhooks, email & notifications | 18 | 2 |
-| Deployment & platform (Kubernetes) | 26 | 6 |
+| Deployment & platform (Kubernetes) | 26 | 5 |
 | Client SDKs & admin-UI integration surface | 26 | 4 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
@@ -383,7 +383,7 @@ the category recorded against it in the model.
 | Tampering | 49 | 1 |
 | Repudiation | 5 | 0 |
 | Information disclosure | 57 | 7 |
-| Denial of service | 22 | 3 |
+| Denial of service | 22 | 2 |
 | Elevation of privilege | 45 | 3 |
 
 ### Coverage by severity
@@ -392,12 +392,12 @@ the category recorded against it in the model.
 |---|---|---|
 | Critical | 28 | 1 |
 | High | 113 | 8 |
-| Medium | 88 | 7 |
+| Medium | 88 | 6 |
 | Low | 7 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 17 still-open items are listed one by one in
+the weight the control carries. The 16 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -967,7 +967,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 17 of
+Every threat the model does not record as mitigated, most severe first — 16 of
 236. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),

@@ -43,6 +43,23 @@
 > **not** regenerated: `website-security-beta11-update-plan.md` has not run yet,
 > and §9 step 3 says to leave it to that plan.
 
+> **EXECUTED — R-2, 2026-09-04.** Verified on 2026-09-04 against the `main`
+> copy of every `sdk-ci-<lang>.yml`: in all eleven repositories the
+> `§27 management surface drift-check` job now carries no `if:` and therefore
+> runs on tag pushes as well as pull requests, and the job that spends the
+> version number — `publish` in the eight registry-publishing repositories,
+> `release` in Swift, C and C++ — lists it in `needs:`. The three shapes §3
+> predicted were the three found: a dedicated `pull_request`-only job in Python,
+> Go, Java, Kotlin, C# and PHP (condition dropped); a step inside the
+> `pull_request`-only test job in Rust and TypeScript (split into its own job,
+> installing only the toolchain the generator needs — rustfmt for Rust, Node for
+> TypeScript, the Go toolchain from `go.mod` for Go); and a job that already ran
+> on tags but that nothing depended on in Swift, C and C++ (added to `needs:`).
+> Nothing else in those workflows moved: `verify-tag-on-main`, the attestation
+> steps and the Python and PHP publish jobs' own gRPC-stub re-checks are as they
+> were. T-235's residual sentence is gone from the model; the website plan
+> records the closure.
+
 > **EXECUTED — R-3, 2026-09-04.** The deployment-origin rule now guards every
 > federated start operation, not two of four. `require_deployment_spa_origin` is
 > called on `oidc_start_public` (`federation.rs`) and `oauth2_start_public`

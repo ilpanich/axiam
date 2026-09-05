@@ -9,7 +9,7 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
 | **Threats identified** | 236 |
-| **Mitigated / Open** | 219 / 17 |
+| **Mitigated / Open** | 220 / 16 |
 | **Owner** | ilpanich |
 
 ---

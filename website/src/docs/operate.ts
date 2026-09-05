@@ -331,7 +331,7 @@ export const OPERATE_PAGES: DocPage[] = [
           },
           {
             title: "Configure auto-unseal before you go live",
-            body: "Without it, every restart — a node drain, an upgrade, an OOM kill — leaves Vault sealed and AXIAM unable to start until three people are woken up. This is the single most important production step, and the one most often deferred. AXIAM cannot do it for you — every Vault OSS seal type needs a cloud KMS, a second Vault or an Enterprise licence — but `just vault-status` now reads `sys/seal-status` and says which one you are running: any auto-unseal reads `OK`, Shamir says plainly that it is not production, a Vault sealed right now gets its own line, and a check that could not reach Vault reports `unknown` rather than `OK`.",
+            body: "Without it, every restart — a node drain, an upgrade, an OOM kill — leaves Vault sealed and AXIAM unable to start until three people are woken up. This is the single most important production step, and the one most often deferred. AXIAM cannot do it for you — every Vault OSS seal type needs a cloud KMS, a second Vault or an Enterprise licence — but `just vault-status` now reads `sys/seal-status` and says which one you are running: any auto-unseal reads `OK`, Shamir says plainly that it is not production, a Vault sealed right now gets its own line, and a check that could not reach Vault reports `unknown` rather than `OK`. Pass `--strict` to `scripts/vault-status.py` and an unconfirmed auto-unseal becomes a non-zero exit, which is what makes it usable as a pre-go-live gate. `just vault-status` deliberately does **not** pass it, because the dev stack it also serves is Shamir by design.",
           },
           {
             title: "Create a narrowly scoped policy",
@@ -813,6 +813,15 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "warn",
         text: "The endpoint returns **200 even when degraded**, and that is deliberate. It is not a readiness gate: a stuck cleanup sweep is an operational problem, not a reason to pull a healthy server out of the load balancer and send its traffic to replicas running the same stuck code. Alert on `status` being `degraded`, or on a specific job's `stalled` — never wire this to a liveness probe.",
+      },
+      { type: "h", id: "ratelimit-signal", text: "Is the rate limiter keying on the right address?" },
+      {
+        type: "p",
+        text: "A `TRUSTED_HOPS` that does not match your topology collapses every client into one rate-limit bucket, including on `/auth/login`. That used to be invisible. Two signals now make it checkable: at startup the server states the hop count it is using, the rule behind it and the number of proxies that implies; and when a header is present but discarded it logs one `WARN` — once per process, so it cannot flood — and increments `axiam_rate_limit_xff_discarded_total{protocol=\"rest\"|\"grpc\"}`.",
+      },
+      {
+        type: "warn",
+        text: "**Alert on the ratio, not the raw counter.** A non-zero value is not automatically a fault: a client sending its own `X-Forwarded-For` to a server that correctly ignores it lands here too. It **is** a fault when the counter tracks total request volume, because that means the header is discarded on every request and the whole deployment shares one bucket. The rule is proxies **minus one** — see [Deriving `TRUSTED_HOPS`](#/docs/deploy#trusted-hops).",
       },
       { type: "h", id: "logs", text: "Logs" },
       {

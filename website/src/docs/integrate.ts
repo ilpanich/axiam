@@ -230,6 +230,10 @@ export const INTEGRATE_PAGES: DocPage[] = [
           ],
         ],
       },
+      {
+        type: "note",
+        text: "**Rate limits follow the family, not the service name.** `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` sizes the authorization and token services; `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService` **and, since the beta11 remediation, the whole of `ReactorAdminService`** — which used to fall through to the authorization family's much larger ceiling. It defaults to **10/s per IP and deliberately does not move with the deployment posture**, because an administrative surface has no throughput case: reactor CRUD over gRPC above that rate needs the variable raised explicitly. See [Sizing your rate limits](https://github.com/ilpanich/axiam/blob/main/docs/deployment/rate-limit-sizing.md).",
+      },
       { type: "h", id: "checkaccess", text: "One CheckAccess call" },
       {
         type: "p",

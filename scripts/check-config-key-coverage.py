@@ -140,7 +140,13 @@ EXEMPT: dict[str, str] = {
     ),
     "AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS": "covered with the caches on the Deploy page",
     "AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED": "covered with the caches on the Deploy page",
-    "AXIAM__GRPC__GRPC_ADMIN_PER_SEC": "gRPC per-family limits are on the gRPC API page",
+    # `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` was exempt on the ground that the gRPC
+    # per-family limits are on the gRPC API page. They were — as a description,
+    # without the key's name. The beta11 remediation moved `ReactorAdminService`
+    # into this family, which changes the ceiling on an existing deployment from
+    # the authz family's to a flat 10/s, so an operator now needs the variable
+    # itself rather than the shape of the rule. The gRPC page names it, with its
+    # default and the reason it does not move with the posture.
     "AXIAM__GRPC__GRPC_IDENTITY_PER_SEC": "gRPC per-family limits are on the gRPC API page",
 }
 

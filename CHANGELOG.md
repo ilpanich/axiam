@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta12] - 2026-09-06
+
 ### Added
+
+- Four small hardenings the beta11 threat-model review found
+
+- Apply the deployment-origin rule to every SSO start path
+
+- Terminate TLS in the listener — reloadable leaf, TLS 1.3 only
 
 - A `TRUSTED_HOPS` misconfiguration is now visible instead of silent
 
@@ -72,6 +80,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `claude_dev/remediation-plan-2026-09-04.md` R-6.
 
 ### Changed
+
+- Reconcile the documents after the remediation pass — 220 / 16
+
+- Cover the pre-existing H2 loader and empty-verifier gaps
+
+- A later reload failure must not mask the first
+
+- Serialize the R-4 counter tests
+
+- Prove the renewal on the wire, and reach both handshake bounds
+
+- Remediation plan for the residuals the beta11 threat-model wave left open
+
+- Plan the website's beta11 security and docs catch-up pass
+
+- Record the beta08…beta11 wave — T-212…T-236, model 2.11.0
 
 - The gRPC listener terminates TLS itself: hot-reloadable certificate, TLS 1.3 only
 
@@ -170,6 +194,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AXIAM__GRPC__GRPC_ADMIN_PER_SEC`. The REST admin surface is unaffected.
 
   Closes the follow-up T-233 names. `claude_dev/remediation-plan-2026-09-04.md` R-5.
+
+### Fixed
+
+- Recover the real tenant slug on re-seed, and refuse expired certs
 
 ## [1.0.0-beta11] - 2026-09-04
 

@@ -941,3 +941,86 @@ Same division of labor as the parent plan: Opus 5 owns every place
 where a plausible-but-wrong answer mints a token it shouldn't; Sonnet 5
 executes everything the contracts, specs, and this document have
 already pinned.
+
+---
+
+## X7 — OpenID Connect **Basic OP** certification, coexisting with FAPI 2.0
+
+**Plan:** [`basic-op-gap-plan.md`](basic-op-gap-plan.md) (plan only; no
+crate source changes yet). **Target:** the OpenID Foundation
+`oidcc-basic-certification-test-plan` in its
+`[server_metadata=discovery][client_registration=static_client]`
+configuration, certification profile "Basic OP", **without** loosening any
+FAPI 2.0 property and **without** changing the behaviour of any client
+registered today.
+
+Two findings settle the shape of the work (both cited in the plan):
+
+- **RS256 is not required.** The only module asserting it
+  (`OIDCCIdTokenSignature`) is `@VariantNotApplicable` for static-client runs,
+  and the suite's generic signature check verifies Ed25519 keys. EdDSA-only
+  stays; no RSA key enters the JWKS; no SDK `alg` pin changes.
+- **Gap 0 was missing from the gap list:** `/oauth2/authorize` has no browser
+  login hop and its cookie is `SameSite=Strict`, so an RP-initiated redirect
+  never sees a session. Every `prompt`/`max_age`/`id_token_hint` module is
+  unreachable until a path-scoped `SameSite=Lax` OP-session cookie and a
+  `return_to` login hop exist, both behind a per-client `browser_sso` flag.
+
+### X7.0 Escalations (maintainer, before any code)
+**A.** Accept `client_secret_basic` server-side — the Basic plan's default
+variant for 37 of 38 modules; reverses `CONTRACT.md` rule 3's *rationale* but
+needs **no SDK code change** (SDKs keep `client_secret_post`).
+**B.** Publish an RSA key in the JWKS — recommended **no**; not needed.
+
+### X7.1 Gates first, honouring nothing (plan §8 W1)
+Per-client `authn_request_params: ignore | honour` (default `ignore`),
+`browser_sso` (default off), typed `AuthnRequestParams` parser on both the
+query and PAR carriers, `validate_registration` arms
+(`AuthnParamsOnFapiClient`, `SensitiveScopesOnFapiClient`),
+`enforce_authorization_request` rules (security-bearing parameters refused on
+`fapi2`; everything ignored on `standard`/`ignore` exactly as today), explicit
+`request_not_supported` / `request_uri_not_supported`, discovery statics.
+Profile-confusion matrix M1–M9 and the two golden-path pins P1/P2 land here.
+FAPI conformance run must equal the W0 baseline.
+
+### X7.2 Session evidence (W2) · X7.3 Login hop + OP cookie (W3)
+Schema v50: `session.authenticated_at`, `amr`, `browser_token_hash`, copied
+across refresh rotation; `auth_time`/`acr`/`amr` snapshotted on the
+authorization code and emitted on the honour lane only. Then the
+`axiam_op_session` cookie (`HttpOnly; Secure; SameSite=Lax; Path=/oauth2/authorize`),
+principal resolution behind `browser_sso`, SPA `/login?return_to` with
+same-origin-path validation on both sides, `reauth` mode. FAPI run #2 must
+equal baseline.
+
+### X7.4–X7.6 Honour lane (W4–W6)
+`prompt` (`none`/`login`/`consent`/`select_account`), `max_age` with
+`max_age=0` ⇒ always reauthenticate by type, `id_token_hint`, ACR derived from
+session evidence by a function that cannot see the request
+(`urn:axiam:acr:1fa` / `urn:axiam:acr:mfa`; essential unmet ⇒
+`unmet_authentication_requirements`), then the cosmetic four (`login_hint`
+prefill with no server lookup, allow-listed `display`/`ui_locales`,
+`claims_locales` accepted), POST userinfo (RFC 6750 §2.2, required by the
+plan), optional POST authorize.
+
+### X7.7 Sensitive scopes (W7) · X7.8 `client_secret_basic` (W8, after A)
+Schema v51 user `phone_number`/`address`; tenant switch off by default;
+per-client registration; per-user per-client consent record via the existing
+`ConsentRepository`; userinfo-only release; audit. Then the new
+`ClientAuthMethod` variant with RFC 6749 §2.3.1 form-urlencoding before
+base64, header redaction test, SEC-093 dispatch on the registered method;
+the FAPI gate refuses it through the existing `is_strong()` arms.
+
+### X7.9 Basic OP harness and final runs (W9)
+`conformance/plans/oidcc-basic-static.json`, `register-clients.sh` variant,
+`docs/conformance/` report, `docs/compliance/oidc-conformance.md` rows; FAPI
+and Basic plans both green on a digest-pinned image.
+
+**Not doing (plan §9):** request objects (reject cleanly; `request_uri` is an
+SSRF vector superseded by PAR), Dynamic OP (would make RS256 mandatory),
+Implicit/Hybrid OP (tokens in URLs; `code`-only is a FAPI 2.0 property),
+RS256/RSA keys.
+
+**Model:** Opus 5 for the gate arms, session evidence, `acr_for`, the
+`client_secret_basic` parser and cookie/principal resolution (each is a place
+where a plausible-but-wrong answer mints something it should not); Sonnet 5
+for SPA changes, harness, docs and discovery statics.

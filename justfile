@@ -719,6 +719,21 @@ conformance-run:
     done
     exit $rc
 
+# Drive the OpenID Connect "Config OP" plan (discovery document + JWKS only).
+#
+# Separate from `conformance-run` because it is a DIFFERENT certification
+# programme with its own plan name and its own fee line, not a fourth FAPI
+# variant. It drives no flow and needs no browser, so it is the one plan that
+# runs to completion unattended. See claude_dev/openid-certification-strategy.md.
+conformance-run-config:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    cfg="conformance/plans/oidcc-config-certification.json"
+    bash conformance/scripts/render-plan.sh "$cfg"
+    bash conformance/scripts/run-plan.sh \
+      "conformance/.run/$(basename "$cfg")" \
+      "${CONFORMANCE_PLAN_NAME:-oidcc-config-certification-test-plan}"
+
 # Render the collected results into docs/conformance/, failures first.
 conformance-report:
     python3 conformance/scripts/report.py --results conformance/.run/results \

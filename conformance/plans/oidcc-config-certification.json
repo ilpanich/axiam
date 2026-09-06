@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "OIDF conformance test-plan configuration — OpenID Connect 'Config OP'",
+    "certification (discovery document + JWKS only).",
+    "",
+    "Plan name to select in the suite UI or the API:",
+    "  oidcc-config-certification-test-plan",
+    "with variant { server_metadata: discovery }.",
+    "",
+    "This plan reads AXIAM's /.well-known/openid-configuration and its jwks_uri",
+    "and asserts they are well-formed and self-consistent. It drives no",
+    "authorization flow, registers no client and needs no browser — which is",
+    "exactly why it is worth running: it is the one OpenID Connect profile",
+    "AXIAM can reach without building the OIDC Core interactive parameter",
+    "surface it deliberately does not have. See",
+    "claude_dev/openid-certification-strategy.md for that argument in full.",
+    "",
+    "render-plan.sh still requires the FAPI client ids and certificate PEMs to",
+    "be present in suite.env, because it validates them for every template it",
+    "renders. That is a property of the renderer, not of this plan: nothing",
+    "below references a client. Run `just conformance-certs` and",
+    "`just conformance-register` once and the requirement is satisfied."
+  ],
+
+  "alias": "axiam-oidcc-config",
+  "description": "AXIAM — OpenID Connect Config OP (discovery + JWKS)",
+
+  "server": {
+    "discoveryUrl": "${AXIAM_ISSUER}/.well-known/openid-configuration?tenant_id=${AXIAM_TENANT_ID}"
+  },
+
+  "variant": {
+    "server_metadata": "discovery"
+  }
+}

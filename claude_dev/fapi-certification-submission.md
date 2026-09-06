@@ -5,6 +5,12 @@ document**: every step needs either money, a legal identity, or an account
 nobody but the maintainer should hold, which is why it is written for a human
 rather than automated.
 
+Scope decision — *why* FAPI 2.0 is AXIAM's first certification rather than a
+later one, and what else is being requested alongside it:
+[`openid-certification-strategy.md`](openid-certification-strategy.md). Its §6
+carries the fee-waiver letter that supersedes §X5.4's draft, and its §5 the
+current fee figures this document only describes in the abstract.
+
 Prerequisite: [`fapi-conformance-runbook.md`](fapi-conformance-runbook.md) —
 how to run the suite and read what it says. This document assumes you have
 already got a green local run and are ready to make it official.

@@ -3,6 +3,10 @@
 How to run the OpenID Foundation conformance suite against AXIAM, how to read
 what it tells you, and how to re-run one failing test without re-running forty.
 
+For *why* this is the certification AXIAM runs first — and for the Config OP
+plan that ships beside these ones — see
+[`openid-certification-strategy.md`](openid-certification-strategy.md).
+
 Read the **Known gaps** section before you treat any green run as
 submission-ready. It is the shortest section and the one that decides whether a
 result means what you want it to mean.

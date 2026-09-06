@@ -115,10 +115,12 @@ EXEMPT: dict[str, str] = {
         "fires unconditionally either way"
     ),
     "AXIAM__PKI__SSRF_ALLOWED_HOSTS": "egress allow-list for metadata fetches",
-    "AXIAM__GRPC__STRICT_REVOCATION": (
-        "opt-in per-request revocation on gRPC; the read-path guide covers the "
-        "trade-off it exists for"
-    ),
+    # `AXIAM__GRPC__STRICT_REVOCATION` was exempt here as an opt-in the
+    # read-path guide covered. Since 1.0.0-beta11 the gRPC listener may be
+    # published through the edge, and the hardening rule for doing so tells an
+    # operator to turn this on — so it is a setting a deployment reaches for,
+    # not one it never needs. It is on the configuration page now, with its
+    # default and the cache that pays for it, and the exemption is gone.
     "AXIAM__AUTH__PEPPER_PREVIOUS": "second pepper accepted during a rotation window",
     "AXIAM__AUTH__COOKIE_SECURE": (
         "development-only override; a production deployment is on TLS and wants "
@@ -138,7 +140,13 @@ EXEMPT: dict[str, str] = {
     ),
     "AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS": "covered with the caches on the Deploy page",
     "AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED": "covered with the caches on the Deploy page",
-    "AXIAM__GRPC__GRPC_ADMIN_PER_SEC": "gRPC per-family limits are on the gRPC API page",
+    # `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` was exempt on the ground that the gRPC
+    # per-family limits are on the gRPC API page. They were — as a description,
+    # without the key's name. The beta11 remediation moved `ReactorAdminService`
+    # into this family, which changes the ceiling on an existing deployment from
+    # the authz family's to a flat 10/s, so an operator now needs the variable
+    # itself rather than the shape of the rule. The gRPC page names it, with its
+    # default and the reason it does not move with the posture.
     "AXIAM__GRPC__GRPC_IDENTITY_PER_SEC": "gRPC per-family limits are on the gRPC API page",
 }
 

@@ -646,7 +646,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       { type: "h", id: "access", text: "Roles, permissions & resources" },
       {
         type: "p",
-        text: "A **permission** is an action on a resource, carrying an effect of either allow or deny. A **role** is a collection of permissions, assignable to users or to groups, and either global or bound to a specific resource. **Resources** form a tree, and a role assigned on a parent cascades to its descendants. **Scopes** add sub-resource granularity where a permission needs to apply to only part of a resource.",
+        text: "A **permission** is an action on a resource, carrying an effect of either allow or deny. A **role** is a collection of permissions, assignable to users or to groups; it may carry `is_global`, and separately each assignment either names a resource or does not — one that does not is tenant-wide. **Resources** form a tree, and a role assigned on a parent cascades to its descendants. **Scopes** add sub-resource granularity where a permission needs to apply to only part of a resource.",
       },
       {
         type: "p",

@@ -534,6 +534,18 @@ export const POSTS: Post[] = [
         type: "p",
         text: "The STRIDE threat model grew to 211 threats across nine diagrams, 196 of them mitigated and 15 recorded openly as shared-responsibility or accepted items. Every one of the findings above is written down there rather than quietly absorbed — the Security section carries the model, the compliance self-assessment and the open risk register in full.",
       },
+      {
+        type: "p",
+        text: "Addendum, 5 September 2026: four releases on, the model is now 236 threats, 220 mitigated and 16 open. Two of the waves it grew by had been written into the STRIDE document at beta08 without ever reaching the Threat Dragon JSON, so the site spent three releases rendering a model its own source had outgrown; that gap is closed.",
+      },
+      {
+        type: "p",
+        text: "What those four releases changed, one sentence each. The backend now sits on the public origin terminating its own TLS 1.3, which removed a proxy hop and the cleartext container-network leg every password and token used to cross, and fixed the rate-limit key with it ([T-212](#/security/diagram/7/T-212)…[T-217](#/security/diagram/7/T-217)). A public login surface arrived — an unauthenticated providers listing that cannot tell an unknown organization from an unconfigured one, sign-in buttons, a plain-OAuth2 variant with its downgrade stated, and 60-second single-use handoff codes that can only be delivered to the deployment's own origins ([T-218](#/security/diagram/3/T-218)…[T-225](#/security/diagram/3/T-225)). An assignment naming no resource became tenant-wide rather than silently inert, scoped grants now inherit down the resource lineage without widening sideways, and the authorization-check endpoints resolve the acting tenant through the same reach check as every other route ([T-226](#/security/diagram/4/T-226)…[T-228](#/security/diagram/4/T-228)). WebAuthn user verification became a tightening-only policy instead of a library constant, so a security key with no PIN enrols as a second factor ([T-229](#/security/diagram/1/T-229), [T-230](#/security/diagram/1/T-230)). And Vault is run as the production secret store it is: Raft storage, a policy that is one checked file, and a seeder that can no longer mistake a refused read for an empty Vault and mint fresh keys over the live ones ([T-231](#/security/diagram/7/T-231), [T-232](#/security/diagram/7/T-232)).",
+      },
+      {
+        type: "p",
+        text: "One of the new entries is recorded open rather than closed, which is the point of keeping the register honest: the unseal key sitting on the same disk as the sealed data ([T-216](#/security/diagram/7/T-216)). A second, the gRPC listener reading its certificate once at startup ([T-234](#/security/diagram/7/T-234)), was published open and has since been closed — the listener now terminates its own TLS and shares the REST listener's reloadable certificate, so one `SIGHUP` renews both. Neither is on AXIAM's own request path, which still carries no open Critical or High finding.",
+      },
       { type: "h", text: "Trying it, and telling us what breaks" },
       {
         type: "p",
@@ -832,7 +844,7 @@ export const PHASES: Phase[] = [
     n: 20,
     title: "Beta line — stabilisation toward 1.0",
     focus:
-      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0",
+      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store",
     start: "Aug 26, 2026",
     end: "Ongoing",
     status: "ongoing",

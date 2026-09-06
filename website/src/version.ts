@@ -12,10 +12,10 @@
  * `claude_dev/threat-modeling-and-security.md`, which is the record of what that
  * verification covered.
  */
-export const SECURITY_VERIFIED_RELEASE = "1.0.0-beta06";
+export const SECURITY_VERIFIED_RELEASE = "1.0.0-beta11";
 
 /** Date of that verification pass, ISO 8601. */
-export const SECURITY_VERIFIED_DATE = "2026-08-30";
+export const SECURITY_VERIFIED_DATE = "2026-09-04";
 
 /**
  * The release a documentation page's claims were last verified against.
@@ -29,4 +29,4 @@ export const SECURITY_VERIFIED_DATE = "2026-08-30";
  * happen for pages nobody looked at, which is worse than saying nothing — an
  * unstamped page reads as "not checked recently", which is exactly what it is.
  */
-export const DOCS_VERIFIED_RELEASE = "1.0.0-beta07";
+export const DOCS_VERIFIED_RELEASE = "1.0.0-beta11";

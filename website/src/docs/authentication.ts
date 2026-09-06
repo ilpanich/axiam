@@ -1,6 +1,8 @@
 import type { DocPage } from "./types";
 import { DOCS_VERIFIED_RELEASE } from "../version";
 
+const GH_BLOB = "https://github.com/ilpanich/axiam/blob/main";
+
 /**
  * "Authentication" — every way a principal can prove who it is, one page per
  * mechanism. The ordering runs from the most common (a password) to the most
@@ -644,7 +646,7 @@ elif result.mfa_setup_required:
         steps: [
           {
             title: "Ask the server for creation options",
-            body: "`POST /api/v1/auth/webauthn/register/start`, with the user's existing session. The response carries the challenge and a state token. The server chooses `residentKey`, `userVerification`, the attestation conveyance, the exclusion list and the timeout — every one of them is a security parameter.",
+            body: "`POST /api/v1/auth/webauthn/register/start`, with the user's existing session. The response carries the challenge and a state token. The server chooses `residentKey`, `userVerification`, the attestation conveyance, the exclusion list and the timeout — every one of them is a security parameter. `userVerification` it chooses **from policy**, not from a library constant: see [User verification is a setting](#uv-policy) below.",
           },
           {
             title: "Run the ceremony",
@@ -667,6 +669,43 @@ elif result.mfa_setup_required:
       {
         type: "warn",
         text: "**Pass the options through untouched, in both directions.** Do not supply a `timeout` the server omitted, do not expand an absent `authenticatorSelection` into an empty object, do not reorder or prune `pubKeyCredParams` or `excludeCredentials`, and do not re-encode the response's base64url fields. Relaxing `userVerification` to `preferred` because a CI authenticator kept prompting weakens a ceremony the server believes it configured, and the server cannot detect it: an assertion produced under weaker options is a perfectly valid assertion.",
+      },
+      { type: "h", id: "uv-policy", text: "User verification is a setting" },
+      {
+        type: "p",
+        text: "`webauthn_user_verification` is a security setting: an **organization** baseline every tenant inherits and may only make stricter, ordered `required` > `preferred` > `discouraged`. Raising the organization baseline past a tenant's override clears that override, so the tenant tracks the new baseline.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Value", "At enrolment", "Use it when"],
+        rows: [
+          ["`discouraged`", "No verification requested", "The key is unambiguously a second factor behind a password"],
+          ["`preferred` **(default)**", "Requested, accepted either way, and what happened is recorded", "Supporting security keys generally, PIN-protected or not"],
+          ["`required`", "A key that cannot verify is refused", "A WebAuthn credential may stand alone as a login factor"],
+        ],
+      },
+      {
+        type: "p",
+        text: "The default is `preferred` rather than `required` because nobody chose `required` — it was a library constant. So a security key with no PIN now **enrols and works as a second factor**, and the server records whether verification actually happened.",
+      },
+      {
+        type: "note",
+        text: "**Two ceremonies ignore the setting.** Usernameless sign-in keeps `required` whatever it is set to — there the credential is the only factor, so without verification mere possession of the token would be a complete login; the practical consequence is that a PIN-less key works as a second factor and cannot be used for passwordless sign-in. Attested registration keeps `required` too, because the library imposes it on the attested ceremony and AXIAM does not override it.",
+      },
+      {
+        type: "p",
+        text: "**Relaxing the setting weakens nothing already enrolled.** The policy a credential was registered under is recorded and honoured for the rest of that credential's life, so every credential enrolled before this existed keeps demanding verification. The setting governs new enrolments. It is also a required field on the settings write, so a client cannot relax it by omission.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Authenticator policies (administrator guide)",
+            href: `${GH_BLOB}/docs/admin/authenticator-policies.md`,
+            note: "The setting, the two ceremonies that ignore it, and the attestation policy it sits beside",
+          },
+        ],
       },
       { type: "h", id: "signin", text: "Signing in" },
       {
@@ -927,6 +966,91 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       {
         type: "note",
         text: "The mapping resolves two fields: `email`, and a display name taken from `name` with `displayName` as a fallback. A provider that calls its address attribute `mail` needs `{\"email\": \"mail\"}` — with the AXIAM name as the key.",
+      },
+      { type: "h", id: "buttons", text: "Sign-in buttons and the public login surface" },
+      {
+        type: "p",
+        text: "A login page renders its \"Sign in with …\" buttons from an **unauthenticated** listing, so that surface is designed for the fact that it is public. It returns only what a button needs — no client id, no endpoint URLs, no `attribute_map`, no secret column — from a dedicated response type rather than a narrowed admin one, so a field added to the admin response cannot leak here by inheritance.",
+      },
+      {
+        type: "api",
+        endpoints: [
+          { method: "GET", path: "/api/v1/auth/federation/providers", summary: "Which buttons to render for a workspace.", public: true },
+          { method: "POST", path: "/api/v1/auth/federation/oauth2/start", summary: "Begin a login through a plain-OAuth2 provider.", public: true },
+          { method: "POST", path: "/api/v1/auth/federation/oauth2/callback", summary: "Complete one, same-origin from the SPA.", public: true },
+          { method: "POST", path: "/api/v1/auth/federation/handoff", summary: "Exchange a handoff code for session cookies.", public: true },
+        ],
+      },
+      {
+        type: "note",
+        text: "An unknown organization and a known one with nothing configured both answer `200` with an empty list. That is deliberate: a list-shaped endpoint answering `401` for one and `200 []` for the other would be a two-valued oracle and a perfect organization-slug enumerator. The listing is rate-limited on the same per-IP login budget as the sign-in endpoints, which is what bounds the guessing rate.",
+      },
+      { type: "h", id: "oauth2-variant", text: "The plain-OAuth2 variant, and the trust it does not have" },
+      {
+        type: "p",
+        text: "Some providers issue no ID token — GitHub and Facebook among them. For those, the `oauth2` protocol authenticates by calling a configured userinfo endpoint with the access token just received. That is a **downgrade**, and AXIAM states it rather than hiding it: on the OIDC path a JWS signature, `iss`, `aud`, `exp`, `iat` and `nonce` are all cryptographic statements bound to this login attempt, and on this path none of them exist. The trust is transport and configuration trust instead.",
+      },
+      {
+        type: "list",
+        items: [
+          "**It cannot be selected by accident.** The protocol is refused at create and update time for every kind that supports OIDC properly (`google`, `microsoft`, `apple`); it is offered only for `facebook`, `github` and `generic_oauth2`.",
+          "**PKCE is mandatory here**, not optional — it is the only replay protection left once `nonce` is gone. `S256` is always sent and the verifier is always stored server-side.",
+          "**The three endpoints come only from configuration.** They are validated as absolute HTTPS on write, never derived from anything the provider says at runtime, and fetched through the same SSRF guard as every other outbound call. A substituted userinfo endpoint would be an authentication bypass with no signature to catch it.",
+          "**Only an affirmatively verified email is adopted.** For `github` a second mandatory call takes the primary *and* verified address, and a login with none is refused rather than provisioned under a synthesized or unverified one. Where a provider offers no verification signal at all, an operator who wants to accept its assertion writes that decision down as a literal in `attribute_map` rather than having AXIAM make it silently.",
+        ],
+      },
+      { type: "h", id: "handoff", text: "Cross-site returns and the handoff code" },
+      {
+        type: "p",
+        text: "The session cookies are `SameSite=Strict`, and that is not being weakened. SAML and Apple both have the provider perform a cross-site form POST straight to an AXIAM endpoint, and the browser will not send `Strict` cookies on the navigation that follows — the user would land back in the SPA holding a session it cannot use. So those two endpoints mint a **handoff code** instead and answer `303` to the SPA, which posts the code back same-origin and gets the cookies on a same-site response.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Property", "Value"],
+        rows: [
+          ["Entropy", "256 bits, `base64url`"],
+          ["Storage", "SHA-256 hash only — a database read must not yield a usable credential"],
+          ["TTL", "60 seconds; it exists to survive one redirect"],
+          ["Uses", "Exactly one, consumed atomically"],
+          ["Carries", "No token material — the tokens are created at redemption, not at mint"],
+        ],
+      },
+      {
+        type: "warn",
+        text: "**Where the code may be delivered is not the caller's choice.** On the two cross-site flows the provider never sees the SPA URL, so nothing else would have checked it, and an unchecked `redirect_uri` there is an authentication bypass rather than an open redirect. The target is confined to the deployment's own issuer origin plus anything an operator names in `AXIAM__AUTH__SSO_SPA_ORIGINS`. Comparison is by origin, not by prefix — a different port, a different scheme, a path suffix and a `https://host@attacker.example/` userinfo trick are all different origins — and the check runs at login start, again at the mint, and on the error redirect.",
+      },
+      {
+        type: "note",
+        text: "**The same rule governs the OIDC and plain-OAuth2 flows**, where the provider *does* see the redirect URI and compares it against its registered set. That comparison stays, as a second layer — but it is only as strict as each provider's registration hygiene, several accept wildcard or prefix registrations, and it is not a control your deployment owns. So a split-origin deployment must name its SPA origin in `AXIAM__AUTH__SSO_SPA_ORIGINS` for **every** federated sign-in, not just SAML and Apple; the `400` names the variable when it does not.",
+      },
+      { type: "h", id: "inheritance", text: "Organization providers a tenant inherits" },
+      {
+        type: "p",
+        text: "A config in the organization's own scope carrying `allow_tenant_inheritance` is offered to the organization's tenants, so one Google registration serves the whole estate. The user it signs in is provisioned in the **requesting** tenant, not in the organization scope.",
+      },
+      {
+        type: "p",
+        text: "A tenant's own config of the same kind shadows the inherited one — **including a disabled one**. A tenant administrator who creates a Google config and disables it has said something about Google in this tenant, and the something is *no*; falling back to the inherited config there would make \"disable\" mean \"re-enable the other one\". The key match is what shadows, not the enabled bit.",
+      },
+      {
+        type: "note",
+        text: "Two more rules worth knowing before you configure a provider. A **templated issuer** — Entra's `common` authority publishes a literal `{tenantid}` placeholder — requires an explicit `allowed_issuer_tenants` list, refused at write time and again at sign-in without one: Microsoft signs every tenant's tokens at `common` with the same keys, so \"accept anything\" there means every Microsoft account on earth. And a custom **button icon** is accepted only for the `generic_*` kinds (the branded marks are not replaceable), stored as a raster `data:` URL bounded at 16 KiB — no SVG, because this is served to everyone who loads a login page.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Federated login providers, end to end",
+            href: `${GH_BLOB}/claude_dev/federation-sso-login-design.md`,
+            note: "The protocol matrix, the inheritance precedence table, the handoff-code mechanism and the alternatives rejected.",
+          },
+          {
+            label: "SDK contract §12.1",
+            href: `${GH_BLOB}/sdks/CONTRACT.md`,
+            note: "The canonical operation set and endpoint map these four operations belong to.",
+          },
+        ],
       },
       { type: "h", id: "links", text: "Linking and unlinking" },
       {

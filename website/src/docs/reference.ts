@@ -287,6 +287,10 @@ export const REFERENCE_PAGES: DocPage[] = [
         type: "warn",
         text: "This table is transcribed from the eleven SDK READMEs at `1.0.0-beta07` and is a snapshot for orientation. Each README's conformance statement is the SDK's own claim and the thing to check before you depend on a section.",
       },
+      {
+        type: "p",
+        text: "A release ships the surface it derives from the spec it vendors: tagging an SDK re-vendors the contract, the OpenAPI document and the management registry, then regenerates that SDK's §27 management surface from them and stages exactly what the generator wrote. A missing generator stops the release rather than tagging a tree the SDK's own drift-check would reject.",
+      },
       { type: "h", id: "packages", text: "Canonical package names" },
       {
         type: "p",

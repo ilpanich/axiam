@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.10.0",
+ "version": "2.11.0",
  "diagramCount": 9,
- "total": 211,
- "open": 15,
- "mitigated": 196,
+ "total": 236,
+ "open": 16,
+ "mitigated": 220,
  "areas": [
   {
    "id": 0,
@@ -68,7 +68,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 1,
    "title": "Authentication & session management",
-   "total": 30,
+   "total": 32,
    "open": 1
   },
   {
@@ -80,13 +80,13 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 23,
+   "total": 31,
    "open": 1
   },
   {
    "id": 4,
    "title": "Authorization engine — RBAC, hierarchy & scopes",
-   "total": 23,
+   "total": 26,
    "open": 0
   },
   {
@@ -104,25 +104,25 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "total": 15,
-   "open": 4
+   "total": 26,
+   "open": 5
   },
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
-   "total": 25,
+   "total": 26,
    "open": 4
   }
  ],
  "categories": [
   {
    "name": "Spoofing",
-   "total": 51,
+   "total": 58,
    "open": 3
   },
   {
    "name": "Tampering",
-   "total": 42,
+   "total": 49,
    "open": 1
   },
   {
@@ -132,34 +132,34 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 54,
+   "total": 57,
    "open": 7
   },
   {
    "name": "Denial of service",
-   "total": 20,
+   "total": 22,
    "open": 2
   },
   {
    "name": "Elevation of privilege",
-   "total": 39,
-   "open": 2
+   "total": 45,
+   "open": 3
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 27,
+   "total": 28,
    "open": 1
   },
   {
    "name": "High",
-   "total": 98,
-   "open": 7
+   "total": 113,
+   "open": 8
   },
   {
    "name": "Medium",
-   "total": 79,
+   "total": 88,
    "open": 6
   },
   {
@@ -247,7 +247,17 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "diagramId": 7,
    "area": "Deployment & platform (Kubernetes)",
    "element": "Secrets (Vault / K8s Secrets / ConfigMap)",
-   "residualRisk": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since H-4 it CHECKS rather than merely advises: just vault-status queries sys/capabilities-self and reports the capabilities the token in hand actually holds on AXIAM's KV path, flagging anything beyond read — and a root token as what it is — with --strict to make it a failure in a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists."
+   "residualRisk": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since H-4 it CHECKS rather than merely advises: just vault-status queries sys/capabilities-self and reports the capabilities the token in hand actually holds on AXIAM's KV path, flagging anything beyond read — and a root token as what it is — with --strict to make it a failure in a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists. Since 1.0.0-beta10 the token is no longer strictly read-only: it holds `read` on the startup path and `create`/`update` on `secret/data/axiam/ca-keys/*`, from the one policy file `docker/vault/axiam-policy.hcl`, and `just vault-status` reports missing capabilities as well as excess ones (T-232)."
+  },
+  {
+   "number": 216,
+   "title": "The unseal key sits on the same disk as the sealed data",
+   "category": "Elevation of privilege",
+   "severity": "High",
+   "diagramId": 7,
+   "area": "Deployment & platform (Kubernetes)",
+   "element": "Secrets (Vault / K8s Secrets / ConfigMap)",
+   "residualRisk": "Narrowed, not closed. `prod-up` now writes the read-only `axiam` policy from `docs/deployment/vault.md` §5.4 and issues a **scoped, periodic token** for the server, refusing to fall back to root if that fails; seeding keeps its own short-lived credential, because the seeding token and the serving token were never the same thing. Both the Compose stack and `k8s/vault/statefulset.yml` move from the `file` backend to **Raft**, which has a consistent backup story (`vault operator raft snapshot save`) and a migration path to three nodes that does not require a re-seed — a re-seed changes the OPAQUE setup key, i.e. a password reset for every user in every tenant. What remains **open** is auto-unseal, which cannot be closed from inside AXIAM: every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option whatever the hardware. `docs/deployment/vault.md` §5.3 and the Pi runbook §7.1 give the honest option table — GCP Cloud KMS at roughly $0.06 per key per month is the cheapest real answer — and state plainly that a deployment which configures none of them needs a human with three shares after every restart and is not production. A script that unseals from shares kept on the machine is explicitly **not** offered as an alternative: it removes the seal rather than automating it, and is strictly worse than Shamir because the shares are now in the one place an attacker already has. Two amendments since: the server's token is no longer strictly read-only — it holds `create`/`update` on the CA-key prefix, from the one policy file (T-232) — and the seeder that runs after unseal can no longer mistake a refused read for an empty Vault and mint fresh keys over the live ones (T-231). Vault itself runs unprivileged: the prod Compose stack chowns the Raft volume in a one-shot init container rather than running the process that holds every secret as root. Made **checkable** in 1.0.0-beta12 (R-7), the way H-4 made T-180's token scope checkable. `just vault-status` gains a Seal section from the unauthenticated `sys/seal-status` — so it answers even when the token is wrong and even when the Vault is sealed: it names the seal type, reads `OK` for any auto-unseal type, and for `shamir` says \"no auto-unseal; every restart needs t of n key shares, not production\" with the quorum quoted from the response. A Vault sealed at that instant gets its own line, because that is a state somebody is about to fix rather than a statement about the configured seal, and conflating the two would train an operator to ignore both; a request that fails reports `unknown`, never `OK`. `--strict` fails on an unconfirmed auto-unseal, and `just vault-status` still does not pass it so the dev stack's deliberate root-token-on-Shamir does not turn every local run red. **Status stays Open**: the control is a check, not a seal — nothing in this repository can configure auto-unseal, and R-7 does not pretend otherwise."
   },
   {
    "number": 9,

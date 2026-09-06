@@ -1,4 +1,5 @@
 import type { Page, Post } from "../types";
+import { renderInline } from "../lib/render";
 
 interface NewsPostProps {
   post: Post;
@@ -94,7 +95,7 @@ export default function NewsPost({ post, go }: NewsPostProps) {
                 margin: "0 0 18px",
               }}
             >
-              {b.text}
+              {renderInline(b.text)}
             </p>
           );
         })}

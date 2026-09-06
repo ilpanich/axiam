@@ -230,6 +230,10 @@ export const INTEGRATE_PAGES: DocPage[] = [
           ],
         ],
       },
+      {
+        type: "note",
+        text: "**Rate limits follow the family, not the service name.** `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` sizes the authorization and token services; `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService` **and, since the beta11 remediation, the whole of `ReactorAdminService`** — which used to fall through to the authorization family's much larger ceiling. It defaults to **10/s per IP and deliberately does not move with the deployment posture**, because an administrative surface has no throughput case: reactor CRUD over gRPC above that rate needs the variable raised explicitly. See [Sizing your rate limits](https://github.com/ilpanich/axiam/blob/main/docs/deployment/rate-limit-sizing.md).",
+      },
       { type: "h", id: "checkaccess", text: "One CheckAccess call" },
       {
         type: "p",
@@ -297,6 +301,11 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "p",
         text: "AXIAM's own gRPC interceptor refuses `jkt`-bound tokens, because a Tonic interceptor sees neither the HTTP method nor the URI a DPoP proof is bound to. That is the server's limitation and should not be copied: an SDK guarding a real endpoint knows both, so it can and should verify the proof.",
+      },
+      { type: "h", id: "publishing", text: "Publishing gRPC outside the mesh" },
+      {
+        type: "p",
+        text: "The listener binds loopback in Compose and ClusterIP in Kubernetes. That is a default rather than a prohibition — it may be published, but only through the same edge as REST, on 443, path-matched, and as an allowlist of the services you actually want reachable. A bare port-forward is not a supported shape: without a proxy appending the real peer, a client keys its own rate-limit bucket and no setting repairs it. [Production hardening](#/docs/hardening#grpc) has the rule, the `AXIAM__GRPC__STRICT_REVOCATION` recommendation and the certificate-reload caveat.",
       },
       { type: "h", id: "codegen", text: "Generating your own stubs" },
       {

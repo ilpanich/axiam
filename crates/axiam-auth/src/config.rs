@@ -63,6 +63,55 @@ pub struct AuthConfig {
     /// OIDC issuer base URL (e.g. "https://auth.example.com"). Used for
     /// OIDC discovery endpoint URLs. Falls back to `jwt_issuer` if unset.
     pub oauth2_issuer_url: String,
+    /// Base URL of the listener that performs the mutual-TLS handshake, when
+    /// that is a different host or port from
+    /// [`effective_issuer`](Self::effective_issuer)
+    /// (`AXIAM__AUTH__OAUTH2_MTLS_BASE_URL`). Empty by default.
+    ///
+    /// Setting it makes the discovery document carry RFC 8705 §5
+    /// `mtls_endpoint_aliases`; leaving it empty omits the member entirely,
+    /// which is what the RFC asks of a server with nothing to alias.
+    ///
+    /// # Why a separate URL is needed at all
+    ///
+    /// A TLS listener decides whether to request a client certificate during
+    /// the handshake, before it has seen a single byte of HTTP. So "ask for a
+    /// certificate on `/oauth2/token` but not on `/oauth2/authorize`" is not a
+    /// thing a listener can do — the choice is per-listener, and a deployment
+    /// that wants both a browser-facing authorization endpoint and a
+    /// certificate-authenticated token endpoint has to run two of them.
+    ///
+    /// Which leaves the client with a question metadata alone could not answer
+    /// before RFC 8705 §5: the discovery document names one `token_endpoint`,
+    /// and a client doing mTLS needs the *other* one. The aliases are that
+    /// answer — the same endpoints, re-based on the host that will ask for a
+    /// certificate.
+    ///
+    /// # When to leave it empty
+    ///
+    /// Two deployments should, and neither is unusual:
+    ///
+    /// - **`client_auth = optional` on a single listener.** rustls requests a
+    ///   certificate and accepts a connection without one, so the conventional
+    ///   endpoints already serve both populations and there is no second URL
+    ///   to point at. This is the shape `scripts/e2e-mtls-native-check.sh`
+    ///   exercises.
+    /// - **`client_auth = required` on a single listener.** Every endpoint is
+    ///   already behind the handshake; an alias would name the URL the client
+    ///   is using.
+    ///
+    /// Set it only when mTLS genuinely terminates somewhere else — typically a
+    /// second proxy hostname such as `https://mtls.iam.example.com` in front of
+    /// the same server.
+    ///
+    /// # What it must be
+    ///
+    /// An absolute URL, validated where the document is built. A value that is
+    /// not parseable fails the discovery request rather than being dropped:
+    /// silently omitting the aliases would send an mTLS client to the
+    /// conventional endpoints, which is the one outcome this setting exists to
+    /// prevent.
+    pub oauth2_mtls_base_url: String,
     /// Extra browser origins this deployment will hand a **federation SSO
     /// handoff code** to (`AXIAM__AUTH__SSO_SPA_ORIGINS`; a list, set the same
     /// way as `AXIAM__SERVER__CORS_ALLOWED_ORIGINS`).
@@ -301,6 +350,23 @@ impl AuthConfig {
         }
     }
 
+    /// The mTLS listener's base URL, or `None` when this deployment has no
+    /// separate one (RFC 8705 §5).
+    ///
+    /// Trailing slashes are stripped for the same reason
+    /// [`effective_issuer`](Self::effective_issuer) strips them: the value is
+    /// concatenated with endpoint paths, and `https://host//oauth2/token` is a
+    /// different URL from the one the operator meant.
+    ///
+    /// A value that is entirely whitespace answers `None` rather than `Some("")`
+    /// — an empty alias base would produce relative alias URLs, which RFC 8705
+    /// §5 does not permit and no client would resolve the way the operator
+    /// intended.
+    pub fn mtls_base_url(&self) -> Option<&str> {
+        let trimmed = self.oauth2_mtls_base_url.trim().trim_end_matches('/');
+        (!trimmed.is_empty()).then_some(trimmed)
+    }
+
     /// CQ-B14: Parse Ed25519 keys from PEM once and cache in `Arc`.
     ///
     /// Call this once at startup after loading config from environment.
@@ -349,6 +415,10 @@ impl Default for AuthConfig {
             auth_code_lifetime_secs: 600,
             jwt_issuer: "axiam".into(),
             oauth2_issuer_url: String::new(),
+            // Empty means "no separate mTLS host", which omits
+            // `mtls_endpoint_aliases` from discovery. The correct default:
+            // most deployments run one listener.
+            oauth2_mtls_base_url: String::new(),
             sso_spa_origins: Vec::new(),
             pepper: None,
             pepper_previous: None,

@@ -25,6 +25,10 @@ base64 = { workspace = true }
 hex = { workspace = true }
 utoipa = { workspace = true }
 subtle = { workspace = true }
+# RFC 8705 §5 — the `mtls_endpoint_aliases` base URL is validated as an
+# absolute URL before any alias is built from it. Already in the workspace
+# graph (axiam-api-rest, axiam-federation), so this adds no new dependency.
+url = { workspace = true }
 # X5.1 — RFC 8705 client authentication reads the subject DN and SANs out of
 # the certificate rustls already verified during the handshake.
 x509-parser = { workspace = true }

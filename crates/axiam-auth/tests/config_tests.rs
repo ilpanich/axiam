@@ -23,6 +23,25 @@ fn default_has_sane_values() {
     assert!(c.opaque_setup_key.is_none());
 }
 
+/// RFC 8705 §5. Empty means "one listener", which must answer `None` so the
+/// discovery document omits the member rather than carrying an instruction to
+/// switch to a host that does not exist.
+#[test]
+fn mtls_base_url_is_none_unless_a_real_host_is_configured() {
+    let mut c = AuthConfig::default();
+    assert_eq!(c.mtls_base_url(), None, "the default is one listener");
+
+    for blank in ["", "   ", "\t\n", "///"] {
+        c.oauth2_mtls_base_url = blank.into();
+        assert_eq!(c.mtls_base_url(), None, "{blank:?} names no host");
+    }
+
+    // Trailing slashes are stripped for the same reason `effective_issuer`
+    // strips them: the value is concatenated with an endpoint path.
+    c.oauth2_mtls_base_url = "  https://mtls.example.com///  ".into();
+    assert_eq!(c.mtls_base_url(), Some("https://mtls.example.com"));
+}
+
 #[test]
 fn effective_issuer_falls_back_to_jwt_issuer() {
     let mut c = AuthConfig {

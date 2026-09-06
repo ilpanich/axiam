@@ -257,6 +257,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "https://iam.acme.dev",
           ],
           [
+            "AXIAM__AUTH__OAUTH2_MTLS_BASE_URL",
+            "Base URL of the listener that performs the mutual-TLS handshake, when that is a different host from the issuer. Publishes RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document. Leave unset on a single-listener deployment — including one running `client_auth = optional`, where the conventional endpoints already serve both populations.",
+            "https://mtls.iam.acme.dev",
+          ],
+          [
             "AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS",
             "Cache-Control max-age on the JWKS endpoint, in seconds.",
             "300",

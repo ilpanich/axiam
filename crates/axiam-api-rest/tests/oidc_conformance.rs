@@ -231,6 +231,101 @@ async fn discovery_doc_has_all_required_fields() {
 }
 
 // ---------------------------------------------------------------------------
+// RFC 8705 §5 — mtls_endpoint_aliases, end to end through the handler
+// ---------------------------------------------------------------------------
+
+/// The shipped topology is one listener, so the default document must carry no
+/// aliases at all. A present member is an instruction to a conforming client to
+/// stop using the top-level endpoints — emitting one by accident would break
+/// every mTLS client against a host that is not there.
+#[actix_rt::test]
+async fn discovery_omits_mtls_aliases_when_no_mtls_host_is_configured() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let _user_id = create_admin_user(&db, tenant_id).await;
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/.well-known/openid-configuration")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let doc: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        doc.get("mtls_endpoint_aliases").is_none(),
+        "the key must be absent, not null: {doc}"
+    );
+}
+
+#[actix_rt::test]
+async fn discovery_publishes_mtls_aliases_when_a_host_is_configured() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = AuthConfig {
+        oauth2_mtls_base_url: "https://mtls.localhost".into(),
+        ..test_auth_config()
+    };
+    let _user_id = create_admin_user(&db, tenant_id).await;
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/.well-known/openid-configuration")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let doc: serde_json::Value = test::read_body_json(resp).await;
+    let aliases = &doc["mtls_endpoint_aliases"];
+
+    assert_eq!(
+        aliases["token_endpoint"],
+        "https://mtls.localhost/oauth2/token"
+    );
+    assert_eq!(
+        aliases["introspection_endpoint"],
+        "https://mtls.localhost/oauth2/introspect"
+    );
+    assert_eq!(
+        aliases["pushed_authorization_request_endpoint"],
+        "https://mtls.localhost/oauth2/par"
+    );
+
+    // RFC 8705 §5 aliases the endpoints; it does not move the issuer, and OIDC
+    // Core §2 needs the issuer to keep matching every token's `iss`.
+    assert_eq!(doc["issuer"], "https://localhost");
+    assert_eq!(doc["token_endpoint"], "https://localhost/oauth2/token");
+    // Front-channel and public endpoints stay off the mTLS host.
+    assert!(aliases.get("authorization_endpoint").is_none());
+    assert!(aliases.get("jwks_uri").is_none());
+}
+
+/// A configured-but-broken alias base must not degrade into a document that
+/// silently sends an mTLS client to the conventional endpoints.
+#[actix_rt::test]
+async fn discovery_fails_closed_on_an_unusable_mtls_base_url() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = AuthConfig {
+        oauth2_mtls_base_url: "mtls.localhost".into(), // no scheme
+        ..test_auth_config()
+    };
+    let _user_id = create_admin_user(&db, tenant_id).await;
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/.well-known/openid-configuration")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        500,
+        "a misconfigured alias base must fail the request, not drop the aliases"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // OIDC Discovery §3 — "none" must be absent from signing alg list
 // ---------------------------------------------------------------------------
 

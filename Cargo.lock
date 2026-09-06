@@ -1139,6 +1139,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "url",
  "utoipa",
  "uuid",
  "x509-parser 0.18.1",

@@ -333,6 +333,68 @@ allowed; on the device path it was allowed and is now opt-in. See
 
 ---
 
+## Telling clients where the mTLS host is (RFC 8705 §5)
+
+A TLS listener decides whether to ask for a client certificate during the
+handshake — before it has seen a byte of HTTP. "Request one on `/oauth2/token`
+but not on `/oauth2/authorize`" is therefore not a thing one listener can do.
+A deployment that wants a browser-facing authorization endpoint *and* a
+certificate-authenticated token endpoint runs two listeners, which leaves the
+client with a question the discovery document could not answer: it names one
+`token_endpoint`, and an mTLS client needs the other one.
+
+`mtls_endpoint_aliases` is that answer. Set:
+
+```
+AXIAM__AUTH__OAUTH2_MTLS_BASE_URL=https://mtls.iam.example.com
+```
+
+and `/.well-known/openid-configuration` gains:
+
+```json
+"mtls_endpoint_aliases": {
+  "token_endpoint":                        "https://mtls.iam.example.com/oauth2/token",
+  "userinfo_endpoint":                     "https://mtls.iam.example.com/oauth2/userinfo",
+  "revocation_endpoint":                   "https://mtls.iam.example.com/oauth2/revoke",
+  "introspection_endpoint":                "https://mtls.iam.example.com/oauth2/introspect",
+  "device_authorization_endpoint":         "https://mtls.iam.example.com/oauth2/device_authorization",
+  "pushed_authorization_request_endpoint": "https://mtls.iam.example.com/oauth2/par"
+}
+```
+
+A conforming client doing mTLS then uses those in preference to the top-level
+entries of the same name.
+
+### Most deployments should leave this unset
+
+The member is **absent** by default, and absence is correct for both
+single-listener shapes:
+
+- **`client_auth = optional`.** rustls requests a certificate and accepts a
+  connection without one, so the conventional endpoints already serve both
+  populations. This is what `scripts/e2e-mtls-native-check.sh` exercises and
+  what most AXIAM deployments run.
+- **`client_auth = required`.** Everything is already behind the handshake; an
+  alias would name the URL the client is on.
+
+Set it only when mTLS genuinely terminates somewhere else — typically a second
+proxy hostname in front of the same server.
+
+### Three things not to get wrong
+
+- **Six endpoints are aliased, and only six.** `authorization_endpoint` and
+  `end_session_endpoint` are front-channel — sending a browser to an mTLS host
+  raises a native certificate-chooser dialog most users cannot answer — and
+  `jwks_uri` is public key material that gains nothing from a handshake.
+- **The `issuer` does not move.** It is an identifier, not an endpoint, and
+  OIDC Core §2 requires it to match every token's `iss` exactly. A token minted
+  at the alias `token_endpoint` still carries the issuer.
+- **A malformed value fails the discovery request with `500`, loudly.** It does
+  not fall back to publishing no aliases: that would send mTLS clients to the
+  conventional endpoints, which is the exact outcome the setting exists to
+  prevent, and a client cannot distinguish it from a deployment that has no
+  mTLS host. The server log names the variable.
+
 ## Certificate-bound access tokens (RFC 8705 §3)
 
 Set `tls_client_certificate_bound_access_tokens: true` and tokens issued to that

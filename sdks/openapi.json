@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta12",
-    "x-axiam-spec-digest": "sha256:aa7f6014aa76d0e452641217aa999dcd3726e7b05cd05fb5967103e06d846825"
+    "x-axiam-spec-digest": "sha256:a5de1d5bc9d934a001d85e24e6de5bb85d98aefaba950a23cec39f3408815d5f"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -19,7 +19,7 @@
           "oidc"
         ],
         "summary": "`GET /.well-known/openid-configuration` -- OIDC Discovery document.",
-        "description": "Returns the OpenID Provider metadata per OpenID Connect Discovery 1.0.\nThe issuer URL is taken from `AuthConfig::oauth2_issuer_url` when set,\nfalling back to `AuthConfig::jwt_issuer` otherwise.",
+        "description": "Returns the OpenID Provider metadata per OpenID Connect Discovery 1.0.\nThe issuer URL is taken from `AuthConfig::oauth2_issuer_url` when set,\nfalling back to `AuthConfig::jwt_issuer` otherwise.\n\nRFC 8705 §5 `mtls_endpoint_aliases` is included when — and only when —\n`AuthConfig::oauth2_mtls_base_url` names a separate mutual-TLS host.",
         "operationId": "discovery",
         "responses": {
           "200": {
@@ -14608,6 +14608,44 @@
           }
         }
       },
+      "MtlsEndpointAliases": {
+        "type": "object",
+        "description": "RFC 8705 §5 `mtls_endpoint_aliases` — the endpoints re-based on the host\nthat performs the mutual-TLS handshake.\n\nPresent only when the deployment configured a separate mTLS host\n(`AXIAM__AUTH__OAUTH2_MTLS_BASE_URL`); a client doing mTLS MUST prefer an\nalias over the top-level endpoint of the same name.",
+        "required": [
+          "token_endpoint",
+          "userinfo_endpoint",
+          "revocation_endpoint",
+          "introspection_endpoint",
+          "device_authorization_endpoint",
+          "pushed_authorization_request_endpoint"
+        ],
+        "properties": {
+          "device_authorization_endpoint": {
+            "type": "string",
+            "description": "RFC 8628 §3.1 — authenticates the client."
+          },
+          "introspection_endpoint": {
+            "type": "string",
+            "description": "RFC 7662 §2.1 — authenticates the caller."
+          },
+          "pushed_authorization_request_endpoint": {
+            "type": "string",
+            "description": "RFC 9126 §2 — authenticates the client."
+          },
+          "revocation_endpoint": {
+            "type": "string",
+            "description": "RFC 7009 §2.1 — authenticates the client."
+          },
+          "token_endpoint": {
+            "type": "string",
+            "description": "RFC 8705 §2 and §3 — client authentication and the mint of a\ncertificate-bound token."
+          },
+          "userinfo_endpoint": {
+            "type": "string",
+            "description": "OIDC Core §5.3, reached with an access token that may carry `cnf`."
+          }
+        }
+      },
       "MtlsTrustAnchorResponse": {
         "type": "object",
         "description": "The acknowledgement, which is mostly about the restart.",
@@ -15255,6 +15293,17 @@
           },
           "jwks_uri": {
             "type": "string"
+          },
+          "mtls_endpoint_aliases": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MtlsEndpointAliases",
+                "description": "RFC 8705 §5 — the mTLS-specific endpoint URLs, when this deployment\nterminates mutual TLS somewhere other than the issuer's own host.\nAbsent (not `null`) when it does not."
+              }
+            ]
           },
           "pushed_authorization_request_endpoint": {
             "type": "string",

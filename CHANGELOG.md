@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Publish RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document
+
+  AXIAM implemented both halves of RFC 8705 — §2 mutual-TLS client
+  authentication and §3 certificate-bound access tokens — but published no §5
+  metadata, so a deployment that terminates mTLS on a separate host had no way
+  to tell clients where that host was. Client configuration had to be passed out
+  of band, which is the problem discovery exists to solve.
+
+  Setting `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` now adds an `mtls_endpoint_aliases`
+  object naming the six endpoints where reaching the server over mTLS is
+  meaningful: `token`, `userinfo`, `revocation`, `introspection`,
+  `device_authorization` and `pushed_authorization_request`. Each is the
+  top-level endpoint of the same name re-based on the mTLS host — both are
+  derived from one path, so they cannot drift apart.
+
+  `authorization_endpoint`, `end_session_endpoint` and `jwks_uri` are
+  deliberately not aliased: the first two are front-channel, where the server
+  authenticates the user rather than the client and a browser prompted for a
+  client certificate raises a chooser dialog most users cannot answer, and the
+  third is public key material that gains nothing from a handshake. The `issuer`
+  does not move either — it is an identifier, and OIDC Core §2 requires it to
+  match every token's `iss` exactly.
+
+  **Absent by default, and absence is correct.** A present member instructs a
+  conforming client to switch hosts, so a single-listener deployment must emit
+  none — including one running `client_auth = optional`, where the conventional
+  endpoints already serve certificate and non-certificate clients alike. The
+  field is omitted rather than serialised as `null`.
+
+  A configured-but-unparseable value fails the discovery request with `500`
+  rather than quietly dropping the aliases. Dropping them would route mTLS
+  clients to the conventional endpoints — the one outcome the setting exists to
+  prevent — and would be indistinguishable, from the client's side, from a
+  deployment that has no mTLS host at all.
+
+  SDK contract 1.40 adds §21.3 rule 2, normative for the §21 client role only:
+  an SDK making a call over mTLS must prefer an alias over the top-level entry.
+  The change is additive and server-side — every existing SDK keeps working
+  unchanged against every existing deployment, because no deployment publishes
+  the member until an operator configures it.
+
 ## [1.0.0-beta12] - 2026-09-06
 
 ### Added

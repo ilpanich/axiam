@@ -936,6 +936,9 @@ pub async fn introspect<C: Connection + Clone>(
 /// Returns the OpenID Provider metadata per OpenID Connect Discovery 1.0.
 /// The issuer URL is taken from `AuthConfig::oauth2_issuer_url` when set,
 /// falling back to `AuthConfig::jwt_issuer` otherwise.
+///
+/// RFC 8705 §5 `mtls_endpoint_aliases` is included when — and only when —
+/// `AuthConfig::oauth2_mtls_base_url` names a separate mutual-TLS host.
 #[utoipa::path(
     get,
     path = "/.well-known/openid-configuration",
@@ -958,7 +961,28 @@ pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
                 .into(),
         });
     }
-    let doc = build_discovery_document(issuer);
+    // A misconfigured mTLS base URL fails the request rather than dropping the
+    // aliases. Serving the document without them would tell an mTLS client the
+    // conventional endpoints are the ones to use — a silent downgrade to
+    // exactly the topology RFC 8705 §5 exists to steer it away from — and it
+    // would look, from the client's side, indistinguishable from a deployment
+    // that has no mTLS host at all.
+    let doc = match build_discovery_document(issuer, auth_config.mtls_base_url()) {
+        Ok(doc) => doc,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "AXIAM__AUTH__OAUTH2_MTLS_BASE_URL is set but unusable; refusing to serve a \
+                 discovery document without its RFC 8705 §5 mtls_endpoint_aliases"
+            );
+            return HttpResponse::InternalServerError().json(OAuth2ErrorResponse {
+                error: "server_error".into(),
+                error_description: "mTLS endpoint alias base URL is not configured as a \
+                    valid URL"
+                    .into(),
+            });
+        }
+    };
     HttpResponse::Ok().json(doc)
 }
 

@@ -503,6 +503,11 @@ use crate::handlers;
         handlers::uma::ResourceSet,
         // OIDC
         axiam_oauth2::oidc::OidcDiscoveryDocument,
+        // RFC 8705 §5. Registered explicitly because it is reachable only as an
+        // optional field of the document above, and utoipa emits a `$ref` to a
+        // component it was never told to generate — the spec would validate as
+        // JSON and dangle for every generator the eleven SDKs run.
+        axiam_oauth2::oidc::MtlsEndpointAliases,
         axiam_oauth2::oidc::JwksDocument,
         axiam_oauth2::oidc::Jwk,
         axiam_oauth2::oidc::UserInfoResponse,

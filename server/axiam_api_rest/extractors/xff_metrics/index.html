@@ -1,0 +1,40 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Visibility for a `TRUSTED_HOPS` misconfiguration (R-4, narrows T-212/T-233)."><title>axiam_api_rest::extractors::xff_metrics - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module xff_metrics</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.0.0-beta12</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module xff_<wbr>metrics</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-this-exists" title="Why this exists">Why this exists</a></li><li><a href="#why-a-counter-and-not-a-metrics-crate" title="Why a counter and not a metrics crate">Why a counter and not a metrics crate</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>api_<wbr>rest::<wbr>extractors</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_rest</a>::<wbr><a href="../index.html">extractors</a></div><h1>Module <span>xff_<wbr>metrics</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_rest/extractors/xff_metrics.rs.html#1-160">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Visibility for a <code>TRUSTED_HOPS</code> misconfiguration (R-4, narrows T-212/T-233).</p>
+<h2 id="why-this-exists"><a class="doc-anchor" href="#why-this-exists">§</a>Why this exists</h2>
+<p>Both rate-limit key extractors fall through to the peer address when
+<code>trusted_hops &gt;= hops.len()</code> — an <code>X-Forwarded-For</code> header that cannot be
+trusted is ignored entirely, rather than indexed into. That fallback is
+<strong>correct</strong> and must stay: it is what stops a client rotating a single-hop
+XFF to mint a fresh bucket per request (SECHRD-03 / D-01d).</p>
+<p>What was wrong is that it happened <strong>silently</strong>. That silence is exactly how
+the off-by-one T-212 describes went unnoticed: with <code>trusted_hops</code> one too
+high, every client keyed to the proxy’s address, the whole deployment shared
+one bucket, and nothing in any log said so. The failure looks like “the rate
+limit is mysteriously strict”, which is the kind of thing an operator raises
+the limit to fix.</p>
+<p>So the fallback now leaves two traces:</p>
+<ul>
+<li>a <strong>once-per-process</strong> <code>WARN</code> naming the hop count seen, the <code>trusted_hops</code>
+in force and the rule (<code>proxies − 1</code>), so the first request that hits it
+explains itself in the log an operator is already reading;</li>
+<li>a counter, so a dashboard can show that every request is keying on the
+peer rather than on the client.</li>
+</ul>
+<p>The <code>WARN</code> is once per process on purpose. The condition fires on <em>every</em>
+request under a misconfiguration, so one line per request would be a log
+flood proportional to traffic — and the second line adds nothing the first
+did not say.</p>
+<h2 id="why-a-counter-and-not-a-metrics-crate"><a class="doc-anchor" href="#why-a-counter-and-not-a-metrics-crate">§</a>Why a counter and not a metrics crate</h2>
+<p>This workspace has no metrics facade. <code>axiam_db::metrics</code> and
+<code>axiam_amqp::reactor::metrics</code> are the pattern: a process-wide relaxed
+atomic, readable from tests and from a future <code>/metrics</code> endpoint, with the
+Prometheus name it will be exported under written down beside it. A second
+convention here would leave this boundary measurable by different means than
+everything around it.</p>
+<p>The metric is one series with a <code>protocol</code> label:
+<code>axiam_rate_limit_xff_discarded_total{protocol="rest"}</code> here, and
+<code>{protocol="grpc"}</code> from the identical counter in
+<code>axiam_api_grpc::middleware::rate_limit</code>. The two crates are siblings —
+neither may depend on the other — so the label is expressed as two counters
+that an exporter renders as one labelled series.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.xff_discarded.html" title="fn axiam_api_rest::extractors::xff_metrics::xff_discarded">xff_<wbr>discarded</a></dt><dd>How many REST requests arrived with an <code>X-Forwarded-For</code> header that
+<code>trusted_hops</code> discarded, so the key came from the peer address instead.</dd></dl></section></div></main></body></html>

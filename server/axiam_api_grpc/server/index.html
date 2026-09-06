@@ -1,28 +1,41 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Tonic gRPC server setup."><title>axiam_api_grpc::server - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_api_grpc" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module server</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_api_grpc/index.html">axiam_<wbr>api_<wbr>grpc</a><span class="version">1.0.0-beta11</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module server</a></h2><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>api_<wbr>grpc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_api_grpc</a></div><h1>Module <span>server</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_api_grpc/server.rs.html#1-353">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Tonic gRPC server setup.</p>
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Tonic gRPC server setup."><title>axiam_api_grpc::server - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_api_grpc" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module server</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_api_grpc/index.html">axiam_<wbr>api_<wbr>grpc</a><span class="version">1.0.0-beta12</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module server</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#tls-req-15-ac-1-r-1--t-234" title="TLS (REQ-15 AC-1, R-1 / T-234)">TLS (REQ-15 AC-1, R-1 / T-234)</a></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>api_<wbr>grpc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_api_grpc</a></div><h1>Module <span>server</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_api_grpc/server.rs.html#1-465">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Tonic gRPC server setup.</p>
 <p>CQ-B20: Server builder sets message-size limits, per-connection timeout,
-and concurrency limit to prevent resource exhaustion.
-TLS (REQ-15 AC-1): When <code>AXIAM__GRPC_TLS_CERT_PATH</code> and
-<code>AXIAM__GRPC_TLS_KEY_PATH</code> env vars are set, the server is configured with
-<code>ServerTlsConfig</code>; otherwise plaintext mode is used (suitable for in-mesh
-mutual-TLS handled at the sidecar/service-mesh layer).</p>
+and concurrency limit to prevent resource exhaustion.</p>
+<h2 id="tls-req-15-ac-1-r-1--t-234"><a class="doc-anchor" href="#tls-req-15-ac-1-r-1--t-234">§</a>TLS (REQ-15 AC-1, R-1 / T-234)</h2>
+<p>This listener does <strong>not</strong> ask tonic to terminate TLS. It takes the
+already-built rustls configuration as a value — <a href="enum.GrpcTls.html" title="enum axiam_api_grpc::server::GrpcTls"><code>GrpcTls</code></a> — and does the
+handshake itself in [<code>crate::tls_incoming</code>], handing tonic an
+already-encrypted stream through <code>serve_with_incoming</code>.</p>
+<p>That indirection is the whole point of the change, and it buys two things
+<code>tonic::transport::ServerTlsConfig</code> cannot express, because it accepts
+neither a <code>rustls::ServerConfig</code> nor a certificate resolver:</p>
+<ul>
+<li><strong>the leaf can be replaced while the listener runs.</strong> The configuration
+this crate is handed carries <code>axiam-server</code>’s <code>ReloadableCertResolver</code>,
+the same instance the REST listener serves from when both listen on the
+same leaf, so one <code>SIGHUP</code> (or one hourly poll) renews both. Before this,
+the gRPC leaf was fixed at boot and a 90-day ACME certificate expired in
+place unless an operator restarted the container — the failure T-214
+fixed for REST and T-234 recorded as still open for gRPC.</li>
+<li><strong>TLS 1.3 only.</strong> The configuration is built with
+<code>with_protocol_versions(&amp;[&amp;rustls::version::TLS13])</code>, matching the REST
+posture (ASVS V9.1.2). Under <code>ServerTlsConfig</code> the crate default left
+TLS 1.2 negotiable, which is the caveat T-233 recorded.</li>
+</ul>
+<p>Who builds that configuration is not a free choice: <code>ReloadableCertResolver</code>
+lives in <code>axiam-server</code> (layer 8) and this crate is layer 6, so the value
+has to arrive from above (<code>scripts/check-crate-layering.py</code> enforces it).
+The composition root reads <code>AXIAM__GRPC_TLS_CERT_PATH</code> /
+<code>AXIAM__GRPC_TLS_KEY_PATH</code> — unchanged flat names, unchanged
+panic-on-unreadable, so a typo is still a failed boot — and passes
+<a href="enum.GrpcTls.html#variant.Rustls" title="variant axiam_api_grpc::server::GrpcTls::Rustls"><code>GrpcTls::Rustls</code></a> or <a href="enum.GrpcTls.html#variant.Plaintext" title="variant axiam_api_grpc::server::GrpcTls::Plaintext"><code>GrpcTls::Plaintext</code></a>. The <code>INFO</code>/<code>WARN</code> lines the
+Pi runbook §14.4 greps for (<code>gRPC server TLS enabled</code>,
+<code>gRPC TLS is DISABLED</code>) are still emitted from here, so which mode a
+listener came up in is still readable from this listener’s own log.</p>
 <p>D2 (benchmark plan — native gRPC TLS termination): this is the same
 mechanism the p2-tls13 native-TLS bench overlay
 (<code>benchmarks/targets/axiam/docker-compose.native-tls.yml</code>) turns on,
 pointed at the SAME server cert/key files the REST listener uses
 (<code>crates/axiam-server/src/tls.rs</code> / <code>AXIAM__SERVER__TLS__CERT_PATH</code>+
-<code>KEY_PATH</code>) so the two protocols present identical PKI material. No new
-<code>TlsConfig</code>-style struct was introduced here — the existing flat
-<code>AXIAM__GRPC_TLS_CERT_PATH</code>/<code>KEY_PATH</code> env-var pair (already shipped in
-phase 11) is reused as-is per D2’s “least invasive” guidance, rather than
-adding a parallel <code>AXIAM__GRPC__TLS__*</code> nested config surface.</p>
-<p>Caveat vs. the REST listener: <code>crates/axiam-server/src/tls.rs</code> builds a
-custom rustls <code>ServerConfig</code> restricted to TLS 1.3 only
-(<code>with_protocol_versions(&amp;[&amp;rustls::version::TLS13])</code>). Tonic 0.14’s
-<code>ServerTlsConfig</code> (see <code>tonic::transport::server::tls</code>) does not expose a
-protocol-version knob — it always builds <code>rustls::ServerConfig::builder()</code>
-with the crate’s default versions (TLS 1.2 negotiable in addition to 1.3).
-There is no way to force TLS-1.3-only through tonic’s public API without
-hand-rolling the accept loop, which is out of scope here; the gRPC
-listener is TLS 1.3-<em>capable</em> (matching REST posture) but not TLS
-1.3-<em>exclusive</em>.</p>
-</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.start_grpc_server.html" title="fn axiam_api_grpc::server::start_grpc_server">start_<wbr>grpc_<wbr>server</a></dt><dd>Start the gRPC server with all registered services.</dd></dl></section></div></main></body></html>
+<code>KEY_PATH</code>) so the two protocols present identical PKI material.</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.GrpcTls.html" title="enum axiam_api_grpc::server::GrpcTls">GrpcTls</a></dt><dd>How the gRPC listener terminates TLS, as decided by the composition root.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.start_grpc_server.html" title="fn axiam_api_grpc::server::start_grpc_server">start_<wbr>grpc_<wbr>server</a></dt><dd>Start the gRPC server with all registered services.</dd></dl></section></div></main></body></html>

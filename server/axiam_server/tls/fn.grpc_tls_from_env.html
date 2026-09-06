@@ -1,0 +1,34 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Decide, from the environment, how the gRPC listener should terminate TLS, and build the configuration for it."><title>grpc_tls_from_env in axiam_server::tls - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_server" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">grpc_tls_from_env</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_server/index.html">axiam_<wbr>server</a><span class="version">1.0.0-beta12</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">grpc_<wbr>tls_<wbr>from_<wbr>env</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-this-shares-with-the-rest-listener" title="What this shares with the REST listener">What this shares with the REST listener</a></li><li><a href="#what-it-deliberately-does-not-share" title="What it deliberately does not share">What it deliberately does not share</a></li><li><a href="#panics" title="Panics">Panics</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In axiam_<wbr>server::<wbr>tls</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_server</a>::<wbr><a href="index.html">tls</a></div><h1>Function <span class="fn">grpc_<wbr>tls_<wbr>from_<wbr>env</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_server/tls.rs.html#1125-1141">Source</a> </span></div><pre class="rust item-decl"><code>pub fn grpc_tls_from_env() -&gt; <a class="enum" href="https://doc.rust-lang.org/1.98.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;ServerConfig&gt;&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Decide, from the environment, how the gRPC listener should terminate TLS,
+and build the configuration for it.</p>
+<p>Returns <code>None</code> when neither variable is set — the shipped in-mesh posture,
+where a sidecar or a terminating proxy owns transport security. Setting only
+one of the two is treated as “off” for the same reason it always was: the
+runbook says both or neither, and half a TLS configuration is more likely a
+typo than an intention. (The typo <em>within</em> a set variable is what panics —
+see below.)</p>
+<h2 id="what-this-shares-with-the-rest-listener"><a class="doc-anchor" href="#what-this-shares-with-the-rest-listener">§</a>What this shares with the REST listener</h2>
+<p>The configuration resolves its leaf through [<code>shared_resolver</code>], so when the
+two listeners are pointed at the same cert and key — “there is no second
+certificate and there must not be”, Pi runbook §14.4 — they hold the <strong>same</strong>
+<a href="struct.ReloadableCertResolver.html" title="struct axiam_server::tls::ReloadableCertResolver"><code>ReloadableCertResolver</code></a> instance and one <code>SIGHUP</code> (or one poll tick)
+renews both. When they are pointed at different files, the gRPC pair is
+registered as a second entry and <a href="fn.reload_leaf_certificate.html" title="fn axiam_server::tls::reload_leaf_certificate"><code>reload_leaf_certificate</code></a> reloads it on
+the same triggers; what is not possible any more is a second, unreloaded
+path.</p>
+<h2 id="what-it-deliberately-does-not-share"><a class="doc-anchor" href="#what-it-deliberately-does-not-share">§</a>What it deliberately does not share</h2>
+<p>Client certificate policy. The REST listener installs a
+<a href="struct.ReloadableClientCertVerifier.html" title="struct axiam_server::tls::ReloadableClientCertVerifier"><code>ReloadableClientCertVerifier</code></a>; this one calls <code>with_no_client_auth</code>,
+which is exactly what tonic’s <code>ServerTlsConfig</code> did with no <code>client_ca_root</code>
+configured. Requesting a client certificate here would change what every
+existing in-mesh gRPC client is asked for during the handshake, which is a
+deployment decision and not part of closing T-234.</p>
+<p>Session resumption, likewise: tonic set no ticketer, and gRPC connections
+are long-lived by design, so a full handshake per <em>connection</em> is not the
+per-request cost it was for REST (B2).</p>
+<h2 id="panics"><a class="doc-anchor" href="#panics">§</a>Panics</h2>
+<p>If a variable is set but the file behind it cannot be read or does not parse
+as a certificate/key pair. T-233 rests on “a typo is a failed boot”: a
+listener that fell back to plaintext because a path was misspelled would be
+serving unencrypted traffic on a port an operator believes is TLS, and would
+say so only in a log line nobody greps until the incident.</p>
+</div></details></section></div></main></body></html>

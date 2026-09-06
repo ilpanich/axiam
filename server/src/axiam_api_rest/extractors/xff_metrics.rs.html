@@ -1,0 +1,161 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/extractors/xff_metrics.rs`."><title>xff_metrics.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/extractors/</div>xff_metrics.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Visibility for a `TRUSTED_HOPS` misconfiguration (R-4, narrows T-212/T-233).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! # Why this exists
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! Both rate-limit key extractors fall through to the peer address when
+<a href=#6 id=6 data-nosnippet>6</a>//! `trusted_hops &gt;= hops.len()` — an `X-Forwarded-For` header that cannot be
+<a href=#7 id=7 data-nosnippet>7</a>//! trusted is ignored entirely, rather than indexed into. That fallback is
+<a href=#8 id=8 data-nosnippet>8</a>//! **correct** and must stay: it is what stops a client rotating a single-hop
+<a href=#9 id=9 data-nosnippet>9</a>//! XFF to mint a fresh bucket per request (SECHRD-03 / D-01d).
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! What was wrong is that it happened **silently**. That silence is exactly how
+<a href=#12 id=12 data-nosnippet>12</a>//! the off-by-one T-212 describes went unnoticed: with `trusted_hops` one too
+<a href=#13 id=13 data-nosnippet>13</a>//! high, every client keyed to the proxy's address, the whole deployment shared
+<a href=#14 id=14 data-nosnippet>14</a>//! one bucket, and nothing in any log said so. The failure looks like "the rate
+<a href=#15 id=15 data-nosnippet>15</a>//! limit is mysteriously strict", which is the kind of thing an operator raises
+<a href=#16 id=16 data-nosnippet>16</a>//! the limit to fix.
+<a href=#17 id=17 data-nosnippet>17</a>//!
+<a href=#18 id=18 data-nosnippet>18</a>//! So the fallback now leaves two traces:
+<a href=#19 id=19 data-nosnippet>19</a>//!
+<a href=#20 id=20 data-nosnippet>20</a>//! - a **once-per-process** `WARN` naming the hop count seen, the `trusted_hops`
+<a href=#21 id=21 data-nosnippet>21</a>//!   in force and the rule (`proxies − 1`), so the first request that hits it
+<a href=#22 id=22 data-nosnippet>22</a>//!   explains itself in the log an operator is already reading;
+<a href=#23 id=23 data-nosnippet>23</a>//! - a counter, so a dashboard can show that every request is keying on the
+<a href=#24 id=24 data-nosnippet>24</a>//!   peer rather than on the client.
+<a href=#25 id=25 data-nosnippet>25</a>//!
+<a href=#26 id=26 data-nosnippet>26</a>//! The `WARN` is once per process on purpose. The condition fires on *every*
+<a href=#27 id=27 data-nosnippet>27</a>//! request under a misconfiguration, so one line per request would be a log
+<a href=#28 id=28 data-nosnippet>28</a>//! flood proportional to traffic — and the second line adds nothing the first
+<a href=#29 id=29 data-nosnippet>29</a>//! did not say.
+<a href=#30 id=30 data-nosnippet>30</a>//!
+<a href=#31 id=31 data-nosnippet>31</a>//! # Why a counter and not a metrics crate
+<a href=#32 id=32 data-nosnippet>32</a>//!
+<a href=#33 id=33 data-nosnippet>33</a>//! This workspace has no metrics facade. `axiam_db::metrics` and
+<a href=#34 id=34 data-nosnippet>34</a>//! `axiam_amqp::reactor::metrics` are the pattern: a process-wide relaxed
+<a href=#35 id=35 data-nosnippet>35</a>//! atomic, readable from tests and from a future `/metrics` endpoint, with the
+<a href=#36 id=36 data-nosnippet>36</a>//! Prometheus name it will be exported under written down beside it. A second
+<a href=#37 id=37 data-nosnippet>37</a>//! convention here would leave this boundary measurable by different means than
+<a href=#38 id=38 data-nosnippet>38</a>//! everything around it.
+<a href=#39 id=39 data-nosnippet>39</a>//!
+<a href=#40 id=40 data-nosnippet>40</a>//! The metric is one series with a `protocol` label:
+<a href=#41 id=41 data-nosnippet>41</a>//! `axiam_rate_limit_xff_discarded_total{protocol="rest"}` here, and
+<a href=#42 id=42 data-nosnippet>42</a>//! `{protocol="grpc"}` from the identical counter in
+<a href=#43 id=43 data-nosnippet>43</a>//! `axiam_api_grpc::middleware::rate_limit`. The two crates are siblings —
+<a href=#44 id=44 data-nosnippet>44</a>//! neither may depend on the other — so the label is expressed as two counters
+<a href=#45 id=45 data-nosnippet>45</a>//! that an exporter renders as one labelled series.
+<a href=#46 id=46 data-nosnippet>46</a>
+<a href=#47 id=47 data-nosnippet>47</a></span><span class="kw">use </span>std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+<a href=#48 id=48 data-nosnippet>48</a>
+<a href=#49 id=49 data-nosnippet>49</a><span class="doccomment">/// `axiam_rate_limit_xff_discarded_total{protocol="rest"}`.
+<a href=#50 id=50 data-nosnippet>50</a></span><span class="kw">static </span>XFF_DISCARDED: AtomicU64 = AtomicU64::new(<span class="number">0</span>);
+<a href=#51 id=51 data-nosnippet>51</a>
+<a href=#52 id=52 data-nosnippet>52</a><span class="doccomment">/// Whether the explanatory `WARN` has already been emitted this process.
+<a href=#53 id=53 data-nosnippet>53</a></span><span class="kw">static </span>WARNED: AtomicBool = AtomicBool::new(<span class="bool-val">false</span>);
+<a href=#54 id=54 data-nosnippet>54</a>
+<a href=#55 id=55 data-nosnippet>55</a><span class="doccomment">/// How many REST requests arrived with an `X-Forwarded-For` header that
+<a href=#56 id=56 data-nosnippet>56</a>/// `trusted_hops` discarded, so the key came from the peer address instead.
+<a href=#57 id=57 data-nosnippet>57</a>///
+<a href=#58 id=58 data-nosnippet>58</a>/// Metric name: `axiam_rate_limit_xff_discarded_total{protocol="rest"}`.
+<a href=#59 id=59 data-nosnippet>59</a>///
+<a href=#60 id=60 data-nosnippet>60</a>/// **A non-zero value is not automatically a fault.** It is a fault when it
+<a href=#61 id=61 data-nosnippet>61</a>/// tracks total request volume: that means the header is present on every
+<a href=#62 id=62 data-nosnippet>62</a>/// request and trusted on none, i.e. `trusted_hops` is too high for this
+<a href=#63 id=63 data-nosnippet>63</a>/// deployment's proxy count and every client shares one bucket. A handful,
+<a href=#64 id=64 data-nosnippet>64</a>/// against a much larger request count, is a few clients sending their own XFF
+<a href=#65 id=65 data-nosnippet>65</a>/// to a server that correctly ignores it.
+<a href=#66 id=66 data-nosnippet>66</a></span><span class="kw">pub fn </span>xff_discarded() -&gt; u64 {
+<a href=#67 id=67 data-nosnippet>67</a>    XFF_DISCARDED.load(Ordering::Relaxed)
+<a href=#68 id=68 data-nosnippet>68</a>}
+<a href=#69 id=69 data-nosnippet>69</a>
+<a href=#70 id=70 data-nosnippet>70</a><span class="doccomment">/// Record that a present `X-Forwarded-For` header was discarded because
+<a href=#71 id=71 data-nosnippet>71</a>/// `trusted_hops` exceeded the hops available, and explain it once.
+<a href=#72 id=72 data-nosnippet>72</a>///
+<a href=#73 id=73 data-nosnippet>73</a>/// Called only on that path — a request with **no** header does not come
+<a href=#74 id=74 data-nosnippet>74</a>/// through here, because a client with no proxy in front of it is not a
+<a href=#75 id=75 data-nosnippet>75</a>/// misconfiguration and counting it would bury the signal.
+<a href=#76 id=76 data-nosnippet>76</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>record_discarded_xff(hops_seen: usize, trusted_hops: usize) {
+<a href=#77 id=77 data-nosnippet>77</a>    XFF_DISCARDED.fetch_add(<span class="number">1</span>, Ordering::Relaxed);
+<a href=#78 id=78 data-nosnippet>78</a>
+<a href=#79 id=79 data-nosnippet>79</a>    <span class="kw">if </span>!WARNED.swap(<span class="bool-val">true</span>, Ordering::Relaxed) {
+<a href=#80 id=80 data-nosnippet>80</a>        <span class="macro">tracing::warn!</span>(
+<a href=#81 id=81 data-nosnippet>81</a>            protocol = <span class="string">"rest"</span>,
+<a href=#82 id=82 data-nosnippet>82</a>            hops_seen,
+<a href=#83 id=83 data-nosnippet>83</a>            trusted_hops,
+<a href=#84 id=84 data-nosnippet>84</a>            <span class="string">"X-Forwarded-For was DISCARDED and the rate-limit key fell back to the \
+<a href=#85 id=85 data-nosnippet>85</a>             connection peer: the header carried {hops_seen} hop(s) but \
+<a href=#86 id=86 data-nosnippet>86</a>             AXIAM__RATE_LIMIT__TRUSTED_HOPS is {trusted_hops}, which trusts them all. \
+<a href=#87 id=87 data-nosnippet>87</a>             If this fires on every request, every client is sharing ONE bucket keyed \
+<a href=#88 id=88 data-nosnippet>88</a>             on the proxy's address. The rule is trusted_hops = proxies - 1 \
+<a href=#89 id=89 data-nosnippet>89</a>             (one proxy in front of the server means 0). Counted as \
+<a href=#90 id=90 data-nosnippet>90</a>             axiam_rate_limit_xff_discarded_total{{protocol=\"rest\"}}; logged once per \
+<a href=#91 id=91 data-nosnippet>91</a>             process."
+<a href=#92 id=92 data-nosnippet>92</a>        </span>);
+<a href=#93 id=93 data-nosnippet>93</a>    }
+<a href=#94 id=94 data-nosnippet>94</a>}
+<a href=#95 id=95 data-nosnippet>95</a>
+<a href=#96 id=96 data-nosnippet>96</a><span class="attr">#[cfg(test)]
+<a href=#97 id=97 data-nosnippet>97</a></span><span class="kw">mod </span>tests {
+<a href=#98 id=98 data-nosnippet>98</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#99 id=99 data-nosnippet>99</a>
+<a href=#100 id=100 data-nosnippet>100</a>    <span class="doccomment">/// Serializes the tests below.
+<a href=#101 id=101 data-nosnippet>101</a>    ///
+<a href=#102 id=102 data-nosnippet>102</a>    /// Both statics are process-global and `cargo test` runs these on threads
+<a href=#103 id=103 data-nosnippet>103</a>    /// of one process, so a test that resets them races any test reading them.
+<a href=#104 id=104 data-nosnippet>104</a>    /// The bug that produces is intermittent and looks like a real regression,
+<a href=#105 id=105 data-nosnippet>105</a>    /// which is the worst kind to leave in a suite that guards an observability
+<a href=#106 id=106 data-nosnippet>106</a>    /// signal.
+<a href=#107 id=107 data-nosnippet>107</a>    </span><span class="kw">fn </span>lock() -&gt; std::sync::MutexGuard&lt;<span class="lifetime">'static</span>, ()&gt; {
+<a href=#108 id=108 data-nosnippet>108</a>        <span class="kw">static </span>LOCK: std::sync::Mutex&lt;()&gt; = std::sync::Mutex::new(());
+<a href=#109 id=109 data-nosnippet>109</a>        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+<a href=#110 id=110 data-nosnippet>110</a>    }
+<a href=#111 id=111 data-nosnippet>111</a>
+<a href=#112 id=112 data-nosnippet>112</a>    <span class="doccomment">/// Reset both statics so a test can assert from a known point.
+<a href=#113 id=113 data-nosnippet>113</a>    </span><span class="kw">fn </span>reset() {
+<a href=#114 id=114 data-nosnippet>114</a>        XFF_DISCARDED.store(<span class="number">0</span>, Ordering::Relaxed);
+<a href=#115 id=115 data-nosnippet>115</a>        WARNED.store(<span class="bool-val">false</span>, Ordering::Relaxed);
+<a href=#116 id=116 data-nosnippet>116</a>    }
+<a href=#117 id=117 data-nosnippet>117</a>
+<a href=#118 id=118 data-nosnippet>118</a>    <span class="doccomment">/// The counter counts every discard; the `WARN` latch fires once.
+<a href=#119 id=119 data-nosnippet>119</a>    ///
+<a href=#120 id=120 data-nosnippet>120</a>    /// Both halves matter and they fail differently. A counter that only
+<a href=#121 id=121 data-nosnippet>121</a>    /// incremented on the first discard would show `1` under a misconfiguration
+<a href=#122 id=122 data-nosnippet>122</a>    /// that is dropping the header on every request — the exact opposite of the
+<a href=#123 id=123 data-nosnippet>123</a>    /// signal R-4 exists to give, which is "this number tracks request volume".
+<a href=#124 id=124 data-nosnippet>124</a>    /// A `WARN` that fired every time would be a log flood proportional to
+<a href=#125 id=125 data-nosnippet>125</a>    /// traffic, which is how an operator learns to filter the line out.
+<a href=#126 id=126 data-nosnippet>126</a>    </span><span class="attr">#[test]
+<a href=#127 id=127 data-nosnippet>127</a>    </span><span class="kw">fn </span>every_discard_is_counted_and_only_the_first_is_warned_about() {
+<a href=#128 id=128 data-nosnippet>128</a>        <span class="kw">let </span>_guard = lock();
+<a href=#129 id=129 data-nosnippet>129</a>        reset();
+<a href=#130 id=130 data-nosnippet>130</a>
+<a href=#131 id=131 data-nosnippet>131</a>        <span class="kw">for _ in </span><span class="number">0</span>..<span class="number">5 </span>{
+<a href=#132 id=132 data-nosnippet>132</a>            record_discarded_xff(<span class="number">1</span>, <span class="number">3</span>);
+<a href=#133 id=133 data-nosnippet>133</a>        }
+<a href=#134 id=134 data-nosnippet>134</a>        <span class="macro">assert_eq!</span>(
+<a href=#135 id=135 data-nosnippet>135</a>            xff_discarded(),
+<a href=#136 id=136 data-nosnippet>136</a>            <span class="number">5</span>,
+<a href=#137 id=137 data-nosnippet>137</a>            <span class="string">"the counter must track every discard, not only the first"
+<a href=#138 id=138 data-nosnippet>138</a>        </span>);
+<a href=#139 id=139 data-nosnippet>139</a>        <span class="macro">assert!</span>(
+<a href=#140 id=140 data-nosnippet>140</a>            WARNED.load(Ordering::Relaxed),
+<a href=#141 id=141 data-nosnippet>141</a>            <span class="string">"the first discard must arm the once-per-process latch"
+<a href=#142 id=142 data-nosnippet>142</a>        </span>);
+<a href=#143 id=143 data-nosnippet>143</a>    }
+<a href=#144 id=144 data-nosnippet>144</a>
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="doccomment">/// A fresh process warns again — the latch is per-process, not permanent
+<a href=#146 id=146 data-nosnippet>146</a>    /// state on disk, so a restart re-explains the misconfiguration.
+<a href=#147 id=147 data-nosnippet>147</a>    </span><span class="attr">#[test]
+<a href=#148 id=148 data-nosnippet>148</a>    </span><span class="kw">fn </span>the_warning_latch_is_per_process() {
+<a href=#149 id=149 data-nosnippet>149</a>        <span class="kw">let </span>_guard = lock();
+<a href=#150 id=150 data-nosnippet>150</a>        reset();
+<a href=#151 id=151 data-nosnippet>151</a>        <span class="macro">assert!</span>(!WARNED.load(Ordering::Relaxed));
+<a href=#152 id=152 data-nosnippet>152</a>        record_discarded_xff(<span class="number">2</span>, <span class="number">4</span>);
+<a href=#153 id=153 data-nosnippet>153</a>        <span class="macro">assert!</span>(WARNED.load(Ordering::Relaxed));
+<a href=#154 id=154 data-nosnippet>154</a>        reset();
+<a href=#155 id=155 data-nosnippet>155</a>        <span class="macro">assert!</span>(
+<a href=#156 id=156 data-nosnippet>156</a>            !WARNED.load(Ordering::Relaxed),
+<a href=#157 id=157 data-nosnippet>157</a>            <span class="string">"a new process must be able to explain itself again"
+<a href=#158 id=158 data-nosnippet>158</a>        </span>);
+<a href=#159 id=159 data-nosnippet>159</a>    }
+<a href=#160 id=160 data-nosnippet>160</a>}
+</code></pre></div></section></main></body></html>

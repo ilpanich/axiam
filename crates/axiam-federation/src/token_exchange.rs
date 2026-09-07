@@ -479,6 +479,11 @@ where
                             email_verified: None,
                             name: None,
                             nonce: None,
+                            // X7.2: token exchange (RFC 8693) is not an
+                            // interactive authentication and issues no
+                            // session, so there is no authentication instant
+                            // to carry.
+                            auth_time: None,
                         },
                     )
                     .await

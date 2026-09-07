@@ -539,6 +539,7 @@ pub(crate) async fn mint_handoff_and_redirect<C: Connection + Clone>(
     tenant_id: Uuid,
     user: &axiam_core::models::user::User,
     spa_redirect_uri: &str,
+    upstream_auth_time: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     // Checked again here, not only at login start: this is the single point
     // every handoff passes through, and a state row written before the check
@@ -558,6 +559,11 @@ pub(crate) async fn mint_handoff_and_redirect<C: Connection + Clone>(
         user_id: user.id,
         redirect_uri: spa_redirect_uri.to_string(),
         expires_at: chrono::Utc::now() + chrono::Duration::seconds(SSO_HANDOFF_TTL_SECS),
+        // X7.2 — recorded here rather than at redemption. The session is
+        // created on the *next* request, by a handler that never saw the
+        // assertion; without this the provider's authentication instant would
+        // be replaced by AXIAM's clock a minute later.
+        authenticated_at: upstream_auth_time,
     };
     state.federation.sso_handoff_code_repo.insert(&row).await?;
 
@@ -649,7 +655,18 @@ pub async fn sso_handoff_public<C: Connection + Clone>(
     // The `login.post_auth` gate already fired when the code was minted — the
     // moment the IdP verified the credentials. Firing it again here would ask
     // a reactor to adjudicate the same sign-in twice.
-    super::federation::issue_sso_session(&state, row.tenant_id, &user, row.redirect_uri).await
+    super::federation::issue_sso_session(
+        &state,
+        row.tenant_id,
+        &user,
+        row.redirect_uri,
+        // Recorded when the code was minted, one redirect ago. `None` (a
+        // provider that asserted no instant, or a row written before schema
+        // v55) falls back to the redemption moment, which is at most the
+        // 60-second handoff window later.
+        row.authenticated_at,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -838,6 +855,10 @@ pub async fn oauth2_callback_public<C: Connection + Clone>(
         login_state.tenant_id,
         &result.user,
         login_state.redirect_uri,
+        // A plain OAuth2 provider issues no ID token and therefore asserts no
+        // authentication instant; the fallback is this moment, which is when
+        // AXIAM verified the provider's answer.
+        result.upstream_auth_time,
     )
     .await
 }
@@ -940,6 +961,10 @@ pub async fn oidc_form_callback_public<C: Connection + Clone>(
         login_state.tenant_id,
         &result.user,
         &login_state.redirect_uri,
+        // X7.2 — the ID token's `auth_time`, carried onto the handoff row so
+        // that the session issued one redirect later is still dated by the
+        // provider.
+        result.upstream_auth_time,
     )
     .await
 }
@@ -1068,6 +1093,8 @@ pub async fn saml_acs_form_public<C: Connection + Clone>(
         login_state.tenant_id,
         &callback_result.user,
         &login_state.redirect_uri,
+        // X7.2 — the assertion's `AuthnInstant`, carried for the same reason.
+        callback_result.upstream_auth_time,
     )
     .await
 }

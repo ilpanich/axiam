@@ -30,6 +30,10 @@ struct SsoHandoffCodeRow {
     user_id: String,
     redirect_uri: String,
     expires_at: DateTime<Utc>,
+    /// X7.2 — see [`SsoHandoffCode::authenticated_at`]. Optional because
+    /// schema v55 does not backfill; a pre-v55 row falls back at redemption.
+    #[surreal(default)]
+    authenticated_at: Option<DateTime<Utc>>,
 }
 
 /// SurrealDB implementation of the SSO handoff-code repository.
@@ -59,7 +63,8 @@ impl<C: Connection> SsoHandoffCodeRepository for SurrealSsoHandoffCodeRepository
                  tenant_id = $tenant_id, \
                  user_id = $user_id, \
                  redirect_uri = $redirect_uri, \
-                 expires_at = $expires_at",
+                 expires_at = $expires_at, \
+                 authenticated_at = $authenticated_at",
             )
             .bind(("id", row_id))
             .bind(("code_hash", row.code_hash.clone()))
@@ -67,6 +72,7 @@ impl<C: Connection> SsoHandoffCodeRepository for SurrealSsoHandoffCodeRepository
             .bind(("user_id", row.user_id.to_string()))
             .bind(("redirect_uri", row.redirect_uri.clone()))
             .bind(("expires_at", row.expires_at))
+            .bind(("authenticated_at", row.authenticated_at))
             .await
             .map_err(DbError::from)?;
 
@@ -92,7 +98,8 @@ impl<C: Connection> SsoHandoffCodeRepository for SurrealSsoHandoffCodeRepository
             .current()
             .query(
                 "BEGIN TRANSACTION; \
-                 LET $row = (SELECT code_hash, tenant_id, user_id, redirect_uri, expires_at \
+                 LET $row = (SELECT code_hash, tenant_id, user_id, redirect_uri, expires_at, \
+                             authenticated_at \
                              FROM sso_handoff_code \
                              WHERE code_hash = $code_hash LIMIT 1); \
                  DELETE sso_handoff_code WHERE code_hash = $code_hash; \
@@ -130,6 +137,7 @@ impl<C: Connection> SsoHandoffCodeRepository for SurrealSsoHandoffCodeRepository
             user_id,
             redirect_uri: row.redirect_uri,
             expires_at: row.expires_at,
+            authenticated_at: row.authenticated_at,
         }))
     }
 

@@ -91,6 +91,33 @@ PAR (RFC 9126 §1) made unnecessary and that FAPI 2.0 does not ask for.
 | 33 | A genuine PAR handle is untouched by that classification | RFC 9126 §2.2 | Pass | `…::t12_3_a_par_handle_is_not_a_request_object` |
 | 34 | `request_parameter_supported: false` is published; `request_uri_parameter_supported` is **omitted** (its default `true` is truthful for PAR handles) | Discovery §3 | Pass | `oidc.rs::discovery_tells_the_truth_about_request_objects_and_claims` |
 
+## OpenID Connect Core 1.0 — session evidence (X7.2, wave W2)
+
+This wave records **when and how** an end user authenticated, and emits none of
+it. `auth_time`, `acr` and `amr` are now storable, snapshottable and
+mintable — and the gate that decides who receives them
+(`fapi::emits_session_evidence`) answers *no* for every client, including one
+an operator has already registered with `authn_request_params: honour`. Row 25
+above says the same thing from the request side; rows 40–46 say it from the
+token side, and add the properties that make the record worth having when the
+honour lane (W4) opens.
+
+The reason to land the record before the claim is that a record can only be
+made at the moment it is true. `session.created_at` cannot stand in for
+`auth_time` because refresh rotation writes a new session row on every refresh
+(row 42), and a code's evidence cannot be looked up at redemption because by
+then the session it came from may be gone (row 43).
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 40 | An ID token issued to any client registered today carries exactly the members it carried before X7.2: no `auth_time`, no `acr`, no `amr`, and no `null` placeholder for any of them | Core §2 | Not emitted (by design, invariant 4) | `oauth2_flow_test.rs::t2_6_an_ignore_lane_client_gets_the_same_id_token_though_the_session_now_has_evidence`; `token.rs::an_id_token_with_no_evidence_has_exactly_todays_claim_set` |
+| 41 | No client is on the emitting lane — not `standard`, not `fapi2`, and not one registered `authn_request_params: honour` | Core §2 | Emitted for nobody (W4 opens the lane) | `fapi.rs::session_evidence_is_emitted_for_nobody` |
+| 42 | Refresh rotation **copies** `authenticated_at` and `amr` to the session it creates rather than restamping them, so a session that is never re-authenticated never reports itself as younger | Core §12.2 | Pass | `session_evidence_rotation_test.rs::refresh_rotation_preserves_the_authentication_event` |
+| 43 | The authorization code snapshots the session's evidence at issuance, with the session's instant and not the code's | Core §3.1.3.3 | Pass | `oauth2_flow_test.rs::t2_6_…` (asserts `auth_time` equals the session's, three hours old) |
+| 44 | A federated login is dated by the **upstream** provider — OIDC `auth_time`, SAML `AuthnInstant`, carried across the SSO handoff hop — and only falls back to AXIAM's clock when the provider asserted no instant | Core §2 | Pass | `session.rs::upstream_evidence_prefers_the_upstream_instant`; `handlers/federation.rs::issue_sso_session` |
+| 45 | `amr` records what was actually verified: `pwd` alone for a password login, `pwd otp mfa` for TOTP, `pwd hwk mfa` for a security key behind a password, `hwk user` for a usernameless passkey (whose ceremony requires user verification), `fed` for a federated sign-in | RFC 8176 §2 | Pass | `session_evidence_rotation_test.rs` (password); the five call sites in `service.rs`, `webauthn.rs`, `federation.rs` |
+| 46 | A session row written before schema v55 reads back with `authenticated_at = created_at` and an empty `amr` — the strict direction in both cases, since neither can make a session look fresher or stronger than it is | — | Pass | `repository/session.rs::decode_evidence` + its tests; `schema.rs::schema_v55_adds_only_optional_columns_and_backfills_nothing` |
+
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
 
 | # | Behaviour | Spec Ref | Status | Evidence |

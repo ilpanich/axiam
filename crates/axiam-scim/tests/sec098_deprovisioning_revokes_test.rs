@@ -193,6 +193,8 @@ async fn give_live_credentials(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: U
             ip_address: None,
             user_agent: None,
             expires_at: chrono::Utc::now() + chrono::Duration::days(7),
+            authenticated_at: chrono::Utc::now(),
+            amr: vec![],
         })
         .await
         .expect("create session");

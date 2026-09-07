@@ -549,6 +549,41 @@ pub fn enforce_authorization_request(
     Ok(())
 }
 
+/// Whether this client's ID tokens carry session evidence (X7.2, plan §4.3).
+///
+/// **False for every client, and that is the wave's whole promise.** The
+/// evidence — `auth_time`, `acr`, `amr` — is now recorded on the session, and
+/// snapshotted onto the authorization code, and shaped as an
+/// [`axiam_auth::token::IdTokenEvidence`] the mint sites accept. What does not
+/// exist yet is anybody to give it to: emitting the claims is the honour lane,
+/// and the honour lane is a later wave.
+///
+/// It is a function rather than a literal `false` at the two mint sites for
+/// three reasons:
+///
+/// 1. **One decision, one place.** The code-exchange and refresh paths must
+///    agree, because OIDC Core §12.2 requires a refreshed ID token's
+///    `auth_time` to equal the original's. Two literals are two places for
+///    that to drift.
+/// 2. **It is a lane decision**, and this module is where the lane decisions
+///    live — the same two-layer mechanism, and the reason X7.1's gates were
+///    not given a module of their own.
+/// 3. **It is testable now.** The tests below pin it closed for every
+///    combination of profile and mode, `authn_request_params: honour`
+///    included, so "emitted for nobody" is a property with a failing test
+///    behind it rather than a sentence in a commit message.
+///
+/// Opening the lane means returning `client.authn_request_params.is_honour()`
+/// here — a `fapi2` client can never reach that, because both layers of the
+/// gate above already refuse it that mode.
+pub fn emits_session_evidence(client: &OAuth2Client) -> bool {
+    // Named and consumed rather than elided, so this reads as "the decision
+    // takes the client and answers no" instead of a stub with an unused
+    // parameter.
+    let _ = client;
+    false
+}
+
 /// How long a client stays quiet after one "parameters ignored" warning.
 ///
 /// The event is per authorization request, so an unthrottled log line would be
@@ -1564,5 +1599,37 @@ mod tests {
         let c = fapi_client();
         assert!(enforce_authorization_request(&c, Some(PKCE), &no_params()).is_ok());
         assert_eq!(validate_registration(&c), Ok(()));
+    }
+
+    /// **X7.2, the wave's central claim**: no client receives session
+    /// evidence — not a `standard` one, not a `fapi2` one, and not one an
+    /// operator has already moved to `authn_request_params: honour`.
+    ///
+    /// The honour case is the one worth stating out loud. That field has been
+    /// registrable since X7.1, so a deployment can already hold a client that
+    /// says `honour`; this wave still gives it nothing, because *emitting* the
+    /// claims is a decision the honour lane makes and the honour lane does not
+    /// exist yet. When it does, this test is the one that must change, and
+    /// changing it is how the change gets noticed.
+    #[test]
+    fn session_evidence_is_emitted_for_nobody() {
+        for mode in [
+            AuthnRequestParamsMode::Ignore,
+            AuthnRequestParamsMode::Honour,
+        ] {
+            let mut standard = base_client();
+            standard.authn_request_params = mode;
+            assert!(
+                !emits_session_evidence(&standard),
+                "a standard client with {mode:?} must receive no session evidence in this wave"
+            );
+
+            let mut fapi = fapi_client();
+            fapi.authn_request_params = mode;
+            assert!(
+                !emits_session_evidence(&fapi),
+                "a fapi2 client with {mode:?} must receive no session evidence, ever"
+            );
+        }
     }
 }

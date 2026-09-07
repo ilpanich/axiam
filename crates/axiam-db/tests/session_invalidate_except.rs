@@ -90,6 +90,8 @@ async fn create_session(
         ip_address: None,
         user_agent: None,
         expires_at: Utc::now() + Duration::hours(1),
+        authenticated_at: Utc::now(),
+        amr: vec![],
     })
     .await
     .unwrap()

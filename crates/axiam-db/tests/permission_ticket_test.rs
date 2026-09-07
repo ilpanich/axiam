@@ -570,6 +570,9 @@ mod single_use_serialisation {
                 code_challenge_method: None,
                 nonce: None,
                 session_id: None,
+                auth_time: None,
+                acr: None,
+                amr: vec![],
                 expires_at: Utc::now() + Duration::seconds(60),
             })
             .await
@@ -629,6 +632,9 @@ mod single_use_serialisation {
             code_challenge_method: None,
             nonce: None,
             session_id: None,
+            auth_time: None,
+            acr: None,
+            amr: vec![],
             expires_at: Utc::now() + Duration::seconds(60),
         })
         .await

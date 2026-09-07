@@ -349,6 +349,8 @@ async fn export_includes_real_session_metadata() {
             ip_address: Some("10.0.0.42".into()),
             user_agent: Some("test-agent/1.0".into()),
             expires_at: Utc::now() + chrono::Duration::hours(1),
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap();

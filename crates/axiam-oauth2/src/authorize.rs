@@ -2,6 +2,7 @@
 
 use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::CreateAuthorizationCode;
+use axiam_core::models::session::Amr;
 use axiam_core::repository::{AuthorizationCodeRepository, OAuth2ClientRepository};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -54,6 +55,34 @@ pub struct AuthorizeRequest {
     /// buys is that the refusal is never redirected to a URI the request
     /// itself supplied.
     pub request_object: Option<RequestObject>,
+    /// X7.2 — the authentication behind [`Self::session_id`], as it stood when
+    /// this request arrived (plan §4.3).
+    ///
+    /// Resolved by the handler, which owns the session repository, and
+    /// snapshotted onto the authorization code below. It is a snapshot and not
+    /// a join because the session may be gone by the time the code is
+    /// redeemed — refresh rotation replaces the row — and evidence that cannot
+    /// be resolved at redemption is evidence that quietly becomes `None`.
+    ///
+    /// Empty when the session could not be read at all. That is the strict
+    /// direction and never an error: an authorization request must not start
+    /// failing because of a column this wave added.
+    pub session_evidence: SessionEvidence,
+}
+
+/// The authentication evidence snapshotted onto an authorization code.
+///
+/// A distinct type from [`axiam_core::models::session::AuthenticationEvidence`]
+/// (which is an *input* to session creation, and whose `authenticated_at` is
+/// therefore not optional) because here the absence of evidence is a real and
+/// expected state: a session row this build cannot read, or a grant with no
+/// browser session behind it at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionEvidence {
+    /// When the end user authenticated, from `session.authenticated_at`.
+    pub auth_time: Option<chrono::DateTime<Utc>>,
+    /// The methods that authentication used.
+    pub amr: Vec<Amr>,
 }
 
 /// Which form of request object arrived (X7 G12, plan §4.10).
@@ -258,6 +287,15 @@ where
                 code_challenge_method: req.code_challenge_method,
                 nonce: req.nonce,
                 session_id: req.session_id,
+                // X7.2: snapshotted here, at issuance, because this is the
+                // last moment the session behind the code is known to exist.
+                auth_time: req.session_evidence.auth_time,
+                // Derived from the session by `acr_for`, which is the honour
+                // lane's and does not exist yet: no client can request an ACR
+                // and no token can carry one, so recording a value here would
+                // be recording a guess.
+                acr: None,
+                amr: req.session_evidence.amr,
                 expires_at,
             })
             .await
@@ -434,6 +472,9 @@ mod tests {
                 code_challenge_method: input.code_challenge_method,
                 nonce: input.nonce,
                 session_id: None,
+                auth_time: input.auth_time,
+                acr: input.acr,
+                amr: input.amr,
                 expires_at: input.expires_at,
                 used: false,
                 created_at: Utc::now(),
@@ -604,6 +645,7 @@ mod tests {
             via_par: false,
             authn_params: AuthnRequestParams::default(),
             request_object: None,
+            session_evidence: SessionEvidence::default(),
         }
     }
 

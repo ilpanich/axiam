@@ -1174,6 +1174,7 @@ async fn a_handoff_code_buys_exactly_one_session() {
         user_id,
         redirect_uri: "https://spa.example.test/dashboard".into(),
         expires_at: chrono::Utc::now() + chrono::Duration::seconds(SSO_HANDOFF_TTL_SECS),
+        authenticated_at: None,
     })
     .await
     .unwrap();

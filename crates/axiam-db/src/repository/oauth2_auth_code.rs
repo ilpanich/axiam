@@ -40,6 +40,7 @@
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{AuthorizationCode, CreateAuthorizationCode};
+use axiam_core::models::session::Amr;
 use axiam_core::repository::AuthorizationCodeRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -57,7 +58,7 @@ use crate::helpers::{CountRow, is_transaction_conflict, take_first_or_not_found}
 /// relying on how the deserializer treats an unexpected key.
 const CONSUME_FIELDS: &str = "meta::id(id) AS record_id, tenant_id, client_id, user_id, \
      code_hash, redirect_uri, scopes, code_challenge, code_challenge_method, nonce, \
-     session_id, expires_at, used, created_at";
+     session_id, auth_time, acr, amr, expires_at, used, created_at";
 
 /// Parse an optional stored UUID.
 ///
@@ -87,6 +88,15 @@ struct AuthCodeRow {
     nonce: Option<String>,
     #[surreal(default)]
     session_id: Option<String>,
+    /// X7.2 — the session evidence snapshotted at code issuance (plan §4.3).
+    /// `#[surreal(default)]` because a code written before schema v55 carries
+    /// none of them, and v55 does not backfill.
+    #[surreal(default)]
+    auth_time: Option<DateTime<Utc>>,
+    #[surreal(default)]
+    acr: Option<String>,
+    #[surreal(default)]
+    amr: Option<Vec<String>>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -106,6 +116,15 @@ struct AuthCodeRowWithId {
     nonce: Option<String>,
     #[surreal(default)]
     session_id: Option<String>,
+    /// X7.2 — the session evidence snapshotted at code issuance (plan §4.3).
+    /// `#[surreal(default)]` because a code written before schema v55 carries
+    /// none of them, and v55 does not backfill.
+    #[surreal(default)]
+    auth_time: Option<DateTime<Utc>>,
+    #[surreal(default)]
+    acr: Option<String>,
+    #[surreal(default)]
+    amr: Option<Vec<String>>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -131,6 +150,12 @@ impl AuthCodeRowWithId {
             code_challenge_method: self.code_challenge_method,
             nonce: self.nonce,
             session_id: parse_opt_uuid(self.session_id.as_deref())?,
+            auth_time: self.auth_time,
+            acr: self.acr,
+            amr: self
+                .amr
+                .map(|raw| Amr::decode_list(&raw))
+                .unwrap_or_default(),
             expires_at: self.expires_at,
             used: self.used,
             created_at: self.created_at,
@@ -171,6 +196,9 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
                  code_challenge_method = $code_challenge_method, \
                  nonce = $nonce, \
                  session_id = $session_id, \
+                 auth_time = $auth_time, \
+                 acr = $acr, \
+                 amr = $amr, \
                  expires_at = $expires_at, \
                  used = false",
             )
@@ -185,6 +213,9 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             .bind(("code_challenge_method", input.code_challenge_method))
             .bind(("nonce", input.nonce))
             .bind(("session_id", input.session_id.map(|id| id.to_string())))
+            .bind(("auth_time", input.auth_time))
+            .bind(("acr", input.acr))
+            .bind(("amr", Amr::encode_list(&input.amr)))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -213,6 +244,12 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             code_challenge_method: row.code_challenge_method,
             nonce: row.nonce,
             session_id: parse_opt_uuid(row.session_id.as_deref())?,
+            auth_time: row.auth_time,
+            acr: row.acr,
+            amr: row
+                .amr
+                .map(|raw| Amr::decode_list(&raw))
+                .unwrap_or_default(),
             expires_at: row.expires_at,
             used: row.used,
             created_at: row.created_at,

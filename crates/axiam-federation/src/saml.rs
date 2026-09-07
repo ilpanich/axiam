@@ -84,6 +84,14 @@ pub struct SamlAssertionClaims {
     pub name_id: String,
     /// Session index from the AuthnStatement, if present.
     pub session_index: Option<String>,
+    /// X7.2 — `AuthnStatement/@AuthnInstant`: when the IdP says it
+    /// authenticated the subject.
+    ///
+    /// Read for the same reason OIDC's `auth_time` is: an IdP replaying a
+    /// long-lived SSO session must not have that login dated by AXIAM's clock.
+    /// `None` when the assertion carries no `AuthnStatement`, which SAML 2.0
+    /// permits.
+    pub authn_instant: Option<chrono::DateTime<chrono::Utc>>,
     /// All attributes keyed by attribute name, with multiple values.
     pub attributes: HashMap<String, Vec<String>>,
 }
@@ -636,14 +644,19 @@ where
         // Apply attribute_map to resolve email and display name.
         let (email, display_name) = apply_attribute_map(&claims, &config.attribute_map);
 
-        self.provision_or_link_user(
-            requesting_tenant_id,
-            config_id,
-            &claims.name_id,
-            email.as_deref(),
-            display_name.as_deref(),
-        )
-        .await
+        // X7.2 — attached where the assertion is still in hand, exactly as the
+        // OIDC path attaches `auth_time`.
+        let mut result = self
+            .provision_or_link_user(
+                requesting_tenant_id,
+                config_id,
+                &claims.name_id,
+                email.as_deref(),
+                display_name.as_deref(),
+            )
+            .await?;
+        result.upstream_auth_time = claims.authn_instant;
+        Ok(result)
     }
 
     /// Generate SP metadata XML for the given federation config.
@@ -764,6 +777,8 @@ where
                     user,
                     federation_link: link,
                     newly_provisioned: false,
+                    // Set by the caller that owns the assertion.
+                    upstream_auth_time: None,
                 })
             }
             Err(AxiamError::NotFound { .. }) => {
@@ -855,6 +870,7 @@ where
             user,
             federation_link: link,
             newly_provisioned: true,
+            upstream_auth_time: None,
         })
     }
 }
@@ -1169,6 +1185,12 @@ fn extract_assertion_claims(
         .and_then(|stmts| stmts.first())
         .and_then(|stmt| stmt.session_index.clone());
 
+    let authn_instant = assertion
+        .authn_statements
+        .as_ref()
+        .and_then(|stmts| stmts.first())
+        .and_then(|stmt| stmt.authn_instant);
+
     let mut attributes: HashMap<String, Vec<String>> = HashMap::new();
     if let Some(attr_statements) = &assertion.attribute_statements {
         for statement in attr_statements {
@@ -1193,6 +1215,7 @@ fn extract_assertion_claims(
     Ok(SamlAssertionClaims {
         name_id,
         session_index,
+        authn_instant,
         attributes,
     })
 }
@@ -2669,6 +2692,13 @@ mod tests {
         let claims = extract_assertion_claims(&assertion).expect("claims should extract");
         assert_eq!(claims.name_id, "nid-value-123");
         assert_eq!(claims.session_index.as_deref(), Some("sess-42"));
+        // X7.2 — `AuthnInstant` is read from the same statement as
+        // `SessionIndex`, and is what dates a SAML-federated session rather
+        // than AXIAM's clock at the moment the ACS request arrived.
+        assert_eq!(
+            claims.authn_instant.map(|t| t.to_rfc3339()),
+            Some("2099-01-01T00:00:00+00:00".to_owned())
+        );
         assert_eq!(
             claims.attributes.get("mail").map(Vec::as_slice),
             Some(["a@b.com".to_string(), "a2@b.com".to_string()].as_slice())
@@ -2705,6 +2735,7 @@ mod tests {
             name_id: "nid".into(),
             session_index: None,
             attributes,
+            authn_instant: None,
         };
         let map = serde_json::json!({ "email": "mail", "name": "cn" });
         let (email, name) = apply_attribute_map(&claims, &map);
@@ -2720,6 +2751,7 @@ mod tests {
             name_id: "nid".into(),
             session_index: None,
             attributes,
+            authn_instant: None,
         };
         // No "name" mapping; the code then tries the "displayName" field key.
         let map = serde_json::json!({ "displayName": "displayName" });
@@ -2734,6 +2766,7 @@ mod tests {
             name_id: "nid".into(),
             session_index: None,
             attributes: HashMap::new(),
+            authn_instant: None,
         };
         let (email, name) = apply_attribute_map(&claims, &serde_json::json!({}));
         assert!(email.is_none());
@@ -3373,6 +3406,7 @@ mod claim_extraction_tests {
         SamlAssertionClaims {
             name_id: "u".into(),
             session_index: None,
+            authn_instant: None,
             attributes: pairs
                 .iter()
                 .map(|(k, vs)| {

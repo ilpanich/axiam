@@ -290,6 +290,8 @@ async fn create_and_get_session() {
             ip_address: Some("127.0.0.1".into()),
             user_agent: Some("TestAgent/1.0".into()),
             expires_at: expires,
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap();
@@ -317,6 +319,8 @@ async fn get_by_token_hash() {
             ip_address: None,
             user_agent: None,
             expires_at: expires,
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap();
@@ -342,6 +346,8 @@ async fn invalidate_session() {
             ip_address: None,
             user_agent: None,
             expires_at: expires,
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap();
@@ -366,6 +372,8 @@ async fn invalidate_user_sessions() {
             ip_address: None,
             user_agent: None,
             expires_at: expires,
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap();
@@ -401,6 +409,8 @@ async fn cleanup_expired() {
             ip_address: None,
             user_agent: None,
             expires_at: past,
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap();
@@ -414,6 +424,8 @@ async fn cleanup_expired() {
             ip_address: None,
             user_agent: None,
             expires_at: future,
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap();

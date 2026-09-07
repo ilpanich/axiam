@@ -1702,6 +1702,18 @@ pub struct SsoHandoffCode {
     /// SPA destination, carried through from the login state row.
     pub redirect_uri: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// X7.2 — when the *upstream* identity provider authenticated the user.
+    ///
+    /// Carried across the handoff hop because the session is created on the
+    /// next request, up to 60 seconds later, and by a handler that never saw
+    /// the assertion. Stamping the clock at redemption would date a federated
+    /// login by AXIAM's clock rather than the provider's, which is precisely
+    /// the overstatement plan §4.3 forbids.
+    ///
+    /// `None` on a row written before schema v55 (at most 60 seconds old at
+    /// any deploy) and whenever the assertion carried no authentication
+    /// instant; redemption then falls back to its own clock.
+    pub authenticated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// How long a handoff code is valid.

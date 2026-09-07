@@ -54,6 +54,59 @@ impl ClientProfile {
     }
 }
 
+/// Whether this client's authorization requests may carry OpenID Connect's
+/// authentication-request parameters, or whether they are ignored (X7.1).
+///
+/// The bundle this governs is `prompt`, `max_age`, `acr_values`, `claims`,
+/// `id_token_hint`, `login_hint`, `display`, `ui_locales` and
+/// `claims_locales`. It is **one** field rather than nine booleans for the
+/// same reason [`ClientProfile`] is one field rather than a dozen: a client
+/// that honours `max_age` but ignores `prompt=none` is not "mostly
+/// conformant", it is a client a relying party cannot reason about.
+///
+/// [`Ignore`](Self::Ignore) is the serde default and is exactly what AXIAM has
+/// always done — unknown authorization-request parameters are dropped by the
+/// query deserialiser and never reach a decision. Every row written before
+/// schema v54 therefore decodes to the behaviour it already had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthnRequestParamsMode {
+    /// Drop them, as every AXIAM client has always done.
+    #[default]
+    Ignore,
+    /// Act on them. Refused for [`ClientProfile::Fapi2`] rows at both the
+    /// registration and the request-time gate — see `axiam_oauth2::fapi`.
+    Honour,
+}
+
+impl AuthnRequestParamsMode {
+    /// The stored/wire spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ignore => "ignore",
+            Self::Honour => "honour",
+        }
+    }
+
+    /// Parse a stored/wire value. `None` for anything unrecognised — see
+    /// [`ClientProfile::from_wire`] for why this does not default. Here the
+    /// stakes run the other way round (an unknown value degrading to `Honour`
+    /// would act on parameters nobody opted into), which is the same argument
+    /// for refusing rather than guessing.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "ignore" => Some(Self::Ignore),
+            "honour" => Some(Self::Honour),
+            _ => None,
+        }
+    }
+
+    /// Whether this client opted into the bundle.
+    pub const fn is_honour(self) -> bool {
+        matches!(self, Self::Honour)
+    }
+}
+
 /// How a client proves its identity at the token endpoint (RFC 8705 §2,
 /// OIDC Core §9 naming).
 ///
@@ -288,6 +341,28 @@ pub struct OAuth2Client {
     /// of the two and is not optional.
     #[serde(default)]
     pub dpop_require_nonce: bool,
+    /// X7.1 — whether this client's authorization requests may carry the OIDC
+    /// authentication-request parameters. See [`AuthnRequestParamsMode`].
+    ///
+    /// `serde(default)` resolves rows written before schema v54 to `ignore`,
+    /// which is exactly what they were doing.
+    #[serde(default)]
+    pub authn_request_params: AuthnRequestParamsMode,
+    /// X7.3 — whether an unauthenticated authorization request from this
+    /// client may be answered with a redirect to the login page rather than
+    /// the 401 JSON body AXIAM answers today.
+    ///
+    /// Nothing reads this field in W1: the login hop it gates does not exist
+    /// yet. It is defined here so the column and its default land in one
+    /// migration alongside [`Self::authn_request_params`], and so a
+    /// registration API that will need it does not change shape twice.
+    ///
+    /// Unlike `authn_request_params` this is **not** refused on a `fapi2` row:
+    /// it relaxes nothing, it only decides how an anonymous browser is
+    /// answered, and refusing it would keep the FAPI harness's interactive
+    /// modules manual forever for no security property.
+    #[serde(default)]
+    pub browser_sso: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -392,6 +467,15 @@ impl UpdateOAuth2Client {
             || self.jwks_uri.is_some()
             || self.dpop_bound_access_tokens.is_some()
             || self.dpop_require_nonce.is_some()
+            // X7.1: flipping a client to `honour` is exactly the patch the
+            // registration gate exists to refuse on a `fapi2` row, so it must
+            // pull the stored row in for the merged validation.
+            || self.authn_request_params.is_some()
+            // `browser_sso` is not refused on any profile, but `scopes` is
+            // (X7 G8), and a patch that only edits scopes must still be
+            // validated against the row it produces.
+            || self.browser_sso.is_some()
+            || self.scopes.is_some()
     }
 }
 
@@ -453,6 +537,19 @@ impl OAuth2Client {
         if let Some(v) = update.dpop_require_nonce {
             self.dpop_require_nonce = v;
         }
+        if let Some(v) = update.authn_request_params {
+            self.authn_request_params = v;
+        }
+        if let Some(v) = update.browser_sso {
+            self.browser_sso = v;
+        }
+        // X7 G8: the sensitive-scope gate reads `scopes`, so a patch that
+        // replaces them must be validated against the list it will store —
+        // otherwise adding `address` to a `fapi2` client would be checked
+        // against the old list and waved through.
+        if let Some(ref v) = update.scopes {
+            self.scopes = v.clone();
+        }
         self
     }
 }
@@ -497,6 +594,28 @@ pub struct CreateOAuth2Client {
     /// X5.1 — see [`OAuth2Client::dpop_require_nonce`].
     #[serde(default)]
     pub dpop_require_nonce: bool,
+    /// X7.1 — whether this client's authorization requests may carry the OIDC
+    /// authentication-request parameters. See [`AuthnRequestParamsMode`].
+    ///
+    /// `serde(default)` resolves rows written before schema v54 to `ignore`,
+    /// which is exactly what they were doing.
+    #[serde(default)]
+    pub authn_request_params: AuthnRequestParamsMode,
+    /// X7.3 — whether an unauthenticated authorization request from this
+    /// client may be answered with a redirect to the login page rather than
+    /// the 401 JSON body AXIAM answers today.
+    ///
+    /// Nothing reads this field in W1: the login hop it gates does not exist
+    /// yet. It is defined here so the column and its default land in one
+    /// migration alongside [`Self::authn_request_params`], and so a
+    /// registration API that will need it does not change shape twice.
+    ///
+    /// Unlike `authn_request_params` this is **not** refused on a `fapi2` row:
+    /// it relaxes nothing, it only decides how an anonymous browser is
+    /// answered, and refusing it would keep the FAPI harness's interactive
+    /// modules manual forever for no security property.
+    #[serde(default)]
+    pub browser_sso: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -540,6 +659,10 @@ pub struct UpdateOAuth2Client {
     pub dpop_bound_access_tokens: Option<bool>,
     /// X5.1 — see [`OAuth2Client::dpop_require_nonce`].
     pub dpop_require_nonce: Option<bool>,
+    /// X7.1 — see [`OAuth2Client::authn_request_params`].
+    pub authn_request_params: Option<AuthnRequestParamsMode>,
+    /// X7.3 — see [`OAuth2Client::browser_sso`].
+    pub browser_sso: Option<bool>,
 }
 
 /// Represents a stored OAuth2 authorization code (short-lived, single-use).
@@ -737,6 +860,19 @@ pub struct PushedAuthRequest {
 }
 
 /// The authorization parameters carried by a pushed request.
+///
+/// # Why the OIDC authentication-request parameters live here too (X7.1)
+///
+/// PAR and the inline query string are the **two carriers** of one request.
+/// A parameter added to only one of them is silently lost by every client
+/// that uses the other — and for a `require_par` client, PAR is the only
+/// carrier there is. So the nine authentication-request parameters are
+/// pushed, stored and returned by `consume` exactly like the original seven,
+/// whether or not the client that pushed them is on a lane that reads them.
+///
+/// Each is `#[serde(default)]` because rows written before schema v54 carry
+/// none of them, and an absent parameter is indistinguishable from one the
+/// client never sent — which is the correct reading in both cases.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PushedAuthParams {
     pub response_type: String,
@@ -746,6 +882,33 @@ pub struct PushedAuthParams {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    /// OIDC Core §3.1.2.1 `prompt`.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// OIDC Core §3.1.2.1 `max_age`.
+    #[serde(default)]
+    pub max_age: Option<String>,
+    /// OIDC Core §3.1.2.1 `acr_values`.
+    #[serde(default)]
+    pub acr_values: Option<String>,
+    /// OIDC Core §5.5 `claims`, as the raw JSON document.
+    #[serde(default)]
+    pub claims: Option<String>,
+    /// OIDC Core §3.1.2.1 `id_token_hint`.
+    #[serde(default)]
+    pub id_token_hint: Option<String>,
+    /// OIDC Core §3.1.2.1 `login_hint`.
+    #[serde(default)]
+    pub login_hint: Option<String>,
+    /// OIDC Core §3.1.2.1 `display`.
+    #[serde(default)]
+    pub display: Option<String>,
+    /// OIDC Core §3.1.2.1 `ui_locales`.
+    #[serde(default)]
+    pub ui_locales: Option<String>,
+    /// OIDC Core §5.2 `claims_locales`.
+    #[serde(default)]
+    pub claims_locales: Option<String>,
 }
 
 /// Input for creating a pushed authorization request.
@@ -974,6 +1137,8 @@ mod tests {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1000,6 +1165,8 @@ mod tests {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
         }
     }
 
@@ -1071,6 +1238,11 @@ mod tests {
             Box::new(|u| u.jwks_uri = Some("https://a.test/jwks".into())),
             Box::new(|u| u.dpop_bound_access_tokens = Some(true)),
             Box::new(|u| u.dpop_require_nonce = Some(true)),
+            // X7.1 — both new fields, and `scopes`, which the sensitive-scope
+            // arm now reads.
+            Box::new(|u| u.authn_request_params = Some(AuthnRequestParamsMode::Honour)),
+            Box::new(|u| u.browser_sso = Some(true)),
+            Box::new(|u| u.scopes = Some(vec!["openid".into(), "address".into()])),
         ];
         for (i, set) in cases.iter().enumerate() {
             let mut u = UpdateOAuth2Client::default();
@@ -1095,6 +1267,8 @@ mod tests {
             jwks: Some("{\"keys\":[]}".into()),
             dpop_bound_access_tokens: Some(true),
             dpop_require_nonce: Some(true),
+            authn_request_params: None,
+            browser_sso: None,
             ..Default::default()
         };
         let merged = row.clone().with_update_applied(&patch);
@@ -1161,5 +1335,141 @@ mod tests {
         // validation now sees zero bindings and can refuse the update.
         assert_eq!(merged.mtls_binding_count(), 0);
         assert_eq!(merged.jwks_source_count(), 0);
+    }
+
+    // -- X7.1: the two new fields, and the pre-migration decode -----------
+
+    #[test]
+    fn authn_request_params_mode_round_trips_through_its_wire_form() {
+        for mode in [
+            AuthnRequestParamsMode::Ignore,
+            AuthnRequestParamsMode::Honour,
+        ] {
+            assert_eq!(AuthnRequestParamsMode::from_wire(mode.as_str()), Some(mode));
+        }
+        // Case and surrounding whitespace are an operator's typing, not a
+        // different policy — the same tolerance `ClientProfile` allows.
+        assert_eq!(
+            AuthnRequestParamsMode::from_wire("  HONOUR "),
+            Some(AuthnRequestParamsMode::Honour)
+        );
+    }
+
+    /// An unrecognised value must not resolve to either lane. Guessing
+    /// `Honour` would act on parameters nobody opted into; guessing `Ignore`
+    /// would hide the fact that this binary is older than the row.
+    #[test]
+    fn an_unrecognised_authn_request_params_mode_is_refused() {
+        for bad in ["", "honor", "yes", "true", "ignore-ish"] {
+            assert_eq!(
+                AuthnRequestParamsMode::from_wire(bad),
+                None,
+                "{bad:?} must not resolve to a lane"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stricter_lane_is_the_default() {
+        assert_eq!(
+            AuthnRequestParamsMode::default(),
+            AuthnRequestParamsMode::Ignore
+        );
+        assert!(!AuthnRequestParamsMode::default().is_honour());
+    }
+
+    /// **Invariant 4's compatibility half.** A client row serialised before
+    /// schema v54 carries neither new field. It must decode to exactly the
+    /// behaviour it had: parameters ignored, no login hop.
+    ///
+    /// Asserted against a JSON document with the fields *absent* rather than
+    /// against `Default`, because absence is the case that actually occurs in
+    /// a database and the one a `#[serde(default)]` that went missing would
+    /// break.
+    #[test]
+    fn a_pre_v54_client_row_decodes_to_todays_behaviour() {
+        let pre_v54 = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "tenant_id": Uuid::new_v4(),
+            "client_id": "oa_legacy",
+            "client_secret_hash": "hash",
+            "name": "a client registered before X7.1",
+            "redirect_uris": ["https://rp.example/cb"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        });
+        let c: OAuth2Client = serde_json::from_value(pre_v54).expect("a pre-v54 row must decode");
+        assert_eq!(c.authn_request_params, AuthnRequestParamsMode::Ignore);
+        assert!(!c.browser_sso);
+    }
+
+    /// The same for a pending registration: an admin API caller that has never
+    /// heard of the fields registers a client that behaves as before.
+    #[test]
+    fn a_registration_omitting_the_new_fields_gets_the_stricter_lane() {
+        let create: CreateOAuth2Client = serde_json::from_value(serde_json::json!({
+            "tenant_id": Uuid::new_v4(),
+            "name": "n",
+            "redirect_uris": ["https://rp.example/cb"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+        }))
+        .expect("a registration without the new fields must decode");
+        assert_eq!(create.authn_request_params, AuthnRequestParamsMode::Ignore);
+        assert!(!create.browser_sso);
+    }
+
+    /// A pushed request stored before schema v54 has none of the nine
+    /// parameters, and must not fail to decode because of it.
+    #[test]
+    fn a_pre_v54_pushed_request_decodes_with_no_authn_parameters() {
+        let p: PushedAuthParams = serde_json::from_value(serde_json::json!({
+            "response_type": "code",
+            "redirect_uri": "https://rp.example/cb",
+            "scope": "openid",
+            "state": null,
+            "code_challenge": null,
+            "code_challenge_method": null,
+            "nonce": null,
+        }))
+        .expect("a pre-v54 pushed request must decode");
+        assert_eq!(p.prompt, None);
+        assert_eq!(p.max_age, None);
+        assert_eq!(p.acr_values, None);
+        assert_eq!(p.claims, None);
+        assert_eq!(p.id_token_hint, None);
+        assert_eq!(p.login_hint, None);
+        assert_eq!(p.display, None);
+        assert_eq!(p.ui_locales, None);
+        assert_eq!(p.claims_locales, None);
+    }
+
+    /// The merge must carry both new fields and `scopes`, or an update
+    /// validated against the merged row would be validated against the wrong
+    /// one.
+    #[test]
+    fn with_update_applied_merges_the_new_fields() {
+        let stored = client();
+        assert_eq!(stored.authn_request_params, AuthnRequestParamsMode::Ignore);
+
+        let merged = stored.clone().with_update_applied(&UpdateOAuth2Client {
+            authn_request_params: Some(AuthnRequestParamsMode::Honour),
+            browser_sso: Some(true),
+            scopes: Some(vec!["openid".into(), "address".into()]),
+            ..Default::default()
+        });
+        assert_eq!(merged.authn_request_params, AuthnRequestParamsMode::Honour);
+        assert!(merged.browser_sso);
+        assert_eq!(merged.scopes, ["openid", "address"]);
+
+        // A patch that says nothing changes nothing.
+        let untouched = stored
+            .clone()
+            .with_update_applied(&UpdateOAuth2Client::default());
+        assert_eq!(untouched.authn_request_params, stored.authn_request_params);
+        assert_eq!(untouched.browser_sso, stored.browser_sso);
+        assert_eq!(untouched.scopes, stored.scopes);
     }
 }

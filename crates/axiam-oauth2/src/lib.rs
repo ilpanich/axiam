@@ -1,5 +1,6 @@
 //! AXIAM OAuth2 — Authorization server and OpenID Connect provider.
 
+pub mod authn_params;
 pub mod authorize;
 pub mod device;
 pub mod device_service;

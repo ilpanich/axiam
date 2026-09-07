@@ -84,6 +84,28 @@ struct PushedAuthParamsRow {
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
     nonce: Option<String>,
+    // X7.1 — the OIDC authentication-request parameters. Optional and
+    // `#[surreal(default)]` because rows pushed before schema v54 carry
+    // none of them, and an absent parameter reads correctly as one the
+    // client never sent.
+    #[surreal(default)]
+    prompt: Option<String>,
+    #[surreal(default)]
+    max_age: Option<String>,
+    #[surreal(default)]
+    acr_values: Option<String>,
+    #[surreal(default)]
+    claims: Option<String>,
+    #[surreal(default)]
+    id_token_hint: Option<String>,
+    #[surreal(default)]
+    login_hint: Option<String>,
+    #[surreal(default)]
+    display: Option<String>,
+    #[surreal(default)]
+    ui_locales: Option<String>,
+    #[surreal(default)]
+    claims_locales: Option<String>,
 }
 
 impl From<PushedAuthParams> for PushedAuthParamsRow {
@@ -96,6 +118,15 @@ impl From<PushedAuthParams> for PushedAuthParamsRow {
             code_challenge: p.code_challenge,
             code_challenge_method: p.code_challenge_method,
             nonce: p.nonce,
+            prompt: p.prompt,
+            max_age: p.max_age,
+            acr_values: p.acr_values,
+            claims: p.claims,
+            id_token_hint: p.id_token_hint,
+            login_hint: p.login_hint,
+            display: p.display,
+            ui_locales: p.ui_locales,
+            claims_locales: p.claims_locales,
         }
     }
 }
@@ -110,6 +141,15 @@ impl From<PushedAuthParamsRow> for PushedAuthParams {
             code_challenge: p.code_challenge,
             code_challenge_method: p.code_challenge_method,
             nonce: p.nonce,
+            prompt: p.prompt,
+            max_age: p.max_age,
+            acr_values: p.acr_values,
+            claims: p.claims,
+            id_token_hint: p.id_token_hint,
+            login_hint: p.login_hint,
+            display: p.display,
+            ui_locales: p.ui_locales,
+            claims_locales: p.claims_locales,
         }
     }
 }

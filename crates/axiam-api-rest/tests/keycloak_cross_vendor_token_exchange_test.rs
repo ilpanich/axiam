@@ -93,6 +93,7 @@ use axiam_auth::config::AuthConfig;
 use axiam_core::models::federation::{
     CreateFederationConfig, FederationProtocol, SubjectMapping, TokenExchangeTrust,
 };
+use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
 use axiam_core::models::oauth2_client::CreateOAuth2Client;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::{CreatePermission, PermissionEffect};
@@ -554,6 +555,8 @@ async fn setup(keycloak_user_id: Uuid) -> Fixture {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
         })
         .await
         .unwrap();

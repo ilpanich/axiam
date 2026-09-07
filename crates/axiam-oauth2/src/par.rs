@@ -76,7 +76,13 @@ pub fn hash_request_uri(raw: &str) -> String {
 }
 
 /// What a client pushes.
-#[derive(Debug, Clone)]
+///
+/// X7.1 — the nine OIDC authentication-request parameters are pushed
+/// alongside the original seven. PAR and the inline query string are two
+/// carriers of one request, and for a `require_par` client PAR is the only
+/// carrier there is: a parameter added to only one of them is silently lost by
+/// exactly the clients the FAPI profile insists on.
+#[derive(Debug, Clone, Default)]
 pub struct PushedRequest {
     pub tenant_id: Uuid,
     pub client_id: String,
@@ -87,6 +93,15 @@ pub struct PushedRequest {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    pub prompt: Option<String>,
+    pub max_age: Option<String>,
+    pub acr_values: Option<String>,
+    pub claims: Option<String>,
+    pub id_token_hint: Option<String>,
+    pub login_hint: Option<String>,
+    pub display: Option<String>,
+    pub ui_locales: Option<String>,
+    pub claims_locales: Option<String>,
 }
 
 /// What `/oauth2/par` answers with (RFC 9126 §2.2).
@@ -169,6 +184,15 @@ where
                     code_challenge: req.code_challenge,
                     code_challenge_method: req.code_challenge_method,
                     nonce: req.nonce,
+                    prompt: req.prompt,
+                    max_age: req.max_age,
+                    acr_values: req.acr_values,
+                    claims: req.claims,
+                    id_token_hint: req.id_token_hint,
+                    login_hint: req.login_hint,
+                    display: req.display,
+                    ui_locales: req.ui_locales,
+                    claims_locales: req.claims_locales,
                 },
                 expires_at,
             })

@@ -364,9 +364,55 @@ fn sign_claims<T: Serialize>(claims: &T, config: &AuthConfig) -> Result<String, 
         &owned
     };
 
-    let header = Header::new(Algorithm::EdDSA);
+    let mut header = Header::new(Algorithm::EdDSA);
+    // X7 §1.3 — name the verifying key in the header.
+    //
+    // The JWKS at `/oauth2/jwks` has always published a `kid`; the tokens
+    // signed by that key have never carried one, so every relying party has
+    // had to try the whole (one-element) set. Naming it is additive, costs a
+    // hash of the public key at issuance, and is what lets a rotation publish
+    // two keys without every RP guessing between them.
+    //
+    // Derived from the *public* key rather than configured, so the header and
+    // the JWKS cannot be configured apart. A key AXIAM cannot derive a `kid`
+    // from is not an error here: `build_jwks` will refuse it at the JWKS
+    // endpoint with a message about the PEM, and failing token issuance with
+    // the same complaint would turn a metadata problem into an outage.
+    header.kid = ed25519_jwk_kid(&config.jwt_public_key_pem);
     jsonwebtoken::encode(&header, claims, key)
         .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+}
+
+/// The `kid` of an Ed25519 public key: the first 16 hex characters (64 bits)
+/// of SHA-256 over the raw 32-byte key.
+///
+/// **The single definition of AXIAM's `kid`.** `axiam_oauth2::oidc::build_jwks`
+/// calls this rather than repeating the derivation, because a JWKS that
+/// publishes one `kid` and a token header that names another is worse than a
+/// token header with no `kid` at all — the RP would look up a key that is not
+/// there and reject a perfectly good signature.
+///
+/// `None` when the PEM is not a well-formed Ed25519 `SubjectPublicKeyInfo`
+/// (exactly 44 DER bytes: a 12-byte OID header and the 32-byte key). The
+/// caller decides what an unusable key means; for [`sign_claims`] it means an
+/// unnamed header, which is exactly what AXIAM emitted before this existed.
+pub fn ed25519_jwk_kid(public_key_pem: &str) -> Option<String> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use sha2::{Digest, Sha256};
+
+    let b64: String = public_key_pem
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
+    let der = STANDARD.decode(&b64).ok()?;
+    if der.len() != 44 {
+        return None;
+    }
+    let mut h = Sha256::new();
+    h.update(&der[12..44]);
+    Some(hex::encode(h.finalize())[..16].to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -2602,5 +2648,83 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             .expect("issues");
         let header = jsonwebtoken::decode_header(&token).expect("header decodes");
         assert_eq!(header.alg, Algorithm::EdDSA);
+    }
+
+    // -- X7 §1.3: the JWKS `kid` in the signed header ---------------------
+
+    /// Every token AXIAM signs now names the key that verifies it. The JWKS
+    /// has always published a `kid`; the tokens never carried one, so an RP
+    /// had to try the whole set. Naming it is additive and is what lets a
+    /// rotation publish two keys without the RP guessing.
+    #[test]
+    fn every_signed_token_names_its_verifying_key() {
+        let config = test_config();
+        let token = issue_access_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .unwrap();
+
+        let header = jsonwebtoken::decode_header(&token).expect("the header decodes");
+        assert_eq!(header.alg, Algorithm::EdDSA, "escalation B: EdDSA only");
+        assert_eq!(
+            header.kid.as_deref(),
+            ed25519_jwk_kid(&config.jwt_public_key_pem).as_deref(),
+            "the header's kid must be the one the JWKS publishes"
+        );
+        assert!(header.kid.is_some(), "the kid must actually be present");
+
+        // The token still verifies — a header field is additive, and the
+        // signature covers it, so getting this wrong would break every token.
+        decode_access_token(&token, &config).expect("a kid-bearing token still verifies");
+    }
+
+    /// The derivation is over the *public* key, deterministic, and 64 bits of
+    /// SHA-256 hex — the shape `build_jwks` has always published.
+    #[test]
+    fn the_kid_is_a_deterministic_digest_of_the_public_key() {
+        let (_, pub_pem) = test_keypair();
+        let a = ed25519_jwk_kid(&pub_pem).expect("a valid SPKI yields a kid");
+        let b = ed25519_jwk_kid(&pub_pem).expect("a valid SPKI yields a kid");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Whitespace and CRLF in an env-var-supplied PEM must not change it.
+        let messy = pub_pem.replace('\n', "\r\n") + "\n  ";
+        assert_eq!(ed25519_jwk_kid(&messy).as_deref(), Some(a.as_str()));
+    }
+
+    /// A key AXIAM cannot derive a `kid` from must not fail token issuance:
+    /// that would turn a metadata problem into an outage. The header simply
+    /// goes unnamed, exactly as it did before X7.
+    #[test]
+    fn an_underivable_kid_leaves_the_header_unnamed_rather_than_failing() {
+        for bad in [
+            "",
+            "not a pem",
+            "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----",
+        ] {
+            assert_eq!(ed25519_jwk_kid(bad), None, "{bad:?}");
+        }
+
+        let mut config = test_config();
+        config.jwt_public_key_pem = "not a pem".into();
+        let token = issue_access_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .expect("an unusable public key must not stop the private key signing");
+        assert_eq!(jsonwebtoken::decode_header(&token).unwrap().kid, None);
     }
 }

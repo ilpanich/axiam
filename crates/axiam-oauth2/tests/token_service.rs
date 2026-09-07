@@ -9,6 +9,7 @@ use axiam_auth::client_secret::{self, V2_PREFIX};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, generate_refresh_token, hash_refresh_token, issue_access_token};
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
 use axiam_core::models::oauth2_client::{
     AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, CreateRefreshToken,
     OAuth2Client, RefreshToken, UpdateOAuth2Client,
@@ -550,6 +551,8 @@ fn make_client(grants: &[&str], scopes: &[&str]) -> Box<OAuth2Client> {
         jwks_uri: None,
         dpop_bound_access_tokens: false,
         dpop_require_nonce: false,
+        authn_request_params: AuthnRequestParamsMode::Ignore,
+        browser_sso: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     })

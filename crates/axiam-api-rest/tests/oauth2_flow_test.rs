@@ -1779,3 +1779,416 @@ async fn an_audit_sink_problem_does_not_cost_the_failure_signal() {
         "an unattributable failure must be recorded, not dropped"
     );
 }
+
+// ---------------------------------------------------------------------------
+// X7.1 — invariant 4, as a test rather than an aspiration (plan §7, P1/P2)
+// ---------------------------------------------------------------------------
+//
+// The plan's fourth invariant is that **no client registered today changes
+// behaviour**. W1 adds nine parameters to what the authorization endpoint
+// deserialises, so the way that invariant breaks is not a refusal — it is a
+// request that used to be served one way and is now served fractionally
+// differently. These two tests are the proof, run through the real HTTP layer:
+//
+// * **P1** — a `standard`/`ignore` client (every client that exists today) is
+//   sent *every* new parameter at once and must produce the same redirect, the
+//   same token response and the same ID token as the identical flow without
+//   them.
+// * **P2** — a `fapi2` client is sent *none* of them and must be unaffected by
+//   everything this wave added. This is the property that lets FAPI
+//   conformance run #1 equal the W0 baseline.
+//
+// "Identical" means identical modulo the parts that are random or clock-driven
+// by construction: the code, the tokens, `jti`, `iat`/`exp`, and the session
+// id. Those are named explicitly below rather than compared loosely, so a
+// value that starts varying for a *new* reason fails the test.
+
+/// The nine parameters, in the query-string form a relying party sends them.
+const EVERY_AUTHN_PARAM: &str = "&prompt=login%20consent\
+     &max_age=0\
+     &acr_values=urn%3Aaxiam%3Aacr%3Amfa\
+     &claims=%7B%22id_token%22%3A%7B%22acr%22%3A%7B%22essential%22%3Atrue%7D%7D%7D\
+     &id_token_hint=ey.header.payload\
+     &login_hint=admin%40example.com\
+     &display=page\
+     &ui_locales=en-GB%20en\
+     &claims_locales=en";
+
+/// Run one authorize → token round trip and return
+/// `(location_header, token_response_body)`.
+///
+/// `extra` is appended to the authorize query string verbatim, which is how
+/// the same flow is run with and without the new parameters.
+async fn flow_with(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    user_jwt: &str,
+    tenant_id: Uuid,
+    client_id: &str,
+    client_secret: &str,
+    redirect_uri: &str,
+    extra: &str,
+) -> (String, serde_json::Value) {
+    let uri = format!(
+        "/oauth2/authorize?response_type=code&client_id={client_id}\
+         &redirect_uri={redirect_uri}&scope=openid&state=p1-state{extra}"
+    );
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&uri)
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        302,
+        "authorize must still redirect: {uri}"
+    );
+    let location = resp
+        .headers()
+        .get("Location")
+        .expect("Location header missing")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let code = url::Url::parse(&location)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.into_owned())
+        .expect("the redirect must carry a code");
+
+    let resp = do_token_exchange(
+        app,
+        tenant_id,
+        client_id,
+        client_secret,
+        &code,
+        redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "token exchange must succeed");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    (location, body)
+}
+
+/// Decode a JWT's claims without verifying it — these tests compare claim
+/// sets, and the signature is covered by `axiam-auth`'s own suite.
+fn claims_of(jwt: &str) -> serde_json::Value {
+    let payload = jwt.split('.').nth(1).expect("a JWT has three parts");
+    let bytes = URL_SAFE_NO_PAD.decode(payload).expect("base64url payload");
+    serde_json::from_slice(&bytes).expect("the payload is JSON")
+}
+
+/// Strip the members that are random or clock-driven by construction, so what
+/// remains is the part that must not change.
+fn stable_claims(mut claims: serde_json::Value) -> serde_json::Value {
+    let obj = claims.as_object_mut().expect("claims are an object");
+    for varying in ["iat", "exp", "auth_time", "jti", "nonce", "sid"] {
+        obj.remove(varying);
+    }
+    claims
+}
+
+/// Strip the query members that are random by construction from a redirect.
+fn stable_redirect(location: &str) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = url::Url::parse(location)
+        .unwrap()
+        .query_pairs()
+        .filter(|(k, _)| k != "code")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+/// **P1** — the `standard`/`ignore` golden path.
+#[actix_rt::test]
+async fn p1_a_standard_client_is_unchanged_by_every_new_parameter() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
+
+    let (bare_location, bare_tokens) = flow_with(
+        &app,
+        &user_jwt,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &redirect_uri,
+        "",
+    )
+    .await;
+    let (loaded_location, loaded_tokens) = flow_with(
+        &app,
+        &user_jwt,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &redirect_uri,
+        EVERY_AUTHN_PARAM,
+    )
+    .await;
+
+    // 1. The redirect. Same destination, same `state`, same `iss`, and no new
+    //    query member — a parameter that leaked into the response would show
+    //    up here.
+    assert_eq!(
+        stable_redirect(&bare_location),
+        stable_redirect(&loaded_location),
+        "the redirect must not change"
+    );
+
+    // 2. The token response. Same shape, same token type, same granted scope.
+    for member in ["token_type", "expires_in", "scope"] {
+        assert_eq!(
+            bare_tokens.get(member),
+            loaded_tokens.get(member),
+            "token response member {member:?} changed"
+        );
+    }
+    assert_eq!(
+        bare_tokens.as_object().unwrap().keys().collect::<Vec<_>>(),
+        loaded_tokens
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        "the token response grew or lost a member"
+    );
+
+    // 3. The ID token. The claim set is the heart of it: `auth_time`, `acr`
+    //    and `amr` must NOT appear merely because the request asked for them,
+    //    and no other claim may change either.
+    let bare_id = claims_of(bare_tokens["id_token"].as_str().expect("an ID token"));
+    let loaded_id = claims_of(loaded_tokens["id_token"].as_str().expect("an ID token"));
+    assert_eq!(
+        stable_claims(bare_id.clone()),
+        stable_claims(loaded_id.clone()),
+        "the ID token claim set must not change"
+    );
+    for claim in ["auth_time", "acr", "amr"] {
+        assert!(
+            loaded_id.get(claim).is_none(),
+            "an ignore-lane client must not receive {claim} just for asking"
+        );
+    }
+}
+
+/// **P2** — the `fapi2` golden path: a client sending none of the nine is
+/// unaffected by everything W1 added.
+///
+/// Exercised at the registration layer plus the two request-time gates rather
+/// than through a full HTTP flow, because a `fapi2` client requires PAR and
+/// mutual TLS, which this in-process harness has no listener for. The full
+/// FAPI round trip is what the conformance run covers, and the plan's promise
+/// there is that run #1 equals the W0 baseline.
+#[actix_rt::test]
+async fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
+    use axiam_core::models::oauth2_client::{
+        AuthnRequestParamsMode, ClientAuthMethod, ClientProfile,
+    };
+    use axiam_oauth2::authn_params::AuthnRequestParams;
+    use axiam_oauth2::fapi::{enforce_authorization_request, validate_registration};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // Register a complete FAPI 2.0 client through the real admin API, so the
+    // stored row is the one an operator would actually get.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "FAPI Client",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+            "profile": "fapi2",
+            "require_par": true,
+            "token_endpoint_auth_method": "tls_client_auth",
+            "tls_client_auth_san_dns": "app.example.com",
+            "tls_client_certificate_bound_access_tokens": true
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "a complete fapi2 registration must still be accepted"
+    );
+    let created: serde_json::Value = test::read_body_json(resp).await;
+
+    // Read the registration back through the CRUD API: the create response
+    // deliberately carries only the secret and the identifiers, and what this
+    // test is about is the *stored* posture.
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/api/v1/oauth2-clients/{}",
+            created["id"]
+                .as_str()
+                .expect("the created client has an id")
+        ))
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "the client must read back");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+
+    // The registration reads back with the stricter lane, without anybody
+    // having asked for it — invariant 3.
+    assert_eq!(body["profile"], "fapi2");
+    assert_eq!(body["authn_request_params"], "ignore");
+    assert_eq!(body["browser_sso"], serde_json::json!(false));
+
+    // And the request-time gate lets it straight through, exactly as before.
+    let client = axiam_core::models::oauth2_client::OAuth2Client {
+        id: Uuid::new_v4(),
+        tenant_id,
+        client_id: created["client_id"].as_str().unwrap().to_string(),
+        client_secret_hash: "hash".into(),
+        name: "FAPI Client".into(),
+        redirect_uris: vec!["https://app.example.com/callback".into()],
+        grant_types: vec!["authorization_code".into()],
+        scopes: vec!["openid".into()],
+        post_logout_redirect_uris: vec![],
+        backchannel_logout_uri: None,
+        require_par: true,
+        profile: ClientProfile::Fapi2,
+        token_endpoint_auth_method: ClientAuthMethod::TlsClientAuth,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: Some("app.example.com".into()),
+        tls_client_auth_san_uri: None,
+        self_signed_tls_client_auth_thumbprints: vec![],
+        tls_client_certificate_bound_access_tokens: true,
+        jwks: None,
+        jwks_uri: None,
+        dpop_bound_access_tokens: false,
+        dpop_require_nonce: false,
+        authn_request_params: AuthnRequestParamsMode::Ignore,
+        browser_sso: false,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    assert_eq!(validate_registration(&client), Ok(()));
+    assert!(
+        enforce_authorization_request(
+            &client,
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
+            &AuthnRequestParams::default(),
+        )
+        .is_ok(),
+        "a fapi2 client sending none of the nine must pass the gate untouched"
+    );
+}
+
+/// M1-M4's HTTP shape: a `fapi2` client that *does* send one of the five
+/// security-bearing parameters is refused with `invalid_request`, rather than
+/// being told a freshness or authentication guarantee it did not get.
+///
+/// Driven through the authorization service's own gate for the reason P2
+/// gives: a `fapi2` client needs PAR and mTLS, which this harness has no
+/// listener for. The refusal's *wire* shape is covered by the handler's
+/// existing error-response tests, which all five reach by the same path.
+#[actix_rt::test]
+async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
+    use axiam_core::models::oauth2_client::{
+        AuthnRequestParamsMode, ClientAuthMethod, ClientProfile,
+    };
+    use axiam_oauth2::authn_params::{AuthnRequestParams, RawAuthnParams};
+    use axiam_oauth2::fapi::enforce_authorization_request;
+
+    let client = axiam_core::models::oauth2_client::OAuth2Client {
+        id: Uuid::new_v4(),
+        tenant_id: Uuid::new_v4(),
+        client_id: "oa_fapi".into(),
+        client_secret_hash: "hash".into(),
+        name: "FAPI Client".into(),
+        redirect_uris: vec!["https://app.example.com/callback".into()],
+        grant_types: vec!["authorization_code".into()],
+        scopes: vec!["openid".into()],
+        post_logout_redirect_uris: vec![],
+        backchannel_logout_uri: None,
+        require_par: true,
+        profile: ClientProfile::Fapi2,
+        token_endpoint_auth_method: ClientAuthMethod::TlsClientAuth,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: Some("app.example.com".into()),
+        tls_client_auth_san_uri: None,
+        self_signed_tls_client_auth_thumbprints: vec![],
+        tls_client_certificate_bound_access_tokens: true,
+        jwks: None,
+        jwks_uri: None,
+        dpop_bound_access_tokens: false,
+        dpop_require_nonce: false,
+        authn_request_params: AuthnRequestParamsMode::Ignore,
+        browser_sso: false,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let cases: [(&str, RawAuthnParams<'_>); 5] = [
+        (
+            "prompt",
+            RawAuthnParams {
+                prompt: Some("none"),
+                ..Default::default()
+            },
+        ),
+        (
+            "max_age",
+            RawAuthnParams {
+                max_age: Some("0"),
+                ..Default::default()
+            },
+        ),
+        (
+            "acr_values",
+            RawAuthnParams {
+                acr_values: Some("urn:axiam:acr:mfa"),
+                ..Default::default()
+            },
+        ),
+        (
+            "claims",
+            RawAuthnParams {
+                claims: Some(r#"{"id_token":{"acr":{"essential":true}}}"#),
+                ..Default::default()
+            },
+        ),
+        (
+            "id_token_hint",
+            RawAuthnParams {
+                id_token_hint: Some("ey.header.payload"),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    for (name, raw) in cases {
+        let err = enforce_authorization_request(
+            &client,
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
+            &AuthnRequestParams::parse(&raw),
+        )
+        .expect_err("a fapi2 client must be refused {name}");
+        assert_eq!(err.error_code(), "invalid_request", "{name}");
+        assert!(err.to_string().contains(name), "{name} unnamed in: {err}");
+    }
+}

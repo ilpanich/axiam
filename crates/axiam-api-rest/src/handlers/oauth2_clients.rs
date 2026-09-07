@@ -2,7 +2,8 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::oauth2_client::{
-    ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client,
+    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client,
+    UpdateOAuth2Client,
 };
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -107,6 +108,28 @@ pub struct CreateOAuth2ClientRequest {
     /// `docs/security-profiles.md`.
     #[serde(default)]
     pub dpop_require_nonce: bool,
+    /// X7.1 — whether this client's authorization requests may carry the
+    /// OpenID Connect authentication-request parameters (`prompt`, `max_age`,
+    /// `acr_values`, `claims`, `id_token_hint`, `login_hint`, `display`,
+    /// `ui_locales`, `claims_locales`).
+    ///
+    /// `"ignore"` (the default) is what every AXIAM client has always done:
+    /// they are dropped and reach no decision. `"honour"` opts in, and is
+    /// **refused on a `fapi2` client** at both this gate and the authorization
+    /// endpoint — the two are different answers to the same question about
+    /// what a request from this client means.
+    #[serde(default)]
+    pub authn_request_params: AuthnRequestParamsMode,
+    /// X7.3 — whether an unauthenticated authorization request from this
+    /// client may be answered with a redirect to the login page rather than
+    /// the `401` AXIAM answers today.
+    ///
+    /// Accepted and stored, but **nothing reads it yet**: the login hop it
+    /// gates is a later wave. Unlike `authn_request_params` it is permitted on
+    /// a `fapi2` client, because it relaxes nothing — it decides only how an
+    /// anonymous browser is answered.
+    #[serde(default)]
+    pub browser_sso: bool,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -136,6 +159,10 @@ pub struct UpdateOAuth2ClientRequest {
     pub jwks_uri: Option<String>,
     pub dpop_bound_access_tokens: Option<bool>,
     pub dpop_require_nonce: Option<bool>,
+    /// X7.1 — see [`CreateOAuth2ClientRequest::authn_request_params`].
+    pub authn_request_params: Option<AuthnRequestParamsMode>,
+    /// X7.3 — see [`CreateOAuth2ClientRequest::browser_sso`].
+    pub browser_sso: Option<bool>,
 }
 
 /// OAuth2 client response -- omits client_secret_hash.
@@ -171,6 +198,12 @@ pub struct OAuth2ClientResponse {
     pub dpop_bound_access_tokens: bool,
     pub dpop_require_nonce: bool,
     pub require_par: bool,
+    /// X7.1 — echoed so an operator can audit which clients act on the OIDC
+    /// authentication-request parameters, from this endpoint rather than from
+    /// the database.
+    pub authn_request_params: AuthnRequestParamsMode,
+    /// X7.3 — echoed for the same reason.
+    pub browser_sso: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -197,6 +230,8 @@ impl From<OAuth2Client> for OAuth2ClientResponse {
             jwks_uri: c.jwks_uri,
             dpop_bound_access_tokens: c.dpop_bound_access_tokens,
             dpop_require_nonce: c.dpop_require_nonce,
+            authn_request_params: c.authn_request_params,
+            browser_sso: c.browser_sso,
             require_par: c.require_par,
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -391,6 +426,8 @@ pub async fn create<C: Connection + Clone>(
         jwks_uri: req.jwks_uri,
         dpop_bound_access_tokens: req.dpop_bound_access_tokens,
         dpop_require_nonce: req.dpop_require_nonce,
+        authn_request_params: req.authn_request_params,
+        browser_sso: req.browser_sso,
     };
 
     // X5.1 — refuse a registration that could not satisfy the profile it
@@ -573,6 +610,8 @@ pub async fn update<C: Connection + Clone>(
         jwks_uri: req.jwks_uri,
         dpop_bound_access_tokens: req.dpop_bound_access_tokens,
         dpop_require_nonce: req.dpop_require_nonce,
+        authn_request_params: req.authn_request_params,
+        browser_sso: req.browser_sso,
     };
 
     // X5.1 — validate the MERGED result, not the patch. Flipping `profile` to

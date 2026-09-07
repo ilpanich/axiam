@@ -62,11 +62,44 @@
 //! one family and sender-constraining from neither — which is the shape a
 //! half-finished migration produces and the one an operator is most likely to
 //! create by accident.
+//!
+//! # The second lane, and why its gates live here too (X7.1)
+//!
+//! AXIAM now has two profiles that answer the same question differently: FAPI
+//! 2.0, and the OpenID Connect "Basic OP" lane that reads the authentication-
+//! request parameters (`prompt`, `max_age`, `acr_values`, `claims`,
+//! `id_token_hint`, and the four display hints). Its opt-in is one per-client
+//! field, [`AuthnRequestParamsMode`], for the same reason `profile` is one
+//! field: a client that honours `max_age` but ignores `prompt=none` is not
+//! "mostly conformant", it is a client a relying party cannot reason about.
+//!
+//! Its gates are **here**, not in a module of their own, because they are the
+//! same two-layer mechanism enforcing a mutual exclusion between the two
+//! lanes, and splitting them would leave two places that each believe they
+//! decide what a `fapi2` client may send:
+//!
+//! | Constraint | Registration | Request time |
+//! |---|---|---|
+//! | `fapi2` may not say `honour` | [`FapiRegistrationError::AuthnParamsOnFapiClient`] | refused + `error!`, as the row must have been edited in the database |
+//! | `fapi2` may not send the five *security-bearing* parameters | — (they are per-request) | `invalid_request`, naming each |
+//! | `fapi2` may not register `address`/`phone` | [`FapiRegistrationError::SensitiveScopesOnFapiClient`] | (userinfo release, a later wave) |
+//!
+//! Two asymmetries in that table are deliberate. The four *cosmetic*
+//! parameters are not refused on an honest `fapi2` row — client libraries send
+//! `login_hint` by reflex, and refusing it would break working clients for no
+//! security property. And `browser_sso` is not refused on any profile: it
+//! decides how an *anonymous* browser is answered and relaxes nothing.
+//!
+//! As everywhere else in this module, all of it is a no-op for a `standard`
+//! client, which is every client registered today. That is invariant 4 of
+//! `claude_dev/basic-op-gap-plan.md`, and like the X5.1 properties above it is
+//! asserted by tests at the bottom of this file rather than hoped for.
 
 use axiam_core::models::oauth2_client::{
-    ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client,
+    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client,
 };
 
+use crate::authn_params::AuthnRequestParams;
 use crate::error::OAuth2Error;
 
 /// Why a client registration cannot satisfy the profile it asked for.
@@ -100,7 +133,29 @@ pub enum FapiRegistrationError {
     MalformedJwks { detail: String },
     /// A registered `jwks_uri` is not an absolute `https` URL.
     InsecureJwksUri { value: String },
+    /// X7.1 — a `fapi2` client asked to honour the OIDC
+    /// authentication-request parameters.
+    ///
+    /// The bundle is the Basic-OP lane's mechanism, and FAPI 2.0 clients do
+    /// not send its parameters (the FAPI conformance plans run
+    /// `openid: plain_oauth`). Permitting it on a `fapi2` row would mean a
+    /// client whose posture answers two different questions depending on
+    /// which parameter arrived.
+    AuthnParamsOnFapiClient,
+    /// X7 G8 — a `fapi2` client registered a GDPR-sensitive scope.
+    ///
+    /// `address` and `phone` release personal data AXIAM has no consent
+    /// record for on the FAPI lane, and FAPI 2.0's whole argument is that the
+    /// data a token reaches is the data the client was authorised for.
+    SensitiveScopesOnFapiClient { scopes: Vec<String> },
 }
+
+/// The scopes X7 G8 treats as GDPR-sensitive, refused on a `fapi2` row.
+///
+/// OIDC Core §5.4 defines both; each releases a category of personal data
+/// (a postal address, a telephone number) that is not derivable from anything
+/// AXIAM already discloses under `profile` or `email`.
+pub const SENSITIVE_SCOPES: [&str; 2] = ["address", "phone"];
 
 impl std::fmt::Display for FapiRegistrationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -154,6 +209,19 @@ impl std::fmt::Display for FapiRegistrationError {
                  the keys that authenticate this client, and a plaintext or relative URL makes \
                  that credential rewritable in transit"
             ),
+            Self::AuthnParamsOnFapiClient => write!(
+                f,
+                "a fapi2 client may not set authn_request_params: honour: the OpenID Connect \
+                 authentication-request parameters (prompt, max_age, acr_values, claims, \
+                 id_token_hint and the display hints) belong to the standard lane, and a \
+                 fapi2 client is refused them at the authorization endpoint as well"
+            ),
+            Self::SensitiveScopesOnFapiClient { scopes } => write!(
+                f,
+                "a fapi2 client may not register the scope(s) {}: address and phone release \
+                 personal data under a consent record the fapi2 lane does not collect",
+                scopes.join(", ")
+            ),
         }
     }
 }
@@ -206,6 +274,11 @@ pub struct RegistrationView<'a> {
     pub jwks: Option<&'a str>,
     pub jwks_uri: Option<&'a str>,
     pub dpop_bound_access_tokens: bool,
+    /// X7.1 — whether this client asked to honour the OIDC
+    /// authentication-request parameters.
+    pub authn_request_params: AuthnRequestParamsMode,
+    /// X7 G8 — the registered scopes, read only for the sensitive-scope arm.
+    pub scopes: &'a [String],
 }
 
 impl<'a> From<&'a OAuth2Client> for RegistrationView<'a> {
@@ -222,6 +295,8 @@ impl<'a> From<&'a OAuth2Client> for RegistrationView<'a> {
             jwks: c.jwks.as_deref(),
             jwks_uri: c.jwks_uri.as_deref(),
             dpop_bound_access_tokens: c.dpop_bound_access_tokens,
+            authn_request_params: c.authn_request_params,
+            scopes: &c.scopes,
         }
     }
 }
@@ -240,6 +315,8 @@ impl<'a> From<&'a CreateOAuth2Client> for RegistrationView<'a> {
             jwks: c.jwks.as_deref(),
             jwks_uri: c.jwks_uri.as_deref(),
             dpop_bound_access_tokens: c.dpop_bound_access_tokens,
+            authn_request_params: c.authn_request_params,
+            scopes: &c.scopes,
         }
     }
 }
@@ -340,6 +417,27 @@ pub fn validate_registration<'a>(
     if !reg.tls_client_certificate_bound_access_tokens && !reg.dpop_bound_access_tokens {
         return Err(FapiRegistrationError::TokensNotSenderConstrained);
     }
+    // X7.1. The Basic-OP lane's opt-in and the FAPI posture are two answers to
+    // the same question — what does an authorization request from this client
+    // mean — so a row may hold at most one of them. Refusing here rather than
+    // only at request time is the same argument the whole module rests on: a
+    // registration that could never be served is a configuration error the
+    // operator should hear about now, not one the client's users discover.
+    if reg.authn_request_params.is_honour() {
+        return Err(FapiRegistrationError::AuthnParamsOnFapiClient);
+    }
+    // X7 G8. Checked last of the bundle because it is the only arm that names
+    // values rather than a flag, and an operator fixing several problems at
+    // once is better served by hearing about the structural ones first.
+    let sensitive: Vec<String> = reg
+        .scopes
+        .iter()
+        .filter(|s| SENSITIVE_SCOPES.contains(&s.trim()))
+        .map(|s| s.trim().to_owned())
+        .collect();
+    if !sensitive.is_empty() {
+        return Err(FapiRegistrationError::SensitiveScopesOnFapiClient { scopes: sensitive });
+    }
 
     Ok(())
 }
@@ -365,27 +463,146 @@ fn is_https_absolute(uri: &str) -> bool {
     uri.len() > "https://".len() && uri[.."https://".len()].eq_ignore_ascii_case("https://")
 }
 
-/// Request-time gate on the authorization endpoint (X5.1).
+/// Request-time gate on the authorization endpoint (X5.1, X7.1).
 ///
-/// One check that `authorize` does not already make for every client: PKCE is
-/// mandatory. AXIAM requires PKCE for *public* clients (SEC-025) and accepts
-/// only `S256` from anybody, so under the FAPI profile the remaining gap is a
-/// confidential client omitting `code_challenge` entirely.
+/// Three things, in the order the plan's §3.3 sets out, all of them before any
+/// redirectable error the authorization service would otherwise raise:
 ///
-/// A no-op for a `standard` client — see the module docs.
+/// 1. **PKCE** is mandatory under the FAPI profile. AXIAM requires PKCE for
+///    *public* clients (SEC-025) and accepts only `S256` from anybody, so the
+///    remaining gap is a confidential client omitting `code_challenge`.
+/// 2. **A `fapi2` client is refused the security-bearing authentication-request
+///    parameters** (X7.1) — `prompt`, `max_age`, `acr_values`, `claims`,
+///    `id_token_hint`. Refusing rather than ignoring is the point: ignoring
+///    `max_age` tells a relying party it got a freshness guarantee it did not
+///    get, and *that* silent downgrade is what this whole gate exists to
+///    prevent. A conforming FAPI 2.0 relying party sends none of the five (the
+///    FAPI conformance plans run `openid: plain_oauth`), so no client that
+///    passes the FAPI plan today observes this.
+/// 3. **A `fapi2` row that says `honour`** cannot have passed
+///    [`validate_registration`], so it was edited in the database. Refused and
+///    logged at `error!`, mirroring [`enforce_token_request`]'s existing
+///    defence-in-depth branch.
+///
+/// The four *cosmetic* parameters (`login_hint`, `display`, `ui_locales`,
+/// `claims_locales`) are **not** refused on an honest `fapi2` row. Client
+/// libraries send `login_hint` by reflex; refusing it would break working FAPI
+/// clients for no security property, and their mechanism — a prefilled form, a
+/// locale, a layout — is reached only through a redirect the server builds on
+/// the honour lane and therefore never builds for a `fapi2` client.
+///
+/// # For a `standard` client this remains a no-op
+///
+/// Every parameter is ignored exactly as it is today, including the
+/// security-bearing five, because invariant 4 says no client registered today
+/// changes behaviour — and it outranks the general preference for the stricter
+/// reading. What is added is a `warn!`, rate-limited per client, so an operator
+/// can see which of their clients are sending parameters that would do
+/// something under `authn_request_params: honour`.
 pub fn enforce_authorization_request(
     client: &OAuth2Client,
     code_challenge: Option<&str>,
+    params: &AuthnRequestParams,
 ) -> Result<(), OAuth2Error> {
     if !client.profile.is_fapi2() {
+        // Rule 3. Nothing is refused, nothing is honoured; the request
+        // proceeds byte-for-byte as it did before X7.1 existed.
+        if !params.is_empty() && client.authn_request_params == AuthnRequestParamsMode::Ignore {
+            warn_ignored_params(client, params);
+        }
         return Ok(());
     }
+
     if code_challenge.is_none_or(str::is_empty) {
         return Err(OAuth2Error::InvalidRequest(
             "PKCE (code_challenge) is required for clients on the fapi2 profile".into(),
         ));
     }
+
+    // Rule 2. Presence is what is refused, not validity: a `fapi2` client that
+    // sent `max_age=tomorrow` is refused for having sent `max_age` at all,
+    // which is why the parse records presence separately from meaning.
+    let refused = params.security_bearing_present();
+    if !refused.is_empty() {
+        return Err(OAuth2Error::InvalidRequest(format!(
+            "the parameter(s) {} are not supported for clients on the fapi2 profile",
+            refused.join(", ")
+        )));
+    }
+
+    // Rule 3's `fapi2` half. `validate_registration` refuses this combination
+    // on create and on update, so a row holding it did not come through either.
+    if client.authn_request_params.is_honour() {
+        tracing::error!(
+            client_id = %client.client_id,
+            "a client on the fapi2 profile is registered with authn_request_params: honour; \
+             this registration cannot have passed validate_registration and the row should be \
+             investigated"
+        );
+        return Err(OAuth2Error::InvalidRequest(
+            "this client's registration is inconsistent: the fapi2 profile does not permit \
+             authn_request_params: honour"
+                .into(),
+        ));
+    }
+
     Ok(())
+}
+
+/// How long a client stays quiet after one "parameters ignored" warning.
+///
+/// The event is per authorization request, so an unthrottled log line would be
+/// emitted once per login for every relying party in a deployment that sends
+/// `login_hint` — which is most of them. Ten minutes is long enough that the
+/// line is a signal an operator notices and short enough that it reappears
+/// while they are still looking.
+const IGNORED_PARAMS_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The largest number of clients tracked for rate limiting at once.
+///
+/// The key is a `client_id`, which is server-generated and therefore bounded by
+/// the number of registered clients — but a map that only ever grows is still a
+/// slow leak in a long-lived process, and the *purpose* here is a log line.
+/// When the bound is reached the whole map is dropped: the cost of that is a
+/// duplicate warning per client, which is exactly the thing this is not very
+/// worried about.
+const IGNORED_PARAMS_WARN_MAX_TRACKED: usize = 1024;
+
+/// Emit the rate-limited "these parameters were ignored" warning (rule 3).
+///
+/// Deliberately never fails and never blocks the request: a poisoned mutex or
+/// a full table costs a log line, not a login. Extracted so the gate above
+/// reads as three rules rather than three rules and a cache.
+fn warn_ignored_params(client: &OAuth2Client, params: &AuthnRequestParams) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    static LAST_WARNED: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let table = LAST_WARNED.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let Ok(mut seen) = table.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    if let Some(last) = seen.get(&client.client_id)
+        && now.duration_since(*last) < IGNORED_PARAMS_WARN_INTERVAL
+    {
+        return;
+    }
+    if seen.len() >= IGNORED_PARAMS_WARN_MAX_TRACKED {
+        seen.clear();
+    }
+    seen.insert(client.client_id.clone(), now);
+    drop(seen);
+
+    tracing::warn!(
+        client_id = %client.client_id,
+        parameters = %params.present().join(", "),
+        "authorization request carried OpenID Connect authentication-request parameters that \
+         this client is registered to ignore (authn_request_params: ignore); the request was \
+         served exactly as before. Set authn_request_params: honour to act on them"
+    );
 }
 
 /// Request-time gate on the token endpoint (X5.1).
@@ -524,6 +741,8 @@ mod tests {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -538,6 +757,33 @@ mod tests {
         c.tls_client_auth_san_dns = Some("rp.example".into());
         c.tls_client_certificate_bound_access_tokens = true;
         c
+    }
+
+    /// A valid `S256` challenge, so a FAPI request under test fails for the
+    /// reason the test is about rather than for missing PKCE.
+    const PKCE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+    /// The bundle every request carried before X7.1: nothing.
+    fn no_params() -> AuthnRequestParams {
+        AuthnRequestParams::default()
+    }
+
+    /// Parse one named parameter, the way a request carrying only it would.
+    fn one_param(name: &str, value: &str) -> AuthnRequestParams {
+        let mut raw = crate::authn_params::RawAuthnParams::default();
+        match name {
+            "prompt" => raw.prompt = Some(value),
+            "max_age" => raw.max_age = Some(value),
+            "acr_values" => raw.acr_values = Some(value),
+            "claims" => raw.claims = Some(value),
+            "id_token_hint" => raw.id_token_hint = Some(value),
+            "login_hint" => raw.login_hint = Some(value),
+            "display" => raw.display = Some(value),
+            "ui_locales" => raw.ui_locales = Some(value),
+            "claims_locales" => raw.claims_locales = Some(value),
+            other => panic!("unknown parameter {other:?}"),
+        }
+        AuthnRequestParams::parse(&raw)
     }
 
     // -- ordinary clients are untouched ----------------------------------
@@ -556,7 +802,7 @@ mod tests {
     fn a_standard_client_needs_no_pkce_from_this_gate() {
         // SEC-025 still requires PKCE of public clients; this gate adds
         // nothing for a standard confidential client.
-        assert!(enforce_authorization_request(&base_client(), None).is_ok());
+        assert!(enforce_authorization_request(&base_client(), None, &no_params()).is_ok());
     }
 
     /// The positive regression test the whole design rests on: a client that
@@ -631,12 +877,9 @@ mod tests {
     #[test]
     fn fapi_requires_pkce_at_the_authorization_endpoint() {
         let c = fapi_client();
-        assert!(enforce_authorization_request(&c, None).is_err());
-        assert!(enforce_authorization_request(&c, Some("")).is_err());
-        assert!(
-            enforce_authorization_request(&c, Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"))
-                .is_ok()
-        );
+        assert!(enforce_authorization_request(&c, None, &no_params()).is_err());
+        assert!(enforce_authorization_request(&c, Some(""), &no_params()).is_err());
+        assert!(enforce_authorization_request(&c, Some(PKCE), &no_params()).is_ok());
     }
 
     #[test]
@@ -975,5 +1218,351 @@ mod tests {
                     | Err(FapiRegistrationError::MalformedThumbprint { .. })
             ));
         }
+    }
+
+    // -- X7.1: the profile-confusion matrix, registration halves ----------
+    //
+    // Plan §7 rows M1-M6 and M8. Every row asserts the *same* refusal on
+    // create and on update, because the update path is a different call site
+    // (`handlers::oauth2_clients` validates the merged row) and a gate that
+    // holds on one is not a gate.
+
+    /// The merged-update equivalent of `validate_registration(&create)`: what
+    /// the REST layer does at `oauth2_clients.rs`'s update handler.
+    fn validate_update(
+        stored: &OAuth2Client,
+        patch: &axiam_core::models::oauth2_client::UpdateOAuth2Client,
+    ) -> Result<(), FapiRegistrationError> {
+        let merged = stored.clone().with_update_applied(patch);
+        validate_registration(&merged)
+    }
+
+    fn patch() -> axiam_core::models::oauth2_client::UpdateOAuth2Client {
+        axiam_core::models::oauth2_client::UpdateOAuth2Client::default()
+    }
+
+    /// M1-M6 registration half, create. One field governs the whole bundle, so
+    /// one arm refuses all six mechanisms at once — which is the reason it is
+    /// one field.
+    #[test]
+    fn m1_m6_fapi_plus_honour_is_refused_at_creation() {
+        let mut c = fapi_client();
+        c.authn_request_params = AuthnRequestParamsMode::Honour;
+        assert_eq!(
+            validate_registration(&c),
+            Err(FapiRegistrationError::AuthnParamsOnFapiClient)
+        );
+    }
+
+    /// M1-M6 registration half, update. Flipping the field on a stored `fapi2`
+    /// row is a well-formed patch and a refused one.
+    #[test]
+    fn m1_m6_fapi_plus_honour_is_refused_on_update() {
+        let stored = fapi_client();
+        let mut p = patch();
+        p.authn_request_params = Some(AuthnRequestParamsMode::Honour);
+        assert_eq!(
+            validate_update(&stored, &p),
+            Err(FapiRegistrationError::AuthnParamsOnFapiClient)
+        );
+
+        // ...and the mirror image: flipping a *standard* honour client to
+        // `fapi2` is the same collision arriving from the other side, and must
+        // be refused just as firmly.
+        let mut standard_honour = base_client();
+        standard_honour.authn_request_params = AuthnRequestParamsMode::Honour;
+        standard_honour.require_par = true;
+        standard_honour.token_endpoint_auth_method = ClientAuthMethod::TlsClientAuth;
+        standard_honour.tls_client_auth_san_dns = Some("rp.example".into());
+        standard_honour.tls_client_certificate_bound_access_tokens = true;
+        let mut to_fapi = patch();
+        to_fapi.profile = Some(ClientProfile::Fapi2);
+        assert_eq!(
+            validate_update(&standard_honour, &to_fapi),
+            Err(FapiRegistrationError::AuthnParamsOnFapiClient)
+        );
+    }
+
+    /// The I4 twin of M1-M6: a `standard` client may hold either value, and
+    /// `ignore` — what every existing row decodes to — is untouched.
+    #[test]
+    fn a_standard_client_may_honour_or_ignore() {
+        for mode in [
+            AuthnRequestParamsMode::Ignore,
+            AuthnRequestParamsMode::Honour,
+        ] {
+            let mut c = base_client();
+            c.authn_request_params = mode;
+            assert_eq!(validate_registration(&c), Ok(()), "{mode:?}");
+        }
+    }
+
+    /// M8 registration half, create.
+    #[test]
+    fn m8_fapi_plus_sensitive_scopes_is_refused_at_creation() {
+        for scope in SENSITIVE_SCOPES {
+            let mut c = fapi_client();
+            c.scopes = vec!["openid".into(), scope.to_owned()];
+            assert_eq!(
+                validate_registration(&c),
+                Err(FapiRegistrationError::SensitiveScopesOnFapiClient {
+                    scopes: vec![scope.to_owned()]
+                }),
+                "scope {scope:?} must be refused on a fapi2 client"
+            );
+        }
+
+        // Both at once are both named, so an operator fixes one registration
+        // rather than discovering the second scope on the next attempt.
+        let mut both = fapi_client();
+        both.scopes = vec!["openid".into(), "address".into(), "phone".into()];
+        assert_eq!(
+            validate_registration(&both),
+            Err(FapiRegistrationError::SensitiveScopesOnFapiClient {
+                scopes: vec!["address".into(), "phone".into()]
+            })
+        );
+    }
+
+    /// M8 registration half, update. The patch replaces the scope list, so the
+    /// gate must read the merged list rather than the stored one.
+    #[test]
+    fn m8_fapi_plus_sensitive_scopes_is_refused_on_update() {
+        let stored = fapi_client();
+        let mut p = patch();
+        p.scopes = Some(vec!["openid".into(), "address".into()]);
+        assert_eq!(
+            validate_update(&stored, &p),
+            Err(FapiRegistrationError::SensitiveScopesOnFapiClient {
+                scopes: vec!["address".into()]
+            })
+        );
+    }
+
+    /// The I4 twin of M8: the scopes are ordinary on the standard lane, and a
+    /// scope that merely *contains* a sensitive name is not one.
+    #[test]
+    fn sensitive_scopes_are_ordinary_for_a_standard_client() {
+        let mut c = base_client();
+        c.scopes = vec!["openid".into(), "address".into(), "phone".into()];
+        assert_eq!(validate_registration(&c), Ok(()));
+
+        // Substring, not scope. `phone_number` is a *claim*; refusing a scope
+        // for containing the letters of another is how a gate acquires a
+        // reputation for being wrong.
+        let mut lookalike = fapi_client();
+        lookalike.scopes = vec!["openid".into(), "phone_number".into(), "addressbook".into()];
+        assert_eq!(validate_registration(&lookalike), Ok(()));
+    }
+
+    /// A patch that touches only a rename must not pay for the stored read —
+    /// but every field the gates now read must force one, or an update could
+    /// be validated against a row it is not about to write.
+    #[test]
+    fn the_new_fields_force_the_merged_validation() {
+        let mut rename = patch();
+        rename.name = Some("new name".into());
+        assert!(!rename.touches_security_profile());
+
+        let mut honour = patch();
+        honour.authn_request_params = Some(AuthnRequestParamsMode::Honour);
+        assert!(honour.touches_security_profile());
+
+        let mut scopes = patch();
+        scopes.scopes = Some(vec!["openid".into(), "address".into()]);
+        assert!(
+            scopes.touches_security_profile(),
+            "the sensitive-scope arm reads `scopes`, so a scope patch must be merged first"
+        );
+
+        let mut sso = patch();
+        sso.browser_sso = Some(true);
+        assert!(sso.touches_security_profile());
+    }
+
+    /// D2: `browser_sso` is permitted on a `fapi2` client, deliberately. It
+    /// relaxes nothing — it decides how an *anonymous* browser is answered —
+    /// and refusing it would keep the FAPI harness's interactive modules
+    /// manual forever for no security property.
+    #[test]
+    fn browser_sso_is_permitted_on_every_profile() {
+        for mut c in [base_client(), fapi_client()] {
+            c.browser_sso = true;
+            assert_eq!(
+                validate_registration(&c),
+                Ok(()),
+                "browser_sso must not be refused on {}",
+                c.profile.as_str()
+            );
+        }
+    }
+
+    // -- X7.1: the matrix, request-time halves ----------------------------
+
+    /// M1-M4 request half. The five security-bearing parameters are refused on
+    /// a `fapi2` client, one at a time, whichever it is.
+    #[test]
+    fn m1_m4_security_bearing_parameters_are_refused_for_a_fapi_client() {
+        let c = fapi_client();
+        for (name, value) in [
+            ("prompt", "none"),
+            ("prompt", "login"),
+            ("max_age", "0"),
+            ("max_age", "3600"),
+            ("acr_values", "urn:axiam:acr:mfa"),
+            ("claims", r#"{"id_token":{"acr":{"essential":true}}}"#),
+            ("id_token_hint", "ey.header.payload"),
+        ] {
+            let err = enforce_authorization_request(&c, Some(PKCE), &one_param(name, value))
+                .expect_err("{name} must be refused for a fapi2 client");
+            assert_eq!(err.error_code(), "invalid_request", "{name}");
+            assert!(
+                err.to_string().contains(name),
+                "the refusal must name {name}: {err}"
+            );
+        }
+    }
+
+    /// A `fapi2` client that sent a *malformed* security-bearing parameter is
+    /// refused for having sent it, not excused for spelling it wrongly. This
+    /// is why the parse records presence separately from meaning.
+    #[test]
+    fn a_malformed_security_bearing_parameter_is_still_refused_for_fapi() {
+        let c = fapi_client();
+        for (name, bad) in [
+            ("max_age", "tomorrow"),
+            ("prompt", "teleport"),
+            ("claims", "{not json"),
+        ] {
+            assert!(
+                enforce_authorization_request(&c, Some(PKCE), &one_param(name, bad)).is_err(),
+                "a fapi2 client sending a malformed {name} must still be refused"
+            );
+        }
+    }
+
+    /// All five at once are all named, so one refusal tells an operator the
+    /// whole story.
+    #[test]
+    fn the_refusal_names_every_offending_parameter() {
+        let params = AuthnRequestParams::parse(&crate::authn_params::RawAuthnParams {
+            prompt: Some("login"),
+            max_age: Some("60"),
+            acr_values: Some("urn:axiam:acr:mfa"),
+            claims: Some(r#"{"id_token":{"acr":{"essential":true}}}"#),
+            id_token_hint: Some("ey.hint"),
+            ..Default::default()
+        });
+        let err = enforce_authorization_request(&fapi_client(), Some(PKCE), &params)
+            .expect_err("a fapi2 client sending all five must be refused");
+        for name in ["prompt", "max_age", "acr_values", "claims", "id_token_hint"] {
+            assert!(err.to_string().contains(name), "{name} missing from: {err}");
+        }
+    }
+
+    /// M5-M6 request half. The cosmetic four are **not** refused on an honest
+    /// `fapi2` row: client libraries send `login_hint` by reflex, and refusing
+    /// it would break working FAPI clients for no security property. Their
+    /// mechanism is unreachable because the server only builds the redirect
+    /// that carries it on the honour lane.
+    #[test]
+    fn m5_m6_the_cosmetic_four_are_not_refused_for_an_honest_fapi_client() {
+        let c = fapi_client();
+        for (name, value) in [
+            ("login_hint", "ada@example.com"),
+            ("display", "page"),
+            ("ui_locales", "en-GB en"),
+            ("claims_locales", "en"),
+        ] {
+            assert!(
+                enforce_authorization_request(&c, Some(PKCE), &one_param(name, value)).is_ok(),
+                "{name} must be ignored, not refused, on an honest fapi2 row"
+            );
+        }
+    }
+
+    /// M1-M6 request half, the tampered-row case (rule 2). A `fapi2` row that
+    /// says `honour` cannot have passed `validate_registration`, so it was
+    /// edited in the database — refused even when it carries no parameter at
+    /// all, and even when the only parameter is a cosmetic one.
+    #[test]
+    fn a_fapi_row_edited_to_honour_is_refused_at_request_time() {
+        let mut c = fapi_client();
+        c.authn_request_params = AuthnRequestParamsMode::Honour;
+
+        for params in [
+            no_params(),
+            one_param("login_hint", "ada@example.com"),
+            one_param("display", "page"),
+        ] {
+            let err = enforce_authorization_request(&c, Some(PKCE), &params)
+                .expect_err("a tampered fapi2 row must be refused");
+            assert_eq!(err.error_code(), "invalid_request");
+        }
+    }
+
+    // -- invariant 4, at this layer ---------------------------------------
+    //
+    // The integration tests P1/P2 prove it end to end; these prove the gate
+    // itself cannot be the thing that breaks it.
+
+    /// The I4 twin of every request-time row: a `standard`/`ignore` client —
+    /// which is every client registered today — sends all nine parameters and
+    /// the gate does exactly what it did before X7.1, namely nothing.
+    #[test]
+    fn a_standard_ignore_client_is_refused_nothing() {
+        let c = base_client();
+        assert_eq!(c.authn_request_params, AuthnRequestParamsMode::Ignore);
+
+        let everything = AuthnRequestParams::parse(&crate::authn_params::RawAuthnParams {
+            prompt: Some("none"),
+            max_age: Some("0"),
+            acr_values: Some("urn:axiam:acr:mfa"),
+            claims: Some(r#"{"id_token":{"acr":{"essential":true}}}"#),
+            id_token_hint: Some("ey.hint"),
+            login_hint: Some("ada@example.com"),
+            display: Some("page"),
+            ui_locales: Some("en-GB"),
+            claims_locales: Some("en"),
+        });
+        assert!(
+            enforce_authorization_request(&c, None, &everything).is_ok(),
+            "a standard client must be untouched by the parameter gate, PKCE included"
+        );
+
+        // Malformed values change nothing either: they were dropped before
+        // X7.1 and they are dropped now.
+        let malformed = AuthnRequestParams::parse(&crate::authn_params::RawAuthnParams {
+            prompt: Some("teleport"),
+            max_age: Some("tomorrow"),
+            ..Default::default()
+        });
+        assert!(malformed.parse_error().is_some());
+        assert!(
+            enforce_authorization_request(&c, None, &malformed).is_ok(),
+            "a parse error must not surface on the ignore lane"
+        );
+    }
+
+    /// A `standard` client on the **honour** lane is not refused either — the
+    /// honour lane is a later wave, and until it exists an opted-in client
+    /// behaves exactly like an opted-out one. Pinned so that landing W4 is a
+    /// deliberate change to this test rather than an accident.
+    #[test]
+    fn the_honour_lane_does_nothing_yet() {
+        let mut c = base_client();
+        c.authn_request_params = AuthnRequestParamsMode::Honour;
+        assert!(enforce_authorization_request(&c, None, &one_param("max_age", "0")).is_ok());
+    }
+
+    /// P2's unit-level half: a `fapi2` client sending none of the nine is
+    /// affected by nothing this wave added. The whole X7.1 gate is invisible
+    /// to the FAPI lane, which is what lets conformance run #1 equal the
+    /// baseline.
+    #[test]
+    fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
+        let c = fapi_client();
+        assert!(enforce_authorization_request(&c, Some(PKCE), &no_params()).is_ok());
+        assert_eq!(validate_registration(&c), Ok(()));
     }
 }

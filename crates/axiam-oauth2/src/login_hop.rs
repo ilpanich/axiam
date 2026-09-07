@@ -62,6 +62,24 @@
 //! removing the guard only harms whoever removed it, and no security decision
 //! anywhere reads the marker. It selects an error message and the shape of a
 //! response; it never selects a principal.
+//!
+//! # What W4 added to the marker, and why it is still not a security decision
+//!
+//! W3 read the marker in one place: an anonymous return leg is answered rather
+//! than redirected again. W4's honour lane reads it in two more (see
+//! [`crate::honour`]) — a requirement that survives one interaction is
+//! answered rather than retried, and `prompt=none` on a request that has been
+//! through the sign-in page is refused because the interaction it forbade has
+//! happened.
+//!
+//! Both are still, exactly, "which of two truthful answers to give". A relying
+//! party can forge the marker on its own authorization request, and the
+//! strongest thing forging it achieves is that the server skips an interaction
+//! *the forger asked for*: no principal changes, no claim is added, and
+//! `auth_time`, `acr` and `amr` still describe the authentication that really
+//! happened rather than the one the request wanted. A third party cannot forge
+//! it into somebody else's request without already being able to write that
+//! request, at which point it is the relying party.
 
 use std::fmt;
 
@@ -219,12 +237,42 @@ pub fn build_return_to(query: &str) -> Option<String> {
 /// a login page that might agree with it is how a hop becomes a loop the guard
 /// then has to catch.
 pub fn build_login_redirect(return_to: &str, reauth: bool) -> String {
+    build_login_redirect_for(return_to, reauth, None)
+}
+
+/// [`build_login_redirect`], plus the one factor the sign-in page must demand
+/// (W4, plan §4.4).
+///
+/// `required_acr` is a member of the closed two-value vocabulary
+/// ([`crate::acr::Acr`]) and nothing else can be passed, which is the whole
+/// design of the step-up: **the page never chooses an authentication context
+/// class.** It learns which factor to insist on, from an allow-list of two,
+/// and the class the resulting session earns is derived afterwards from what
+/// the session actually proves ([`crate::acr::acr_for`]). A `String` parameter
+/// here would be the first place an operator-chosen or relying-party-chosen
+/// ACR could reach a user-facing page, and from there the temptation to echo
+/// it into the claim is one refactor away.
+///
+/// A step-up is always a `reauth` in practice — the point is to authenticate
+/// afresh — but the two are separate parameters because they answer different
+/// questions: `reauth` says *do not trust what this browser already holds*,
+/// and `acr` says *what to ask it for*.
+pub fn build_login_redirect_for(
+    return_to: &str,
+    reauth: bool,
+    required_acr: Option<crate::acr::Acr>,
+) -> String {
     let encoded: String = url::form_urlencoded::byte_serialize(return_to.as_bytes()).collect();
+    let mut location = format!("{LOGIN_PATH}?return_to={encoded}");
     if reauth {
-        format!("{LOGIN_PATH}?return_to={encoded}&reauth=1")
-    } else {
-        format!("{LOGIN_PATH}?return_to={encoded}")
+        location.push_str("&reauth=1");
     }
+    if let Some(acr) = required_acr {
+        let value: String = url::form_urlencoded::byte_serialize(acr.as_str().as_bytes()).collect();
+        location.push_str("&acr=");
+        location.push_str(&value);
+    }
+    location
 }
 
 /// Is this authorization request the return leg of a hop this server started?
@@ -355,6 +403,30 @@ mod tests {
 
         let reauth = build_login_redirect(GOOD, true);
         assert!(reauth.ends_with("&reauth=1"), "{reauth}");
+    }
+
+    /// **W4.** The step-up redirect names one factor, from the closed
+    /// vocabulary, percent-encoded so the URN's colons cannot be read as
+    /// anything else. `reauth` and `acr` are independent parameters.
+    #[test]
+    fn a_step_up_redirect_names_the_factor_the_page_must_demand() {
+        let location = build_login_redirect_for(GOOD, true, Some(crate::acr::Acr::MultiFactor));
+        assert!(location.starts_with("/login?return_to="), "{location}");
+        assert!(location.contains("&reauth=1"), "{location}");
+        assert!(
+            location.ends_with("&acr=urn%3Aaxiam%3Aacr%3Amfa"),
+            "the factor must be percent-encoded: {location}"
+        );
+
+        // The W3 shape is exactly what it was: no `acr`, byte for byte.
+        assert_eq!(
+            build_login_redirect_for(GOOD, true, None),
+            build_login_redirect(GOOD, true),
+        );
+        assert_eq!(
+            build_login_redirect_for(GOOD, false, None),
+            build_login_redirect(GOOD, false),
+        );
     }
 
     /// The loop guard, stated as the property the module docs argue: a request

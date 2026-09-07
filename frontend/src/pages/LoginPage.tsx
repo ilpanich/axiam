@@ -22,6 +22,12 @@ import { KeyRound, ChevronRight, Loader2, AlertCircle, Fingerprint } from "lucid
 import { getApiErrorCode, getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
 import { sanitizeReturnTo } from "@/lib/returnTo";
 import {
+  ACR_MULTI_FACTOR,
+  clearReauthAttempts,
+  recordReauthAttempt,
+  sanitizeRequiredAcr,
+} from "@/lib/reauth";
+import {
   OpaqueExchangeFailedError,
   OpaqueNotOfferedError,
   loginOpaque,
@@ -95,13 +101,25 @@ export function LoginPage() {
     () => searchParams.get("reauth") === "1"
   );
   const [reauthNotice, setReauthNotice] = useState<string | null>(null);
+  // W4 — the one factor this sign-in has to demand, when the authorization
+  // endpoint asked for a step-up (`?acr=…`). Allow-listed to the two values
+  // AXIAM defines: this page never chooses an authentication context class and
+  // never reports one — the server derives the class from what the session
+  // actually proves — so anything else is dropped rather than displayed.
+  const [requiredAcr] = useState(() =>
+    sanitizeRequiredAcr(searchParams.get("acr"))
+  );
+  // W4 (T1.6) — the loop guard. `null` until the check below runs; a string is
+  // the message shown *instead* of the form.
+  const [loopBlocked, setLoopBlocked] = useState<string | null>(null);
 
   useEffect(() => {
     if (
       searchParams.get("bootstrapped") === "1" ||
       searchParams.get("org") ||
       searchParams.get("tenant") ||
-      searchParams.get("reauth")
+      searchParams.get("reauth") ||
+      searchParams.get("acr")
     ) {
       // Strip the query params so a refresh doesn't re-show the notice or
       // re-seed the workspace fields.
@@ -116,6 +134,7 @@ export function LoginPage() {
       next.delete("org");
       next.delete("tenant");
       next.delete("reauth");
+      next.delete("acr");
       setSearchParams(next, { replace: true });
     }
   }, [searchParams, setSearchParams]);
@@ -129,7 +148,26 @@ export function LoginPage() {
   // store either way.
   useEffect(() => {
     if (!reauthRequested) return;
-    setReauthNotice("Please sign in again to continue.");
+
+    // W4 (T1.6) — the loop guard, before anything else this effect does. A
+    // relying party that answers `login_required` by restarting the
+    // authorization request produces a fresh, individually well-behaved chain
+    // every time; from here that is an unbroken sequence of sign-in forms, and
+    // after three in a minute the honest answer is to stop. See `@/lib/reauth`.
+    if (returnTo && !recordReauthAttempt(returnTo)) {
+      setLoopBlocked(
+        "The application you are signing in to keeps asking you to " +
+          "authenticate again. Something is misconfigured — please close this " +
+          "page and contact the administrator of that application."
+      );
+      return;
+    }
+
+    setReauthNotice(
+      requiredAcr === ACR_MULTI_FACTOR
+        ? "The application you are signing in to requires multi-factor authentication. Please sign in again and complete your second factor."
+        : "Please sign in again to continue."
+    );
     void (async () => {
       try {
         await api.post("/api/v1/auth/logout");
@@ -219,6 +257,11 @@ export function LoginPage() {
     // between the two.
     const resume = sanitizeReturnTo(returnTo);
     if (resume) {
+      // W4 — this hop is over. Forgetting its attempts here is what keeps a
+      // user who signs in slowly from looking like a loop; the counter exists
+      // for a destination that keeps *coming back*, not for one that took a
+      // while.
+      clearReauthAttempts(resume);
       window.location.assign(resume);
       return;
     }
@@ -606,8 +649,21 @@ export function LoginPage() {
           </div>
         )}
 
+        {/* W4 (T1.6): the reauthentication loop guard. Rendered *instead* of
+            the sign-in form — offering a fourth form for a destination that
+            has already rejected three would be the loop, not a fix for it. */}
+        {loopBlocked && (
+          <div
+            role="alert"
+            className="mb-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"
+          >
+            <AlertCircle size={16} className="shrink-0 mt-0.5" />
+            <span>{loopBlocked}</span>
+          </div>
+        )}
+
         {/* W3: reauthentication notice (?reauth=1) */}
-        {reauthNotice && (
+        {!loopBlocked && reauthNotice && (
           <div
             role="status"
             className="mb-4 flex items-start gap-2 rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-primary"
@@ -628,7 +684,7 @@ export function LoginPage() {
         )}
 
         {/* Step 1: Org + Tenant */}
-        {step === "org-tenant" && (
+        {!loopBlocked && step === "org-tenant" && (
           <form onSubmit={handleOrgTenantSubmit}>
             <fieldset>
               <legend className="text-lg font-semibold text-foreground mb-1">
@@ -699,7 +755,7 @@ export function LoginPage() {
         )}
 
         {/* Step 2: Credentials */}
-        {step === "credentials" && (
+        {!loopBlocked && step === "credentials" && (
           <form onSubmit={handleCredentialsSubmit}>
             <div className="mb-6">
               <h2 className="text-lg font-semibold text-foreground mb-1">
@@ -875,7 +931,7 @@ export function LoginPage() {
         )}
 
         {/* Step 3: MFA */}
-        {step === "mfa" && (
+        {!loopBlocked && step === "mfa" && (
           <form onSubmit={handleMfaSubmit}>
             <div className="flex flex-col items-center mb-6">
               <div className="h-12 w-12 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center mb-3 shadow-glow-cyan">

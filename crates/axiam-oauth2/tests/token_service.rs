@@ -598,6 +598,89 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
     }
 }
 
+// ---------------------------------------------------------------------------
+// W4 — the session behind a refresh grant
+// ---------------------------------------------------------------------------
+
+/// A session store that holds at most one row.
+///
+/// `None` — the default here — is the state every test in this file was
+/// written against: no session row behind the grant, so a refreshed ID token
+/// carries no authentication evidence, exactly as before W4. A test that wants
+/// the honour lane's behaviour supplies one.
+#[derive(Clone, Default)]
+struct MockSessionRepo(Option<axiam_core::models::session::Session>);
+
+impl axiam_core::repository::SessionRepository for MockSessionRepo {
+    async fn create(
+        &self,
+        _input: axiam_core::models::session::CreateSession,
+    ) -> AxiamResult<axiam_core::models::session::Session> {
+        unimplemented!()
+    }
+    async fn get_by_id(
+        &self,
+        _tenant_id: Uuid,
+        id: Uuid,
+    ) -> AxiamResult<axiam_core::models::session::Session> {
+        self.0
+            .clone()
+            .filter(|s| s.id == id)
+            .ok_or(AxiamError::NotFound {
+                entity: "session".into(),
+                id: id.to_string(),
+            })
+    }
+    async fn get_by_token_hash(
+        &self,
+        _tenant_id: Uuid,
+        _token_hash: &str,
+    ) -> AxiamResult<axiam_core::models::session::Session> {
+        unimplemented!()
+    }
+    async fn get_by_browser_token_hash(
+        &self,
+        _tenant_id: Uuid,
+        _token_hash: &str,
+    ) -> AxiamResult<Option<axiam_core::models::session::Session>> {
+        Ok(None)
+    }
+    async fn invalidate(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<()> {
+        Ok(())
+    }
+    async fn consume(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<bool> {
+        Ok(false)
+    }
+    async fn consume_by_token_hash(
+        &self,
+        _tenant_id: Uuid,
+        _token_hash: &str,
+    ) -> AxiamResult<Option<axiam_core::models::session::Session>> {
+        Ok(None)
+    }
+    async fn invalidate_user_sessions(&self, _tenant_id: Uuid, _user_id: Uuid) -> AxiamResult<()> {
+        Ok(())
+    }
+    async fn invalidate_user_sessions_except(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _current_session_id: Uuid,
+    ) -> AxiamResult<u64> {
+        Ok(0)
+    }
+    async fn cleanup_expired(&self, _tenant_id: Uuid) -> AxiamResult<u64> {
+        Ok(0)
+    }
+    async fn list_by_user(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> AxiamResult<Vec<axiam_core::models::session::Session>> {
+        Ok(vec![])
+    }
+}
+
 type Svc = TokenService<
     MockClientRepo,
     MockCodeRepo,
@@ -605,6 +688,7 @@ type Svc = TokenService<
     MockRefreshRepo,
     MockUserRepo,
     MockSaRepo,
+    MockSessionRepo,
 >;
 
 fn build(
@@ -633,6 +717,7 @@ fn build_with_upgrade_log(
         MockTenantRepo(tenant),
         refresh,
         MockUserRepo,
+        MockSessionRepo::default(),
         test_config(),
         2_592_000,
     );
@@ -2094,6 +2179,7 @@ fn build_sa(sa: SaOutcome) -> (Svc, UpgradeLog) {
         MockTenantRepo(TenantOutcome::Found),
         MockRefreshRepo::new(),
         MockUserRepo,
+        MockSessionRepo::default(),
         test_config(),
         2_592_000,
     );

@@ -248,3 +248,15 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 ```
 
 Any client not in that list is on the pre-W3 behaviour exactly.
+
+---
+
+## What the hop is *for*
+
+W3 built the hop and honoured nothing: a `browser_sso` client that sent
+`prompt=none` got exactly the answer every other client got, because no
+authentication-request parameter was read. Wave W4 is what reads them, behind a
+second per-client switch — see
+[Standard-lane OIDC parameters](oidc-authn-parameters.md). The hop is the
+mechanism a `prompt=login`, an unmet `max_age` and an authentication step-up
+all ride: one `return_to`, one loop guard, one sign-in page.

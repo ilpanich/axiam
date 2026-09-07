@@ -16,6 +16,10 @@ self-test, per-provider sender-domain requirements),
 [The browser login hop](browser-login-hop.md) (`browser_sso`: letting a
 third-party relying party's redirect reach a sign-in page, the
 `SameSite=Lax` OP cookie and what it costs, the 60-second PAR window),
+[Standard-lane OIDC parameters](oidc-authn-parameters.md)
+(`authn_request_params`: making `prompt`, `max_age`, `acr_values` and
+`id_token_hint` mean what they say, the two ACR values, why `max_age=0`
+never succeeds),
 [API docs](../api/README.md).
 
 All endpoints below require a bearer JWT (`Authorization: Bearer <token>`,

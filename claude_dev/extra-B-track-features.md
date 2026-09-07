@@ -966,11 +966,12 @@ Two findings settle the shape of the work (both cited in the plan):
   unreachable until a path-scoped `SameSite=Lax` OP-session cookie and a
   `return_to` login hop exist, both behind a per-client `browser_sso` flag.
 
-### X7.0 Escalations (maintainer, before any code)
+### X7.0 Escalations — **answered by the maintainer, 2026-09-07**
 **A.** Accept `client_secret_basic` server-side — the Basic plan's default
 variant for 37 of 38 modules; reverses `CONTRACT.md` rule 3's *rationale* but
-needs **no SDK code change** (SDKs keep `client_secret_post`).
+needs **no SDK code change** (SDKs keep `client_secret_post`). **Answer: yes.**
 **B.** Publish an RSA key in the JWKS — recommended **no**; not needed.
+**Answer: no.** EdDSA-only stays.
 
 ### X7.1 Gates first, honouring nothing (plan §8 W1)
 Per-client `authn_request_params: ignore | honour` (default `ignore`),
@@ -1002,7 +1003,7 @@ prefill with no server lookup, allow-listed `display`/`ui_locales`,
 `claims_locales` accepted), POST userinfo (RFC 6750 §2.2, required by the
 plan), optional POST authorize.
 
-### X7.7 Sensitive scopes (W7) · X7.8 `client_secret_basic` (W8, after A)
+### X7.7 Sensitive scopes (W7) · X7.8 `client_secret_basic` (W8, decision A: yes)
 Schema v51 user `phone_number`/`address`; tenant switch off by default;
 per-client registration; per-user per-client consent record via the existing
 `ConsentRepository`; userinfo-only release; audit. Then the new

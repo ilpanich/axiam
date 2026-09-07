@@ -43,7 +43,8 @@ file and line it was read from.
 3. **`client_secret_basic` is not one module of the Basic plan; it is the
    plan's default variant.** 37 of 38 modules run with
    `ClientAuthType = client_secret_basic`; exactly one runs `client_secret_post`.
-   Without it there is no Basic OP badge. This is escalated (§10, decision A)
+   Without it there is no Basic OP badge. This was escalated (§10, decision A)
+   and **decided yes by the maintainer on 2026-09-07**; W8 is unblocked
    because it touches a documented SDK-contract commitment — but see §10 for
    why the fan-out can be **zero**: the server can accept it while every SDK
    keeps sending `client_secret_post`.
@@ -153,7 +154,7 @@ Consequences, stated so they are not re-derived:
 
 | Consequence | Effect on this plan |
 |---|---|
-| No RSA key in the JWKS | Escalation B (§10) is answered **"no, and nothing in the plan needs it"** — it is recorded only because the task asked that it never happen as a side effect |
+| No RSA key in the JWKS | Escalation B (§10) is answered **"no"** — by this analysis and, on 2026-09-07, by the maintainer. Nothing in the plan needs it; it is recorded only because the task asked that it never happen as a side effect |
 | No SDK `alg` relaxation | Zero SDK fan-out from the ID-token side; `CONTRACT.md` §10 rule 1 and the `oidc_exchange` requirement 1 stay verbatim |
 | FAPI 2.0 unaffected | FAPI 2.0 §5.3.1.1 permits `EdDSA`; nothing changes on that lane |
 | Dynamic OP is foreclosed | The moment `client_registration=dynamic_client` is attempted, `OIDCCIdTokenSignature` becomes applicable and requires RS256. That is one of the reasons Dynamic OP is in §9 ("not doing") |
@@ -855,7 +856,7 @@ and a diff in the report is a stop-the-line signal.
 
 | Wave | Content | Gate/tests that must be green first | FAPI run |
 |---|---|---|---|
-| **W0** | Baseline: execute the FAPI plans on `main` once (the runbook notes no run has yet happened); commit the report to `docs/conformance/`. Escalate decisions A and B (§10) **now** — A gates W7 and the badge | — | **#0 baseline** |
+| **W0** | Baseline: execute the FAPI plans on `main` once (the runbook notes no run has yet happened); commit the report to `docs/conformance/`. Decisions A and B (§10) are **taken** (A yes, B no, 2026-09-07); nothing gates W8 any more | — | **#0 baseline** |
 | **W1** | Model + gates + parsing, **honouring nothing**: `authn_request_params` (default `ignore`), `browser_sso` (default off), `AuthnRequestParams::parse` wired into query and PAR carriers, `validate_registration` new arms, `enforce_authorization_request` rules 1–3, discovery statics (`request_parameter_supported`, `claims_parameter_supported`), G12 request-object classification, optional `kid` header. Matrix M1–M6, M8 registration halves, P1, P2, T12.* | none (first wave) | **#1** — must equal #0 |
 | **W2** | Session evidence: schema v50, `authenticated_at`/`amr`/`browser_token_hash`, `create_session_and_tokens` + callers, rotation copy, `AuthorizationCode` snapshot, `issue_id_token` optional claims (emitted for nobody yet). T2.5, T2.6 golden, P2 re-run | W1 | — |
 | **W3** | Gap 0: `axiam_op_session`, principal resolution behind `browser_sso`, SPA `/login?return_to`, `reauth`, loop guard. T0.1–T0.6, M7 | W1, W2 | **#2** — must equal #0 |
@@ -863,7 +864,7 @@ and a diff in the report is a stop-the-line signal.
 | **W5** | Honour lane, cosmetic: `login_hint`, `display`, `ui_locales`, `claims_locales` in the SPA. T5.*, T6.*, M5–M6 request halves | W4 | — |
 | **W6** | G10 POST userinfo (+ G11 optional). T10.* | W1 | — |
 | **W7** | G8 sensitive scopes: schema v51, tenant switch, consent screen, userinfo release, SCIM mapping, GDPR doc. T8.*, M8, M10 | W3 (consent screen rides the login hop) | — |
-| **W8** | G9 `client_secret_basic` — **only if decision A is "yes"**. T9.*, M9; contract 1.41 text; `openapi.json` | W1; decision A | — |
+| **W8** | G9 `client_secret_basic` — decision A is **yes**, so this wave is in scope. T9.*, M9; contract 1.41 text; `openapi.json` | W1 | — |
 | **W9** | Basic OP harness: `conformance/plans/oidcc-basic-static.json` (plan `oidcc-basic-certification-test-plan`, variants `server_metadata=discovery`, `client_registration=static_client`; config `server.acr_values`, `server.login_hint`, `server.ui_locales`; two static clients, one `client_secret_basic`, one `client_secret_post`, both `standard`/`honour`/`browser_sso`, scopes `openid profile email address phone`, `grant_types` incl. `refresh_token`); `register-clients.sh` variant; test user with phone/address; run; `docs/conformance/` report; `docs/compliance/oidc-conformance.md` rows for the new modules | W1–W8 | **#3 final** — FAPI and Basic both green, on a digest-pinned image, per `fapi-certification-submission.md` |
 
 Rollback story per wave: every wave is additive with defaults equal to today,
@@ -897,10 +898,17 @@ Sonnet 5.
 
 ---
 
-## 10. Decisions escalated to the maintainer
+## 10. Decisions escalated to the maintainer — **both answered 2026-09-07**
 
 Neither should happen as a side effect of chasing a badge. Both reverse a
-documented commitment. Recommendations are given, but the choice is yours.
+documented commitment, so they were put to the maintainer rather than
+assumed. The answers are recorded here with the reasoning that was in front
+of the maintainer when they were given.
+
+| Decision | Answer | Consequence for the plan |
+|---|---|---|
+| **A.** Accept `client_secret_basic` server-side | **Yes** | W8 is in scope; the Basic OP badge is reachable. SDKs keep `client_secret_post`; only the rationale sentence of `CONTRACT.md` rule 3 changes (contract 1.41 text) |
+| **B.** Publish an RSA key in the JWKS | **No** | EdDSA-only stays, in the server and in all eleven SDK pins. §9 lists it under "not doing" |
 
 ### A. Accept `client_secret_basic` server-side
 
@@ -925,6 +933,9 @@ gate handles it with no new code).
 text). The "reversal across eleven SDKs" the task feared is avoidable; the
 reversal is of the *server's* documented stance, not of SDK behaviour.
 
+**Decision (2026-09-07): yes.** The recommendation below was the one on the
+table, and it was accepted as written.
+
 **Recommendation.** Accept, **if** Basic OP certification is wanted at all;
 keep SDKs on `client_secret_post`; keep the operator guide's recommendation
 that first-party integrations use `client_secret_post` or a strong method. If
@@ -947,6 +958,8 @@ so `fapi2` rows must be refused it at both layers — a third gate row); a
 strictly weaker SDK invariant ("pin to the registered alg") re-implemented in
 eleven repositories, each a chance to get key confusion wrong; an RSA key
 that RPs pin and that cannot be withdrawn without a coordinated rotation.
+
+**Decision (2026-09-07): no.** As recommended.
 
 **Recommendation.** **No.** Do not publish an RSA key. If a future
 certification target requires an RSA-family algorithm, prefer PS256 over RS256

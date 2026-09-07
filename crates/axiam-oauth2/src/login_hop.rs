@@ -80,6 +80,26 @@
 //! happened rather than the one the request wanted. A third party cannot forge
 //! it into somebody else's request without already being able to write that
 //! request, at which point it is the relying party.
+//!
+//! # What W5 adds, and why it is all allow-listed types
+//!
+//! W5 lets the sign-in page be *presented* the way the relying party asked:
+//! a pre-filled username (`login_hint`), a compact layout (`display`) and a
+//! language (`ui_locales`). All three arrive as relying-party-controlled
+//! strings and all three end up on a page a human types a password into, so
+//! the rule for this module is the one W4 set for `acr`: **what crosses into
+//! the URL is a type, not a string**, wherever a closed set exists.
+//!
+//! Two of the three have one — [`crate::locale::Locale`] and
+//! [`crate::locale::Display`] — and are matched on the server, so the raw
+//! `ui_locales` and `display` values never reach the SPA at all. The third,
+//! `login_hint`, has no closed set by definition: it is whatever identifier
+//! the relying party believes the user types. It is carried verbatim, and the
+//! two things that make that safe are stated where they are decided rather
+//! than here — the parser bounds it to
+//! [`crate::authn_params::MAX_HINT_LEN`] bytes and drops it if it fails to
+//! parse as UTF-8, and [`Cosmetic::login_hint`] documents the property that
+//! actually matters: **no server-side lookup is ever performed on it.**
 
 use std::fmt;
 
@@ -237,11 +257,123 @@ pub fn build_return_to(query: &str) -> Option<String> {
 /// a login page that might agree with it is how a hop becomes a loop the guard
 /// then has to catch.
 pub fn build_login_redirect(return_to: &str, reauth: bool) -> String {
-    build_login_redirect_for(return_to, reauth, None)
+    build_login_redirect_for(return_to, reauth, None, &Cosmetic::NONE)
+}
+
+/// The presentation an authorization request asked the sign-in page for
+/// (W5, plan §4.5/§4.6).
+///
+/// A struct rather than three more positional arguments on
+/// [`build_login_redirect_for`], which would otherwise take six — two of them
+/// `Option`s a transposed call site would still compile with.
+///
+/// [`Cosmetic::NONE`] is what every request that asked for nothing produces,
+/// and it is the value the *ignore* lane always passes: a client registered
+/// today gets a `/login` URL byte-identical to the one W3 and W4 built, which
+/// is invariant 4 for this wave.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Cosmetic<'a> {
+    /// The relying party's guess at the identifier the end user will type, to
+    /// be pre-filled into the username field.
+    ///
+    /// **The server performs no lookup on this value, on any path.** It is
+    /// never compared to a user, never used to select a session or a tenant,
+    /// and it is not read at all when a session already exists — the only
+    /// place it is used is here, building a URL for a page that is being shown
+    /// anyway.
+    ///
+    /// That is the enumeration mitigation the plan asks for, and it is worth
+    /// being precise about *why* it is the strong form. The weak form of this
+    /// defence looks up the hint, finds the account or does not, and then
+    /// takes care to answer identically either way. It is one refactor away
+    /// from a timing difference, an audit row, a cache entry or an error
+    /// message that distinguishes the two — because the two branches exist and
+    /// something has to keep them equal. Here there is no branch: the value is
+    /// percent-encoded into a `Location` header and nothing else in this
+    /// server ever reads it. Test **T5.1** asserts the responses for an
+    /// existing and a non-existing hint are byte-identical apart from the
+    /// echoed parameter, and it is asserting a property of the shape of the
+    /// code rather than of anybody's diligence.
+    ///
+    /// Already bounded to [`crate::authn_params::MAX_HINT_LEN`] bytes and
+    /// known to be valid UTF-8 by the time it arrives here: it comes from
+    /// [`crate::authn_params::AuthnRequestParams`], which drops an over-long
+    /// value rather than truncating it.
+    pub login_hint: Option<&'a str>,
+    /// The layout the relying party asked for, already allow-listed.
+    pub display: Option<crate::locale::Display>,
+    /// The language the sign-in page should render in — **the selected one**,
+    /// not the `ui_locales` list that selected it.
+    ///
+    /// The matching happens in [`crate::locale::select_ui_locale`] precisely so
+    /// that this field can be a five-value enum. See that module for why the
+    /// raw value must never reach the SPA.
+    pub ui_locale: Option<crate::locale::Locale>,
+}
+
+impl Cosmetic<'_> {
+    /// A request that asked for no particular presentation — and the value the
+    /// ignore lane always uses.
+    pub const NONE: Self = Self {
+        login_hint: None,
+        display: None,
+        ui_locale: None,
+    };
+
+    /// Whether anything at all was asked for.
+    pub const fn is_empty(&self) -> bool {
+        self.login_hint.is_none() && self.display.is_none() && self.ui_locale.is_none()
+    }
+}
+
+impl<'a> Cosmetic<'a> {
+    /// Assemble the presentation from a parsed request, on the honour lane.
+    ///
+    /// This is the **only** function that turns
+    /// [`crate::authn_params::AuthnRequestParams`] into something a URL builder
+    /// accepts, and it exists so that three properties are readable in one
+    /// place instead of being spread across two call sites in the REST layer:
+    ///
+    /// 1. `display` and `ui_locales` are *matched here* and forwarded as
+    ///    types, so the raw values stop at this function (T6.2).
+    /// 2. `login_hint` is forwarded verbatim and nothing looks it up (T5.1;
+    ///    see [`Cosmetic::login_hint`]).
+    /// 3. **`claims_locales` is not read.** It has no field on [`Cosmetic`],
+    ///    it is not a parameter of this function, and `select_ui_locale` is
+    ///    called with `params.ui_locales` at exactly one call site — this one.
+    ///
+    /// That third property is the one worth a paragraph. `claims_locales` and
+    /// `ui_locales` are adjacent in OIDC Core §3.1.2.1, carry the same BCP 47
+    /// syntax, and differ by a prefix; one selects the language of the *page*
+    /// and the other the language of *claim values*, of which AXIAM has none.
+    /// A future edit reaching for "the locale the relying party asked for"
+    /// could reach for either and look right in review. Having exactly one
+    /// call site — pinned by a test that `claims_locales=it` alone leaves the
+    /// page in the deployment default — is what makes the wrong one visible.
+    ///
+    /// `tenant_default` is the tenant's configured language, already parsed;
+    /// it is consulted only when the relying party asked for nothing this
+    /// deployment ships.
+    pub fn from_params(
+        params: &'a crate::authn_params::AuthnRequestParams,
+        tenant_default: Option<crate::locale::Locale>,
+    ) -> Self {
+        Self {
+            login_hint: params.login_hint.as_deref(),
+            display: params
+                .display
+                .as_deref()
+                .and_then(crate::locale::Display::from_wire),
+            ui_locale: crate::locale::select_ui_locale(
+                params.ui_locales.as_deref(),
+                tenant_default,
+            ),
+        }
+    }
 }
 
 /// [`build_login_redirect`], plus the one factor the sign-in page must demand
-/// (W4, plan §4.4).
+/// (W4, plan §4.4) and the presentation it was asked for (W5, plan §4.5/§4.6).
 ///
 /// `required_acr` is a member of the closed two-value vocabulary
 /// ([`crate::acr::Acr`]) and nothing else can be passed, which is the whole
@@ -257,22 +389,57 @@ pub fn build_login_redirect(return_to: &str, reauth: bool) -> String {
 /// afresh — but the two are separate parameters because they answer different
 /// questions: `reauth` says *do not trust what this browser already holds*,
 /// and `acr` says *what to ask it for*.
+///
+/// `cosmetic` follows the same rule for the same reason (see [`Cosmetic`]).
+/// Passing [`Cosmetic::NONE`] reproduces the W3/W4 URL byte for byte, which is
+/// what the ignore lane does and what its test asserts.
+///
+/// This is the **only** place a `/login` URL is built. Keeping it that way is
+/// what makes "the raw `ui_locales` appears in no redirect the server builds"
+/// (T6.2) a claim about one function rather than a claim about the tree.
 pub fn build_login_redirect_for(
     return_to: &str,
     reauth: bool,
     required_acr: Option<crate::acr::Acr>,
+    cosmetic: &Cosmetic<'_>,
 ) -> String {
-    let encoded: String = url::form_urlencoded::byte_serialize(return_to.as_bytes()).collect();
-    let mut location = format!("{LOGIN_PATH}?return_to={encoded}");
+    let mut location = format!("{LOGIN_PATH}?return_to={}", encode(return_to));
     if reauth {
         location.push_str("&reauth=1");
     }
     if let Some(acr) = required_acr {
-        let value: String = url::form_urlencoded::byte_serialize(acr.as_str().as_bytes()).collect();
         location.push_str("&acr=");
-        location.push_str(&value);
+        location.push_str(&encode(acr.as_str()));
+    }
+    // W5. `login_hint` is the only one of the three that is not a type, so it
+    // is the only one that is encoded rather than merely written; the other
+    // two can emit nothing but short lower-case ASCII identifiers and are
+    // encoded anyway, because a builder that treats its inputs differently
+    // depending on how much it trusts them is one whose next parameter gets
+    // the wrong treatment.
+    if let Some(hint) = cosmetic.login_hint {
+        location.push_str("&login_hint=");
+        location.push_str(&encode(hint));
+    }
+    if let Some(display) = cosmetic.display {
+        location.push_str("&display=");
+        location.push_str(&encode(display.as_str()));
+    }
+    if let Some(locale) = cosmetic.ui_locale {
+        location.push_str("&ui_locale=");
+        location.push_str(&encode(locale.as_tag()));
     }
     location
+}
+
+/// Percent-encode one query-parameter value.
+///
+/// `byte_serialize` rather than a hand-rolled escape: it is the encoder the
+/// SPA's `URLSearchParams` is the decoder for, and the two have to agree about
+/// `+`, `&`, `=` and every non-ASCII byte of a `login_hint` that is somebody's
+/// name.
+fn encode(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 /// Is this authorization request the return leg of a hop this server started?
@@ -410,7 +577,12 @@ mod tests {
     /// anything else. `reauth` and `acr` are independent parameters.
     #[test]
     fn a_step_up_redirect_names_the_factor_the_page_must_demand() {
-        let location = build_login_redirect_for(GOOD, true, Some(crate::acr::Acr::MultiFactor));
+        let location = build_login_redirect_for(
+            GOOD,
+            true,
+            Some(crate::acr::Acr::MultiFactor),
+            &Cosmetic::NONE,
+        );
         assert!(location.starts_with("/login?return_to="), "{location}");
         assert!(location.contains("&reauth=1"), "{location}");
         assert!(
@@ -420,12 +592,294 @@ mod tests {
 
         // The W3 shape is exactly what it was: no `acr`, byte for byte.
         assert_eq!(
-            build_login_redirect_for(GOOD, true, None),
+            build_login_redirect_for(GOOD, true, None, &Cosmetic::NONE),
             build_login_redirect(GOOD, true),
         );
         assert_eq!(
-            build_login_redirect_for(GOOD, false, None),
+            build_login_redirect_for(GOOD, false, None, &Cosmetic::NONE),
             build_login_redirect(GOOD, false),
+        );
+    }
+
+    /// **W5, invariant 4.** A request that asked for no presentation produces
+    /// exactly the URL W3 and W4 produced — which is what the ignore lane
+    /// always does, since it never assembles anything but [`Cosmetic::NONE`].
+    #[test]
+    fn a_request_that_asked_for_no_presentation_builds_the_w4_url_byte_for_byte() {
+        assert!(Cosmetic::NONE.is_empty());
+        assert!(Cosmetic::default().is_empty());
+        for reauth in [false, true] {
+            for acr in [None, Some(crate::acr::Acr::MultiFactor)] {
+                let with = build_login_redirect_for(GOOD, reauth, acr, &Cosmetic::NONE);
+                assert!(
+                    !with.contains("login_hint")
+                        && !with.contains("display")
+                        && !with.contains("ui_locale"),
+                    "an empty presentation must add no parameter at all: {with}"
+                );
+            }
+        }
+    }
+
+    /// **W5, T5.1's builder half.** The hint is carried verbatim and
+    /// percent-encoded, and — the property that matters — the URL is the same
+    /// whatever the hint says, because nothing here looks it up. Two hints of
+    /// the same length produce URLs of the same length; the only difference
+    /// between them is the echoed value.
+    #[test]
+    fn the_login_hint_is_echoed_and_never_interpreted() {
+        let existing = build_login_redirect_for(
+            GOOD,
+            false,
+            None,
+            &Cosmetic {
+                login_hint: Some("ada@example.com"),
+                ..Cosmetic::NONE
+            },
+        );
+        let missing = build_login_redirect_for(
+            GOOD,
+            false,
+            None,
+            &Cosmetic {
+                login_hint: Some("bob@example.com"),
+                ..Cosmetic::NONE
+            },
+        );
+        assert!(
+            existing.ends_with("&login_hint=ada%40example.com"),
+            "{existing}"
+        );
+        assert!(
+            missing.ends_with("&login_hint=bob%40example.com"),
+            "{missing}"
+        );
+        assert_eq!(
+            existing.replace("ada", "bob"),
+            missing,
+            "the two URLs may differ only in the echoed value"
+        );
+    }
+
+    /// **T5.2's server half.** A hostile hint is a hostile *value*, not a
+    /// hostile URL: everything that could terminate a parameter or a header is
+    /// percent-encoded, so the `Location` still carries exactly one
+    /// `login_hint`.
+    #[test]
+    fn a_hostile_login_hint_cannot_escape_its_parameter() {
+        for hostile in [
+            "<script>alert(1)</script>",
+            "a&reauth=1",
+            "a&acr=urn:axiam:acr:mfa",
+            "a#fragment",
+            "a b",
+            "a\r\nSet-Cookie: x=y",
+            "ada+bob@example.com",
+            "%2e%2e%2f",
+            "日本語@example.com",
+        ] {
+            let location = build_login_redirect_for(
+                GOOD,
+                false,
+                None,
+                &Cosmetic {
+                    login_hint: Some(hostile),
+                    ..Cosmetic::NONE
+                },
+            );
+            assert_eq!(
+                location.matches("login_hint=").count(),
+                1,
+                "{hostile:?} produced {location}"
+            );
+            // Everything after the parameter name is one encoded value: no
+            // separator, no fragment, no whitespace, no control character.
+            let value = location.rsplit("&login_hint=").next().expect("a value");
+            assert!(
+                !value.contains('&')
+                    && !value.contains('#')
+                    && !value.contains('=')
+                    && value.chars().all(|c| !c.is_whitespace() && !c.is_control()),
+                "{hostile:?} produced the value {value:?}"
+            );
+        }
+    }
+
+    /// **T6.2's builder half.** `display` and `ui_locale` are types, so the
+    /// only strings that can appear are the ones the types can spell. There is
+    /// no parameter on this function a raw `ui_locales` list could arrive
+    /// through.
+    #[test]
+    fn only_allow_listed_tokens_reach_the_presentation_parameters() {
+        use crate::locale::{ALL_LOCALES, Display, Locale};
+
+        let location = build_login_redirect_for(
+            GOOD,
+            true,
+            Some(crate::acr::Acr::MultiFactor),
+            &Cosmetic {
+                login_hint: Some("ada"),
+                display: Some(Display::Popup),
+                ui_locale: Some(Locale::Italian),
+            },
+        );
+        assert!(location.contains("&display=popup"), "{location}");
+        assert!(location.contains("&ui_locale=it"), "{location}");
+        // The whole URL is one line of ASCII with no unencoded separators
+        // beyond the ones this builder wrote.
+        assert!(location.is_ascii(), "{location}");
+
+        for locale in ALL_LOCALES {
+            let built = build_login_redirect_for(
+                GOOD,
+                false,
+                None,
+                &Cosmetic {
+                    ui_locale: Some(locale),
+                    ..Cosmetic::NONE
+                },
+            );
+            assert!(
+                built.ends_with(&format!("&ui_locale={}", locale.as_tag())),
+                "{built}"
+            );
+        }
+        for display in [Display::Page, Display::Popup, Display::Touch, Display::Wap] {
+            let built = build_login_redirect_for(
+                GOOD,
+                false,
+                None,
+                &Cosmetic {
+                    display: Some(display),
+                    ..Cosmetic::NONE
+                },
+            );
+            assert!(
+                built.ends_with(&format!("&display={}", display.as_str())),
+                "{built}"
+            );
+        }
+    }
+
+    /// **W5.** `claims_locales` selects nothing, on its own or beside a
+    /// `ui_locales` that matches: it is not a parameter of `from_params`, it
+    /// has no field on `Cosmetic`, and this is the assertion that the one
+    /// call site reads the other list.
+    #[test]
+    fn claims_locales_never_reaches_the_ui_locale_selection() {
+        use crate::authn_params::{AuthnRequestParams, RawAuthnParams};
+        use crate::locale::Locale;
+
+        // `claims_locales=it` alone: parsed, present, and it changes nothing.
+        let only_claims = AuthnRequestParams::parse(&RawAuthnParams {
+            claims_locales: Some("it"),
+            ..Default::default()
+        });
+        assert_eq!(only_claims.claims_locales.as_deref(), Some("it"));
+        let cosmetic = Cosmetic::from_params(&only_claims, None);
+        assert!(
+            cosmetic.is_empty(),
+            "claims_locales must select no page language: {cosmetic:?}"
+        );
+        assert_eq!(
+            build_login_redirect_for(GOOD, false, None, &cosmetic),
+            build_login_redirect(GOOD, false),
+            "a request carrying only claims_locales must build the W3 URL"
+        );
+
+        // …and it does not override a `ui_locales` that did match, nor stand
+        // in for one that did not.
+        let both = AuthnRequestParams::parse(&RawAuthnParams {
+            ui_locales: Some("fr"),
+            claims_locales: Some("it"),
+            ..Default::default()
+        });
+        assert_eq!(
+            Cosmetic::from_params(&both, None).ui_locale,
+            Some(Locale::French)
+        );
+        let claims_only_matches = AuthnRequestParams::parse(&RawAuthnParams {
+            ui_locales: Some("zz"),
+            claims_locales: Some("it"),
+            ..Default::default()
+        });
+        assert_eq!(
+            Cosmetic::from_params(&claims_only_matches, None).ui_locale,
+            None
+        );
+    }
+
+    /// **W5.** The assembly step, end to end: allow-listed values survive,
+    /// out-of-list ones are dropped, and the tenant default is the second
+    /// answer rather than the first.
+    #[test]
+    fn the_presentation_is_assembled_from_the_parsed_bundle_alone() {
+        use crate::authn_params::{AuthnRequestParams, RawAuthnParams};
+        use crate::locale::{Display, Locale};
+
+        let params = AuthnRequestParams::parse(&RawAuthnParams {
+            login_hint: Some("ada@example.com"),
+            display: Some("popup"),
+            ui_locales: Some("de-AT fr"),
+            ..Default::default()
+        });
+        let cosmetic = Cosmetic::from_params(&params, Some(Locale::Italian));
+        assert_eq!(cosmetic.login_hint, Some("ada@example.com"));
+        assert_eq!(cosmetic.display, Some(Display::Popup));
+        assert_eq!(
+            cosmetic.ui_locale,
+            Some(Locale::German),
+            "de-AT truncates to de, and it is first in the RP's order"
+        );
+
+        // An out-of-list `display` is dropped; the tenant default answers a
+        // `ui_locales` that matched nothing.
+        let dropped = AuthnRequestParams::parse(&RawAuthnParams {
+            display: Some("modal"),
+            ui_locales: Some("zz"),
+            ..Default::default()
+        });
+        let cosmetic = Cosmetic::from_params(&dropped, Some(Locale::Spanish));
+        assert_eq!(cosmetic.display, None);
+        assert_eq!(cosmetic.ui_locale, Some(Locale::Spanish));
+
+        // Nothing asked for, no tenant default: the ignore lane's value.
+        let nothing = AuthnRequestParams::parse(&RawAuthnParams::default());
+        assert!(Cosmetic::from_params(&nothing, None).is_empty());
+    }
+
+    /// The parameters are appended in a fixed order, so a test that compares
+    /// two URLs is comparing what it thinks it is.
+    #[test]
+    fn the_presentation_parameters_are_appended_in_a_fixed_order() {
+        use crate::locale::{Display, Locale};
+        let location = build_login_redirect_for(
+            GOOD,
+            true,
+            Some(crate::acr::Acr::SingleFactor),
+            &Cosmetic {
+                login_hint: Some("ada"),
+                display: Some(Display::Touch),
+                ui_locale: Some(Locale::German),
+            },
+        );
+        let order: Vec<usize> = [
+            "&reauth=1",
+            "&acr=",
+            "&login_hint=",
+            "&display=",
+            "&ui_locale=",
+        ]
+        .iter()
+        .map(|needle| {
+            location
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} in {location}"))
+        })
+        .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "parameters out of order in {location}"
         );
     }
 

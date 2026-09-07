@@ -1,7 +1,7 @@
 # Standard-lane OpenID Connect parameters (`authn_request_params`)
 
-**Wave W4 of [`claude_dev/basic-op-gap-plan.md`](../../claude_dev/basic-op-gap-plan.md)
-§4.2–§4.4.** Sits beside [the browser login hop](browser-login-hop.md) and
+**Waves W4 and W5 of [`claude_dev/basic-op-gap-plan.md`](../../claude_dev/basic-op-gap-plan.md)
+§4.2–§4.6.** Sits beside [the browser login hop](browser-login-hop.md) and
 [FAPI 2.0 profile and mTLS](fapi2-profile.md): three per-client switches on the
 same registration, each defaulting to what an AXIAM client already was.
 
@@ -27,6 +27,21 @@ get, and could not tell.
 
 `authn_request_params: honour` makes them mean what they say. It is per client,
 and the default stays `ignore`.
+
+It also lets a relying party ask for four things that change only how the
+sign-in page *looks*. W5 honours these on the same switch:
+
+| Parameter | What the relying party is asking | What AXIAM does |
+|---|---|---|
+| `login_hint` | pre-fill the username field with this | fills the field; **never looks the value up** |
+| `display` | lay the page out for `page`, `popup`, `touch` or `wap` | `popup` gets a compact card; everything else the default; anything outside the four is dropped |
+| `ui_locales` | render the page in one of these languages | matches the list against the five AXIAM ships and renders the first requested tag that matches |
+| `claims_locales` | return claim *values* in this language | accepted and ignored — AXIAM has no localised claims |
+
+These four are never *refused*, on any lane, including `fapi2`: relying-party
+libraries send `login_hint` by reflex and refusing it would break working
+clients for no security gain. What they get on a lane other than `honour` is
+what they have always got — nothing.
 
 ---
 
@@ -97,6 +112,33 @@ sends the browser to `/login?return_to=…&reauth=1` (and `&acr=…` when a
 particular factor is needed), the user authenticates, and the authorization
 request resumes. That redirect is the same hop `browser_sso` uses, with the
 same `return_to` validation on both sides and the same loop guard.
+
+### The sign-in page may be pre-filled, laid out and translated
+
+The same redirect carries the presentation the relying party asked for:
+`/login?return_to=…&login_hint=…&display=popup&ui_locale=it`.
+
+Three things are worth an operator's attention.
+
+**Nothing is looked up.** AXIAM never compares a `login_hint` to a user, never
+uses it to select a tenant or a session, and ignores it entirely when a session
+already exists. The response to a hint naming a real account and one naming
+nobody is byte-identical apart from the echoed value — not because two branches
+were carefully equalised, but because there is only one branch. A relying party
+therefore cannot use `login_hint` to discover who has an account here.
+
+**The raw values do not reach the browser.** `ui_locales` and `display` are
+matched on the server; what travels in the redirect is a validated tag from a
+list this build knows (`ui_locale=it`) or nothing at all. A `ui_locales` value
+that matches nothing produces no parameter, and the page renders English.
+
+**Five languages, translated completely:** English (default), Italian, French,
+German and Spanish. The **admin console is not translated** — `ui_locales` is
+an authentication-request parameter and cannot reach it. A language is either
+complete or absent: a stub bundle would make `ui_locales=pt` succeed and then
+deliver English, which tells the relying party its request was honoured when it
+was not. There is no per-tenant default language yet; every deployment falls
+back to English.
 
 ### The authorization endpoint may now refuse
 

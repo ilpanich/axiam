@@ -600,6 +600,99 @@ localised claims); it must merely not error (`OIDCCClaimsLocales`).
 
 I1–I4 via the bundle. I5: SPA only; server forwards allow-listed tokens.
 
+#### W5 amendment — the widened scope, and what shipped (2026-09-07)
+
+§8's W5 row is one line: the four cosmetic parameters in the SPA. **W5
+deliberately went further, at the maintainer's request**, and this section is
+amended in the same commit so that plan and code agree afterwards rather than
+leaving a reader to work out which one is current.
+
+The widening is the second sentence of the mechanism above. It said `ui_locales`
+is *"matched against the SPA's bundled locale list"* — and no such list existed:
+before W5 the SPA had no i18n framework, no locale bundles and no locale list,
+so the paragraph described matching against the empty set, which would have
+selected nothing for every relying party for ever. W5 therefore builds the
+layer as well as the parameter.
+
+**What shipped, beyond the row:**
+
+| Item | Where |
+|---|---|
+| Five complete locales — `en` (default), `it`, `fr`, `de`, `es` | `frontend/src/i18n/messages.ts` |
+| A typed catalogue: `MessageKey` derived from the English bundle, every other bundle `Record<MessageKey, string>`, so a missing string is a **compile error** | same |
+| A `useMessages()` hook that also sets `<html lang>` and restores it on unmount | `frontend/src/i18n/index.ts` |
+| A typed `Locale` enum and an RFC 4647 §3.4 lookup on the **server**, so the raw `ui_locales` never crosses into the SPA | `crates/axiam-oauth2/src/locale.rs` |
+| A CI gate asserting the Rust allow-list and the SPA catalogue agree in both directions | `scripts/check-locale-bundle-sync.py`, Architecture Invariants |
+
+**What the layer deliberately does not cover.** The **admin console is out of
+scope**. `ui_locales` is an authentication-request parameter, so the only pages
+it can reach are the sign-in page, W3/W4's reauthentication and step-up
+prompts, their error and validation messages, and (in W7) the consent screen.
+Those are translated completely; the console is not translated at all. The
+layer is built so the console can adopt it later — nothing in `useMessages()`
+knows what kind of page is using it — but a half-translated console would be
+the "stub bundle" failure this section warns about, one screen up.
+
+**No sixth language as a stub.** A locale added to the enum without a complete
+bundle would make `ui_locales=pt` *succeed* and then deliver English, which is
+worse than answering "no match" and delivering English: the relying party is
+told its request was honoured. The sync gate refuses that in both directions.
+
+**The matching rule, made explicit.** RFC 4647 §3.4 lookup, applied to each
+requested tag **in the relying party's order**: the first *requested* tag that
+matches anything wins, not the best match found anywhere in the list. So
+`ui_locales=zz it fr` selects Italian. That mirrors the "most-preferred
+satisfied, in RP order" rule §4.4 pinned for `acr_values`, so the authorization
+request has one preference rule rather than one per parameter.
+
+**`claims_locales` must not reach the UI-locale selection.** Now that
+`ui_locales` does something real, the adjacency is a hazard: the two names
+differ by a prefix, carry the same BCP 47 syntax, and one of them is a no-op.
+There is exactly one call site of `select_ui_locale`, inside
+`login_hop::Cosmetic::from_params`, and `claims_locales` is neither a field of
+`Cosmetic` nor a parameter of that function. Pinned by
+`claims_locales_never_reaches_the_ui_locale_selection` and by an HTTP test that
+`claims_locales=it` alone leaves the page in the default locale.
+
+**Tenant default — deferred to W7, and this is the decision, not an omission.**
+The paragraph above says "no match → tenant default". W5 implements the
+*chain*: `select_ui_locale(requested, tenant_default)` takes the tenant's
+locale as an argument and is unit-tested through all three steps
+(`ui_locales` → tenant default → deployment default `en`). What W5 does **not**
+add is a place for an operator to set it, and the callers therefore pass
+`None`, which lands every deployment on `en` exactly as before.
+
+Two reasons, and the first is the one that would still hold in a different
+environment:
+
+1. **A per-tenant switch belongs in `TenantSettingsOverride`**, which is where
+   every other one already lives — `mfa_enforced`, `opaque_mode`,
+   `webauthn_user_verification`, `deletion_grace_period_days`. A
+   `default_locale` column on the `tenant` table would be the first per-tenant
+   switch not to live there, and it would be reachable only by a DB edit until
+   somebody built the API for it. The plan's own §4.8 (G8) puts the sensitive-
+   scopes switch in the settings surface for the same reason; W7 touches that
+   surface anyway.
+2. **The settings surface is `utoipa`-generated**, so adding a field there
+   regenerates `sdks/openapi.json` — and `axiam-server --dump-openapi` cannot
+   be built in the environment this wave was developed in (`protoc` is absent,
+   so `axiam-api-grpc`'s build script fails). A hand-edited spec whose digest
+   CI re-derives from a fresh dump is exactly the kind of guess that ships red.
+
+So schema **v57 was not added**, and §8's W5 row does not carry a migration.
+When W7 adds `default_locale: Option<String>` to `TenantSettingsOverride`, the
+change here is one argument at two call sites in
+`crates/axiam-api-rest/src/handlers/oauth2.rs`, parsed with
+`Locale::from_tag` — which is already written and already tested as "the parser
+for a stored tenant default", exact rather than a lookup, so a stored `fr-CA`
+reads as "somebody wrote something this binary does not ship" rather than as a
+guess at French.
+
+**Accessibility.** `<html lang>` is set to the selected locale and restored on
+unmount. All five languages are left-to-right, so **no `dir` handling was
+added**: untested RTL support would only make a future reviewer believe the
+question had been settled.
+
 ### 4.7 G9 — `client_secret_basic` (**gated on escalation A, §10**)
 
 **Mechanism.**
@@ -861,7 +954,7 @@ and a diff in the report is a stop-the-line signal.
 | **W2** | Session evidence: schema v50, `authenticated_at`/`amr`/`browser_token_hash`, `create_session_and_tokens` + callers, rotation copy, `AuthorizationCode` snapshot, `issue_id_token` optional claims (emitted for nobody yet). T2.5, T2.6 golden, P2 re-run | W1 | — |
 | **W3** | Gap 0: `axiam_op_session`, principal resolution behind `browser_sso`, SPA `/login?return_to`, `reauth`, loop guard. T0.1–T0.6, M7 | W1, W2 | **#2** — must equal #0 |
 | **W4** | Honour lane, security-bearing: `prompt`, `max_age`, `id_token_hint`, `acr`/`claims.acr`, step-up. T1.*, T2.1–T2.4, T2.7, T3.*, M1–M4 request halves | W3 | — |
-| **W5** | Honour lane, cosmetic: `login_hint`, `display`, `ui_locales`, `claims_locales` in the SPA. T5.*, T6.*, M5–M6 request halves | W4 | — |
+| **W5** | Honour lane, cosmetic: `login_hint`, `display`, `ui_locales`, `claims_locales` in the SPA — **plus the SPA i18n layer and five shipped locales** the row's `ui_locales` needs in order to select anything at all (§4.6's W5 amendment: widened at the maintainer's request; no v57 migration, tenant default deferred to W7). T5.*, T6.*, M5–M6 request halves | W4 | — |
 | **W6** | G10 POST userinfo (+ G11 optional). T10.* | W1 | — |
 | **W7** | G8 sensitive scopes: schema v51, tenant switch, consent screen, userinfo release, SCIM mapping, GDPR doc. T8.*, M8, M10 | W3 (consent screen rides the login hop) | — |
 | **W8** | G9 `client_secret_basic` — decision A is **yes**, so this wave is in scope. T9.*, M9; contract 1.41 text; `openapi.json` | W1 | — |

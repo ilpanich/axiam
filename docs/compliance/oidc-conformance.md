@@ -69,7 +69,7 @@ lane that would act on them is a later wave. Rows 23–26 therefore record the
 | # | Behaviour | Spec Ref | Status | Evidence |
 |---|-----------|----------|--------|----------|
 | 23 | `prompt`, `max_age`, `acr_values`, `claims`, `id_token_hint` are accepted and ignored for a `standard`/`ignore` client, with no change to the redirect, the token response or the ID token | Core §3.1.2.1 | Ignored (by design, invariant 4) | `oauth2_flow_test.rs::p1_a_standard_client_is_unchanged_by_every_new_parameter` |
-| 24 | `login_hint`, `display`, `ui_locales`, `claims_locales` are accepted and ignored | Core §3.1.2.1, §5.2 | Ignored (by design) | same as row 23 |
+| 24 | `login_hint`, `display`, `ui_locales`, `claims_locales` are accepted and ignored **for a `standard`/`ignore` client** — the login URL such a client's browser is sent to is byte-identical to W3's, with no `login_hint`, `display` or `ui_locale` on it | Core §3.1.2.1, §5.2 | Ignored (by design, invariant 4) | same as row 23; `oauth2_cosmetic_params_test.rs::m5_m6_i4_twin_an_ignore_lane_client_gets_the_w3_login_url_byte_for_byte`, `::i4_twin_the_interaction_arm_is_unreachable_for_an_ignore_lane_client` |
 | 25 | `auth_time`, `acr` and `amr` are **not** emitted merely because a request asked for them — an `ignore`-lane client receives none of the three however much it asks | Core §2, §3.1.3.7 | Not emitted for `ignore` (still true after W4) | `oauth2_flow_test.rs::p1_…` asserts their absence; `oauth2_honour_lane_test.rs::t3_5_…`, `::t2_1_i4_twin_…` |
 | 26 | The same parameters are carried by PAR and by the inline query string, and parse identically from either | RFC 9126 §2.1 | Pass | `authn_params.rs::the_par_carrier_parses_identically_to_the_inline_one` |
 | 27 | A `fapi2` client is **refused** the five security-bearing parameters with `invalid_request` | FAPI 2.0 §5.3.1 | Pass | `fapi.rs::m1_m4_security_bearing_parameters_are_refused_for_a_fapi_client`; `oauth2_flow_test.rs::a_fapi_client_is_refused_the_security_bearing_parameters` |
@@ -199,6 +199,38 @@ table:
 | 79 | A federated session whose upstream `acr`/`amr` the operator has not mapped satisfies only the `1fa` floor | Core §2 | Pass (strict by default) | `acr.rs::single_factor_is_the_answer_for_everything_else` (`fed`); `handlers/federation.rs::issue_sso_session` |
 | 80 | A session row written before schema v55 (`amr = []`) satisfies only the `1fa` floor and never presents as fresh beyond its creation — no backfill | — | Pass | `acr.rs::a_session_with_no_recorded_evidence_satisfies_only_the_floor`; row 46 |
 
+## OpenID Connect Core 1.0 — the cosmetic parameters on the honour lane (wave W5)
+
+Rows 23–24 record what happens on the `ignore` lane and stay true. These rows
+record what a client registered `authn_request_params: honour` gets instead —
+per client, and never for `fapi2`, whose registration cannot hold `honour`
+(row 28).
+
+The four are **never refused** on an honest `fapi2` row: they change no token,
+so ignoring one costs a relying party nothing it can detect, and refusing
+`login_hint` — which client libraries send by reflex — would break working FAPI
+clients for no security gain. What a `fapi2` client is denied is the
+*mechanism*: the server assembles a presentation only on the honour lane, so
+no `/login?login_hint=` is ever built for it.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 81 | `login_hint` is forwarded to the sign-in page **only when a page is being shown anyway**, and pre-fills the username field | Core §3.1.2.1 | Pass | `oauth2_cosmetic_params_test.rs::t5_1_a_hint_is_never_a_reason_to_show_a_login_page`; `LoginPagePresentation.test.tsx` |
+| 82 | **No server-side lookup is performed on `login_hint`, on any path.** The response for a hint naming an existing account and one naming none is byte-identical apart from the echoed value — uniform by construction, not by two branches kept equal | Core §3.1.2.1 (enumeration) | Pass | `oauth2_cosmetic_params_test.rs::t5_1_the_response_is_identical_whether_or_not_the_hinted_account_exists`; `login_hop.rs::the_login_hint_is_echoed_and_never_interpreted` |
+| 83 | A hostile `login_hint` appears in the DOM **only** as the username input's `value` — React value binding, no `dangerouslySetInnerHTML` | Core §3.1.2.1 | Pass (T5.2) | `LoginPagePresentation.test.tsx::shows a hostile hint only as the input's value` |
+| 84 | `display ∈ {page, popup, touch, wap}` is forwarded; anything else is dropped rather than refused. `popup` selects a compact layout; the value is never rendered as text and never used as a class name of its own | Core §3.1.2.1 | Pass (T6.1) | `oauth2_cosmetic_params_test.rs::t6_1_display_is_allow_listed_and_never_echoed_verbatim`; `locale.rs::display_is_allow_listed_and_only_popup_is_compact` |
+| 85 | `ui_locales` is matched **on the server** by RFC 4647 §3.4 lookup, in the relying party's preference order, against the five locales AXIAM ships (`en`, `it`, `fr`, `de`, `es`); the *selected tag* is forwarded and the raw value never crosses into the SPA | Core §3.1.2.1; RFC 4647 §3.4 | Pass (T6.1) | `locale.rs` unit tests; `oauth2_cosmetic_params_test.rs::t6_1_ui_locales_is_matched_on_the_server_and_forwarded_as_one_tag` |
+| 86 | A `ui_locales` value that matches nothing selects nothing and appears in no redirect the server builds | Core §3.1.2.1 | Pass (T6.2) | `oauth2_cosmetic_params_test.rs::t6_2_a_hostile_ui_locales_reaches_no_redirect_the_server_builds`; `locale.rs::a_hostile_ui_locales_selects_nothing` |
+| 87 | `claims_locales` is accepted, is not an error, and selects **no page language** — it is not read by the UI-locale selection at all | Core §3.1.2.1, §5.2 (`OIDCCClaimsLocales`) | Pass | `oauth2_cosmetic_params_test.rs::claims_locales_alone_leaves_the_page_in_the_default_locale`; `login_hop.rs::claims_locales_never_reaches_the_ui_locale_selection` |
+| 88 | The selected locale is announced to assistive technology as `<html lang>`, and restored when the sign-in page is left | WCAG 2.2 SC 3.1.1 | Pass | `LoginPagePresentation.test.tsx::sets <html lang> to %s`, `::restores <html lang> when the page goes away` |
+| 89 | An honest `fapi2` client is refused none of the four, and is offered the mechanism for none of them | FAPI 2.0 §5.3.1 | Pass (M5/M6) | `oauth2_cosmetic_params_test.rs::m5_m6_an_honest_fapi2_client_is_refused_nothing_and_offered_no_mechanism`; `fapi.rs::m5_m6_the_cosmetic_four_are_not_refused_for_an_honest_fapi_client`, `::a_fapi_row_edited_to_honour_is_refused_at_request_time` |
+
+**Not covered, and stated rather than implied.** There is no per-tenant default
+language: `ui_locales` that matches nothing falls through to the deployment
+default, English. The admin console is not translated — `ui_locales` is an
+authentication-request parameter and cannot reach it. Both are recorded in
+`claude_dev/basic-op-gap-plan.md` §4.6's W5 amendment, with the reasoning.
+
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
 
 | # | Behaviour | Spec Ref | Status | Evidence |
@@ -317,3 +349,4 @@ table:
 *Rows 40–46 added: X7.2 wave W2 — 2026-09-07*
 *Rows 47–59 added: X7.3 wave W3 — 2026-09-07*
 *Rows 60–80 added: X7.4 wave W4 — 2026-09-07*
+*Rows 81–89 added: wave W5 (cosmetic parameters + SPA i18n) — 2026-09-07*

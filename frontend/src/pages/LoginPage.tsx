@@ -6,7 +6,7 @@ import {
   isWebauthnSupported,
   isConditionalMediationAvailable,
   classifyWebauthnError,
-  webauthnErrorMessage,
+  type WebauthnFailure,
 } from "@/services/webauthn";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,6 +28,15 @@ import {
   sanitizeRequiredAcr,
 } from "@/lib/reauth";
 import {
+  type MessageKey,
+  format,
+  layoutClassFor,
+  resolveLocale,
+  sanitizeDisplay,
+  sanitizeLoginHint,
+  useMessages,
+} from "@/i18n";
+import {
   OpaqueExchangeFailedError,
   OpaqueNotOfferedError,
   loginOpaque,
@@ -42,6 +51,27 @@ import {
 import { ProviderSignInButton } from "@/components/providers/ProviderSignInButton";
 
 type LoginStep = "org-tenant" | "credentials" | "mfa";
+
+/**
+ * W5 — each WebAuthn failure kind's message key.
+ *
+ * `@/services/webauthn` keeps its own English-only `webauthnErrorMessage` for
+ * the admin console, which `ui_locales` cannot reach and this wave does not
+ * translate. The sign-in page maps the classified kind here instead, so the
+ * five messages are translated without dragging the console's whole string
+ * inventory into scope.
+ *
+ * `Record<WebauthnFailure, MessageKey>` is total by type: a sixth failure kind
+ * added to the service does not compile until it has a message here, which is
+ * the property that keeps this map from silently going stale.
+ */
+const WEBAUTHN_MESSAGE_KEY: Record<WebauthnFailure, MessageKey> = {
+  cancelled: "webauthnCancelled",
+  "already-registered": "webauthnAlreadyRegistered",
+  timeout: "webauthnTimeout",
+  unsupported: "webauthnUnsupported",
+  unknown: "webauthnUnknown",
+};
 
 interface OrgTenantData {
   orgSlug: string;
@@ -68,12 +98,38 @@ export function LoginPage() {
   const navigate = useNavigate();
   const { setUser, setTenantContext } = useAuthStore();
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // W5 — the presentation `/oauth2/authorize` asked for
+  // (claude_dev/basic-op-gap-plan.md §4.5/§4.6).
+  //
+  // All three are read once from the initial URL, like `return_to`, and all
+  // three are deliberately **not** stripped by the effect below: a user who
+  // reloads this page mid-typing must not have it switch back to English,
+  // shed its layout, or lose the username that was filled in for them.
+  //
+  // Each is sanitised here even though the server already allow-listed it.
+  // Nothing stops someone handing a victim a `/login?ui_locale=…` of their
+  // own, so these checks are the ones that have to hold on their own — the
+  // same argument `sanitizeReturnTo` and `sanitizeRequiredAcr` make.
+  const [locale] = useState(() => resolveLocale(searchParams.get("ui_locale")));
+  const [displayMode] = useState(() =>
+    sanitizeDisplay(searchParams.get("display")),
+  );
+  // The one value with no closed set: it is whatever identifier the relying
+  // party believes this person types. It reaches the DOM through React value
+  // binding and nowhere else — never `dangerouslySetInnerHTML`, never an
+  // attribute built by string concatenation — which is what makes T5.2 a
+  // property of how the field is written rather than of an escape somebody
+  // remembered.
+  const [loginHint] = useState(() =>
+    sanitizeLoginHint(searchParams.get("login_hint")),
+  );
+  const m = useMessages(locale);
+
   // Derive the notice once from the initial URL so it survives stripping the
   // query param below (lazy initializer — no setState in an effect).
-  const [bootstrapNotice] = useState<string | null>(() =>
-    searchParams.get("bootstrapped") === "1"
-      ? "Admin account created. Sign in to continue."
-      : null
+  const [bootstrapNotice] = useState<boolean>(
+    () => searchParams.get("bootstrapped") === "1"
   );
 
   // W3 — the OpenID Connect login hop (claude_dev/basic-op-gap-plan.md §4.0).
@@ -155,18 +211,12 @@ export function LoginPage() {
     // every time; from here that is an unbroken sequence of sign-in forms, and
     // after three in a minute the honest answer is to stop. See `@/lib/reauth`.
     if (returnTo && !recordReauthAttempt(returnTo)) {
-      setLoopBlocked(
-        "The application you are signing in to keeps asking you to " +
-          "authenticate again. Something is misconfigured — please close this " +
-          "page and contact the administrator of that application."
-      );
+      setLoopBlocked(m.loopBlocked);
       return;
     }
 
     setReauthNotice(
-      requiredAcr === ACR_MULTI_FACTOR
-        ? "The application you are signing in to requires multi-factor authentication. Please sign in again and complete your second factor."
-        : "Please sign in again to continue."
+      requiredAcr === ACR_MULTI_FACTOR ? m.reauthNoticeMfa : m.reauthNotice
     );
     void (async () => {
       try {
@@ -194,7 +244,11 @@ export function LoginPage() {
     orgSlug: searchParams.get("org") ?? "",
     tenantSlug: searchParams.get("tenant") ?? "",
   }));
-  const [username, setUsername] = useState("");
+  // W5 (plan §4.5) — the relying party's `login_hint`, pre-filled. Seeded once
+  // as the field's initial value rather than forced on every render, so the
+  // first keystroke replaces it: a hint is a guess about who is at the
+  // keyboard, and a field the user cannot correct would be a worse guess.
+  const [username, setUsername] = useState(() => loginHint ?? "");
   const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [mfaChallengeToken, setMfaChallengeToken] = useState("");
@@ -236,7 +290,7 @@ export function LoginPage() {
   const completeSignIn = async () => {
     const hydrated = await fetchCurrentUser();
     if (!hydrated) {
-      setError("Authentication error. Please sign in again.");
+      setError(m.authenticationError);
       navigate("/login");
       return;
     }
@@ -290,7 +344,7 @@ export function LoginPage() {
       await completeSignIn();
     } catch (err) {
       if (!conditional) {
-        setError(webauthnErrorMessage(classifyWebauthnError(err)));
+        setError(m[WEBAUTHN_MESSAGE_KEY[classifyWebauthnError(err)]]);
       }
     } finally {
       if (!conditional) setPasskeyBusy(false);
@@ -420,7 +474,7 @@ export function LoginPage() {
       setError(
         getApiErrorMessage(
           err,
-          `Could not start sign-in with ${provider.display_name}. Please try again.`,
+          format(m.ssoStartFailed, { provider: provider.display_name }),
         ),
       );
     }
@@ -435,7 +489,7 @@ export function LoginPage() {
     // a wrong password — so the field can be blank without the form having to
     // know which kind of user is typing into it.
     if (!orgTenantData.orgSlug.trim()) {
-      setError("Please enter your organization slug.");
+      setError(m.orgSlugRequired);
       return;
     }
     // Fire-and-forget: the credentials step renders immediately and the
@@ -449,7 +503,7 @@ export function LoginPage() {
     e.preventDefault();
     setError(null);
     if (!username.trim() || !password.trim()) {
-      setError("Please enter your username and password.");
+      setError(m.credentialsRequired);
       return;
     }
 
@@ -544,7 +598,7 @@ export function LoginPage() {
         // that used to silently log the user in with no permissions.
         await completeSignIn();
       } else {
-        setError("Authentication error. Please sign in again.");
+        setError(m.authenticationError);
         navigate("/login");
       }
     } catch (err) {
@@ -555,17 +609,13 @@ export function LoginPage() {
         // works. It is reachable when OPAQUE is required but this browser could
         // not complete the exchange.
         if (getApiErrorCode(err) === "opaque_required") {
-          setError(
-            "This organization requires OPAQUE sign-in, which this browser could not complete. Please update your browser or contact your administrator."
-          );
+          setError(m.opaqueRequired);
           return;
         }
-        setError(
-          "Request rejected for security reasons. Please refresh the page and try again."
-        );
+        setError(m.securityRejected);
         return;
       }
-      setError(getApiErrorMessage(err, "Invalid credentials. Please try again."));
+      setError(getApiErrorMessage(err, m.invalidCredentials));
     } finally {
       setIsLoading(false);
     }
@@ -575,7 +625,7 @@ export function LoginPage() {
     e.preventDefault();
     setError(null);
     if (totpCode.length !== 6) {
-      setError("Please enter the 6-digit code from your authenticator app.");
+      setError(m.totpLengthRequired);
       return;
     }
 
@@ -592,17 +642,15 @@ export function LoginPage() {
         // degrading to `permissions: []` when /auth/me comes back null.
         await completeSignIn();
       } else {
-        setError("Authentication error. Please sign in again.");
+        setError(m.authenticationError);
         navigate("/login");
       }
     } catch (err) {
       if (getApiErrorStatus(err) === 403) {
-        setError(
-          "Request rejected for security reasons. Please refresh the page and try again."
-        );
+        setError(m.securityRejected);
         return;
       }
-      setError(getApiErrorMessage(err, "Invalid or expired MFA code."));
+      setError(getApiErrorMessage(err, m.invalidMfaCode));
     } finally {
       setIsLoading(false);
     }
@@ -611,8 +659,10 @@ export function LoginPage() {
   const steps: LoginStep[] = ["org-tenant", "credentials", "mfa"];
   const currentIndex = steps.indexOf(step);
 
-  return (
-    <PublicLayout>
+  const layoutClass = layoutClassFor(displayMode);
+
+  const content = (
+    <>
       {/* Step indicator */}
       <div className="flex items-center justify-center gap-2 mb-6">
         {steps.map((s, i) => (
@@ -645,7 +695,7 @@ export function LoginPage() {
             role="status"
             className="mb-4 flex items-start gap-2 rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-primary"
           >
-            <span>{bootstrapNotice}</span>
+            <span>{m.bootstrapNotice}</span>
           </div>
         )}
 
@@ -688,20 +738,19 @@ export function LoginPage() {
           <form onSubmit={handleOrgTenantSubmit}>
             <fieldset>
               <legend className="text-lg font-semibold text-foreground mb-1">
-                Select your workspace
+                {m.workspaceLegend}
               </legend>
               <p className="text-sm text-muted-foreground mb-6">
-                Enter your organization to continue. Add a tenant only if your
-                account belongs to one.
+                {m.workspaceHelp}
               </p>
 
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="org-slug">Organization slug</Label>
+                  <Label htmlFor="org-slug">{m.orgSlugLabel}</Label>
                   <Input
                     id="org-slug"
                     type="text"
-                    placeholder="my-organization"
+                    placeholder={m.orgSlugPlaceholder}
                     value={orgTenantData.orgSlug}
                     onChange={(e) =>
                       setOrgTenantData((d) => ({
@@ -716,15 +765,15 @@ export function LoginPage() {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="tenant-slug">
-                    Tenant slug{" "}
+                    {m.tenantSlugLabel}{" "}
                     <span className="text-muted-foreground font-normal">
-                      (optional)
+                      {m.optionalSuffix}
                     </span>
                   </Label>
                   <Input
                     id="tenant-slug"
                     type="text"
-                    placeholder="Leave blank to sign in at organization level"
+                    placeholder={m.tenantSlugPlaceholder}
                     value={orgTenantData.tenantSlug}
                     onChange={(e) =>
                       setOrgTenantData((d) => ({
@@ -739,15 +788,13 @@ export function LoginPage() {
                     id="tenant-slug-help"
                     className="text-xs text-muted-foreground"
                   >
-                    Organization-level accounts — including the administrator
-                    created at setup — leave this blank. Tenant accounts must
-                    name their tenant.
+                    {m.tenantSlugHelp}
                   </p>
                 </div>
               </div>
 
               <Button type="submit" className="w-full mt-6">
-                Continue
+                {m.continueAction}
                 <ChevronRight size={16} aria-hidden="true" />
               </Button>
             </fieldset>
@@ -759,25 +806,25 @@ export function LoginPage() {
           <form onSubmit={handleCredentialsSubmit}>
             <div className="mb-6">
               <h2 className="text-lg font-semibold text-foreground mb-1">
-                Sign in
+                {m.signInHeading}
               </h2>
               <p className="text-sm text-muted-foreground">
-                Workspace:{" "}
+                {m.workspaceSummaryLabel}{" "}
                 <span className="text-primary font-mono text-xs">
                   {orgTenantData.tenantSlug.trim()
                     ? `${orgTenantData.orgSlug}/${orgTenantData.tenantSlug}`
-                    : `${orgTenantData.orgSlug} (organization)`}
+                    : `${orgTenantData.orgSlug} ${m.organizationScopeSuffix}`}
                 </span>
               </p>
             </div>
 
             <div className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="username">Username or email</Label>
+                <Label htmlFor="username">{m.usernameLabel}</Label>
                 <Input
                   id="username"
                   type="text"
-                  placeholder="username or email"
+                  placeholder={m.usernamePlaceholder}
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   // C2: the `webauthn` token is what makes conditional
@@ -791,7 +838,7 @@ export function LoginPage() {
               </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <Label htmlFor="password">Password</Label>
+                  <Label htmlFor="password">{m.passwordLabel}</Label>
                   <Link
                     to={{
                       pathname: "/auth/forgot-password",
@@ -806,7 +853,7 @@ export function LoginPage() {
                     }}
                     className="text-xs text-primary hover:underline"
                   >
-                    Forgot password?
+                    {m.forgotPassword}
                   </Link>
                 </div>
                 <Input
@@ -831,7 +878,7 @@ export function LoginPage() {
                 }}
                 className="flex-1"
               >
-                Back
+                {m.backAction}
               </Button>
               <Button type="submit" className="flex-1" disabled={isLoading}>
                 {isLoading ? (
@@ -841,10 +888,10 @@ export function LoginPage() {
                       className="animate-spin"
                       aria-hidden="true"
                     />
-                    Signing in...
+                    {m.signingIn}
                   </>
                 ) : (
-                  "Sign in"
+                  m.signInAction
                 )}
               </Button>
             </div>
@@ -860,7 +907,7 @@ export function LoginPage() {
                 <div className="flex items-center gap-3 my-5">
                   <span className="h-px flex-1 bg-border" />
                   <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                    or
+                    {m.orSeparator}
                   </span>
                   <span className="h-px flex-1 bg-border" />
                 </div>
@@ -872,7 +919,7 @@ export function LoginPage() {
                 <div className="flex items-center gap-3 my-5" aria-hidden="true">
                   <span className="h-px flex-1 bg-border" />
                   <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                    or
+                    {m.orSeparator}
                   </span>
                   <span className="h-px flex-1 bg-border" />
                 </div>
@@ -898,7 +945,7 @@ export function LoginPage() {
                 <div className="flex items-center gap-3 my-5" aria-hidden="true">
                   <span className="h-px flex-1 bg-border" />
                   <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                    or
+                    {m.orSeparator}
                   </span>
                   <span className="h-px flex-1 bg-border" />
                 </div>
@@ -916,12 +963,12 @@ export function LoginPage() {
                   {passkeyBusy ? (
                     <>
                       <Loader2 size={16} className="animate-spin" aria-hidden="true" />
-                      Waiting for your device…
+                      {m.waitingForDevice}
                     </>
                   ) : (
                     <>
                       <Fingerprint size={16} aria-hidden="true" />
-                      Sign in with a passkey
+                      {m.passkeySignIn}
                     </>
                   )}
                 </Button>
@@ -938,15 +985,15 @@ export function LoginPage() {
                 <KeyRound size={22} className="text-primary" />
               </div>
               <h2 className="text-lg font-semibold text-foreground">
-                Two-factor authentication
+                {m.mfaHeading}
               </h2>
               <p className="text-sm text-muted-foreground text-center mt-1">
-                Enter the 6-digit code from your authenticator app.
+                {m.mfaPrompt}
               </p>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="totp-code">Authentication code</Label>
+              <Label htmlFor="totp-code">{m.mfaCodeLabel}</Label>
               <Input
                 id="totp-code"
                 type="text"
@@ -987,12 +1034,12 @@ export function LoginPage() {
                     {passkeyBusy ? (
                       <>
                         <Loader2 size={16} className="animate-spin" aria-hidden="true" />
-                        Waiting for your device…
+                        {m.waitingForDevice}
                       </>
                     ) : (
                       <>
                         <Fingerprint size={16} aria-hidden="true" />
-                        Use a passkey or security key instead
+                        {m.mfaPasskeyAction}
                       </>
                     )}
                   </Button>
@@ -1010,7 +1057,7 @@ export function LoginPage() {
                 }}
                 className="flex-1"
               >
-                Back
+                {m.backAction}
               </Button>
               <Button type="submit" className="flex-1" disabled={isLoading}>
                 {isLoading ? (
@@ -1020,16 +1067,31 @@ export function LoginPage() {
                       className="animate-spin"
                       aria-hidden="true"
                     />
-                    Verifying...
+                    {m.verifying}
                   </>
                 ) : (
-                  "Verify"
+                  m.verifyAction
                 )}
               </Button>
             </div>
           </form>
         )}
       </div>
+    </>
+  );
+
+  // W5 (plan §4.6) — the layout the relying party asked for, as a class name
+  // this file chose from a fixed list. `display` is never rendered as text and
+  // never reaches `className` as its own value: `layoutClassFor` maps `popup`
+  // to a compact card and everything else to `""`.
+  //
+  // The wrapper element exists **only** when a layout was asked for. A `<div
+  // class="">` that was always there would be markup no client sees today, and
+  // invariant 4 for this wave is that a client on the `ignore` lane — which is
+  // forwarded no `display` at all — renders the page byte for byte as before.
+  return (
+    <PublicLayout>
+      {layoutClass ? <div className={layoutClass}>{content}</div> : content}
     </PublicLayout>
   );
 }

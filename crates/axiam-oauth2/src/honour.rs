@@ -62,6 +62,23 @@
 //! return leg and the answer is `login_required`. An RP that sends `max_age=0`
 //! is asking for an authentication of age zero, which no clock can report; the
 //! honest answer is the refusal, not a code minted under a rounder comparison.
+//!
+//! # W5's cosmetic four are not here
+//!
+//! `login_hint`, `display`, `ui_locales` and `claims_locales` are carried on
+//! the same [`AuthnRequestParams`] bundle this module reads, and this module
+//! reads none of them. That is deliberate and it is the whole of their design:
+//! they change how a page *looks*, so there is no [`Outcome`] they could
+//! select. Threading them through [`evaluate`] to reach the login redirect
+//! would give the honour lane's one security decision four inputs that cannot
+//! affect it, and would put a relying-party-controlled string inside the
+//! function whose job is to decide whether to mint a code.
+//!
+//! Instead they are assembled by [`crate::login_hop::Cosmetic::from_params`],
+//! at the point the redirect is built, from the same bundle — so they reach
+//! the page without ever having been in scope where the decision was made. A
+//! test below pins the consequence: setting all four to anything at all leaves
+//! every `Outcome` in this module identical.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -923,5 +940,78 @@ mod tests {
             interaction(&evaluate(f.request(&p, 0, &[Amr::Pwd]))).reason,
             Reason::HintMismatch
         );
+    }
+    /// **W5.** The cosmetic four ride on the same bundle and decide nothing.
+    /// Every shape this module can answer with is unchanged by setting all
+    /// four — including a hostile `ui_locales`, which is the value the plan
+    /// most wants kept away from a decision.
+    #[test]
+    fn the_cosmetic_four_change_no_outcome() {
+        use crate::authn_params::RawAuthnParams;
+
+        let cosmetic_only = |base: RawAuthnParams<'static>| {
+            let mut with = base;
+            with.login_hint = Some("ada@example.com");
+            with.display = Some("popup");
+            with.ui_locales = Some("<img onerror=alert(1)> it");
+            with.claims_locales = Some("it");
+            (
+                AuthnRequestParams::parse(&base),
+                AuthnRequestParams::parse(&with),
+            )
+        };
+
+        for base in [
+            // Nothing asked: Proceed.
+            RawAuthnParams::default(),
+            // An interaction asked for: Interact.
+            RawAuthnParams {
+                prompt: Some("login"),
+                ..Default::default()
+            },
+            // A freshness bound no session meets: Interact, then Refuse.
+            RawAuthnParams {
+                max_age: Some("0"),
+                ..Default::default()
+            },
+            // Silent authorization: Proceed or Refuse, never Interact.
+            RawAuthnParams {
+                prompt: Some("none"),
+                ..Default::default()
+            },
+            // An essential class this session does not satisfy.
+            RawAuthnParams {
+                claims: Some(
+                    r#"{"id_token":{"acr":{"essential":true,"value":"urn:axiam:acr:mfa"}}}"#,
+                ),
+                ..Default::default()
+            },
+        ] {
+            let (without, with) = cosmetic_only(base);
+            for return_leg in [false, true] {
+                fn request<'a>(
+                    params: &'a AuthnRequestParams,
+                    amr: &'a [Amr],
+                    return_leg: bool,
+                ) -> Request<'a> {
+                    Request {
+                        params,
+                        auth_time: Some(Utc::now() - chrono::Duration::seconds(30)),
+                        amr,
+                        subject: Uuid::nil(),
+                        client_id: "oa_1",
+                        id_token_hint: None,
+                        return_leg,
+                        now: Utc::now(),
+                    }
+                }
+                let amr = [Amr::Pwd];
+                assert_eq!(
+                    format!("{:?}", evaluate(request(&without, &amr, return_leg))),
+                    format!("{:?}", evaluate(request(&with, &amr, return_leg))),
+                    "the cosmetic four moved an outcome (return_leg = {return_leg})"
+                );
+            }
+        }
     }
 }

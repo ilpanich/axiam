@@ -1850,6 +1850,20 @@ pub async fn userinfo<C: Connection + Clone>(
     user: AuthenticatedUser,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
+    userinfo_claims(&user, &state).await
+}
+
+/// The UserInfo response itself, for a principal already authenticated.
+///
+/// Shared verbatim by [`userinfo`] (GET) and [`userinfo_post`] (POST), which is
+/// the whole reason W6 could add a method without touching what the endpoint
+/// answers. Nothing here reads the request: the response is a function of the
+/// token's subject and its scopes, so the two methods cannot diverge except in
+/// how the token was carried.
+async fn userinfo_claims<C: Connection + Clone>(
+    user: &AuthenticatedUser,
+    state: &AppState<C>,
+) -> HttpResponse {
     let scopes: Vec<String> = user
         .claims
         .0
@@ -1911,6 +1925,129 @@ pub async fn userinfo<C: Connection + Clone>(
         tenant_id: user.tenant_id.to_string(),
         org_id: user.org_id.to_string(),
     })
+}
+
+/// The form body `POST /oauth2/userinfo` accepts (RFC 6750 §2.2).
+///
+/// Unknown fields are ignored, as serde does by default: RFC 6750 §2.2 defines
+/// one parameter and says nothing about others, and a UserInfo request that
+/// also carried, say, a `client_id` is not malformed.
+#[derive(Deserialize)]
+pub struct UserInfoPostForm {
+    /// The access token, per RFC 6750 §2.2.
+    access_token: Option<String>,
+}
+
+/// Hand-written so that the token cannot be logged by anyone who reaches for
+/// `?form` — hazard 1 of plan §4.9's G10, and the same line the repository drew
+/// in `e33977d` for a `Set-Cookie` header carrying a credential.
+///
+/// A derived `Debug` would print the bearer token verbatim into whichever
+/// `tracing` field, panic message or `dbg!` picked it up. Deriving nothing at
+/// all would make that a compile error, which is stronger — but it is also
+/// undone by anyone who adds `#[derive(Debug)]` to make a borrow checker
+/// message readable. This states the intent where it will be read.
+impl std::fmt::Debug for UserInfoPostForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserInfoPostForm")
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// `POST /oauth2/userinfo` — the same endpoint, the other method (W6, plan
+/// §4.9 G10; OIDC Core §5.3, which says an OP MUST support both).
+///
+/// # Why a second handler rather than a second extractor
+///
+/// The access token may arrive in the `Authorization` header (RFC 6750 §2.1) or
+/// — on POST only — in an `access_token` form field (§2.2). The second carrier
+/// lives in the body, which [`AuthenticatedUser`]'s `FromRequest` impl does not
+/// read and must not start reading: that impl is on the path `GET` takes, and
+/// on the path every other authenticated route in the tree takes. Resolving the
+/// token here instead leaves all of them untouched, which is what makes "GET
+/// behaviour is unchanged" a property of the routing table rather than a claim
+/// about a shared code path. Both arms then hand the same
+/// [`AuthenticatedUser`] to the same [`userinfo_claims`].
+///
+/// # The refusals, and where each is decided
+///
+/// * **Two carriers, one request.** RFC 6750 §2: *"Clients MUST NOT use more
+///   than one method to transmit the token in each request."* A form field
+///   presented together with an `Authorization` header is refused here with
+///   `400 invalid_request`, and the refusal names neither token — it does not
+///   read them at all, so there is nothing to leak into the body or the log.
+///   The `axiam_access` cookie is refused alongside the form field for the same
+///   reason even though it is not one of RFC 6750's methods: it is a second
+///   credential naming a possibly different subject, and the alternative to
+///   refusing is choosing silently between two identities.
+/// * **The cookie alone still authenticates, exactly as on GET.** That is
+///   today's behaviour and invariant 4 keeps it. It is a CSRF surface in
+///   principle — `/oauth2` is not wrapped in `CsrfMiddleware`, only `/api/v1`
+///   is — and it fails closed in practice because `axiam_access` is
+///   `SameSite=Strict` (`middleware::csrf::access_cookie`), so a cross-site
+///   form POST carries no cookie and lands here unauthenticated. That is a
+///   property of the cookie, not of this handler, so it is pinned by a test
+///   rather than asserted by this comment
+///   (`oauth2_userinfo_post_test.rs::the_access_cookie_is_strict_so_a_cross_site_post_cannot_be_authenticated_by_it`).
+/// * **`access_token` in the query string is never read** — on either method.
+///   RFC 6750 §2.3 deprecates that form because it puts a credential in a URL,
+///   a `Referer` and every access log in the path. Refusing it would mean
+///   reading it first, and the parameter's problem is that it exists at all,
+///   not that a server honours it. So there is no code here that looks at the
+///   query string, and a `GET /oauth2/userinfo?access_token=…` is simply an
+///   unauthenticated request with an odd URL.
+///
+/// # An empty field is not a carrier
+///
+/// `access_token=` transmits no token, so it is treated as absent rather than
+/// as a second method or as an invalid credential. A request carrying an empty
+/// field and a real `Authorization` header is answered, not refused.
+pub async fn userinfo_post<C: Connection + Clone>(
+    req: HttpRequest,
+    form: Option<web::Form<UserInfoPostForm>>,
+    maybe_user: MaybeAuthenticatedUser,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    use actix_web::ResponseError as _;
+
+    let body_token = form
+        .as_ref()
+        .and_then(|f| f.access_token.as_deref())
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+
+    let Some(body_token) = body_token else {
+        // No §2.2 carrier: this is a header- or cookie-authenticated request,
+        // and `MaybeAuthenticatedUser` holds precisely what actix would have
+        // handed a `AuthenticatedUser` handler — the same principal, or the
+        // same 401.
+        return match maybe_user.into_result() {
+            Ok(user) => userinfo_claims(&user, &state).await,
+            Err(e) => e.error_response(),
+        };
+    };
+
+    let header_present = req
+        .headers()
+        .contains_key(actix_web::http::header::AUTHORIZATION);
+    let cookie_present = req.cookie("axiam_access").is_some();
+    if header_present || cookie_present {
+        return HttpResponse::BadRequest().json(OAuth2ErrorResponse {
+            error: "invalid_request".into(),
+            error_description: "the access token was presented by more than one method; \
+                 RFC 6750 section 2 permits exactly one per request"
+                .into(),
+        });
+    }
+
+    match crate::extractors::auth::authenticate_presented_token(&req, body_token).await {
+        Ok(user) => userinfo_claims(&user, &state).await,
+        Err(e) => e.error_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------

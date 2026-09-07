@@ -650,7 +650,31 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     .route(web::post().to(handlers::oauth2::end_session::<C>)),
             )
             .route("/jwks", web::get().to(handlers::oauth2::jwks::<C>))
-            .route("/userinfo", web::get().to(handlers::oauth2::userinfo::<C>)),
+            // W6 / OIDC Core §5.3: the UserInfo endpoint MUST accept both
+            // methods. Same shape as `/end_session` above — one resource, two
+            // routes — but deliberately **without** the rate-limit wraps those
+            // endpoints carry, for two reasons.
+            //
+            //   * Every one of the wrapped endpoints (`/end_session`,
+            //     `/device_authorization`, `/par`, `/token`) is reachable
+            //     unauthenticated, and each accepted request either allocates
+            //     state or terminates it. UserInfo does neither: it requires a
+            //     valid access token, so its abuse ceiling is already the token
+            //     endpoint's own bucket, and it reads one row.
+            //   * Adding one would change what `GET /oauth2/userinfo` does
+            //     under load, which is exactly the byte-identical behaviour
+            //     invariant 4 protects — rows 17-20 of
+            //     `docs/compliance/oidc-conformance.md` are its twin. A wave
+            //     that adds a method must not also add a 429.
+            //
+            // GET keeps taking `AuthenticatedUser`, so an unauthenticated GET
+            // is the same 401 it was, produced in the same order. POST resolves
+            // its own token because RFC 6750 §2.2 puts one carrier in the body.
+            .service(
+                web::resource("/userinfo")
+                    .route(web::get().to(handlers::oauth2::userinfo::<C>))
+                    .route(web::post().to(handlers::oauth2::userinfo_post::<C>)),
+            ),
     );
     let api_scope = web::scope("/api/v1")
             .wrap(AuthzMiddleware)

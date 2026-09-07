@@ -2231,6 +2231,7 @@ async fn t2_6_an_ignore_lane_client_gets_the_same_id_token_though_the_session_no
             expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
             authenticated_at,
             amr: vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
+            browser_token_hash: None,
         })
         .await
         .expect("session");

@@ -122,8 +122,12 @@ pub struct WebauthnLoginResponse {
 /// `axiam_refresh`, never from a body), and every state-changing call after it
 /// would have failed CSRF, there being no `axiam_csrf` to echo.
 ///
-/// So this emits the same `Set-Cookie` triple and the same `X-CSRF-Token`
-/// header as `cookie_response_from_output`, the password path's builder.
+/// So this emits the same `Set-Cookie` set and the same `X-CSRF-Token`
+/// header as `cookie_response_from_output`, the password path's builder — four
+/// cookies since W3, because a passkey sign-in is a browser sign-in and must
+/// leave the browser able to use `/oauth2/authorize`'s login hop. A passkey
+/// user who could sign in but not authorize a `browser_sso` relying party would
+/// be the same class of bug this helper was written to fix, one endpoint along.
 ///
 /// **The body keeps its tokens.** They are what a non-browser client uses —
 /// CONTRACT.md §24 has the SDKs adopt them directly rather than digging a value
@@ -138,6 +142,12 @@ fn webauthn_session_response(
     let csrf_token = generate_csrf_token();
 
     HttpResponse::Ok()
+        // W3 (plan §4.0): the OP browser session, on the same terms as the
+        // password path — `Max-Age` is the session's, not the access token's.
+        .cookie(crate::middleware::csrf::op_session_cookie(
+            &out.browser_session_token,
+            config.refresh_token_lifetime_secs,
+        ))
         .cookie(access_cookie(
             &out.access_token,
             config.access_token_lifetime_secs,
@@ -795,6 +805,7 @@ mod tests {
             refresh_token: "refresh-token-value".into(),
             session_id: Uuid::nil(),
             expires_in: 900,
+            browser_session_token: "op-session-value".into(),
         }
     }
 
@@ -805,10 +816,19 @@ mod tests {
             .collect()
     }
 
+    /// The `Set-Cookie` header whose cookie is called `name`.
+    ///
+    /// The failure message names the cookies that *were* set and not their
+    /// values: these headers carry an access token, a refresh token and an OP
+    /// browser-session token, and a panic message reaches stderr and the CI
+    /// log. The names alone are the whole of what a failure here needs to say.
     fn cookie_named<'a>(set: &'a [String], name: &str) -> &'a str {
         set.iter()
             .find(|c| c.starts_with(&format!("{name}=")))
-            .unwrap_or_else(|| panic!("no {name} cookie in {set:?}"))
+            .unwrap_or_else(|| {
+                let present: Vec<&str> = set.iter().filter_map(|c| c.split('=').next()).collect();
+                panic!("no {name} cookie; the response set: {present:?}")
+            })
     }
 
     /// The regression this helper exists for: a completed passkey ceremony
@@ -840,6 +860,26 @@ mod tests {
         // `X-CSRF-Token`, which it cannot do with an httpOnly cookie.
         let csrf = cookie_named(&set, "axiam_csrf");
         assert!(!csrf.contains("HttpOnly"), "csrf cookie must be readable");
+
+        // W3: the fourth cookie. A passkey sign-in is a browser sign-in, so it
+        // must leave the browser able to complete `/oauth2/authorize`'s login
+        // hop — otherwise passkey users alone would be unable to authorize a
+        // `browser_sso` relying party, which is exactly the shape of bug this
+        // helper exists to have fixed once.
+        let op = cookie_named(&set, "axiam_op_session");
+        assert!(op.contains("op-session-value"));
+        assert!(op.contains("HttpOnly"), "the OP cookie must be httpOnly");
+        // The attributes are asserted without echoing the header: it carries
+        // the OP browser-session token, and an assertion message is a log line.
+        assert!(
+            op.contains("SameSite=Lax"),
+            "the OP cookie must be SameSite=Lax — that is what makes the \
+             cross-site relying-party redirect carry it"
+        );
+        assert!(
+            op.contains("Path=/oauth2/authorize"),
+            "the OP cookie must be scoped to exactly one endpoint"
+        );
     }
 
     /// §3's non-browser rule: the same token, in the header and the cookie.

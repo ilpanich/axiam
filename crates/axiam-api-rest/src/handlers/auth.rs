@@ -22,8 +22,8 @@ use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::cert_auth::CertificateAuthenticated;
 use crate::extractors::client_info::{client_ip, user_agent};
 use crate::middleware::csrf::{
-    HEADER_CSRF, access_cookie, clear_access_cookie, clear_csrf_cookie, clear_refresh_cookie,
-    csrf_cookie, generate_csrf_token, refresh_cookie,
+    HEADER_CSRF, access_cookie, clear_access_cookie, clear_csrf_cookie, clear_op_session_cookie,
+    clear_refresh_cookie, csrf_cookie, generate_csrf_token, refresh_cookie,
 };
 use crate::state::AppState;
 
@@ -329,6 +329,24 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
 
     let csrf_token = generate_csrf_token();
     Ok(HttpResponse::Ok()
+        // W3 (plan §4.0): the OP browser session, set on every browser login
+        // beside the three cookies that were already here.
+        //
+        // Unconditional, and that is not a behaviour change: no client reads it
+        // unless it is registered `browser_sso`, which no client that exists
+        // today is. Making it conditional would require this handler to know
+        // which relying party the user is *about* to be sent to, which it
+        // cannot — the login that precedes an authorization request has not met
+        // the client yet.
+        //
+        // Its `Max-Age` is the session's (`refresh_token_lifetime_secs`), not
+        // the access token's: the value it names is the session row, and a
+        // cookie that expired every fifteen minutes would send a signed-in user
+        // back through the login hop several times an hour.
+        .cookie(crate::middleware::csrf::op_session_cookie(
+            &out.browser_session_token,
+            config.refresh_token_lifetime_secs,
+        ))
         .cookie(access_cookie(
             &out.access_token,
             config.access_token_lifetime_secs,
@@ -638,6 +656,12 @@ pub async fn logout<C: Connection + Clone>(
         .cookie(clear_access_cookie(cookie_secure))
         .cookie(clear_refresh_cookie(cookie_secure))
         .cookie(clear_csrf_cookie(cookie_secure))
+        // W3: the fourth cookie. The session row is gone, so the OP cookie
+        // could not resolve to a principal anyway — but leaving a live-looking
+        // credential in the browser after an explicit logout is how a user ends
+        // up at a login page that then bounces them somewhere they did not
+        // expect, and the removal is one line.
+        .cookie(clear_op_session_cookie())
         .finish())
 }
 

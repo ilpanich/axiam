@@ -92,6 +92,7 @@ async fn create_session(
         expires_at: Utc::now() + Duration::hours(1),
         authenticated_at: Utc::now(),
         amr: vec![],
+        browser_token_hash: None,
     })
     .await
     .unwrap()

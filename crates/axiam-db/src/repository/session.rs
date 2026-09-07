@@ -224,7 +224,8 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
                  user_agent = $user_agent, \
                  expires_at = $expires_at, \
                  authenticated_at = $authenticated_at, \
-                 amr = $amr",
+                 amr = $amr, \
+                 browser_token_hash = $browser_token_hash",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", input.tenant_id.to_string()))
@@ -238,6 +239,11 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             // the upstream's, and a rotated session's is the one it inherited.
             .bind(("authenticated_at", input.authenticated_at))
             .bind(("amr", Amr::encode_list(&input.amr)))
+            // W3: the digest of the `axiam_op_session` cookie this session was
+            // handed, or NONE for every path that is not a browser sign-in.
+            // Rotation binds the value it inherited, never a fresh one — the
+            // cookie in the browser did not change.
+            .bind(("browser_token_hash", input.browser_token_hash))
             .await
             .map_err(DbError::from)?;
 
@@ -292,6 +298,63 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             take_first_or_not_found(rows, "session", &format!("token_hash={token_hash_owned}"))?;
 
         row.try_into_session().map_err(Into::into)
+    }
+
+    async fn get_by_browser_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<Session>> {
+        // An empty digest is not a value this column ever holds, but it *is*
+        // what an empty cookie would hash to if a caller ever forgot to hash.
+        // Refusing it here means no query can match rows by accident.
+        if token_hash.is_empty() {
+            return Ok(None);
+        }
+
+        // `LIMIT 2`, not `LIMIT 1`: the point of the read is to notice an
+        // ambiguity, and a query that can only ever return one row cannot.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM session \
+                 WHERE tenant_id = $tenant_id \
+                 AND browser_token_hash = $token_hash LIMIT 2",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("token_hash", token_hash.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<SessionRowWithId> = result.take(0).map_err(DbError::from)?;
+        if rows.len() > 1 {
+            // Unreachable without a 256-bit collision or a bug that wrote one
+            // digest to two rows. Either way the safe answer is "no principal":
+            // picking a row would mint an authorization code for whichever
+            // user the scan happened to return first.
+            tracing::error!(
+                %tenant_id,
+                matched = rows.len(),
+                "more than one live session claims the same OP browser-session \
+                 digest; refusing to resolve a principal from it"
+            );
+            return Ok(None);
+        }
+
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let session: Session = row.try_into_session()?;
+
+        // Expiry is filtered here rather than by the caller: nothing is
+        // consumed on this path, so there is no replay to prevent by handing an
+        // expired row back, and a check the caller must remember is a check the
+        // caller can forget.
+        if session.expires_at <= Utc::now() {
+            return Ok(None);
+        }
+        Ok(Some(session))
     }
 
     async fn invalidate(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
@@ -593,6 +656,120 @@ mod tests {
         db
     }
 
+    /// W3 — the OP browser session, looked up by digest.
+    ///
+    /// Four cases, and three of them are refusals. The lookup is on the
+    /// anonymous path of an unauthenticated endpoint, so what it must never do
+    /// is return a principal it is not certain of.
+    #[tokio::test]
+    async fn the_op_browser_session_resolves_only_a_live_row_in_the_right_tenant() {
+        let db = setup_db().await;
+        let repo = SurrealSessionRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let other_tenant = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        let live = repo
+            .create(CreateSession {
+                tenant_id,
+                user_id,
+                token_hash: "op-live".into(),
+                ip_address: None,
+                user_agent: None,
+                expires_at: Utc::now() + Duration::hours(1),
+                authenticated_at: Utc::now(),
+                amr: vec![Amr::Pwd],
+                browser_token_hash: Some("digest-live".into()),
+            })
+            .await
+            .unwrap();
+
+        // 1. The happy path: the row, with its evidence intact.
+        let found = repo
+            .get_by_browser_token_hash(tenant_id, "digest-live")
+            .await
+            .unwrap()
+            .expect("a live session");
+        assert_eq!(found.id, live.id);
+        assert_eq!(found.user_id, user_id);
+        assert_eq!(found.amr, vec![Amr::Pwd]);
+
+        // 2. Tenant scoping. The digest is the same; the tenant is not. A
+        //    session in one tenant must not authorize a client in another.
+        assert!(
+            repo.get_by_browser_token_hash(other_tenant, "digest-live")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // 3. An unknown digest, and the empty one a caller might reach here
+        //    with if they ever forgot to hash an absent cookie.
+        assert!(
+            repo.get_by_browser_token_hash(tenant_id, "digest-nobody-has")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            repo.get_by_browser_token_hash(tenant_id, "")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // 4. Expiry is filtered here, not by the caller — a check the caller
+        //    must remember is a check the caller can forget.
+        repo.create(CreateSession {
+            tenant_id,
+            user_id,
+            token_hash: "op-expired".into(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: Utc::now() - Duration::hours(1),
+            authenticated_at: Utc::now() - Duration::hours(9),
+            amr: vec![Amr::Pwd],
+            browser_token_hash: Some("digest-expired".into()),
+        })
+        .await
+        .unwrap();
+        assert!(
+            repo.get_by_browser_token_hash(tenant_id, "digest-expired")
+                .await
+                .unwrap()
+                .is_none(),
+            "an expired session is not a principal"
+        );
+    }
+
+    /// The column is written and read back as given — and a session created by
+    /// a path that is not a browser sign-in leaves it unset, which is what the
+    /// v56 index is deliberately not UNIQUE about.
+    #[tokio::test]
+    async fn many_sessions_may_carry_no_op_browser_session_digest_at_all() {
+        let db = setup_db().await;
+        let repo = SurrealSessionRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+
+        for i in 0..3 {
+            let created = repo
+                .create(CreateSession {
+                    tenant_id,
+                    user_id: Uuid::new_v4(),
+                    token_hash: format!("no-op-session-{i}"),
+                    ip_address: None,
+                    user_agent: None,
+                    expires_at: Utc::now() + Duration::hours(1),
+                    authenticated_at: Utc::now(),
+                    amr: vec![],
+                    browser_token_hash: None,
+                })
+                .await
+                .expect("a UNIQUE index over this column would have failed here");
+            assert!(created.browser_token_hash.is_none());
+        }
+    }
+
     /// X7.2 — the evidence a login recorded survives a write/read round trip
     /// intact, in the order it was given.
     #[tokio::test]
@@ -612,6 +789,7 @@ mod tests {
                 expires_at: Utc::now() + Duration::hours(1),
                 authenticated_at,
                 amr: vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
+                browser_token_hash: None,
             })
             .await
             .unwrap();
@@ -731,6 +909,7 @@ mod tests {
                 expires_at: expires,
                 authenticated_at: Utc::now(),
                 amr: vec![],
+                browser_token_hash: None,
             })
             .await
             .unwrap();
@@ -746,6 +925,7 @@ mod tests {
             expires_at: expires,
             authenticated_at: Utc::now(),
             amr: vec![],
+            browser_token_hash: None,
         })
         .await
         .unwrap();
@@ -761,6 +941,7 @@ mod tests {
             expires_at: expires,
             authenticated_at: Utc::now(),
             amr: vec![],
+            browser_token_hash: None,
         })
         .await
         .unwrap();
@@ -819,6 +1000,7 @@ mod tests {
             expires_at: Utc::now() + Duration::hours(1),
             authenticated_at: Utc::now(),
             amr: vec![],
+            browser_token_hash: None,
         })
         .await
         .unwrap()
@@ -890,6 +1072,7 @@ mod tests {
             expires_at: Utc::now() - Duration::hours(1),
             authenticated_at: Utc::now(),
             amr: vec![],
+            browser_token_hash: None,
         })
         .await
         .unwrap();
@@ -952,6 +1135,7 @@ mod tests {
                     expires_at: Utc::now() - Duration::hours(1),
                     authenticated_at: Utc::now(),
                     amr: vec![],
+                    browser_token_hash: None,
                 })
                 .await
                 .unwrap();
@@ -1133,6 +1317,7 @@ mod tests {
                 expires_at: Utc::now() - Duration::hours(1),
                 authenticated_at: Utc::now(),
                 amr: vec![],
+                browser_token_hash: None,
             })
             .await
             .unwrap();

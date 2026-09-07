@@ -232,7 +232,7 @@ where
                 // deliberately: distinguishing them tells an attacker holding a
                 // stolen request_uri whether it is worth racing for, and none of
                 // the three is recoverable by the client anyway.
-                OAuth2Error::InvalidRequest("request_uri is unknown, expired, or used".into())
+                OAuth2Error::InvalidRequest(REQUEST_URI_GONE.into())
             })?;
 
         // The pushed request belongs to the client that pushed it. Without
@@ -246,6 +246,28 @@ where
 
         Ok(stored.params)
     }
+}
+
+/// The single answer given for a `request_uri` that is unknown, expired or
+/// already consumed.
+///
+/// A constant because two places need to agree on it: [`ParService::consume`]
+/// produces it, and the authorization endpoint recognises it to tell a
+/// **login-hop return leg** whose 60-second window closed (W3, plan §4.0 and
+/// F10) apart from a client that sent nonsense. See [`is_request_uri_gone`].
+pub const REQUEST_URI_GONE: &str = "request_uri is unknown, expired, or used";
+
+/// Is this the "the pushed request is gone" refusal?
+///
+/// The recogniser lives here, next to the producer, so the two cannot drift:
+/// a caller matching on the message itself would keep compiling after the
+/// wording changed and would silently stop recognising the case.
+///
+/// Deliberately narrow. `request_uri was not issued to this client` is a
+/// different failure — a client spending someone else's handle — and must keep
+/// its own answer even on a return leg.
+pub fn is_request_uri_gone(e: &OAuth2Error) -> bool {
+    matches!(e, OAuth2Error::InvalidRequest(msg) if msg == REQUEST_URI_GONE)
 }
 
 /// Whether an authorize request is carrying inline parameters alongside a

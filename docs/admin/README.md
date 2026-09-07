@@ -12,8 +12,11 @@ and permissions, and assigning roles. See also:
 policy, MDS3 operations), [Reactors](reactors.md) (external hook actors —
 webhook vs. listener Reactor, failure-policy implications),
 [Email delivery](email-delivery.md) (org/tenant inheritance, the delivery
-self-test, per-provider sender-domain requirements), [API
-docs](../api/README.md).
+self-test, per-provider sender-domain requirements),
+[The browser login hop](browser-login-hop.md) (`browser_sso`: letting a
+third-party relying party's redirect reach a sign-in page, the
+`SameSite=Lax` OP cookie and what it costs, the 60-second PAR window),
+[API docs](../api/README.md).
 
 All endpoints below require a bearer JWT (`Authorization: Bearer <token>`,
 obtained via `POST /api/v1/auth/login`) except the bootstrap endpoint itself.

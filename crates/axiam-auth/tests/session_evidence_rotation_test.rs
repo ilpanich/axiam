@@ -231,3 +231,187 @@ async fn refresh_rotation_preserves_the_authentication_event() {
     );
     assert_eq!(twice_rotated.amr, original.amr);
 }
+
+/// **W3** — a reauthentication is the one event that *moves* what rotation
+/// preserves.
+///
+/// The two halves are a pair and neither means anything alone. W2 made refresh
+/// rotation copy `authenticated_at` precisely so that it never moves; if
+/// signing in again did not move it either, the field would be a constant, and
+/// a later wave's `max_age` and `prompt=login` — whose entire job is to demand
+/// a *recent* authentication — would be satisfiable by a login from last month
+/// with no way to force a new one. So this asserts both directions in one run:
+/// rotation copies, sign-in advances.
+///
+/// The OP browser-session digest follows the opposite rule for the same
+/// reason. It is copied across rotation, because the cookie in the browser did
+/// not change and a rotation that dropped it would silently sign the user out
+/// of `/oauth2/authorize` alone; and it is *replaced* by a new sign-in, because
+/// that response sets a new cookie and the old value must stop naming anything.
+#[tokio::test]
+async fn reauthentication_moves_the_authentication_event_that_rotation_preserves() {
+    let db = Surreal::new::<Mem>(()).await.expect("in-memory surreal");
+    db.use_ns("test").use_db("test").await.expect("ns/db");
+    axiam_db::run_migrations(&db).await.expect("migrations");
+
+    let org_repo = SurrealOrganizationRepository::new(db.clone());
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let session_repo = SurrealSessionRepository::new(db.clone());
+
+    let org = org_repo
+        .create(CreateOrganization {
+            name: "Reauth Org".into(),
+            slug: "reauth-org".into(),
+            metadata: None,
+        })
+        .await
+        .expect("org");
+    let tenant = tenant_repo
+        .create(CreateTenant {
+            organization_id: org.id,
+            kind: TenantKind::Standard,
+            name: "Reauth Tenant".into(),
+            slug: "reauth-tenant".into(),
+            metadata: None,
+        })
+        .await
+        .expect("tenant");
+
+    let password = test_password();
+    let user = user_repo
+        .create(CreateUser {
+            tenant_id: tenant.id,
+            username: "reauth".into(),
+            email: "reauth@example.com".into(),
+            password: password.clone(),
+            metadata: None,
+        })
+        .await
+        .expect("user");
+    user_repo
+        .update(
+            tenant.id,
+            user.id,
+            UpdateUser {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("activate");
+
+    let svc = AuthService::new(
+        user_repo,
+        session_repo.clone(),
+        SurrealFederationLinkRepository::new(db.clone()),
+        SurrealRefreshTokenRepository::new(db.clone()),
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let sign_in = || {
+        let svc = &svc;
+        let password = password.clone();
+        async move {
+            match svc
+                .login(LoginInput {
+                    tenant_id: tenant.id,
+                    org_id: org.id,
+                    username_or_email: "reauth".into(),
+                    password,
+                    ip_address: None,
+                    user_agent: None,
+                    mfa_policy: None,
+                    lockout_policy: None,
+                })
+                .await
+                .expect("login")
+            {
+                LoginResult::Success(out) => out,
+                // Named, never debug-formatted: the other two variants carry a
+                // bearer credential and a panic message reaches the CI log.
+                LoginResult::MfaRequired(_) => panic!("expected Success, got MfaRequired"),
+                LoginResult::MfaSetupRequired(_) => {
+                    panic!("expected Success, got MfaSetupRequired")
+                }
+            }
+        }
+    };
+
+    let first = sign_in().await;
+    let original = session_repo
+        .get_by_id(tenant.id, first.session_id)
+        .await
+        .expect("the first session");
+    let original_digest = original
+        .browser_token_hash
+        .clone()
+        .expect("a browser login records an OP browser-session digest");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    // A refresh: not an authentication. Nothing moves, and the browser's
+    // cookie keeps naming the session lineage it always named.
+    let rotated = svc
+        .refresh(RefreshInput {
+            tenant_id: tenant.id,
+            org_id: org.id,
+            raw_refresh_token: first.refresh_token.clone(),
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .expect("refresh");
+    let rotated_session = session_repo
+        .get_by_id(tenant.id, rotated.session_id)
+        .await
+        .expect("the rotated session");
+    assert_eq!(
+        rotated_session.authenticated_at, original.authenticated_at,
+        "rotation copies the authentication event"
+    );
+    assert_eq!(
+        rotated_session.browser_token_hash.as_deref(),
+        Some(original_digest.as_str()),
+        "rotation must carry the OP browser-session digest forward: the cookie \
+         in the browser was not reissued, so a dropped digest would sign the \
+         user out of /oauth2/authorize alone"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    // A reauthentication: this is the event that moves it.
+    let second = sign_in().await;
+    let reauthenticated = session_repo
+        .get_by_id(tenant.id, second.session_id)
+        .await
+        .expect("the reauthenticated session");
+
+    assert!(
+        reauthenticated.authenticated_at > original.authenticated_at,
+        "signing in again is an authentication event and must advance \
+         authenticated_at ({} must be later than {}) — otherwise max_age can \
+         never be satisfied by asking the user to sign in again",
+        reauthenticated.authenticated_at,
+        original.authenticated_at
+    );
+    assert_ne!(
+        reauthenticated.browser_token_hash.as_deref(),
+        Some(original_digest.as_str()),
+        "a new sign-in issues a new OP browser-session cookie, so the old \
+         value must stop naming a session"
+    );
+    assert!(
+        reauthenticated.browser_token_hash.is_some(),
+        "and the new session has one of its own"
+    );
+
+    // The first session's evidence is untouched by any of it: this is a
+    // statement about what was recorded, not about what is current.
+    let still_original = session_repo
+        .get_by_id(tenant.id, rotated.session_id)
+        .await
+        .expect("the rotated session still exists");
+    assert_eq!(still_original.authenticated_at, original.authenticated_at);
+}

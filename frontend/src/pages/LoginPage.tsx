@@ -20,6 +20,7 @@ import {
 } from "@/lib/fetchCurrentUser";
 import { KeyRound, ChevronRight, Loader2, AlertCircle, Fingerprint } from "lucide-react";
 import { getApiErrorCode, getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
+import { sanitizeReturnTo } from "@/lib/returnTo";
 import {
   OpaqueExchangeFailedError,
   OpaqueNotOfferedError,
@@ -69,21 +70,79 @@ export function LoginPage() {
       : null
   );
 
+  // W3 — the OpenID Connect login hop (claude_dev/basic-op-gap-plan.md §4.0).
+  //
+  // `/oauth2/authorize` sends an anonymous browser here on behalf of a client
+  // registered `browser_sso`, with `?return_to=<path>` naming the authorization
+  // request to resume. Both values are read once, from the URL this page was
+  // loaded with, because the effect below rewrites the query string.
+  //
+  // `sanitizeReturnTo` is the second of the two checks the plan requires: the
+  // server validated the value when it built it, and this page validates it
+  // again before it will navigate. Nothing stops someone handing a victim a
+  // `/login?return_to=…` of their own, so this check is the one that has to
+  // hold on its own — see `@/lib/returnTo` for the rules and why they are the
+  // same four the server applies.
+  const [returnTo] = useState<string | null>(() =>
+    sanitizeReturnTo(searchParams.get("return_to"))
+  );
+  // `reauth=1` says this browser arrived believing it was signed in and was
+  // not — it presented an `axiam_op_session` cookie that resolved to no live
+  // session. Trusting whatever is left in the store would be how a hop becomes
+  // a loop, so the leftovers are cleared and the user is told why they are
+  // being asked again.
+  const [reauthRequested] = useState<boolean>(
+    () => searchParams.get("reauth") === "1"
+  );
+  const [reauthNotice, setReauthNotice] = useState<string | null>(null);
+
   useEffect(() => {
     if (
       searchParams.get("bootstrapped") === "1" ||
       searchParams.get("org") ||
-      searchParams.get("tenant")
+      searchParams.get("tenant") ||
+      searchParams.get("reauth")
     ) {
       // Strip the query params so a refresh doesn't re-show the notice or
       // re-seed the workspace fields.
+      //
+      // `reauth` joins them: it has been acted on by the effect below, and a
+      // refresh that re-ran it would sign the user out again mid-typing.
+      // `return_to` deliberately does NOT — a user who reloads this page must
+      // still land back on the authorization request they came from, and the
+      // value is re-validated on every read anyway.
       const next = new URLSearchParams(searchParams);
       next.delete("bootstrapped");
       next.delete("org");
       next.delete("tenant");
+      next.delete("reauth");
       setSearchParams(next, { replace: true });
     }
   }, [searchParams, setSearchParams]);
+
+  // W3 — `reauth` mode. End whatever session this browser still holds before
+  // showing the form, so that what follows is a real authentication event:
+  // a new session row with a new `authenticated_at`, which is the field a
+  // later wave's `max_age` and `prompt=login` are worth anything only if it
+  // moves. Best-effort by design — the session may already be gone, which is
+  // the very condition that produced `reauth=1` — and it clears the local
+  // store either way.
+  useEffect(() => {
+    if (!reauthRequested) return;
+    setReauthNotice("Please sign in again to continue.");
+    void (async () => {
+      try {
+        await api.post("/api/v1/auth/logout");
+      } catch {
+        // An already-dead session answers 401. Nothing to recover: the point
+        // was to leave this browser signed out, and it is.
+      }
+      useAuthStore.getState().clearAuth();
+    })();
+    // Runs once: `reauthRequested` is captured from the initial URL and never
+    // changes for the life of the page.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // After bootstrap, /login?bootstrapped=1&org=…&tenant=… pre-fills the
   // workspace and jumps straight to the credentials step. Lazy initializers
@@ -148,6 +207,21 @@ export function LoginPage() {
     // reach before the store is populated. No-op for everyone else.
     setUser(await withReachableTenantSelected(hydrated));
     setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
+
+    // W3 — resume the authorization request this sign-in was for, if there was
+    // one. `location.assign` rather than `navigate`, because the destination is
+    // a server endpoint and not a route in this application: the browser has to
+    // make a real request to `/oauth2/authorize`, carrying the
+    // `axiam_op_session` cookie the login response just set.
+    //
+    // Re-validated here rather than trusted from the state above. It is one
+    // call and it means the value cannot have been anything else at any point
+    // between the two.
+    const resume = sanitizeReturnTo(returnTo);
+    if (resume) {
+      window.location.assign(resume);
+      return;
+    }
     navigate("/dashboard");
   };
 
@@ -529,6 +603,16 @@ export function LoginPage() {
             className="mb-4 flex items-start gap-2 rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-primary"
           >
             <span>{bootstrapNotice}</span>
+          </div>
+        )}
+
+        {/* W3: reauthentication notice (?reauth=1) */}
+        {reauthNotice && (
+          <div
+            role="status"
+            className="mb-4 flex items-start gap-2 rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-primary"
+          >
+            <span>{reauthNotice}</span>
           </div>
         )}
 

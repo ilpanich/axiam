@@ -96,6 +96,17 @@ impl SessionRepository for CountingSessionRepo {
         self.inner.get_by_token_hash(tenant_id, token_hash).await
     }
 
+    async fn get_by_browser_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<Session>> {
+        self.hit();
+        self.inner
+            .get_by_browser_token_hash(tenant_id, token_hash)
+            .await
+    }
+
     async fn invalidate(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.hit();
         self.inner.invalidate(tenant_id, id).await

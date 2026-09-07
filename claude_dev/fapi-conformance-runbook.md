@@ -128,6 +128,27 @@ harness. `run-plan.sh` starts them, waits `CONFORMANCE_MODULE_TIMEOUT`
 (default 180 s), and records what it found. Finish them in the suite UI at
 `<SUITE_BASE_URL>/plan-detail.html?plan=<id>`, then re-run the report.
 
+#### The manual same-tab trick, and what W3 changes about it
+
+Those modules are finished by hand in a browser tab that already holds an admin
+UI session, because `axiam_access` is `SameSite=Strict` and would not otherwise
+survive the suite's cross-site redirect. That trick still works and is still
+what these runs use.
+
+Since **W3** (`claude_dev/basic-op-gap-plan.md` §4.0) there is an alternative:
+register the harness's clients with `"browser_sso": true` and add
+`tenant_id=$AXIAM_TENANT_ID` to the authorization request, and the suite's own
+redirect reaches a sign-in page instead of a `401`. That is what the plan's W9
+Basic OP harness is designed around, and it is the reason `browser_sso` is
+permitted on `fapi2` clients (§11, D2).
+
+Do **not** flip it on the existing FAPI clients before run #3. Plan §8's
+promise is that runs #1 and #2 equal the W0 baseline, and a comparison is only
+worth making if the client registrations did not move underneath it. See
+[`docs/admin/browser-login-hop.md`](../docs/admin/browser-login-hop.md) for the
+cookie, the `SameSite=Lax` iframe limitation, and the 60-second PAR window that
+bounds how long a hop may take.
+
 ### Opening a log
 
 Every non-passing module in the report carries its test id. Open it at:
@@ -229,9 +250,23 @@ do mTLS should.
 **No run has been performed yet.** As of this document's most recent revision the
 harness exists and has still not been executed against a live deployment — there
 is no docker daemon in the environment X5.1 was implemented in, either half.
-`docs/conformance/` is therefore empty. The first person to run it should expect
-to find harness bugs, and should fix them here rather than working around them
-locally. This entry has not moved and is now the only one blocking submission.
+`docs/conformance/` therefore does not exist. The first person to run it should
+expect to find harness bugs, and should fix them here rather than working around
+them locally. This entry has not moved and is now the only one blocking
+submission.
+
+That has a consequence the Basic OP plan's §8 sequencing depends on, and it is
+recorded here rather than left to be rediscovered: **baseline run #0 has not
+happened**, so runs #1 (W1) and #2 (W3) have not happened either, and neither
+was skipped by anyone's choice. There is nothing to compare against yet. The
+plan asks that each of them *equal* the baseline; until #0 exists, the argument
+that W1–W3 changed nothing on the FAPI lane rests on §8's construction — every
+addition is per-client opt-in or a refusal, and the FAPI plans run
+`openid: plain_oauth` (F12), so they exercise no OpenID Connect
+authentication-request parameter at all — plus the unit and integration pins
+listed in `docs/compliance/oidc-conformance.md`. Whoever first has a docker
+daemon should run #0 on `main` before running anything else, and commit the
+report.
 
 ---
 

@@ -87,6 +87,17 @@ jobs:
       - name: §27 management registry is in sync with openapi.json
         run: python3 scripts/gen-management-registry.py --check
 
+      # W5 -- the sign-in page's language list is written down twice: the
+      # server's allow-list decides what `ui_locales` can ever select, and the
+      # SPA's catalogue decides what can actually be rendered. Drift is silent
+      # in both directions, and the worse one is the server winning: the
+      # redirect carries `ui_locale=pt`, the relying party is told its request
+      # was honoured, and the page delivers English.
+      - name: Locale sync gate self-test (fixtures)
+        run: python3 scripts/check-locale-bundle-sync.py --self-test
+      - name: Server locale allow-list and SPA bundles agree
+        run: python3 scripts/check-locale-bundle-sync.py
+
       # The registry gate above copies info.x-axiam-spec-digest out of the spec
       # verbatim, so it agrees with a stale digest; sdk-openapi-drift.yml would
       # catch one but needs a full server build, so it is path-filtered. That

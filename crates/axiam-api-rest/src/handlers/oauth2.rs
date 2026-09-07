@@ -503,32 +503,50 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     // Honour lane only, and that is what keeps T0.1 exact: a `browser_sso`
     // client registered `ignore` — which is every client that exists — sending
     // `prompt=none` gets today's answer, byte for byte.
-    if client.authn_request_params.is_honour() {
-        let params = AuthnRequestParams::parse(&RawAuthnParams {
+    //
+    // W5 (plan §4.5/§4.6) reads the same bundle for the cosmetic four, which is
+    // why it is parsed once here with every field rather than only `prompt`.
+    // Query string only, as before: a pushed request's parameters cannot be
+    // seen at this point (the handle is consumed inside the handler, after a
+    // principal exists), so a PAR client's presentation reaches the page on the
+    // *interaction* arm below instead. Both arms build their URL through the
+    // one builder, so the two carriers cannot come to disagree about what a
+    // `/login` URL looks like.
+    let honour = client.authn_request_params.is_honour();
+    let authn_params = honour.then(|| {
+        AuthnRequestParams::parse(&RawAuthnParams {
             prompt: q.prompt.as_deref(),
+            login_hint: q.login_hint.as_deref(),
+            display: q.display.as_deref(),
+            ui_locales: q.ui_locales.as_deref(),
+            // `claims_locales` is deliberately not read: it selects the
+            // language of *claim values*, which AXIAM does not localise, and
+            // it must not reach the page's language. See
+            // `axiam_oauth2::login_hop::Cosmetic::from_params`.
             ..Default::default()
-        });
-        if params
+        })
+    });
+    if let Some(params) = authn_params.as_ref()
+        && params
             .prompt
             .contains(&axiam_oauth2::authn_params::Prompt::None)
-        {
-            let refusal = OAuth2Error::LoginRequired(
-                "no end user is authenticated at this authorization server, and prompt=none \
+    {
+        let refusal = OAuth2Error::LoginRequired(
+            "no end user is authenticated at this authorization server, and prompt=none \
                  forbids asking them to sign in"
-                    .into(),
-            );
-            audit_prompt_none(state, http_req, tenant_id, &q.client_id, Some(&refusal)).await;
-            // RFC 6749 §4.1.2.1: an error is redirected only to a
-            // `redirect_uri` this client registered. Exact match, the same
-            // comparison `AuthorizeService::authorize` makes — an unregistered
-            // or absent one is answered directly instead.
-            return Err(Box::new(match q.redirect_uri.as_deref() {
-                Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
-                    build_error_redirect(uri, &refusal, q.state.as_deref(), &state.auth_config)
-                }
-                _ => build_oauth2_error_response(&refusal),
-            }));
-        }
+                .into(),
+        );
+        audit_prompt_none(state, http_req, tenant_id, &q.client_id, Some(&refusal)).await;
+        // RFC 6749 §4.1.2.1: an error is redirected only to a
+        // `redirect_uri` this client registered. Exact match, the same
+        // comparison `AuthorizeService::authorize` makes — an unregistered
+        // or absent one is answered directly instead.
+        return Err(Box::new(match q.redirect_uri.as_deref() {
+            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
+                build_error_redirect(uri, &refusal, q.state.as_deref(), &state.auth_config)
+            }
+            _ => build_oauth2_error_response(&refusal),
+        }));
     }
 
     // The loop guard. A request that already carries the marker is one this
@@ -567,7 +585,21 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     // to authenticate afresh instead of trusting what it already holds, and the
     // dead cookie is removed on the way out so the next attempt starts clean.
     let stale = presented.is_some();
-    let location = axiam_oauth2::login_hop::build_login_redirect(&return_to, stale);
+    // W5. The presentation the relying party asked for, on the honour lane and
+    // nowhere else: `authn_params` is `None` for every client registered
+    // `ignore`, so `Cosmetic::NONE` is what they get and their `/login` URL is
+    // byte-identical to the one W3 built. Invariant 4, as a type rather than as
+    // a branch somebody has to remember to write.
+    //
+    // The tenant default is `None` here — see plan §4.6's W5 amendment for why
+    // W5 ships the fallback chain without a tenant surface to configure it.
+    let cosmetic = authn_params
+        .as_ref()
+        .map_or(axiam_oauth2::login_hop::Cosmetic::NONE, |params| {
+            axiam_oauth2::login_hop::Cosmetic::from_params(params, None)
+        });
+    let location =
+        axiam_oauth2::login_hop::build_login_redirect_for(&return_to, stale, None, &cosmetic);
 
     let mut builder = HttpResponse::Found();
     builder
@@ -846,6 +878,27 @@ pub async fn authorize<C: Connection + Clone>(
         .prompt
         .contains(&axiam_oauth2::authn_params::Prompt::None);
 
+    // W5 — the presentation the sign-in page will be asked for, if it is
+    // shown. Captured before `req` moves, from the bundle whichever carrier
+    // delivered it, and used **only** inside the interaction arm below.
+    //
+    // There is no honour-lane condition here and there does not need to be:
+    // `AuthorizeOutcome::Interact` is produced at exactly one place
+    // (`axiam_oauth2::authorize`, step 6b) and that place is inside
+    // `if fapi::honours_authn_params(&client)`. A client on the `ignore` lane
+    // never reaches the arm that reads this, so it never reaches a `/login`
+    // URL carrying a presentation — invariant 4, held by the shape of the
+    // outcome type rather than by a second copy of the lane check that could
+    // come to disagree with the first.
+    //
+    // Assembled here rather than inside `honour::evaluate` because the cosmetic
+    // four decide no `Outcome` — see that module's "W5's cosmetic four are not
+    // here". The tenant default is `None`: plan §4.6's W5 amendment says why.
+    let cosmetic_owned = {
+        let c = axiam_oauth2::login_hop::Cosmetic::from_params(&req.authn_params, None);
+        (c.login_hint.map(str::to_owned), c.display, c.ui_locale)
+    };
+
     let outcome = match state.oauth2.authorize_service.authorize(req).await {
         Ok(axiam_oauth2::authorize::AuthorizeOutcome::Interact(interaction)) => {
             // W4 — the honour lane asked for an interaction. It rides W3's
@@ -893,10 +946,17 @@ pub async fn authorize<C: Connection + Clone>(
                     &state.auth_config,
                 );
             }
+            let (login_hint, display, ui_locale) = &cosmetic_owned;
+            let cosmetic = axiam_oauth2::login_hop::Cosmetic {
+                login_hint: login_hint.as_deref(),
+                display: *display,
+                ui_locale: *ui_locale,
+            };
             let location = axiam_oauth2::login_hop::build_login_redirect_for(
                 &return_to,
                 true,
                 interaction.required_acr,
+                &cosmetic,
             );
             return HttpResponse::Found()
                 .append_header((actix_web::http::header::LOCATION, location))

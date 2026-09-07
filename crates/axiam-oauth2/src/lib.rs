@@ -11,6 +11,7 @@ pub mod fapi;
 pub mod honour;
 pub mod jose;
 pub mod jwks_cache;
+pub mod locale;
 pub mod login_hop;
 pub mod logout;
 pub mod mtls;

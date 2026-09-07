@@ -62,12 +62,31 @@ profile. It relaxes nothing: it decides how a request with **no principal** is
 answered, and every gate — PAR, exact `redirect_uri`, PKCE, the profile bundle
 — runs on the return leg exactly as it runs on a request that never hopped.
 
-### It honours no authentication-request parameter
+### It honours no authentication-request parameter by itself
 
-`prompt`, `max_age`, `acr_values`, `claims` and `id_token_hint` are still
-ignored on the standard lane and still refused on `fapi2`, `browser_sso` or
-not. The hop makes them *reachable* — there is finally a browser session for
-them to be about — but reading them is a later wave. See
+`browser_sso` decides *whether a browser can sign in here*. Whether the
+authorization request's OpenID Connect parameters mean anything is a **separate
+switch**, `authn_request_params` — see
+[Standard-lane OpenID Connect parameters](oidc-authn-parameters.md). A client
+with `browser_sso: true` and `authn_request_params: ignore`, which is what
+every client registered before W4 has, gets the hop and nothing else:
+`prompt`, `max_age`, `acr_values`, `claims` and `id_token_hint` are ignored as
+they always were, and `login_hint`, `display` and `ui_locales` reach no
+`/login` URL — the redirect is `/login?return_to=…` and nothing more.
+
+What the hop does is make the parameters *reachable*: there is finally a
+browser session for them to be about. Two later waves read them, both behind
+`authn_request_params: honour` and neither behind this switch:
+
+| Wave | Adds to the `/login` URL |
+|---|---|
+| W4 | `&reauth=1` and `&acr=…` — reauthenticate, and which factor to demand |
+| W5 | `&login_hint=…`, `&display=…`, `&ui_locale=…` — pre-fill, layout, language |
+
+Everything in that table is built by one function
+(`axiam_oauth2::login_hop::build_login_redirect_for`), which is why the
+`return_to` validation, the loop guard and the same-origin requirement below
+apply identically to all of it. See
 [`docs/compliance/oidc-conformance.md`](../compliance/oidc-conformance.md)
 rows 23–25.
 

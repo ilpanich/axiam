@@ -128,7 +128,18 @@ async fn refresh_rotation_preserves_the_authentication_event() {
         .expect("login")
     {
         LoginResult::Success(out) => out,
-        other => panic!("expected Success, got {other:?}"),
+        // Named, never debug-formatted. Both other variants carry a bearer
+        // credential — `MfaChallengeOutput::challenge_token`,
+        // `MfaSetupOutput::setup_token` — and a panic message reaches stderr
+        // and the CI log, so `{other:?}` would print a live token on the one
+        // path where this assertion ever fires. The variant name is the whole
+        // of what a failure here needs to say.
+        LoginResult::MfaRequired(_) => {
+            panic!("expected Success, got MfaRequired: the test user has no MFA enrolled")
+        }
+        LoginResult::MfaSetupRequired(_) => {
+            panic!("expected Success, got MfaSetupRequired: no MFA policy is set on this tenant")
+        }
     };
 
     let original = session_repo

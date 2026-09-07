@@ -118,6 +118,39 @@ then the session it came from may be gone (row 43).
 | 45 | `amr` records what was actually verified: `pwd` alone for a password login, `pwd otp mfa` for TOTP, `pwd hwk mfa` for a security key behind a password, `hwk user` for a usernameless passkey (whose ceremony requires user verification), `fed` for a federated sign-in | RFC 8176 §2 | Pass | `session_evidence_rotation_test.rs` (password); the five call sites in `service.rs`, `webauthn.rs`, `federation.rs` |
 | 46 | A session row written before schema v55 reads back with `authenticated_at = created_at` and an empty `amr` — the strict direction in both cases, since neither can make a session look fresher or stronger than it is | — | Pass | `repository/session.rs::decode_evidence` + its tests; `schema.rs::schema_v55_adds_only_optional_columns_and_backfills_nothing` |
 
+## OpenID Connect Core 1.0 — the browser login hop (X7.3, wave W3)
+
+Every row above about `prompt`, `max_age` and `id_token_hint` describes a
+parameter that was, until this wave, **unreachable**: `/oauth2/authorize`
+required an access token, `axiam_access` is `SameSite=Strict`, and a Strict
+cookie is not sent on the cross-site top-level navigation that *is* a relying
+party's redirect. A signed-in user arrived at the authorization endpoint
+anonymous, and an anonymous request was answered with a 401 JSON body. There
+was no login page to reach.
+
+W3 adds one, opt-in per client (`browser_sso`, schema v54, default `false`),
+behind a second cookie that exists so the first three do not have to change.
+It honours **no** authentication-request parameter: a `browser_sso` client that
+sends `prompt=none` gets exactly the answer row 23 describes. What changes is
+only how a request with *no principal* is answered, and only for a client that
+asked.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 47 | An unauthenticated authorization request for a client registered `browser_sso: false` — which is every client registered today — is answered with the **byte-identical** 401 JSON body AXIAM has always sent, with no `Location` header, whatever authentication-request parameters it carries | — (invariant 4) | Pass | `oauth2_login_hop_test.rs::t0_1_an_unauthenticated_request_for_a_non_browser_sso_client_is_todays_401` |
+| 48 | An unauthenticated request for a `browser_sso` client is redirected to the sign-in page with a `return_to` that is a **path** on this deployment — no scheme, no host, no `//`, no traversal — naming `/oauth2/authorize` and nothing else | Core §3.1.2.1 | Pass | `…::t0_2_an_anonymous_browser_sso_request_is_sent_to_the_login_page`; `login_hop.rs::every_open_redirect_shape_is_refused`; `handlers/oauth2.rs::t0_3_return_to_must_resolve_onto_an_origin_this_deployment_owns`; `returnTo.test.ts` |
+| 49 | `return_to` is validated by the builder, by the return leg, and by the SPA before it navigates — the last check by the same four rules, because the login page is reachable with a `return_to` the server never built | Core §3.1.2.1 | Pass | `login_hop.rs::the_shape_the_server_builds_is_the_shape_it_accepts`; `LoginPage.test.tsx` ("refuses … and goes to the dashboard instead") |
+| 50 | The return leg re-runs **every** gate: `require_par`, exact `redirect_uri`, PKCE, and the `fapi2` profile checks. Nothing is cached across the hop | RFC 9126 §2.2; FAPI 2.0 §5.3.1.2 | Pass | `…::t0_4_the_return_leg_still_refuses_a_require_par_client_sending_inline_parameters`; `fapi.rs::m7_browser_sso_does_not_change_what_a_request_may_contain` |
+| 51 | The hop terminates: a request carrying the server's own `axiam_login_hop` marker is never redirected a second time, and is answered `login_required` instead | Core §3.1.2.6 | Pass | `…::the_loop_guard_answers_the_return_leg_instead_of_redirecting_again`; `login_hop.rs::the_marker_makes_the_second_leg_recognisable` |
+| 52 | A pushed request that expired during the hop (a `request_uri` lives 60 s) is refused `invalid_request_uri` with a description saying so — and **only** on the return leg, so an ordinary request with a dead handle keeps today's `invalid_request` | Core §3.1.2.6; RFC 9126 §2.2 | Pass | `…::a_pushed_request_that_expired_during_the_hop_fails_with_invalid_request_uri` |
+| 53 | The `axiam_op_session` cookie is `HttpOnly; Secure; SameSite=Lax; Path=/oauth2/authorize`, with the session's lifetime. `Lax` is load-bearing: it is sent on a top-level navigation and not inside a frame, so cross-site iframe probing fails closed — and so, deliberately, does hidden-iframe silent renew | Core §3.1.2.1 | Pass | `csrf.rs::t0_6_the_op_session_cookie_attributes_are_pinned`; `oauth2_login_hop_test.rs::t0_6_a_browser_login_sets_the_op_session_cookie_with_its_intended_attributes` |
+| 54 | The three API cookies are unchanged — still `SameSite=Strict` — and the OP cookie is separate bytes, not a copy of the access or refresh token | — (SEC-046) | Pass | `csrf.rs::the_api_cookies_are_still_strict_and_unscoped_by_the_op_session_cookie`; `…::t0_6_a_browser_login_sets_…` |
+| 55 | A live OP session does not authorize a client that did not opt in: for `browser_sso: false` the cookie is not read at all, and the refusal is the same 401 as for a browser with no cookie | — (invariant 4) | Pass | `…::t0_5_the_op_session_cookie_is_not_honoured_for_a_client_that_did_not_opt_in` |
+| 56 | An anonymous caller cannot learn which client ids exist: an unknown `client_id`, an unknown tenant and an opted-out client all answer with the same 401 | — | Pass | `…::an_unknown_client_id_is_refused_the_same_way_as_one_that_did_not_opt_in`; `…::without_a_tenant_an_anonymous_request_gets_todays_401_even_for_a_browser_sso_client` |
+| 57 | Logging out — through the API or through RP-initiated `end_session` — clears the OP cookie, and the value it held authorizes nothing afterwards | RP-Initiated Logout §2 | Pass | `…::logging_out_clears_the_op_session_cookie_and_the_session_it_names` |
+| 58 | Refresh rotation **copies** the OP browser-session digest (the cookie was not reissued), while a fresh sign-in **replaces** it and advances `authenticated_at` — the one event that moves what row 42 pins in place | Core §12.2 | Pass | `session_evidence_rotation_test.rs::reauthentication_moves_the_authentication_event_that_rotation_preserves` |
+| 59 | A request carrying an access token is unaffected: its tenant comes from the token, and the new `tenant_id` query parameter is ignored for it | — (invariant 4) | Pass | `…::a_token_bearing_request_is_unaffected_and_ignores_the_tenant_parameter` |
+
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
 
 | # | Behaviour | Spec Ref | Status | Evidence |
@@ -145,13 +178,38 @@ then the session it came from may be gone (row 43).
   an `authn_request_params: honour` column rather than flipping to Pass — the
   `ignore` behaviour stays, and stays tested, because it remains the default.
 
-- **Not yet Basic OP.** These rows close the gates and the refusals, not the
-  certification. The remaining Basic OP work — the browser login hop, session
-  authentication evidence, the honour lane, POST userinfo, the sensitive
-  scopes, `client_secret_basic` and the harness itself — is waves W2–W9 of
+- **Not yet Basic OP.** These rows close the gates, the refusals, the session
+  record and now the login hop — not the certification. The remaining Basic OP
+  work — the honour lane, POST userinfo, the sensitive scopes,
+  `client_secret_basic` and the harness itself — is waves W4–W9 of
   `claude_dev/basic-op-gap-plan.md` §8.
+
+- **The login hop reaches the parameters; it does not read them.** Rows 47–59
+  make `prompt`, `max_age` and `id_token_hint` *reachable* for the first time,
+  because there is now a browser session at `/oauth2/authorize` for them to be
+  about. Rows 23–25 still describe what happens to them: nothing. W4 is where
+  they are read.
+
+- **The tenant on an anonymous authorization request.** `/oauth2/authorize`
+  takes an optional `tenant_id`, read **only** when the request carries no
+  access token — every session, client and code in AXIAM is tenant-scoped, and
+  an anonymous browser has no token to take a tenant from. It is the same
+  parameter `/oauth2/end_session`, `/oauth2/token` and the tenant-scoped
+  discovery document already take. It is ignored whenever a principal was
+  resolved from a token, so no client registered today can observe it. The
+  published `authorization_endpoint` does not yet carry it; a relying party on
+  the hop must add it, and making discovery emit a tenant-scoped
+  `authorization_endpoint` is a W9 question rather than a W3 one, since it
+  would change the document every client already reads.
+
+- **Cross-site hidden-iframe silent renew is not supported, and fails closed.**
+  A consequence of the `SameSite=Lax` cookie in row 53, recorded in the plan's
+  §9 as a decision rather than discovered as a bug. Relying parties renew with
+  a top-level `prompt=none` navigation (W4) or with a refresh token.
 
 ---
 
 *Generated: Phase 7, Plan 02 — 2026-06-07*
 *Rows 23–39 added: X7.1 wave W1 — 2026-09-07*
+*Rows 40–46 added: X7.2 wave W2 — 2026-09-07*
+*Rows 47–59 added: X7.3 wave W3 — 2026-09-07*

@@ -351,6 +351,7 @@ async fn export_includes_real_session_metadata() {
             expires_at: Utc::now() + chrono::Duration::hours(1),
             authenticated_at: Utc::now(),
             amr: vec![],
+            browser_token_hash: None,
         })
         .await
         .unwrap();

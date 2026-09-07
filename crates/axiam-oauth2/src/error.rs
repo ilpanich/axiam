@@ -76,6 +76,44 @@ pub enum OAuth2Error {
     // sent a malformed request" from "this server does not do request
     // objects", and a conformance suite matches on the distinction. AXIAM
     // implements neither form — see `authorize::RequestObject` for why.
+    /// OIDC Core §3.1.2.6 — `login_required`: the authorization server needs
+    /// the end user to authenticate and cannot ask again (W3, plan §4.0).
+    ///
+    /// The **terminal state of the login hop's loop guard**. A `browser_sso`
+    /// client's anonymous authorization request is redirected to the login page
+    /// once; if the request that redirect produces comes back still carrying no
+    /// principal, this is the answer, and it is deliberately not another
+    /// redirect. See `crate::login_hop` for the argument that this bounds the
+    /// chain at two authorization requests.
+    ///
+    /// Answered **directly**, not by redirecting to the relying party. W3
+    /// honours no authentication-request parameter, so it builds no
+    /// parameter-driven redirect error; the loop guard is a server-side safety
+    /// valve for a deployment that is misconfigured or a browser that is
+    /// refusing cookies, and neither is something the relying party can act on
+    /// by being told in a query string.
+    #[error("login_required: {0}")]
+    LoginRequired(String),
+
+    /// OIDC Core §3.1.2.6 — `invalid_request_uri`, raised on the **return leg
+    /// of a login hop** when the pushed request the browser left with is gone
+    /// (W3, plan §4.0 and F10).
+    ///
+    /// A PAR `request_uri` lives 60 seconds (RFC 9126 §2.2, and `par.rs`'s own
+    /// constant). A user who takes longer than that to type a password comes
+    /// back to an authorization endpoint that has nothing to consume — and
+    /// telling them `invalid_request: request_uri is unknown, expired, or used`
+    /// describes a client bug that did not happen. This code says the recoverable
+    /// thing instead, which is what OIDC Core defines it for: the relying party
+    /// pushes again and restarts.
+    ///
+    /// Raised **only** on a request carrying `axiam_login_hop`; an ordinary
+    /// authorization request with a dead `request_uri` gets the same
+    /// `invalid_request` it has always got, because changing that would change
+    /// behaviour for a client registered today.
+    #[error("invalid_request_uri: {0}")]
+    InvalidRequestUri(String),
+
     /// OIDC Core §3.1.2.6 — a `request` parameter (a request object by value).
     #[error(
         "request_not_supported: this server does not accept request objects; send the \
@@ -110,6 +148,8 @@ impl OAuth2Error {
             Self::SlowDown => "slow_down",
             Self::ExpiredToken => "expired_token",
             Self::InvalidTarget(_) => "invalid_target",
+            Self::LoginRequired(_) => "login_required",
+            Self::InvalidRequestUri(_) => "invalid_request_uri",
             Self::RequestNotSupported => "request_not_supported",
             Self::RequestUriNotSupported => "request_uri_not_supported",
         }

@@ -1793,6 +1793,17 @@ pub(crate) async fn issue_sso_session<C: Connection + Clone>(
         })?;
 
     Ok(HttpResponse::Ok()
+        // W3 (plan §4.0): the OP browser session. A federated sign-in is a
+        // browser sign-in like any other, and a user who arrived through an
+        // upstream identity provider must be able to complete
+        // `/oauth2/authorize`'s login hop afterwards — otherwise the hop would
+        // work for password and passkey users and silently not for federated
+        // ones, which is a difference nobody would think to look for.
+        .cookie(crate::middleware::csrf::op_session_cookie(
+            &auth_out.browser_session_token,
+            state.auth_config.refresh_token_lifetime_secs,
+            state.auth_config.cookie_secure,
+        ))
         .cookie(crate::middleware::csrf::access_cookie(
             &auth_out.access_token,
             state.auth_config.access_token_lifetime_secs,

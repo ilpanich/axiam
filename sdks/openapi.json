@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta12",
-    "x-axiam-spec-digest": "sha256:689937e65ada521324714d2f3765fcf26d56f941639bebbd5e916ec53b110962"
+    "x-axiam-spec-digest": "sha256:c8cfb18551f2ca996838e6a078e1f4aa5e69187533b031024bf21b4e1f4d2f1a"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -10327,14 +10327,14 @@
           "oauth2"
         ],
         "summary": "`GET /oauth2/authorize` -- OAuth2 authorization endpoint.",
-        "description": "The user must be authenticated (redirected to login first if not).\nOn success, redirects to `redirect_uri?code=...&state=...`.\nOn error, redirects with `?error=...&error_description=...&state=...`.",
+        "description": "A request carrying an access token authorizes as its subject. A request\ncarrying none is answered with a 401 JSON body — unless the client it names\nis registered `browser_sso`, in which case it is either recognised by its\n`axiam_op_session` cookie or redirected to the sign-in page and brought back\n(W3, plan §4.0). See [`resolve_authorize_principal`].\n\nOn success, redirects to `redirect_uri?code=...&state=...`.\nOn error, redirects with `?error=...&error_description=...&state=...`.",
         "operationId": "authorize",
         "parameters": [
           {
             "name": "response_type",
-            "in": "query",
+            "in": "path",
             "description": "Required unless `request_uri` is present (B5 / RFC 9126 §4).",
-            "required": false,
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10344,7 +10344,7 @@
           },
           {
             "name": "client_id",
-            "in": "query",
+            "in": "path",
             "required": true,
             "schema": {
               "type": "string"
@@ -10352,9 +10352,9 @@
           },
           {
             "name": "redirect_uri",
-            "in": "query",
+            "in": "path",
             "description": "Required unless `request_uri` is present.",
-            "required": false,
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10364,8 +10364,8 @@
           },
           {
             "name": "scope",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10375,8 +10375,8 @@
           },
           {
             "name": "state",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10386,8 +10386,8 @@
           },
           {
             "name": "code_challenge",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10397,8 +10397,8 @@
           },
           {
             "name": "code_challenge_method",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10408,8 +10408,8 @@
           },
           {
             "name": "nonce",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10419,9 +10419,9 @@
           },
           {
             "name": "request_uri",
-            "in": "query",
+            "in": "path",
             "description": "B5 — a `urn:ietf:params:oauth:request_uri:` value obtained from\n`/oauth2/par`. Mutually exclusive with the inline parameters above.",
-            "required": false,
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10431,9 +10431,9 @@
           },
           {
             "name": "request",
-            "in": "query",
+            "in": "path",
             "description": "X7 G12 — RFC 9101 `request`, a request object by value. AXIAM does not\naccept one; the field exists so the refusal can name the right error\ncode (`request_not_supported`) instead of the parameter being dropped\nby serde and the request quietly succeeding without it.",
-            "required": false,
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10443,8 +10443,8 @@
           },
           {
             "name": "prompt",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10454,8 +10454,8 @@
           },
           {
             "name": "max_age",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10465,8 +10465,8 @@
           },
           {
             "name": "acr_values",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10476,8 +10476,8 @@
           },
           {
             "name": "claims",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10487,8 +10487,8 @@
           },
           {
             "name": "id_token_hint",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10498,8 +10498,8 @@
           },
           {
             "name": "login_hint",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10509,8 +10509,8 @@
           },
           {
             "name": "display",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10520,8 +10520,8 @@
           },
           {
             "name": "ui_locales",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10531,8 +10531,33 @@
           },
           {
             "name": "claims_locales",
-            "in": "query",
-            "required": false,
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "W3 — which tenant this authorization request is for, read **only** when\nthe request carries no authenticated principal (plan §4.0).\n\nEvery session, client and code in AXIAM is tenant-scoped, and until this\nwave the tenant came exclusively from the caller's own access token. An\nanonymous browser has no token, so the login hop cannot even look up the\nclient whose `browser_sso` field decides how to answer it — hence a\nparameter, the same way `/oauth2/end_session` and `/oauth2/token` already\ntake one, and the same way the tenant-scoped discovery document is\nfetched.\n\n**Ignored whenever a principal was resolved from a token**, which is\nevery request that works today: the token's tenant wins, unconditionally,\nexactly as before. A request that omits it and has no principal is\nanswered with today's 401 — so a client registered today, which has never\nsent it, cannot observe that it exists.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "axiam_login_hop",
+            "in": "path",
+            "description": "W3 — the login hop's loop guard (`axiam_login_hop`).\n\nSet by this server inside the `return_to` it builds, and read here to\nrecognise the return leg. See `axiam_oauth2::login_hop` for why its\npresence bounds the hop at one redirect, and for why a browser that\nstrips it harms only itself.",
+            "required": true,
             "schema": {
               "type": [
                 "string",
@@ -10543,7 +10568,20 @@
         ],
         "responses": {
           "302": {
-            "description": "Redirect with authorization code"
+            "description": "Redirect with authorization code, or to the sign-in page for a browser_sso client"
+          },
+          "400": {
+            "description": "OAuth2 error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No authenticated principal, and the client did not opt into the login hop"
           }
         },
         "security": [

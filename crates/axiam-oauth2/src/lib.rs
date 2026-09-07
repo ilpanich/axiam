@@ -9,6 +9,7 @@ pub mod error;
 pub mod fapi;
 pub mod jose;
 pub mod jwks_cache;
+pub mod login_hop;
 pub mod logout;
 pub mod mtls;
 pub mod oidc;

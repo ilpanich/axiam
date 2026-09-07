@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | [`Session::authenticated_at`] | the login that created the session | **yes** |
 //! | [`Session::amr`] | the same login, from the factors it actually verified | **yes** |
-//! | [`Session::browser_token_hash`] | the OP browser session (W3) | — |
+//! | [`Session::browser_token_hash`] | the OP browser session (W3) | **yes** |
 //!
 //! Nothing in this wave *reads* the evidence into a token. The claims
 //! (`auth_time`, `acr`, `amr`) are emitted for no client at all — see
@@ -198,9 +198,22 @@ pub struct Session {
     pub amr: Vec<Amr>,
     /// W3 — SHA-256 of the OP browser-session token this session is bound to.
     ///
-    /// The column exists from schema v55 so that the login hop lands as one
-    /// behaviour change rather than a behaviour change plus a migration.
-    /// Nothing writes it in this wave, and every row therefore carries `None`.
+    /// The column exists from schema v55; W3 is what writes it and what indexes
+    /// it (v56). It is the stored half of the `axiam_op_session` cookie: the
+    /// browser holds 256 random bits, the row holds their digest, and
+    /// `/oauth2/authorize` resolves one to the other for a client registered
+    /// `browser_sso`.
+    ///
+    /// `None` for every session created before W3, for every session created by
+    /// a path that is not a browser login, and for every deployment that never
+    /// registers a `browser_sso` client — the hash is written unconditionally
+    /// at login, but no client consults it unless it opted in.
+    ///
+    /// **Copied across refresh rotation**, like [`Self::authenticated_at`] and
+    /// [`Self::amr`] and for a related reason: rotation replaces the row, and a
+    /// browser whose OP cookie stopped resolving because its access token was
+    /// renewed would be silently signed out of the authorization endpoint
+    /// alone.
     #[serde(default)]
     pub browser_token_hash: Option<String>,
 }
@@ -234,6 +247,13 @@ pub struct CreateSession {
     /// X7.2 — see [`Session::amr`]. Copied across rotation for the same
     /// reason.
     pub amr: Vec<Amr>,
+    /// W3 — see [`Session::browser_token_hash`].
+    ///
+    /// `None` on every path that is not a browser sign-in, and on rotation it
+    /// carries the consumed session's value rather than a fresh one: the cookie
+    /// in the browser did not change, so neither may the digest it is matched
+    /// against.
+    pub browser_token_hash: Option<String>,
 }
 
 #[cfg(test)]

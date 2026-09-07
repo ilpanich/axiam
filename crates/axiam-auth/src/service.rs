@@ -56,12 +56,37 @@ pub struct LoginInput {
 }
 
 /// Successful login result (no MFA required).
-#[derive(Debug)]
+///
+/// Three of its five fields are credentials, so [`Debug`] is implemented by
+/// hand and redacts all of them. The derive would have printed an access
+/// token, a refresh token and now an OP browser-session token into any
+/// `{:?}` — a log line, an `assert!` message, a panic — which is exactly the
+/// cleartext-logging defect CodeQL caught in W2 on this type's enclosing
+/// [`LoginResult`].
 pub struct LoginOutput {
     pub access_token: String,
     pub refresh_token: String,
     pub session_id: Uuid,
     pub expires_in: u64,
+    /// W3 — the raw `axiam_op_session` value for this login.
+    ///
+    /// Returned exactly once, the way the refresh token is: only its SHA-256
+    /// reaches the database. The REST layer turns it into the path-scoped,
+    /// `SameSite=Lax` cookie that lets `/oauth2/authorize` recognise this
+    /// browser on a cross-site navigation from a relying party.
+    pub browser_session_token: String,
+}
+
+impl std::fmt::Debug for LoginOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginOutput")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("session_id", &self.session_id)
+            .field("expires_in", &self.expires_in)
+            .field("browser_session_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Login result — full success, MFA challenge, or MFA setup required.
@@ -941,6 +966,15 @@ impl<
                 // token: it must equal the original.
                 authenticated_at: session.authenticated_at,
                 amr: session.amr,
+                // W3: **copied**, for a reason adjacent to the one above. A
+                // refresh response never reaches `/oauth2/authorize`'s cookie
+                // path, so the `axiam_op_session` value in the browser is not
+                // reissued here and cannot be. A rotation that dropped the
+                // digest would leave a live cookie pointing at a row that no
+                // longer exists, and the user would be signed out of the
+                // authorization endpoint alone — invisibly, at a moment nothing
+                // in the interface corresponds to.
+                browser_token_hash: session.browser_token_hash,
             })
             .await?;
         let session_create_us = t_create.elapsed().as_micros() as u64;
@@ -1326,6 +1360,20 @@ impl<
         let expires_at =
             Utc::now() + Duration::seconds(self.config.refresh_token_lifetime_secs as i64);
 
+        // W3 (plan §4.0). Minted here, at the choke point every browser sign-in
+        // funnels through, for the same reason the authentication evidence is:
+        // a login path that forgot it would be a browser that silently cannot
+        // use the authorization endpoint's login hop — discovered by a relying
+        // party rather than by the compiler.
+        //
+        // It is minted unconditionally. This layer does not know, and must not
+        // need to know, whether any client in the deployment is registered
+        // `browser_sso`; issuing a credential no client consults is not a
+        // behaviour change, and deciding here would put a per-client policy in
+        // the one place that has never seen a client.
+        let raw_browser_session = token::generate_browser_session_token();
+        let browser_token_hash = token::hash_browser_session_token(&raw_browser_session);
+
         let session = self
             .session_repo
             .create(CreateSession {
@@ -1337,6 +1385,7 @@ impl<
                 expires_at,
                 authenticated_at: evidence.authenticated_at,
                 amr: evidence.amr,
+                browser_token_hash: Some(browser_token_hash),
             })
             .await?;
 
@@ -1356,6 +1405,7 @@ impl<
             refresh_token: raw_refresh,
             session_id: session.id,
             expires_in: self.config.access_token_lifetime_secs,
+            browser_session_token: raw_browser_session,
         })
     }
 

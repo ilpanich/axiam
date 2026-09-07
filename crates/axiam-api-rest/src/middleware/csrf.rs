@@ -28,6 +28,8 @@ use crate::error::AxiamApiError;
 pub const COOKIE_ACCESS: &str = "axiam_access";
 pub const COOKIE_REFRESH: &str = "axiam_refresh";
 pub const COOKIE_CSRF: &str = "axiam_csrf";
+/// W3 — the OP browser-session cookie read by `/oauth2/authorize` (plan §4.0).
+pub const COOKIE_OP_SESSION: &str = "axiam_op_session";
 pub const HEADER_CSRF: &str = "X-CSRF-Token";
 
 // ---------------------------------------------------------------------------
@@ -344,6 +346,50 @@ pub fn csrf_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cooki
         .finish()
 }
 
+/// Build the `axiam_op_session` cookie — the OP browser session (W3, plan §4.0).
+///
+/// - `httpOnly(true)` — script must never read it; it buys authorization codes
+/// - `Secure` — controlled by `cookie_secure`, exactly as the other three
+/// - `SameSite::Lax` — **the load-bearing attribute**, see below
+/// - `path("/oauth2/authorize")` — the only endpoint that consults it
+/// - `Max-Age` = the session's, i.e. `AuthConfig::refresh_token_lifetime_secs`
+///
+/// # Why `Lax`, and why it must stay `Lax`
+///
+/// A browser sends a `Lax` cookie on **top-level GET navigations and nothing
+/// else**. That is precisely an OpenID Connect redirect from a relying party,
+/// and precisely *not* an `<iframe>`, an `<img>`, or a cross-site `fetch` —
+/// so the one thing this cookie exists to enable works, and the probing
+/// technique it would otherwise enable does not. An attacker's page cannot
+/// frame `/oauth2/authorize` and watch whether a session exists, because the
+/// cookie is not sent inside a frame at all.
+///
+/// The cost is stated rather than hidden, and it is recorded in plan §9: the
+/// cross-site hidden-iframe silent-renew pattern (`prompt=none` in an invisible
+/// frame) **is not supported and fails closed**. Relying parties renew with a
+/// top-level `prompt=none` navigation or with a refresh token. Changing this to
+/// `SameSite=None` would make that pattern work and would hand every site on
+/// the internet the same probe; it is not a fix and must not be made as one.
+///
+/// # Why a second cookie rather than relaxing `axiam_access`
+///
+/// `axiam_access` is `SameSite=Strict; Path=/` and opens the entire API. This
+/// one is scoped to a single endpoint, so a browser that sends it cross-site can
+/// obtain exactly one thing: an authorization code, for a client that is
+/// registered, at a `redirect_uri` that matched exactly, bound to the relying
+/// party's own PKCE and `state`. The API surface keeps its Strict cookies and
+/// its double-submit CSRF token untouched, and SEC-046's threat model for the
+/// API cookie is unchanged rather than re-argued.
+pub fn op_session_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cookie<'static> {
+    Cookie::build(COOKIE_OP_SESSION, token.to_owned())
+        .http_only(true)
+        .secure(cookie_secure)
+        .same_site(SameSite::Lax)
+        .path("/oauth2/authorize")
+        .max_age(Duration::seconds(max_age_secs as i64))
+        .finish()
+}
+
 // A removal cookie is still a `Set-Cookie` the browser parses and stores until
 // it expires, so it must mirror **every** attribute of the cookie it clears —
 // not just `path`. Emitting a bare `Path=/` removal for a cookie that was set
@@ -387,6 +433,18 @@ pub fn clear_refresh_cookie(cookie_secure: bool) -> Cookie<'static> {
 /// to populate `X-CSRF-Token`) and is therefore kept here too.
 pub fn clear_csrf_cookie(cookie_secure: bool) -> Cookie<'static> {
     let mut c = csrf_cookie("", 0, cookie_secure);
+    c.make_removal();
+    c
+}
+
+/// Clear the `axiam_op_session` cookie (W3).
+///
+/// Built from [`op_session_cookie`], so it mirrors its attributes — including
+/// the `/oauth2/authorize` path scope, without which the removal would not
+/// match the cookie and a logged-out browser would keep presenting an OP
+/// session at the authorization endpoint.
+pub fn clear_op_session_cookie(cookie_secure: bool) -> Cookie<'static> {
+    let mut c = op_session_cookie("", 0, cookie_secure);
     c.make_removal();
     c
 }
@@ -486,6 +544,9 @@ mod tests {
 
         let c = csrf_cookie("tok", 900, true);
         assert!(c.secure().unwrap_or(false), "expected Secure=true");
+
+        let c = op_session_cookie("tok", 86400, true);
+        assert!(c.secure().unwrap_or(false), "expected Secure=true");
     }
 
     #[test]
@@ -507,6 +568,68 @@ mod tests {
             !c.secure().unwrap_or(true),
             "expected Secure=false for HTTP dev"
         );
+
+        let c = op_session_cookie("tok", 86400, false);
+        assert!(
+            !c.secure().unwrap_or(true),
+            "expected Secure=false for HTTP dev"
+        );
+    }
+
+    /// **T0.6** — the OP browser-session cookie's attributes, pinned one by
+    /// one, because every one of them is doing a job:
+    ///
+    /// - `SameSite=Lax` is what defeats iframe probing and what makes the
+    ///   cross-site RP redirect work at all. Plan §9 records that the price is
+    ///   hidden-iframe silent renew, which fails closed. A future change to
+    ///   `None` would buy that pattern back and sell the probe with it.
+    /// - `Path=/oauth2/authorize` is what bounds a stolen cookie to producing
+    ///   authorization codes for registered clients rather than API calls.
+    /// - `HttpOnly` keeps it out of script.
+    /// - `Max-Age` is the session's, not the access token's: it names the same
+    ///   thing the session row does.
+    #[test]
+    fn t0_6_the_op_session_cookie_attributes_are_pinned() {
+        let c = op_session_cookie("browser-token", 86_400, true);
+        assert_eq!(c.name(), "axiam_op_session");
+        assert_eq!(
+            c.same_site(),
+            Some(SameSite::Lax),
+            "Lax is deliberate: it is sent on a top-level navigation and not \
+             inside a frame. Do not 'fix' this to None — see plan §9."
+        );
+        assert_eq!(
+            c.path(),
+            Some("/oauth2/authorize"),
+            "the cookie must reach exactly one endpoint"
+        );
+        assert!(
+            c.http_only().unwrap_or(false),
+            "must not be script-readable"
+        );
+        assert!(c.secure().unwrap_or(false));
+        assert_eq!(c.max_age(), Some(Duration::seconds(86_400)));
+    }
+
+    /// The other three cookies are unchanged by W3. Pinned here because the
+    /// argument for a *second* cookie is that the first three keep the threat
+    /// model SEC-046 gave them — and an edit that relaxed `axiam_access` to
+    /// `Lax` would make this wave's cookie pointless and its predecessor
+    /// weaker.
+    #[test]
+    fn the_api_cookies_are_still_strict_and_unscoped_by_the_op_session_cookie() {
+        assert_eq!(
+            access_cookie("tok", 900, true).same_site(),
+            Some(SameSite::Strict)
+        );
+        assert_eq!(
+            refresh_cookie("tok", 86_400, true).same_site(),
+            Some(SameSite::Strict)
+        );
+        assert_eq!(
+            csrf_cookie("tok", 900, true).same_site(),
+            Some(SameSite::Strict)
+        );
     }
 
     /// A removal cookie is a `Set-Cookie` in its own right: the browser stores
@@ -527,6 +650,10 @@ mod tests {
                     clear_refresh_cookie(secure),
                 ),
                 (csrf_cookie("tok", 900, secure), clear_csrf_cookie(secure)),
+                (
+                    op_session_cookie("tok", 86400, secure),
+                    clear_op_session_cookie(secure),
+                ),
             ];
 
             for (set, clear) in pairs {
@@ -564,6 +691,7 @@ mod tests {
             clear_access_cookie(true),
             clear_refresh_cookie(true),
             clear_csrf_cookie(true),
+            clear_op_session_cookie(true),
         ] {
             let name = c.name().to_owned();
             assert_eq!(c.value(), "", "{name}: removal must carry an empty value");

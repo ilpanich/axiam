@@ -1432,6 +1432,57 @@ mod tests {
         }
     }
 
+    /// **M7 request half (W3).** `browser_sso` changes nothing about what an
+    /// authorization request is *allowed to contain*, on either profile.
+    ///
+    /// It is the one field in the two-layer gate that is permitted on `fapi2`
+    /// (D2), so the obvious worry is that permitting it smuggled a relaxation
+    /// in with it. It did not, and cannot: the flag decides how a request with
+    /// **no principal** is answered — a 401 or a redirect to a sign-in page —
+    /// and every gate this function applies runs afterwards, on the return leg,
+    /// exactly as it runs on a request that never hopped. Here that is asserted
+    /// as an equality rather than a description: for every combination of
+    /// profile and parameter, the answer with `browser_sso` set is the answer
+    /// without it.
+    ///
+    /// The end-to-end half — a `require_par` client that cannot smuggle inline
+    /// parameters through the hop, and PKCE still required on the way back —
+    /// is `axiam-api-rest`'s `oauth2_login_hop_test`, which has an HTTP
+    /// listener to hop through.
+    #[test]
+    fn m7_browser_sso_does_not_change_what_a_request_may_contain() {
+        for base in [base_client(), fapi_client()] {
+            for (name, value) in [
+                ("prompt", "none"),
+                ("max_age", "0"),
+                ("acr_values", "urn:axiam:acr:mfa"),
+                ("id_token_hint", "ey.header.payload"),
+                ("login_hint", "someone@example.com"),
+                ("display", "page"),
+            ] {
+                let mut with = base.clone();
+                with.browser_sso = true;
+                let params = one_param(name, value);
+
+                let without_pkce = enforce_authorization_request(&base, None, &params).is_err();
+                let with_pkce = enforce_authorization_request(&base, Some(PKCE), &params).is_err();
+
+                assert_eq!(
+                    enforce_authorization_request(&with, None, &params).is_err(),
+                    without_pkce,
+                    "browser_sso changed the answer for {name}={value} on {} (no PKCE)",
+                    base.profile.as_str()
+                );
+                assert_eq!(
+                    enforce_authorization_request(&with, Some(PKCE), &params).is_err(),
+                    with_pkce,
+                    "browser_sso changed the answer for {name}={value} on {}",
+                    base.profile.as_str()
+                );
+            }
+        }
+    }
+
     // -- X7.1: the matrix, request-time halves ----------------------------
 
     /// M1-M4 request half. The five security-bearing parameters are refused on

@@ -311,6 +311,52 @@ impl actix_web::FromRequest for AuthenticatedUser {
     }
 }
 
+/// [`AuthenticatedUser`], or the 401 that would have been returned instead
+/// (W3, plan §4.0).
+///
+/// One endpoint needs to *decide* what an unauthenticated request means rather
+/// than have the decision made for it by extractor failure: `/oauth2/authorize`,
+/// where the answer depends on a per-client registration field the handler has
+/// not read yet. Everything else keeps taking [`AuthenticatedUser`] and keeps
+/// getting the 401.
+///
+/// # Why it carries the error rather than an `Option`
+///
+/// Because invariant 4 of `claude_dev/basic-op-gap-plan.md` says a client
+/// registered today must see a byte-identical answer, and the only way to be
+/// certain of that is to return *the same object* actix would have returned.
+/// `Option<AuthenticatedUser>` would have thrown the error away and left the
+/// handler to reconstruct a 401 that merely looks similar — a body that drifts
+/// by one field is exactly the kind of thing a golden test catches a year later.
+/// [`AxiamApiError::error_response`] here is the same call actix makes when an
+/// extractor fails, so the two cannot differ.
+///
+/// # It never fails
+///
+/// Its `Error` is [`std::convert::Infallible`]: the whole point is to hand the
+/// handler a decision, not to make one. A handler taking this extractor is
+/// responsible for answering an unauthenticated request itself, and gets no
+/// help from the framework if it forgets.
+pub struct MaybeAuthenticatedUser(Result<AuthenticatedUser, AxiamApiError>);
+
+impl MaybeAuthenticatedUser {
+    /// The authenticated principal, or the error that would have been the
+    /// response.
+    pub fn into_result(self) -> Result<AuthenticatedUser, AxiamApiError> {
+        self.0
+    }
+}
+
+impl actix_web::FromRequest for MaybeAuthenticatedUser {
+    type Error = std::convert::Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
+
+    fn from_request(req: &HttpRequest, payload: &mut Payload) -> Self::Future {
+        let inner = <AuthenticatedUser as actix_web::FromRequest>::from_request(req, payload);
+        Box::pin(async move { Ok(Self(inner.await)) })
+    }
+}
+
 /// Service-account context extracted from a valid M2M JWT.
 ///
 /// Use this as a handler parameter to require M2M authentication.

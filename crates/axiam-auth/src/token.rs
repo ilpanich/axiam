@@ -1528,6 +1528,34 @@ pub fn hash_refresh_token(raw: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// W3 — generate the OP browser-session token carried by `axiam_op_session`
+/// (32 bytes → base64url, no padding).
+///
+/// Separate bytes from the refresh token, not a second encoding of it. The two
+/// credentials have different reach: the refresh token renews API access from
+/// one path under a `SameSite=Strict` cookie, while this one is sent on a
+/// cross-site top-level navigation to `/oauth2/authorize` and buys an
+/// authorization code for a registered relying party. Deriving one from the
+/// other would mean a disclosure of either is a disclosure of both.
+pub fn generate_browser_session_token() -> String {
+    use rand::RngExt;
+    let mut rng = rand::rng();
+    let bytes: [u8; 32] = rng.random();
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// SHA-256 hash of an OP browser-session token, hex-encoded.
+///
+/// This is the value stored as `session.browser_token_hash`, and the value
+/// `/oauth2/authorize` looks a cookie up by. The token itself is never stored,
+/// for the reason the refresh token is not: a database read must not yield a
+/// credential.
+pub fn hash_browser_session_token(raw: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

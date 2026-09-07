@@ -173,6 +173,127 @@ describe("LoginPage — org/tenant step", () => {
   });
 });
 
+/**
+ * W3 — the OpenID Connect login hop (`claude_dev/basic-op-gap-plan.md` §4.0).
+ *
+ * `/oauth2/authorize` sends an anonymous browser here on behalf of a client
+ * registered `browser_sso`, and the page has to bring it back afterwards. The
+ * value that says where "back" is decides where a browser goes the instant it
+ * has a session, so the interesting tests are the ones that refuse.
+ */
+describe("LoginPage — the OIDC login hop", () => {
+  const RETURN_TO =
+    "/oauth2/authorize?response_type=code&client_id=oa_1&axiam_login_hop=1";
+
+  /** A successful password sign-in, with `/auth/me` answering. */
+  const signInSucceeds = () => {
+    apiMock.post.mockImplementation((url: string) => {
+      if (url === OPAQUE_LOGIN_START) return opaqueDisabled();
+      if (url === "/api/v1/auth/login") {
+        return Promise.resolve(res({ user: loginUser }));
+      }
+      if (url === "/api/v1/auth/logout") return Promise.resolve(res(null));
+      return Promise.reject(new Error("unexpected post " + url));
+    });
+    apiMock.get.mockImplementation((url: string) =>
+      url === "/api/v1/auth/me"
+        ? Promise.resolve(
+            res({
+              user: loginUser,
+              permissions: ["*"],
+              tenant_slug: "default",
+              org_slug: "acme",
+            }),
+          )
+        : Promise.reject(new Error("unexpected get " + url)),
+    );
+  };
+
+  /**
+   * `location.assign` and not the router: the destination is a server endpoint,
+   * and the browser has to make a real request to it carrying the
+   * `axiam_op_session` cookie the login response just set.
+   */
+  let assign: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    assign = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { ...window.location, assign },
+    });
+  });
+
+  it("resumes the authorization request after signing in", async () => {
+    signInSucceeds();
+    await goToCredentials(`/login?return_to=${encodeURIComponent(RETURN_TO)}`);
+    await submitCredentials();
+
+    await waitFor(() => expect(assign).toHaveBeenCalledWith(RETURN_TO));
+    expect(navigate).not.toHaveBeenCalledWith("/dashboard");
+  });
+
+  it("goes to the dashboard when there is no return_to", async () => {
+    signInSucceeds();
+    await goToCredentials();
+    await submitCredentials();
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The open-redirect cases, end to end through the page rather than only
+   * through the sanitizer: a refused `return_to` must not merely fail to be
+   * navigated to, it must leave the user somewhere sensible.
+   */
+  it.each([
+    ["a foreign origin", "https://evil.example/oauth2/authorize?x=1"],
+    ["a scheme-relative reference", "//evil.example/oauth2/authorize?x=1"],
+    ["path traversal", "/oauth2/authorize/../../admin?x=1"],
+    ["a same-origin path the deployment did not allow", "/api/v1/users?x=1"],
+  ])("refuses %s and goes to the dashboard instead", async (_label, hostile) => {
+    signInSucceeds();
+    await goToCredentials(`/login?return_to=${encodeURIComponent(hostile)}`);
+    await submitCredentials();
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  /**
+   * `reauth=1` means this browser arrived believing it was signed in and was
+   * not. Whatever session it still holds is ended before the form is shown, so
+   * that what follows is a real authentication event — the one thing a later
+   * wave's `max_age` and `prompt=login` are worth anything only if it happens.
+   */
+  it("ends the existing session and says so when ?reauth=1 is present", async () => {
+    signInSucceeds();
+    renderWithProviders(<LoginPage />, {
+      route: `/login?reauth=1&return_to=${encodeURIComponent(RETURN_TO)}`,
+    });
+
+    expect(
+      await screen.findByText("Please sign in again to continue."),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith("/api/v1/auth/logout"),
+    );
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+
+  it("does not sign the browser out when reauth was not asked for", async () => {
+    signInSucceeds();
+    renderWithProviders(<LoginPage />, {
+      route: `/login?return_to=${encodeURIComponent(RETURN_TO)}`,
+    });
+    await screen.findByLabelText("Organization slug");
+    expect(apiMock.post).not.toHaveBeenCalledWith("/api/v1/auth/logout");
+    expect(
+      screen.queryByText("Please sign in again to continue."),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("LoginPage — credentials step", () => {
   it("requires username and password", async () => {
     await goToCredentials();

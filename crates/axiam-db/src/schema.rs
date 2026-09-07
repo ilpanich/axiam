@@ -317,6 +317,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "session_authentication_evidence",
         sql: SCHEMA_V55,
     },
+    Migration {
+        version: 56,
+        name: "op_browser_session_lookup",
+        sql: SCHEMA_V56,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3092,9 +3097,84 @@ DEFINE FIELD IF NOT EXISTS amr ON TABLE oauth2_auth_code TYPE option<array<strin
 DEFINE FIELD IF NOT EXISTS authenticated_at ON TABLE sso_handoff_code TYPE option<datetime>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v56 — the OP browser session becomes something we look sessions up by
+// -----------------------------------------------------------------------
+//
+// v55 defined `session.browser_token_hash` and said, in as many words, that an
+// index would arrive "when W3 starts looking sessions up by it". It does now:
+// `/oauth2/authorize` resolves the `axiam_op_session` cookie to a session by
+// digest, on the anonymous path of every request from a `browser_sso` client.
+// Without an index that is a full table scan of the busiest table in the
+// deployment, on an unauthenticated endpoint — which is a denial-of-service
+// primitive, not merely a slow query.
+//
+// The columns are `(tenant_id, browser_token_hash)`, matching `idx_session_token`:
+// every session read in this codebase is tenant-scoped, and the login hop is
+// no exception — a browser holding a session in tenant A must not be able to
+// authorize a client registered in tenant B.
+//
+// # Why it is not UNIQUE, unlike `idx_session_token`
+//
+// Because the column is `option<string>` and almost every row leaves it unset.
+// A unique index treats the absent value as a value: the second session ever
+// created by a path that is not a browser sign-in would collide with the
+// first, and *logging in would start failing*. The uniqueness this index would
+// have expressed is supplied instead by the value itself — 256 CSPRNG bits —
+// and enforced where it can be enforced honestly, in
+// `get_by_browser_token_hash`, which returns no principal at all rather than
+// the first of two rows if a digest ever matches twice.
+//
+// Additive, no backfill, no column: a rolled-back binary reads a migrated
+// database exactly as it read the unmigrated one.
+const SCHEMA_V56: &str = "\
+DEFINE INDEX IF NOT EXISTS idx_session_browser_token ON TABLE session
+    COLUMNS tenant_id, browser_token_hash;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W3 — v56 adds one index and nothing else. Not a column, not a value:
+    /// the column it indexes was defined by v55 and is written for the first
+    /// time by this wave's login path.
+    #[test]
+    fn schema_v56_adds_exactly_one_index_and_no_data() {
+        assert!(
+            SCHEMA_V56.contains("idx_session_browser_token ON TABLE session"),
+            "v56 must define the OP browser-session index"
+        );
+        assert!(
+            SCHEMA_V56.contains("COLUMNS tenant_id, browser_token_hash"),
+            "the index must be tenant-scoped: a session in one tenant may not \
+             authorize a client in another"
+        );
+        for forbidden in ["UPDATE", "DEFINE FIELD", "REMOVE", "DELETE"] {
+            assert!(
+                !SCHEMA_V56.contains(forbidden),
+                "v56 must not {forbidden}: it is an index, not a data migration"
+            );
+        }
+    }
+
+    /// The index is deliberately **not** UNIQUE, and this pins the reason so a
+    /// later tightening pass cannot "fix" it into an outage.
+    ///
+    /// `browser_token_hash` is `option<string>` and unset on almost every row.
+    /// A unique index over it would treat the absent value as a value and make
+    /// the second non-browser session ever created collide with the first —
+    /// that is, it would break logging in. The uniqueness the index would have
+    /// asserted comes from the 256 CSPRNG bits behind the digest, and the
+    /// ambiguity it cannot assert is refused in `get_by_browser_token_hash`.
+    #[test]
+    fn schema_v56_index_is_not_unique_because_the_column_is_usually_absent() {
+        assert!(
+            !SCHEMA_V56.contains("UNIQUE"),
+            "a UNIQUE index over a mostly-absent option<string> column would \
+             make the second session with no OP token collide with the first"
+        );
+    }
 
     /// X7.2 — v55 is additive and un-backfilled, and every column it adds is
     /// optional so that a rolled-back binary reads a migrated database.
@@ -3139,8 +3219,8 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&55),
-            "v55 is this wave's migration (v54 belongs to W1)"
+            Some(&56),
+            "v56 is this wave's migration (v54 belongs to W1, v55 to W2)"
         );
     }
 

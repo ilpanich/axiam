@@ -32,7 +32,7 @@ use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::{AuditLogRepository, TenantRepository};
 use axiam_db::{SurrealAuditLogRepository, SurrealTenantRepository};
 
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::{AuthenticatedUser, MaybeAuthenticatedUser};
 use crate::extractors::cert_auth::VerifiedClientCert;
 use crate::extractors::client_info::{client_ip, peer_ip};
 use crate::state::AppState;
@@ -105,6 +105,31 @@ pub struct AuthorizeQuery {
     pub display: Option<String>,
     pub ui_locales: Option<String>,
     pub claims_locales: Option<String>,
+    /// W3 — which tenant this authorization request is for, read **only** when
+    /// the request carries no authenticated principal (plan §4.0).
+    ///
+    /// Every session, client and code in AXIAM is tenant-scoped, and until this
+    /// wave the tenant came exclusively from the caller's own access token. An
+    /// anonymous browser has no token, so the login hop cannot even look up the
+    /// client whose `browser_sso` field decides how to answer it — hence a
+    /// parameter, the same way `/oauth2/end_session` and `/oauth2/token` already
+    /// take one, and the same way the tenant-scoped discovery document is
+    /// fetched.
+    ///
+    /// **Ignored whenever a principal was resolved from a token**, which is
+    /// every request that works today: the token's tenant wins, unconditionally,
+    /// exactly as before. A request that omits it and has no principal is
+    /// answered with today's 401 — so a client registered today, which has never
+    /// sent it, cannot observe that it exists.
+    pub tenant_id: Option<Uuid>,
+    /// W3 — the login hop's loop guard (`axiam_login_hop`).
+    ///
+    /// Set by this server inside the `return_to` it builds, and read here to
+    /// recognise the return leg. See `axiam_oauth2::login_hop` for why its
+    /// presence bounds the hop at one redirect, and for why a browser that
+    /// strips it harms only itself.
+    #[serde(rename = "axiam_login_hop")]
+    pub login_hop: Option<String>,
 }
 
 /// Query parameter for the token endpoint tenant routing.
@@ -197,9 +222,228 @@ fn classify_request_object(
     }
 }
 
+/// The principal an authorization request is acting for (W3, plan §4.0).
+///
+/// Three fields rather than an [`AuthenticatedUser`] because the two ways of
+/// arriving here produce different amounts of context and only these three are
+/// used past this point: an access token carries an organization scope and an
+/// active-tenant header, an `axiam_op_session` cookie carries a session row.
+/// Modelling the union would invite a later reader to ask a question of the
+/// cookie path that only the token path can answer.
+struct AuthorizePrincipal {
+    tenant_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+}
+
+/// Is this `return_to` a path on an origin this deployment owns?
+///
+/// The second of the two server-side checks the plan asks for. The first is
+/// [`axiam_oauth2::login_hop::validate_return_to`], which is syntactic and
+/// demands the exact authorize path; this one *resolves* the candidate against
+/// the issuer and hands the result to
+/// [`require_deployment_spa_origin`](crate::handlers::federation_login::require_deployment_spa_origin)
+/// — the rule that already decides where a federation SSO handoff code may be
+/// sent, rather than a second rule that could come to disagree with it.
+///
+/// While the syntactic check demands `/oauth2/authorize?…` this is redundant,
+/// and it is kept for the case that stops being true: `Url::join` is what turns
+/// `//evil.example` into a different host and `/a/../../b` into `/b`, so it is
+/// an independent opinion on the two attacks that are about *resolution*
+/// rather than about spelling.
+fn return_to_is_on_this_deployment<C: Connection + Clone>(
+    state: &AppState<C>,
+    return_to: &str,
+) -> bool {
+    let Ok(base) = url::Url::parse(state.auth_config.effective_issuer()) else {
+        return false;
+    };
+    let Ok(resolved) = base.join(return_to) else {
+        return false;
+    };
+    if resolved.path() != axiam_oauth2::login_hop::AUTHORIZE_PATH {
+        return false;
+    }
+    crate::handlers::federation_login::require_deployment_spa_origin(state, resolved.as_str())
+        .is_ok()
+}
+
+/// Resolve who this authorization request is acting for (W3, plan §4.0).
+///
+/// Two ways in, in this order:
+///
+/// 1. **An access token** — the `axiam_access` cookie or a `Bearer`/`DPoP`
+///    header, via [`AuthenticatedUser`]. Unchanged, and it wins whenever it
+///    succeeds. Every request that works today takes this path and cannot tell
+///    that the other exists.
+/// 2. **The `axiam_op_session` cookie**, and only for a client registered
+///    `browser_sso`. This is the path that makes AXIAM usable as an OP for a
+///    third-party relying party at all: `axiam_access` is `SameSite=Strict`, so
+///    the cross-site top-level navigation an RP redirect *is* never carries it,
+///    and until this wave a signed-in user arrived here anonymous.
+///
+/// # Order of operations, and why the client is loaded first
+///
+/// The client must be read before the cookie is, because the client's
+/// registration is what decides whether the cookie is consulted. That is the
+/// reordering plan §4.0 describes, and it is not a new trust decision — the
+/// authorize service already loads this row before any redirectable error, so
+/// the lookup moves one step earlier rather than appearing.
+///
+/// # Every anonymous refusal is today's refusal
+///
+/// No tenant, no such client, a client that did not opt in, a repository that
+/// failed: all four return the **same** 401 the extractor would have produced,
+/// byte for byte, by returning the extractor's own error object. That is
+/// invariant 4 and it is also what keeps the endpoint from becoming an oracle:
+/// an anonymous caller cannot learn from the response whether a `client_id`
+/// exists in a tenant, only whether it opted into the hop.
+///
+/// # Errors
+///
+/// Returns a complete [`HttpResponse`] — the 401, the 302 into the login page,
+/// or the loop guard's terminal `login_required` — because each of the three
+/// is finished at the point it is decided and none is expressible as an
+/// [`OAuth2Error`] the caller could usefully re-render.
+async fn resolve_authorize_principal<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &HttpRequest,
+    q: &AuthorizeQuery,
+    maybe_user: MaybeAuthenticatedUser,
+) -> Result<AuthorizePrincipal, HttpResponse> {
+    use actix_web::ResponseError;
+
+    let auth_error = match maybe_user.into_result() {
+        Ok(user) => {
+            // Path 1. `tenant_id` on the query is ignored here, deliberately:
+            // the tenant a token was minted for is the tenant it acts in, and
+            // letting a query parameter move that would be a tenant-crossing
+            // primitive handed to whoever holds the browser.
+            return Ok(AuthorizePrincipal {
+                tenant_id: user.tenant_id,
+                user_id: user.user_id,
+                session_id: user.session_id,
+            });
+        }
+        Err(e) => e,
+    };
+
+    // ---- Path 2: anonymous ------------------------------------------------
+    let Some(tenant_id) = q.tenant_id else {
+        return Err(auth_error.error_response());
+    };
+    let Ok(client) = state
+        .oauth2_client_repo
+        .get_by_client_id(tenant_id, &q.client_id)
+        .await
+    else {
+        return Err(auth_error.error_response());
+    };
+    if !client.browser_sso {
+        // **T0.1 / T0.5 / M7's I4 twin.** Every client registered today lands
+        // here, including one whose browser happens to be carrying an
+        // `axiam_op_session` cookie: the cookie is not read, because reading it
+        // is what `browser_sso` opts into.
+        return Err(auth_error.error_response());
+    }
+
+    // The cookie, and whether it still names a live session in this tenant.
+    let presented = http_req.cookie(crate::middleware::csrf::COOKIE_OP_SESSION);
+    let resolved = match presented.as_ref() {
+        Some(cookie) => {
+            let digest = axiam_auth::token::hash_browser_session_token(cookie.value());
+            match state
+                .session_repo
+                .get_by_browser_token_hash(tenant_id, &digest)
+                .await
+            {
+                Ok(found) => found,
+                Err(e) => {
+                    // A read failure is not a principal. Logged without the
+                    // cookie value or its digest — the first is a credential and
+                    // the second is enough to recognise one.
+                    tracing::warn!(
+                        error = %e,
+                        %tenant_id,
+                        "could not resolve the OP browser session; treating the \
+                         request as anonymous"
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
+    if let Some(session) = resolved {
+        return Ok(AuthorizePrincipal {
+            tenant_id,
+            user_id: session.user_id,
+            session_id: session.id,
+        });
+    }
+
+    // ---- No principal: hop, or stop --------------------------------------
+    //
+    // The loop guard. A request that already carries the marker is one this
+    // server sent to the login page and got back; sending it there a second
+    // time is the non-terminating case, so it is answered instead. See
+    // `axiam_oauth2::login_hop` for the full argument.
+    if axiam_oauth2::login_hop::is_return_leg(q.login_hop.as_deref()) {
+        tracing::warn!(
+            %tenant_id,
+            client_id = %q.client_id,
+            "an authorization request returned from the login hop still \
+             carrying no OP session; refusing to redirect again"
+        );
+        return Err(build_oauth2_error_response(&OAuth2Error::LoginRequired(
+            "the sign-in did not establish a session for this tenant at this \
+             origin; sign in again from the relying party, and check that the \
+             browser accepts the axiam_op_session cookie"
+                .into(),
+        )));
+    }
+
+    let Some(return_to) = axiam_oauth2::login_hop::build_return_to(http_req.query_string()) else {
+        // Nothing safe to come back to. Answer as if the request had been
+        // anonymous with no `browser_sso` at all rather than send a browser
+        // somewhere on a value that did not validate.
+        return Err(auth_error.error_response());
+    };
+    if !return_to_is_on_this_deployment(state, &return_to) {
+        return Err(auth_error.error_response());
+    }
+
+    // A cookie that was presented and did not resolve is stale: this browser
+    // believes it is signed in and is not. `reauth` tells the SPA to say so and
+    // to authenticate afresh instead of trusting what it already holds, and the
+    // dead cookie is removed on the way out so the next attempt starts clean.
+    let stale = presented.is_some();
+    let location = axiam_oauth2::login_hop::build_login_redirect(&return_to, stale);
+
+    let mut builder = HttpResponse::Found();
+    builder
+        .append_header((actix_web::http::header::LOCATION, location))
+        // The URL carries the whole authorization request; it must not be
+        // cached, and it must not travel onward as a referrer.
+        .append_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+        .append_header(("Referrer-Policy", "no-referrer"));
+    if stale {
+        builder.cookie(crate::middleware::csrf::clear_op_session_cookie(
+            state.auth_config.cookie_secure,
+        ));
+    }
+    Err(builder.finish())
+}
+
 /// `GET /oauth2/authorize` -- OAuth2 authorization endpoint.
 ///
-/// The user must be authenticated (redirected to login first if not).
+/// A request carrying an access token authorizes as its subject. A request
+/// carrying none is answered with a 401 JSON body — unless the client it names
+/// is registered `browser_sso`, in which case it is either recognised by its
+/// `axiam_op_session` cookie or redirected to the sign-in page and brought back
+/// (W3, plan §4.0). See [`resolve_authorize_principal`].
+///
 /// On success, redirects to `redirect_uri?code=...&state=...`.
 /// On error, redirects with `?error=...&error_description=...&state=...`.
 #[utoipa::path(
@@ -208,16 +452,43 @@ fn classify_request_object(
     tag = "oauth2",
     params(AuthorizeQuery),
     responses(
-        (status = 302, description = "Redirect with authorization code"),
+        (status = 302, description = "Redirect with authorization code, or to \
+                                      the sign-in page for a browser_sso client"),
+        (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
+        (status = 401, description = "No authenticated principal, and the \
+                                      client did not opt into the login hop"),
     ),
     security(("bearer" = []))
 )]
 pub async fn authorize<C: Connection + Clone>(
-    user: AuthenticatedUser,
-    query: web::Query<AuthorizeQuery>,
+    http_req: HttpRequest,
+    maybe_user: MaybeAuthenticatedUser,
+    // W3: a `Result` rather than a plain extractor so that the **order** of
+    // today's refusals is preserved. `AuthenticatedUser` used to be the first
+    // extractor on this handler, so an unauthenticated request with an
+    // unparseable query was answered 401 and never reached the body.
+    // `MaybeAuthenticatedUser` cannot fail, which would have promoted the query
+    // error to first place and turned that 401 into a 400 — a behaviour change
+    // for nobody's benefit. Resolving both here keeps the precedence explicit.
+    query: Result<web::Query<AuthorizeQuery>, actix_web::Error>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
-    let q = query.into_inner();
+    use actix_web::ResponseError;
+
+    let q = match query {
+        Ok(q) => q.into_inner(),
+        Err(query_error) => {
+            return match maybe_user.into_result() {
+                Err(auth_error) => auth_error.error_response(),
+                Ok(_) => query_error.error_response(),
+            };
+        }
+    };
+
+    let user = match resolve_authorize_principal(&state, &http_req, &q, maybe_user).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
 
     // X7 G12 (plan §4.10). Classify request objects FIRST, before the PAR
     // branch below, for two reasons. A `request_uri` that is not a PAR handle
@@ -275,6 +546,30 @@ pub async fn authorize<C: Connection + Clone>(
                 .await
             {
                 Ok(params) => params,
+                // W3 (plan §4.0, F10). A pushed request lives 60 seconds. A
+                // user who took longer than that to type a password comes back
+                // here to a handle that no longer exists — and telling them
+                // `invalid_request: request_uri is unknown, expired, or used`
+                // describes a client bug that did not happen. On a return leg,
+                // and only there, the recoverable code is used instead: the
+                // relying party pushes again and restarts, which is RFC 9126
+                // §2.2's own design rather than a workaround for it.
+                //
+                // Narrow on purpose. Only the "gone" refusal is remapped, only
+                // when the marker says this request came back from the login
+                // page, so an ordinary authorization request with a dead handle
+                // gets exactly the answer it got before this wave.
+                Err(e)
+                    if axiam_oauth2::login_hop::is_return_leg(q.login_hop.as_deref())
+                        && axiam_oauth2::par::is_request_uri_gone(&e) =>
+                {
+                    return build_oauth2_error_response(&OAuth2Error::InvalidRequestUri(
+                        "the pushed authorization request expired while signing in \
+                         (a request_uri lives 60 seconds); push it again and restart \
+                         the authorization request"
+                            .into(),
+                    ));
+                }
                 Err(e) => return build_oauth2_error_response(&e),
             };
 
@@ -1895,6 +2190,66 @@ mod jwks_handler_tests {
         AppState::for_test(db, auth_config)
     }
 
+    /// **T0.3, server side.** The `return_to` check that resolves rather than
+    /// parses.
+    ///
+    /// `login_hop::validate_return_to` refuses these on spelling; this one
+    /// refuses them on where they *resolve to*, which is the property that
+    /// survives an edit to the first. `Url::join` is what turns
+    /// `//evil.example` into another host and normalises `..` away, so the two
+    /// checks fail for genuinely independent reasons.
+    #[actix_web::test]
+    async fn t0_3_return_to_must_resolve_onto_an_origin_this_deployment_owns() {
+        let db = Surreal::new::<Mem>(()).await.expect("in-memory db");
+        let state = AppState::for_test(
+            db,
+            AuthConfig {
+                oauth2_issuer_url: "https://iam.example.com".into(),
+                ..AuthConfig::default()
+            },
+        );
+
+        assert!(return_to_is_on_this_deployment(
+            &state,
+            "/oauth2/authorize?client_id=oa_1&axiam_login_hop=1"
+        ));
+
+        for hostile in [
+            "https://evil.example/oauth2/authorize?x=1",
+            "//evil.example/oauth2/authorize?x=1",
+            "/oauth2/authorize/../../admin/users?x=1",
+            "/api/v1/users?x=1",
+            "/login?return_to=%2F",
+            // Resolves to the right path on the wrong host — the case only a
+            // resolving check can see.
+            "https://iam.example.com.evil.test/oauth2/authorize?x=1",
+        ] {
+            assert!(
+                !return_to_is_on_this_deployment(&state, hostile),
+                "must refuse {hostile}"
+            );
+        }
+    }
+
+    /// The two checks are applied in series and the builder is bound by both:
+    /// what `build_return_to` emits is what this accepts.
+    #[actix_web::test]
+    async fn the_return_to_the_server_builds_passes_the_origin_check() {
+        let db = Surreal::new::<Mem>(()).await.expect("in-memory db");
+        let state = AppState::for_test(
+            db,
+            AuthConfig {
+                oauth2_issuer_url: "https://iam.example.com".into(),
+                ..AuthConfig::default()
+            },
+        );
+        let built = axiam_oauth2::login_hop::build_return_to(
+            "response_type=code&client_id=oa_1&tenant_id=00000000-0000-0000-0000-000000000001",
+        )
+        .expect("a return_to");
+        assert!(return_to_is_on_this_deployment(&state, &built));
+    }
+
     #[actix_web::test]
     async fn jwks_returns_200_with_cache_control_and_etag_when_no_if_none_match() {
         let state = web::Data::new(test_state().await);
@@ -2269,6 +2624,12 @@ pub async fn end_session<C: Connection + Clone>(
                 .cookie(crate::middleware::csrf::clear_access_cookie(cookie_secure))
                 .cookie(crate::middleware::csrf::clear_refresh_cookie(cookie_secure))
                 .cookie(crate::middleware::csrf::clear_csrf_cookie(cookie_secure))
+                // W3: RP-initiated logout clears the OP browser session too.
+                // Leaving it would mean a user who logged out through one
+                // relying party is still recognised, silently, by the next.
+                .cookie(crate::middleware::csrf::clear_op_session_cookie(
+                    cookie_secure,
+                ))
                 .finish()
         }
         axiam_oauth2::logout::LogoutOutcome::Rendered => logged_out_page(cookie_secure),
@@ -2290,6 +2651,9 @@ fn logged_out_page(cookie_secure: bool) -> HttpResponse {
         .cookie(crate::middleware::csrf::clear_access_cookie(cookie_secure))
         .cookie(crate::middleware::csrf::clear_refresh_cookie(cookie_secure))
         .cookie(crate::middleware::csrf::clear_csrf_cookie(cookie_secure))
+        .cookie(crate::middleware::csrf::clear_op_session_cookie(
+            cookie_secure,
+        ))
         .body(
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
              <title>Signed out</title></head><body><h1>You are signed out.</h1>\

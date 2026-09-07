@@ -869,6 +869,29 @@ pub trait SessionRepository: Send + Sync {
         tenant_id: Uuid,
         token_hash: &str,
     ) -> impl Future<Output = AxiamResult<Session>> + Send;
+    /// W3 — the live session an `axiam_op_session` cookie names, if any.
+    ///
+    /// `token_hash` is the SHA-256 of the 256-bit browser-session token the
+    /// cookie carries. Three deliberate differences from
+    /// [`Self::get_by_token_hash`]:
+    ///
+    /// - **`Option` rather than `NotFound`.** "This browser has no session
+    ///   here" is the ordinary answer on the authorization endpoint's
+    ///   anonymous path, not a failure — it means *show a login page*, and an
+    ///   error type would have every caller mapping it back to that.
+    /// - **Expiry is filtered here.** Unlike the refresh path, nothing is
+    ///   consumed and there is no replay to prevent by returning an expired
+    ///   row; a caller that had to remember the check is a caller that can
+    ///   forget it.
+    /// - **More than one match answers `None`.** The digest is over 256
+    ///   CSPRNG bits, so two live rows sharing one cannot happen by accident;
+    ///   if it ever does, the ambiguity is resolved by refusing to pick a
+    ///   principal rather than by taking the first row a scan returned.
+    fn get_by_browser_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<Session>>> + Send;
     /// Invalidate a single session.
     fn invalidate(&self, tenant_id: Uuid, id: Uuid)
     -> impl Future<Output = AxiamResult<()>> + Send;

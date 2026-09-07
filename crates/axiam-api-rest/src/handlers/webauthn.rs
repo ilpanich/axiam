@@ -122,8 +122,12 @@ pub struct WebauthnLoginResponse {
 /// `axiam_refresh`, never from a body), and every state-changing call after it
 /// would have failed CSRF, there being no `axiam_csrf` to echo.
 ///
-/// So this emits the same `Set-Cookie` triple and the same `X-CSRF-Token`
-/// header as `cookie_response_from_output`, the password path's builder.
+/// So this emits the same `Set-Cookie` set and the same `X-CSRF-Token`
+/// header as `cookie_response_from_output`, the password path's builder — four
+/// cookies since W3, because a passkey sign-in is a browser sign-in and must
+/// leave the browser able to use `/oauth2/authorize`'s login hop. A passkey
+/// user who could sign in but not authorize a `browser_sso` relying party would
+/// be the same class of bug this helper was written to fix, one endpoint along.
 ///
 /// **The body keeps its tokens.** They are what a non-browser client uses —
 /// CONTRACT.md §24 has the SDKs adopt them directly rather than digging a value
@@ -138,6 +142,13 @@ fn webauthn_session_response(
     let csrf_token = generate_csrf_token();
 
     HttpResponse::Ok()
+        // W3 (plan §4.0): the OP browser session, on the same terms as the
+        // password path — `Max-Age` is the session's, not the access token's.
+        .cookie(crate::middleware::csrf::op_session_cookie(
+            &out.browser_session_token,
+            config.refresh_token_lifetime_secs,
+            config.cookie_secure,
+        ))
         .cookie(access_cookie(
             &out.access_token,
             config.access_token_lifetime_secs,
@@ -795,6 +806,7 @@ mod tests {
             refresh_token: "refresh-token-value".into(),
             session_id: Uuid::nil(),
             expires_in: 900,
+            browser_session_token: "op-session-value".into(),
         }
     }
 
@@ -840,6 +852,23 @@ mod tests {
         // `X-CSRF-Token`, which it cannot do with an httpOnly cookie.
         let csrf = cookie_named(&set, "axiam_csrf");
         assert!(!csrf.contains("HttpOnly"), "csrf cookie must be readable");
+
+        // W3: the fourth cookie. A passkey sign-in is a browser sign-in, so it
+        // must leave the browser able to complete `/oauth2/authorize`'s login
+        // hop — otherwise passkey users alone would be unable to authorize a
+        // `browser_sso` relying party, which is exactly the shape of bug this
+        // helper exists to have fixed once.
+        let op = cookie_named(&set, "axiam_op_session");
+        assert!(op.contains("op-session-value"));
+        assert!(op.contains("HttpOnly"), "the OP cookie must be httpOnly");
+        assert!(
+            op.contains("SameSite=Lax"),
+            "Lax is what makes the cross-site RP redirect carry it: {op}"
+        );
+        assert!(
+            op.contains("Path=/oauth2/authorize"),
+            "the OP cookie must reach exactly one endpoint: {op}"
+        );
     }
 
     /// §3's non-browser rule: the same token, in the header and the cookie.

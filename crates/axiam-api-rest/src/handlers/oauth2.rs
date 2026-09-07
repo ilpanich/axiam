@@ -222,6 +222,15 @@ fn classify_request_object(
     }
 }
 
+/// What [`resolve_authorize_principal`] answers with when there is no principal
+/// to return: a finished response, boxed.
+///
+/// Boxed because `HttpResponse` is a large value (well over
+/// `clippy::result_large_err`'s 128-byte threshold), and a `Result` whose error
+/// variant is large makes *every* caller pay that size on the success path too.
+/// Do not unbox it back for tidiness — CI's clippy is the thing that notices.
+type AuthorizeRefusal = Box<HttpResponse>;
+
 /// The principal an authorization request is acting for (W3, plan §4.0).
 ///
 /// Three fields rather than an [`AuthenticatedUser`] because the two ways of
@@ -304,13 +313,14 @@ fn return_to_is_on_this_deployment<C: Connection + Clone>(
 /// Returns a complete [`HttpResponse`] — the 401, the 302 into the login page,
 /// or the loop guard's terminal `login_required` — because each of the three
 /// is finished at the point it is decided and none is expressible as an
-/// [`OAuth2Error`] the caller could usefully re-render.
+/// [`OAuth2Error`] the caller could usefully re-render. Boxed: see
+/// [`AuthorizeRefusal`].
 async fn resolve_authorize_principal<C: Connection + Clone>(
     state: &AppState<C>,
     http_req: &HttpRequest,
     q: &AuthorizeQuery,
     maybe_user: MaybeAuthenticatedUser,
-) -> Result<AuthorizePrincipal, HttpResponse> {
+) -> Result<AuthorizePrincipal, AuthorizeRefusal> {
     use actix_web::ResponseError;
 
     let auth_error = match maybe_user.into_result() {
@@ -330,21 +340,21 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
 
     // ---- Path 2: anonymous ------------------------------------------------
     let Some(tenant_id) = q.tenant_id else {
-        return Err(auth_error.error_response());
+        return Err(Box::new(auth_error.error_response()));
     };
     let Ok(client) = state
         .oauth2_client_repo
         .get_by_client_id(tenant_id, &q.client_id)
         .await
     else {
-        return Err(auth_error.error_response());
+        return Err(Box::new(auth_error.error_response()));
     };
     if !client.browser_sso {
         // **T0.1 / T0.5 / M7's I4 twin.** Every client registered today lands
         // here, including one whose browser happens to be carrying an
         // `axiam_op_session` cookie: the cookie is not read, because reading it
         // is what `browser_sso` opts into.
-        return Err(auth_error.error_response());
+        return Err(Box::new(auth_error.error_response()));
     }
 
     // The cookie, and whether it still names a live session in this tenant.
@@ -396,11 +406,13 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             "an authorization request returned from the login hop still \
              carrying no OP session; refusing to redirect again"
         );
-        return Err(build_oauth2_error_response(&OAuth2Error::LoginRequired(
-            "the sign-in did not establish a session for this tenant at this \
-             origin; sign in again from the relying party, and check that the \
-             browser accepts the axiam_op_session cookie"
-                .into(),
+        return Err(Box::new(build_oauth2_error_response(
+            &OAuth2Error::LoginRequired(
+                "the sign-in did not establish a session for this tenant at this \
+                 origin; sign in again from the relying party, and check that the \
+                 browser accepts the axiam_op_session cookie"
+                    .into(),
+            ),
         )));
     }
 
@@ -408,10 +420,10 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         // Nothing safe to come back to. Answer as if the request had been
         // anonymous with no `browser_sso` at all rather than send a browser
         // somewhere on a value that did not validate.
-        return Err(auth_error.error_response());
+        return Err(Box::new(auth_error.error_response()));
     };
     if !return_to_is_on_this_deployment(state, &return_to) {
-        return Err(auth_error.error_response());
+        return Err(Box::new(auth_error.error_response()));
     }
 
     // A cookie that was presented and did not resolve is stale: this browser
@@ -433,7 +445,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             state.auth_config.cookie_secure,
         ));
     }
-    Err(builder.finish())
+    Err(Box::new(builder.finish()))
 }
 
 /// `GET /oauth2/authorize` -- OAuth2 authorization endpoint.
@@ -487,7 +499,7 @@ pub async fn authorize<C: Connection + Clone>(
 
     let user = match resolve_authorize_principal(&state, &http_req, &q, maybe_user).await {
         Ok(principal) => principal,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     // X7 G12 (plan §4.10). Classify request objects FIRST, before the PAR

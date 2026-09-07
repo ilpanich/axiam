@@ -9,6 +9,7 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::authn_params::AuthnRequestParams;
 use crate::error::OAuth2Error;
 
 /// Authorization request parameters (from query string).
@@ -37,6 +38,52 @@ pub struct AuthorizeRequest {
     /// service already fetches; doing it in the handler would mean a second
     /// lookup of the same row and a second place for the policy to drift.
     pub via_par: bool,
+    /// X7.1 — the OIDC authentication-request parameters, parsed once from
+    /// whichever carrier delivered them.
+    ///
+    /// Here for the same reason `via_par` is: the decision they feed needs the
+    /// client registration this service already loaded. Nothing in this wave
+    /// *acts* on them — the gate reads which of them arrived and refuses a
+    /// `fapi2` client the five that carry security.
+    pub authn_params: AuthnRequestParams,
+    /// X7 G12 — a request-object parameter the server refuses (plan §4.10).
+    ///
+    /// Carried rather than answered in the handler so that the refusal is
+    /// reported only *after* the client and its `redirect_uri` have been
+    /// validated. A request object is refused whatever happens; what this
+    /// buys is that the refusal is never redirected to a URI the request
+    /// itself supplied.
+    pub request_object: Option<RequestObject>,
+}
+
+/// Which form of request object arrived (X7 G12, plan §4.10).
+///
+/// AXIAM implements neither, and §9 of the plan records why nobody should
+/// "helpfully" implement them later: JAR by value duplicates PAR's purpose
+/// with a weaker integrity story, and `request_uri` by reference is an SSRF
+/// primitive — the authorization server fetches an attacker-chosen URL — which
+/// PAR (RFC 9126 §1) made unnecessary. FAPI 2.0 requires PAR and does not
+/// require JAR.
+///
+/// Modelled as a type rather than answered with a bare string so the two
+/// distinct OIDC error codes cannot be swapped: the suite matches on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestObject {
+    /// A `request` parameter — a request object by value (RFC 9101).
+    ByValue,
+    /// A `request_uri` that is not a `urn:ietf:params:oauth:request_uri:`
+    /// value, i.e. a request object by reference rather than a PAR handle.
+    ByReference,
+}
+
+impl RequestObject {
+    /// The OIDC Core §3.1.2.6 error this refusal answers with.
+    pub fn into_error(self) -> OAuth2Error {
+        match self {
+            Self::ByValue => OAuth2Error::RequestNotSupported,
+            Self::ByReference => OAuth2Error::RequestUriNotSupported,
+        }
+    }
 }
 
 /// Authorization response -- contains the code to return to the client.
@@ -123,7 +170,21 @@ where
         //     for a `standard` client, which is every client that predates
         //     X5.1. `S256`-only is already enforced for everybody at step 6,
         //     so this is the whole of the remaining gap.
-        crate::fapi::enforce_authorization_request(&client, req.code_challenge.as_deref())?;
+        crate::fapi::enforce_authorization_request(
+            &client,
+            req.code_challenge.as_deref(),
+            &req.authn_params,
+        )?;
+
+        // 2d. X7 G12: request objects are refused, with the error code OIDC
+        //     Core §3.1.2.6 defines for each form. Placed *after* redirect_uri
+        //     validation so the refusal redirects only to a URI this client
+        //     registered, and *before* every other redirectable error so the
+        //     suite sees `request_not_supported` rather than whichever
+        //     complaint the rest of the request happens to earn first.
+        if let Some(object) = req.request_object {
+            return Err(object.into_error());
+        }
 
         // 3. Validate response_type (now safe to redirect errors)
         if req.response_type != "code" {
@@ -245,6 +306,7 @@ fn parse_scopes(scope: Option<&str>) -> Vec<String> {
 mod tests {
     use super::*;
     use axiam_core::error::AxiamResult;
+    use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
     use axiam_core::models::oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateOAuth2Client, OAuth2Client,
         UpdateOAuth2Client,
@@ -515,6 +577,8 @@ mod tests {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -538,6 +602,8 @@ mod tests {
             nonce: None,
             session_id: None,
             via_par: false,
+            authn_params: AuthnRequestParams::default(),
+            request_object: None,
         }
     }
 

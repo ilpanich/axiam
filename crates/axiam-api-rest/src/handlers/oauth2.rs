@@ -4,7 +4,8 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_core::models::uma::{UMA_CLAIM_TOKEN_FORMAT, UMA_TICKET_GRANT_TYPE};
 use axiam_core::repository::{OAuth2ClientRepository, SessionClientRepository, UserRepository};
-use axiam_oauth2::authorize::AuthorizeRequest;
+use axiam_oauth2::authn_params::{AuthnRequestParams, RawAuthnParams};
+use axiam_oauth2::authorize::{AuthorizeRequest, RequestObject};
 use axiam_oauth2::device_service::{
     DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationRequest, DeviceAuthorizationResponse,
 };
@@ -78,6 +79,30 @@ pub struct AuthorizeQuery {
     /// B5 — a `urn:ietf:params:oauth:request_uri:` value obtained from
     /// `/oauth2/par`. Mutually exclusive with the inline parameters above.
     pub request_uri: Option<String>,
+    /// X7 G12 — RFC 9101 `request`, a request object by value. AXIAM does not
+    /// accept one; the field exists so the refusal can name the right error
+    /// code (`request_not_supported`) instead of the parameter being dropped
+    /// by serde and the request quietly succeeding without it.
+    pub request: Option<String>,
+    // X7.1 — the nine OIDC authentication-request parameters (OIDC Core
+    // §3.1.2.1, §5.2, §5.5). Declared so they can be *parsed*; whether any of
+    // them is acted on is the client's `authn_request_params` registration,
+    // and in this wave the answer is "none of them, for anybody".
+    //
+    // Adding them here is the one change in this file that alters what serde
+    // accepts. It cannot change what a request *does*: previously they were
+    // dropped as unknown parameters, and the golden-path tests (P1) assert
+    // that a standard client sending all nine still gets a byte-identical
+    // redirect, token response and ID token.
+    pub prompt: Option<String>,
+    pub max_age: Option<String>,
+    pub acr_values: Option<String>,
+    pub claims: Option<String>,
+    pub id_token_hint: Option<String>,
+    pub login_hint: Option<String>,
+    pub display: Option<String>,
+    pub ui_locales: Option<String>,
+    pub claims_locales: Option<String>,
 }
 
 /// Query parameter for the token endpoint tenant routing.
@@ -96,6 +121,41 @@ pub struct OAuth2ErrorResponse {
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+/// Classify a request object on an authorization request (X7 G12, plan §4.10).
+///
+/// AXIAM accepts neither form. `request` is RFC 9101's request object by
+/// value; a `request_uri` that is not a `urn:ietf:params:oauth:request_uri:`
+/// handle is a request object by reference, which would have the authorization
+/// server fetch an attacker-chosen URL — an SSRF primitive that PAR (RFC 9126
+/// §1) made unnecessary and that FAPI 2.0 does not ask for.
+///
+/// `request` is checked first: when both arrive, the by-value object is the
+/// one the server would have had to *read*, so it is the one the refusal
+/// should name.
+///
+/// Returns `None` for a request carrying no request object at all, including
+/// one whose `request_uri` is a genuine PAR handle — that path is untouched.
+fn classify_request_object(
+    request: Option<&str>,
+    request_uri: Option<&str>,
+) -> Option<RequestObject> {
+    // A blank value is a client library filling in a template, not an object.
+    // Refusing it would break a request that works today and carries nothing.
+    fn present(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|s| !s.is_empty())
+    }
+
+    if present(request).is_some() {
+        return Some(RequestObject::ByValue);
+    }
+    match present(request_uri) {
+        Some(uri) if !uri.starts_with(axiam_oauth2::par::REQUEST_URI_PREFIX) => {
+            Some(RequestObject::ByReference)
+        }
+        _ => None,
+    }
+}
 
 /// `GET /oauth2/authorize` -- OAuth2 authorization endpoint.
 ///
@@ -119,12 +179,36 @@ pub async fn authorize<C: Connection + Clone>(
 ) -> HttpResponse {
     let q = query.into_inner();
 
+    // X7 G12 (plan §4.10). Classify request objects FIRST, before the PAR
+    // branch below, for two reasons. A `request_uri` that is not a PAR handle
+    // would otherwise fall into `par_service.consume` and come back as a
+    // generic `invalid_request`, losing the code OIDC Core §3.1.2.6 defines
+    // and a conformance suite matches on; and a non-PAR `request_uri` sent
+    // alongside inline parameters would earn the "must not be combined"
+    // refusal, which describes a rule that is beside the point when the
+    // parameter is not supported at all.
+    //
+    // Both forms are refused either way — this only decides *which* refusal.
+    // The marker travels on the `AuthorizeRequest` rather than being answered
+    // here so that the client and its `redirect_uri` are validated first: a
+    // refusal is redirected only to a URI the client actually registered, and
+    // otherwise answered directly.
+    let request_object = classify_request_object(q.request.as_deref(), q.request_uri.as_deref());
+
     // B5 / RFC 9126 §4. The two forms do not mix: a request carrying both a
     // `request_uri` and inline parameters is refused rather than merged.
     // Merging is exactly where parameter confusion lives — an attacker
     // supplies the inline value they want and lets the pushed copy satisfy
     // whatever check reads the other one.
-    let req = match q.request_uri {
+    //
+    // A refused request object takes the inline branch whatever it carried:
+    // there is nothing to consume, and the branch exists only to reach the
+    // validation that decides how the refusal is reported.
+    let request_uri = match request_object {
+        Some(_) => None,
+        None => q.request_uri,
+    };
+    let req = match request_uri {
         Some(request_uri) => {
             if axiam_oauth2::par::has_inline_params(
                 q.response_type.as_deref(),
@@ -149,6 +233,12 @@ pub async fn authorize<C: Connection + Clone>(
                 Err(e) => return build_oauth2_error_response(&e),
             };
 
+            // X7.1 — parsed from the *pushed* copy, never from the query
+            // string. `state` and `nonce` already work this way and for the
+            // same reason: a parameter the client chose at push time must not
+            // be substitutable by the browser that carries the handle.
+            let authn_params = AuthnRequestParams::parse(&RawAuthnParams::from(&params));
+
             AuthorizeRequest {
                 tenant_id: user.tenant_id,
                 user_id: user.user_id,
@@ -169,11 +259,31 @@ pub async fn authorize<C: Connection + Clone>(
                 // subject's every session.
                 session_id: Some(user.session_id),
                 via_par: true,
+                authn_params,
+                request_object,
             }
         }
         None => {
+            let authn_params = AuthnRequestParams::parse(&RawAuthnParams {
+                prompt: q.prompt.as_deref(),
+                max_age: q.max_age.as_deref(),
+                acr_values: q.acr_values.as_deref(),
+                claims: q.claims.as_deref(),
+                id_token_hint: q.id_token_hint.as_deref(),
+                login_hint: q.login_hint.as_deref(),
+                display: q.display.as_deref(),
+                ui_locales: q.ui_locales.as_deref(),
+                claims_locales: q.claims_locales.as_deref(),
+            });
             let (Some(response_type), Some(redirect_uri)) = (q.response_type, q.redirect_uri)
             else {
+                // A refused request object with no inline redirect_uri cannot
+                // be reported by redirecting — there is no validated URI to
+                // redirect to — so it is answered directly, with its own code
+                // rather than the generic complaint about missing parameters.
+                if let Some(object) = request_object {
+                    return build_oauth2_error_response(&object.into_error());
+                }
                 return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
                     "response_type and redirect_uri are required unless \
                      request_uri is used"
@@ -193,6 +303,8 @@ pub async fn authorize<C: Connection + Clone>(
                 nonce: q.nonce,
                 session_id: Some(user.session_id),
                 via_par: false,
+                authn_params,
+                request_object,
             }
         }
     };
@@ -1823,6 +1935,17 @@ pub struct PushedAuthorizationRequest {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    // X7.1 — pushed alongside the original seven, because PAR is the only
+    // carrier a `require_par` client has.
+    pub prompt: Option<String>,
+    pub max_age: Option<String>,
+    pub acr_values: Option<String>,
+    pub claims: Option<String>,
+    pub id_token_hint: Option<String>,
+    pub login_hint: Option<String>,
+    pub display: Option<String>,
+    pub ui_locales: Option<String>,
+    pub claims_locales: Option<String>,
 }
 
 /// `POST /oauth2/par` success body (RFC 9126 §2.2).
@@ -1931,6 +2054,15 @@ pub async fn pushed_authorization_request<C: Connection + Clone>(
             code_challenge: req.code_challenge,
             code_challenge_method: req.code_challenge_method,
             nonce: req.nonce,
+            prompt: req.prompt,
+            max_age: req.max_age,
+            acr_values: req.acr_values,
+            claims: req.claims,
+            id_token_hint: req.id_token_hint,
+            login_hint: req.login_hint,
+            display: req.display,
+            ui_locales: req.ui_locales,
+            claims_locales: req.claims_locales,
         })
         .await
     {
@@ -2304,5 +2436,112 @@ mod dpop_htu_tests {
             dpop_htu(&state, &token),
             "cross-endpoint replay must still be refused by the htu comparison"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// X7 G12 — request-object classification (plan §4.10)
+// ---------------------------------------------------------------------------
+//
+// T12.1-T12.3. Pure-function tests of the classifier, deliberately narrow:
+// what a refusal *does* to the response (redirect vs 400) is the authorize
+// service's business and is covered by `authorize`'s own tests and by the
+// oauth2_conformance integration suite. What is pinned here is the
+// classification itself, because the two error codes are what a conformance
+// suite matches on and swapping them is invisible until a run fails.
+#[cfg(test)]
+mod request_object_tests {
+    use super::*;
+    use axiam_oauth2::par::REQUEST_URI_PREFIX;
+
+    /// T12.1 — `request` present ⇒ `request_not_supported`.
+    #[test]
+    fn t12_1_a_request_object_by_value_is_classified() {
+        assert_eq!(
+            classify_request_object(Some("eyJhbGciOiJub25lIn0.e30."), None),
+            Some(RequestObject::ByValue)
+        );
+        assert_eq!(
+            RequestObject::ByValue.into_error().error_code(),
+            "request_not_supported"
+        );
+    }
+
+    /// T12.2 — a `request_uri` that is not a PAR handle ⇒
+    /// `request_uri_not_supported`. This is the SSRF-shaped form: it would
+    /// have the authorization server fetch a URL the request chose.
+    #[test]
+    fn t12_2_a_request_object_by_reference_is_classified() {
+        for uri in [
+            "https://attacker.example/request.jwt",
+            "http://169.254.169.254/latest/meta-data/",
+            "file:///etc/passwd",
+            "urn:ietf:params:oauth:not-a-request-uri:abc",
+            "not a uri at all",
+        ] {
+            assert_eq!(
+                classify_request_object(None, Some(uri)),
+                Some(RequestObject::ByReference),
+                "{uri:?} is not a PAR handle and must be refused as one"
+            );
+        }
+        assert_eq!(
+            RequestObject::ByReference.into_error().error_code(),
+            "request_uri_not_supported"
+        );
+    }
+
+    /// T12.3 — a genuine PAR handle is **not** a request object. This is the
+    /// regression that matters: classifying before the consume path must not
+    /// break PAR, which FAPI 2.0 requires of every client.
+    #[test]
+    fn t12_3_a_par_handle_is_not_a_request_object() {
+        let handle = format!("{REQUEST_URI_PREFIX}p6nS1_A2b3C4d5E6f7G8h9");
+        assert_eq!(classify_request_object(None, Some(&handle)), None);
+        assert_eq!(classify_request_object(None, None), None);
+    }
+
+    /// When both arrive, the by-value object is the one named: it is the one
+    /// the server would have had to read.
+    #[test]
+    fn a_by_value_object_is_named_before_a_by_reference_one() {
+        assert_eq!(
+            classify_request_object(Some("ey.jwt"), Some("https://attacker.example/r.jwt")),
+            Some(RequestObject::ByValue)
+        );
+        // ...including alongside a PAR handle, which is otherwise untouched.
+        let handle = format!("{REQUEST_URI_PREFIX}abc");
+        assert_eq!(
+            classify_request_object(Some("ey.jwt"), Some(&handle)),
+            Some(RequestObject::ByValue)
+        );
+    }
+
+    /// A blank value is a client library filling in a template, not a request
+    /// object. Refusing it would break a request that works today and carries
+    /// nothing — the same emptiness rule the rest of this server applies.
+    #[test]
+    fn a_blank_parameter_is_not_a_request_object() {
+        assert_eq!(classify_request_object(Some(""), None), None);
+        assert_eq!(classify_request_object(Some("   "), None), None);
+        assert_eq!(classify_request_object(None, Some("")), None);
+        assert_eq!(classify_request_object(None, Some("  ")), None);
+    }
+
+    /// The two codes are distinct and are the ones OIDC Core §3.1.2.6 spells.
+    /// A test rather than a comment because the whole value of the change is
+    /// that a relying party can tell the two apart.
+    #[test]
+    fn the_two_refusals_do_not_share_an_error_code() {
+        let by_value = RequestObject::ByValue.into_error();
+        let by_reference = RequestObject::ByReference.into_error();
+        assert_ne!(by_value.error_code(), by_reference.error_code());
+        assert_eq!(by_value.error_code(), "request_not_supported");
+        assert_eq!(by_reference.error_code(), "request_uri_not_supported");
+        // Neither is reported as a generic invalid_request, which is what the
+        // pre-X7 code path produced and what the suite does not match on.
+        for e in [by_value, by_reference] {
+            assert_ne!(e.error_code(), "invalid_request");
+        }
     }
 }

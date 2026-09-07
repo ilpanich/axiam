@@ -307,6 +307,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "webauthn_user_verification_policy",
         sql: SCHEMA_V53,
     },
+    Migration {
+        version: 54,
+        name: "oidc_authn_request_params_and_browser_sso",
+        sql: SCHEMA_V54,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -2993,6 +2998,42 @@ DEFINE FIELD IF NOT EXISTS webauthn_user_verification ON TABLE \
 -- the value put there explicitly.
 UPDATE security_settings SET webauthn_user_verification = 'preferred' \
     WHERE webauthn_user_verification = NONE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v54 — OIDC authentication-request parameters and the login hop (X7.1)
+// -----------------------------------------------------------------------
+//
+// Two additive client-registration columns, both defaulting to the behaviour a
+// pre-v54 client already had. The same argument as v38: the posture is a
+// per-client switch, and a deployment that never touches it cannot be changed
+// by this migration.
+//
+// - `authn_request_params` defaults to `'ignore'`, which is what every AXIAM
+//   client has always done — `prompt`, `max_age`, `acr_values`, `claims`,
+//   `id_token_hint`, `login_hint`, `display`, `ui_locales` and
+//   `claims_locales` are dropped by the query deserialiser and reach no
+//   decision. A string rather than a bool for the reason `profile` is one: the
+//   next policy (per-parameter, or a profile-specific bundle) should be a new
+//   value here rather than a second flag that can contradict the first.
+// - `browser_sso` defaults to `false`, so an unauthenticated authorization
+//   request keeps getting today's 401 JSON body rather than a redirect.
+//
+// Deliberately **no `UPDATE`**. Unlike v53, whose ASSERT made an absent value
+// illegal, both columns here are read through an `Option` in the row struct and
+// decode to their default when absent (`decode_authn_request_params`,
+// `#[surreal(default)]`), so a backfill would rewrite every operator row to say
+// what the code already reads. The pre-migration decode path is the
+// compatibility story, and it is asserted by
+// `axiam_core::models::oauth2_client`'s own round-trip tests.
+//
+// No index: both fields are read on the authorization path, which already
+// loads the whole row by `(tenant_id, client_id)` through
+// `idx_oauth2_tenant_client_id`.
+const SCHEMA_V54: &str = "\
+DEFINE FIELD IF NOT EXISTS authn_request_params ON TABLE oauth2_client
+    TYPE string DEFAULT 'ignore' ASSERT $value IN ['ignore', 'honour'];
+DEFINE FIELD IF NOT EXISTS browser_sso ON TABLE oauth2_client TYPE bool DEFAULT false;
 ";
 
 #[cfg(test)]

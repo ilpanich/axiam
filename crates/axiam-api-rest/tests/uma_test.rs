@@ -22,6 +22,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_M2M, AUD_USER, SubjectKind, issue_access_token};
 use axiam_authz::AuthorizationEngine;
+use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
 use axiam_core::models::oauth2_client::CreateOAuth2Client;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::{CreatePermission, PermissionEffect};
@@ -259,6 +260,8 @@ async fn setup() -> Fixture {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
         })
         .await
         .unwrap();
@@ -284,6 +287,8 @@ async fn setup() -> Fixture {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
         })
         .await
         .unwrap();

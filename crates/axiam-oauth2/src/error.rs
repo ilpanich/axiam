@@ -67,6 +67,28 @@ pub enum OAuth2Error {
     /// well-formed, it is simply not theirs to address.
     #[error("invalid_target: {0}")]
     InvalidTarget(String),
+
+    // --- OIDC Core §3.1.2.6 request objects (X7 G12) -----------------------
+    //
+    // Their own variants rather than `InvalidRequest` because the codes are
+    // the whole point: OIDC Core defines `request_not_supported` and
+    // `request_uri_not_supported` precisely so a relying party can tell "I
+    // sent a malformed request" from "this server does not do request
+    // objects", and a conformance suite matches on the distinction. AXIAM
+    // implements neither form — see `authorize::RequestObject` for why.
+    /// OIDC Core §3.1.2.6 — a `request` parameter (a request object by value).
+    #[error(
+        "request_not_supported: this server does not accept request objects; send the \
+             authorization parameters directly, or push them to /oauth2/par"
+    )]
+    RequestNotSupported,
+    /// OIDC Core §3.1.2.6 — a `request_uri` that is not a PAR handle.
+    #[error(
+        "request_uri_not_supported: request_uri accepts only a \
+             urn:ietf:params:oauth:request_uri: value obtained from /oauth2/par (RFC 9126); \
+             this server does not fetch request objects by reference"
+    )]
+    RequestUriNotSupported,
 }
 
 impl OAuth2Error {
@@ -88,6 +110,8 @@ impl OAuth2Error {
             Self::SlowDown => "slow_down",
             Self::ExpiredToken => "expired_token",
             Self::InvalidTarget(_) => "invalid_target",
+            Self::RequestNotSupported => "request_not_supported",
+            Self::RequestUriNotSupported => "request_uri_not_supported",
         }
     }
 

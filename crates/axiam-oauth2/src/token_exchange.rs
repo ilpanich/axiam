@@ -951,6 +951,7 @@ pub const ISSUER_NOT_TRUSTED: &str =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
@@ -1085,6 +1086,8 @@ mod tests {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1275,6 +1278,8 @@ mod tests {
                 jwks_uri: None,
                 dpop_bound_access_tokens: false,
                 dpop_require_nonce: false,
+                authn_request_params: AuthnRequestParamsMode::Ignore,
+                browser_sso: false,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }

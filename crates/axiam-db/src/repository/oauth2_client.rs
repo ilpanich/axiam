@@ -4,7 +4,8 @@ use axiam_auth::client_secret;
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{
-    ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client, UpdateOAuth2Client,
+    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client,
+    UpdateOAuth2Client,
 };
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -86,6 +87,12 @@ struct OAuth2ClientRow {
     dpop_bound_access_tokens: bool,
     #[surreal(default)]
     dpop_require_nonce: bool,
+    // X7.1. Rows written before schema v54 have neither; both defaults
+    // reproduce the pre-v54 behaviour exactly (see `SCHEMA_V54`).
+    #[surreal(default)]
+    authn_request_params: Option<String>,
+    #[surreal(default)]
+    browser_sso: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -133,6 +140,12 @@ struct OAuth2ClientRowWithId {
     dpop_bound_access_tokens: bool,
     #[surreal(default)]
     dpop_require_nonce: bool,
+    // X7.1. Rows written before schema v54 have neither; both defaults
+    // reproduce the pre-v54 behaviour exactly (see `SCHEMA_V54`).
+    #[surreal(default)]
+    authn_request_params: Option<String>,
+    #[surreal(default)]
+    browser_sso: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -172,6 +185,26 @@ fn decode_auth_method(raw: Option<&str>) -> Result<ClientAuthMethod, DbError> {
     }
 }
 
+/// Decode the stored `authn_request_params` mode.
+///
+/// Fails closed on an unrecognised value for the same reason
+/// [`decode_profile`] does, with the argument running the other way round: a
+/// value this binary does not implement must not resolve to `Honour`, which
+/// would act on authentication-request parameters the operator never opted
+/// into, nor be quietly downgraded, which would hide a rollback. An **absent**
+/// value is a pre-v54 row and correctly reads as `Ignore`.
+fn decode_authn_request_params(raw: Option<&str>) -> Result<AuthnRequestParamsMode, DbError> {
+    match raw {
+        None => Ok(AuthnRequestParamsMode::default()),
+        Some(s) => AuthnRequestParamsMode::from_wire(s).ok_or_else(|| {
+            DbError::Migration(format!(
+                "oauth2_client.authn_request_params holds an unrecognised value {s:?}; this \
+                 binary cannot serve a client under a parameter policy it does not implement"
+            ))
+        }),
+    }
+}
+
 impl OAuth2ClientRow {
     fn try_into_client(self, id: Uuid) -> Result<OAuth2Client, DbError> {
         let tenant_id = Uuid::parse_str(&self.tenant_id)
@@ -202,6 +235,10 @@ impl OAuth2ClientRow {
             jwks_uri: self.jwks_uri,
             dpop_bound_access_tokens: self.dpop_bound_access_tokens,
             dpop_require_nonce: self.dpop_require_nonce,
+            authn_request_params: decode_authn_request_params(
+                self.authn_request_params.as_deref(),
+            )?,
+            browser_sso: self.browser_sso,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -240,6 +277,10 @@ impl OAuth2ClientRowWithId {
             jwks_uri: self.jwks_uri,
             dpop_bound_access_tokens: self.dpop_bound_access_tokens,
             dpop_require_nonce: self.dpop_require_nonce,
+            authn_request_params: decode_authn_request_params(
+                self.authn_request_params.as_deref(),
+            )?,
+            browser_sso: self.browser_sso,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -294,7 +335,9 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                  jwks = $jwks, \
                  jwks_uri = $jwks_uri, \
                  dpop_bound_access_tokens = $dpop_bound_tokens, \
-                 dpop_require_nonce = $dpop_require_nonce",
+                 dpop_require_nonce = $dpop_require_nonce, \
+                 authn_request_params = $authn_request_params, \
+                 browser_sso = $browser_sso",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
@@ -336,6 +379,8 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .bind(("jwks_uri", normalise_optional(input.jwks_uri)))
             .bind(("dpop_bound_tokens", input.dpop_bound_access_tokens))
             .bind(("dpop_require_nonce", input.dpop_require_nonce))
+            .bind(("authn_request_params", input.authn_request_params.as_str()))
+            .bind(("browser_sso", input.browser_sso))
             .await
             .map_err(DbError::from)?;
 
@@ -465,6 +510,12 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         if input.dpop_require_nonce.is_some() {
             sets.push("dpop_require_nonce = $dpop_require_nonce");
         }
+        if input.authn_request_params.is_some() {
+            sets.push("authn_request_params = $authn_request_params");
+        }
+        if input.browser_sso.is_some() {
+            sets.push("browser_sso = $browser_sso");
+        }
         sets.push("updated_at = time::now()");
 
         let query = format!(
@@ -542,6 +593,12 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         }
         if let Some(required) = input.dpop_require_nonce {
             builder = builder.bind(("dpop_require_nonce", required));
+        }
+        if let Some(mode) = input.authn_request_params {
+            builder = builder.bind(("authn_request_params", mode.as_str()));
+        }
+        if let Some(enabled) = input.browser_sso {
+            builder = builder.bind(("browser_sso", enabled));
         }
         if let Some(bound) = input.tls_client_certificate_bound_access_tokens {
             builder = builder.bind(("cert_bound_tokens", bound));

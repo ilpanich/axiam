@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta12",
-    "x-axiam-spec-digest": "sha256:a5de1d5bc9d934a001d85e24e6de5bb85d98aefaba950a23cec39f3408815d5f"
+    "x-axiam-spec-digest": "sha256:689937e65ada521324714d2f3765fcf26d56f941639bebbd5e916ec53b110962"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -3966,10 +3966,20 @@
                           "dpop_bound_access_tokens",
                           "dpop_require_nonce",
                           "require_par",
+                          "authn_request_params",
+                          "browser_sso",
                           "created_at",
                           "updated_at"
                         ],
                         "properties": {
+                          "authn_request_params": {
+                            "$ref": "#/components/schemas/AuthnRequestParamsMode",
+                            "description": "X7.1 — echoed so an operator can audit which clients act on the OIDC\nauthentication-request parameters, from this endpoint rather than from\nthe database."
+                          },
+                          "browser_sso": {
+                            "type": "boolean",
+                            "description": "X7.3 — echoed for the same reason."
+                          },
                           "client_id": {
                             "type": "string"
                           },
@@ -10418,6 +10428,117 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "request",
+            "in": "query",
+            "description": "X7 G12 — RFC 9101 `request`, a request object by value. AXIAM does not\naccept one; the field exists so the refusal can name the right error\ncode (`request_not_supported`) instead of the parameter being dropped\nby serde and the request quietly succeeding without it.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "max_age",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "acr_values",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "claims",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "id_token_hint",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "login_hint",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "display",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "ui_locales",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "claims_locales",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -11338,6 +11459,14 @@
           "Success",
           "Failure",
           "Denied"
+        ]
+      },
+      "AuthnRequestParamsMode": {
+        "type": "string",
+        "description": "Whether this client's authorization requests may carry OpenID Connect's\nauthentication-request parameters, or whether they are ignored (X7.1).\n\nThe bundle this governs is `prompt`, `max_age`, `acr_values`, `claims`,\n`id_token_hint`, `login_hint`, `display`, `ui_locales` and\n`claims_locales`. It is **one** field rather than nine booleans for the\nsame reason [`ClientProfile`] is one field rather than a dozen: a client\nthat honours `max_age` but ignores `prompt=none` is not \"mostly\nconformant\", it is a client a relying party cannot reason about.\n\n[`Ignore`](Self::Ignore) is the serde default and is exactly what AXIAM has\nalways done — unknown authorization-request parameters are dropped by the\nquery deserialiser and never reach a decision. Every row written before\nschema v54 therefore decodes to the behaviour it already had.",
+        "enum": [
+          "ignore",
+          "honour"
         ]
       },
       "BatchCheckAccessBody": {
@@ -12410,12 +12539,20 @@
           "scopes"
         ],
         "properties": {
+          "authn_request_params": {
+            "$ref": "#/components/schemas/AuthnRequestParamsMode",
+            "description": "X7.1 — whether this client's authorization requests may carry the\nOpenID Connect authentication-request parameters (`prompt`, `max_age`,\n`acr_values`, `claims`, `id_token_hint`, `login_hint`, `display`,\n`ui_locales`, `claims_locales`).\n\n`\"ignore\"` (the default) is what every AXIAM client has always done:\nthey are dropped and reach no decision. `\"honour\"` opts in, and is\n**refused on a `fapi2` client** at both this gate and the authorization\nendpoint — the two are different answers to the same question about\nwhat a request from this client means."
+          },
           "backchannel_logout_uri": {
             "type": [
               "string",
               "null"
             ],
             "description": "B5 — where OIDC back-channel logout tokens are delivered. Omit for a\nclient that does not participate."
+          },
+          "browser_sso": {
+            "type": "boolean",
+            "description": "X7.3 — whether an unauthenticated authorization request from this\nclient may be answered with a redirect to the login page rather than\nthe `401` AXIAM answers today.\n\nAccepted and stored, but **nothing reads it yet**: the login hop it\ngates is a later wave. Unlike `authn_request_params` it is permitted on\na `fapi2` client, because it relaxes nothing — it decides only how an\nanonymous browser is answered."
           },
           "dpop_bound_access_tokens": {
             "type": "boolean",
@@ -14923,10 +15060,20 @@
           "dpop_bound_access_tokens",
           "dpop_require_nonce",
           "require_par",
+          "authn_request_params",
+          "browser_sso",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "authn_request_params": {
+            "$ref": "#/components/schemas/AuthnRequestParamsMode",
+            "description": "X7.1 — echoed so an operator can audit which clients act on the OIDC\nauthentication-request parameters, from this endpoint rather than from\nthe database."
+          },
+          "browser_sso": {
+            "type": "boolean",
+            "description": "X7.3 — echoed for the same reason."
+          },
           "client_id": {
             "type": "string"
           },
@@ -15234,9 +15381,19 @@
           "grant_types_supported",
           "authorization_response_iss_parameter_supported",
           "tls_client_certificate_bound_access_tokens",
+          "request_parameter_supported",
+          "claims_parameter_supported",
+          "acr_values_supported",
           "dpop_signing_alg_values_supported"
         ],
         "properties": {
+          "acr_values_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "OIDC Discovery §3 — X7 G3/G4. The authentication context class\nreferences AXIAM can assert.\n\nA capability statement, not a promise about any particular client: a\nclient on the `ignore` lane (every client today) receives no `acr`\nclaim at all. Two fixed URNs rather than operator-defined strings so\nthat an ACR cannot be configured to mean whatever an echo of the\nrequest said it meant."
+          },
           "authorization_endpoint": {
             "type": "string"
           },
@@ -15251,6 +15408,10 @@
           "backchannel_logout_supported": {
             "type": "boolean",
             "description": "Back-Channel Logout 1.0 §3."
+          },
+          "claims_parameter_supported": {
+            "type": "boolean",
+            "description": "OIDC Discovery §3 — X7. `false`: of the `claims` document AXIAM reads\nexactly one member, `id_token.acr`, and a partially-honoured `claims`\nis worse than an unsupported one because a relying party cannot tell\nwhich members were read."
           },
           "claims_supported": {
             "type": "array",
@@ -15308,6 +15469,10 @@
           "pushed_authorization_request_endpoint": {
             "type": "string",
             "description": "RFC 9126 §5 — B5. Advertised unconditionally because the endpoint is\nalways mounted."
+          },
+          "request_parameter_supported": {
+            "type": "boolean",
+            "description": "OIDC Discovery §3 — X7 G12. `false`, and truthfully so: AXIAM accepts\nno request object by value (see `authorize::RequestObject` for why it\nnever will).\n\n`request_uri_parameter_supported` is deliberately **absent** rather\nthan `false`: its default is `true`, and that is the truthful answer —\nAXIAM does accept `request_uri`, for the PAR handles RFC 9126 defines.\nPublishing `false` would tell a conforming client not to use PAR."
           },
           "require_pushed_authorization_requests": {
             "type": "boolean",
@@ -16241,6 +16406,24 @@
           "redirect_uri"
         ],
         "properties": {
+          "acr_values": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claims": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claims_locales": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "client_assertion": {
             "type": [
               "string",
@@ -16276,7 +16459,37 @@
               "null"
             ]
           },
+          "display": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id_token_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "login_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_age": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "nonce": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prompt": {
             "type": [
               "string",
               "null"
@@ -16295,6 +16508,12 @@
             ]
           },
           "state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ui_locales": {
             "type": [
               "string",
               "null"
@@ -18660,12 +18879,30 @@
       "UpdateOAuth2ClientRequest": {
         "type": "object",
         "properties": {
+          "authn_request_params": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AuthnRequestParamsMode",
+                "description": "X7.1 — see [`CreateOAuth2ClientRequest::authn_request_params`]."
+              }
+            ]
+          },
           "backchannel_logout_uri": {
             "type": [
               "string",
               "null"
             ],
             "description": "Pass an empty string to clear a previously registered URI — the one\nedit an operator makes when an RP is decommissioned."
+          },
+          "browser_sso": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "X7.3 — see [`CreateOAuth2ClientRequest::browser_sso`]."
           },
           "dpop_bound_access_tokens": {
             "type": [

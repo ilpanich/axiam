@@ -606,6 +606,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
     use axiam_core::models::oauth2_client::{ClientAuthMethod, ClientProfile, OAuth2Client};
     use chrono::Utc;
     use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -996,6 +997,8 @@ mod tests {
             jwks_uri: jwks_uri.map(str::to_owned),
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

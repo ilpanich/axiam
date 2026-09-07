@@ -8,6 +8,7 @@ use axiam_core::models::federation::{
     CreateFederationConfig, CreateFederationLink, FederationProtocol, SubjectMapping,
     TokenExchangeTrust, UpdateFederationConfig,
 };
+use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
 use axiam_core::models::oauth2_client::{CreateOAuth2Client, UpdateOAuth2Client};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::password_reset::CreatePasswordResetToken;
@@ -771,6 +772,8 @@ async fn oauth2_client_crud() {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
         })
         .await
         .unwrap();
@@ -840,6 +843,8 @@ async fn oauth2_client_secret_hash_is_upgraded_with_a_compare_and_swap() {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
         })
         .await
         .unwrap();

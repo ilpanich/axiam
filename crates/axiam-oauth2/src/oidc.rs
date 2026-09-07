@@ -3,7 +3,6 @@
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Discovery Document (RFC 8414 / OpenID Connect Discovery 1.0)
@@ -70,6 +69,19 @@ pub struct MtlsEndpointAliases {
     pub pushed_authorization_request_endpoint: String,
 }
 
+/// The authentication context class reference for a single-factor login
+/// (X7 G3/G4).
+///
+/// An AXIAM URN rather than one of the several competing registries because
+/// the value must mean exactly one thing across every deployment: an operator
+/// who can configure the string can configure it to say `mfa` for a password
+/// login, and an `acr` an RP cannot trust is worse than none.
+pub const ACR_SINGLE_FACTOR: &str = "urn:axiam:acr:1fa";
+
+/// The authentication context class reference for a login that completed a
+/// second factor (X7 G3/G4). See [`ACR_SINGLE_FACTOR`].
+pub const ACR_MULTI_FACTOR: &str = "urn:axiam:acr:mfa";
+
 /// OpenID Connect Discovery 1.0 metadata document.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct OidcDiscoveryDocument {
@@ -121,6 +133,29 @@ pub struct OidcDiscoveryDocument {
     /// this document is scoped to the server, and a per-client answer here
     /// would leak one client's posture to every reader.
     pub tls_client_certificate_bound_access_tokens: bool,
+    /// OIDC Discovery §3 — X7 G12. `false`, and truthfully so: AXIAM accepts
+    /// no request object by value (see `authorize::RequestObject` for why it
+    /// never will).
+    ///
+    /// `request_uri_parameter_supported` is deliberately **absent** rather
+    /// than `false`: its default is `true`, and that is the truthful answer —
+    /// AXIAM does accept `request_uri`, for the PAR handles RFC 9126 defines.
+    /// Publishing `false` would tell a conforming client not to use PAR.
+    pub request_parameter_supported: bool,
+    /// OIDC Discovery §3 — X7. `false`: of the `claims` document AXIAM reads
+    /// exactly one member, `id_token.acr`, and a partially-honoured `claims`
+    /// is worse than an unsupported one because a relying party cannot tell
+    /// which members were read.
+    pub claims_parameter_supported: bool,
+    /// OIDC Discovery §3 — X7 G3/G4. The authentication context class
+    /// references AXIAM can assert.
+    ///
+    /// A capability statement, not a promise about any particular client: a
+    /// client on the `ignore` lane (every client today) receives no `acr`
+    /// claim at all. Two fixed URNs rather than operator-defined strings so
+    /// that an ACR cannot be configured to mean whatever an echo of the
+    /// request said it meant.
+    pub acr_values_supported: Vec<String>,
     /// RFC 9449 §5.1 — X5.1 second half. The JWS algorithms AXIAM accepts on a
     /// DPoP proof.
     ///
@@ -269,6 +304,15 @@ pub fn build_discovery_document(
             "preferred_username".into(),
             "tenant_id".into(),
             "org_id".into(),
+            // X7 — the three authentication-evidence claims. Advertised as
+            // claims AXIAM *can* assert; which clients receive them is their
+            // own `authn_request_params` registration, and in this wave the
+            // answer is none of them. Discovery describes the server's
+            // capabilities, not any one client's grant — the same distinction
+            // `require_pushed_authorization_requests` above draws.
+            "auth_time".into(),
+            "acr".into(),
+            "amr".into(),
         ],
         grant_types_supported: vec![
             "authorization_code".into(),
@@ -287,6 +331,9 @@ pub fn build_discovery_document(
             "urn:ietf:params:oauth:grant-type:token-exchange".into(),
         ],
         authorization_response_iss_parameter_supported: true,
+        request_parameter_supported: false,
+        claims_parameter_supported: false,
+        acr_values_supported: vec![ACR_SINGLE_FACTOR.into(), ACR_MULTI_FACTOR.into()],
         tls_client_certificate_bound_access_tokens: true,
         dpop_signing_alg_values_supported: vec!["PS256".into(), "ES256".into(), "EdDSA".into()],
         mtls_endpoint_aliases,
@@ -344,11 +391,16 @@ pub fn build_jwks(public_key_pem: &str) -> Result<JwksDocument, String> {
     let x = URL_SAFE_NO_PAD.encode(raw_key);
 
     // Deterministic kid: first 16 hex chars of SHA-256(raw_key).
-    let kid = {
-        let mut h = Sha256::new();
-        h.update(raw_key);
-        hex::encode(h.finalize())[..16].to_string()
-    };
+    //
+    // X7 §1.3 — derived by `axiam_auth::token::ed25519_jwk_kid`, which is also
+    // what stamps the `kid` into every signed header. One definition, because
+    // a JWKS advertising one `kid` while the tokens name another is worse than
+    // no `kid` at all: the relying party looks up a key that is not there and
+    // rejects a good signature. The PEM has already been validated above, so
+    // the `None` arm is unreachable in practice and is answered with the same
+    // message the length check would have given.
+    let kid = axiam_auth::token::ed25519_jwk_kid(public_key_pem)
+        .ok_or_else(|| "expected a 44-byte Ed25519 SPKI".to_owned())?;
 
     Ok(JwksDocument {
         keys: vec![Jwk {
@@ -599,5 +651,116 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         let jwks1 = build_jwks(pem).unwrap();
         let jwks2 = build_jwks(pem).unwrap();
         assert_eq!(jwks1.keys[0].kid, jwks2.keys[0].kid);
+    }
+
+    // -- X7: discovery statics --------------------------------------------
+
+    /// The three new capability statements, and the one that is deliberately
+    /// **absent**. `request_uri_parameter_supported` defaults to `true`, which
+    /// is the truthful answer — AXIAM does accept `request_uri`, for the PAR
+    /// handles RFC 9126 defines — so publishing `false` would tell a
+    /// conforming client not to use PAR, which FAPI 2.0 requires of it.
+    #[test]
+    fn discovery_tells_the_truth_about_request_objects_and_claims() {
+        let doc = doc(None);
+        assert!(!doc.request_parameter_supported);
+        assert!(!doc.claims_parameter_supported);
+
+        let json = serde_json::to_value(&doc).expect("the document serialises");
+        assert_eq!(
+            json["request_parameter_supported"],
+            serde_json::json!(false)
+        );
+        assert_eq!(json["claims_parameter_supported"], serde_json::json!(false));
+        assert!(
+            json.get("request_uri_parameter_supported").is_none(),
+            "request_uri_parameter_supported must be omitted, not published false: \
+             AXIAM accepts request_uri for PAR handles"
+        );
+        assert!(
+            json.get("request_object_signing_alg_values_supported")
+                .is_none(),
+            "advertising request-object algorithms would claim support that does not exist"
+        );
+    }
+
+    #[test]
+    fn discovery_advertises_the_two_axiam_acr_urns() {
+        let doc = doc(None);
+        assert_eq!(
+            doc.acr_values_supported,
+            [ACR_SINGLE_FACTOR, ACR_MULTI_FACTOR]
+        );
+        // A fixed vocabulary, not an operator-configurable one: an ACR whose
+        // meaning a deployment can edit is one a relying party cannot trust.
+        assert!(
+            doc.acr_values_supported
+                .iter()
+                .all(|v| v.starts_with("urn:axiam:acr:"))
+        );
+    }
+
+    #[test]
+    fn discovery_advertises_the_three_authentication_evidence_claims() {
+        let doc = doc(None);
+        for claim in ["auth_time", "acr", "amr"] {
+            assert!(
+                doc.claims_supported.iter().any(|c| c == claim),
+                "{claim} must be advertised"
+            );
+        }
+        // ...without disturbing the claims that were already there.
+        for claim in ["sub", "iss", "aud", "exp", "iat", "nonce", "email"] {
+            assert!(
+                doc.claims_supported.iter().any(|c| c == claim),
+                "{claim} lost"
+            );
+        }
+    }
+
+    /// Escalation B was answered **no**: no RSA key enters the JWKS, and this
+    /// wave must not be the thing that widens the list. Pinned next to the new
+    /// statics because that is where a well-meaning "while we are here" edit
+    /// would land.
+    #[test]
+    fn the_id_token_algorithm_list_is_still_eddsa_only() {
+        assert_eq!(doc(None).id_token_signing_alg_values_supported, ["EdDSA"]);
+    }
+
+    /// X7 §1.3 — the JWKS `kid` and the `kid` stamped into every signed header
+    /// come from **one** derivation. A JWKS publishing one `kid` while the
+    /// tokens name another is worse than no `kid` at all: the relying party
+    /// looks up a key that is not there and rejects a good signature.
+    #[test]
+    fn the_published_kid_is_the_one_the_signer_stamps() {
+        let pem = "\
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
+-----END PUBLIC KEY-----";
+        let published = build_jwks(pem).unwrap().keys[0].kid.clone();
+        let stamped =
+            axiam_auth::token::ed25519_jwk_kid(pem).expect("a valid Ed25519 SPKI yields a kid");
+        assert_eq!(published, stamped);
+        // 64 bits of SHA-256, hex-encoded.
+        assert_eq!(published.len(), 16);
+        assert!(published.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// A PEM the signer cannot derive a `kid` from is not an outage: the
+    /// header simply goes unnamed, exactly as it did before X7. It is the
+    /// JWKS endpoint's job to complain about the key.
+    #[test]
+    fn an_unusable_pem_yields_no_kid_rather_than_an_error() {
+        for bad in [
+            "",
+            "not a pem",
+            "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----",
+        ] {
+            assert_eq!(axiam_auth::token::ed25519_jwk_kid(bad), None, "{bad:?}");
+            assert!(
+                build_jwks(bad).is_err(),
+                "{bad:?} must still fail at the JWKS endpoint"
+            );
+        }
     }
 }

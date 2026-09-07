@@ -571,6 +571,12 @@ fn make_auth_code(scopes: &[&str], challenge: Option<&str>) -> AuthorizationCode
         code_challenge: challenge.map(String::from),
         code_challenge_method: challenge.map(|_| "S256".into()),
         nonce: None,
+        // X7.2 — a code with no session evidence, which is what every code
+        // issued before schema v55 carries and what the ignore lane produces
+        // when no browser session is behind the request.
+        auth_time: None,
+        acr: None,
+        amr: vec![],
         expires_at: Utc::now() + chrono::Duration::minutes(10),
         used: false,
         created_at: Utc::now(),

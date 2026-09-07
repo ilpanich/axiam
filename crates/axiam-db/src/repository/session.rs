@@ -2,7 +2,7 @@
 
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
-use axiam_core::models::session::{CreateSession, Session};
+use axiam_core::models::session::{Amr, CreateSession, Session};
 use axiam_core::repository::SessionRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -25,6 +25,15 @@ struct SessionRow {
     user_agent: Option<String>,
     expires_at: DateTime<Utc>,
     created_at: DateTime<Utc>,
+    /// X7.2 — `#[surreal(default)]` for all three: a row written before schema
+    /// v55 carries none of them, and v55 deliberately does not backfill. See
+    /// [`decode_evidence`] for what absence means.
+    #[surreal(default)]
+    authenticated_at: Option<DateTime<Utc>>,
+    #[surreal(default)]
+    amr: Option<Vec<String>>,
+    #[surreal(default)]
+    browser_token_hash: Option<String>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -37,6 +46,35 @@ struct SessionRowWithId {
     user_agent: Option<String>,
     expires_at: DateTime<Utc>,
     created_at: DateTime<Utc>,
+    /// X7.2 — see [`SessionRow`].
+    #[surreal(default)]
+    authenticated_at: Option<DateTime<Utc>>,
+    #[surreal(default)]
+    amr: Option<Vec<String>>,
+    #[surreal(default)]
+    browser_token_hash: Option<String>,
+}
+
+/// The pre-v55 decode path, specified once (plan §4.3).
+///
+/// An absent `authenticated_at` reads as the row's `created_at`: it is the
+/// closest truthful answer the row contains, and it is never *later* than the
+/// real authentication, so a session can only ever be judged staler than it
+/// is. An absent `amr` reads as the empty list, which is evidence of nothing
+/// and therefore satisfies no assurance level above the floor.
+///
+/// Both directions are the strict one. That is the whole point: a migration
+/// that guessed generously here would silently credit every pre-existing
+/// session with a freshness nobody proved.
+fn decode_evidence(
+    authenticated_at: Option<DateTime<Utc>>,
+    amr: Option<Vec<String>>,
+    created_at: DateTime<Utc>,
+) -> (DateTime<Utc>, Vec<Amr>) {
+    (
+        authenticated_at.unwrap_or(created_at),
+        amr.map(|raw| Amr::decode_list(&raw)).unwrap_or_default(),
+    )
 }
 
 fn row_to_session(row: SessionRow, id: Uuid) -> Result<Session, DbError> {
@@ -44,6 +82,7 @@ fn row_to_session(row: SessionRow, id: Uuid) -> Result<Session, DbError> {
         .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
     let user_id = Uuid::parse_str(&row.user_id)
         .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
+    let (authenticated_at, amr) = decode_evidence(row.authenticated_at, row.amr, row.created_at);
     Ok(Session {
         id,
         tenant_id,
@@ -53,6 +92,9 @@ fn row_to_session(row: SessionRow, id: Uuid) -> Result<Session, DbError> {
         user_agent: row.user_agent,
         expires_at: row.expires_at,
         created_at: row.created_at,
+        authenticated_at,
+        amr,
+        browser_token_hash: row.browser_token_hash,
     })
 }
 
@@ -64,6 +106,8 @@ impl SessionRowWithId {
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
         let user_id = Uuid::parse_str(&self.user_id)
             .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
+        let (authenticated_at, amr) =
+            decode_evidence(self.authenticated_at, self.amr, self.created_at);
         Ok(Session {
             id,
             tenant_id,
@@ -73,6 +117,9 @@ impl SessionRowWithId {
             user_agent: self.user_agent,
             expires_at: self.expires_at,
             created_at: self.created_at,
+            authenticated_at,
+            amr,
+            browser_token_hash: self.browser_token_hash,
         })
     }
 }
@@ -175,7 +222,9 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
                  token_hash = $token_hash, \
                  ip_address = $ip_address, \
                  user_agent = $user_agent, \
-                 expires_at = $expires_at",
+                 expires_at = $expires_at, \
+                 authenticated_at = $authenticated_at, \
+                 amr = $amr",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", input.tenant_id.to_string()))
@@ -184,6 +233,11 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .bind(("ip_address", input.ip_address))
             .bind(("user_agent", input.user_agent))
             .bind(("expires_at", input.expires_at))
+            // X7.2: the authentication event, as the caller observed it. Never
+            // `time::now()` in the statement — a federated login's instant is
+            // the upstream's, and a rotated session's is the one it inherited.
+            .bind(("authenticated_at", input.authenticated_at))
+            .bind(("amr", Amr::encode_list(&input.amr)))
             .await
             .map_err(DbError::from)?;
 
@@ -539,6 +593,122 @@ mod tests {
         db
     }
 
+    /// X7.2 — the evidence a login recorded survives a write/read round trip
+    /// intact, in the order it was given.
+    #[tokio::test]
+    async fn a_sessions_authentication_evidence_round_trips() {
+        let db = setup_db().await;
+        let repo = SurrealSessionRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let authenticated_at = Utc::now() - Duration::hours(6);
+
+        let created = repo
+            .create(CreateSession {
+                tenant_id,
+                user_id: Uuid::new_v4(),
+                token_hash: "evidence-round-trip".into(),
+                ip_address: None,
+                user_agent: None,
+                expires_at: Utc::now() + Duration::hours(1),
+                authenticated_at,
+                amr: vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            created.authenticated_at.timestamp(),
+            authenticated_at.timestamp()
+        );
+        assert_eq!(created.amr, vec![Amr::Pwd, Amr::Otp, Amr::Mfa]);
+        assert!(
+            created.browser_token_hash.is_none(),
+            "W3 writes this, not W2"
+        );
+
+        // …and again on the read paths, which use a different row type.
+        let by_id = repo.get_by_id(tenant_id, created.id).await.unwrap();
+        assert_eq!(
+            by_id.authenticated_at.timestamp(),
+            authenticated_at.timestamp()
+        );
+        assert_eq!(by_id.amr, created.amr);
+
+        let by_hash = repo
+            .get_by_token_hash(tenant_id, "evidence-round-trip")
+            .await
+            .unwrap();
+        assert_eq!(
+            by_hash.authenticated_at.timestamp(),
+            authenticated_at.timestamp()
+        );
+        assert_eq!(by_hash.amr, created.amr);
+    }
+
+    /// The pre-v55 decode path (plan §4.3), exercised against a row that
+    /// genuinely lacks the columns rather than against a struct with `None` in
+    /// it: schema v55 defines them but does not backfill, so this is the shape
+    /// every session in an upgraded deployment has until it is replaced.
+    ///
+    /// Both defaults lean strict — `created_at` is never later than the real
+    /// authentication, and an empty `amr` is evidence of nothing — so an old
+    /// row can be judged staler and weaker than it was, never fresher and
+    /// stronger.
+    #[tokio::test]
+    async fn a_pre_v55_row_decodes_to_created_at_and_no_methods() {
+        let db = setup_db().await;
+        let tenant_id = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let created_at = Utc::now() - Duration::days(3);
+
+        // Written the way the pre-X7.2 repository wrote it: no
+        // `authenticated_at`, no `amr`, no `browser_token_hash`.
+        db.query(
+            "CREATE type::record('session', $id) SET \
+             tenant_id = $tenant_id, \
+             user_id = $user_id, \
+             token_hash = $token_hash, \
+             ip_address = NONE, \
+             user_agent = NONE, \
+             expires_at = $expires_at, \
+             created_at = $created_at",
+        )
+        .bind(("id", id.to_string()))
+        .bind(("tenant_id", tenant_id.to_string()))
+        .bind(("user_id", Uuid::new_v4().to_string()))
+        .bind(("token_hash", "legacy-row".to_owned()))
+        .bind(("expires_at", Utc::now() + Duration::hours(1)))
+        .bind(("created_at", created_at))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let repo = SurrealSessionRepository::new(db);
+        let session = repo.get_by_id(tenant_id, id).await.unwrap();
+
+        assert_eq!(
+            session.authenticated_at.timestamp(),
+            created_at.timestamp(),
+            "an absent authenticated_at reads as the row's created_at"
+        );
+        assert!(
+            session.amr.is_empty(),
+            "an absent amr is evidence of nothing, not evidence of a password"
+        );
+        assert!(session.browser_token_hash.is_none());
+
+        // The same row through the other read path, which projects `*` into a
+        // different struct — a decode that worked for one and not the other
+        // would be a bug nobody found until a logout failed.
+        let by_hash = repo
+            .get_by_token_hash(tenant_id, "legacy-row")
+            .await
+            .unwrap();
+        assert_eq!(by_hash.authenticated_at.timestamp(), created_at.timestamp());
+        assert!(by_hash.amr.is_empty());
+    }
+
     #[tokio::test]
     async fn list_by_user_returns_only_target_users_sessions() {
         let db = setup_db().await;
@@ -559,6 +729,8 @@ mod tests {
                 ip_address: Some("127.0.0.1".into()),
                 user_agent: Some("test-agent".into()),
                 expires_at: expires,
+                authenticated_at: Utc::now(),
+                amr: vec![],
             })
             .await
             .unwrap();
@@ -572,6 +744,8 @@ mod tests {
             ip_address: Some("127.0.0.1".into()),
             user_agent: Some("test-agent".into()),
             expires_at: expires,
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap();
@@ -585,6 +759,8 @@ mod tests {
             ip_address: Some("127.0.0.1".into()),
             user_agent: Some("test-agent".into()),
             expires_at: expires,
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap();
@@ -641,6 +817,8 @@ mod tests {
             ip_address: None,
             user_agent: None,
             expires_at: Utc::now() + Duration::hours(1),
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap()
@@ -710,6 +888,8 @@ mod tests {
             ip_address: None,
             user_agent: None,
             expires_at: Utc::now() - Duration::hours(1),
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap();
@@ -770,6 +950,8 @@ mod tests {
                     ip_address: None,
                     user_agent: None,
                     expires_at: Utc::now() - Duration::hours(1),
+                    authenticated_at: Utc::now(),
+                    amr: vec![],
                 })
                 .await
                 .unwrap();
@@ -949,6 +1131,8 @@ mod tests {
                 ip_address: None,
                 user_agent: None,
                 expires_at: Utc::now() - Duration::hours(1),
+                authenticated_at: Utc::now(),
+                amr: vec![],
             })
             .await
             .unwrap();

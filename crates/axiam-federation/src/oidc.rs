@@ -78,6 +78,14 @@ pub struct IdTokenClaims {
     pub email_verified: Option<bool>,
     pub name: Option<String>,
     pub nonce: Option<String>,
+    /// OIDC Core §2 `auth_time` — when the upstream provider says the end user
+    /// authenticated, as a NumericDate.
+    ///
+    /// X7.2: this, and not AXIAM's clock, dates a federated session. A
+    /// provider replaying an SSO session it established hours ago would
+    /// otherwise have that login recorded as having happened just now, which
+    /// overstates freshness to every relying party downstream.
+    pub auth_time: Option<i64>,
 }
 
 /// A verified ID token: the typed claims AXIAM needs, plus the full claim
@@ -120,6 +128,23 @@ pub struct FederationCallbackResult {
     pub federation_link: FederationLink,
     /// True if the user was newly provisioned during this callback.
     pub newly_provisioned: bool,
+    /// X7.2 — when the *upstream* provider authenticated the user, if it said.
+    ///
+    /// `None` when the assertion carried no authentication instant: a plain
+    /// OAuth2 provider has no ID token at all, and neither `auth_time` (OIDC)
+    /// nor `AuthnInstant` (SAML) is mandatory. The caller then falls back to
+    /// the moment it verified the assertion (plan §4.3).
+    pub upstream_auth_time: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Read an upstream NumericDate as an instant, dropping a value that is not
+/// one.
+///
+/// A provider that sends nonsense gets the same treatment as one that sends
+/// nothing: the caller falls back to its own clock. Trusting an unparseable
+/// value would be worse than not reading it.
+pub(crate) fn upstream_instant(numeric_date: Option<i64>) -> Option<chrono::DateTime<chrono::Utc>> {
+    numeric_date.and_then(|secs| chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0))
 }
 
 /// OIDC Federation Service that handles external IdP integration.
@@ -542,8 +567,14 @@ where
                 )
             })?;
 
-        self.provision_or_link_identity(requesting_tenant_id, config.id, &identity)
-            .await
+        // X7.2 — attached here, where the verified ID token is still in hand;
+        // `provision_or_link_identity` links an identity and never sees one.
+        let upstream_auth_time = upstream_instant(claims.auth_time);
+        let mut result = self
+            .provision_or_link_identity(requesting_tenant_id, config.id, &identity)
+            .await?;
+        result.upstream_auth_time = upstream_auth_time;
+        Ok(result)
     }
 
     /// Verify an OIDC ID token with full cryptographic validation.
@@ -850,6 +881,9 @@ where
                     user,
                     federation_link: link,
                     newly_provisioned: false,
+                    // Set by the caller that owns the assertion: this function
+                    // links an identity and never sees a token.
+                    upstream_auth_time: None,
                 })
             }
             Err(AxiamError::NotFound { .. }) => {
@@ -941,6 +975,7 @@ where
             user,
             federation_link: link,
             newly_provisioned: true,
+            upstream_auth_time: None,
         })
     }
 }
@@ -1021,6 +1056,24 @@ mod tests {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use std::sync::Arc;
     use uuid::Uuid;
+
+    /// X7.2 — an upstream `auth_time` is read as the NumericDate OIDC Core §2
+    /// defines, and an unrepresentable one is dropped rather than guessed at.
+    ///
+    /// Dropping is the safe direction: the caller then falls back to the
+    /// moment it verified the assertion, which is a truthful statement about
+    /// AXIAM even when the provider's is not.
+    #[test]
+    fn an_upstream_numeric_date_is_read_or_dropped_but_never_guessed() {
+        let instant = upstream_instant(Some(1_764_500_000)).expect("a valid NumericDate");
+        assert_eq!(instant.timestamp(), 1_764_500_000);
+
+        assert!(upstream_instant(None).is_none(), "absent stays absent");
+        assert!(
+            upstream_instant(Some(i64::MAX)).is_none(),
+            "an unrepresentable instant is dropped, not saturated to a date"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Test helpers — Ed25519 keypair (embedded, test-only)
@@ -1695,6 +1748,7 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
             email_verified: Some(true),
             name: Some("Test User".into()),
             nonce: None,
+            auth_time: None,
         }
     }
 

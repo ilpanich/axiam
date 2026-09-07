@@ -403,6 +403,7 @@ mod tests {
             &[],
             &expired_cfg,
             Some(sid),
+            &axiam_auth::token::IdTokenEvidence::NONE,
         )
         .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -428,6 +429,7 @@ mod tests {
             &[],
             &cfg,
             Some(Uuid::new_v4()),
+            &axiam_auth::token::IdTokenEvidence::NONE,
         )
         .unwrap();
         let other = concat!(

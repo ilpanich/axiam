@@ -5,7 +5,7 @@ use axiam_core::models::password_history::CreatePasswordHistoryEntry;
 use axiam_core::models::reactor::{
     ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events, noop_reactor_gate,
 };
-use axiam_core::models::session::CreateSession;
+use axiam_core::models::session::{Amr, AuthenticationEvidence, CreateSession};
 use axiam_core::models::settings::{LockoutPolicy, MfaPolicy, PasswordPolicy};
 use axiam_core::models::user::{UpdateUser, User, UserStatus};
 use axiam_core::repository::{
@@ -431,7 +431,16 @@ impl<
 
         // 7. No MFA — issue tokens directly.
         let output = self
-            .create_session_and_tokens(user.id, tenant_id, org_id, ip_address, user_agent)
+            .create_session_and_tokens(
+                user.id,
+                tenant_id,
+                org_id,
+                ip_address,
+                user_agent,
+                // A password and nothing else: this branch is reached only
+                // when no second factor was required (RFC 8176 `pwd`).
+                AuthenticationEvidence::now(vec![Amr::Pwd]),
+            )
             .await?;
 
         Ok(LoginResult::Success(output))
@@ -674,6 +683,11 @@ impl<
             org_id,
             input.ip_address,
             input.user_agent,
+            // A password *and* a one-time code: this path is only reachable
+            // with an MFA challenge token, which only the password step mints.
+            // `mfa` is recorded alongside the two factors, as RFC 8176 §2
+            // intends, rather than instead of them.
+            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Otp, Amr::Mfa]),
         )
         .await
     }
@@ -918,6 +932,15 @@ impl<
                 ip_address: input.ip_address,
                 user_agent: input.user_agent,
                 expires_at,
+                // X7.2 (plan §4.3): **copied**, never re-stamped. A refresh is
+                // not an authentication event — nobody proved anything to
+                // AXIAM here — and a session whose `authenticated_at` reset on
+                // every refresh would report a freshness that grows younger
+                // the longer the user stays signed in. OIDC Core §12.2 says
+                // the same thing about the `auth_time` of a refreshed ID
+                // token: it must equal the original.
+                authenticated_at: session.authenticated_at,
+                amr: session.amr,
             })
             .await?;
         let session_create_us = t_create.elapsed().as_micros() as u64;
@@ -1199,8 +1222,18 @@ impl<
         self.confirm_mfa(tenant_id, user_id, totp_code).await?;
 
         // Create session and issue tokens.
-        self.create_session_and_tokens(user_id, tenant_id, org_id, ip_address, user_agent)
-            .await
+        self.create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            ip_address,
+            user_agent,
+            // Same evidence as `verify_mfa`: the setup token descends from a
+            // verified password, and the TOTP code was just checked by
+            // `confirm_mfa` above.
+            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Otp, Amr::Mfa]),
+        )
+        .await
     }
 
     /// Reset MFA for a user — disables MFA, clears the secret, and
@@ -1267,6 +1300,18 @@ impl<
     ///
     /// Public so that `WebauthnService` callers (REST handlers) can
     /// complete the login flow after WebAuthn authentication succeeds.
+    ///
+    /// # The authentication event (X7.2, plan §4.3)
+    ///
+    /// `evidence` is what the caller actually verified, and this is the one
+    /// place it is recorded — every browser sign-in funnels through here, so
+    /// a path that forgets to record it is a missing argument at a call site
+    /// rather than a session that silently claims to be something it is not.
+    ///
+    /// It is a parameter and not a clock read for the federated case: an
+    /// upstream identity provider may be replaying an SSO session it
+    /// established hours ago, and dating that login "now" would tell a
+    /// relying party the user just authenticated when they did not.
     pub async fn create_session_and_tokens(
         &self,
         user_id: Uuid,
@@ -1274,6 +1319,7 @@ impl<
         org_id: Uuid,
         ip_address: Option<String>,
         user_agent: Option<String>,
+        evidence: AuthenticationEvidence,
     ) -> AxiamResult<LoginOutput> {
         let raw_refresh = token::generate_refresh_token();
         let token_hash = token::hash_refresh_token(&raw_refresh);
@@ -1289,6 +1335,8 @@ impl<
                 ip_address,
                 user_agent,
                 expires_at,
+                authenticated_at: evidence.authenticated_at,
+                amr: evidence.amr,
             })
             .await?;
 

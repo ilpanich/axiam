@@ -5,7 +5,7 @@
 use axiam_auth::client_secret::{self, ClientSecretVerdict};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    generate_refresh_token, hash_refresh_token, issue_access_token_enriched,
+    IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_access_token_enriched,
     issue_client_credentials_token_enriched, issue_id_token,
     issue_service_account_client_credentials_token_enriched, validate_access_token,
 };
@@ -331,6 +331,26 @@ impl TokenRequestContext {
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
+
+/// The ID-token claims an authorization code's snapshot would produce (X7.2).
+///
+/// Pure, and deliberately the *only* conversion from stored evidence to
+/// emitted claims: `auth_time` is the snapshot's instant as a NumericDate,
+/// `amr` its RFC 8176 spellings, `acr` whatever the code recorded — which is
+/// nothing at all until the honour lane derives one.
+///
+/// Nothing calls it with a client on the emitting lane in this wave, because
+/// there is no such client. It exists — and is unit-tested — so that when one
+/// appears, what it receives is already decided and already pinned.
+fn session_evidence_of(
+    code: &axiam_core::models::oauth2_client::AuthorizationCode,
+) -> IdTokenEvidence {
+    IdTokenEvidence {
+        auth_time: code.auth_time.map(|t| t.timestamp()),
+        acr: code.acr.clone(),
+        amr: axiam_core::models::session::Amr::encode_list(&code.amr),
+    }
+}
 
 /// OAuth2 token service — handles token exchange, revocation, and
 /// introspection.
@@ -1125,6 +1145,15 @@ where
                 .get_by_id(tenant_id, auth_code.user_id)
                 .await
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            // X7.2 — the evidence the code was issued with, released only to a
+            // client on the lane that asked for it. `emits_session_evidence`
+            // answers `false` for every client in this wave, so this is
+            // `NONE` and the claim set is what it has always been.
+            let evidence = if crate::fapi::emits_session_evidence(&client) {
+                session_evidence_of(&auth_code)
+            } else {
+                IdTokenEvidence::NONE
+            };
             Some(
                 issue_id_token(
                     auth_code.user_id,
@@ -1137,6 +1166,7 @@ where
                     &auth_code.scopes,
                     &self.auth_config,
                     auth_code.session_id,
+                    &evidence,
                 )
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?,
             )
@@ -1615,6 +1645,16 @@ where
                     .get_by_id(tenant_id, uid)
                     .await
                     .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+                // X7.2 — the same gate as the code-exchange path above, and
+                // the same answer: nobody is on the lane, so a refreshed ID
+                // token carries no `auth_time` either. When the lane opens,
+                // this branch must resolve the evidence from the session
+                // behind `stored.session_id` — which rotation preserves
+                // precisely so that OIDC Core §12.2 holds: the `auth_time` of
+                // a refreshed ID token must equal the original's, and a
+                // freshly-stamped one would be a lie that grows younger with
+                // every refresh.
+                let evidence = IdTokenEvidence::NONE;
                 Some(
                     issue_id_token(
                         uid,
@@ -1630,6 +1670,7 @@ where
                         // that only ever sees refreshed ID tokens must still
                         // be able to match a logout token to its session.
                         stored.session_id,
+                        &evidence,
                     )
                     .map_err(|e| OAuth2Error::ServerError(e.to_string()))?,
                 )
@@ -1876,5 +1917,71 @@ where
             .await?;
 
         Ok(client)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::models::oauth2_client::AuthorizationCode;
+    use axiam_core::models::session::Amr;
+    use chrono::{TimeZone, Utc};
+
+    fn code_with(
+        auth_time: Option<chrono::DateTime<Utc>>,
+        acr: Option<&str>,
+        amr: Vec<Amr>,
+    ) -> AuthorizationCode {
+        AuthorizationCode {
+            id: uuid::Uuid::new_v4(),
+            tenant_id: uuid::Uuid::new_v4(),
+            client_id: "oa_test".into(),
+            user_id: uuid::Uuid::new_v4(),
+            code_hash: "hash".into(),
+            redirect_uri: "https://rp.example/cb".into(),
+            scopes: vec!["openid".into()],
+            code_challenge: None,
+            code_challenge_method: None,
+            nonce: None,
+            session_id: None,
+            auth_time,
+            acr: acr.map(str::to_owned),
+            amr,
+            expires_at: Utc::now(),
+            used: false,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// X7.2 — the one conversion from stored evidence to emitted claims, in
+    /// the units OIDC Core §2 asks for: `auth_time` is a NumericDate (seconds
+    /// since the epoch), not an RFC 3339 string and not milliseconds.
+    ///
+    /// Nothing on the emitting lane calls this yet, which is precisely why it
+    /// is pinned here: when the lane opens, what a client receives will have
+    /// been decided by this test rather than by whichever mint site is edited
+    /// first.
+    #[test]
+    fn a_codes_snapshot_becomes_the_three_claims_in_their_oidc_units() {
+        let instant = Utc.with_ymd_and_hms(2026, 9, 7, 8, 30, 0).unwrap();
+        let evidence = session_evidence_of(&code_with(
+            Some(instant),
+            Some("urn:axiam:acr:mfa"),
+            vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
+        ));
+
+        assert_eq!(evidence.auth_time, Some(instant.timestamp()));
+        assert_eq!(evidence.acr.as_deref(), Some("urn:axiam:acr:mfa"));
+        assert_eq!(evidence.amr, ["pwd", "otp", "mfa"]);
+    }
+
+    /// A code with no evidence — every code issued before schema v55, and
+    /// every grant with no browser session behind it — converts to exactly
+    /// nothing, so it could not add a claim even if the lane were open.
+    #[test]
+    fn a_code_without_evidence_converts_to_nothing() {
+        let evidence = session_evidence_of(&code_with(None, None, vec![]));
+        assert!(evidence.is_empty());
+        assert_eq!(evidence, IdTokenEvidence::NONE);
     }
 }

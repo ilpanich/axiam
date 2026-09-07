@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::models::session::Amr;
+
 /// Which security posture a client is registered under (X5.1).
 ///
 /// This is the FAPI "one switch". FAPI 2.0 is not a single feature but a
@@ -686,6 +688,30 @@ pub struct AuthorizationCode {
     /// value is genuinely absent on paths with no browser session behind them.
     #[serde(default)]
     pub session_id: Option<Uuid>,
+    /// X7.2 — when the end user authenticated, snapshotted from the session at
+    /// the moment this code was issued (plan §4.3).
+    ///
+    /// A snapshot rather than a lookup through [`Self::session_id`] because
+    /// the session this code was minted from may be gone by the time the code
+    /// is redeemed — refresh rotation replaces the row — and an `auth_time`
+    /// that cannot be resolved is worse than one that was recorded when it was
+    /// still true.
+    ///
+    /// `None` on a code issued before schema v55, and on any path with no
+    /// browser session behind it.
+    #[serde(default)]
+    pub auth_time: Option<DateTime<Utc>>,
+    /// X7.2 — the authentication context class the session satisfied.
+    ///
+    /// Always `None` in this wave: deriving it is `acr_for`, which belongs to
+    /// the honour lane (plan §4.4) and cannot be reached by any client yet.
+    /// The column exists now so that opening the lane is a code change and not
+    /// a migration.
+    #[serde(default)]
+    pub acr: Option<String>,
+    /// X7.2 — the methods [`Self::auth_time`] refers to, snapshotted with it.
+    #[serde(default)]
+    pub amr: Vec<Amr>,
     pub expires_at: DateTime<Utc>,
     pub used: bool,
     pub created_at: DateTime<Utc>,
@@ -706,6 +732,12 @@ pub struct CreateAuthorizationCode {
     pub nonce: Option<String>,
     /// B5 — the AXIAM session this code was issued from.
     pub session_id: Option<Uuid>,
+    /// X7.2 — see [`AuthorizationCode::auth_time`].
+    pub auth_time: Option<DateTime<Utc>>,
+    /// X7.2 — see [`AuthorizationCode::acr`]. Always `None` in this wave.
+    pub acr: Option<String>,
+    /// X7.2 — see [`AuthorizationCode::amr`].
+    pub amr: Vec<Amr>,
     pub expires_at: DateTime<Utc>,
 }
 

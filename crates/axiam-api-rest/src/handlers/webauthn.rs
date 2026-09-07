@@ -1,6 +1,7 @@
 //! WebAuthn passkey registration and authentication endpoints.
 
 use actix_web::{HttpRequest, HttpResponse, web};
+use axiam_core::models::session::{Amr, AuthenticationEvidence};
 use axiam_core::models::webauthn_credential::WebauthnCredentialType;
 use axiam_core::repository::{
     MdsRepository, SettingsRepository, WebauthnAttestationPolicyRepository,
@@ -710,6 +711,12 @@ pub async fn finish_discoverable_authentication<C: Connection + Clone>(
             org_id,
             client_ip(&req),
             user_agent(&req),
+            // X7.2 — a usernameless sign-in: the credential is the only
+            // factor, so `mfa` is *not* claimed. `user` is, and truthfully:
+            // this ceremony requires user verification unconditionally
+            // (`WebauthnUserVerification` does not relax it here), so a PIN or
+            // biometric was performed rather than mere presence.
+            AuthenticationEvidence::now(vec![Amr::Hwk, Amr::User]),
         )
         .await?;
 
@@ -759,6 +766,13 @@ pub async fn finish_authentication<C: Connection + Clone>(
             org_id,
             client_ip(&req),
             user_agent(&req),
+            // X7.2 — the username-bound ceremony is reachable only with an MFA
+            // challenge token, which only the password step mints: a password
+            // and a security key, two distinct factors, hence `mfa`. `user` is
+            // not claimed here — this ceremony's user-verification policy is
+            // the tenant's (`preferred` by default), so a PIN-less key proves
+            // presence only and saying otherwise would overstate it.
+            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
         )
         .await?;
 

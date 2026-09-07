@@ -3,9 +3,11 @@
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_core::models::uma::{UMA_CLAIM_TOKEN_FORMAT, UMA_TICKET_GRANT_TYPE};
-use axiam_core::repository::{OAuth2ClientRepository, SessionClientRepository, UserRepository};
+use axiam_core::repository::{
+    OAuth2ClientRepository, SessionClientRepository, SessionRepository, UserRepository,
+};
 use axiam_oauth2::authn_params::{AuthnRequestParams, RawAuthnParams};
-use axiam_oauth2::authorize::{AuthorizeRequest, RequestObject};
+use axiam_oauth2::authorize::{AuthorizeRequest, RequestObject, SessionEvidence};
 use axiam_oauth2::device_service::{
     DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationRequest, DeviceAuthorizationResponse,
 };
@@ -122,6 +124,44 @@ pub struct OAuth2ErrorResponse {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// Read the authentication behind this request's session (X7.2, plan §4.3).
+///
+/// The evidence is snapshotted onto the authorization code, so it has to be
+/// read here, while the session still exists: refresh rotation replaces the
+/// row, and by the time the code is redeemed the session it was minted from
+/// may be a different row with a different id.
+///
+/// # It never fails the request
+///
+/// A session that cannot be read yields empty evidence and a `debug!` line,
+/// not an error. Two reasons, and both are invariant 4: an authorization
+/// request that works today must not start failing because of a column added
+/// this wave, and the principal on this path is not always a browser session
+/// at all (a bearer token minted for a service, a session already rotated
+/// away). Empty evidence is also the strict reading — a code with no
+/// `auth_time` can never present as fresh.
+async fn resolve_session_evidence<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    session_id: Uuid,
+) -> SessionEvidence {
+    match state.session_repo.get_by_id(tenant_id, session_id).await {
+        Ok(session) => SessionEvidence {
+            auth_time: Some(session.authenticated_at),
+            amr: session.amr,
+        },
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                %session_id,
+                "no session row behind this authorization request; the code is issued \
+                 without authentication evidence"
+            );
+            SessionEvidence::default()
+        }
+    }
+}
+
 /// Classify a request object on an authorization request (X7 G12, plan §4.10).
 ///
 /// AXIAM accepts neither form. `request` is RFC 9101's request object by
@@ -195,6 +235,11 @@ pub async fn authorize<C: Connection + Clone>(
     // otherwise answered directly.
     let request_object = classify_request_object(q.request.as_deref(), q.request_uri.as_deref());
 
+    // X7.2 — resolved once, for both carriers: the evidence describes the
+    // session this request arrives in, which is the same session whether the
+    // parameters came inline or through PAR.
+    let session_evidence = resolve_session_evidence(&state, user.tenant_id, user.session_id).await;
+
     // B5 / RFC 9126 §4. The two forms do not mix: a request carrying both a
     // `request_uri` and inline parameters is refused rather than merged.
     // Merging is exactly where parameter confusion lives — an attacker
@@ -261,6 +306,7 @@ pub async fn authorize<C: Connection + Clone>(
                 via_par: true,
                 authn_params,
                 request_object,
+                session_evidence,
             }
         }
         None => {
@@ -305,6 +351,7 @@ pub async fn authorize<C: Connection + Clone>(
                 via_par: false,
                 authn_params,
                 request_object,
+                session_evidence,
             }
         }
     };

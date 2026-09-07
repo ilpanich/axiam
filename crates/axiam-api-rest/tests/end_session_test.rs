@@ -199,6 +199,8 @@ async fn new_session(f: &Fixture) -> Uuid {
             ip_address: None,
             user_agent: None,
             expires_at: Utc::now() + Duration::hours(1),
+            authenticated_at: Utc::now(),
+            amr: vec![],
         })
         .await
         .unwrap()
@@ -217,6 +219,7 @@ fn id_token_for(f: &Fixture, client_id: &str, session_id: Option<Uuid>) -> Strin
         &["openid".to_string()],
         &f.auth,
         session_id,
+        &axiam_auth::token::IdTokenEvidence::NONE,
     )
     .unwrap()
 }
@@ -348,6 +351,7 @@ async fn an_unverifiable_hint_ends_nothing() {
         &["openid".to_string()],
         &other,
         Some(session),
+        &axiam_auth::token::IdTokenEvidence::NONE,
     )
     .unwrap();
 

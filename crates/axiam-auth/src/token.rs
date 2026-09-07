@@ -1103,6 +1103,55 @@ pub fn issue_service_account_client_credentials_token_enriched(
     .issue(config)
 }
 
+/// The session evidence an ID token may carry (X7.2, plan §4.3).
+///
+/// Three OpenID Connect claims that describe the *authentication* behind a
+/// token rather than the token itself: `auth_time` (when the end user
+/// authenticated), `acr` (which assurance class that authentication reached)
+/// and `amr` (which methods it used).
+///
+/// # Emitted for nobody
+///
+/// This wave lands the plumbing and no policy. Both mint sites construct
+/// [`Self::NONE`], every claim is `skip_serializing_if`-suppressed when empty,
+/// and the resulting token is byte-for-byte the token the same request
+/// produced before — which is invariant 4 of `claude_dev/basic-op-gap-plan.md`
+/// and is asserted rather than asserted-to-be-obvious (see the golden tests in
+/// `oauth2_flow_test`).
+///
+/// The reason the type exists before the policy does is ordering: the evidence
+/// has to be *recorded* at the moment it is true, and the claim has to be
+/// *shaped* before anything decides who receives it. Deciding who receives it
+/// is the honour lane, a later wave.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IdTokenEvidence {
+    /// Seconds since the epoch at which the end user authenticated
+    /// (OIDC Core §2, `auth_time`).
+    pub auth_time: Option<i64>,
+    /// The authentication context class reference the session satisfied.
+    pub acr: Option<String>,
+    /// RFC 8176 method references, in the order they were recorded.
+    pub amr: Vec<String>,
+}
+
+impl IdTokenEvidence {
+    /// No evidence at all — the token carries none of the three claims.
+    ///
+    /// What every ID token AXIAM mints today is built from, and what makes
+    /// "the claim set is unchanged" a property of the code rather than of a
+    /// careful reading of it.
+    pub const NONE: Self = Self {
+        auth_time: None,
+        acr: None,
+        amr: Vec::new(),
+    };
+
+    /// Whether this carries nothing, i.e. adds no claim to a token.
+    pub fn is_empty(&self) -> bool {
+        self.auth_time.is_none() && self.acr.is_none() && self.amr.is_empty()
+    }
+}
+
 /// OIDC ID Token claims per OpenID Connect Core 1.0 section 2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdTokenClaims {
@@ -1138,6 +1187,26 @@ pub struct IdTokenClaims {
     /// Preferred username — included only when `profile` scope is requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_username: Option<String>,
+    /// X7.2 — when the end user authenticated (OIDC Core §2).
+    ///
+    /// `skip_serializing_if` + `default` on all three of these: absent from
+    /// every token AXIAM mints today, and absent from the struct's view of a
+    /// token minted before they existed. A `null` here rather than an absent
+    /// member would be a visible change to every relying party's parser, which
+    /// is the change this wave promises not to make.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_time: Option<i64>,
+    /// X7.2 — the authentication context class reference (OIDC Core §2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acr: Option<String>,
+    /// X7.2 — the authentication methods references (RFC 8176).
+    ///
+    /// A `Vec<String>` rather than a `Vec<Amr>` because this type is also used
+    /// to *decode* a token (`id_token_hint`), and refusing to parse a token
+    /// because one of its `amr` values is unknown would be a decode failure
+    /// where the specification asks for a claim that is simply not understood.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub amr: Vec<String>,
 }
 
 /// Issue a signed OIDC ID token (EdDSA / Ed25519).
@@ -1145,6 +1214,12 @@ pub struct IdTokenClaims {
 /// The token includes standard OIDC claims plus AXIAM-specific
 /// `tenant_id` and `org_id`. Profile/email claims are gated behind
 /// the corresponding scopes.
+///
+/// `evidence` (X7.2) contributes `auth_time`, `acr` and `amr`, each emitted
+/// only when it carries a value. Every caller in this wave passes
+/// [`IdTokenEvidence::NONE`], so the claim set is exactly what it was before
+/// the parameter existed; the decision of *who* receives session evidence is
+/// the honour lane and belongs to a later wave.
 #[allow(clippy::too_many_arguments)]
 pub fn issue_id_token(
     user_id: Uuid,
@@ -1157,6 +1232,7 @@ pub fn issue_id_token(
     scopes: &[String],
     config: &AuthConfig,
     session_id: Option<Uuid>,
+    evidence: &IdTokenEvidence,
 ) -> Result<String, AuthError> {
     let now = Utc::now().timestamp();
     let has_scope = |s: &str| scopes.iter().any(|sc| sc == s);
@@ -1181,6 +1257,9 @@ pub fn issue_id_token(
         } else {
             None
         },
+        auth_time: evidence.auth_time,
+        acr: evidence.acr.clone(),
+        amr: evidence.amr.clone(),
     };
 
     sign_claims(&claims, config)
@@ -1731,6 +1810,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             &scopes,
             &config,
             None,
+            &IdTokenEvidence::NONE,
         )
         .unwrap();
 
@@ -1744,6 +1824,176 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         assert_eq!(claims.nonce.as_deref(), Some("abc123"));
         assert_eq!(claims.email.as_deref(), Some("user@example.com"),);
         assert_eq!(claims.preferred_username.as_deref(), Some("jdoe"),);
+    }
+
+    /// Decode a JWT payload as raw JSON, so a test can compare the *claim
+    /// set* rather than the fields this build happens to have a struct for.
+    fn payload_of(jwt: &str) -> serde_json::Value {
+        use base64::Engine;
+        let payload = jwt.split('.').nth(1).expect("a JWT has three parts");
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("base64url payload");
+        serde_json::from_slice(&bytes).expect("the payload is JSON")
+    }
+
+    /// **T2.6 (unit half) — the golden claim set.**
+    ///
+    /// The ID token every client receives today, minted through the signature
+    /// that now takes evidence, must carry exactly the members it carried
+    /// before: no `auth_time`, no `acr`, no `amr`, and no `null`-valued
+    /// placeholder for any of them. A `"auth_time": null` would be as visible
+    /// to a relying party's parser as a value, which is why the three claims
+    /// are `skip_serializing_if` and not merely `Option`.
+    #[test]
+    fn an_id_token_with_no_evidence_has_exactly_todays_claim_set() {
+        let config = test_config();
+        let token = issue_id_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "test-client",
+            Some("abc123"),
+            Some("user@example.com"),
+            Some("jdoe"),
+            &[
+                "openid".to_owned(),
+                "email".to_owned(),
+                "profile".to_owned(),
+            ],
+            &config,
+            Some(Uuid::new_v4()),
+            &IdTokenEvidence::NONE,
+        )
+        .unwrap();
+
+        let mut members: Vec<String> = payload_of(&token)
+            .as_object()
+            .expect("claims are an object")
+            .keys()
+            .cloned()
+            .collect();
+        members.sort();
+        assert_eq!(
+            members,
+            [
+                "aud",
+                "email",
+                "exp",
+                "iat",
+                "iss",
+                "nonce",
+                "org_id",
+                "preferred_username",
+                "sid",
+                "sub",
+                "tenant_id",
+            ],
+            "the ID token claim set must be byte-for-byte what it was before X7.2"
+        );
+    }
+
+    /// The other half of the same property: the claims *do* appear when
+    /// evidence is supplied, in their OIDC spellings and types.
+    ///
+    /// Nothing in this wave supplies any — `emits_session_evidence` answers
+    /// `false` for every client — so this test is what proves the plumbing is
+    /// real rather than merely inert, and what the honour lane will be
+    /// measured against.
+    #[test]
+    fn evidence_becomes_the_three_oidc_claims_when_it_is_given() {
+        let config = test_config();
+        let authenticated_at = 1_764_500_000_i64;
+        let token = issue_id_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "test-client",
+            None,
+            None,
+            None,
+            &["openid".to_owned()],
+            &config,
+            None,
+            &IdTokenEvidence {
+                auth_time: Some(authenticated_at),
+                acr: Some("urn:axiam:acr:mfa".into()),
+                amr: vec!["pwd".into(), "otp".into(), "mfa".into()],
+            },
+        )
+        .unwrap();
+
+        let payload = payload_of(&token);
+        assert_eq!(payload["auth_time"], serde_json::json!(authenticated_at));
+        assert_eq!(payload["acr"], serde_json::json!("urn:axiam:acr:mfa"));
+        assert_eq!(payload["amr"], serde_json::json!(["pwd", "otp", "mfa"]));
+
+        // And a partial set stays partial: an empty `amr` is absent, not `[]`.
+        let partial = issue_id_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "test-client",
+            None,
+            None,
+            None,
+            &["openid".to_owned()],
+            &config,
+            None,
+            &IdTokenEvidence {
+                auth_time: Some(authenticated_at),
+                acr: None,
+                amr: vec![],
+            },
+        )
+        .unwrap();
+        let partial = payload_of(&partial);
+        assert!(partial.get("acr").is_none());
+        assert!(partial.get("amr").is_none());
+    }
+
+    /// OIDC Core §12.2 in the shape this crate can assert: the claim is a
+    /// function of the evidence and of nothing else — not of the clock, not of
+    /// which mint site called. Two tokens minted from the same evidence a
+    /// moment apart agree on `auth_time` and differ on `iat`.
+    ///
+    /// That is what makes "a refreshed ID token's `auth_time` equals the
+    /// original's" a consequence of copying the evidence across rotation
+    /// (which `AuthService::refresh` does, and `session_evidence_rotation_test`
+    /// asserts) rather than a second rule someone has to remember.
+    #[test]
+    fn auth_time_follows_the_evidence_and_never_the_clock() {
+        let config = test_config();
+        let evidence = IdTokenEvidence {
+            auth_time: Some(1_700_000_000),
+            acr: None,
+            amr: vec!["pwd".into()],
+        };
+        let mint = || {
+            issue_id_token(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "test-client",
+                None,
+                None,
+                None,
+                &["openid".to_owned()],
+                &config,
+                None,
+                &evidence,
+            )
+            .unwrap()
+        };
+        let first = payload_of(&mint());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = payload_of(&mint());
+
+        assert_eq!(first["auth_time"], second["auth_time"]);
+        assert_ne!(
+            first["iat"], second["iat"],
+            "the tokens must genuinely have been minted at different times"
+        );
     }
 
     #[test]
@@ -1762,6 +2012,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             &scopes,
             &config,
             None,
+            &IdTokenEvidence::NONE,
         )
         .unwrap();
 
@@ -1776,6 +2027,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             &scopes,
             &config,
             None,
+            &IdTokenEvidence::NONE,
         )
         .unwrap();
 
@@ -1805,6 +2057,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             &["openid".to_owned(), "email".to_owned()],
             &config,
             None,
+            &IdTokenEvidence::NONE,
         )
         .unwrap();
         let c = decode_id_token(&token_with, &config);
@@ -1822,6 +2075,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             &["openid".to_owned()],
             &config,
             None,
+            &IdTokenEvidence::NONE,
         )
         .unwrap();
         let c = decode_id_token(&token_without, &config);
@@ -1847,6 +2101,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             &["openid".to_owned(), "profile".to_owned()],
             &config,
             None,
+            &IdTokenEvidence::NONE,
         )
         .unwrap();
         let c = decode_id_token(&token_with, &config);
@@ -1864,6 +2119,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             &["openid".to_owned()],
             &config,
             None,
+            &IdTokenEvidence::NONE,
         )
         .unwrap();
         let c = decode_id_token(&token_without, &config);

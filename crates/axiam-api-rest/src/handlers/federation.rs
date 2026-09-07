@@ -8,6 +8,7 @@ use axiam_core::models::federation::{
     CreateFederationConfig, FederationConfig, FederationLink, FederationProtocol, ProviderKind,
     SubjectMapping, TokenExchangeTrust, UpdateFederationConfig,
 };
+use axiam_core::models::session::{Amr, AuthenticationEvidence};
 use axiam_core::repository::{
     FederationConfigRepository, FederationLinkRepository, PaginatedResult, Pagination,
     UserRepository,
@@ -1739,11 +1740,21 @@ pub(crate) async fn sso_login_post_auth<C: Connection + Clone>(
 /// the credentials were verified, which for the handoff path is minutes earlier
 /// and on a different request; firing it here as well would ask a reactor to
 /// adjudicate one sign-in twice.
+///
+/// `upstream_auth_time` is what the identity provider said about *when* it
+/// authenticated the user (X7.2, plan §4.3): OIDC's `auth_time`, SAML's
+/// `AuthnInstant`, or the instant carried across a handoff hop. `None` — a
+/// provider that said nothing — falls back to this moment, which is when
+/// AXIAM verified the assertion. It is never simply "now", because a provider
+/// replaying an SSO session it established this morning would otherwise have
+/// that login recorded as having happened just now, and every freshness
+/// answer downstream would inherit the overstatement.
 pub(crate) async fn issue_sso_session<C: Connection + Clone>(
     state: &web::Data<AppState<C>>,
     tenant_id: Uuid,
     user: &axiam_core::models::user::User,
     spa_redirect_uri: String,
+    upstream_auth_time: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     // R-3: checked again here, not only at login start — the same reason
     // `mint_handoff_and_redirect` re-checks. This is the single point every
@@ -1756,7 +1767,20 @@ pub(crate) async fn issue_sso_session<C: Connection + Clone>(
     // SSO-provisioned access tokens currently carry an empty org_id claim.
     let auth_out = state
         .auth_service
-        .create_session_and_tokens(user.id, tenant_id, Uuid::nil(), None, None)
+        .create_session_and_tokens(
+            user.id,
+            tenant_id,
+            Uuid::nil(),
+            None,
+            None,
+            // X7.2 — `fed` and nothing else: AXIAM verified an assertion, and
+            // what the provider did to produce it is the provider's claim, not
+            // AXIAM's evidence. Mapping an upstream `amr` into this list is
+            // the honour lane's business (plan §4.4) and is deliberately not
+            // done here, where it would be indistinguishable from evidence
+            // AXIAM gathered itself.
+            AuthenticationEvidence::upstream(upstream_auth_time, vec![Amr::Fed]),
+        )
         .await?;
 
     let csrf_token = crate::middleware::csrf::generate_csrf_token();
@@ -2004,6 +2028,7 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
 
+    let callback_upstream_auth_time = callback_result.upstream_auth_time;
     let user = callback_result.user;
 
     // SEC-095: `login.post_auth` fires here too, not only on the password
@@ -2014,7 +2039,14 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
     // an embargoed-region veto) was bypassed by clicking "Sign in with Okta".
     sso_login_post_auth(&state, &http_req, tenant_id, &user).await?;
 
-    issue_sso_session(&state, tenant_id, &user, spa_redirect_uri).await
+    issue_sso_session(
+        &state,
+        tenant_id,
+        &user,
+        spa_redirect_uri,
+        callback_upstream_auth_time,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -2217,10 +2249,18 @@ pub async fn saml_acs_public<C: Connection + Clone>(
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
 
+    let callback_upstream_auth_time = callback_result.upstream_auth_time;
     let user = callback_result.user;
 
     // SEC-095 — see the identical call in `oidc_callback_public`.
     sso_login_post_auth(&state, &http_req, tenant_id, &user).await?;
 
-    issue_sso_session(&state, tenant_id, &user, spa_redirect_uri).await
+    issue_sso_session(
+        &state,
+        tenant_id,
+        &user,
+        spa_redirect_uri,
+        callback_upstream_auth_time,
+    )
+    .await
 }

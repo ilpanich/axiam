@@ -2192,3 +2192,176 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
         assert!(err.to_string().contains(name), "{name} unnamed in: {err}");
     }
 }
+
+/// **T2.6 (plan §4.3) — the golden ID token, with the evidence actually
+/// present.**
+///
+/// P1 above proves that *asking* for the new parameters changes nothing. This
+/// proves the stronger and more surprising half: the session behind the
+/// request now carries a real `authenticated_at` and a real `amr`, the
+/// authorization code carries a snapshot of both — and the ID token the client
+/// receives is still, member for member, the token it received before X7.2
+/// existed.
+///
+/// That is invariant 4 stated where it can fail: recording evidence and
+/// emitting it are two decisions, and this wave takes only the first. A client
+/// on the `ignore` lane — which is every client that exists — is told nothing
+/// new.
+#[actix_rt::test]
+async fn t2_6_an_ignore_lane_client_gets_the_same_id_token_though_the_session_now_has_evidence() {
+    use axiam_core::models::session::{Amr, CreateSession};
+    use axiam_core::repository::{AuthorizationCodeRepository, SessionRepository};
+    use axiam_db::repository::{SurrealAuthorizationCodeRepository, SurrealSessionRepository};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+
+    // A real session row, with an authentication event that is emphatically
+    // not "now": if any part of the pipeline restamped it, the assertions
+    // below would not be able to tell the difference from a fresh login.
+    let authenticated_at = chrono::Utc::now() - chrono::Duration::hours(3);
+    let session = SurrealSessionRepository::new(db.clone())
+        .create(CreateSession {
+            tenant_id,
+            user_id,
+            token_hash: Uuid::new_v4().to_string(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            authenticated_at,
+            amr: vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
+        })
+        .await
+        .expect("session");
+
+    // `jti` = session id is the D-15 convention the authorize handler reads,
+    // so this token arrives as that session.
+    let user_jwt = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        &auth,
+        session.id.to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
+
+    let app = test_app!(db, auth);
+
+    // A client registered for `email` and `profile` as well as `openid`, so
+    // that the golden claim set below is the *widest* one an ID token can
+    // carry — a narrower registration would prove less about what W2 does not
+    // add. `create_client` registers only `openid profile`, hence the inline
+    // registration.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Evidence Golden Client",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid", "email", "profile"],
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201, "client registration");
+    let created: serde_json::Value = test::read_body_json(resp).await;
+    let client_id = created["client_id"].as_str().unwrap().to_string();
+    let client_secret = created["client_secret"].as_str().unwrap().to_string();
+    let redirect_uri = "https://app.example.com/callback".to_string();
+
+    // Authorize, then read the stored code *before* redeeming it.
+    let uri = format!(
+        "/oauth2/authorize?response_type=code&client_id={client_id}\
+         &redirect_uri={redirect_uri}&scope=openid%20email%20profile&state=xyz&nonce=n-1"
+    );
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&uri)
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 302, "authorize must redirect");
+    let location = resp
+        .headers()
+        .get("Location")
+        .expect("Location")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let code = url::Url::parse(&location)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.into_owned())
+        .expect("a code");
+
+    let stored = SurrealAuthorizationCodeRepository::new(db.clone())
+        .get_by_hash(
+            tenant_id,
+            &axiam_oauth2::authorize::hash_code(&code),
+            &client_id,
+            &redirect_uri,
+        )
+        .await
+        .expect("the stored code");
+
+    // 1. The snapshot is real, and it is the session's, not the clock's.
+    assert_eq!(
+        stored.auth_time.map(|t| t.timestamp()),
+        Some(authenticated_at.timestamp()),
+        "the code must snapshot the session's authentication instant, not the \
+         moment the code was issued"
+    );
+    assert_eq!(stored.amr, vec![Amr::Pwd, Amr::Otp, Amr::Mfa]);
+    assert_eq!(
+        stored.acr, None,
+        "no ACR is derived in this wave: deriving one is the honour lane's"
+    );
+
+    // 2. And none of it reaches the client.
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "token exchange must succeed");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let id_token = claims_of(body["id_token"].as_str().expect("an ID token"));
+
+    let mut members: Vec<&str> = id_token
+        .as_object()
+        .expect("claims are an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    members.sort_unstable();
+    assert_eq!(
+        members,
+        [
+            "aud",
+            "email",
+            "exp",
+            "iat",
+            "iss",
+            "nonce",
+            "org_id",
+            "preferred_username",
+            "sid",
+            "sub",
+            "tenant_id",
+        ],
+        "an ignore-lane client's ID token must carry exactly the members it \
+         carried before X7.2 — no auth_time, no acr, no amr, and no nulls"
+    );
+}

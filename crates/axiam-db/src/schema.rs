@@ -312,6 +312,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "oidc_authn_request_params_and_browser_sso",
         sql: SCHEMA_V54,
     },
+    Migration {
+        version: 55,
+        name: "session_authentication_evidence",
+        sql: SCHEMA_V55,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3036,9 +3041,108 @@ DEFINE FIELD IF NOT EXISTS authn_request_params ON TABLE oauth2_client
 DEFINE FIELD IF NOT EXISTS browser_sso ON TABLE oauth2_client TYPE bool DEFAULT false;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v55 — session authentication evidence (X7.2, plan §4.3)
+// -----------------------------------------------------------------------
+//
+// A session records when its *row* was written and nothing about the
+// authentication behind it. Refresh rotation writes a new row on every
+// refresh, so `created_at` resets several times an hour and cannot stand in
+// for OpenID Connect's `auth_time` — an RP told "this login is one minute
+// old" about a week-old session has been given a guarantee it did not get.
+//
+// Three columns close that, on two tables:
+//
+// - `session.authenticated_at` — when the end user authenticated. Written by
+//   the login that created the session and **copied** by refresh rotation,
+//   because a refresh is not an authentication event.
+// - `session.amr` — the RFC 8176 methods that authentication verified.
+//   Copied across rotation for the same reason.
+// - `session.browser_token_hash` — the OP browser session (W3). Defined here
+//   so that the login hop lands as one behaviour change rather than a
+//   behaviour change plus a migration; nothing writes it yet.
+// - `oauth2_auth_code.auth_time` / `.acr` / `.amr` — the same evidence,
+//   snapshotted at code issuance. A snapshot rather than a join through
+//   `session_id`, because the session a code was minted from may be gone
+//   before the code is redeemed.
+// - `sso_handoff_code.authenticated_at` — the upstream authentication instant,
+//   carried across the 60-second handoff hop so that a federated login whose
+//   session is issued on the *next* request is still dated by the identity
+//   provider rather than by AXIAM's clock.
+//
+// Every column is `option<…>`, and deliberately there is **no `UPDATE`
+// backfill** — the same argument as v54. The decode path is the compatibility
+// story and it is specified rather than inferred: an absent `authenticated_at`
+// reads as the row's `created_at` (the closest truthful answer, and never
+// later than the real authentication, so it can only understate freshness),
+// and an absent `amr` reads as the empty list (which satisfies no assurance
+// level above the floor). Both are asserted by the repositories' own tests.
+//
+// No index: `authenticated_at` is read as part of a row already fetched by
+// primary key or by an existing unique index, and is never itself a predicate.
+// `browser_token_hash` will need one when W3 starts looking sessions up by it;
+// defining it now would be an index on a column no query mentions.
+const SCHEMA_V55: &str = "\
+DEFINE FIELD IF NOT EXISTS authenticated_at ON TABLE session TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS amr ON TABLE session TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS browser_token_hash ON TABLE session TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS auth_time ON TABLE oauth2_auth_code TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS acr ON TABLE oauth2_auth_code TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS amr ON TABLE oauth2_auth_code TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS authenticated_at ON TABLE sso_handoff_code TYPE option<datetime>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X7.2 — v55 is additive and un-backfilled, and every column it adds is
+    /// optional so that a rolled-back binary reads a migrated database.
+    ///
+    /// The absence of `UPDATE` is the assertion that matters: a backfill would
+    /// write a value the decode path already supplies (`created_at` for
+    /// `authenticated_at`, `[]` for `amr`) and would do it to every session
+    /// row in every deployment.
+    #[test]
+    fn schema_v55_adds_only_optional_columns_and_backfills_nothing() {
+        for column in [
+            "authenticated_at ON TABLE session",
+            "amr ON TABLE session",
+            "browser_token_hash ON TABLE session",
+            "auth_time ON TABLE oauth2_auth_code",
+            "acr ON TABLE oauth2_auth_code",
+            "amr ON TABLE oauth2_auth_code",
+            "authenticated_at ON TABLE sso_handoff_code",
+        ] {
+            assert!(SCHEMA_V55.contains(column), "v55 must define {column}");
+        }
+        assert_eq!(
+            SCHEMA_V55.matches("TYPE option<").count(),
+            7,
+            "every v55 column must be option<…> — a non-optional column would \
+             make a pre-migration row unreadable rather than merely undecorated"
+        );
+        assert!(
+            !SCHEMA_V55.contains("UPDATE"),
+            "v55 must not backfill: the decode path is the compatibility story"
+        );
+    }
+
+    /// A version number is claimed once. W1 took 54; taking it twice would
+    /// mean one of the two migrations never runs on an existing deployment.
+    #[test]
+    fn every_migration_version_is_unique_and_ordered() {
+        let versions: Vec<u32> = MIGRATIONS.iter().map(|m| m.version).collect();
+        let mut sorted = versions.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(versions, sorted, "migrations must be unique and ascending");
+        assert_eq!(
+            versions.last(),
+            Some(&55),
+            "v55 is this wave's migration (v54 belongs to W1)"
+        );
+    }
 
     /// The one destructive-looking statement in v52, and why it is not.
     ///

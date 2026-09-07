@@ -760,8 +760,16 @@ async fn t0_6_a_browser_login_sets_the_op_session_cookie_with_its_intended_attri
         .iter()
         .find(|c| c.name() == "axiam_refresh")
         .unwrap();
-    assert_ne!(op.value(), access.value());
-    assert_ne!(op.value(), refresh.value());
+    // `assert_ne!` would print both credentials on failure, so the comparison
+    // is made first and only its result is asserted.
+    assert!(
+        op.value() != access.value(),
+        "the OP cookie must be its own bytes, not a copy of the access token"
+    );
+    assert!(
+        op.value() != refresh.value(),
+        "the OP cookie must be its own bytes, not a copy of the refresh token"
+    );
 }
 
 /// Logging out takes the OP session with it. Otherwise a user who signed out

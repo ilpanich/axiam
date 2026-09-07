@@ -817,10 +817,19 @@ mod tests {
             .collect()
     }
 
+    /// The `Set-Cookie` header whose cookie is called `name`.
+    ///
+    /// The failure message names the cookies that *were* set and not their
+    /// values: these headers carry an access token, a refresh token and an OP
+    /// browser-session token, and a panic message reaches stderr and the CI
+    /// log. The names alone are the whole of what a failure here needs to say.
     fn cookie_named<'a>(set: &'a [String], name: &str) -> &'a str {
         set.iter()
             .find(|c| c.starts_with(&format!("{name}=")))
-            .unwrap_or_else(|| panic!("no {name} cookie in {set:?}"))
+            .unwrap_or_else(|| {
+                let present: Vec<&str> = set.iter().filter_map(|c| c.split('=').next()).collect();
+                panic!("no {name} cookie; the response set: {present:?}")
+            })
     }
 
     /// The regression this helper exists for: a completed passkey ceremony
@@ -861,13 +870,16 @@ mod tests {
         let op = cookie_named(&set, "axiam_op_session");
         assert!(op.contains("op-session-value"));
         assert!(op.contains("HttpOnly"), "the OP cookie must be httpOnly");
+        // The attributes are asserted without echoing the header: it carries
+        // the OP browser-session token, and an assertion message is a log line.
         assert!(
             op.contains("SameSite=Lax"),
-            "Lax is what makes the cross-site RP redirect carry it: {op}"
+            "the OP cookie must be SameSite=Lax — that is what makes the \
+             cross-site relying-party redirect carry it"
         );
         assert!(
             op.contains("Path=/oauth2/authorize"),
-            "the OP cookie must reach exactly one endpoint: {op}"
+            "the OP cookie must be scoped to exactly one endpoint"
         );
     }
 

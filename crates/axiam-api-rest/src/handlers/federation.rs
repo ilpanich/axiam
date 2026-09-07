@@ -1802,7 +1802,6 @@ pub(crate) async fn issue_sso_session<C: Connection + Clone>(
         .cookie(crate::middleware::csrf::op_session_cookie(
             &auth_out.browser_session_token,
             state.auth_config.refresh_token_lifetime_secs,
-            state.auth_config.cookie_secure,
         ))
         .cookie(crate::middleware::csrf::access_cookie(
             &auth_out.access_token,

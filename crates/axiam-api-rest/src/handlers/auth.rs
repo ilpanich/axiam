@@ -346,7 +346,6 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
         .cookie(crate::middleware::csrf::op_session_cookie(
             &out.browser_session_token,
             config.refresh_token_lifetime_secs,
-            config.cookie_secure,
         ))
         .cookie(access_cookie(
             &out.access_token,
@@ -662,7 +661,7 @@ pub async fn logout<C: Connection + Clone>(
         // credential in the browser after an explicit logout is how a user ends
         // up at a login page that then bounces them somewhere they did not
         // expect, and the removal is one line.
-        .cookie(clear_op_session_cookie(cookie_secure))
+        .cookie(clear_op_session_cookie())
         .finish())
 }
 

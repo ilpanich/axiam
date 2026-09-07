@@ -147,7 +147,6 @@ fn webauthn_session_response(
         .cookie(crate::middleware::csrf::op_session_cookie(
             &out.browser_session_token,
             config.refresh_token_lifetime_secs,
-            config.cookie_secure,
         ))
         .cookie(access_cookie(
             &out.access_token,

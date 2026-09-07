@@ -441,9 +441,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         .append_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
         .append_header(("Referrer-Policy", "no-referrer"));
     if stale {
-        builder.cookie(crate::middleware::csrf::clear_op_session_cookie(
-            state.auth_config.cookie_secure,
-        ));
+        builder.cookie(crate::middleware::csrf::clear_op_session_cookie());
     }
     Err(Box::new(builder.finish()))
 }
@@ -2639,9 +2637,7 @@ pub async fn end_session<C: Connection + Clone>(
                 // W3: RP-initiated logout clears the OP browser session too.
                 // Leaving it would mean a user who logged out through one
                 // relying party is still recognised, silently, by the next.
-                .cookie(crate::middleware::csrf::clear_op_session_cookie(
-                    cookie_secure,
-                ))
+                .cookie(crate::middleware::csrf::clear_op_session_cookie())
                 .finish()
         }
         axiam_oauth2::logout::LogoutOutcome::Rendered => logged_out_page(cookie_secure),
@@ -2663,9 +2659,7 @@ fn logged_out_page(cookie_secure: bool) -> HttpResponse {
         .cookie(crate::middleware::csrf::clear_access_cookie(cookie_secure))
         .cookie(crate::middleware::csrf::clear_refresh_cookie(cookie_secure))
         .cookie(crate::middleware::csrf::clear_csrf_cookie(cookie_secure))
-        .cookie(crate::middleware::csrf::clear_op_session_cookie(
-            cookie_secure,
-        ))
+        .cookie(crate::middleware::csrf::clear_op_session_cookie())
         .body(
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
              <title>Signed out</title></head><body><h1>You are signed out.</h1>\

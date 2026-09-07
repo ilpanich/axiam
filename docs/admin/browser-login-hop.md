@@ -122,6 +122,15 @@ token is. Every attribute is doing a job:
   a `redirect_uri` that matched exactly, bound to the relying party's own PKCE
   and `state`. It reaches no API endpoint.
 - **`HttpOnly`** — not readable from script.
+- **`Secure`** — **always**, and unlike the other three it does *not* follow
+  `AXIAM__AUTH__COOKIE_SECURE` (D-18). It is the only `SameSite=Lax` cookie
+  AXIAM sets, i.e. the only one a browser sends on a *cross-site* top-level
+  navigation, and the endpoint it is scoped to must be TLS-protected anyway
+  (RFC 6749 §3.1). Loopback development is unaffected — browsers store `Secure`
+  cookies set from `http://localhost` and `http://127.0.0.1`. What it refuses
+  is a browser login hop over plaintext to a non-loopback host: there,
+  `browser_sso` clients will see the `login_required` described below, and the
+  fix is TLS, not a flag.
 - **`Max-Age`** — the session's lifetime (`refresh_token_lifetime_secs`), not
   the access token's: the value names the session row.
 

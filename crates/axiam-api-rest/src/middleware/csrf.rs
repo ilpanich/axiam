@@ -349,7 +349,7 @@ pub fn csrf_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cooki
 /// Build the `axiam_op_session` cookie — the OP browser session (W3, plan §4.0).
 ///
 /// - `httpOnly(true)` — script must never read it; it buys authorization codes
-/// - `Secure` — controlled by `cookie_secure`, exactly as the other three
+/// - `Secure` — **unconditionally `true`**, unlike the other three; see below
 /// - `SameSite::Lax` — **the load-bearing attribute**, see below
 /// - `path("/oauth2/authorize")` — the only endpoint that consults it
 /// - `Max-Age` = the session's, i.e. `AuthConfig::refresh_token_lifetime_secs`
@@ -380,10 +380,32 @@ pub fn csrf_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cooki
 /// party's own PKCE and `state`. The API surface keeps its Strict cookies and
 /// its double-submit CSRF token untouched, and SEC-046's threat model for the
 /// API cookie is unchanged rather than re-argued.
-pub fn op_session_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cookie<'static> {
+///
+/// # Why `Secure` is not `cookie_secure` here
+///
+/// The other three cookies take `AuthConfig::cookie_secure` (D-18), whose
+/// documented purpose is local HTTP development *"e.g. http://localhost"*. This
+/// one does not, for two reasons that only apply to it:
+///
+/// 1. It is the only `SameSite=Lax` cookie in the codebase, i.e. the only one a
+///    browser sends on a **cross-site** top-level navigation. That is the whole
+///    point of it — and it means a plaintext hop exposes it on a request the
+///    user never typed, in a context the three `Strict` cookies never reach.
+/// 2. The endpoint it is scoped to must be TLS-protected regardless: RFC 6749
+///    §3.1 requires TLS on the authorization endpoint, and this project's own
+///    standard is TLS 1.3 minimum for external communication. A cookie that
+///    refuses to exist over plaintext is enforcing a rule the endpoint already
+///    has, not adding one.
+///
+/// It costs nothing in the case D-18 exists for: browsers treat
+/// `http://localhost` and `http://127.0.0.1` as trustworthy origins and store
+/// `Secure` cookies set from them. What it does refuse is a browser login hop
+/// over plaintext to a *non-loopback* host — which is a deployment that should
+/// not be completing OpenID Connect authorization requests at all.
+pub fn op_session_cookie(token: &str, max_age_secs: u64) -> Cookie<'static> {
     Cookie::build(COOKIE_OP_SESSION, token.to_owned())
         .http_only(true)
-        .secure(cookie_secure)
+        .secure(true)
         .same_site(SameSite::Lax)
         .path("/oauth2/authorize")
         .max_age(Duration::seconds(max_age_secs as i64))
@@ -442,9 +464,11 @@ pub fn clear_csrf_cookie(cookie_secure: bool) -> Cookie<'static> {
 /// Built from [`op_session_cookie`], so it mirrors its attributes — including
 /// the `/oauth2/authorize` path scope, without which the removal would not
 /// match the cookie and a logged-out browser would keep presenting an OP
-/// session at the authorization endpoint.
-pub fn clear_op_session_cookie(cookie_secure: bool) -> Cookie<'static> {
-    let mut c = op_session_cookie("", 0, cookie_secure);
+/// session at the authorization endpoint — and including its unconditional
+/// `Secure`, without which the removal could not overwrite it at all
+/// ("Leave Secure Cookies Alone").
+pub fn clear_op_session_cookie() -> Cookie<'static> {
+    let mut c = op_session_cookie("", 0);
     c.make_removal();
     c
 }
@@ -545,7 +569,7 @@ mod tests {
         let c = csrf_cookie("tok", 900, true);
         assert!(c.secure().unwrap_or(false), "expected Secure=true");
 
-        let c = op_session_cookie("tok", 86400, true);
+        let c = op_session_cookie("tok", 86400);
         assert!(c.secure().unwrap_or(false), "expected Secure=true");
     }
 
@@ -569,10 +593,24 @@ mod tests {
             "expected Secure=false for HTTP dev"
         );
 
-        let c = op_session_cookie("tok", 86400, false);
+        // `axiam_op_session` is deliberately absent from this list: it does
+        // not take `cookie_secure` at all. See the next test.
+    }
+
+    /// The OP browser-session cookie does **not** follow `cookie_secure` down.
+    /// It is the one `SameSite=Lax` cookie here — the one a browser sends on a
+    /// cross-site top-level navigation — and the endpoint it is scoped to is
+    /// required to be TLS-protected anyway (RFC 6749 §3.1). Loopback dev is
+    /// unaffected: browsers store `Secure` cookies set from `http://localhost`.
+    #[test]
+    fn the_op_session_cookie_is_secure_whatever_the_deployment_flag_says() {
         assert!(
-            !c.secure().unwrap_or(true),
-            "expected Secure=false for HTTP dev"
+            op_session_cookie("tok", 86400).secure().unwrap_or(false),
+            "the OP session cookie must be Secure unconditionally"
+        );
+        assert!(
+            clear_op_session_cookie().secure().unwrap_or(false),
+            "and so must its removal, or it cannot overwrite the cookie"
         );
     }
 
@@ -590,7 +628,7 @@ mod tests {
     ///   thing the session row does.
     #[test]
     fn t0_6_the_op_session_cookie_attributes_are_pinned() {
-        let c = op_session_cookie("browser-token", 86_400, true);
+        let c = op_session_cookie("browser-token", 86_400);
         assert_eq!(c.name(), "axiam_op_session");
         assert_eq!(
             c.same_site(),
@@ -650,10 +688,7 @@ mod tests {
                     clear_refresh_cookie(secure),
                 ),
                 (csrf_cookie("tok", 900, secure), clear_csrf_cookie(secure)),
-                (
-                    op_session_cookie("tok", 86400, secure),
-                    clear_op_session_cookie(secure),
-                ),
+                (op_session_cookie("tok", 86400), clear_op_session_cookie()),
             ];
 
             for (set, clear) in pairs {
@@ -691,7 +726,7 @@ mod tests {
             clear_access_cookie(true),
             clear_refresh_cookie(true),
             clear_csrf_cookie(true),
-            clear_op_session_cookie(true),
+            clear_op_session_cookie(),
         ] {
             let name = c.name().to_owned();
             assert_eq!(c.value(), "", "{name}: removal must carry an empty value");

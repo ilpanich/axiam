@@ -292,6 +292,71 @@ describe("LoginPage — the OIDC login hop", () => {
       screen.queryByText("Please sign in again to continue."),
     ).not.toBeInTheDocument();
   });
+
+  /**
+   * **W4.** A step-up carries `?acr=…`, naming the one factor the relying
+   * party's request could not be satisfied without. The page's job is to say
+   * so — it never chooses or reports an authentication context class; the
+   * server derives that from what the session actually proves.
+   */
+  it("says which factor is required when the hop carries an acr", async () => {
+    signInSucceeds();
+    renderWithProviders(<LoginPage />, {
+      route: `/login?reauth=1&acr=urn%3Aaxiam%3Aacr%3Amfa&return_to=${encodeURIComponent(RETURN_TO)}`,
+    });
+
+    expect(
+      await screen.findByText(/requires multi-factor authentication/i),
+    ).toBeInTheDocument();
+  });
+
+  /** An `acr` outside the two-value allow-list is dropped, not displayed. */
+  it("ignores an acr it does not recognise", async () => {
+    signInSucceeds();
+    renderWithProviders(<LoginPage />, {
+      route: `/login?reauth=1&acr=urn%3Aaxiam%3Aacr%3Agod-mode&return_to=${encodeURIComponent(RETURN_TO)}`,
+    });
+
+    expect(
+      await screen.findByText("Please sign in again to continue."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/requires multi-factor authentication/i),
+    ).not.toBeInTheDocument();
+  });
+
+  /**
+   * **T1.6 — the loop guard.** A relying party that answers `login_required`
+   * by restarting the authorization request produces a fresh, individually
+   * well-behaved chain each time; from the end user's side that is an unbroken
+   * sequence of sign-in forms. After three in a minute the page stops and says
+   * so, and shows no fourth form — offering one would be the loop.
+   */
+  it("refuses a fourth reauthentication hop for the same destination", async () => {
+    signInSucceeds();
+    window.sessionStorage.clear();
+
+    for (let i = 0; i < 3; i += 1) {
+      const { unmount } = renderWithProviders(<LoginPage />, {
+        route: `/login?reauth=1&return_to=${encodeURIComponent(RETURN_TO)}`,
+      });
+      expect(
+        await screen.findByText("Please sign in again to continue."),
+      ).toBeInTheDocument();
+      unmount();
+    }
+
+    renderWithProviders(<LoginPage />, {
+      route: `/login?reauth=1&return_to=${encodeURIComponent(RETURN_TO)}`,
+    });
+    expect(
+      await screen.findByText(/keeps asking you to authenticate again/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Organization slug"),
+    ).not.toBeInTheDocument();
+    window.sessionStorage.clear();
+  });
 });
 
 describe("LoginPage — credentials step", () => {

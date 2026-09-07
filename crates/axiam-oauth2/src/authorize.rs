@@ -43,9 +43,11 @@ pub struct AuthorizeRequest {
     /// whichever carrier delivered them.
     ///
     /// Here for the same reason `via_par` is: the decision they feed needs the
-    /// client registration this service already loaded. Nothing in this wave
-    /// *acts* on them — the gate reads which of them arrived and refuses a
-    /// `fapi2` client the five that carry security.
+    /// client registration this service already loaded. The gate
+    /// (`crate::fapi`) reads which of them arrived and refuses a `fapi2`
+    /// client the five that carry security; W4's honour lane
+    /// (`crate::honour`) is what reads their *meaning*, and only for a client
+    /// registered `authn_request_params: honour`.
     pub authn_params: AuthnRequestParams,
     /// X7 G12 — a request-object parameter the server refuses (plan §4.10).
     ///
@@ -68,6 +70,60 @@ pub struct AuthorizeRequest {
     /// direction and never an error: an authorization request must not start
     /// failing because of a column this wave added.
     pub session_evidence: SessionEvidence,
+    /// W4 — the decoded `id_token_hint`, when one arrived and verified
+    /// (plan §4.2).
+    ///
+    /// Decoded by the handler, which holds the signing key, and decoded
+    /// unconditionally rather than only for the honour lane: the decode is a
+    /// signature check over a value the request already carried, it changes no
+    /// response, and making it conditional would put the lane decision in two
+    /// places. Only [`crate::honour`] reads it, and only on the honour lane.
+    ///
+    /// `None` when no hint arrived **and** when one arrived and did not verify.
+    /// The two are distinguished by [`AuthnRequestParams::id_token_hint`], and
+    /// the second is treated as a hint naming somebody else — never as an
+    /// absent hint, which would let an unsigned string turn a `prompt=none`
+    /// refusal into a code.
+    pub id_token_hint: Option<crate::logout::IdTokenHint>,
+    /// W4 — whether the query string carried an authentication-request
+    /// parameter alongside a `request_uri` (plan §4.1, test T1.3).
+    ///
+    /// RFC 9126 §4 does not mix the two forms, and the existing refusal
+    /// ([`crate::par::has_inline_params`]) already covers the seven original
+    /// parameters. The nine OIDC ones are refused **only on the honour lane**,
+    /// which is where the refusal is worth anything: there a browser adding
+    /// `prompt=none` to somebody's pushed request would be changing what the
+    /// request means, and on the `ignore` lane it would be adding a parameter
+    /// that is dropped either way. Refusing it for every client would change
+    /// the answer given to a client registered today, which is the one thing
+    /// this plan does not do.
+    pub inline_authn_params_beside_request_uri: bool,
+    /// W4 — whether this request carries
+    /// [`crate::login_hop::LOGIN_HOP_MARKER`], i.e. has already been through
+    /// the sign-in page once.
+    ///
+    /// The honour lane's termination argument rests on it: a requirement that
+    /// survives one interaction is answered rather than retried. See
+    /// [`crate::honour`].
+    pub login_hop_return_leg: bool,
+}
+
+/// What an authorization request earned (W4, plan §4.2).
+///
+/// Before W4 the answer was a code or an error. The honour lane adds a third:
+/// *the end user has to do something first*. It is modelled here rather than
+/// as an `OAuth2Error` variant because it is not an error and must not be
+/// reported like one — it produces a redirect to this deployment's own sign-in
+/// page, not a redirect to the relying party — and because the service is the
+/// only place that can decide it: the decision needs the client registration,
+/// the validated `redirect_uri` and the session evidence at once.
+#[derive(Debug)]
+pub enum AuthorizeOutcome {
+    /// A code was issued. Redirect to the relying party.
+    Code(AuthorizeResponse),
+    /// The end user must authenticate before this request can be answered.
+    /// Send the browser through the login hop (`crate::login_hop`).
+    Interact(crate::honour::Interaction),
 }
 
 /// The authentication evidence snapshotted onto an authorization code.
@@ -144,8 +200,13 @@ where
         }
     }
 
-    /// Process an authorization request, returning a code on success.
-    pub async fn authorize(&self, req: AuthorizeRequest) -> Result<AuthorizeResponse, OAuth2Error> {
+    /// Process an authorization request.
+    ///
+    /// Answers with a code, with a request for an interaction (W4's honour
+    /// lane — see [`AuthorizeOutcome`]), or with an error. Everything a
+    /// relying party may be *redirected* an error about happens after step 2,
+    /// where the client and its `redirect_uri` have been validated.
+    pub async fn authorize(&self, req: AuthorizeRequest) -> Result<AuthorizeOutcome, OAuth2Error> {
         // 1. Look up client — must happen BEFORE any redirectable
         //    errors to avoid open-redirect to unvalidated URIs.
         let client = self
@@ -266,6 +327,48 @@ where
             ));
         }
 
+        // 6a. W4 — a pushed request may not be topped up through the browser
+        //     (plan §4.1, T1.3). Honour lane only; see the field's docs.
+        if crate::fapi::honours_authn_params(&client) && req.inline_authn_params_beside_request_uri
+        {
+            return Err(OAuth2Error::InvalidRequest(
+                "request_uri must not be combined with inline authorization parameters".into(),
+            ));
+        }
+
+        // 6b. W4 — the honour lane (plan §4.2/§4.3/§4.4).
+        //
+        // Placed here, and this is the whole of why: every gate above has run,
+        // so the client is known, the `redirect_uri` is one this client
+        // registered, and any error raised from now on is safe to report by
+        // redirecting; and no code has been generated, so a request that needs
+        // an interaction has not already minted the thing the interaction was
+        // supposed to gate.
+        //
+        // For a client on the `ignore` lane — which is every client registered
+        // today — this block does nothing at all: `honour_lane` is false, no
+        // parameter is read, and no `acr` is recorded. That is invariant 4.
+        let acr = if crate::fapi::honours_authn_params(&client) {
+            match crate::honour::evaluate(crate::honour::Request {
+                params: &req.authn_params,
+                auth_time: req.session_evidence.auth_time,
+                amr: &req.session_evidence.amr,
+                subject: req.user_id,
+                client_id: &req.client_id,
+                id_token_hint: req.id_token_hint.as_ref(),
+                return_leg: req.login_hop_return_leg,
+                now: Utc::now(),
+            }) {
+                crate::honour::Outcome::Proceed { acr } => acr.map(str::to_owned),
+                crate::honour::Outcome::Interact(interaction) => {
+                    return Ok(AuthorizeOutcome::Interact(interaction));
+                }
+                crate::honour::Outcome::Refuse(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+
         // 7. Generate random authorization code
         let raw_code = generate_auth_code();
         let code_hash = hash_code(&raw_code);
@@ -290,22 +393,24 @@ where
                 // X7.2: snapshotted here, at issuance, because this is the
                 // last moment the session behind the code is known to exist.
                 auth_time: req.session_evidence.auth_time,
-                // Derived from the session by `acr_for`, which is the honour
-                // lane's and does not exist yet: no client can request an ACR
-                // and no token can carry one, so recording a value here would
-                // be recording a guess.
-                acr: None,
+                // W4 — derived from the session's evidence by
+                // `crate::acr::acr_for`, which cannot see this request, and
+                // then filtered through `report_acr`, which can only select
+                // among values that evidence already satisfies. `None` for
+                // every client on the `ignore` lane and for any request with
+                // no session to speak for.
+                acr,
                 amr: req.session_evidence.amr,
                 expires_at,
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
-        Ok(AuthorizeResponse {
+        Ok(AuthorizeOutcome::Code(AuthorizeResponse {
             code: raw_code,
             state: req.state,
             redirect_uri: req.redirect_uri,
-        })
+        }))
     }
 }
 
@@ -646,6 +751,9 @@ mod tests {
             authn_params: AuthnRequestParams::default(),
             request_object: None,
             session_evidence: SessionEvidence::default(),
+            id_token_hint: None,
+            inline_authn_params_beside_request_uri: false,
+            login_hop_return_leg: false,
         }
     }
 

@@ -70,7 +70,7 @@ lane that would act on them is a later wave. Rows 23–26 therefore record the
 |---|-----------|----------|--------|----------|
 | 23 | `prompt`, `max_age`, `acr_values`, `claims`, `id_token_hint` are accepted and ignored for a `standard`/`ignore` client, with no change to the redirect, the token response or the ID token | Core §3.1.2.1 | Ignored (by design, invariant 4) | `oauth2_flow_test.rs::p1_a_standard_client_is_unchanged_by_every_new_parameter` |
 | 24 | `login_hint`, `display`, `ui_locales`, `claims_locales` are accepted and ignored | Core §3.1.2.1, §5.2 | Ignored (by design) | same as row 23 |
-| 25 | `auth_time`, `acr` and `amr` are **not** emitted merely because a request asked for them | Core §2, §3.1.3.7 | Not emitted (W2/W4) | `oauth2_flow_test.rs::p1_…` asserts their absence |
+| 25 | `auth_time`, `acr` and `amr` are **not** emitted merely because a request asked for them — an `ignore`-lane client receives none of the three however much it asks | Core §2, §3.1.3.7 | Not emitted for `ignore` (still true after W4) | `oauth2_flow_test.rs::p1_…` asserts their absence; `oauth2_honour_lane_test.rs::t3_5_…`, `::t2_1_i4_twin_…` |
 | 26 | The same parameters are carried by PAR and by the inline query string, and parse identically from either | RFC 9126 §2.1 | Pass | `authn_params.rs::the_par_carrier_parses_identically_to_the_inline_one` |
 | 27 | A `fapi2` client is **refused** the five security-bearing parameters with `invalid_request` | FAPI 2.0 §5.3.1 | Pass | `fapi.rs::m1_m4_security_bearing_parameters_are_refused_for_a_fapi_client`; `oauth2_flow_test.rs::a_fapi_client_is_refused_the_security_bearing_parameters` |
 | 28 | A `fapi2` registration may not set `authn_request_params: honour`, on create or on update | FAPI 2.0 §5.3.1 | Pass | `fapi.rs::m1_m6_fapi_plus_honour_is_refused_at_creation`, `::…_on_update` |
@@ -111,7 +111,7 @@ then the session it came from may be gone (row 43).
 | # | Behaviour | Spec Ref | Status | Evidence |
 |---|-----------|----------|--------|----------|
 | 40 | An ID token issued to any client registered today carries exactly the members it carried before X7.2: no `auth_time`, no `acr`, no `amr`, and no `null` placeholder for any of them | Core §2 | Not emitted (by design, invariant 4) | `oauth2_flow_test.rs::t2_6_an_ignore_lane_client_gets_the_same_id_token_though_the_session_now_has_evidence`; `token.rs::an_id_token_with_no_evidence_has_exactly_todays_claim_set` |
-| 41 | No client is on the emitting lane — not `standard`, not `fapi2`, and not one registered `authn_request_params: honour` | Core §2 | Emitted for nobody (W4 opens the lane) | `fapi.rs::session_evidence_is_emitted_for_nobody` |
+| 41 | The emitting lane is exactly `standard` + `authn_request_params: honour`. No `fapi2` client is on it at any setting, and no client registered today is on it | Core §2 | Opened by W4, per client | `fapi.rs::session_evidence_reaches_the_honour_lane_and_nobody_else` |
 | 42 | Refresh rotation **copies** `authenticated_at` and `amr` to the session it creates rather than restamping them, so a session that is never re-authenticated never reports itself as younger | Core §12.2 | Pass | `session_evidence_rotation_test.rs::refresh_rotation_preserves_the_authentication_event` |
 | 43 | The authorization code snapshots the session's evidence at issuance, with the session's instant and not the code's | Core §3.1.3.3 | Pass | `oauth2_flow_test.rs::t2_6_…` (asserts `auth_time` equals the session's, three hours old) |
 | 44 | A federated login is dated by the **upstream** provider — OIDC `auth_time`, SAML `AuthnInstant`, carried across the SSO handoff hop — and only falls back to AXIAM's clock when the provider asserted no instant | Core §2 | Pass | `session.rs::upstream_evidence_prefers_the_upstream_instant`; `handlers/federation.rs::issue_sso_session` |
@@ -151,6 +151,54 @@ asked.
 | 58 | Refresh rotation **copies** the OP browser-session digest (the cookie was not reissued), while a fresh sign-in **replaces** it and advances `authenticated_at` — the one event that moves what row 42 pins in place | Core §12.2 | Pass | `session_evidence_rotation_test.rs::reauthentication_moves_the_authentication_event_that_rotation_preserves` |
 | 59 | A request carrying an access token is unaffected: its tenant comes from the token, and the new `tenant_id` query parameter is ignored for it | — (invariant 4) | Pass | `…::a_token_bearing_request_is_unaffected_and_ignores_the_tenant_parameter` |
 
+## OpenID Connect Core 1.0 — the honour lane (X7.4, wave W4)
+
+Everything above this section describes parameters AXIAM **read and did not
+act on**. This is the wave where a relying party that asks for a security
+property gets it, or is told it cannot have it — never a token that quietly
+does not have it. It is opt-in per client
+(`authn_request_params: honour`, schema v54, default `ignore`), refused for
+`fapi2` at both layers, and invisible to every client registered today.
+
+Three things decide every row below, and they are worth stating before the
+table:
+
+1. **The `acr` claim is derived from the session's evidence by a function that
+   cannot see the request.** `acr::acr_for(amr: &[Amr]) -> Acr` takes the
+   evidence and nothing else; there is no parameter through which the request
+   could reach it. The request's `acr_values` decide only whether a step-up is
+   offered and *which satisfied value* is reported — never what the claim says.
+2. **`max_age = 0` is a value, not an absence**, and `elapsed >= max_age` has
+   no leeway in the relying party's disfavour. See the note below for the
+   consequence.
+3. **The login hop is the only interaction mechanism**, and its marker is what
+   makes every requirement terminate: a requirement that survives one
+   interaction is answered, not retried.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 60 | `prompt=none` with no usable session is answered `login_required`, **redirected to the relying party** with `state` and `iss` and no code — never with a sign-in page | Core §3.1.2.1, §3.1.2.6 | Pass | `oauth2_honour_lane_test.rs::t1_1_and_t1_7_prompt_none_without_a_session_is_login_required_at_the_relying_party` |
+| 61 | `prompt=none` with a session that satisfies the request yields a code, no interaction, and an ID token carrying the evidence | Core §3.1.2.1 | Pass | `…::t1_2_prompt_none_with_a_session_yields_a_code` |
+| 62 | An authentication-request parameter on the query string beside a `request_uri` is refused `invalid_request` — a browser may not top up somebody's pushed request | RFC 9126 §4 | Pass (honour lane) | `…::t1_3_an_inline_parameter_beside_a_request_uri_is_invalid_request` |
+| 63 | `prompt=none` combined with any other value is `invalid_request` | Core §3.1.2.1 | Pass | `…::t1_4_prompt_none_combined_with_another_value_is_invalid_request` |
+| 64 | `prompt=login` always reauthenticates, and the ID token issued afterwards carries a strictly later `auth_time` | Core §3.1.2.1 | Pass | `…::t1_5_prompt_login_reauthenticates_and_moves_auth_time_forward` |
+| 65 | The sign-in page refuses the same `reauth` destination more than three times in a minute and shows an error rather than a fourth form | — | Pass | `reauth.test.ts::recordReauthAttempt (T1.6)` |
+| 66 | `prompt=none` from an iframe-shaped request (no `Lax` cookie on a sub-frame navigation) is `login_required` — the login-status probe fails closed | Core §3.1.2.1 | Pass | `…::t1_1_and_t1_7_…` (same request, no cookie) |
+| 67 | `max_age=0` always reauthenticates — a one-second-old session does not satisfy it, and neither does the authentication the reauthentication produces, so the chain terminates in `login_required` and never in a code | Core §3.1.2.1 | Pass (see note) | `…::t2_1_max_age_zero_always_reauthenticates_and_never_yields_a_code`; `honour.rs::t2_1_…`, `::max_age_zero_is_refused_rather_than_looped_after_a_reauthentication` |
+| 68 | A session older than `max_age` reauthenticates; the token issued after the return leg carries a fresh `auth_time` (mirrors `OIDCCMaxAge1`) | Core §3.1.2.1 | Pass | `…::t2_2_an_expired_max_age_reauthenticates_and_the_second_token_is_fresh` |
+| 69 | Two requests with different, satisfied `max_age` bounds report the same `auth_time` and the same `sub`, and neither reauthenticates (mirrors `OIDCCMaxAge10000`) | Core §3.1.2.1 | Pass | `…::t2_3_a_satisfied_max_age_does_not_reauthenticate` |
+| 70 | A refreshed ID token's `auth_time` equals the original's (mirrors `OIDCCRefreshToken`) | Core §12.2 | Pass | `…::t2_4_a_refreshed_id_token_carries_the_original_auth_time` |
+| 71 | A malformed value (`max_age=-1`, `max_age=abc`, `prompt=teleport`) is `invalid_request` on the honour lane and **dropped**, with a code issued, on the `ignore` lane | Core §3.1.2.1 | Pass | `…::t2_7_a_malformed_value_is_invalid_request_on_the_honour_lane` and `::t2_7_i4_twin_…`; `fapi.rs::t2_7_…` |
+| 72 | A request for an authentication context class the session does not satisfy is **never** echoed into the `acr` claim: it produces a step-up, and a declined step-up produces a token saying what the session actually proved | Core §3.1.2.1, §5.5.1.1 | Pass | `…::t3_1_and_t3_3_an_acr_request_is_never_echoed_into_the_claim`; `acr.rs::the_claim_is_derived_from_evidence_the_request_cannot_reach`, `::an_unknown_requested_value_is_never_echoed` |
+| 73 | An **essential** `claims.id_token.acr` that cannot be satisfied is refused `unmet_authentication_requirements`, never with a token | Core §5.5.1.1; `unmet_authentication_requirements` 1.0 | Pass | `…::t3_2_an_unmet_essential_acr_is_refused_rather_than_downgraded` |
+| 74 | The reported class is the **most-preferred satisfied** value in the relying party's order, not the highest achieved | Core §3.1.2.1 | Pass | `…::t3_4_the_reported_class_is_the_most_preferred_one_that_is_satisfied`; `acr.rs::t3_4_…` |
+| 75 | `acr_values` on an `ignore`-lane client is ignored and its ID token carries no `acr` at all | — (invariant 4) | Pass | `…::t3_5_acr_values_on_an_ignore_lane_client_produces_no_claim` |
+| 76 | An `id_token_hint` must name this end user **and** this client; one that does not verify is treated as naming somebody else, never as absent | Core §3.1.2.1 | Pass | `…::an_id_token_hint_is_honoured_and_a_mismatched_one_reauthenticates`; `honour.rs::an_unverifiable_hint_is_treated_as_naming_somebody_else` |
+| 77 | `select_account` is handled as `login`, and yields `account_selection_required` only where a hint mismatch survives the interaction | Core §3.1.2.1, §3.1.2.6 | Pass | `honour.rs::select_account_is_handled_as_login`, `::select_account_names_the_account_when_a_hint_still_does_not_match` |
+| 78 | The outcome of every `prompt=none` request is audited per client (`oauth2.prompt_none.code` / `.login_required`), so the silent-authentication oracle is countable | — | Pass | `handlers/oauth2.rs::audit_prompt_none` |
+| 79 | A federated session whose upstream `acr`/`amr` the operator has not mapped satisfies only the `1fa` floor | Core §2 | Pass (strict by default) | `acr.rs::single_factor_is_the_answer_for_everything_else` (`fed`); `handlers/federation.rs::issue_sso_session` |
+| 80 | A session row written before schema v55 (`amr = []`) satisfies only the `1fa` floor and never presents as fresh beyond its creation — no backfill | — | Pass | `acr.rs::a_session_with_no_recorded_evidence_satisfies_only_the_floor`; row 46 |
+
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
 
 | # | Behaviour | Spec Ref | Status | Evidence |
@@ -181,14 +229,18 @@ asked.
 - **Not yet Basic OP.** These rows close the gates, the refusals, the session
   record and now the login hop — not the certification. The remaining Basic OP
   work — the honour lane, POST userinfo, the sensitive scopes,
-  `client_secret_basic` and the harness itself — is waves W4–W9 of
-  `claude_dev/basic-op-gap-plan.md` §8.
+  `client_secret_basic` and the harness itself — is waves W5–W9 of
+  `claude_dev/basic-op-gap-plan.md` §8. **No conformance run has been executed
+  against any of it:** there is no docker daemon in the environment these waves
+  were implemented in, `docs/conformance/` does not exist, and baseline run #0
+  has never happened, so runs #1 and #2 have nothing to be compared against
+  either.
 
-- **The login hop reaches the parameters; it does not read them.** Rows 47–59
-  make `prompt`, `max_age` and `id_token_hint` *reachable* for the first time,
-  because there is now a browser session at `/oauth2/authorize` for them to be
-  about. Rows 23–25 still describe what happens to them: nothing. W4 is where
-  they are read.
+- **The login hop reaches the parameters; W4 reads them.** Rows 47–59 make
+  `prompt`, `max_age` and `id_token_hint` *reachable*, because there is now a
+  browser session at `/oauth2/authorize` for them to be about; rows 60–80 are
+  what reading them does. Rows 23–25 still describe what happens on the
+  `ignore` lane: nothing, which is every client registered today.
 
 - **The tenant on an anonymous authorization request.** `/oauth2/authorize`
   takes an optional `tenant_id`, read **only** when the request carries no
@@ -202,10 +254,61 @@ asked.
   `authorization_endpoint` is a W9 question rather than a W3 one, since it
   would change the document every client already reads.
 
+- **`prompt=consent` is treated as `login` in W4, and W7 supersedes it.** Plan
+  §4.2 sends it to a first-party consent screen that G8 (wave W7) renders. That
+  screen does not exist yet, and the two available answers were *ignore it* —
+  the silent downgrade the whole lane exists to prevent — or refuse with
+  `interaction_required`. W4 treats it as `login`. The argument: OIDC Core
+  §3.1.2.1 says the server "SHOULD prompt the End-User for consent" and leaves
+  the OP to choose the ceremony; a fresh credential check *is* an interaction,
+  performed by the user, before any code is issued; nothing is asserted about
+  it, because there is no consent claim to be false and no consent-gated data to
+  release until W7 defines the sensitive scopes; and `interaction_required`
+  would make the honour lane unusable for every relying party whose library
+  sends `prompt=consent` by reflex, which pushes operators back to `ignore`
+  where `max_age` and `prompt=none` are dropped silently too. W7 replaces the
+  ceremony behind the same redirect and no relying party has to change.
+
+- **`consent_required` and `interaction_required` are unreachable in W4.**
+  `consent_required` needs a consent-gated scope and there are none until W7;
+  every `prompt=none` refusal the honour lane can produce has a more specific
+  name than `interaction_required`. Both variants exist in `OAuth2Error` — the
+  four OIDC interaction codes are one vocabulary and splitting it across waves
+  is how a code comes to be spelled twice — and neither is raised by any branch.
+  The audit action `oauth2.prompt_none.consent_required` the plan names is,
+  for the same reason, not written.
+
+- **`max_age=0` cannot be satisfied by any code, and that is the honest
+  answer.** The plan fixes the comparison as `elapsed >= max_age` with no
+  special case and no leeway; an authentication is never zero seconds old, so
+  `max_age=0` always demands a reauthentication and the reauthentication it
+  produces fails the same comparison. The relying party gets an interaction and
+  then `login_required`. A rounder comparison (`>`) would let it succeed, at the
+  cost of the one guarantee the parameter exists to give. Note that the OpenID
+  Foundation's Basic OP plan exercises `max_age=1` and `max_age=10000`, not
+  `max_age=0`.
+
+- **A pushed `prompt=none` from an anonymous browser cannot be read before the
+  hop.** The handle is consumed inside the authorization handler, after the
+  principal has been resolved, so a PAR client's `prompt=none` is not visible
+  at the moment the login redirect would be built. It is not converted into a
+  code either: the return leg carries the hop marker, and `prompt=none` on a
+  marked request is `login_required` (`honour.rs::prompt_none_on_a_return_leg_is_refused_however_good_the_session_is`).
+  A relying party that needs silent authentication over PAR sees
+  `invalid_request_uri` or `login_required`, never a token minted behind an
+  interaction it forbade.
+
+- **A refreshed ID token reports the class the authentication achieved.** A
+  refresh carries no authorization request, so there is no relying-party
+  preference for row 74's rule to express. Where the original token may have
+  reported the weaker of two satisfied classes because the relying party listed
+  it first, the refreshed one reports what the session proves. Both are true of
+  the same authentication; `auth_time` and `amr` are identical either way.
+
 - **Cross-site hidden-iframe silent renew is not supported, and fails closed.**
   A consequence of the `SameSite=Lax` cookie in row 53, recorded in the plan's
   §9 as a decision rather than discovered as a bug. Relying parties renew with
-  a top-level `prompt=none` navigation (W4) or with a refresh token.
+  a top-level `prompt=none` navigation (rows 60–61) or with a refresh token.
 
 ---
 
@@ -213,3 +316,4 @@ asked.
 *Rows 23–39 added: X7.1 wave W1 — 2026-09-07*
 *Rows 40–46 added: X7.2 wave W2 — 2026-09-07*
 *Rows 47–59 added: X7.3 wave W3 — 2026-09-07*
+*Rows 60–80 added: X7.4 wave W4 — 2026-09-07*

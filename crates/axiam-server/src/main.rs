@@ -1061,6 +1061,10 @@ async fn main() -> std::io::Result<()> {
         tenant_repo.clone(),
         refresh_token_repo,
         user_repo.clone(),
+        // W4 — the session behind a refresh grant, so a re-issued ID token's
+        // `auth_time` equals the original's (OIDC Core §12.2). Read only for a
+        // client on the honour lane.
+        session_repo.clone(),
         config.auth.clone(),
         i64::try_from(config.auth.refresh_token_lifetime_secs)
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),

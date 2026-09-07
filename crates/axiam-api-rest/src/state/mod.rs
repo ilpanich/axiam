@@ -181,6 +181,7 @@ pub type TokenServiceT<C> = TokenService<
     SurrealRefreshTokenRepository<C>,
     SurrealUserRepository<C>,
     SurrealServiceAccountRepository<C>,
+    SurrealSessionRepository<C>,
 >;
 
 /// B2 — the device-authorization grant's own service. Separate from
@@ -605,6 +606,10 @@ impl<C: Connection + Clone> AppState<C> {
             tenant_repo.clone(),
             refresh_token_repo.clone(),
             user_repo.clone(),
+            // W4: read on one path only — re-issuing an ID token for a client
+            // on the honour lane, where OIDC Core §12.2 requires `auth_time`
+            // to equal the original's.
+            session_repo.clone(),
             auth_config.clone(),
             2_592_000,
         );

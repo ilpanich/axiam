@@ -509,6 +509,23 @@ pub fn enforce_authorization_request(
         // proceeds byte-for-byte as it did before X7.1 existed.
         if !params.is_empty() && client.authn_request_params == AuthnRequestParamsMode::Ignore {
             warn_ignored_params(client, params);
+            return Ok(());
+        }
+        // Rule 4 (W4) — the honour lane. The only thing decided here is that a
+        // value nobody can interpret is refused rather than acted on: from
+        // this point the parameters *mean* something, so `max_age=tomorrow`
+        // can no longer be quietly dropped the way an `ignore` client's is.
+        //
+        // Deliberately the whole of rule 4 that lives in this module. What the
+        // parameters then *do* is `crate::honour`, evaluated inside the
+        // authorization service where the client, the `redirect_uri` and the
+        // session are all in hand — this gate runs before the request is known
+        // to be redirectable, and an interaction decision made here could not
+        // be reported to the relying party.
+        if client.authn_request_params.is_honour()
+            && let Some(detail) = params.parse_error()
+        {
+            return Err(OAuth2Error::InvalidRequest(detail.to_owned()));
         }
         return Ok(());
     }
@@ -549,39 +566,48 @@ pub fn enforce_authorization_request(
     Ok(())
 }
 
-/// Whether this client's ID tokens carry session evidence (X7.2, plan §4.3).
+/// Whether this client's ID tokens carry session evidence (X7.2/W4, plan §4.3).
 ///
-/// **False for every client, and that is the wave's whole promise.** The
-/// evidence — `auth_time`, `acr`, `amr` — is now recorded on the session, and
-/// snapshotted onto the authorization code, and shaped as an
-/// [`axiam_auth::token::IdTokenEvidence`] the mint sites accept. What does not
-/// exist yet is anybody to give it to: emitting the claims is the honour lane,
-/// and the honour lane is a later wave.
+/// **True for the honour lane and for nothing else.** W2 recorded the evidence
+/// — `auth_time`, `acr`, `amr` — on every session and snapshotted it onto every
+/// authorization code, and emitted it for nobody. W4 opens the one door: a
+/// client registered `authn_request_params: honour` receives the three claims;
+/// every client registered today is `ignore` and its ID token is byte-for-byte
+/// what it has always been (invariant 4, pinned by
+/// `oauth2_flow_test::t2_6_…` and `…::p1_…`).
 ///
-/// It is a function rather than a literal `false` at the two mint sites for
-/// three reasons:
+/// A `fapi2` client can never reach `honour`: [`validate_registration`] refuses
+/// the combination on create and on update, and
+/// [`enforce_authorization_request`] refuses it again at request time on a row
+/// that was edited past both. The profile is nevertheless asked here — a third
+/// time, for a row those two could only have refused — because this function
+/// is read by the token endpoint, where no authorization request is in hand and
+/// so neither of the other two gates has run. `acr`/`amr`/`auth_time` on a
+/// `fapi2` ID token is a claim the FAPI lane has never emitted and this
+/// function is the last place that could start.
 ///
-/// 1. **One decision, one place.** The code-exchange and refresh paths must
-///    agree, because OIDC Core §12.2 requires a refreshed ID token's
-///    `auth_time` to equal the original's. Two literals are two places for
-///    that to drift.
-/// 2. **It is a lane decision**, and this module is where the lane decisions
-///    live — the same two-layer mechanism, and the reason X7.1's gates were
-///    not given a module of their own.
-/// 3. **It is testable now.** The tests below pin it closed for every
-///    combination of profile and mode, `authn_request_params: honour`
-///    included, so "emitted for nobody" is a property with a failing test
-///    behind it rather than a sentence in a commit message.
+/// It is a function rather than a field read at the two mint sites because the
+/// code-exchange and refresh paths must agree: OIDC Core §12.2 requires a
+/// refreshed ID token's `auth_time` to equal the original's, and two
+/// expressions are two places for that to drift.
 ///
-/// Opening the lane means returning `client.authn_request_params.is_honour()`
-/// here — a `fapi2` client can never reach that, because both layers of the
-/// gate above already refuse it that mode.
+/// Plan §11 D5 keeps this per-client. Emitting `auth_time` for *every* client
+/// is additive and truthful, and it is also a visible change to every relying
+/// party's ID token; it is left to the maintainer, and it is one line here.
 pub fn emits_session_evidence(client: &OAuth2Client) -> bool {
-    // Named and consumed rather than elided, so this reads as "the decision
-    // takes the client and answers no" instead of a stub with an unused
-    // parameter.
-    let _ = client;
-    false
+    honours_authn_params(client)
+}
+
+/// Is this client on the honour lane (W4)?
+///
+/// The one predicate every honour-lane decision asks, so that "on the lane"
+/// cannot come to mean one thing at the authorization endpoint and another at
+/// the token endpoint. Both halves matter: the client opted in **and** it is
+/// not on the FAPI profile, which the two registration gates already
+/// guarantee and which is asserted here anyway because this is the last place
+/// that could start honouring a parameter for a `fapi2` row.
+pub fn honours_authn_params(client: &OAuth2Client) -> bool {
+    !client.profile.is_fapi2() && client.authn_request_params.is_honour()
 }
 
 /// How long a client stays quiet after one "parameters ignored" warning.
@@ -1652,27 +1678,31 @@ mod tests {
         assert_eq!(validate_registration(&c), Ok(()));
     }
 
-    /// **X7.2, the wave's central claim**: no client receives session
-    /// evidence — not a `standard` one, not a `fapi2` one, and not one an
-    /// operator has already moved to `authn_request_params: honour`.
+    /// **W4, the wave's central claim**: session evidence reaches the honour
+    /// lane and nothing else.
     ///
-    /// The honour case is the one worth stating out loud. That field has been
-    /// registrable since X7.1, so a deployment can already hold a client that
-    /// says `honour`; this wave still gives it nothing, because *emitting* the
-    /// claims is a decision the honour lane makes and the honour lane does not
-    /// exist yet. When it does, this test is the one that must change, and
-    /// changing it is how the change gets noticed.
+    /// This test replaces X7.2's `session_evidence_is_emitted_for_nobody`, and
+    /// the replacement is the change getting noticed — which is exactly what
+    /// that test was for. The half that must not move is the `ignore` half:
+    /// every client registered today is `standard` + `ignore`, and its ID
+    /// token still carries no `auth_time`, no `acr` and no `amr`.
+    ///
+    /// The `fapi2` + `honour` row cannot be registered — both layers of the
+    /// gate refuse it — and is asserted here anyway, because "cannot be
+    /// registered" is a property of two other functions and this one should
+    /// not depend on either of them being right.
     #[test]
-    fn session_evidence_is_emitted_for_nobody() {
+    fn session_evidence_reaches_the_honour_lane_and_nobody_else() {
         for mode in [
             AuthnRequestParamsMode::Ignore,
             AuthnRequestParamsMode::Honour,
         ] {
             let mut standard = base_client();
             standard.authn_request_params = mode;
-            assert!(
-                !emits_session_evidence(&standard),
-                "a standard client with {mode:?} must receive no session evidence in this wave"
+            assert_eq!(
+                emits_session_evidence(&standard),
+                mode.is_honour(),
+                "a standard client receives session evidence exactly when it opted in ({mode:?})"
             );
 
             let mut fapi = fapi_client();
@@ -1680,6 +1710,101 @@ mod tests {
             assert!(
                 !emits_session_evidence(&fapi),
                 "a fapi2 client with {mode:?} must receive no session evidence, ever"
+            );
+        }
+    }
+
+    /// **M1–M4's request halves, and the I4 twin of each.**
+    ///
+    /// One table rather than four tests because the rows differ only in which
+    /// parameter arrives: a `fapi2` client is refused every security-bearing
+    /// one, and the same input against the `standard`/`ignore` client every
+    /// deployment actually holds is served exactly as it was before X7.1 —
+    /// which is the half of the matrix a negative test alone does not prove.
+    #[test]
+    fn m1_to_m4_every_security_bearing_parameter_is_refused_on_fapi2_and_ignored_on_the_default_lane()
+     {
+        for (row, name, value) in [
+            ("M1", "prompt", "none"),
+            ("M1", "prompt", "login"),
+            ("M2", "max_age", "0"),
+            ("M2", "max_age", "3600"),
+            ("M3", "acr_values", "urn:axiam:acr:mfa"),
+            ("M3", "claims", r#"{"id_token":{"acr":{"essential":true}}}"#),
+            ("M4", "id_token_hint", "ey.header.payload"),
+        ] {
+            let params = one_param(name, value);
+
+            // Layer 2, the refusal.
+            let refusal = enforce_authorization_request(&fapi_client(), Some(PKCE), &params)
+                .expect_err(&format!("{row}: a fapi2 client must be refused {name}"));
+            let message = refusal.to_string();
+            assert!(
+                message.contains(name) && message.contains("fapi2"),
+                "{row}: the refusal must name the parameter and the profile: {message}"
+            );
+
+            // The I4 twin: the client every deployment holds today.
+            assert!(
+                enforce_authorization_request(&base_client(), None, &params).is_ok(),
+                "{row} (I4): a standard/ignore client must be served exactly as before, \
+                 whatever it sends"
+            );
+        }
+    }
+
+    /// Rule 4's one refusal: a value that has no meaning is refused **on the
+    /// honour lane only**, because there it would otherwise have to be acted
+    /// on, and there is nothing to act on.
+    ///
+    /// The `ignore` twin is the point. `max_age=tomorrow` from a client
+    /// registered today has always produced a code, and still does.
+    #[test]
+    fn t2_7_a_malformed_value_is_invalid_request_on_the_honour_lane_and_dropped_on_the_ignore_one()
+    {
+        for (name, value) in [
+            ("max_age", "-1"),
+            ("max_age", "abc"),
+            ("prompt", "teleport"),
+            ("prompt", "none login"),
+            ("claims", "{not json"),
+        ] {
+            let params = one_param(name, value);
+            assert!(
+                params.parse_error().is_some(),
+                "{name}={value} must parse as malformed"
+            );
+
+            let mut honour = base_client();
+            honour.authn_request_params = AuthnRequestParamsMode::Honour;
+            let refusal = enforce_authorization_request(&honour, None, &params).expect_err(
+                &format!("{name}={value} must be refused on the honour lane"),
+            );
+            assert_eq!(refusal.error_code(), "invalid_request");
+
+            assert!(
+                enforce_authorization_request(&base_client(), None, &params).is_ok(),
+                "{name}={value} must still be dropped for an ignore-lane client"
+            );
+        }
+    }
+
+    /// A well-formed bundle passes rule 4 untouched: the gate decides nothing
+    /// else about it, and everything it *does* decide lives in
+    /// `crate::honour`.
+    #[test]
+    fn rule_four_refuses_nothing_a_client_spelled_correctly() {
+        let mut honour = base_client();
+        honour.authn_request_params = AuthnRequestParamsMode::Honour;
+        for (name, value) in [
+            ("prompt", "none"),
+            ("max_age", "0"),
+            ("acr_values", "urn:axiam:acr:mfa"),
+            ("login_hint", "ada@example.com"),
+        ] {
+            assert!(
+                enforce_authorization_request(&honour, None, &one_param(name, value)).is_ok(),
+                "{name}={value}"
             );
         }
     }

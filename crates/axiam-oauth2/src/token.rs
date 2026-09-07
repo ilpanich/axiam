@@ -355,7 +355,7 @@ fn session_evidence_of(
 /// OAuth2 token service — handles token exchange, revocation, and
 /// introspection.
 #[derive(Clone)]
-pub struct TokenService<OC, AC, TR, RT, UR, SA> {
+pub struct TokenService<OC, AC, TR, RT, UR, SA, SR> {
     client_repo: OC,
     /// X5.1 — resolves a `private_key_jwt` client's keys, verifies its
     /// assertion, and records the `jti`.
@@ -371,6 +371,19 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA> {
     tenant_repo: TR,
     refresh_token_repo: RT,
     user_repo: UR,
+    /// W4 — the sessions behind refresh grants (plan §4.3).
+    ///
+    /// A repository rather than a snapshot on the refresh-token row because
+    /// the authentication event lives on the session and refresh rotation
+    /// **copies** it there (`axiam_auth::service`, X7.2): reading it is
+    /// therefore reading the same value the authorization code recorded, and
+    /// storing a second copy per refresh token would be a second thing that
+    /// can drift from it.
+    ///
+    /// Read on one path only — re-issuing an ID token for a client on the
+    /// honour lane — and a failed read yields no evidence rather than an
+    /// error, so no grant that works today can start failing because of it.
+    session_repo: SR,
     auth_config: AuthConfig,
     refresh_token_lifetime_secs: i64,
     /// X1 — the `token.pre_issue` interceptor chain.
@@ -382,7 +395,7 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA> {
     reactor_gate: SharedReactorGate,
 }
 
-impl<OC, AC, TR, RT, UR, SA> TokenService<OC, AC, TR, RT, UR, SA>
+impl<OC, AC, TR, RT, UR, SA, SR> TokenService<OC, AC, TR, RT, UR, SA, SR>
 where
     OC: OAuth2ClientRepository,
     SA: ServiceAccountRepository,
@@ -390,6 +403,7 @@ where
     TR: TenantRepository,
     RT: RefreshTokenRepository,
     UR: UserRepository,
+    SR: axiam_core::repository::SessionRepository,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -399,6 +413,7 @@ where
         tenant_repo: TR,
         refresh_token_repo: RT,
         user_repo: UR,
+        session_repo: SR,
         auth_config: AuthConfig,
         refresh_token_lifetime_secs: i64,
     ) -> Self {
@@ -410,9 +425,57 @@ where
             tenant_repo,
             refresh_token_repo,
             user_repo,
+            session_repo,
             auth_config,
             refresh_token_lifetime_secs,
             reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
+        }
+    }
+
+    /// The evidence a refreshed ID token carries (W4, plan §4.3).
+    ///
+    /// Read from the session the original grant was minted in. Three things
+    /// are worth saying about what comes back:
+    ///
+    /// - **`auth_time` equals the original's**, which is what OIDC Core §12.2
+    ///   requires and what `OIDCCRefreshToken` compares. It holds because
+    ///   refresh rotation copies `authenticated_at` onto the session row it
+    ///   writes rather than stamping the clock (X7.2).
+    /// - **`acr` is the class the authentication achieved**, not the one the
+    ///   original authorization request selected. A refresh carries no
+    ///   authorization request, so there is no relying-party preference to
+    ///   express: where the original may have reported the weaker of two
+    ///   satisfied classes because the RP listed it first
+    ///   ([`crate::acr::report_acr`]), a refreshed token reports what the
+    ///   session proves. Both statements are true of the same authentication,
+    ///   and the one available here is the only one that can be derived
+    ///   without inventing a request.
+    /// - **A session that cannot be read yields no evidence at all**, never an
+    ///   error and never a guess. A refresh that works today must not begin to
+    ///   fail because a session row was reaped.
+    async fn session_evidence_for_refresh(
+        &self,
+        tenant_id: Uuid,
+        session_id: Option<Uuid>,
+    ) -> IdTokenEvidence {
+        let Some(session_id) = session_id else {
+            return IdTokenEvidence::NONE;
+        };
+        match self.session_repo.get_by_id(tenant_id, session_id).await {
+            Ok(session) => IdTokenEvidence {
+                auth_time: Some(session.authenticated_at.timestamp()),
+                acr: Some(crate::acr::acr_for(&session.amr).as_str().to_owned()),
+                amr: axiam_core::models::session::Amr::encode_list(&session.amr),
+            },
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    %session_id,
+                    "no session row behind this refresh grant; the re-issued ID token \
+                     carries no authentication evidence"
+                );
+                IdTokenEvidence::NONE
+            }
         }
     }
 
@@ -1645,16 +1708,19 @@ where
                     .get_by_id(tenant_id, uid)
                     .await
                     .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
-                // X7.2 — the same gate as the code-exchange path above, and
-                // the same answer: nobody is on the lane, so a refreshed ID
-                // token carries no `auth_time` either. When the lane opens,
-                // this branch must resolve the evidence from the session
-                // behind `stored.session_id` — which rotation preserves
-                // precisely so that OIDC Core §12.2 holds: the `auth_time` of
-                // a refreshed ID token must equal the original's, and a
-                // freshly-stamped one would be a lie that grows younger with
-                // every refresh.
-                let evidence = IdTokenEvidence::NONE;
+                // W4 — the same gate as the code-exchange path above. For a
+                // client on the honour lane the evidence is resolved from the
+                // session behind `stored.session_id`, which refresh rotation
+                // preserves precisely so that OIDC Core §12.2 holds: the
+                // `auth_time` of a refreshed ID token equals the original's,
+                // and a freshly-stamped one would be a lie that grows younger
+                // with every refresh.
+                let evidence = if crate::fapi::emits_session_evidence(&client) {
+                    self.session_evidence_for_refresh(tenant_id, stored.session_id)
+                        .await
+                } else {
+                    IdTokenEvidence::NONE
+                };
                 Some(
                     issue_id_token(
                         uid,

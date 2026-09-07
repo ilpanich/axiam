@@ -187,6 +187,100 @@ async fn resolve_session_evidence<C: Connection + Clone>(
     }
 }
 
+/// Record the outcome of a `prompt=none` authorization request (W4, plan §4.2).
+///
+/// `prompt=none` is a **silent-authentication oracle**: a registered relying
+/// party learns, without any interaction, whether this browser is signed in.
+/// That is inherent to the parameter and it is accepted — it is bounded to
+/// clients registered in this tenant with exact `redirect_uri` matching, and
+/// nothing but one bit crosses — but "accepted" and "invisible" are different
+/// things. One audit row per outcome is what makes abuse of it something an
+/// operator can see and count rather than something they have to be told about
+/// by the party doing it.
+///
+/// Two actions are emitted, `oauth2.prompt_none.code` and
+/// `oauth2.prompt_none.login_required`. The plan names a third,
+/// `oauth2.prompt_none.consent_required`, which **cannot** be emitted in W4:
+/// it needs a consent-gated scope and there are none until W7 (plan §4.8). It
+/// is not written here rather than written into a branch that can never run.
+///
+/// Never fails the request. An audit sink that is down costs a row, not a
+/// login (T-15-04).
+async fn audit_prompt_none<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &HttpRequest,
+    tenant_id: Uuid,
+    client_id: &str,
+    refusal: Option<&OAuth2Error>,
+) {
+    let (action, result) = match refusal {
+        None => ("oauth2.prompt_none.code", AuditOutcome::Success),
+        Some(e) => (
+            match e.error_code() {
+                "login_required" => "oauth2.prompt_none.login_required",
+                _ => "oauth2.prompt_none.refused",
+            },
+            AuditOutcome::Failure,
+        ),
+    };
+    if let Err(e) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::System,
+            action: action.into(),
+            resource_id: None,
+            outcome: result,
+            ip_address: peer_ip(http_req),
+            metadata: Some(serde_json::json!({
+                // The `client_id` is the point of the row: the oracle is
+                // per-client, so counting it per client is what makes a
+                // relying party polling every few seconds visible.
+                "client_id": truncate_bytes_on_char_boundary(client_id),
+                "error": refusal.map(OAuth2Error::error_code),
+            })),
+        })
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            %tenant_id,
+            "could not record a prompt=none outcome; the authorization request is unaffected"
+        );
+    }
+}
+
+/// Decode an `id_token_hint` presented at the authorization endpoint (W4,
+/// plan §4.2).
+///
+/// One decoder, shared with `/oauth2/end_session`
+/// ([`axiam_oauth2::logout::decode_id_token_hint`]): the signature is checked,
+/// the expiry deliberately is not — an `id_token_hint` has routinely expired,
+/// which is exactly why an RP is sending one rather than a live token — and
+/// `aud` is read out rather than validated against, because who the token was
+/// for is part of what the caller wants to learn. A second decoder here would
+/// be a second opinion about what a hint proves.
+///
+/// Returns `None` when no hint arrived and when one arrived and did not
+/// verify. The caller distinguishes them by
+/// [`AuthnRequestParams::id_token_hint`], and treats the second as a hint that
+/// names somebody else rather than as an absent one — dropping an unverifiable
+/// hint would let any string turn a `prompt=none` refusal into a code.
+///
+/// Run for every request carrying the parameter, not only for the honour lane.
+/// It costs one Ed25519 verification of a value the request already carried,
+/// it cannot change any response on the `ignore` lane (nothing reads the
+/// result there), and making it conditional would put the lane decision in a
+/// second place.
+fn decode_authorize_id_token_hint<C: Connection + Clone>(
+    state: &AppState<C>,
+    params: &AuthnRequestParams,
+) -> Option<axiam_oauth2::logout::IdTokenHint> {
+    let raw = params.id_token_hint.as_deref()?;
+    axiam_oauth2::logout::decode_id_token_hint(raw, &state.auth_config.jwt_public_key_pem)
+}
+
 /// Classify a request object on an authorization request (X7 G12, plan §4.10).
 ///
 /// AXIAM accepts neither form. `request` is RFC 9101's request object by
@@ -393,8 +487,50 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         });
     }
 
-    // ---- No principal: hop, or stop --------------------------------------
+    // ---- No principal: refuse silently, hop, or stop ---------------------
     //
+    // W4 (plan §4.2, T1.1/T1.7). `prompt=none` says: answer without showing
+    // the end user anything. There is nothing to answer with — no session
+    // resolved — so the answer is `login_required`, **redirected to the
+    // relying party** rather than to a sign-in page it forbade.
+    //
+    // Read from the query string only. A pushed request's `prompt` cannot be
+    // seen here at all (the handle is consumed later, inside the handler), so
+    // a PAR client's `prompt=none` takes the hop first and is refused on the
+    // return leg instead, by the marker rule in `axiam_oauth2::honour` — the
+    // interaction is never converted into a code either way.
+    //
+    // Honour lane only, and that is what keeps T0.1 exact: a `browser_sso`
+    // client registered `ignore` — which is every client that exists — sending
+    // `prompt=none` gets today's answer, byte for byte.
+    if client.authn_request_params.is_honour() {
+        let params = AuthnRequestParams::parse(&RawAuthnParams {
+            prompt: q.prompt.as_deref(),
+            ..Default::default()
+        });
+        if params
+            .prompt
+            .contains(&axiam_oauth2::authn_params::Prompt::None)
+        {
+            let refusal = OAuth2Error::LoginRequired(
+                "no end user is authenticated at this authorization server, and prompt=none \
+                 forbids asking them to sign in"
+                    .into(),
+            );
+            audit_prompt_none(state, http_req, tenant_id, &q.client_id, Some(&refusal)).await;
+            // RFC 6749 §4.1.2.1: an error is redirected only to a
+            // `redirect_uri` this client registered. Exact match, the same
+            // comparison `AuthorizeService::authorize` makes — an unregistered
+            // or absent one is answered directly instead.
+            return Err(Box::new(match q.redirect_uri.as_deref() {
+                Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
+                    build_error_redirect(uri, &refusal, q.state.as_deref(), &state.auth_config)
+                }
+                _ => build_oauth2_error_response(&refusal),
+            }));
+        }
+    }
+
     // The loop guard. A request that already carries the marker is one this
     // server sent to the login page and got back; sending it there a second
     // time is the non-terminating case, so it is answered instead. See
@@ -589,6 +725,26 @@ pub async fn authorize<C: Connection + Clone>(
             // be substitutable by the browser that carries the handle.
             let authn_params = AuthnRequestParams::parse(&RawAuthnParams::from(&params));
 
+            // W4 (T1.3) — and this is the other half of that sentence: the
+            // query string's copies are not merely ignored, they are grounds
+            // to refuse the request on the honour lane. Parsed rather than
+            // tested field by field so "an authentication-request parameter
+            // arrived" means the same thing here as everywhere else, blank
+            // template values included.
+            let inline_authn_params_beside_request_uri =
+                !AuthnRequestParams::parse(&RawAuthnParams {
+                    prompt: q.prompt.as_deref(),
+                    max_age: q.max_age.as_deref(),
+                    acr_values: q.acr_values.as_deref(),
+                    claims: q.claims.as_deref(),
+                    id_token_hint: q.id_token_hint.as_deref(),
+                    login_hint: q.login_hint.as_deref(),
+                    display: q.display.as_deref(),
+                    ui_locales: q.ui_locales.as_deref(),
+                    claims_locales: q.claims_locales.as_deref(),
+                })
+                .is_empty();
+
             AuthorizeRequest {
                 tenant_id: user.tenant_id,
                 user_id: user.user_id,
@@ -609,6 +765,11 @@ pub async fn authorize<C: Connection + Clone>(
                 // subject's every session.
                 session_id: Some(user.session_id),
                 via_par: true,
+                id_token_hint: decode_authorize_id_token_hint(&state, &authn_params),
+                inline_authn_params_beside_request_uri,
+                login_hop_return_leg: axiam_oauth2::login_hop::is_return_leg(
+                    q.login_hop.as_deref(),
+                ),
                 authn_params,
                 request_object,
                 session_evidence,
@@ -654,6 +815,13 @@ pub async fn authorize<C: Connection + Clone>(
                 nonce: q.nonce,
                 session_id: Some(user.session_id),
                 via_par: false,
+                id_token_hint: decode_authorize_id_token_hint(&state, &authn_params),
+                // Not a pushed request: there is no second copy to conflict
+                // with.
+                inline_authn_params_beside_request_uri: false,
+                login_hop_return_leg: axiam_oauth2::login_hop::is_return_leg(
+                    q.login_hop.as_deref(),
+                ),
                 authn_params,
                 request_object,
                 session_evidence,
@@ -668,7 +836,94 @@ pub async fn authorize<C: Connection + Clone>(
     let resolved_state = req.state.clone();
     let authorized_client_id = req.client_id.clone();
 
-    match state.oauth2.authorize_service.authorize(req).await {
+    // W4 — was this a `prompt=none` request? Captured before `req` moves so
+    // the audit rows below can name the outcome of a silent authorization
+    // (plan §4.2, "Threats and what remains"): the one-bit login-status oracle
+    // `prompt=none` inherently gives a registered relying party is accepted,
+    // and made visible.
+    let silent = req
+        .authn_params
+        .prompt
+        .contains(&axiam_oauth2::authn_params::Prompt::None);
+
+    let outcome = match state.oauth2.authorize_service.authorize(req).await {
+        Ok(axiam_oauth2::authorize::AuthorizeOutcome::Interact(interaction)) => {
+            // W4 — the honour lane asked for an interaction. It rides W3's
+            // login hop: same `return_to`, same validation on both sides, same
+            // marker, so the chain is still bounded at one redirect.
+            //
+            // `reauth` is unconditional here, unlike W3's stale-cookie case.
+            // Every reason the honour lane interacts — `prompt=login`, a
+            // `max_age` this session cannot satisfy, a step-up, an
+            // `id_token_hint` naming somebody else — is a reason not to trust
+            // what the browser already holds; a sign-in page that silently
+            // reused the current session would return the same unsatisfying
+            // session and the loop guard would have to catch it.
+            tracing::debug!(
+                client_id = %authorized_client_id,
+                reason = ?interaction.reason,
+                required_acr = ?interaction.required_acr,
+                "an authorization request on the honour lane needs an interaction"
+            );
+            let Some(return_to) = axiam_oauth2::login_hop::build_return_to(http_req.query_string())
+            else {
+                // Nothing safe to come back to, so there is nothing to send
+                // the browser away for. The relying party is told what is
+                // missing instead.
+                return build_error_redirect(
+                    &resolved_redirect_uri,
+                    &OAuth2Error::LoginRequired(
+                        "this authorization request needs the end user to authenticate, and \
+                         could not be resumed after a sign-in"
+                            .into(),
+                    ),
+                    resolved_state.as_deref(),
+                    &state.auth_config,
+                );
+            };
+            if !return_to_is_on_this_deployment(&state, &return_to) {
+                return build_error_redirect(
+                    &resolved_redirect_uri,
+                    &OAuth2Error::LoginRequired(
+                        "this authorization request needs the end user to authenticate, and \
+                         could not be resumed after a sign-in"
+                            .into(),
+                    ),
+                    resolved_state.as_deref(),
+                    &state.auth_config,
+                );
+            }
+            let location = axiam_oauth2::login_hop::build_login_redirect_for(
+                &return_to,
+                true,
+                interaction.required_acr,
+            );
+            return HttpResponse::Found()
+                .append_header((actix_web::http::header::LOCATION, location))
+                .append_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+                .append_header(("Referrer-Policy", "no-referrer"))
+                .finish();
+        }
+        other => other.map(|o| match o {
+            axiam_oauth2::authorize::AuthorizeOutcome::Code(resp) => resp,
+            axiam_oauth2::authorize::AuthorizeOutcome::Interact(_) => {
+                unreachable!("the interaction arm returned above")
+            }
+        }),
+    };
+
+    if silent {
+        audit_prompt_none(
+            &state,
+            &http_req,
+            user.tenant_id,
+            &authorized_client_id,
+            outcome.as_ref().err(),
+        )
+        .await;
+    }
+
+    match outcome {
         Ok(resp) => {
             // B5: the client has just joined this session. Recorded here —
             // the moment a code is issued — because that is when

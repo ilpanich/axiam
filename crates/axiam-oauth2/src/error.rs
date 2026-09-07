@@ -95,6 +95,60 @@ pub enum OAuth2Error {
     #[error("login_required: {0}")]
     LoginRequired(String),
 
+    /// OIDC Core §3.1.2.6 — `consent_required`: the end user has not consented
+    /// to something this request needs, and `prompt=none` forbids asking.
+    ///
+    /// **Unreachable in W4, deliberately and stated rather than hidden.** The
+    /// only thing that could require consent is a consent-gated scope, and
+    /// there are none until W7 defines `address` and `phone` (plan §4.8). The
+    /// variant exists because the four OIDC interaction errors are one
+    /// vocabulary and splitting it across two waves is how an error code comes
+    /// to be spelled twice; the honour lane raises it nowhere, and
+    /// `crate::honour` has no branch that could.
+    #[error("consent_required: {0}")]
+    ConsentRequired(String),
+
+    /// OIDC Core §3.1.2.6 — `interaction_required`: some interaction other
+    /// than authentication or consent is needed, and `prompt=none` forbids it.
+    ///
+    /// **Also unreachable in W4.** Every `prompt=none` refusal the honour lane
+    /// can produce has a more specific name — `login_required` for a missing,
+    /// stale or mismatched authentication, `account_selection_required` when a
+    /// hint mismatch is the cause, `unmet_authentication_requirements` for an
+    /// essential `acr` — and OIDC Core asks for the most specific code that
+    /// applies. It is declared with its siblings for the same reason
+    /// [`Self::ConsentRequired`] is.
+    #[error("interaction_required: {0}")]
+    InteractionRequired(String),
+
+    /// OIDC Core §3.1.2.6 — `account_selection_required`: the end user needs
+    /// to choose a session, and this request could not choose for them.
+    ///
+    /// Raised on the return leg of a login hop when `prompt=select_account`
+    /// was asked and the `id_token_hint` still names somebody other than
+    /// whoever signed in (plan §4.2). Without `select_account` the same state
+    /// is `login_required`: the relying party did not ask about accounts, so
+    /// naming accounts in the answer would tell it something it did not ask.
+    #[error("account_selection_required: {0}")]
+    AccountSelectionRequired(String),
+
+    /// OpenID Connect Core Error Code `unmet_authentication_requirements` 1.0
+    /// — an **essential** authentication context class the end user did not
+    /// reach.
+    ///
+    /// Distinct from `login_required` because the two ask the relying party
+    /// for different things: `login_required` says "send them back and they
+    /// can sign in", and this says "they signed in, and this deployment cannot
+    /// give you the assurance level you require of them" — commonly a user
+    /// with no second factor enrolled against a request for
+    /// [`crate::acr::Acr::MultiFactor`]. Answering `login_required` there
+    /// invites a loop the relying party drives.
+    ///
+    /// Never accompanied by a token, at any point. That is the whole
+    /// difference between an essential and a voluntary `acr` request.
+    #[error("unmet_authentication_requirements: {0}")]
+    UnmetAuthenticationRequirements(String),
+
     /// OIDC Core §3.1.2.6 — `invalid_request_uri`, raised on the **return leg
     /// of a login hop** when the pushed request the browser left with is gone
     /// (W3, plan §4.0 and F10).
@@ -149,6 +203,10 @@ impl OAuth2Error {
             Self::ExpiredToken => "expired_token",
             Self::InvalidTarget(_) => "invalid_target",
             Self::LoginRequired(_) => "login_required",
+            Self::ConsentRequired(_) => "consent_required",
+            Self::InteractionRequired(_) => "interaction_required",
+            Self::AccountSelectionRequired(_) => "account_selection_required",
+            Self::UnmetAuthenticationRequirements(_) => "unmet_authentication_requirements",
             Self::InvalidRequestUri(_) => "invalid_request_uri",
             Self::RequestNotSupported => "request_not_supported",
             Self::RequestUriNotSupported => "request_uri_not_supported",
@@ -167,5 +225,53 @@ impl OAuth2Error {
             Some((_, msg)) => msg.to_string(),
             None => full,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The OIDC interaction vocabulary, pinned as strings.
+    ///
+    /// These five codes are what a relying party matches on and what the
+    /// conformance suite's
+    /// `CheckErrorFromAuthorizationEndpointIsOneThatRequiredAUserInterface`
+    /// accepts; a typo in one of them is invisible to every type in the
+    /// codebase and visible to every client. Two of the five are unreachable
+    /// in W4 — see their doc comments — and are pinned anyway so the wave that
+    /// reaches them inherits the spelling rather than choosing it again.
+    #[test]
+    fn the_oidc_interaction_error_codes_are_spelled_as_the_specification_spells_them() {
+        for (error, code) in [
+            (OAuth2Error::LoginRequired(String::new()), "login_required"),
+            (
+                OAuth2Error::ConsentRequired(String::new()),
+                "consent_required",
+            ),
+            (
+                OAuth2Error::InteractionRequired(String::new()),
+                "interaction_required",
+            ),
+            (
+                OAuth2Error::AccountSelectionRequired(String::new()),
+                "account_selection_required",
+            ),
+            (
+                OAuth2Error::UnmetAuthenticationRequirements(String::new()),
+                "unmet_authentication_requirements",
+            ),
+        ] {
+            assert_eq!(error.error_code(), code);
+        }
+    }
+
+    /// The description carries the message and not the code — the two travel
+    /// in separate members of the RFC 6749 §5.2 body.
+    #[test]
+    fn the_description_does_not_repeat_the_code() {
+        let e = OAuth2Error::UnmetAuthenticationRequirements("no second factor enrolled".into());
+        assert_eq!(e.error_description(), "no second factor enrolled");
+        assert!(!e.error_description().contains("unmet_authentication"));
     }
 }

@@ -257,9 +257,43 @@ pub fn build_discovery_document(
     issuer: &str,
     mtls_base_url: Option<&str>,
 ) -> Result<OidcDiscoveryDocument, String> {
+    build_discovery_document_for(issuer, mtls_base_url, false)
+}
+
+/// [`build_discovery_document`], told whether the tenant this document
+/// describes has the X7 G8 sensitive scopes enabled (W7, plan §6).
+///
+/// # The plan assumed a tenant-scoped document; there is not one
+///
+/// Plan §6 heads its table "tenant-scoped discovery document" and gates two
+/// rows on the tenant switch. `GET /.well-known/openid-configuration` takes no
+/// tenant: it is registered at the host root, reads only `AuthConfig`, and
+/// describes the deployment. So the gate had to be built rather than used, and
+/// `false` — omit the two scopes — is what a caller that names no tenant gets.
+///
+/// That default is the honest answer rather than a cautious one. Discovery
+/// says what a relying party may ask for, and with no tenant named the server
+/// genuinely does not know: one tenant may have the capability on and the next
+/// may not. Advertising it unconditionally would tell every relying party in
+/// every tenant that `address` is available, and most of them would be refused
+/// `invalid_scope` on the first request.
+///
+/// Note the contrast with `auth_time`/`acr`/`amr`, added to `claims_supported`
+/// by W1 *unconditionally* with the argument that "discovery describes the
+/// server's capabilities, not any one client's grant". That argument holds
+/// there and not here, and the difference is who decides: those three are a
+/// per-**client** registration, and this is a per-**tenant** switch. A document
+/// that cannot name the client is still truthful about what the server can do
+/// for some client; a document that cannot name the tenant cannot say whether
+/// the capability exists at all in the deployment the caller is talking to.
+pub fn build_discovery_document_for(
+    issuer: &str,
+    mtls_base_url: Option<&str>,
+    sensitive_scopes_enabled: bool,
+) -> Result<OidcDiscoveryDocument, String> {
     let issuer = issuer.trim_end_matches('/');
     let mtls_endpoint_aliases = build_mtls_aliases(mtls_base_url)?;
-    Ok(OidcDiscoveryDocument {
+    let mut doc = OidcDiscoveryDocument {
         issuer: issuer.to_string(),
         authorization_endpoint: format!("{issuer}/oauth2/authorize"),
         token_endpoint: endpoint!(issuer, "/oauth2/token"),
@@ -276,7 +310,13 @@ pub fn build_discovery_document(
         response_types_supported: vec!["code".into()],
         subject_types_supported: vec!["public".into()],
         id_token_signing_alg_values_supported: vec!["EdDSA".into()],
-        scopes_supported: vec!["openid".into(), "profile".into(), "email".into()],
+        scopes_supported: {
+            let mut scopes = vec!["openid".into(), "profile".into(), "email".into()];
+            if sensitive_scopes_enabled {
+                scopes.extend(crate::sensitive::SENSITIVE_SCOPES.map(String::from));
+            }
+            scopes
+        },
         token_endpoint_auth_methods_supported: vec![
             "client_secret_post".into(),
             // X5.1 / RFC 8705 §2. Advertised unconditionally: whether a mTLS
@@ -314,6 +354,10 @@ pub fn build_discovery_document(
             "acr".into(),
             "amr".into(),
         ],
+        // X7 G8 (W7). Appended after the closing bracket above rather than
+        // inside it because these three are conditional and the ten are not —
+        // and a `Vec` built by one expression with an `if` in the middle of it
+        // is a `Vec` whose unconditional members are hard to read off.
         grant_types_supported: vec![
             "authorization_code".into(),
             "client_credentials".into(),
@@ -337,7 +381,12 @@ pub fn build_discovery_document(
         tls_client_certificate_bound_access_tokens: true,
         dpop_signing_alg_values_supported: vec!["PS256".into(), "ES256".into(), "EdDSA".into()],
         mtls_endpoint_aliases,
-    })
+    };
+    if sensitive_scopes_enabled {
+        doc.claims_supported
+            .extend(["phone_number", "phone_number_verified", "address"].map(String::from));
+    }
+    Ok(doc)
 }
 
 // ---------------------------------------------------------------------------
@@ -419,15 +468,62 @@ pub fn build_jwks(public_key_pem: &str) -> Result<JwksDocument, String> {
 // ---------------------------------------------------------------------------
 
 /// OIDC UserInfo response.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+///
+/// # The three W7 claims are absent unless four gates all said yes
+///
+/// `phone_number`, `phone_number_verified` and `address` (X7 G8) are the only
+/// members of this type that are not derivable from the token alone. They are
+/// present only when the tenant switch is on, the access token carries the
+/// scope, the relying party the token names holds a live consent record, and
+/// that relying party is not on the `fapi2` profile — see
+/// `crate::sensitive` for why each of the four exists and who closes it.
+///
+/// `Debug` is manual so that neither value can reach a log line through the
+/// most natural diagnostic anybody writes, the same rule
+/// `axiam_core::models::user::User` follows.
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct UserInfoResponse {
     pub sub: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_username: Option<String>,
+    /// OIDC Core §5.1, released under the `phone` scope (X7 G8).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phone_number: Option<String>,
+    /// Whether [`Self::phone_number`] has been verified out of band.
+    ///
+    /// Emitted **only alongside** the number, per OIDC Core §5.1: a
+    /// `phone_number_verified` with no `phone_number` asserts something about
+    /// a value the relying party was not given. `false` rather than omitted
+    /// when the number is present and unverified — that is a statement AXIAM
+    /// is answerable for, and the honest one for a verification that never
+    /// happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phone_number_verified: Option<bool>,
+    /// OIDC Core §5.1.1, released under the `address` scope (X7 G8).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<axiam_core::models::user::Address>,
     pub tenant_id: String,
     pub org_id: String,
+}
+
+impl std::fmt::Debug for UserInfoResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserInfoResponse")
+            .field("sub", &self.sub)
+            .field("email", &self.email)
+            .field("preferred_username", &self.preferred_username)
+            .field(
+                "phone_number",
+                &self.phone_number.as_ref().map(|_| "<redacted>"),
+            )
+            .field("phone_number_verified", &self.phone_number_verified)
+            .field("address", &self.address.as_ref().map(|_| "<redacted>"))
+            .field("tenant_id", &self.tenant_id)
+            .field("org_id", &self.org_id)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------

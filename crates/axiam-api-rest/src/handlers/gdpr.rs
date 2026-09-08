@@ -674,3 +674,330 @@ pub async fn cancel_account_delete<C: Connection + Clone>(
 
     Ok(HttpResponse::Ok().json(CancelledResponse { cancelled: true }))
 }
+
+// ---------------------------------------------------------------------------
+// GDPR Art. 7 — OIDC scope-release consent (X7 G8 / W7)
+// ---------------------------------------------------------------------------
+//
+// The plan's §4.8 says withdrawal is "an entry on the user's GDPR self-service
+// page (the existing consent list)". There was no such list, and no consent
+// endpoint of any kind: `consent` rows were written by registration and read
+// only by the Art. 15 export. So the three endpoints below are new, and the
+// first of them is the list the plan assumed.
+//
+// All three are strictly self-service. An administrator cannot consent on a
+// subject's behalf — that is what Art. 4(11)'s "freely given, specific,
+// informed and unambiguous indication of the data subject's wishes" rules
+// out — and there is deliberately no `user_id` parameter to try it with,
+// unlike the export and erasure endpoints above, where acting for a subject on
+// their request is exactly the point.
+
+/// One consent record, as the subject sees it.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ConsentView {
+    /// What was consented to, e.g. `terms_of_service` or
+    /// `oidc_scope_release:<client_id>`.
+    pub consent_type: String,
+    /// The document version or, for a scope release, the consented scopes.
+    pub version: String,
+    pub accepted_at: chrono::DateTime<Utc>,
+    /// Whether this record can be withdrawn here.
+    ///
+    /// `false` for `terms_of_service`: withdrawing it is not a consent
+    /// operation but an erasure, and it has its own endpoint with its own
+    /// grace period. Reported rather than silently absent so the self-service
+    /// page can show the record and explain it.
+    pub withdrawable: bool,
+}
+
+/// Body for recording an OIDC scope-release consent.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct GrantScopeConsent {
+    /// The relying party the claims would be released to.
+    pub client_id: String,
+    /// The sensitive scopes being consented to. Order does not matter; the
+    /// record is written in the canonical order so that the same consent has
+    /// one name.
+    pub scopes: Vec<String>,
+}
+
+/// `GET /api/v1/account/consents` — the caller's own consent records.
+///
+/// Art. 7(1) says a controller must be able to demonstrate that consent was
+/// given; Art. 15(1)(a) says the subject may see what is held about them. This
+/// endpoint is the second, and it is also the page the withdrawal control
+/// lives on.
+#[utoipa::path(
+    get,
+    path = "/api/v1/account/consents",
+    tag = "gdpr",
+    responses(
+        (status = 200, description = "The caller's consent records",
+         body = Vec<ConsentView>),
+        (status = 401, description = "Not authenticated"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_own_consents<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    state: web::Data<AppState<C>>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let records = axiam_core::repository::ConsentRepository::list_by_user(
+        &state.gdpr.consent_repo,
+        user.principal_tenant_id,
+        user.user_id,
+    )
+    .await?;
+
+    let view: Vec<ConsentView> = records
+        .into_iter()
+        .map(|c| ConsentView {
+            withdrawable: c
+                .consent_type
+                .starts_with(axiam_core::repository::OIDC_SCOPE_RELEASE_CONSENT_PREFIX),
+            consent_type: c.consent_type,
+            version: c.version,
+            accepted_at: c.accepted_at,
+        })
+        .collect();
+    Ok(HttpResponse::Ok().json(view))
+}
+
+/// `POST /api/v1/account/consents/oidc-scopes` — record a scope-release consent.
+///
+/// What the SPA's consent screen calls when the end user says yes. Everything
+/// it accepts is checked against the registration rather than taken on trust,
+/// because a consent record is the thing UserInfo releases personal data on
+/// the strength of:
+///
+/// * the scopes must be sensitive ones — nothing else belongs in this
+///   namespace, and a record naming `openid` would be a record that never
+///   matches and never expires;
+/// * the client must exist in the caller's tenant;
+/// * the client must have every named scope **registered**, so a consent
+///   cannot be recorded for a release the client could never have been
+///   authorised for;
+/// * the tenant switch must be on, so consent collected while the capability
+///   is off cannot sit waiting for somebody to turn it on.
+///
+/// Idempotent: the `(tenant, user, type, version)` index makes a repeated
+/// grant the same grant, and a second call is answered `200` rather than a
+/// conflict. A consent screen the user double-submits has consented once.
+#[utoipa::path(
+    post,
+    path = "/api/v1/account/consents/oidc-scopes",
+    tag = "gdpr",
+    request_body = GrantScopeConsent,
+    responses(
+        (status = 200, description = "Consent recorded"),
+        (status = 400, description = "Unknown client, unregistered scope, \
+                                      non-sensitive scope, or the capability is off"),
+        (status = 401, description = "Not authenticated"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn grant_oidc_scope_consent<C: Connection + Clone>(
+    http_req: actix_web::HttpRequest,
+    user: AuthenticatedUser,
+    state: web::Data<AppState<C>>,
+    body: web::Json<GrantScopeConsent>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let body = body.into_inner();
+
+    // Only the sensitive scopes, and in canonical order. `requested` filters
+    // and orders in one step, so a body naming `openid` yields an empty set
+    // and is refused below rather than silently recorded.
+    let wanted = axiam_oauth2::sensitive::requested(&body.scopes);
+    if wanted.is_empty() || wanted.len() != body.scopes.len() {
+        return Err(AxiamApiError::from(AxiamError::Validation {
+            message: format!(
+                "consent may be recorded only for the scopes {}, and for nothing else",
+                axiam_oauth2::sensitive::SENSITIVE_SCOPES.join(", ")
+            ),
+        }));
+    }
+
+    let client = axiam_core::repository::OAuth2ClientRepository::get_by_client_id(
+        &state.oauth2_client_repo,
+        user.principal_tenant_id,
+        &body.client_id,
+    )
+    .await?;
+    if let Some(missing) = wanted
+        .iter()
+        .find(|s| !client.scopes.iter().any(|r| r == *s))
+    {
+        return Err(AxiamApiError::from(AxiamError::Validation {
+            message: format!(
+                "this client has no {missing} scope registered, so consenting to release it \
+                 would authorise nothing"
+            ),
+        }));
+    }
+
+    let tenant = state
+        .tenant_repo
+        .get_by_id(user.principal_tenant_id)
+        .await?;
+    let settings = axiam_core::repository::SettingsRepository::get_effective_settings(
+        &state.settings_repo,
+        tenant.organization_id,
+        user.principal_tenant_id,
+    )
+    .await?;
+    if !settings.oidc.sensitive_scopes_enabled {
+        return Err(AxiamApiError::from(AxiamError::Validation {
+            message: "the address and phone scopes are not enabled for this tenant".into(),
+        }));
+    }
+
+    let consent_type = axiam_oauth2::sensitive::consent_type(&body.client_id);
+    let version = axiam_oauth2::sensitive::consent_version(&wanted);
+
+    // Idempotence, checked rather than relying on the unique index's error:
+    // a second grant is the same grant, and answering it with a conflict
+    // would make a double-submitted consent screen look broken.
+    let already = axiam_core::repository::ConsentRepository::list_by_user(
+        &state.gdpr.consent_repo,
+        user.principal_tenant_id,
+        user.user_id,
+    )
+    .await?
+    .into_iter()
+    .any(|c| c.consent_type == consent_type && c.version == version);
+
+    if !already {
+        axiam_core::repository::ConsentRepository::create(
+            &state.gdpr.consent_repo,
+            axiam_core::models::gdpr::CreateConsent {
+                tenant_id: user.principal_tenant_id,
+                user_id: user.user_id,
+                consent_type: consent_type.clone(),
+                version: version.clone(),
+                ip_address: crate::extractors::client_info::client_ip(&http_req),
+                user_agent: crate::extractors::client_info::user_agent(&http_req),
+            },
+        )
+        .await?;
+
+        // Art. 7(1) proof lives in two places on purpose: the record, which is
+        // live state and can be withdrawn, and the audit log, which is
+        // append-only and cannot. Scope *names*, never the values they would
+        // release.
+        audit_consent(
+            &state,
+            &http_req,
+            &user,
+            "gdpr.oidc_scope_consent_granted",
+            &body.client_id,
+            &version,
+        )
+        .await;
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "consent_type": consent_type,
+        "version": version,
+    })))
+}
+
+/// `DELETE /api/v1/account/consents/oidc-scopes/{client_id}` — withdraw.
+///
+/// Art. 7(3): as easy to withdraw as to give. One call, no grace period, no
+/// confirmation step, and it takes effect on the **next UserInfo call with the
+/// token the relying party already holds** — not on the next token. That is
+/// the property T8.4 asserts, and it is why the release gate re-reads the
+/// record on every call rather than trusting the one taken at authorization.
+///
+/// Withdraws every scope set consented to for this relying party, not one of
+/// them: a subject saying "stop giving my address to this app" does not mean
+/// "stop giving it under the two-scope record but carry on under the
+/// one-scope one".
+///
+/// Answers `200` whether or not anything was there, and says how many records
+/// went. A subject who withdraws twice is not told off, and an attacker who
+/// guesses `client_id`s learns nothing from the status code — though they
+/// would have to be the subject to ask at all.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/account/consents/oidc-scopes/{client_id}",
+    tag = "gdpr",
+    params(("client_id" = String, Path, description = "The relying party to stop releasing to")),
+    responses(
+        (status = 200, description = "Consent withdrawn (or there was none)"),
+        (status = 401, description = "Not authenticated"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn withdraw_oidc_scope_consent<C: Connection + Clone>(
+    http_req: actix_web::HttpRequest,
+    user: AuthenticatedUser,
+    state: web::Data<AppState<C>>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let client_id = path.into_inner();
+    let consent_type = axiam_oauth2::sensitive::consent_type(&client_id);
+
+    let removed = axiam_core::repository::ConsentRepository::withdraw(
+        &state.gdpr.consent_repo,
+        user.principal_tenant_id,
+        user.user_id,
+        &consent_type,
+    )
+    .await?;
+
+    if removed > 0 {
+        audit_consent(
+            &state,
+            &http_req,
+            &user,
+            "gdpr.oidc_scope_consent_withdrawn",
+            &client_id,
+            "",
+        )
+        .await;
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "withdrawn": removed })))
+}
+
+/// Record a consent grant or withdrawal in the append-only log.
+///
+/// Carries the relying party and the scope *names*, and no claim values —
+/// there are none to carry at this point, and there will not be any at this
+/// point in a future version either. Failure is logged and swallowed: refusing
+/// a withdrawal because the audit store is unavailable would make Art. 7(3)
+/// conditional on infrastructure.
+async fn audit_consent<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &actix_web::HttpRequest,
+    user: &AuthenticatedUser,
+    action: &str,
+    client_id: &str,
+    scopes: &str,
+) {
+    if let Err(e) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id: user.principal_tenant_id,
+            actor_id: user.user_id,
+            actor_type: ActorType::User,
+            action: action.to_string(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: crate::extractors::client_info::client_ip(http_req),
+            metadata: Some(serde_json::json!({
+                "client_id": client_id,
+                "scopes": scopes,
+            })),
+        })
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user.user_id,
+            %action,
+            "could not record a consent change; the change itself stands"
+        );
+    }
+}

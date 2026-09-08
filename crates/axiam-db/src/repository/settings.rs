@@ -6,7 +6,7 @@ use axiam_core::error::AxiamResult;
 use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
     CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
-    OpaquePolicy, PasswordPolicy, PrivacyPolicy, SecuritySettings, SetOrgSettings,
+    OidcPolicy, OpaquePolicy, PasswordPolicy, PrivacyPolicy, SecuritySettings, SetOrgSettings,
     SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy, WebauthnPolicy,
     clamp_overrides_to_org, diff_against_org, effective_settings, settings_from_org_input,
     system_defaults,
@@ -69,6 +69,10 @@ struct SettingsRow {
     // the migration has no such column. It resolves to `preferred`, which is
     // what the migration backfills.
     webauthn_user_verification: Option<String>,
+    // OIDC (V57 / X7 G8). `Option` for the same reason again. Absent resolves
+    // to the value that releases nothing, and to no locale preference.
+    oidc_sensitive_scopes_enabled: Option<bool>,
+    oidc_default_locale: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     // JSON-encoded `TenantSettingsOverride`; `None` for org rows.
     overrides_json: Option<String>,
@@ -125,6 +129,9 @@ struct SettingsRowWithId {
     // the migration has no such column. It resolves to `preferred`, which is
     // what the migration backfills.
     webauthn_user_verification: Option<String>,
+    // OIDC (V57 / X7 G8).
+    oidc_sensitive_scopes_enabled: Option<bool>,
+    oidc_default_locale: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     overrides_json: Option<String>,
     // Timestamps
@@ -165,6 +172,23 @@ fn decode_webauthn(uv: Option<&str>) -> WebauthnPolicy {
         webauthn_user_verification: uv
             .and_then(|v| v.parse::<WebauthnUserVerification>().ok())
             .unwrap_or_default(),
+    }
+}
+
+/// Decode the two OIDC columns, tolerating rows written before the V57
+/// migration.
+///
+/// The fallback direction matters here and it is the strict one: an absent or
+/// unreadable `oidc_sensitive_scopes_enabled` reads as `false`, so a row this
+/// build cannot understand releases nothing. There is no shape of stored data
+/// that turns the release on by accident.
+fn decode_oidc(enabled: Option<bool>, locale: Option<&str>) -> OidcPolicy {
+    OidcPolicy {
+        sensitive_scopes_enabled: enabled.unwrap_or(false),
+        default_locale: locale
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned),
     }
 }
 
@@ -238,6 +262,10 @@ impl SettingsRowWithId {
             ),
             privacy: decode_privacy(self.privacy_deletion_grace_days),
             webauthn: decode_webauthn(self.webauthn_user_verification.as_deref()),
+            oidc: decode_oidc(
+                self.oidc_sensitive_scopes_enabled,
+                self.oidc_default_locale.as_deref(),
+            ),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -275,6 +303,8 @@ opaque_suite = $opaque_suite, \
 opaque_ksf = $opaque_ksf, \
 privacy_deletion_grace_days = $privacy_deletion_grace_days, \
 webauthn_user_verification = $webauthn_user_verification, \
+oidc_sensitive_scopes_enabled = $oidc_sensitive_scopes_enabled, \
+oidc_default_locale = $oidc_default_locale, \
 overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
@@ -407,6 +437,18 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         bindings.push((
             "webauthn_user_verification",
             BindValue::Str(settings.webauthn.webauthn_user_verification.to_string()),
+        ));
+        // W7 / X7 G8. `Bool` rather than an `Option`: the effective settings
+        // this function writes are already fully resolved, so "off" is a
+        // decision the row records rather than an absence a reader has to
+        // interpret.
+        bindings.push((
+            "oidc_sensitive_scopes_enabled",
+            BindValue::Bool(settings.oidc.sensitive_scopes_enabled),
+        ));
+        bindings.push((
+            "oidc_default_locale",
+            BindValue::OptionStr(settings.oidc.default_locale.clone()),
         ));
         bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
         bindings
@@ -587,6 +629,10 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             ),
             privacy: decode_privacy(row.privacy_deletion_grace_days),
             webauthn: decode_webauthn(row.webauthn_user_verification.as_deref()),
+            oidc: decode_oidc(
+                row.oidc_sensitive_scopes_enabled,
+                row.oidc_default_locale.as_deref(),
+            ),
             created_at: row.created_at,
             updated_at: row.updated_at,
         })

@@ -432,6 +432,64 @@ pub fn build_login_redirect_for(
     location
 }
 
+/// The SPA route that asks the end user to consent to a scope release (W7).
+///
+/// A sibling of [`LOGIN_PATH`] rather than a query flag on it, because the two
+/// pages ask different questions of a different person-state: `/login` asks an
+/// anonymous browser to prove who it is, `/consent` asks a signed-in person
+/// what they are willing to hand over. Conflating them is how a consent
+/// ceremony turns into "type your password again", which is a dark pattern
+/// whatever the specification says.
+pub const CONSENT_PATH: &str = "/consent";
+
+/// Build the redirect for an interaction the authorization endpoint asked for.
+///
+/// The one place either first-party page's URL is chosen, so that "which page,
+/// with which flags" is a single exhaustive decision rather than a condition
+/// the two call sites could answer differently.
+///
+/// # `/login` — every reason but one
+///
+/// Byte-identical to what [`build_login_redirect_for`] built for W4 and W5:
+/// `reauth=1`, the required `acr` when there is one, and the full cosmetic
+/// presentation. This is the path invariant 4's golden tests pin.
+///
+/// # `/consent` — [`crate::honour::Reason::ConsentRequired`]
+///
+/// No `reauth`, because the end user is authenticated and re-authenticating
+/// answers no question about consent. No `acr`, because the sign-in ceremony
+/// is not being repeated and naming a factor for a page that will not run one
+/// would be telling it something untrue.
+///
+/// And no `login_hint`: it is a guess at the identifier somebody is about to
+/// type, and on this page nobody is about to type one. Dropping it is not
+/// tidiness — it is the difference between a relying party's opaque string
+/// reaching a page that renders it into a form field and it reaching no page
+/// at all. `display` and `ui_locale` are kept, because how to render and in
+/// which language are questions the consent page really does have to answer,
+/// and both are closed vocabularies (`crate::authn_params::Display`,
+/// `crate::locale::Locale`) rather than relying-party strings.
+pub fn build_interaction_redirect(
+    return_to: &str,
+    reason: crate::honour::Reason,
+    required_acr: Option<crate::acr::Acr>,
+    cosmetic: &Cosmetic<'_>,
+) -> String {
+    if reason.requires_reauthentication() {
+        return build_login_redirect_for(return_to, true, required_acr, cosmetic);
+    }
+    let mut location = format!("{CONSENT_PATH}?return_to={}", encode(return_to));
+    if let Some(display) = cosmetic.display {
+        location.push_str("&display=");
+        location.push_str(&encode(display.as_str()));
+    }
+    if let Some(locale) = cosmetic.ui_locale {
+        location.push_str("&ui_locale=");
+        location.push_str(&encode(locale.as_tag()));
+    }
+    location
+}
+
 /// Percent-encode one query-parameter value.
 ///
 /// `byte_serialize` rather than a hand-rolled escape: it is the encoder the

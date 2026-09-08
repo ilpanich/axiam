@@ -83,6 +83,12 @@ pub struct UserPatchDelta {
     pub family_name: Option<Option<String>>,
     pub formatted: Option<Option<String>>,
     pub password: Option<String>,
+    /// X7 G8 / W7. `Some(None)` is a `remove` — which, for these two, is the
+    /// operation a data subject exercising Art. 17 through their identity
+    /// provider actually reaches, so it is supported rather than refused the
+    /// way `userName` and `emails` are.
+    pub phone_number: Option<Option<String>>,
+    pub address: Option<Option<axiam_core::models::user::Address>>,
 }
 
 /// The exact set of top-level User attribute paths this crate accepts in a
@@ -97,6 +103,8 @@ const USER_PATCHABLE_PATHS: &[&str] = &[
     "name.formatted",
     "emails",
     "password",
+    "phonenumbers",
+    "addresses",
 ];
 
 pub fn parse_user_patch(body: &PatchRequest) -> Result<UserPatchDelta, ScimError> {
@@ -191,6 +199,25 @@ fn apply_user_op(
             }
             delta.password = Some(string_value(value, "password")?);
         }
+        // X7 G8 / W7. Both are removable, unlike `emails`: AXIAM requires an
+        // email address to exist and requires neither of these, and a
+        // provisioning client sending `remove` is a data subject asking for a
+        // telephone number to stop being held. Refusing it would leave them
+        // with no way to do that short of deleting the account.
+        "phonenumbers" => {
+            delta.phone_number = Some(if op == Op::Remove {
+                None
+            } else {
+                primary_multivalued_str(value, "phoneNumbers", "value")?
+            });
+        }
+        "addresses" => {
+            delta.address = Some(if op == Op::Remove {
+                None
+            } else {
+                primary_address(value)?
+            });
+        }
         other => {
             return Err(ScimError::invalid_path(format!(
                 "unsupported PATCH path {other:?} — supported: {USER_PATCHABLE_PATHS:?}"
@@ -239,6 +266,73 @@ fn primary_email(value: Option<&serde_json::Value>) -> Result<String, ScimError>
         .and_then(|v| v.as_str())
         .map(str::to_owned)
         .ok_or_else(|| ScimError::invalid_value("\"emails\" entries must have a \"value\""))
+}
+
+/// Pick the primary (or first) entry of a SCIM multi-valued attribute and read
+/// one string member out of it.
+///
+/// `Ok(None)` for an empty array, which RFC 7644 §3.5.2.3 makes the spelling
+/// of "replace this attribute with nothing" — the same thing a `remove`
+/// says, and reached by clients that only ever send `replace`.
+fn primary_multivalued_str(
+    value: Option<&serde_json::Value>,
+    attr: &str,
+    member: &str,
+) -> Result<Option<String>, ScimError> {
+    let arr = value.and_then(|v| v.as_array()).ok_or_else(|| {
+        ScimError::invalid_value(format!("{attr:?} requires an array of objects"))
+    })?;
+    let Some(entry) = arr
+        .iter()
+        .find(|e| e.get("primary").and_then(|p| p.as_bool()) == Some(true))
+        .or_else(|| arr.first())
+    else {
+        return Ok(None);
+    };
+    Ok(entry
+        .get(member)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned))
+}
+
+/// Read the primary (or first) `addresses` entry into the OIDC §5.1.1 shape.
+///
+/// SCIM's member names and OIDC's are the same words in different casings —
+/// `streetAddress`/`street_address`, `postalCode`/`postal_code` — which is why
+/// this is a rename rather than a translation. An entry whose every member is
+/// blank yields `Ok(None)`: an address with nothing in it is not an address.
+fn primary_address(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<axiam_core::models::user::Address>, ScimError> {
+    let arr = value
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ScimError::invalid_value("\"addresses\" requires an array of objects"))?;
+    let Some(entry) = arr
+        .iter()
+        .find(|e| e.get("primary").and_then(|p| p.as_bool()) == Some(true))
+        .or_else(|| arr.first())
+    else {
+        return Ok(None);
+    };
+    let member = |name: &str| {
+        entry
+            .get(name)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    let address = axiam_core::models::user::Address {
+        formatted: member("formatted"),
+        street_address: member("streetAddress"),
+        locality: member("locality"),
+        region: member("region"),
+        postal_code: member("postalCode"),
+        country: member("country"),
+    };
+    Ok((!address.is_empty()).then_some(address))
 }
 
 // ---------------------------------------------------------------------------

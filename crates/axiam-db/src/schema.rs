@@ -322,6 +322,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "op_browser_session_lookup",
         sql: SCHEMA_V56,
     },
+    Migration {
+        version: 57,
+        name: "oidc_sensitive_scopes_and_tenant_locale",
+        sql: SCHEMA_V57,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3132,9 +3137,151 @@ DEFINE INDEX IF NOT EXISTS idx_session_browser_token ON TABLE session
     COLUMNS tenant_id, browser_token_hash;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v57 — the OIDC sensitive scopes and the tenant default locale (X7 G8)
+// -----------------------------------------------------------------------
+//
+// Three columns on `user` and two on `security_settings`. All optional, all
+// defaulting to the behaviour a pre-v57 row already had, no backfill: the
+// pre-migration decode path is an `Option` in each row struct, so a rolled-back
+// binary reads a migrated database exactly as it read the unmigrated one.
+//
+// # `user.phone_number` and `user.address` are personal data, and the shape
+//   says so
+//
+// `address` is defined with **one sub-field per OIDC Core §5.1.1 member and no
+// `FLEXIBLE`**, unlike `user.metadata`, which is `object FLEXIBLE` precisely so
+// operators can put arbitrary things in it. That is the difference between a
+// column whose contents nobody promised anything about and a column released to
+// a relying party under a consent record: the closed shape is what makes "the
+// `address` scope releases a postal address and nothing else" a property of the
+// schema rather than of everybody's care. An integration that tries to park a
+// tax number in `address.notes` is refused by the database.
+//
+// No index on either column. Neither is ever a lookup key — nothing in AXIAM
+// authenticates against a telephone number, sends to it, or searches by it —
+// and an index would be a second copy of personal data with its own erasure
+// story. The columns are read exactly once, by `get_by_id` on the UserInfo
+// path, which already loads the whole row.
+//
+// # `phone_number_verified_at` is a timestamp, not a bool
+//
+// The claim OIDC Core §5.1 defines is `phone_number_verified`, a boolean. It is
+// stored as *when* rather than *whether* for the same reason `email_verified_at`
+// is: a boolean records that somebody said yes and loses who and when, and a
+// verification whose date cannot be produced is one an auditor has to take on
+// trust. The claim is derived at release time.
+//
+// # `security_settings`
+//
+// `oidc_sensitive_scopes_enabled` defaults to `false` — X7 G8's invariant I3,
+// in the database as well as in `system_defaults()`, so a row written by a
+// pre-v57 binary and read by a post-v57 one releases nothing. The tenant half
+// of both settings needs no column at all: tenant overrides live in the
+// existing `overrides_json` blob.
+//
+// `oidc_default_locale` carries no `ASSERT` listing the shipped tags. The
+// parser is `axiam_oauth2::locale::Locale::from_tag`, which is exact and
+// answers `None` for anything this build does not ship; encoding the same list
+// in the schema would mean a deployment could not roll back to a binary with a
+// smaller list without a failed write, and would put the list in two places
+// that can disagree. An unrecognised tag falls back to the deployment default,
+// which is the pre-W5 behaviour and is not a failure.
+const SCHEMA_V57: &str = "\
+DEFINE FIELD IF NOT EXISTS phone_number ON TABLE user TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS phone_number_verified_at ON TABLE user TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS address ON TABLE user TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS address.formatted ON TABLE user TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS address.street_address ON TABLE user TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS address.locality ON TABLE user TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS address.region ON TABLE user TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS address.postal_code ON TABLE user TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS address.country ON TABLE user TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS oidc_sensitive_scopes_enabled ON TABLE security_settings
+    TYPE option<bool> DEFAULT false;
+DEFINE FIELD IF NOT EXISTS oidc_default_locale ON TABLE security_settings
+    TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W7 — v57's `user` columns are additive, optional, and carry no
+    /// backfill. A migration that rewrote rows would be rewriting personal
+    /// data it has nothing to write.
+    #[test]
+    fn v57_adds_optional_user_columns_and_backfills_nothing() {
+        for column in [
+            "phone_number ON TABLE user TYPE option<string>",
+            "phone_number_verified_at ON TABLE user TYPE option<datetime>",
+            "address ON TABLE user TYPE option<object>",
+        ] {
+            assert!(SCHEMA_V57.contains(column), "v57 must define {column}");
+        }
+        assert!(
+            !SCHEMA_V57.contains("UPDATE"),
+            "v57 must not rewrite any existing row"
+        );
+        assert!(
+            !SCHEMA_V57.contains("DEFINE INDEX"),
+            "neither new user column is a lookup key, and an index would be a \
+             second copy of personal data with its own erasure story"
+        );
+    }
+
+    /// The `address` column is closed: exactly the six OIDC Core §5.1.1
+    /// members, and no `FLEXIBLE`. This is the data-minimisation argument as a
+    /// schema property — see the migration's own docs.
+    #[test]
+    fn the_address_column_admits_exactly_the_oidc_members() {
+        for member in [
+            "formatted",
+            "street_address",
+            "locality",
+            "region",
+            "postal_code",
+            "country",
+        ] {
+            assert!(
+                SCHEMA_V57.contains(&format!(
+                    "address.{member} ON TABLE user TYPE option<string>"
+                )),
+                "v57 must define address.{member}"
+            );
+        }
+        assert_eq!(
+            SCHEMA_V57.matches("address.").count(),
+            6,
+            "the address claim has six members and the column must have six sub-fields"
+        );
+        assert!(
+            !SCHEMA_V57.contains("FLEXIBLE"),
+            "a FLEXIBLE address would let an integration store personal data \
+             nobody consented to release"
+        );
+    }
+
+    /// I3 in the schema: the settings column defaults to the value that
+    /// releases nothing, so a row written by a pre-v57 binary and read by a
+    /// post-v57 one is off.
+    #[test]
+    fn v57_defaults_the_sensitive_scopes_switch_to_off() {
+        assert!(SCHEMA_V57.contains(
+            "oidc_sensitive_scopes_enabled ON TABLE security_settings\n    TYPE option<bool> DEFAULT false"
+        ));
+    }
+
+    /// The locale column carries no `ASSERT`: the shipped-tag list lives in
+    /// one place, `Locale::from_tag`, and a schema copy of it could disagree.
+    #[test]
+    fn the_tenant_locale_column_does_not_duplicate_the_shipped_locale_list() {
+        assert!(SCHEMA_V57.contains("oidc_default_locale ON TABLE security_settings"));
+        assert!(
+            !SCHEMA_V57.contains("ASSERT"),
+            "v57 must not encode a second copy of the shipped-locale list"
+        );
+    }
 
     /// W3 — v56 adds one index and nothing else. Not a column, not a value:
     /// the column it indexes was defined by v55 and is written for the first
@@ -3219,8 +3366,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&56),
-            "v56 is this wave's migration (v54 belongs to W1, v55 to W2)"
+            Some(&57),
+            "v57 is this wave's migration (v54 belongs to W1, v55 to W2, v56 to W3; \
+             W5 deliberately added none)"
         );
     }
 

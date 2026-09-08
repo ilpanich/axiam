@@ -37,6 +37,7 @@ import { VerifyEmailPage } from "@/pages/auth/VerifyEmailPage";
 import { MfaSetupPage } from "@/pages/auth/MfaSetupPage";
 import { SsoCallbackPage } from "@/pages/auth/SsoCallbackPage";
 import { DevicePage } from "@/pages/device/DevicePage";
+import { ConsentPage } from "@/pages/ConsentPage";
 import { PrivacyPage } from "@/pages/privacy/PrivacyPage";
 
 export const router = createBrowserRouter([
@@ -326,6 +327,20 @@ export const router = createBrowserRouter([
         path: "device",
         element: <DevicePage />,
         handle: { crumb: "Connect a Device" },
+      },
+      {
+        // W7 / X7 G8 -- the OpenID Connect consent screen. Inside AppLayout
+        // because it is only ever reached by a signed-in browser: the
+        // authorization endpoint resolves the principal before it can decide
+        // that consent is what is missing, so an anonymous visitor here has
+        // arrived by hand and AppLayout's guard sends them to /login, which is
+        // the right answer.
+        //
+        // No permission gate: consenting to release one's own details is the
+        // same self-service class as /privacy and /device.
+        path: "consent",
+        element: <ConsentPage />,
+        handle: { crumb: "Share your details" },
       },
       {
         // GDPR Art. 15/17 self-service export & erasure -- every

@@ -496,7 +496,7 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
     // OIDC Discovery (must be outside /oauth2 scope per spec)
     cfg.route(
         "/.well-known/openid-configuration",
-        web::get().to(handlers::oauth2::discovery),
+        web::get().to(handlers::oauth2::discovery::<C>),
     );
     // X2 / UMA 2.0 §2. Outside the `/oauth2` scope for the same reason as OIDC
     // discovery: the spec fixes the path at the host root.
@@ -1349,6 +1349,24 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                         web::post()
                             .to(handlers::gdpr::request_account_delete::<C>),
                     ),
+            )
+            // --- GDPR Art. 7 consent (X7 G8 / W7) ---
+            //
+            // Self-service only, and inside the `/api/v1` scope so that the
+            // CSRF middleware applies: recording a consent from a cross-site
+            // POST would be recording somebody else's answer to a question
+            // they were never asked.
+            .service(
+                web::resource("/account/consents")
+                    .route(web::get().to(handlers::gdpr::list_own_consents::<C>)),
+            )
+            .service(
+                web::resource("/account/consents/oidc-scopes")
+                    .route(web::post().to(handlers::gdpr::grant_oidc_scope_consent::<C>)),
+            )
+            .service(
+                web::resource("/account/consents/oidc-scopes/{client_id}")
+                    .route(web::delete().to(handlers::gdpr::withdraw_oidc_scope_consent::<C>)),
             )
             // --- Authz check (FND-04) — dedicated higher rate-limit tier (D-07) ---
             // AuthzMiddleware and CsrfMiddleware are inherited from the /api/v1 scope.

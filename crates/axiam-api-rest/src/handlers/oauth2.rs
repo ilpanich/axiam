@@ -15,7 +15,7 @@ use axiam_oauth2::error::OAuth2Error;
 use axiam_oauth2::jwks_cache::JwksCacheResponse;
 use axiam_oauth2::mtls::PresentedCertificate;
 use axiam_oauth2::oidc::{
-    JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document,
+    JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document_for,
 };
 use axiam_oauth2::token::{
     IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenRequestContext,
@@ -591,12 +591,18 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     // byte-identical to the one W3 built. Invariant 4, as a type rather than as
     // a branch somebody has to remember to write.
     //
-    // The tenant default is `None` here — see plan §4.6's W5 amendment for why
-    // W5 ships the fallback chain without a tenant surface to configure it.
+    // W7 — the tenant default, which W5 deferred for want of a place to
+    // configure it. Read only when a bundle arrived at all: a client on the
+    // `ignore` lane gets `Cosmetic::NONE` and no settings read, so its
+    // `/login` URL is byte-identical to W3's and costs the same.
+    let tenant_default = match authn_params.as_ref() {
+        Some(_) => tenant_default_locale(state, tenant_id).await,
+        None => None,
+    };
     let cosmetic = authn_params
         .as_ref()
         .map_or(axiam_oauth2::login_hop::Cosmetic::NONE, |params| {
-            axiam_oauth2::login_hop::Cosmetic::from_params(params, None)
+            axiam_oauth2::login_hop::Cosmetic::from_params(params, tenant_default)
         });
     let location =
         axiam_oauth2::login_hop::build_login_redirect_for(&return_to, stale, None, &cosmetic);
@@ -612,6 +618,162 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         builder.cookie(crate::middleware::csrf::clear_op_session_cookie());
     }
     Err(Box::new(builder.finish()))
+}
+
+/// W7 — the tenant's fallback UI language, for the last step of W5's
+/// `ui_locales` chain (plan §4.6's deferral, now picked up).
+///
+/// W5 shipped `select_ui_locale(requested, tenant_default)` and unit-tested it
+/// through all three steps, then passed `None` at both call sites because there
+/// was nowhere for an operator to set the value. There is now:
+/// `TenantSettingsOverride::default_locale`, on the settings surface every
+/// other per-tenant control lives on. This is the one argument those two call
+/// sites were waiting for.
+///
+/// Three ways to get `None`, and all three land on the deployment default
+/// (`en`), which is what every deployment did before this wave:
+///
+/// * the tenant has no preference;
+/// * the settings could not be read (a login page is not worth failing over a
+///   language);
+/// * the stored tag is one this build does not ship. `Locale::from_tag` is an
+///   **exact** match rather than an RFC 4647 lookup, deliberately: a stored
+///   `fr-CA` means "somebody wrote something this binary does not ship", and
+///   answering it with French would be a guess presented as a setting.
+async fn tenant_default_locale<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+) -> Option<axiam_oauth2::locale::Locale> {
+    let tenant = state.tenant_repo.get_by_id(tenant_id).await.ok()?;
+    let settings = axiam_core::repository::SettingsRepository::get_effective_settings(
+        &state.settings_repo,
+        tenant.organization_id,
+        tenant_id,
+    )
+    .await
+    .ok()?;
+    let tag = settings.oidc.default_locale?;
+    let locale = axiam_oauth2::locale::Locale::from_tag(&tag);
+    if locale.is_none() {
+        tracing::warn!(
+            %tenant_id,
+            configured = %tag,
+            "this tenant's default_locale is not a locale this build ships; the sign-in page \
+             falls back to the deployment default"
+        );
+    }
+    locale
+}
+
+/// W7 / X7 G8 — resolve what this authorization request's GDPR-sensitive
+/// scopes have earned, so `AuthorizeService` can decide without a repository.
+///
+/// Returns `(state, switch_is_off)`. Two values rather than one because they
+/// come from two reads and `axiam_oauth2::sensitive::decide` checks them
+/// against each other; collapsing them here would be collapsing the check.
+///
+/// # Costs nothing for a request that asks for nothing
+///
+/// The first line answers "did this request name `address` or `phone`", which
+/// is a scan of a short vector, and returns before either database read. Every
+/// client registered today asks for neither — they could not, the scopes were
+/// unregistrable — so this function adds one string comparison per scope to
+/// every authorization request in every existing deployment and nothing else.
+/// That is invariant 4 measured rather than asserted.
+///
+/// # A read that fails is not a release
+///
+/// Both reads fail closed and in different directions, which is deliberate:
+/// a settings read that fails reports the switch as **off** (refuse), and a
+/// consent read that fails reports the consent as **missing** (ask again).
+/// Neither answer can release data, and the second is recoverable by the end
+/// user rather than terminal.
+async fn resolve_sensitive_scopes<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    client_id: &str,
+    scope: Option<&str>,
+) -> (axiam_oauth2::sensitive::Requested, bool) {
+    let scopes: Vec<String> = scope
+        .unwrap_or("")
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let wanted = axiam_oauth2::sensitive::requested(&scopes);
+    if wanted.is_empty() {
+        return (axiam_oauth2::sensitive::Requested::None, false);
+    }
+
+    // The organization the settings baseline belongs to. Resolved from the
+    // tenant rather than taken from the caller's principal, the same way
+    // `axiam_auth::lockout` resolves it: the authorization endpoint's
+    // principal type carries no `org_id`, and adding one to it would put a
+    // field on the hot path for a branch almost no request takes.
+    let enabled = match state.tenant_repo.get_by_id(tenant_id).await {
+        Ok(tenant) => match axiam_core::repository::SettingsRepository::get_effective_settings(
+            &state.settings_repo,
+            tenant.organization_id,
+            tenant_id,
+        )
+        .await
+        {
+            Ok(settings) => settings.oidc.sensitive_scopes_enabled,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    %tenant_id,
+                    "could not read the tenant's effective settings while deciding whether the \
+                     address/phone scopes are enabled; treating them as disabled"
+                );
+                false
+            }
+        },
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                %tenant_id,
+                "could not resolve the organization behind this tenant; treating the \
+                 address/phone scopes as disabled"
+            );
+            false
+        }
+    };
+    if !enabled {
+        return (axiam_oauth2::sensitive::Requested::Disabled, true);
+    }
+
+    let consent_type = axiam_oauth2::sensitive::consent_type(client_id);
+    let version = axiam_oauth2::sensitive::consent_version(&wanted);
+    let consented = match axiam_core::repository::ConsentRepository::list_by_user(
+        &state.gdpr.consent_repo,
+        tenant_id,
+        user_id,
+    )
+    .await
+    {
+        Ok(records) => records
+            .iter()
+            .any(|c| c.consent_type == consent_type && c.version == version),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                %tenant_id,
+                "could not read the end user's consent records; treating the release as \
+                 unconsented, which asks again rather than releasing"
+            );
+            false
+        }
+    };
+
+    (
+        if consented {
+            axiam_oauth2::sensitive::Requested::Consented
+        } else {
+            axiam_oauth2::sensitive::Requested::ConsentMissing
+        },
+        false,
+    )
 }
 
 /// `GET /oauth2/authorize` -- OAuth2 authorization endpoint.
@@ -805,6 +967,9 @@ pub async fn authorize<C: Connection + Clone>(
                 authn_params,
                 request_object,
                 session_evidence,
+                // Resolved below, once, for both carriers.
+                sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
+                sensitive_scopes_switch_is_off: false,
             }
         }
         None => {
@@ -857,9 +1022,28 @@ pub async fn authorize<C: Connection + Clone>(
                 authn_params,
                 request_object,
                 session_evidence,
+                // Resolved below, once, for both carriers.
+                sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
+                sensitive_scopes_switch_is_off: false,
             }
         }
     };
+
+    // W7 — resolved here rather than inside either arm above because both
+    // arms produce the same three inputs (client, scope, subject) and a copy
+    // of this in each is a copy that can drift. It is also the first point at
+    // which the *resolved* scope is known: a pushed request's scope comes from
+    // the pushed copy, never from the query string.
+    let mut req = req;
+    (req.sensitive_scopes, req.sensitive_scopes_switch_is_off) = resolve_sensitive_scopes(
+        &state,
+        user.tenant_id,
+        user.user_id,
+        &req.client_id,
+        req.scope.as_deref(),
+    )
+    .await;
+    let req = req;
 
     // Captured before `req` moves: the error path needs the *resolved*
     // redirect_uri and state, which for a PAR request came from the pushed
@@ -882,20 +1066,41 @@ pub async fn authorize<C: Connection + Clone>(
     // shown. Captured before `req` moves, from the bundle whichever carrier
     // delivered it, and used **only** inside the interaction arm below.
     //
-    // There is no honour-lane condition here and there does not need to be:
-    // `AuthorizeOutcome::Interact` is produced at exactly one place
-    // (`axiam_oauth2::authorize`, step 6b) and that place is inside
-    // `if fapi::honours_authn_params(&client)`. A client on the `ignore` lane
-    // never reaches the arm that reads this, so it never reaches a `/login`
-    // URL carrying a presentation — invariant 4, held by the shape of the
-    // outcome type rather than by a second copy of the lane check that could
-    // come to disagree with the first.
+    // There is no honour-lane condition here, and W7 is why it now needs
+    // saying rather than assuming. W4 produced `AuthorizeOutcome::Interact` at
+    // exactly one place — step 6b, inside `if fapi::honours_authn_params` — so
+    // a client on the `ignore` lane could not reach the arm that reads this.
+    // W7 added a second producer, step 6c's consent gate, which is *not*
+    // lane-conditional: the tenant switch and the consent record decide it,
+    // not the client's `authn_request_params`.
+    //
+    // That is still invariant 4, and for a reason stronger than a lane check:
+    // reaching step 6c at all requires the request to carry `address` or
+    // `phone`, and requires the client to have them registered. No client in
+    // any existing deployment does — the scopes were unregistrable before this
+    // wave, which is the whole of I4 for G8. A client that has them was
+    // registered after W7 shipped, by an operator who turned the tenant switch
+    // on to do it.
+    //
+    // `build_interaction_redirect` then decides which page and which of these
+    // values it may carry; `login_hint` reaches the consent page from neither
+    // lane.
     //
     // Assembled here rather than inside `honour::evaluate` because the cosmetic
     // four decide no `Outcome` — see that module's "W5's cosmetic four are not
-    // here". The tenant default is `None`: plan §4.6's W5 amendment says why.
+    // here".
+    //
+    // W7 supplies the tenant default W5 left as `None`, and reads it only when
+    // the request carried a bundle: an empty bundle selects nothing whatever
+    // the tenant prefers, so the read would be a database round trip on every
+    // authorization request in the deployment to reach the same answer.
     let cosmetic_owned = {
-        let c = axiam_oauth2::login_hop::Cosmetic::from_params(&req.authn_params, None);
+        let tenant_default = if req.authn_params.is_empty() {
+            None
+        } else {
+            tenant_default_locale(&state, user.tenant_id).await
+        };
+        let c = axiam_oauth2::login_hop::Cosmetic::from_params(&req.authn_params, tenant_default);
         (c.login_hint.map(str::to_owned), c.display, c.ui_locale)
     };
 
@@ -905,13 +1110,19 @@ pub async fn authorize<C: Connection + Clone>(
             // login hop: same `return_to`, same validation on both sides, same
             // marker, so the chain is still bounded at one redirect.
             //
-            // `reauth` is unconditional here, unlike W3's stale-cookie case.
-            // Every reason the honour lane interacts — `prompt=login`, a
-            // `max_age` this session cannot satisfy, a step-up, an
-            // `id_token_hint` naming somebody else — is a reason not to trust
-            // what the browser already holds; a sign-in page that silently
-            // reused the current session would return the same unsatisfying
-            // session and the loop guard would have to catch it.
+            // `reauth` is set for every reason the *honour lane* interacts —
+            // `prompt=login`, a `max_age` this session cannot satisfy, a
+            // step-up, an `id_token_hint` naming somebody else — because each
+            // is a reason not to trust what the browser already holds; a
+            // sign-in page that silently reused the current session would
+            // return the same unsatisfying session and the loop guard would
+            // have to catch it.
+            //
+            // W7 adds the one reason that is not: a consent question. The end
+            // user is signed in, and what is missing is their answer, not
+            // their password. `Reason::requires_reauthentication` is where
+            // that distinction lives, so the two callers of this redirect
+            // cannot come to disagree about it.
             tracing::debug!(
                 client_id = %authorized_client_id,
                 reason = ?interaction.reason,
@@ -952,9 +1163,9 @@ pub async fn authorize<C: Connection + Clone>(
                 display: *display,
                 ui_locale: *ui_locale,
             };
-            let location = axiam_oauth2::login_hop::build_login_redirect_for(
+            let location = axiam_oauth2::login_hop::build_interaction_redirect(
                 &return_to,
-                true,
+                interaction.reason,
                 interaction.required_acr,
                 &cosmetic,
             );
@@ -1718,16 +1929,41 @@ pub async fn introspect<C: Connection + Clone>(
 ///
 /// RFC 8705 §5 `mtls_endpoint_aliases` is included when — and only when —
 /// `AuthConfig::oauth2_mtls_base_url` names a separate mutual-TLS host.
+/// Query string for [`discovery`] (W7).
+#[derive(Debug, Deserialize)]
+pub struct DiscoveryQuery {
+    /// Which tenant the document should describe (X7 G8, plan §6).
+    ///
+    /// Optional, and ignored by everything except the two sensitive-scope
+    /// rows: every other field in the document is a property of the
+    /// deployment. A caller that omits it — which is every caller written
+    /// before W7, and the conformance suite — receives exactly the document
+    /// W6 served.
+    ///
+    /// Named the same way `/oauth2/authorize`, `/oauth2/end_session` and
+    /// `/oauth2/token` name a tenant, rather than by a path prefix or a
+    /// header, because a `.well-known` path is fixed by specification and a
+    /// query parameter is the only place left to put it.
+    pub tenant_id: Option<Uuid>,
+}
+
 #[utoipa::path(
     get,
     path = "/.well-known/openid-configuration",
+    params(("tenant_id" = Option<Uuid>, Query,
+            description = "Tenant whose OIDC capabilities the document should describe. \
+                           Omit for the deployment-wide document.")),
     tag = "oidc",
     responses(
         (status = 200, description = "OpenID Connect Discovery document",
          body = OidcDiscoveryDocument),
     ),
 )]
-pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
+pub async fn discovery<C: Connection + Clone>(
+    query: web::Query<DiscoveryQuery>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    let auth_config = &state.auth_config;
     let issuer = auth_config.effective_issuer();
     // Guard: effective_issuer must be a valid URL for a compliant
     // discovery document.  Startup validation should catch this, but
@@ -1746,7 +1982,39 @@ pub async fn discovery(auth_config: web::Data<AuthConfig>) -> HttpResponse {
     // exactly the topology RFC 8705 §5 exists to steer it away from — and it
     // would look, from the client's side, indistinguishable from a deployment
     // that has no mTLS host at all.
-    let doc = match build_discovery_document(issuer, auth_config.mtls_base_url()) {
+    // W7 / X7 G8 — whether this tenant may use the sensitive scopes at all.
+    // `false` when no tenant was named, which is every call made before this
+    // wave: the document such a caller receives is byte-identical to the one
+    // W6 served. See `build_discovery_document_for` for why omitting is the
+    // truthful answer rather than the cautious one.
+    let sensitive_scopes_enabled = match query.tenant_id {
+        None => false,
+        Some(tenant_id) => match state.tenant_repo.get_by_id(tenant_id).await {
+            Ok(tenant) => axiam_core::repository::SettingsRepository::get_effective_settings(
+                &state.settings_repo,
+                tenant.organization_id,
+                tenant_id,
+            )
+            .await
+            .map(|s| s.oidc.sensitive_scopes_enabled)
+            // A settings read that fails advertises less rather than more.
+            // A relying party told a scope exists and then refused it has a
+            // worse day than one that was never told.
+            .unwrap_or(false),
+            // An unknown tenant is not an error here: discovery is public and
+            // unauthenticated, and answering `404` for a tenant id would make
+            // this endpoint a tenant-enumeration oracle. The deployment-wide
+            // document is served instead, which is what a caller that named no
+            // tenant gets.
+            Err(_) => false,
+        },
+    };
+
+    let doc = match build_discovery_document_for(
+        issuer,
+        auth_config.mtls_base_url(),
+        sensitive_scopes_enabled,
+    ) {
         Ok(doc) => doc,
         Err(e) => {
             tracing::error!(
@@ -1847,10 +2115,11 @@ pub async fn jwks<C: Connection + Clone>(
     security(("bearer" = []))
 )]
 pub async fn userinfo<C: Connection + Clone>(
+    req: HttpRequest,
     user: AuthenticatedUser,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
-    userinfo_claims(&user, &state).await
+    userinfo_claims_for(&user, &state, Some(&req)).await
 }
 
 /// The UserInfo response itself, for a principal already authenticated.
@@ -1860,9 +2129,15 @@ pub async fn userinfo<C: Connection + Clone>(
 /// answers. Nothing here reads the request: the response is a function of the
 /// token's subject and its scopes, so the two methods cannot diverge except in
 /// how the token was carried.
-async fn userinfo_claims<C: Connection + Clone>(
+/// W7 threads the `HttpRequest` in so the X7 G8 audit row can carry a peer
+/// address. It is used for **nothing else**: the response stays a function of
+/// the token's subject and its scopes, which is what keeps `GET` and `POST`
+/// byte-identical (evidence row 91). `None` writes the audit row without an
+/// address rather than not writing it.
+async fn userinfo_claims_for<C: Connection + Clone>(
     user: &AuthenticatedUser,
     state: &AppState<C>,
+    http_req: Option<&HttpRequest>,
 ) -> HttpResponse {
     let scopes: Vec<String> = user
         .claims
@@ -1918,13 +2193,251 @@ async fn userinfo_claims<C: Connection + Clone>(
         (None, None)
     };
 
+    // W7 / X7 G8 — the sensitive claims, decided here and nowhere else.
+    let released = release_sensitive_claims(user, state, &scopes, http_req).await;
+
     HttpResponse::Ok().json(UserInfoResponse {
         sub: user.user_id.to_string(),
         email,
         preferred_username,
+        phone_number: released.phone_number,
+        phone_number_verified: released.phone_number_verified,
+        address: released.address,
         tenant_id: user.tenant_id.to_string(),
         org_id: user.org_id.to_string(),
     })
+}
+
+/// What the sensitive-scope gates allowed this UserInfo call to say.
+///
+/// A struct rather than a tuple so the two telephone members cannot be
+/// separated: `phone_number_verified` is a statement *about* `phone_number`
+/// and emitting it alone would assert something about a value the relying
+/// party was not given.
+#[derive(Default)]
+struct ReleasedSensitiveClaims {
+    phone_number: Option<String>,
+    phone_number_verified: Option<bool>,
+    address: Option<axiam_core::models::user::Address>,
+}
+
+impl ReleasedSensitiveClaims {
+    /// The claim **names** released, for the audit row. Never the values.
+    fn names(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.phone_number.is_some() {
+            names.push("phone_number");
+        }
+        if self.phone_number_verified.is_some() {
+            names.push("phone_number_verified");
+        }
+        if self.address.is_some() {
+            names.push("address");
+        }
+        names
+    }
+}
+
+/// Decide, and record, what `address` and `phone` release for this call
+/// (X7 G8, plan §4.8).
+///
+/// # Every gate is re-asked here, at the moment of release
+///
+/// The authorization endpoint asked all of them too, and none of its answers
+/// is reused. That is the whole design: an access token lives fifteen minutes
+/// and a refresh of it lives thirty days, so a decision taken when the token
+/// was minted is a decision that outlives the facts it rested on. Asking again
+/// is what makes withdrawal immediate (T8.4) rather than effective on the next
+/// token.
+///
+/// In order, cheapest and most decisive first:
+///
+/// 1. **The token's scopes.** No `phone`, no telephone number. A scope the
+///    relying party never asked for cannot be released by any later gate
+///    saying yes.
+/// 2. **The relying party.** Taken from the token's `client_id`
+///    (RFC 9068 §2.2). A token that names none — every token issued before W7,
+///    and every token minted by a login, a device flow or an exchange — cannot
+///    have a consent record looked up for it, and releases nothing. Fail
+///    closed, and the direction matters: the alternative is "any consent this
+///    subject ever gave", which would hand a postal address to a client the
+///    subject consented to a *different* client receiving.
+/// 3. **The profile (M10).** A `fapi2` client is refused here regardless of
+///    scope, switch or record — the third of the three places the FAPI gate
+///    runs, and the only one where no authorization request is in hand.
+/// 4. **The tenant switch.** The operator's decision outranks the subject's.
+/// 5. **The consent record**, matched on client *and* on the exact scope set.
+///
+/// # A read that fails releases nothing
+///
+/// Every fallible step below resolves to "release nothing" and logs. A
+/// UserInfo response missing an optional claim is what OIDC Core §5.3.2 calls
+/// an omitted claim and what the conformance suite treats as a WARNING; a
+/// UserInfo response carrying a postal address the subject withdrew is a
+/// personal-data breach. Those are not comparable failures and the code does
+/// not treat them as if they were.
+async fn release_sensitive_claims<C: Connection + Clone>(
+    user: &AuthenticatedUser,
+    state: &AppState<C>,
+    scopes: &[String],
+    http_req: Option<&HttpRequest>,
+) -> ReleasedSensitiveClaims {
+    let none = ReleasedSensitiveClaims::default();
+
+    // 1. Scope.
+    let wanted = axiam_oauth2::sensitive::requested(scopes);
+    if wanted.is_empty() {
+        return none;
+    }
+
+    // 2. The relying party.
+    let Some(client_id) = user.claims.0.client_id.as_deref() else {
+        tracing::debug!(
+            user_id = %user.user_id,
+            "an access token carrying a sensitive scope names no client_id, so no consent \
+             record can be found for it; releasing nothing"
+        );
+        return none;
+    };
+
+    // 3. The profile — M10.
+    match state
+        .oauth2_client_repo
+        .get_by_client_id(user.principal_tenant_id, client_id)
+        .await
+    {
+        Ok(client) if client.profile.is_fapi2() => {
+            tracing::warn!(
+                %client_id,
+                "a fapi2-issued access token carries a GDPR-sensitive scope; the fapi2 lane \
+                 collects no consent record and nothing is released"
+            );
+            return none;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                %client_id,
+                "could not read the client behind this access token; releasing no sensitive \
+                 claims rather than releasing them unprofiled"
+            );
+            return none;
+        }
+    }
+
+    // 4. The tenant switch.
+    let enabled = match state.tenant_repo.get_by_id(user.principal_tenant_id).await {
+        Ok(tenant) => axiam_core::repository::SettingsRepository::get_effective_settings(
+            &state.settings_repo,
+            tenant.organization_id,
+            user.principal_tenant_id,
+        )
+        .await
+        .map(|s| s.oidc.sensitive_scopes_enabled)
+        .unwrap_or(false),
+        Err(_) => false,
+    };
+    if !enabled {
+        return none;
+    }
+
+    // 5. The consent record, on this client and this exact scope set.
+    let consent_type = axiam_oauth2::sensitive::consent_type(client_id);
+    let version = axiam_oauth2::sensitive::consent_version(&wanted);
+    let consented = axiam_core::repository::ConsentRepository::list_by_user(
+        &state.gdpr.consent_repo,
+        user.principal_tenant_id,
+        user.user_id,
+    )
+    .await
+    .map(|records| {
+        records
+            .iter()
+            .any(|c| c.consent_type == consent_type && c.version == version)
+    })
+    .unwrap_or(false);
+    if !consented {
+        return none;
+    }
+
+    // Only now is the row read. Reaching for the data before the gates had
+    // finished would mean a telephone number in memory on a path that was
+    // never going to release it.
+    let Ok(subject) = state
+        .user_repo
+        .get_by_id(user.principal_tenant_id, user.user_id)
+        .await
+    else {
+        tracing::error!(
+            user_id = %user.user_id,
+            "could not read the subject for its consented claims; releasing nothing"
+        );
+        return none;
+    };
+
+    let mut released = ReleasedSensitiveClaims::default();
+    if wanted.contains(&"phone") {
+        // The verified flag rides with the number and never travels alone.
+        if let Some(number) = subject.phone_number {
+            released.phone_number_verified = Some(subject.phone_number_verified_at.is_some());
+            released.phone_number = Some(number);
+        }
+    }
+    if wanted.contains(&"address") {
+        released.address = subject.address;
+    }
+
+    let names = released.names();
+    if !names.is_empty() {
+        audit_sensitive_claims_released(state, http_req, user, client_id, &names).await;
+    }
+    released
+}
+
+/// Record that sensitive claims were released — **names, never values**
+/// (X7 G8, T8.6).
+///
+/// The audit log is queryable by operators and exported to subjects under
+/// Art. 15, so a row carrying the telephone number would be a second copy of
+/// the personal data in a store whose whole point is that it is append-only
+/// and cannot be erased. What the row has to answer is *who was given what
+/// kind of thing, when*, and claim names answer that exactly.
+///
+/// A failure to write is logged and swallowed. Losing an audit row is bad;
+/// failing a UserInfo call the four gates already allowed is worse, and would
+/// turn the audit store's availability into the relying party's.
+async fn audit_sensitive_claims_released<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: Option<&HttpRequest>,
+    user: &AuthenticatedUser,
+    client_id: &str,
+    claim_names: &[&str],
+) {
+    if let Err(e) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id: user.principal_tenant_id,
+            actor_id: user.user_id,
+            actor_type: ActorType::User,
+            action: "userinfo.sensitive_claims_released".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: http_req.and_then(peer_ip),
+            metadata: Some(serde_json::json!({
+                "client_id": truncate_bytes_on_char_boundary(client_id),
+                "claims": claim_names,
+            })),
+        })
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user.user_id,
+            %client_id,
+            "could not record a sensitive-claims release; the UserInfo response is unaffected"
+        );
+    }
 }
 
 /// The form body `POST /oauth2/userinfo` accepts (RFC 6750 §2.2).
@@ -1932,7 +2445,7 @@ async fn userinfo_claims<C: Connection + Clone>(
 /// Unknown fields are ignored, as serde does by default: RFC 6750 §2.2 defines
 /// one parameter and says nothing about others, and a UserInfo request that
 /// also carried, say, a `client_id` is not malformed.
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UserInfoPostForm {
     /// The access token, per RFC 6750 §2.2.
     access_token: Option<String>,
@@ -2006,6 +2519,27 @@ impl std::fmt::Debug for UserInfoPostForm {
 /// `access_token=` transmits no token, so it is treated as absent rather than
 /// as a second method or as an invalid credential. A request carrying an empty
 /// field and a real `Authorization` header is answered, not refused.
+#[utoipa::path(
+    post,
+    path = "/oauth2/userinfo",
+    tag = "oidc",
+    request_body(
+        content = UserInfoPostForm,
+        content_type = "application/x-www-form-urlencoded",
+        description = "RFC 6750 §2.2 form-encoded access token. Omit the body \
+                       entirely to present the token in the Authorization header \
+                       instead; presenting it both ways is refused."
+    ),
+    responses(
+        (status = 200, description = "UserInfo response — byte-identical to what \
+                                      GET answers for the same token",
+         body = UserInfoResponse),
+        (status = 400, description = "The access token was presented by more than \
+                                      one method (RFC 6750 §2)"),
+        (status = 401, description = "Invalid or missing access token"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn userinfo_post<C: Connection + Clone>(
     req: HttpRequest,
     form: Option<web::Form<UserInfoPostForm>>,
@@ -2026,7 +2560,7 @@ pub async fn userinfo_post<C: Connection + Clone>(
         // handed a `AuthenticatedUser` handler — the same principal, or the
         // same 401.
         return match maybe_user.into_result() {
-            Ok(user) => userinfo_claims(&user, &state).await,
+            Ok(user) => userinfo_claims_for(&user, &state, Some(&req)).await,
             Err(e) => e.error_response(),
         };
     };
@@ -2045,7 +2579,7 @@ pub async fn userinfo_post<C: Connection + Clone>(
     }
 
     match crate::extractors::auth::authenticate_presented_token(&req, body_token).await {
-        Ok(user) => userinfo_claims(&user, &state).await,
+        Ok(user) => userinfo_claims_for(&user, &state, Some(&req)).await,
         Err(e) => e.error_response(),
     }
 }

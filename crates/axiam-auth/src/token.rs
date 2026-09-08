@@ -142,6 +142,36 @@ pub struct AccessTokenClaims {
     /// refuse the token, not ignore the claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<CnfClaim>,
+    /// RFC 9068 §2.2 — the `client_id` this token was issued to (W7, X7 G8).
+    ///
+    /// Present on a token minted by the OAuth2 authorization-code grant and by
+    /// a refresh of one; absent everywhere else, including on every token
+    /// issued before this wave. Absent is not "unknown to be safe": a resource
+    /// server that needs to know which relying party is holding a token, and
+    /// finds no answer, must treat the answer as *no relying party it can
+    /// name*.
+    ///
+    /// # Why AXIAM needed it
+    ///
+    /// The UserInfo endpoint releases `phone_number` and `address` only while
+    /// a consent record exists, and a consent record names the relying party
+    /// it was given to (`axiam_oauth2::sensitive::consent_type`). Until this
+    /// claim existed, an access token identified its subject and its scopes
+    /// but not its audience-in-fact, so UserInfo could not tell whose consent
+    /// to look for — and "any consent this user ever gave" would release a
+    /// postal address to a client the user consented to a *different* client
+    /// receiving. The claim is what makes per-client consent enforceable at
+    /// the point of release rather than only at the point of authorization.
+    ///
+    /// It is also what makes M10 checkable: a `fapi2`-issued token is
+    /// recognisable as such at UserInfo, where no authorization request is in
+    /// hand and neither of the other two FAPI gates has run.
+    ///
+    /// A client-credentials token does not carry it, and does not need to: its
+    /// `sub` *is* the `client_id` ([`AccessTokenSpec::oauth2_client`]).
+    /// Duplicating it would create two fields that can disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
     /// X1 — custom claims contributed by a `token.pre_issue` reactor.
     ///
     /// # Why a nested object rather than flattened top-level claims
@@ -492,6 +522,7 @@ pub struct AccessTokenSpec {
     act: Option<ActClaim>,
     permissions: Option<Vec<RptPermission>>,
     ext_exchange: Option<ExtExchangeClaim>,
+    client_id: Option<String>,
 }
 
 impl AccessTokenSpec {
@@ -517,6 +548,7 @@ impl AccessTokenSpec {
             act: None,
             permissions: None,
             ext_exchange: None,
+            client_id: None,
         }
     }
 
@@ -600,6 +632,19 @@ impl AccessTokenSpec {
         } else {
             Some(scopes.join(" "))
         };
+        self
+    }
+
+    /// Name the relying party this token was issued to (RFC 9068 §2.2, W7).
+    ///
+    /// `None` reproduces the token every caller received before this method
+    /// existed, byte for byte, which is why the two OAuth2 issuance sites are
+    /// the only ones that call it: the claim is a fact about a grant, and a
+    /// token minted by a login, a device flow or an exchange has no relying
+    /// party to name.
+    #[must_use]
+    pub fn client_id(mut self, client_id: Option<&str>) -> Self {
+        self.client_id = client_id.map(str::to_owned);
         self
     }
 
@@ -709,6 +754,7 @@ impl AccessTokenSpec {
             ext_exchange: self.ext_exchange.clone(),
             cnf: self.cnf.clone(),
             ext: self.ext.clone(),
+            client_id: self.client_id.clone(),
         })
     }
 
@@ -798,11 +844,42 @@ pub fn issue_access_token_enriched(
     cnf: Option<CnfClaim>,
     ext: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<String, AuthError> {
+    issue_access_token_for_client(
+        user_id, tenant_id, org_id, scopes, config, jti, aud, cnf, ext, None,
+    )
+}
+
+/// [`issue_access_token_enriched`], naming the relying party the grant was
+/// made to (W7, RFC 9068 §2.2).
+///
+/// Passing `None` produces a byte-identical token to
+/// [`issue_access_token_enriched`], which is why *that* function is a one-line
+/// delegation rather than a copy — the same relationship, and for the same
+/// reason, that `cnf` and `ext` already have to the ones above them.
+///
+/// Only the OAuth2 authorization-code and refresh paths pass `Some`. Every
+/// other issuance site — login, WebAuthn, federation, device flow, token
+/// exchange — mints a token that no relying party was granted, and naming one
+/// would be asserting something untrue about it.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_access_token_for_client(
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+    jti: String,
+    aud: &str,
+    cnf: Option<CnfClaim>,
+    ext: Option<std::collections::BTreeMap<String, String>>,
+    client_id: Option<&str>,
+) -> Result<String, AuthError> {
     AccessTokenSpec::user(user_id, tenant_id, org_id, jti)
         .aud(aud)
         .scopes(scopes)
         .cnf(cnf)
         .ext(ext)
+        .client_id(client_id)
         .issue(config)
 }
 

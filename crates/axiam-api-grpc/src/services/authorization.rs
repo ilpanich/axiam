@@ -434,6 +434,7 @@ mod tests {
             permissions: None,
             ext_exchange: None,
             cnf: None,
+            client_id: None,
             ext: None,
         });
 

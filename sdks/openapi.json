@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta12",
-    "x-axiam-spec-digest": "sha256:956fa9012c09f6433cbc8d6dfe0ad6b7ee0bbf5f3573146a5a2f86e119a896cf"
+    "x-axiam-spec-digest": "sha256:40cea0ec22c43d143663417773ce1aed234aacf8b8683e5c5c65a92ca35a5027"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -10670,6 +10670,18 @@
             "name": "axiam_login_hop",
             "in": "path",
             "description": "W3 — the login hop's loop guard (`axiam_login_hop`).\n\nSet by this server inside the `return_to` it builds, and read here to\nrecognise the return leg. See `axiam_oauth2::login_hop` for why its\npresence bounds the hop at one redirect, and for why a browser that\nstrips it harms only itself.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "axiam_consent_hop",
+            "in": "path",
+            "description": "W7 — the **consent** hop's loop guard (`axiam_consent_hop`).\n\nA second marker rather than a reuse of the one above, because the two\nceremonies answer different questions and a request can need both. See\n`axiam_oauth2::login_hop::CONSENT_HOP_MARKER`.",
             "required": true,
             "schema": {
               "type": [

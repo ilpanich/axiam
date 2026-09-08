@@ -165,6 +165,32 @@ pub struct OidcDiscoveryDocument {
     /// RSA will hit first, and the reason advertising the list matters rather
     /// than merely advertising support.
     pub dpop_signing_alg_values_supported: Vec<String>,
+    /// RFC 8414 §2 / RFC 7636 §4.3 — the PKCE transformations AXIAM accepts.
+    ///
+    /// `S256`, and only `S256`: `authorize` refuses `plain` outright, so a
+    /// list carrying it would be a lie the client discovers one redirect
+    /// later.
+    ///
+    /// Its **absence** was a real finding of the first FAPI 2.0 conformance
+    /// run (`EnsureServerConfigurationSupportsCodeChallengeMethodS256`
+    /// reported NOT FOUND). RFC 8414 defines no default for this member, so
+    /// silence does not mean "S256" — it means a conforming client cannot
+    /// establish that PKCE is available at all, which for a profile that
+    /// *requires* PKCE is a failed check rather than a cosmetic omission.
+    pub code_challenge_methods_supported: Vec<String>,
+    /// RFC 8414 §2 — the JWS algorithms AXIAM accepts on a `private_key_jwt`
+    /// client assertion.
+    ///
+    /// Derived from [`crate::jose::permitted_algorithm_names`] rather than
+    /// written out here, so the advertisement cannot drift from the verifier
+    /// that has to honour it.
+    ///
+    /// Also absent until the first conformance run named it
+    /// (`FAPI2CheckDiscEndpointTokenEndpointAuthSigningAlgValuesSupported`).
+    /// The member is required once an assertion-based method is advertised,
+    /// and `token_endpoint_auth_methods_supported` above advertises
+    /// `private_key_jwt` unconditionally.
+    pub token_endpoint_auth_signing_alg_values_supported: Vec<String>,
     /// RFC 8705 §5 — the mTLS-specific endpoint URLs, when this deployment
     /// terminates mutual TLS somewhere other than the issuer's own host.
     /// Absent (not `null`) when it does not.
@@ -395,6 +421,8 @@ pub fn build_discovery_document_for(
         acr_values_supported: vec![ACR_SINGLE_FACTOR.into(), ACR_MULTI_FACTOR.into()],
         tls_client_certificate_bound_access_tokens: true,
         dpop_signing_alg_values_supported: vec!["PS256".into(), "ES256".into(), "EdDSA".into()],
+        code_challenge_methods_supported: vec!["S256".into()],
+        token_endpoint_auth_signing_alg_values_supported: crate::jose::permitted_algorithm_names(),
         mtls_endpoint_aliases,
     };
     if sensitive_scopes_enabled {
@@ -566,6 +594,58 @@ mod tests {
         );
         assert!(doc.response_types_supported.contains(&"code".into()));
         assert!(doc.scopes_supported.contains(&"openid".into()));
+    }
+
+    /// The two members the first FAPI 2.0 conformance run reported NOT FOUND
+    /// (`fapi2-security-profile-final-discovery-end-point-verification`,
+    /// 2026-09-08). Pinned together because they failed together and because
+    /// each is a *required* member of a profile AXIAM already implements —
+    /// the code was conformant, the document describing it was not.
+    #[test]
+    fn discovery_advertises_pkce_and_assertion_signing_algorithms() {
+        let doc = doc(None);
+
+        assert_eq!(
+            doc.code_challenge_methods_supported,
+            ["S256"],
+            "authorize refuses `plain`, so S256 alone is the truthful list"
+        );
+        assert_eq!(
+            doc.token_endpoint_auth_signing_alg_values_supported,
+            crate::jose::permitted_algorithm_names(),
+            "the advertisement must be the verifier's own profile, not a copy of it"
+        );
+
+        // Advertising an assertion-signing profile is only required because a
+        // method that uses one is advertised. If that ever stops being true
+        // this test should be the thing that notices.
+        assert!(
+            doc.token_endpoint_auth_methods_supported
+                .contains(&"private_key_jwt".to_string()),
+            "the signing-alg member exists to serve private_key_jwt"
+        );
+    }
+
+    /// Both members must survive serialisation as JSON arrays. RFC 8414 gives
+    /// neither a default, so a client reads absence as "unsupported" — which
+    /// is exactly the failure this pair of members was added to fix, and would
+    /// be reintroduced by a stray `skip_serializing_if`.
+    #[test]
+    fn the_new_members_are_present_in_the_serialised_document() {
+        let json = serde_json::to_value(doc(None)).expect("document serialises");
+
+        for member in [
+            "code_challenge_methods_supported",
+            "token_endpoint_auth_signing_alg_values_supported",
+        ] {
+            let value = json
+                .get(member)
+                .unwrap_or_else(|| panic!("{member} must be present: {json}"));
+            let array = value
+                .as_array()
+                .unwrap_or_else(|| panic!("{member} must be a JSON array, got {value}"));
+            assert!(!array.is_empty(), "{member} must not be empty");
+        }
     }
 
     /// RFC 8705 §5 makes the member OPTIONAL, and a *present* one is an

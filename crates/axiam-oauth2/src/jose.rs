@@ -105,6 +105,39 @@ pub fn is_permitted(alg: Algorithm) -> bool {
     PERMITTED_ALGORITHMS.contains(&alg)
 }
 
+/// The permitted algorithms as the names that appear on the wire.
+///
+/// Discovery has to publish this profile as JSON strings
+/// (`token_endpoint_auth_signing_alg_values_supported`, RFC 8414 §2), and the
+/// one thing that must never happen is the advertisement and the verifier
+/// disagreeing — a client that picks an advertised algorithm and is then
+/// refused has been lied to by the document that exists to prevent exactly
+/// that. So the names are derived from [`PERMITTED_ALGORITHMS`] through an
+/// **exhaustive** match: widening the profile stops compiling here until the
+/// new name is spelled, rather than silently shipping a shorter list.
+///
+/// Not `format!("{alg:?}")`, which would produce the right three strings today
+/// by coincidence — `Debug` is not a wire format, and a variant rename
+/// upstream would change the document without changing a line of AXIAM.
+pub fn permitted_algorithm_names() -> Vec<String> {
+    PERMITTED_ALGORITHMS
+        .iter()
+        .map(|alg| {
+            match alg {
+                Algorithm::PS256 => "PS256",
+                Algorithm::ES256 => "ES256",
+                Algorithm::EdDSA => "EdDSA",
+                // Unreachable while PERMITTED_ALGORITHMS is the three above,
+                // and the point of the arm is that adding a fourth without
+                // naming it here is a panic in a test rather than a wrong
+                // discovery document in production.
+                other => unreachable!("{other:?} is in PERMITTED_ALGORITHMS but has no wire name"),
+            }
+            .to_string()
+        })
+        .collect()
+}
+
 /// The one algorithm this key may be used with.
 ///
 /// Derived from the key material — `kty` and, for the curve families, `crv` —
@@ -295,6 +328,24 @@ pub fn candidate_keys<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wire names and the profile they describe are the same list, in the
+    /// same order. This is the test that fails if somebody widens
+    /// `PERMITTED_ALGORITHMS` and does not teach the discovery document about
+    /// it — the `unreachable!` arm would panic here rather than in production.
+    #[test]
+    fn every_permitted_algorithm_has_a_wire_name() {
+        let names = permitted_algorithm_names();
+        assert_eq!(names.len(), PERMITTED_ALGORITHMS.len());
+        assert_eq!(names, ["PS256", "ES256", "EdDSA"]);
+
+        // Each name must parse back to the algorithm it stands for: a name
+        // that round-trips is a name a client can actually send.
+        for (name, alg) in names.iter().zip(PERMITTED_ALGORITHMS) {
+            let parsed: Algorithm = name.parse().expect("a wire name jsonwebtoken knows");
+            assert_eq!(parsed, alg, "{name} does not name {alg:?}");
+        }
+    }
     use jsonwebtoken::jwk::JwkSet;
 
     /// The RFC 7638 §3.1 worked example, verbatim. If this thumbprint ever

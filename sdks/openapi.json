@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta12",
-    "x-axiam-spec-digest": "sha256:57fd68735f6c524cdd016a3ae6db389891cadd6fb95193a12d8b146adec293f3"
+    "x-axiam-spec-digest": "sha256:9fc576c3ed92ef76c405540713f75e68acbb3e9f39afde6644d31282b2ef7fae"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -15687,7 +15687,9 @@
           "request_parameter_supported",
           "claims_parameter_supported",
           "acr_values_supported",
-          "dpop_signing_alg_values_supported"
+          "dpop_signing_alg_values_supported",
+          "code_challenge_methods_supported",
+          "token_endpoint_auth_signing_alg_values_supported"
         ],
         "properties": {
           "acr_values_supported": {
@@ -15721,6 +15723,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "code_challenge_methods_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 8414 §2 / RFC 7636 §4.3 — the PKCE transformations AXIAM accepts.\n\n`S256`, and only `S256`: `authorize` refuses `plain` outright, so a\nlist carrying it would be a lie the client discovers one redirect\nlater.\n\nIts **absence** was a real finding of the first FAPI 2.0 conformance\nrun (`EnsureServerConfigurationSupportsCodeChallengeMethodS256`\nreported NOT FOUND). RFC 8414 defines no default for this member, so\nsilence does not mean \"S256\" — it means a conforming client cannot\nestablish that PKCE is available at all, which for a profile that\n*requires* PKCE is a failed check rather than a cosmetic omission."
           },
           "device_authorization_endpoint": {
             "type": "string",
@@ -15814,6 +15823,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "token_endpoint_auth_signing_alg_values_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 8414 §2 — the JWS algorithms AXIAM accepts on a `private_key_jwt`\nclient assertion.\n\nDerived from [`crate::jose::permitted_algorithm_names`] rather than\nwritten out here, so the advertisement cannot drift from the verifier\nthat has to honour it.\n\nAlso absent until the first conformance run named it\n(`FAPI2CheckDiscEndpointTokenEndpointAuthSigningAlgValuesSupported`).\nThe member is required once an assertion-based method is advertised,\nand `token_endpoint_auth_methods_supported` above advertises\n`private_key_jwt` unconditionally."
           },
           "userinfo_endpoint": {
             "type": "string"

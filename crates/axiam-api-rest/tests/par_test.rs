@@ -398,18 +398,21 @@ async fn another_client_cannot_spend_a_request_uri() {
 }
 
 // ---------------------------------------------------------------------------
-// The two parameter channels do not mix
+// The two parameter channels do not mix — the pushed one wins
 // ---------------------------------------------------------------------------
 
 #[actix_web::test]
-async fn request_uri_combined_with_inline_params_is_refused() {
-    // Merging is where parameter confusion lives: the attacker supplies the
-    // inline value they want and lets the pushed copy satisfy whatever check
-    // reads the other one. So both-present is an error, not a merge.
+async fn request_uri_combined_with_inline_params_is_accepted() {
+    // RFC 9101 §5: a client MAY duplicate the pushed parameters in the query
+    // string. §6.3: the authorization server MUST only use the ones from the
+    // pushed request. RFC 9126 §4 adopts both by reference.
+    //
+    // This is the operator-facing contract, and it is hard-coded here rather
+    // than derived from the handler: an earlier revision refused these
+    // requests, which failed every FAPI 2.0 authorization module because the
+    // OIDF conformance suite sends exactly this shape.
     let f = setup().await;
     let app = test_app!(f);
-    let (_, body) = par!(app, f, f.client_id, f.client_secret, "");
-    let uri = body["request_uri"].as_str().unwrap().to_string();
 
     for extra in [
         "&response_type=code",
@@ -417,6 +420,9 @@ async fn request_uri_combined_with_inline_params_is_refused() {
         "&scope=openid",
         "&code_challenge=abc",
     ] {
+        // A fresh handle per iteration: a request_uri is single-use.
+        let (_, body) = par!(app, f, f.client_id, f.client_secret, "");
+        let uri = body["request_uri"].as_str().unwrap().to_string();
         let query = format!(
             "client_id={}&request_uri={}{}",
             f.client_id,
@@ -425,10 +431,93 @@ async fn request_uri_combined_with_inline_params_is_refused() {
         );
         assert_eq!(
             authorize!(app, &f, query),
-            400,
-            "inline param {extra} must not be accepted alongside request_uri"
+            302,
+            "duplicated inline param {extra} must be ignored, not refused"
         );
     }
+}
+
+#[actix_web::test]
+async fn a_query_string_copy_cannot_override_the_pushed_parameters() {
+    // The other half of §6.3, and the reason ignoring is as safe as refusing:
+    // the inline value is never read, so it cannot be the one that decides
+    // where the browser is sent. `state` is the observable proof — it is the
+    // only pushed parameter that comes back out in the redirect.
+    let f = setup().await;
+    let app = test_app!(f);
+    let (_, body) = par!(app, f, f.client_id, f.client_secret, "&state=pushed-state");
+    let uri = body["request_uri"].as_str().unwrap().to_string();
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?client_id={}&request_uri={}&state=attacker-state\
+             &scope=openid&response_type=code",
+            f.client_id,
+            enc(&uri)
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", user_token(&f))))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let location = resp
+        .headers()
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        location.contains("state=pushed-state"),
+        "the pushed state must win over a query-string copy, got {location}"
+    );
+    assert!(
+        !location.contains("attacker-state"),
+        "the query-string state must not reach the redirect, got {location}"
+    );
+}
+
+/// RFC 9126 §2.3 — the PAR endpoint's error response is the token endpoint's:
+/// a JSON object. A body `web::Form` cannot deserialize is rejected before the
+/// handler runs, and actix's default rendering is `text/plain` ("Parse error:
+/// missing field `redirect_uri`."), which two FAPI 2.0 modules reported as
+/// "Pushed Authorization did not return a JSON object".
+#[actix_web::test]
+async fn a_body_that_does_not_deserialize_still_gets_a_json_oauth2_error() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    // Well-formed urlencoding, missing a required field — the shape that
+    // reaches the extractor's error path rather than the handler's.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/par?tenant_id={}", f.tenant_id))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(format!(
+            "client_id={}&client_secret={}&response_type=code",
+            f.client_id, f.client_secret
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("application/json"),
+        "PAR must answer errors as JSON, got content-type {content_type}"
+    );
+
+    // `read_body_json` would panic on the plain-text body this test exists to
+    // prevent, so the assertion above is not redundant with this one.
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(
+        body["error"], "invalid_request",
+        "RFC 9126 §2.3 error object, got {body}"
+    );
 }
 
 #[actix_web::test]

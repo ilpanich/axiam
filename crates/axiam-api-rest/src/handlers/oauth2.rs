@@ -839,15 +839,11 @@ pub async fn authorize<C: Connection + Clone>(
     };
 
     // X7 G12 (plan §4.10). Classify request objects FIRST, before the PAR
-    // branch below, for two reasons. A `request_uri` that is not a PAR handle
-    // would otherwise fall into `par_service.consume` and come back as a
-    // generic `invalid_request`, losing the code OIDC Core §3.1.2.6 defines
-    // and a conformance suite matches on; and a non-PAR `request_uri` sent
-    // alongside inline parameters would earn the "must not be combined"
-    // refusal, which describes a rule that is beside the point when the
-    // parameter is not supported at all.
+    // branch below: a `request_uri` that is not a PAR handle would otherwise
+    // fall into `par_service.consume` and come back as a generic
+    // `invalid_request`, losing the code OIDC Core §3.1.2.6 defines and a
+    // conformance suite matches on.
     //
-    // Both forms are refused either way — this only decides *which* refusal.
     // The marker travels on the `AuthorizeRequest` rather than being answered
     // here so that the client and its `redirect_uri` are validated first: a
     // refusal is redirected only to a URI the client actually registered, and
@@ -859,11 +855,31 @@ pub async fn authorize<C: Connection + Clone>(
     // parameters came inline or through PAR.
     let session_evidence = resolve_session_evidence(&state, user.tenant_id, user.session_id).await;
 
-    // B5 / RFC 9126 §4. The two forms do not mix: a request carrying both a
-    // `request_uri` and inline parameters is refused rather than merged.
-    // Merging is exactly where parameter confusion lives — an attacker
-    // supplies the inline value they want and lets the pushed copy satisfy
-    // whatever check reads the other one.
+    // B5. The pushed copy wins; the query string's copies are IGNORED, not
+    // merged and not refused.
+    //
+    // The distinction is the whole of RFC 9101 §6.3, which RFC 9126 §4 adopts
+    // by reference ("build an authorization request as defined in [RFC9101]"):
+    //
+    //   The authorization server MUST extract the set of authorization request
+    //   parameters from the Request Object value. The authorization server MUST
+    //   only use the parameters in the Request Object, even if the same
+    //   parameter is provided in the query parameter.
+    //
+    // and §5 says in terms that a client MAY send them duplicated. So a
+    // duplicated `response_type`/`redirect_uri`/`scope`/`code_challenge` is a
+    // conformant request, and an earlier revision of this handler refused it —
+    // which failed every FAPI 2.0 authorization module, since the OIDF suite
+    // sends exactly that shape.
+    //
+    // The security argument the refusal was built on is sound and is satisfied
+    // by ignoring rather than refusing: parameter confusion needs the inline
+    // value to be *read* by something, and nothing below reads it. Every field
+    // of the request comes from `params`, the pushed copy — as `state` and
+    // `nonce` already did, for exactly this reason. `client_id` is the one
+    // parameter that is still compared rather than ignored, because §6.3
+    // requires the two to be identical; `par_service.consume` does that by
+    // scoping the handle to the client that pushed it.
     //
     // A refused request object takes the inline branch whatever it carried:
     // there is nothing to consume, and the branch exists only to reach the
@@ -874,19 +890,6 @@ pub async fn authorize<C: Connection + Clone>(
     };
     let req = match request_uri {
         Some(request_uri) => {
-            if axiam_oauth2::par::has_inline_params(
-                q.response_type.as_deref(),
-                q.redirect_uri.as_deref(),
-                q.scope.as_deref(),
-                q.code_challenge.as_deref(),
-            ) {
-                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
-                    "request_uri must not be combined with inline \
-                     authorization parameters"
-                        .into(),
-                ));
-            }
-
             let params = match state
                 .oauth2
                 .par_service
@@ -3618,6 +3621,38 @@ pub struct PushedAuthorizationResponse {
     pub request_uri: String,
     /// Seconds until the `request_uri` expires.
     pub expires_in: i64,
+}
+
+/// Render a malformed PAR body as an OAuth2 error object (RFC 9126 §2.3).
+///
+/// # Why this exists
+///
+/// `web::Form` rejects a body it cannot deserialize *before* the handler runs,
+/// and actix's default rendering is `400` with a `text/plain` body — for a
+/// missing `redirect_uri`, literally:
+///
+/// ```text
+/// Parse error: missing field `redirect_uri`.
+/// ```
+///
+/// RFC 9126 §2.3 says the PAR endpoint's error response is the token
+/// endpoint's: a JSON object carrying `error` and optionally
+/// `error_description`. A client cannot act on prose, and a conformance suite
+/// reports it as "Pushed Authorization did not return a JSON object" — which
+/// is what two FAPI 2.0 modules did.
+///
+/// The description is deliberately actix's own message: the caller already
+/// controls every byte of the body being described, so naming the field it got
+/// wrong tells an attacker nothing and saves an integrator an afternoon.
+///
+/// Wired at the route rather than inside the handler because the handler is
+/// never reached — see `crate::server`'s `/par` resource.
+pub fn par_form_error(
+    err: actix_web::error::UrlencodedError,
+    _req: &HttpRequest,
+) -> actix_web::Error {
+    let body = build_oauth2_error_response(&OAuth2Error::InvalidRequest(err.to_string()));
+    actix_web::error::InternalError::from_response(err, body).into()
 }
 
 /// `POST /oauth2/par` — RFC 9126 (B5).

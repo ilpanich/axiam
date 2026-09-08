@@ -270,19 +270,19 @@ pub fn is_request_uri_gone(e: &OAuth2Error) -> bool {
     matches!(e, OAuth2Error::InvalidRequest(msg) if msg == REQUEST_URI_GONE)
 }
 
-/// Whether an authorize request is carrying inline parameters alongside a
-/// `request_uri`.
-///
-/// RFC 9126 §4: the two forms do not mix. Rather than merging (where parameter
-/// confusion lives), a request carrying both is refused.
-pub fn has_inline_params(
-    response_type: Option<&str>,
-    redirect_uri: Option<&str>,
-    scope: Option<&str>,
-    code_challenge: Option<&str>,
-) -> bool {
-    response_type.is_some() || redirect_uri.is_some() || scope.is_some() || code_challenge.is_some()
-}
+// `has_inline_params` used to live here: it reported whether an authorize
+// request carried `response_type`/`redirect_uri`/`scope`/`code_challenge`
+// alongside a `request_uri`, and the authorization endpoint refused such a
+// request as "the two forms do not mix".
+//
+// It is gone rather than merely unused, because the rule it encoded is not the
+// one the specifications state. RFC 9126 §4 delegates the shape of the
+// authorization request to RFC 9101, whose §5 says a client MAY duplicate the
+// pushed parameters in the query string and whose §6.3 says the authorization
+// server MUST only *use* the ones from the pushed request. Ignore, not refuse
+// — and the endpoint reads every field from the pushed copy already, so
+// ignoring is what it now does. See the comment at the `request_uri` branch in
+// `axiam_api_rest::handlers::oauth2`.
 
 #[cfg(test)]
 mod tests {
@@ -316,15 +316,6 @@ mod tests {
         let h = hash_request_uri(&uri);
         assert!(!uri.contains(&h));
         assert_eq!(h.len(), 64, "hex-encoded SHA-256");
-    }
-
-    #[test]
-    fn inline_params_are_detected_individually() {
-        assert!(!has_inline_params(None, None, None, None));
-        assert!(has_inline_params(Some("code"), None, None, None));
-        assert!(has_inline_params(None, Some("https://rp/cb"), None, None));
-        assert!(has_inline_params(None, None, Some("openid"), None));
-        assert!(has_inline_params(None, None, None, Some("chal")));
     }
 
     #[test]

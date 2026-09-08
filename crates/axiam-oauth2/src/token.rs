@@ -1183,6 +1183,77 @@ where
     }
 
     /// Exchange an authorization code for tokens (RFC 6749 section 4.1.3).
+    /// Revoke what a replayed authorization code minted (RFC 6749 §10.5).
+    ///
+    /// # What gets revoked, and why it is the session
+    ///
+    /// The spec says "all tokens previously issued based on that authorization
+    /// code". An AXIAM access token is a stateless EdDSA JWT — there is
+    /// nothing to delete — but every resource request already checks that the
+    /// session named by the token's `sid` is still live
+    /// (`is_session_active`, on the hot path and cached). Invalidating that
+    /// session therefore stops the minted access token at the next request,
+    /// with no new store and no new per-request read.
+    ///
+    /// # The two costs, stated plainly
+    ///
+    /// The session is the **browser** session the authorization happened in,
+    /// so revoking it signs the user out of everything that session reaches,
+    /// AXIAM's own admin UI included. And a legitimate client that retries
+    /// after losing a `200` response replays a code exactly as an attacker
+    /// does — the server cannot tell them apart, which is precisely why
+    /// §10.5's answer is to revoke rather than to guess.
+    ///
+    /// # Not an oracle
+    ///
+    /// Both branches return the same `invalid_grant` from the caller, and a
+    /// hash naming no row revokes nothing. A replay does cost one extra read
+    /// and one write, so the two are distinguishable by timing — to an
+    /// attacker who already holds a real authorization code, which is the
+    /// position this whole path exists to answer.
+    async fn revoke_after_code_replay(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
+    ) {
+        let session_id = match self
+            .code_repo
+            .replayed_session(tenant_id, code_hash, client_id, redirect_uri)
+            .await
+        {
+            Ok(Some(id)) => id,
+            // Nothing to revoke: an unknown code, or one issued with no
+            // session behind it. Not a replay worth reporting.
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not check whether a refused authorization code was a replay; \
+                     the redemption is still denied"
+                );
+                return;
+            }
+        };
+
+        match self.session_repo.invalidate(tenant_id, session_id).await {
+            Ok(()) => tracing::warn!(
+                client_id = %client_id,
+                session_id = %session_id,
+                "authorization code replay detected; revoked the session it was issued from \
+                 (RFC 6749 §10.5)"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                client_id = %client_id,
+                session_id = %session_id,
+                "authorization code replay detected but the session could not be revoked; \
+                 the redemption is still denied"
+            ),
+        }
+    }
+
     async fn handle_authorization_code(
         &self,
         tenant_id: Uuid,
@@ -1299,14 +1370,26 @@ where
         }
 
         // Now atomically consume (mark as used) the code.
-        self.code_repo
+        if self
+            .code_repo
             .consume(tenant_id, &code_hash, client_id, redirect_uri)
             .await
-            .map_err(|_| {
-                OAuth2Error::InvalidGrant(
-                    "authorization code is invalid, expired, or already used".into(),
-                )
-            })?;
+            .is_err()
+        {
+            // RFC 6749 §10.5: a code used more than once must be denied — the
+            // `Err` above already does that — and the server "SHOULD revoke
+            // (when possible) all tokens previously issued based on that
+            // authorization code".
+            //
+            // Best-effort and never fatal: the denial is the guarantee, the
+            // revocation is the clean-up, and a caller must not learn from a
+            // 500 that its replay found something.
+            self.revoke_after_code_replay(tenant_id, &code_hash, client_id, redirect_uri)
+                .await;
+            return Err(OAuth2Error::InvalidGrant(
+                "authorization code is invalid, expired, or already used".into(),
+            ));
+        }
 
         // Resolve org_id from tenant
         let tenant = self

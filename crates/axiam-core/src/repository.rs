@@ -1470,6 +1470,32 @@ pub trait AuthorizationCodeRepository: Send + Sync {
         redirect_uri: &str,
     ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
 
+    /// The session an **already-redeemed** code was issued from, if this hash
+    /// names one.
+    ///
+    /// Called only after [`Self::consume`] has refused, to tell a *replay* —
+    /// a code that existed and has been spent — apart from a hash that names
+    /// nothing. RFC 6749 §10.5 asks an authorization server that sees a code
+    /// used twice to "revoke (when possible) all tokens previously issued
+    /// based on that authorization code", and the session is what AXIAM can
+    /// revoke: an access token is a stateless JWT, but every resource request
+    /// already checks that the session in its `sid` is still live.
+    ///
+    /// `Ok(None)` for an unknown hash, which is what an attacker guessing
+    /// codes produces. Deliberately **not** an error: nothing to revoke is the
+    /// ordinary answer here, and the token endpoint says `invalid_grant`
+    /// either way, so this cannot become an oracle for which codes exist.
+    ///
+    /// Expiry is not filtered. A replay of a code that has since expired is
+    /// still a replay, and the tokens it minted may still be live.
+    fn replayed_session(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
+    ) -> impl Future<Output = AxiamResult<Option<Uuid>>> + Send;
+
     /// Delete expired and already-used codes (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }

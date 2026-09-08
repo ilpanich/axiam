@@ -88,9 +88,11 @@ pub struct AuthorizeRequest {
     /// W4 — whether the query string carried an authentication-request
     /// parameter alongside a `request_uri` (plan §4.1, test T1.3).
     ///
-    /// RFC 9126 §4 does not mix the two forms, and the existing refusal
-    /// ([`crate::par::has_inline_params`]) already covers the seven original
-    /// parameters. The nine OIDC ones are refused **only on the honour lane**,
+    /// The seven original parameters (`response_type`, `redirect_uri`,
+    /// `scope`, `code_challenge` and friends) are **ignored** when duplicated
+    /// beside a `request_uri`, which is what RFC 9101 §6.3 requires and what
+    /// RFC 9126 §4 adopts by reference. The nine OIDC authentication-request
+    /// parameters are refused **only on the honour lane**,
     /// which is where the refusal is worth anything: there a browser adding
     /// `prompt=none` to somebody's pushed request would be changing what the
     /// request means, and on the `ignore` lane it would be adding a parameter
@@ -467,8 +469,16 @@ where
         let code_hash = hash_code(&raw_code);
 
         // 8. Store authorization code
-        let lifetime =
-            i64::try_from(self.code_lifetime_secs).expect("code_lifetime_secs exceeds i64::MAX");
+        //
+        // The lifetime is the deployment's, capped by the client's profile:
+        // FAPI 2.0 §5.3.2.1 caps an authorization code at 60 seconds, and
+        // AXIAM's default is 600. See `crate::fapi::auth_code_lifetime_secs`
+        // for why this is a per-client cap rather than a lower global default.
+        let lifetime = i64::try_from(crate::fapi::auth_code_lifetime_secs(
+            &client,
+            self.code_lifetime_secs,
+        ))
+        .expect("code_lifetime_secs exceeds i64::MAX");
         let expires_at = Utc::now() + chrono::Duration::seconds(lifetime);
         let _stored = self
             .code_repo
@@ -696,6 +706,17 @@ mod tests {
         ) -> AxiamResult<AuthorizationCode> {
             unimplemented!()
         }
+        async fn replayed_session(
+            &self,
+            _tid: Uuid,
+            _hash: &str,
+            _client_id: &str,
+            _redirect_uri: &str,
+        ) -> AxiamResult<Option<Uuid>> {
+            // These mocks exercise `authorize`, which never redeems a code and
+            // so never reaches the replay path.
+            unimplemented!()
+        }
         async fn delete_expired(&self) -> AxiamResult<u64> {
             Ok(0)
         }
@@ -779,6 +800,17 @@ mod tests {
             _client_id: &str,
             _redirect_uri: &str,
         ) -> AxiamResult<AuthorizationCode> {
+            unimplemented!()
+        }
+        async fn replayed_session(
+            &self,
+            _tid: Uuid,
+            _hash: &str,
+            _client_id: &str,
+            _redirect_uri: &str,
+        ) -> AxiamResult<Option<Uuid>> {
+            // These mocks exercise `authorize`, which never redeems a code and
+            // so never reaches the replay path.
             unimplemented!()
         }
         async fn delete_expired(&self) -> AxiamResult<u64> {

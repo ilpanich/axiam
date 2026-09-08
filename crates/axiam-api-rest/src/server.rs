@@ -630,6 +630,14 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/par")
                     .wrap(build_governor(rate_limit_cfg.par_per_min))
+                    // RFC 9126 §2.3 — a body `web::Form` cannot deserialize is
+                    // rejected before the handler runs, and actix's default
+                    // rendering is `text/plain`. The PAR endpoint's errors are
+                    // the token endpoint's: a JSON object. See
+                    // `handlers::oauth2::par_form_error`.
+                    .app_data(web::FormConfig::default().error_handler(
+                        handlers::oauth2::par_form_error,
+                    ))
                     .route(
                         web::post().to(handlers::oauth2::pushed_authorization_request::<C>),
                     ),

@@ -812,6 +812,44 @@ pub const fn wants_dpop_binding(client: &OAuth2Client) -> bool {
     client.dpop_bound_access_tokens
 }
 
+/// FAPI 2.0's ceiling on how long an authorization code may live.
+///
+/// FAPI 2.0 Security Profile Final §5.3.2.1, authorization server clause 11:
+/// "shall issue authorization codes with a maximum lifetime of 60 seconds".
+/// The rationale is in the profile's own §NOTE on authorization-code CSRF —
+/// the code's validity window *is* the window in which the attack has to land,
+/// so shortening it is a mitigation rather than housekeeping.
+pub const FAPI2_MAX_AUTH_CODE_LIFETIME_SECS: u64 = 60;
+
+/// How long an authorization code issued to `client` may live.
+///
+/// A FAPI 2.0 client gets the smaller of the deployment's configured lifetime
+/// and [`FAPI2_MAX_AUTH_CODE_LIFETIME_SECS`]; every other client gets exactly
+/// what the operator configured.
+///
+/// # Why this is a cap rather than a new default
+///
+/// `auth_code_lifetime_secs` defaults to 600, which is what OAuth 2.0 §4.1.2
+/// recommends as a *maximum* ("a maximum authorization code lifetime of 10
+/// minutes is RECOMMENDED") and is a perfectly ordinary value for a
+/// non-FAPI deployment. Lowering it globally would shorten the window for
+/// every existing client to satisfy a profile none of them are on — and a
+/// user who takes 90 seconds between the consent screen and the client's
+/// redemption is not an attacker.
+///
+/// Taking the minimum rather than forcing 60 also means an operator who has
+/// deliberately configured something shorter keeps it. A cap that raised a
+/// 30-second lifetime to 60 would be a profile making a deployment *less*
+/// strict, which is not what a security profile is for.
+#[must_use]
+pub fn auth_code_lifetime_secs(client: &OAuth2Client, configured: u64) -> u64 {
+    if client.profile.is_fapi2() {
+        configured.min(FAPI2_MAX_AUTH_CODE_LIFETIME_SECS)
+    } else {
+        configured
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1991,5 +2029,41 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // -- authorization code lifetime (FAPI 2.0 §5.3.2.1) --------------------
+
+    /// The operator-facing contract, hard-coded rather than derived: AXIAM's
+    /// default is 600 seconds and FAPI 2.0 caps a code at 60. Asserting the
+    /// numbers means a future change to either one has to come here and say so.
+    #[test]
+    fn a_fapi2_client_gets_a_sixty_second_code_from_the_default_config() {
+        assert_eq!(auth_code_lifetime_secs(&fapi_client(), 600), 60);
+    }
+
+    /// The cap applies to FAPI clients only. Lowering it for everybody would
+    /// shorten the window for every client in every existing deployment to
+    /// satisfy a profile none of them are on.
+    #[test]
+    fn a_non_fapi_client_keeps_the_configured_lifetime() {
+        assert_eq!(auth_code_lifetime_secs(&base_client(), 600), 600);
+    }
+
+    /// A cap, not a setting: an operator who deliberately configured something
+    /// shorter than 60 keeps it. Raising it to 60 would be a security profile
+    /// making a deployment *less* strict.
+    #[test]
+    fn a_shorter_configured_lifetime_survives_the_fapi_cap() {
+        assert_eq!(auth_code_lifetime_secs(&fapi_client(), 30), 30);
+        assert_eq!(auth_code_lifetime_secs(&base_client(), 30), 30);
+    }
+
+    /// The boundary the conformance suite actually probes: it waits 62 seconds
+    /// and expects the code to be dead. Exactly 60 must therefore be the
+    /// ceiling, not one second more.
+    #[test]
+    fn the_cap_is_sixty_not_sixty_one() {
+        assert_eq!(FAPI2_MAX_AUTH_CODE_LIFETIME_SECS, 60);
+        assert_eq!(auth_code_lifetime_secs(&fapi_client(), 61), 60);
     }
 }

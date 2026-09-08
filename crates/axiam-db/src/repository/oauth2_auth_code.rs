@@ -407,6 +407,52 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
         row.try_into_auth_code().map_err(Into::into)
     }
 
+    async fn replayed_session(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
+    ) -> AxiamResult<Option<Uuid>> {
+        // `used = true` is the whole predicate that makes this a replay rather
+        // than a lookup: an unspent code never reaches here, because `consume`
+        // would have succeeded. `client_id` and `redirect_uri` are matched for
+        // the same reason `consume` matches them — a caller presenting the
+        // wrong pair is not the party this code was issued to, and must not be
+        // able to revoke the session it belongs to.
+        //
+        // Expiry is deliberately absent: a replayed code that has since
+        // expired still minted tokens, and those may still be live.
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE session_id FROM oauth2_auth_code \
+                 WHERE tenant_id = $tenant_id \
+                   AND code_hash = $code_hash \
+                   AND client_id = $client_id \
+                   AND redirect_uri = $redirect_uri \
+                   AND used = true",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("code_hash", code_hash.to_string()))
+            .bind(("client_id", client_id.to_string()))
+            .bind(("redirect_uri", redirect_uri.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<Option<String>> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .flatten()
+            .next()
+            .and_then(|s| Uuid::parse_str(&s).ok()))
+    }
+
     async fn delete_expired(&self) -> AxiamResult<u64> {
         let mut result = self
             .db

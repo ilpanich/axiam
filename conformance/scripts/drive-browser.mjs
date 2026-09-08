@@ -235,6 +235,26 @@ async function main() {
     for (;;) {
       let drove = 0;
       for (const testId of await currentInstances()) {
+        // Only a test that is still WAITING may be driven, and this check is
+        // not defensive — it is a correctness requirement.
+        //
+        // The suite runs every module of a plan through ONE alias, and a
+        // callback is delivered to whichever test holds that alias at the
+        // moment it arrives ("Alias has now been claimed by another test" in
+        // the log). Completing a URL whose test has already moved on therefore
+        // delivers ITS result to somebody else's callback. That is not
+        // hypothetical: an `invalid_request` from
+        // `oidcc-response-type-missing` was driven late and landed on
+        // `oidcc-server`, failing the plan's happy path with an error it never
+        // asked for — and looking exactly like an AXIAM defect.
+        let status;
+        try {
+          status = (await suiteJson(`/api/info/${testId}`)).status;
+        } catch {
+          continue;
+        }
+        if (status !== 'WAITING') continue;
+
         let info;
         try {
           info = await suiteJson(`/api/runner/browser/${testId}`);

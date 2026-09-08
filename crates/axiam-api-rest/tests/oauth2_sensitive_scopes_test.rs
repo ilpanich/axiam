@@ -296,6 +296,9 @@ fn userinfo_token(
         None,
         None,
         client_id,
+        // No session: these fixtures mint a token directly rather than through
+        // an authorization, and the reader falls back to `jti`.
+        None,
     )
     .unwrap()
 }

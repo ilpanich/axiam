@@ -1357,6 +1357,11 @@ where
             cnf,
             ext,
             Some(client_id),
+            // The session this authorization was performed in. `jti` stays a
+            // unique per-token id; the session travels in `sid`, which is what
+            // the session-revocation check reads. Without it this token is
+            // refused at every session-validated endpoint, UserInfo included.
+            auth_code.session_id,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -1822,6 +1827,11 @@ where
                 cnf,
                 ext,
                 Some(client_id),
+                // Rotation carries the session forward. A refreshed token that
+                // dropped `sid` would stop working at UserInfo the moment it
+                // replaced the one that did, which the end user would
+                // experience as the session silently ending mid-flow.
+                stored.session_id,
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         } else {

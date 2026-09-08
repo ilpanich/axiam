@@ -65,6 +65,36 @@ pub struct AccessTokenClaims {
     /// revocation tolerates this by treating the jti-to-session relationship
     /// as advisory.
     pub jti: String,
+    /// OIDC session identifier — the `session.id` this token was issued from.
+    ///
+    /// # Why this exists alongside `jti`
+    ///
+    /// The `jti` doc above states the intended contract: for a user-flow token
+    /// it *equals* the issuing session's id. Every login path honours it. The
+    /// OAuth2 authorization-code and refresh paths did not — they minted a
+    /// random `jti`, because a `jti` must be unique per token and a session
+    /// issues many — so `is_session_active` looked up a session that had never
+    /// existed and refused the token with "session revoked or expired".
+    ///
+    /// The effect was that **no OAuth2 access token could be used at
+    /// `/oauth2/userinfo`**, which is to say UserInfo did not work for any OIDC
+    /// client. Found by the OpenID Foundation suite: eight of the first eleven
+    /// Basic OP modules failed on `EnsureHttpStatusCodeIs200` against the
+    /// resource endpoint, all with the same 401.
+    ///
+    /// So the session travels in its own claim and `jti` goes back to being
+    /// what RFC 7519 §4.1.7 says it is — a unique id for *this token*. Readers
+    /// prefer `sid` and fall back to `jti`, which keeps every token issued
+    /// before this claim existed working exactly as it did.
+    ///
+    /// `None` for a token with no session behind it: client-credentials, an
+    /// RPT, a token exchange. Those are not weakened by the absence — there is
+    /// no session to revoke.
+    ///
+    /// Named `sid` to match OIDC Core §2's ID-token claim, which already
+    /// carries the same value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
     /// Token audience — `"axiam:user"` or `"axiam:m2m"`.
     ///
     /// `None` means the token was issued before Phase 4 and should be treated
@@ -515,6 +545,7 @@ pub struct AccessTokenSpec {
     org_id: Uuid,
     scope: Option<String>,
     jti: String,
+    sid: Option<String>,
     aud: String,
     expiry: Expiry,
     cnf: Option<CnfClaim>,
@@ -541,6 +572,7 @@ impl AccessTokenSpec {
             org_id,
             scope: None,
             jti,
+            sid: None,
             aud: aud.to_owned(),
             expiry: Expiry::FromConfig,
             cnf: None,
@@ -702,6 +734,18 @@ impl AccessTokenSpec {
         self
     }
 
+    /// Bind this token to the session it was issued from (`sid`).
+    ///
+    /// Call it wherever a session exists. Omitting it does not fail — it
+    /// produces a token nothing can revoke ahead of its expiry, which is
+    /// correct for client-credentials and wrong for anything a user signed in
+    /// for. See [`AccessTokenClaims::sid`].
+    #[must_use]
+    pub fn session(mut self, session_id: Option<Uuid>) -> Self {
+        self.sid = session_id.map(|s| s.to_string());
+        self
+    }
+
     /// Expire `secs` after issuance instead of after
     /// `config.access_token_lifetime_secs`.
     #[must_use]
@@ -746,6 +790,7 @@ impl AccessTokenSpec {
             iat: now,
             exp,
             jti: self.jti.clone(),
+            sid: self.sid.clone(),
             aud: Some(self.aud.clone()),
             scope: self.scope.clone(),
             sub_kind: self.sub_kind,
@@ -844,8 +889,13 @@ pub fn issue_access_token_enriched(
     cnf: Option<CnfClaim>,
     ext: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<String, AuthError> {
+    // No `sid`, deliberately. Every caller of this wrapper is a login path,
+    // and a login path passes the session's own id as `jti` — the contract
+    // `AccessTokenClaims::jti` documents. The reader falls back to `jti` when
+    // `sid` is absent, so these tokens resolve to the same session they always
+    // did, and no login path had to change for the OAuth2 fix.
     issue_access_token_for_client(
-        user_id, tenant_id, org_id, scopes, config, jti, aud, cnf, ext, None,
+        user_id, tenant_id, org_id, scopes, config, jti, aud, cnf, ext, None, None,
     )
 }
 
@@ -873,6 +923,7 @@ pub fn issue_access_token_for_client(
     cnf: Option<CnfClaim>,
     ext: Option<std::collections::BTreeMap<String, String>>,
     client_id: Option<&str>,
+    session_id: Option<Uuid>,
 ) -> Result<String, AuthError> {
     AccessTokenSpec::user(user_id, tenant_id, org_id, jti)
         .aud(aud)
@@ -880,6 +931,10 @@ pub fn issue_access_token_for_client(
         .cnf(cnf)
         .ext(ext)
         .client_id(client_id)
+        // The authorization-code and refresh paths both have a session and
+        // both pass it. Without this the token is unusable at every
+        // session-validated endpoint, UserInfo included.
+        .session(session_id)
         .issue(config)
 }
 
@@ -2514,6 +2569,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             iat: 0,
             exp: i64::MAX,
             jti: Uuid::new_v4().to_string(),
+            sid: None,
             aud: Some(AUD_M2M.into()),
             scope: None,
             sub_kind: SubjectKind::OAuth2Client,

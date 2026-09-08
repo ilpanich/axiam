@@ -426,6 +426,7 @@ mod tests {
             iat: 0,
             exp: i64::MAX,
             jti: Uuid::new_v4().to_string(),
+            sid: None,
             aud: None,
             scope: None,
             // B3: this fixture is a directly-issued token, not one obtained

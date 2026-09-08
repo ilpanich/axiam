@@ -102,6 +102,7 @@ fn make_admin(tenant_id: Uuid) -> AuthenticatedUser {
             iat: 0,
             exp: i64::MAX,
             jti: session_id.to_string(),
+            sid: None,
             aud: Some("axiam:user".into()),
             scope: None,
             sub_kind: SubjectKind::User,

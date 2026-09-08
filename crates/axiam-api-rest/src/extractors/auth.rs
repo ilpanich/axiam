@@ -846,9 +846,23 @@ fn check_user_aud_and_parse_jti(
         }
     }
 
-    Uuid::parse_str(&validated.0.jti).map_err(|_| {
+    // `sid` first, `jti` second — and the order is the fix, not a preference.
+    //
+    // A login-issued token sets `jti` to its session's id, which is the
+    // contract `AccessTokenClaims::jti` documents and what this function
+    // originally read. An OAuth2 access token cannot: `jti` must be unique per
+    // token and one session issues many, so the authorization-code path minted
+    // a random one. `is_session_active` then looked up a session that had never
+    // existed and refused every OAuth2 token with "session revoked or expired"
+    // — which meant UserInfo did not work for any OIDC client.
+    //
+    // Falling back to `jti` is what keeps every token issued before `sid`
+    // existed working exactly as it did, so this needs no migration and no
+    // flag day.
+    let raw = validated.0.sid.as_deref().unwrap_or(&validated.0.jti);
+    Uuid::parse_str(raw).map_err(|_| {
         AxiamError::AuthenticationFailed {
-            reason: "invalid jti".into(),
+            reason: "invalid session identifier".into(),
         }
         .into()
     })
@@ -1240,6 +1254,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             iat: now,
             exp: now + 900,
             jti: Uuid::new_v4().to_string(),
+            sid: None,
             aud: None, // no audience
             scope: None,
             sub_kind: SubjectKind::User,
@@ -1457,6 +1472,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             iat: now,
             exp: now + 900,
             jti: Uuid::new_v4().to_string(),
+            sid: None,
             aud: Some("axiam:user".into()),
             scope: None,
             sub_kind: SubjectKind::User,

@@ -114,11 +114,21 @@ async function suiteJson(path) {
   return res.json();
 }
 
-/** Every test instance in the newest plan, newest plan first. */
+/**
+ * Every test instance in the newest plan.
+ *
+ * `length` has to be generous, and that is the whole point of this comment.
+ * `/api/plan` returns plans in the suite's own order, which is OLDEST FIRST —
+ * so `length=5` on a suite that has run a dozen plans returns the five oldest
+ * and the newest is not in the window at all. Sorting them by `started`
+ * afterwards then yields the newest of the WRONG five, and the driver polls a
+ * long-dead plan forever, reporting "0 authorizations completed" with no error
+ * to explain it. Fetch a wide window, then sort.
+ */
 async function currentInstances() {
-  const plans = (await suiteJson('/api/plan?length=5')).data ?? [];
-  plans.sort((a, b) => String(b.started ?? '').localeCompare(String(a.started ?? '')));
+  const plans = (await suiteJson('/api/plan?length=100')).data ?? [];
   if (plans.length === 0) return [];
+  plans.sort((a, b) => String(b.started ?? '').localeCompare(String(a.started ?? '')));
   const plan = await suiteJson(`/api/plan/${plans[0]._id}`);
   return (plan.modules ?? []).flatMap((m) => m.instances ?? []);
 }

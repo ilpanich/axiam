@@ -236,10 +236,35 @@ async function main() {
     headless: true,
     args: ['--host-resolver-rules=MAP host.docker.internal 127.0.0.1'],
   });
-  // A fresh context per sweep is not an optimisation to skip: the OP session
-  // cookie is the whole point of the login hop, and carrying one between
-  // modules would silently turn "sign in" into "already signed in" and make
-  // prompt/max_age modules test nothing.
+  // ONE BROWSER CONTEXT PER TEST — not per authorization, and not one for the
+  // whole run. Both extremes are wrong, in opposite directions.
+  //
+  // A context per authorization was the first attempt, on the reasoning that
+  // carrying an OP session between modules would turn "sign in" into "already
+  // signed in". True between modules; false WITHIN one. A test may drive two
+  // authorizations and compare them, and `oidcc-max-age-10000` does exactly
+  // that:
+  //
+  //     CheckIdTokenAuthTimeClaimsSameIfPresent: the id_tokens contain
+  //     different auth_time claims, but must contain the same auth_time
+  //
+  // Two fresh contexts meant two sign-ins, two sessions and two `auth_time`s,
+  // so the module failed on a difference the harness had manufactured.
+  // `oidcc-prompt-none-logged-in` failed the same way: it asks for `prompt=none`
+  // expecting the session established a moment earlier, and met a browser that
+  // had never signed in.
+  //
+  // One context for the whole run is the opposite error — then
+  // `oidcc-prompt-none-not-logged-in` can never see a signed-out browser.
+  //
+  // Per test gives both: continuity inside a test, isolation between them.
+  const contexts = new Map();
+  const contextFor = async (testId) => {
+    if (!contexts.has(testId)) {
+      contexts.set(testId, await browser.newContext({ ignoreHTTPSErrors: true }));
+    }
+    return contexts.get(testId);
+  };
   let seen = new Set();
   try {
     for (;;) {
@@ -263,7 +288,17 @@ async function main() {
         } catch {
           continue;
         }
-        if (status !== 'WAITING') continue;
+        if (status !== 'WAITING') {
+          // The test is done with its browser. Closing it here — rather than
+          // after each visit — is what bounds the number of live contexts
+          // without breaking continuity inside a test.
+          const finished = contexts.get(testId);
+          if (finished) {
+            contexts.delete(testId);
+            await finished.close().catch(() => {});
+          }
+          continue;
+        }
 
         let info;
         try {
@@ -274,9 +309,10 @@ async function main() {
         for (const url of info.urls ?? []) {
           if (seen.has(url)) continue;
           seen.add(url);
-          const context = await browser.newContext({ ignoreHTTPSErrors: true });
+          // Reused across every authorization this test performs, and closed
+          // only when the test leaves WAITING for good — see `contextFor`.
+          const context = await contextFor(testId);
           if (await visit(context, url)) drove += 1;
-          await context.close();
         }
       }
       if (ONCE) {

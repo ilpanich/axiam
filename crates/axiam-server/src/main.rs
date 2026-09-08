@@ -1071,7 +1071,37 @@ async fn main() -> std::io::Result<()> {
     )
     // X1 — the same gate `AuthService` holds, so `token.pre_issue` and
     // `login.post_auth` share one routing table and one per-tenant cap.
-    .with_reactor_gate(Arc::clone(&reactor_gate));
+    .with_reactor_gate(Arc::clone(&reactor_gate))
+    // X5.1 — `private_key_jwt` (RFC 7523 §2.2), one of FAPI 2.0's two
+    // client-authentication families.
+    //
+    // Without this the crypto still exists and nothing can reach it:
+    // `TokenService` answers a client registered for the method with
+    // "no assertion verifier configured" and refuses — deliberately, rather
+    // than falling back to another credential — so the effect of not wiring it
+    // is that no client anywhere can authenticate this way. The whole
+    // 56-module FAPI `private_key_jwt` conformance lane failed on that one
+    // missing line.
+    //
+    // The JWKS cache is the FEDERATION one, shared with the OIDC IdP handlers
+    // on purpose: a client's `jwks_uri` is a URL the server fetches on demand,
+    // which is the same SEC-054 SSRF surface whichever feature asked for it,
+    // and a second cache would be a second place for a guard to be missing.
+    .with_assertion_verifier(Arc::new(
+        axiam_oauth2::private_key_jwt::JwksAssertionVerifier::new(
+            (*jwks_cache).clone(),
+            http_client.clone(),
+            proof_replay_repo.clone(),
+            config.auth.oauth2_issuer_url.clone(),
+            // The token endpoint, for clients following OIDC Core §9 rather
+            // than RFC 7523. A FAPI 2.0 client is held to the issuer alone —
+            // `JwksAssertionVerifier` decides that from the client's profile.
+            vec![format!(
+                "{}/oauth2/token",
+                config.auth.oauth2_issuer_url.trim_end_matches('/')
+            )],
+        ),
+    ));
 
     // B2 — device authorization grant (RFC 8628).
     //

@@ -98,6 +98,45 @@ impl Audience {
     }
 }
 
+/// Which `aud` values a client-authentication assertion may carry.
+///
+/// Two rules, because two specifications disagree and AXIAM serves clients
+/// under both.
+#[derive(Debug, Clone, Copy)]
+pub enum AudiencePolicy<'a> {
+    /// The interop rule, for every client not on a FAPI profile.
+    ///
+    /// RFC 7523 §3 wants an identifier of the authorization server; OIDC Core
+    /// §9 wants the token endpoint URL. Refusing a client for following the
+    /// other specification would be an interop failure with no security
+    /// content, so both are accepted, in a string or in an array.
+    AnyOf(&'a [String]),
+    /// The FAPI 2.0 rule.
+    ///
+    /// FAPI 2.0 Security Profile Final §5.3.2.1: the authorization server
+    /// "shall **only** accept its issuer identifier value (as defined in
+    /// [RFC8414]) **as a string** in the aud claim received in client
+    /// authentication assertions" — and the client half of the profile adds
+    /// "The issuer identifier value shall be sent as a string not as an item
+    /// in an array."
+    ///
+    /// Both halves are enforced here. An array is refused *even when it
+    /// contains the issuer*, which is the point: the profile removes the
+    /// ambiguity about which audience a token was meant for rather than
+    /// resolving it.
+    IssuerStringOnly(&'a str),
+}
+
+impl AudiencePolicy<'_> {
+    fn accepts(&self, aud: &Audience) -> bool {
+        match (self, aud) {
+            (Self::AnyOf(acceptable), _) => aud.contains_any(acceptable),
+            (Self::IssuerStringOnly(issuer), Audience::One(a)) => a == issuer,
+            (Self::IssuerStringOnly(_), Audience::Many(_)) => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AssertionClaims {
     iss: String,
@@ -245,12 +284,8 @@ pub fn check_assertion_type(presented: Option<&str>) -> Result<(), AssertionErro
 
 /// Verify a `client_assertion` against the keys a client registered.
 ///
-/// `acceptable_audiences` is the set of values RFC 7523 §3 permits in `aud`:
-/// AXIAM's issuer and its token-endpoint URL. Both are accepted because the
-/// specifications disagree about which one a client should use — OIDC Core §9
-/// says the token endpoint URL, RFC 7523 says an identifier of the
-/// authorization server — and refusing a client for following the other
-/// specification would be an interop failure with no security content.
+/// `audience` says which `aud` values this client may use — see
+/// [`AudiencePolicy`], which carries the two rules and why there are two.
 ///
 /// Returns the `jti` for the caller to record. **A caller that drops it has not
 /// implemented replay protection**, which is why the return type carries it
@@ -258,7 +293,7 @@ pub fn check_assertion_type(presented: Option<&str>) -> Result<(), AssertionErro
 pub fn verify_client_assertion(
     assertion: &str,
     client_id: &str,
-    acceptable_audiences: &[String],
+    audience: AudiencePolicy<'_>,
     keys: &JwkSet,
     now: i64,
 ) -> Result<VerifiedAssertion, AssertionError> {
@@ -330,7 +365,7 @@ pub fn verify_client_assertion(
             got: claims.sub,
         });
     }
-    if !claims.aud.contains_any(acceptable_audiences) {
+    if !audience.accepts(&claims.aud) {
         return Err(AssertionError::AudienceMismatch);
     }
 
@@ -474,22 +509,33 @@ pub struct JwksAssertionVerifier<R> {
     jwks: axiam_federation::jwks_cache::JwksCache,
     http: reqwest::Client,
     replay: R,
-    /// The `aud` values an assertion may name: AXIAM's issuer and its
-    /// token-endpoint URL. See [`verify_client_assertion`] for why both.
+    /// AXIAM's issuer identifier — the only `aud` a FAPI 2.0 client may name,
+    /// and the first choice for everyone else.
+    issuer: String,
+    /// The `aud` values a non-FAPI client's assertion may name: the issuer and
+    /// the token-endpoint URL. See [`AudiencePolicy`] for why both, and why a
+    /// FAPI 2.0 client gets neither this list nor an array.
     acceptable_audiences: Vec<String>,
 }
 
 impl<R> JwksAssertionVerifier<R> {
+    /// `issuer` is AXIAM's issuer identifier; `also_acceptable` are the extra
+    /// audiences a non-FAPI client may use, conventionally the token-endpoint
+    /// URL. The issuer is always acceptable and need not be repeated.
     pub fn new(
         jwks: axiam_federation::jwks_cache::JwksCache,
         http: reqwest::Client,
         replay: R,
-        acceptable_audiences: Vec<String>,
+        issuer: String,
+        also_acceptable: Vec<String>,
     ) -> Self {
+        let mut acceptable_audiences = vec![issuer.clone()];
+        acceptable_audiences.extend(also_acceptable);
         Self {
             jwks,
             http,
             replay,
+            issuer,
             acceptable_audiences,
         }
     }
@@ -545,22 +591,26 @@ where
                 }
             };
 
+            // FAPI 2.0 §5.3.2.1 narrows RFC 7523's audience rule to the issuer
+            // alone, sent as a string. Every other client keeps the interop
+            // list — a profile tightens what it covers and nothing else.
+            let audience = if client.profile.is_fapi2() {
+                AudiencePolicy::IssuerStringOnly(&self.issuer)
+            } else {
+                AudiencePolicy::AnyOf(&self.acceptable_audiences)
+            };
+
             let now = chrono::Utc::now().timestamp();
-            let verified = verify_client_assertion(
-                assertion,
-                &client.client_id,
-                &self.acceptable_audiences,
-                &keys,
-                now,
-            )
-            .map_err(|e| {
-                tracing::debug!(
-                    client_id = %client.client_id,
-                    reason = %e,
-                    "private_key_jwt client authentication failed"
-                );
-                failed()
-            })?;
+            let verified =
+                verify_client_assertion(assertion, &client.client_id, audience, &keys, now)
+                    .map_err(|e| {
+                        tracing::debug!(
+                            client_id = %client.client_id,
+                            reason = %e,
+                            "private_key_jwt client authentication failed"
+                        );
+                        failed()
+                    })?;
 
             // The signature proved possession of the key. This is what makes
             // the assertion single-*use* rather than merely single-*purpose*,
@@ -687,7 +737,28 @@ mod tests {
     }
 
     fn verify(assertion: &str, keys: &JwkSet) -> Result<VerifiedAssertion, AssertionError> {
-        verify_client_assertion(assertion, CLIENT, &audiences(), keys, NOW)
+        verify_client_assertion(
+            assertion,
+            CLIENT,
+            AudiencePolicy::AnyOf(&audiences()),
+            keys,
+            NOW,
+        )
+    }
+
+    /// The same verification under the FAPI 2.0 audience rule.
+    fn verify_fapi(
+        assertion: &str,
+        keys: &JwkSet,
+        issuer: &str,
+    ) -> Result<VerifiedAssertion, AssertionError> {
+        verify_client_assertion(
+            assertion,
+            CLIENT,
+            AudiencePolicy::IssuerStringOnly(issuer),
+            keys,
+            NOW,
+        )
     }
 
     // -- the happy path ---------------------------------------------------
@@ -712,6 +783,58 @@ mod tests {
         // ...as is an array containing one of them (RFC 7519 §4.1.3).
         let mut c = claims(NOW);
         c["aud"] = json!(["https://elsewhere.example", TOKEN_ENDPOINT]);
+        assert!(verify(&sign(&key, &c), &jwks(&[&key])).is_ok());
+    }
+
+    // -- the FAPI 2.0 audience rule (§5.3.2.1) ----------------------------
+
+    const ISSUER: &str = "https://as.example";
+
+    /// The one value FAPI 2.0 permits, in the one form it permits.
+    #[test]
+    fn a_fapi_client_may_name_the_issuer_as_a_string() {
+        let key = ed25519_key(None);
+        let mut c = claims(NOW);
+        c["aud"] = json!(ISSUER);
+        assert!(verify_fapi(&sign(&key, &c), &jwks(&[&key]), ISSUER).is_ok());
+    }
+
+    /// "shall only accept its issuer identifier value" — the token endpoint
+    /// URL is a perfectly good RFC 7523 audience and is still refused here.
+    /// The conformance suite probes this directly
+    /// (`par-test-token-endpoint-url-as-audience-fails`).
+    #[test]
+    fn a_fapi_client_may_not_name_the_token_endpoint() {
+        let key = ed25519_key(None);
+        let mut c = claims(NOW);
+        c["aud"] = json!(TOKEN_ENDPOINT);
+        assert!(matches!(
+            verify_fapi(&sign(&key, &c), &jwks(&[&key]), ISSUER),
+            Err(AssertionError::AudienceMismatch)
+        ));
+    }
+
+    /// "shall be sent as a string not as an item in an array" — refused even
+    /// though the array *contains* the issuer, which is the whole point of the
+    /// clause (`par-test-array-as-audience-fails`).
+    #[test]
+    fn a_fapi_client_may_not_wrap_the_issuer_in_an_array() {
+        let key = ed25519_key(None);
+        let mut c = claims(NOW);
+        c["aud"] = json!([ISSUER]);
+        assert!(matches!(
+            verify_fapi(&sign(&key, &c), &jwks(&[&key]), ISSUER),
+            Err(AssertionError::AudienceMismatch)
+        ));
+    }
+
+    /// The narrowing is the FAPI profile's alone: the same array is accepted
+    /// for a client that is not on it.
+    #[test]
+    fn the_interop_rule_is_unchanged_for_everyone_else() {
+        let key = ed25519_key(None);
+        let mut c = claims(NOW);
+        c["aud"] = json!([ISSUER]);
         assert!(verify(&sign(&key, &c), &jwks(&[&key])).is_ok());
     }
 

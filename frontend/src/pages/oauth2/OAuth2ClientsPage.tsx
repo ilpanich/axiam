@@ -48,7 +48,8 @@ function GrantTypeBadge({ type }: { type: string }) {
 // ─── X5.1 posture presentation ────────────────────────────────────────────────
 
 const AUTH_METHOD_LABELS: Record<string, string> = {
-  client_secret_post: "Client Secret",
+  client_secret_post: "Client Secret (body)",
+  client_secret_basic: "Client Secret (HTTP Basic)",
   tls_client_auth: "mTLS (PKI)",
   self_signed_tls_client_auth: "mTLS (self-signed)",
   private_key_jwt: "Private Key JWT",

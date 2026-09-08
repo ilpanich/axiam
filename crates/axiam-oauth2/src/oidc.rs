@@ -319,6 +319,21 @@ pub fn build_discovery_document_for(
         },
         token_endpoint_auth_methods_supported: vec![
             "client_secret_post".into(),
+            // W8 / RFC 6749 §2.3.1. Advertised unconditionally, like the two
+            // mTLS methods and for a narrower version of the same reason:
+            // whether a *particular* client may use it is decided by its
+            // registration, and this document describes the deployment's
+            // capabilities rather than any one client's. A `fapi2` client
+            // reading this list still cannot register for the method —
+            // `validate_registration` refuses it — which is the intended
+            // shape: the server can speak Basic, and the FAPI profile will
+            // not let a client that must not, do so.
+            //
+            // Listed second rather than first: the order is the operator's
+            // recommendation, and `client_secret_post` remains it (the header
+            // channel is the one intermediaries log). SDKs are forbidden from
+            // sending Basic at all — `sdks/CONTRACT.md` §5 rule 3.
+            "client_secret_basic".into(),
             // X5.1 / RFC 8705 §2. Advertised unconditionally: whether a mTLS
             // handshake is actually available is a deployment's listener
             // configuration (the p3 profile), and a client that cannot reach

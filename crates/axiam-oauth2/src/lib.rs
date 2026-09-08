@@ -3,6 +3,7 @@
 pub mod acr;
 pub mod authn_params;
 pub mod authorize;
+pub mod client_secret_basic;
 pub mod device;
 pub mod device_service;
 pub mod dpop;

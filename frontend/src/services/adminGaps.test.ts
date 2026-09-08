@@ -6,6 +6,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 import {
   validateClientPosture,
   isStrongAuthMethod,
+  CLIENT_AUTH_METHODS,
   OAUTH2_SCOPES,
   type ClientPosturePayload,
 } from "@/services/oauth2clients";
@@ -201,11 +202,26 @@ describe("validateClientPosture", () => {
 });
 
 describe("isStrongAuthMethod", () => {
-  it("counts only client_secret_post as weak", () => {
+  it("counts both shared-secret spellings as weak", () => {
     expect(isStrongAuthMethod("client_secret_post")).toBe(false);
+    // W8. One credential, two channels; neither is proof of possession of a
+    // private key, so FAPI 2.0 refuses both.
+    expect(isStrongAuthMethod("client_secret_basic")).toBe(false);
     expect(isStrongAuthMethod("tls_client_auth")).toBe(true);
     expect(isStrongAuthMethod("self_signed_tls_client_auth")).toBe(true);
     expect(isStrongAuthMethod("private_key_jwt")).toBe(true);
+  });
+
+  it("classifies every method the backend enum can hold", () => {
+    // The list and the classifier must not drift: a method added to
+    // CLIENT_AUTH_METHODS but forgotten in STRONG_AUTH_METHODS silently
+    // becomes weak, which is the safe direction; the reverse would let the
+    // UI offer a fapi2 registration the server refuses. This asserts the
+    // list is enumerated, not that every entry is strong.
+    for (const m of CLIENT_AUTH_METHODS) {
+      expect(typeof isStrongAuthMethod(m)).toBe("boolean");
+    }
+    expect(CLIENT_AUTH_METHODS).toContain("client_secret_basic");
   });
 });
 

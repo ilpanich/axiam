@@ -17,6 +17,10 @@
 - `crates/axiam-db/tests/w7_sensitive_columns_test.rs` — the storage, erasure and
   projection of the two columns (W7)
 - `crates/axiam-oauth2/src/sensitive.rs` — the four gates, and which party closes each
+- `crates/axiam-oauth2/src/client_secret_basic.rs` — the RFC 6749 §2.3.1 decoding
+  (W8), unit-tested without a running server
+- `crates/axiam-api-rest/tests/client_secret_basic_test.rs` — `client_secret_basic`
+  end to end, and the header-redaction grep (W8, T9.*)
 
 ---
 
@@ -366,6 +370,36 @@ discovery field.
   administrator asserting an out-of-band check and by nothing else, which is why
   row 127 is about the claim's honesty rather than about a ceremony.
 
+## OAuth 2.0 client authentication — `client_secret_basic` (wave W8)
+
+The Basic OP certification plan runs 37 of its 38 modules with
+`ClientAuthType = client_secret_basic`, so these rows are not one module's
+prerequisite but the default variant of the whole plan. The credential is the
+one `client_secret_post` already used — same peppered HMAC-SHA256 comparison,
+same rate-limit buckets, same uniform `invalid_client` — and every row below is
+about the *channel*, not the secret.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 130 | `client_secret_basic` is a registrable method: `ClientAuthMethod::ClientSecretBasic`, wire name `client_secret_basic`, `is_strong() == false`, `is_mtls() == false`. This reverses `an_unrecognised_auth_method_is_refused`, which pinned the refusal — a deliberate reversal on maintainer decision A (2026-09-07) | RFC 6749 §2.3.1 | Pass | `oauth2_client.rs::an_unrecognised_auth_method_is_refused`, `::client_auth_method_round_trips_through_its_wire_form` |
+| 131 | The credentials blob is base64-decoded, split on the **first** `:`, and each half then `application/x-www-form-urlencoded`-decoded. Skipping the last step is invisible against server-generated secrets and fatal for a third-party one; the fixture secret is `p%a+s:s` | RFC 6749 §2.3.1; RFC 7617 §2 | Pass | `client_secret_basic.rs::each_half_is_form_urldecoded_after_the_split`, `::the_split_is_on_the_first_colon`, `::a_raw_plus_decodes_to_a_space`; `client_secret_basic_test.rs::t9_1_*` |
+| 132 | The `client_id` may arrive in the header alone — the body parameter is optional for a client authenticating through `Authorization`, which is how 37 of the plan's 38 modules send it | RFC 6749 §2.3.1 | Pass | `client_secret_basic_test.rs::t9_2_the_client_id_may_arrive_only_in_the_header` |
+| 133 | A header `client_id` that disagrees with a body `client_id` is `invalid_request`, decided **before** the client lookup so no client-existence oracle is created | RFC 6749 §2.3.1; SEC-086 | Pass | `token.rs::resolve_client_id`; `client_secret_basic_test.rs::t9_2_a_body_client_id_that_disagrees_with_the_header_is_refused` |
+| 134 | A `client_secret` in the **body** of a `client_secret_basic` client is `invalid_request` — one authentication method per request. Ordered *after* the header credential verifies, so a caller holding no credential still gets the uniform `invalid_client` | RFC 6749 §2.3; SEC-086 | Pass | `client_secret_basic_test.rs::t9_3_a_body_secret_on_a_basic_client_is_invalid_request`, `::t9_3_a_wrong_basic_secret_plus_a_body_secret_reveals_nothing` |
+| 135 | The **registration** decides the channel (SEC-093 applied to a fourth method). A `client_secret_basic` client cannot authenticate with a body secret; a `client_secret_post` client's `Authorization: Basic` header is ignored and logged at `warn`, never a second way in | RFC 6749 §2.3; SEC-093 | Pass | `client_secret_basic_test.rs::t9_3_a_basic_client_may_not_authenticate_with_a_body_secret`, `::t9_3_i4_a_basic_header_on_a_post_client_is_ignored`, `::t9_3_i4_a_post_client_cannot_authenticate_with_the_header_alone` |
+| 136 | A malformed header — not base64, no separator, a truncated `%` escape, an empty half — is `invalid_client`, uniformly, with the four causes distinguishable only in a server-side `debug!` | RFC 6749 §5.2; SEC-086 | Pass | `client_secret_basic.rs::malformed_blobs_are_classified_rather_than_guessed_at`; `client_secret_basic_test.rs::a_malformed_basic_header_is_refused_and_challenged` |
+| 137 | A 401 answering a Basic attempt challenges with `WWW-Authenticate: Basic realm="axiam"`; one answering a form-body client keeps `Bearer realm="axiam"`. Decided from the request before the handler runs, so it holds on every exit including the edge refusal | RFC 6749 §5.2 | Pass | `oauth2_conformance.rs::a_basic_attempt_is_challenged_with_basic`, `::invalid_client_returns_www_authenticate_header`; `client_secret_basic_test.rs::a_failed_basic_attempt_is_challenged_with_basic`, `::a_failure_without_a_basic_header_keeps_the_bearer_challenge` |
+| 138 | The `Authorization` header never reaches a log. Asserted at TRACE over a successful request, a rejected one and one refused at the edge — none of the secret, the encoded secret, the base64 blob or the header value appears. `BasicCredentials`' `Debug` is hand-written to redact | plan §4.7 | Pass | `client_secret_basic.rs::the_secret_never_reaches_a_debug_rendering`; `client_secret_basic_test.rs::t9_4_a_failed_basic_attempt_logs_neither_the_secret_nor_the_blob`, `::t9_4_the_request_logging_layer_records_no_headers_at_all` |
+| 139 | The FAPI gate needed no new code: `validate_registration` refuses a `fapi2` + `client_secret_basic` registration through the existing `WeakClientAuth` arm, and `enforce_token_request` re-checks `is_strong()` at request time — both ask the question rather than enumerate the methods | FAPI 2.0 §5.3.1.1 | Pass | `fapi.rs::fapi_with_secret_auth_is_refused`, `::dpop_does_not_make_a_secret_client_fapi`, `::fapi_token_request_refuses_a_tampered_row` (all parametrised over both weak methods) |
+| 140 | `token_endpoint_auth_methods_supported` advertises `client_secret_basic`, listed after `client_secret_post` — the order is the operator's recommendation. The list is asserted **exhaustively**, so a method wired into `authenticate_client_credential` and never advertised fails the gate | Discovery §3 | Pass | `oidc_conformance.rs::discovery_advertises_every_implemented_client_auth_method` |
+
+**Not asserted here.** No conformance run has happened (see the W7 note above),
+so row 130–140 evidence is what the code does and the tests that show it, not a
+suite result. The operator guidance that `client_secret_post` remains the
+recommended method — and the reason (intermediaries log `Authorization`) — is in
+`sdks/CONTRACT.md` §5 rule 3 and `docs/security-profiles.md`, not in this
+matrix, which records conformance rather than advice.
+
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
 
 | # | Behaviour | Spec Ref | Status | Evidence |
@@ -498,3 +532,4 @@ discovery field.
 *Rows 81–89 added: wave W5 (cosmetic parameters + SPA i18n) — 2026-09-07*
 *Rows 90–103 added: wave W6 (`POST /oauth2/userinfo`) — 2026-09-07*
 *Rows 104–129 added: wave W7 (`address` and `phone` sensitive scopes) — 2026-09-08*
+*Rows 130–140 added: wave W8 (`client_secret_basic`) — 2026-09-08*

@@ -84,7 +84,29 @@ if [ "$PROFILE" = "basic" ]; then
         profile: "standard",
         require_par: false,
         token_endpoint_auth_method: $m,
-        browser_sso: true
+        browser_sso: true,
+        # The honour lane from W4, and without it a third of this plan tests
+        # nothing.
+        #
+        # `authn_request_params` defaults to `ignore`, which means AXIAM drops
+        # `prompt`, `max_age`, `acr_values`, `id_token_hint`, `login_hint`,
+        # `display`, `ui_locales` and `claims_locales` before any decision sees
+        # them. The Basic OP plan has whole families of modules that do nothing
+        # but send those parameters and assert on the result — so on `ignore`
+        # they do not test a relaxed AXIAM, they test an AXIAM that was never
+        # asked the question.
+        #
+        # It showed up as three FAILUREs and an INTERRUPTED that all looked
+        # like defects in the honour lane: prompt-none-not-logged-in,
+        # max-age-1, max-age-10000, prompt-login. The W9 row of the gap plan
+        # specified these clients as `standard`/`honour`/`browser_sso` from the
+        # start; only the third was ever written down here.
+        # (No apostrophes in this comment: it sits inside a single-quoted jq
+        # program.)
+        #
+        # Legal on `standard` and refused on `fapi2`, which is why the FAPI
+        # clients above must NOT carry it.
+        authn_request_params: "honour"
       }')"
   }
 

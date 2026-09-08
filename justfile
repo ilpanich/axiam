@@ -671,6 +671,7 @@ bootstrap-local:
 #                               # it in discovery, so restart conformance-serve
 #                               # once after the first registration.
 #   just conformance-register-basic  # the Basic OP clients + test user (W9)
+#   just conformance-drive      # (second terminal) complete the sign-in hops
 #   just conformance-run        # drive the three FAPI plans, collect results
 #   just conformance-run-basic  # drive the OIDC Core Basic plan (W9)
 #   just conformance-report     # render docs/conformance/*.md — failures first
@@ -732,6 +733,27 @@ conformance-up:
     done
     echo "[conformance] the suite did not become ready; check 'docker compose -f conformance/docker-compose.yml logs'" >&2
     exit 1
+
+# Complete the interactive hops of a running plan in a real browser.
+#
+# The suite's own automation is HtmlUnit and cannot execute the admin SPA's
+# React bundle, so the plans deliberately carry no `browser` block and their
+# authorization modules WAIT with a URL. This drives those URLs in Chromium.
+#
+# Run it in a second terminal BEFORE conformance-run / conformance-run-basic and
+# leave it running; it polls, so starting it first costs nothing. `--once` does
+# a single sweep, which is what a CI step wants.
+#
+# Complete a running plan's sign-in hops in a real browser.
+conformance-drive *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -a; . conformance/suite.env; [ -f conformance/suite.local.env ] && . conformance/suite.local.env; set +a
+    # playwright-core is the frontend's dependency, not a second copy at the
+    # root: one browser download for the repository, and the version the E2E
+    # suite already pins.
+    export NODE_PATH="$PWD/frontend/node_modules"
+    node conformance/scripts/drive-browser.mjs {{ARGS}}
 
 # Register the fapi2 clients against a running AXIAM and update suite.env.
 conformance-register:

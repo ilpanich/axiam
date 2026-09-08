@@ -78,6 +78,20 @@ const USER = need('CONFORMANCE_USER');
 const PASSWORD = need('CONFORMANCE_USER_PASSWORD');
 const ONCE = process.argv.includes('--once');
 
+/**
+ * The suite's hostname, compared WITHOUT the port.
+ *
+ * The callback arrives on SUITE_BASE_URL's port (8442 here, the published one),
+ * and the suite then redirects the browser to its own internal base — port 8443
+ * — which nothing publishes, so the host browser gets `404 page not found`.
+ * That 404 is not a failure: by the time it happens the callback has been
+ * delivered and the module has moved on. Matching on the full base URL called
+ * it one anyway, and every module then cost a 45-second timeout it had already
+ * passed.
+ */
+const SUITE_HOST = new URL(SUITE).hostname;
+const atSuite = (u) => u.hostname === SUITE_HOST;
+
 function need(name) {
   const v = process.env[name];
   if (!v) {
@@ -155,7 +169,7 @@ async function visit(context, url) {
     // `openid` alone and never see consent). Racing the two is what lets a
     // single driver serve both lanes without being told which it is in.
     const backAtSuite = () =>
-      page.waitForURL((u) => u.href.startsWith(SUITE), { timeout: 45_000 });
+      page.waitForURL((u) => atSuite(u), { timeout: 45_000 });
 
     const outcome = await Promise.race([
       backAtSuite().then(() => 'suite', () => 'timeout'),

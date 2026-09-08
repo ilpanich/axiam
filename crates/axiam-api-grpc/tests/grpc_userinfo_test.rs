@@ -58,6 +58,7 @@ fn test_auth_config() -> AuthConfig {
         jwt_issuer: "axiam-test".into(),
         oauth2_issuer_url: String::new(),
         oauth2_mtls_base_url: String::new(),
+        oauth2_default_tenant_id: String::new(),
         sso_spa_origins: Vec::new(),
         pepper: None,
         pepper_previous: None,

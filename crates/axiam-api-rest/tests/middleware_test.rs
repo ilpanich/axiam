@@ -75,6 +75,7 @@ fn test_auth_config(lifetime: u64) -> AuthConfig {
         auth_code_lifetime_secs: 600,
         oauth2_issuer_url: String::new(),
         oauth2_mtls_base_url: String::new(),
+        oauth2_default_tenant_id: String::new(),
         sso_spa_origins: Vec::new(),
         max_lockout_duration_secs: 3600,
         email_verification_grace_period_hours: 24,

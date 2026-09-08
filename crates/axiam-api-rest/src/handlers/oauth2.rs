@@ -2191,7 +2191,19 @@ pub async fn discovery<C: Connection + Clone>(
     // wave: the document such a caller receives is byte-identical to the one
     // W6 served. See `build_discovery_document_for` for why omitting is the
     // truthful answer rather than the cautious one.
-    let sensitive_scopes_enabled = match query.tenant_id {
+    // The tenant this document describes: the one the caller named, else the
+    // deployment's configured default (`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`,
+    // unset on a multi-tenant deployment). `None` reproduces the pre-existing
+    // document exactly, endpoint for endpoint.
+    //
+    // ONE value for both halves of the document, deliberately: the endpoints it
+    // publishes and the scopes it advertises must describe the same tenant. A
+    // document offering `address` for tenant X while pointing its token
+    // endpoint at tenant Y would be internally inconsistent in a way no client
+    // could detect and every client would trust.
+    let described_tenant = query.tenant_id.or_else(|| auth_config.default_tenant_id());
+
+    let sensitive_scopes_enabled = match described_tenant {
         None => false,
         Some(tenant_id) => match state.tenant_repo.get_by_id(tenant_id).await {
             Ok(tenant) => axiam_core::repository::SettingsRepository::get_effective_settings(
@@ -2218,6 +2230,7 @@ pub async fn discovery<C: Connection + Clone>(
         issuer,
         auth_config.mtls_base_url(),
         sensitive_scopes_enabled,
+        described_tenant,
     ) {
         Ok(doc) => doc,
         Err(e) => {

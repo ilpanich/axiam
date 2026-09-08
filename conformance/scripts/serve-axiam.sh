@@ -124,8 +124,36 @@ export AXIAM__AUTH__OAUTH2_ISSUER_URL="${AXIAM_ISSUER}"
 # deployment, and one where no mTLS client can authenticate through the proxy.
 export AXIAM__AUTH__OAUTH2_MTLS_BASE_URL="${AXIAM_MTLS_BASE_URL:-}"
 
+# The tenant the discovery document describes.
+#
+# AXIAM's OAuth2 endpoints that authenticate a CLIENT — token, PAR,
+# introspection, revocation, device authorization, end-session — take a required
+# `tenant_id`, and `/oauth2/authorize` needs one for any request without a
+# principal, which is every browser arriving from a relying party. Until the
+# document published them, a conformance client that followed it exactly got
+# `400 missing field tenant_id` at the token endpoint, and no plan could
+# complete a single authorization.
+#
+# Setting this makes the bare well-known document — the only one a plan can use,
+# because its retrieval location must equal `issuer` — publish endpoint URLs
+# carrying the tenant. It changes NO endpoint behaviour; a request that arrives
+# without the parameter is refused exactly as before.
+#
+# ORDER OF OPERATIONS. The value comes from suite.local.env, which
+# `conformance-register` writes after discovering it from the admin session. So
+# the first ever run on a fresh deployment is: register, then RESTART this
+# server. The warning below is what tells you which of the two situations you
+# are in, rather than leaving you to infer it from a 401 twenty minutes later.
+export AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID="${AXIAM_TENANT_ID:-}"
+if [ -z "${AXIAM_TENANT_ID:-}" ]; then
+  echo "[serve] WARNING: no AXIAM_TENANT_ID — discovery will publish endpoints" >&2
+  echo "[serve]          with no tenant, and every authorization will be refused." >&2
+  echo "[serve]          Run 'just conformance-register' and restart this." >&2
+fi
+
 echo "[serve] issuer    $AXIAM__AUTH__OAUTH2_ISSUER_URL (served by the nginx sidecar)"
 echo "[serve] mTLS base $AXIAM__AUTH__OAUTH2_MTLS_BASE_URL"
+echo "[serve] tenant    ${AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID:-<none — authorizations will fail>}"
 echo "[serve] listener  https://$AXIAM__SERVER__HOST:$AXIAM__SERVER__PORT (client_auth=$AXIAM__SERVER__TLS__CLIENT_AUTH)"
 echo "[serve] cert      $CERT"
 echo "[serve] client CA $CA"

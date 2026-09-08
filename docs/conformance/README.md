@@ -140,49 +140,121 @@ about what an AXIAM issuer *is* and it is larger than one wave:
 - accept it, and document that AXIAM advertises the sensitive scopes only to
   callers that already know their tenant.
 
-## The interactive wall
+## The interactive wall, and what was behind it
 
-Thirty-one of the Basic plan's 35 modules finished `WAITING`.
+Thirty-one of the Basic plan's 35 modules finished `WAITING`, and thirty of the
+FAPI plan's 31 finished `INTERRUPTED`. Neither verdict is an assertion about
+AXIAM. Both mean the browser never completed the login hop, and behind that one
+symptom sat **five** distinct causes, each of which would have produced the same
+red run on its own.
 
-The cause is specific, and worth recording because `browser_sso` was expected to
-solve exactly this. The W3 login hop redirects to `LOGIN_PATH` — a *same-origin*
-`/login`, deliberately, since same-origin is what keeps `return_to` path-only
-and stops it becoming an open redirect. But the `axiam-server` binary does not
-serve that route; the admin SPA does. So:
+**1. Nothing served `/login`.** The W3 login hop redirects to `LOGIN_PATH` — a
+*same-origin* `/login`, deliberately, since same-origin is what keeps `return_to`
+path-only and stops it becoming an open redirect. The `axiam-server` binary does
+not serve that route; the admin SPA does. `conformance/nginx-axiam.conf` is the
+front door that now serves both on the issuer origin.
 
-> `just conformance-serve` is sufficient for the metadata half of a plan
-> (discovery, JWKS, token, userinfo) and cannot complete a single authorization
-> module.
+It cannot simply be a proxy in front of everything. `axiam_oauth2::mtls` refuses
+a forwarded `X-Client-Certificate` for OAuth2 client authentication **by
+construction — there is no setting that enables it** — because FAPI 2.0 requires
+the authorization server itself to authenticate the client. Terminating TLS in
+front of the token endpoint would have traded 65 stalled modules for 31
+unauthenticatable ones. The deployment therefore splits the way RFC 8705 §5
+designed it: the front door owns the front channel on the issuer origin, and
+`axiam-server`'s own rustls listener owns the back channel, advertised through
+`mtls_endpoint_aliases`.
 
-A conformance target must serve the SPA and the API **on one origin** — which
-the production nginx image already does. Until a run is pointed at such a
-deployment, `browser_sso` buys nothing unattended, a `browser` automation block
-in the plan would be driving a page that 404s, and the interactive modules must
-be finished by hand in the suite UI. This is the top follow-up.
+**2. The FAPI clients were not registered `browser_sso`.** All 30 FAPI
+authorization modules would have met a 401 rather than a sign-in page even with
+the SPA served. It is not a profile relaxation: the return leg re-runs the PAR,
+PKCE and FAPI gates unchanged.
 
-One module produced a genuine verdict rather than waiting:
-`oidcc-server-client-secret-post` **FAILED** at `GetStaticClientConfiguration`
-("As static client was selected, the test configuration must contain a client
-configuration"). The rendered plan does carry a complete `client2` block with a
-client id, a 64-character secret and a scope list, so the cause is not a missing
-value and is **not yet determined**. It is recorded as open rather than
-attributed: nothing here demonstrates an AXIAM defect.
+**3. The `browser` automation block matched the wrong URL.** A block's top-level
+`match` is the URL the suite *navigates to* — the authorization endpoint — not
+the page it lands on. Matching `/login*` there meant no block matched at all and
+every module fell back to "please visit this URL yourself", which is precisely
+the `WAITING` verdict.
+
+**4. The harness was pointed at a tenant nothing lived in.** `suite.env` carried
+a hard-coded `AXIAM_TENANT_ID` and the registrars passed it as `?tenant_id=`.
+AXIAM ignores that parameter for an admin-session caller — the tenant a session
+acts in comes from the session — so every client and the test user were created
+in the *admin's* tenant while the harness believed otherwise. Nothing failed
+loudly. `admin_login` now discovers the tenant from `/api/v1/auth/me`.
+
+**5. And then the one that is a genuine AXIAM defect.** See below.
+
+## The endpoints the discovery document could not be used to reach
+
+This is the finding of record, and it is larger than conformance.
+
+Every OAuth2 endpoint that authenticates a **client** — `/oauth2/token`,
+`/oauth2/par`, `/oauth2/introspect`, `/oauth2/revoke`,
+`/oauth2/device_authorization`, `/oauth2/end_session` — takes a
+`web::Query<TenantQuery>` whose `tenant_id` is **required**, and
+`/oauth2/authorize` needs one for any request without a principal, which is
+every browser arriving from a relying party.
+
+The discovery document published all of them **bare**. So a relying party that
+did exactly what OIDC Discovery tells it to do — read the document, use the URLs
+— got:
+
+```
+$ curl -X POST https://…/oauth2/token -d 'grant_type=…'
+HTTP 400
+Query deserialize error: missing field `tenant_id`
+```
+
+OIDC Discovery exists so that a client needs nothing out of band. This was
+therefore not only a conformance blocker: **no third-party discovery-driven OIDC
+client could complete a flow against AXIAM.** It is the same root cause as the
+`?tenant_id=` issuer mismatch recorded above, but load-bearing rather than
+cosmetic.
+
+The fix, taken by the maintainer on 2026-09-08, is that the document publishes
+the tenant it describes *in the endpoint URLs* — which RFC 6749 §3.1 and §3.2
+explicitly allow, requiring the client to retain the query component when adding
+parameters of its own. Which tenant that is comes from the caller's
+`?tenant_id=`, or failing that from a new
+`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`. The default setting exists because the
+*bare* well-known URL is the only one a conformance plan can use — its retrieval
+location must correspond to the `issuer` claim — and it is what makes a
+deployment say "this issuer serves this tenant", which is what an OP is.
+
+Two properties worth stating, because both are load-bearing:
+
+- **No endpoint's behaviour changed.** A request arriving without `tenant_id` is
+  refused exactly as it was before. The setting states a fact in a document; it
+  is not a fallback in a handler. A default applied at the endpoint would
+  silently give an unparameterised request a tenant, and on a multi-tenant
+  authorization server the tenant is the isolation boundary.
+- **A deployment that sets nothing serves the document it served before.** No
+  endpoint gains a query string, which is what keeps the setting safe to leave
+  unset — the correct configuration for one issuer serving many tenants.
+
+`userinfo_endpoint`, `jwks_uri` and `issuer` stay bare throughout: UserInfo
+resolves its tenant from the bearer token that authenticates the call, a JWKS is
+deployment-wide, and an `issuer` carrying a query would stop matching the `iss`
+of every token AXIAM mints.
 
 ## Reproducing a run
 
 ```bash
 just conformance-certs             # CA, two client certs, AXIAM's own server cert
-just conformance-up                # the pinned suite + mongo + the TLS sidecar
+just conformance-frontend          # the admin SPA the front door serves
+just conformance-up                # the pinned suite + mongo + BOTH TLS sidecars
 cargo build -p axiam-server --no-default-features
-just conformance-serve             # AXIAM with TLS, on a non-loopback bind
-just conformance-register          # the FAPI clients
+just conformance-serve             # AXIAM on the mTLS listener, behind the front door
+just conformance-register          # the FAPI clients (mTLS, self-signed, private_key_jwt)
 just conformance-register-basic    # the Basic OP clients and the test user
+# FIRST RUN ONLY: registration is what discovers the tenant, and the server
+# publishes it in the discovery document — so restart conformance-serve once.
 just conformance-run               # the FAPI plans
 just conformance-run-basic         # the OIDC Core Basic plan
 CONFORMANCE_DATE=$(date +%F) just conformance-report
 ```
 
-Two things the recipes do not do for you:
+Three things the recipes do not do for you:
 
 - **`sensitive_scopes_enabled` must be on at the ORGANIZATION level.** It is off
   by default and validated disable-only at the tenant level — a tenant may turn
@@ -192,3 +264,8 @@ Two things the recipes do not do for you:
 - **`localhost.emobix.co.uk` must resolve.** Add `127.0.0.1
   localhost.emobix.co.uk` to `/etc/hosts`, and flush the resolver cache if
   `/etc/nsswitch.conf` lists `resolve` before `files`.
+- **The server must know its tenant before a plan runs.** `conformance-serve`
+  exports `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` from `suite.local.env`, which
+  only exists once a registrar has run. Serving without it publishes endpoint
+  URLs that carry no tenant, and every authorization is then refused — the
+  script warns, loudly, rather than leaving you to infer it from a 401.

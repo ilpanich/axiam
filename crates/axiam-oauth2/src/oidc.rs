@@ -3,6 +3,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde::Serialize;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Discovery Document (RFC 8414 / OpenID Connect Discovery 1.0)
@@ -216,6 +217,42 @@ macro_rules! endpoint {
     };
 }
 
+/// Append `?tenant_id=<uuid>` to an endpoint URL, when this document describes
+/// one tenant.
+///
+/// # Why an endpoint URL carries a query string at all
+///
+/// Because AXIAM's OAuth2 endpoints need one, and OIDC Discovery exists so that
+/// a relying party needs nothing else. Every endpoint that authenticates a
+/// *client* — token, PAR, introspection, revocation, device authorization,
+/// end-session — takes a **required** `tenant_id`, and `/oauth2/authorize`
+/// needs one for a request with no principal, which is every browser arriving
+/// from a relying party. Until this function existed the document advertised
+/// all of them bare, so a client that followed the document exactly got
+/// `400 Query deserialize error: missing field tenant_id` at the token
+/// endpoint. That is what the first OpenID Foundation conformance run hit, and
+/// it is equally what any third-party client would hit.
+///
+/// RFC 6749 §3.1 and §3.2 both allow these endpoints to include a query
+/// component and require the client to **retain** it when adding parameters of
+/// its own, so this is the mechanism the specification provides rather than a
+/// workaround for the lack of one.
+///
+/// `userinfo_endpoint` and `jwks_uri` are deliberately NOT passed through here:
+/// UserInfo resolves the tenant from the bearer token that authenticates the
+/// call, and a JWKS is a deployment-wide document. Adding a parameter neither
+/// reads would be noise a client has to carry.
+fn tenant_scoped(url: String, tenant_id: Option<Uuid>) -> String {
+    match tenant_id {
+        // Every caller passes a URL this module just built from a validated
+        // issuer, so none of them already carries a query — `?` is correct and
+        // `&` would be wrong. Asserted by
+        // `every_tenant_scoped_endpoint_has_exactly_one_query_string`.
+        Some(id) => format!("{url}?tenant_id={id}"),
+        None => url,
+    }
+}
+
 /// Build the RFC 8705 §5 aliases for a base URL, or `None` when there is no
 /// separate mTLS host.
 ///
@@ -225,7 +262,10 @@ macro_rules! endpoint {
 /// dropping it on a typo would produce exactly the failure the operator
 /// configured it to prevent — and would do so invisibly, since a client cannot
 /// tell an absent alias from one the server meant to send.
-fn build_mtls_aliases(mtls_base_url: Option<&str>) -> Result<Option<MtlsEndpointAliases>, String> {
+fn build_mtls_aliases(
+    mtls_base_url: Option<&str>,
+    tenant_id: Option<Uuid>,
+) -> Result<Option<MtlsEndpointAliases>, String> {
     let Some(base) = mtls_base_url else {
         return Ok(None);
     };
@@ -258,13 +298,24 @@ fn build_mtls_aliases(mtls_base_url: Option<&str>) -> Result<Option<MtlsEndpoint
         );
     }
 
+    // An alias must be usable on arrival, and every one of these but UserInfo
+    // authenticates a client and therefore needs the tenant. An alias that
+    // omitted it would be strictly worse than no alias: RFC 8705 §5 tells an
+    // mTLS client it MUST use these, so it would follow a URL that cannot work
+    // and would have no conventional endpoint to fall back to.
     Ok(Some(MtlsEndpointAliases {
-        token_endpoint: endpoint!(base, "/oauth2/token"),
+        token_endpoint: tenant_scoped(endpoint!(base, "/oauth2/token"), tenant_id),
         userinfo_endpoint: endpoint!(base, "/oauth2/userinfo"),
-        revocation_endpoint: endpoint!(base, "/oauth2/revoke"),
-        introspection_endpoint: endpoint!(base, "/oauth2/introspect"),
-        device_authorization_endpoint: endpoint!(base, "/oauth2/device_authorization"),
-        pushed_authorization_request_endpoint: endpoint!(base, "/oauth2/par"),
+        revocation_endpoint: tenant_scoped(endpoint!(base, "/oauth2/revoke"), tenant_id),
+        introspection_endpoint: tenant_scoped(endpoint!(base, "/oauth2/introspect"), tenant_id),
+        device_authorization_endpoint: tenant_scoped(
+            endpoint!(base, "/oauth2/device_authorization"),
+            tenant_id,
+        ),
+        pushed_authorization_request_endpoint: tenant_scoped(
+            endpoint!(base, "/oauth2/par"),
+            tenant_id,
+        ),
     }))
 }
 
@@ -283,7 +334,7 @@ pub fn build_discovery_document(
     issuer: &str,
     mtls_base_url: Option<&str>,
 ) -> Result<OidcDiscoveryDocument, String> {
-    build_discovery_document_for(issuer, mtls_base_url, false)
+    build_discovery_document_for(issuer, mtls_base_url, false, None)
 }
 
 /// [`build_discovery_document`], told whether the tenant this document
@@ -316,21 +367,32 @@ pub fn build_discovery_document_for(
     issuer: &str,
     mtls_base_url: Option<&str>,
     sensitive_scopes_enabled: bool,
+    tenant_id: Option<Uuid>,
 ) -> Result<OidcDiscoveryDocument, String> {
     let issuer = issuer.trim_end_matches('/');
-    let mtls_endpoint_aliases = build_mtls_aliases(mtls_base_url)?;
+    let mtls_endpoint_aliases = build_mtls_aliases(mtls_base_url, tenant_id)?;
     let mut doc = OidcDiscoveryDocument {
         issuer: issuer.to_string(),
-        authorization_endpoint: format!("{issuer}/oauth2/authorize"),
-        token_endpoint: endpoint!(issuer, "/oauth2/token"),
+        // `tenant_scoped` on everything that authenticates a client, and its
+        // doc comment is where the argument lives. UserInfo and the JWKS are
+        // bare on purpose: one resolves the tenant from its bearer token, the
+        // other is deployment-wide.
+        authorization_endpoint: tenant_scoped(format!("{issuer}/oauth2/authorize"), tenant_id),
+        token_endpoint: tenant_scoped(endpoint!(issuer, "/oauth2/token"), tenant_id),
         userinfo_endpoint: endpoint!(issuer, "/oauth2/userinfo"),
         jwks_uri: format!("{issuer}/oauth2/jwks"),
-        revocation_endpoint: endpoint!(issuer, "/oauth2/revoke"),
-        introspection_endpoint: endpoint!(issuer, "/oauth2/introspect"),
-        device_authorization_endpoint: endpoint!(issuer, "/oauth2/device_authorization"),
-        pushed_authorization_request_endpoint: endpoint!(issuer, "/oauth2/par"),
+        revocation_endpoint: tenant_scoped(endpoint!(issuer, "/oauth2/revoke"), tenant_id),
+        introspection_endpoint: tenant_scoped(endpoint!(issuer, "/oauth2/introspect"), tenant_id),
+        device_authorization_endpoint: tenant_scoped(
+            endpoint!(issuer, "/oauth2/device_authorization"),
+            tenant_id,
+        ),
+        pushed_authorization_request_endpoint: tenant_scoped(
+            endpoint!(issuer, "/oauth2/par"),
+            tenant_id,
+        ),
         require_pushed_authorization_requests: false,
-        end_session_endpoint: format!("{issuer}/oauth2/end_session"),
+        end_session_endpoint: tenant_scoped(format!("{issuer}/oauth2/end_session"), tenant_id),
         backchannel_logout_supported: true,
         backchannel_logout_session_supported: true,
         response_types_supported: vec!["code".into()],
@@ -582,6 +644,157 @@ mod tests {
 
     fn doc(mtls: Option<&str>) -> OidcDiscoveryDocument {
         build_discovery_document(ISSUER, mtls).expect("valid inputs build a document")
+    }
+
+    const TENANT: Uuid = Uuid::from_u128(0x01a0813a_cd24_7632_9d6f_439f872d861e);
+
+    fn doc_for_tenant(mtls: Option<&str>) -> OidcDiscoveryDocument {
+        build_discovery_document_for(ISSUER, mtls, false, Some(TENANT))
+            .expect("valid inputs build a document")
+    }
+
+    /// The endpoints that authenticate a **client** all take a required
+    /// `tenant_id`, and `/oauth2/authorize` needs one for a request with no
+    /// principal — which is every browser arriving from a relying party.
+    /// Publishing them bare is what made the first conformance run unable to
+    /// complete a single authorization: a client that did exactly what OIDC
+    /// Discovery says to do got `400 missing field tenant_id`.
+    #[test]
+    fn every_client_authenticating_endpoint_carries_the_tenant() {
+        let doc = doc_for_tenant(None);
+        let expected = format!("?tenant_id={TENANT}");
+
+        for (name, url) in [
+            ("authorization_endpoint", &doc.authorization_endpoint),
+            ("token_endpoint", &doc.token_endpoint),
+            ("revocation_endpoint", &doc.revocation_endpoint),
+            ("introspection_endpoint", &doc.introspection_endpoint),
+            (
+                "device_authorization_endpoint",
+                &doc.device_authorization_endpoint,
+            ),
+            (
+                "pushed_authorization_request_endpoint",
+                &doc.pushed_authorization_request_endpoint,
+            ),
+            ("end_session_endpoint", &doc.end_session_endpoint),
+        ] {
+            assert!(
+                url.ends_with(&expected),
+                "{name} must name the tenant it belongs to, got {url}"
+            );
+        }
+    }
+
+    /// UserInfo resolves the tenant from the bearer token that authenticates
+    /// the call, and a JWKS is deployment-wide. Neither reads the parameter, so
+    /// neither should carry it — and the `issuer` must stay bare or it stops
+    /// matching the `iss` of every token AXIAM mints.
+    #[test]
+    fn userinfo_jwks_and_the_issuer_stay_bare() {
+        let doc = doc_for_tenant(Some(MTLS));
+
+        for (name, url) in [
+            ("issuer", &doc.issuer),
+            ("userinfo_endpoint", &doc.userinfo_endpoint),
+            ("jwks_uri", &doc.jwks_uri),
+            (
+                "mtls userinfo_endpoint",
+                &doc.mtls_endpoint_aliases
+                    .as_ref()
+                    .expect("aliases present")
+                    .userinfo_endpoint,
+            ),
+        ] {
+            assert!(
+                !url.contains("tenant_id"),
+                "{name} does not read tenant_id and must not carry it: {url}"
+            );
+        }
+    }
+
+    /// RFC 8705 §5 tells an mTLS client it MUST use these, so an alias that
+    /// omitted the tenant would be strictly worse than no alias at all: the
+    /// client would follow a URL that cannot work, with no conventional
+    /// endpoint left to fall back to.
+    #[test]
+    fn the_mtls_aliases_carry_the_tenant_too() {
+        let aliases = doc_for_tenant(Some(MTLS))
+            .mtls_endpoint_aliases
+            .expect("aliases present");
+        let expected = format!("?tenant_id={TENANT}");
+
+        for (name, url) in [
+            ("token", &aliases.token_endpoint),
+            ("revocation", &aliases.revocation_endpoint),
+            ("introspection", &aliases.introspection_endpoint),
+            (
+                "device_authorization",
+                &aliases.device_authorization_endpoint,
+            ),
+            ("par", &aliases.pushed_authorization_request_endpoint),
+        ] {
+            assert!(
+                url.starts_with(MTLS) && url.ends_with(&expected),
+                "the {name} alias must be on the mTLS host AND name the tenant, got {url}"
+            );
+        }
+    }
+
+    /// Naming no tenant must reproduce the document exactly as it was before
+    /// this change — that is what every multi-tenant deployment keeps getting,
+    /// and it is the property that makes the new setting safe to leave unset.
+    #[test]
+    fn a_document_that_names_no_tenant_carries_no_query_string() {
+        let doc = doc(Some(MTLS));
+        let json = serde_json::to_value(&doc).expect("document serialises");
+
+        for (key, value) in json.as_object().expect("an object") {
+            let Some(text) = value.as_str() else { continue };
+            assert!(
+                !text.contains('?'),
+                "{key} gained a query string on the tenantless document: {text}"
+            );
+        }
+    }
+
+    /// `tenant_scoped` appends with `?`, which is only correct because every
+    /// URL handed to it was built here from a bare issuer. This is the test
+    /// that fails if somebody gives one of them a query string of its own and
+    /// produces `...?a=1?tenant_id=...`, which parses as a path and points
+    /// nowhere.
+    #[test]
+    fn every_tenant_scoped_endpoint_has_exactly_one_query_string() {
+        let doc = doc_for_tenant(Some(MTLS));
+        let json = serde_json::to_value(&doc).expect("document serialises");
+
+        let mut urls: Vec<String> = json
+            .as_object()
+            .expect("an object")
+            .values()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        urls.extend(
+            json["mtls_endpoint_aliases"]
+                .as_object()
+                .expect("aliases object")
+                .values()
+                .filter_map(|v| v.as_str().map(str::to_owned)),
+        );
+
+        for url in urls {
+            assert!(
+                url.matches('?').count() <= 1,
+                "more than one query separator in {url}"
+            );
+            if url.contains('?') {
+                let parsed = url::Url::parse(&url).expect("a tenant-scoped endpoint parses");
+                let pairs: Vec<_> = parsed.query_pairs().collect();
+                assert_eq!(pairs.len(), 1, "exactly one parameter in {url}");
+                assert_eq!(pairs[0].0, "tenant_id");
+                assert_eq!(pairs[0].1, TENANT.to_string());
+            }
+        }
     }
 
     #[test]

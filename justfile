@@ -665,7 +665,11 @@ bootstrap-local:
 #                               # for ANY module that completes an authorization)
 #   just conformance-up         # start the pinned suite + the AXIAM front door
 #   just conformance-serve      # run AXIAM with TLS as the system under test
-#   just conformance-register   # create the two fapi2 clients, fill suite.local.env
+#   just conformance-register   # create the fapi2 clients, fill suite.local.env
+#                               # NOTE on a FIRST run: registration is what
+#                               # discovers the tenant, and the server publishes
+#                               # it in discovery, so restart conformance-serve
+#                               # once after the first registration.
 #   just conformance-register-basic  # the Basic OP clients + test user (W9)
 #   just conformance-run        # drive the three FAPI plans, collect results
 #   just conformance-run-basic  # drive the OIDC Core Basic plan (W9)

@@ -133,11 +133,18 @@ pub enum Refusal {
 ///
 /// * `switch_is_off` is answered first because it is the operator's decision
 ///   and it outranks anything the end user or the relying party wants.
-/// * `return_leg` — the request has already been through the consent screen
-///   once — is answered before `prompt_none` because it is the stronger
-///   statement: the user was asked, in person, and did not grant. Redirecting
-///   again is the non-terminating case, so the chain is bounded at one hop
-///   exactly as `crate::honour`'s is.
+/// * `consent_leg` — the request has already been through the **consent
+///   screen** once — is answered before `prompt_none` because it is the
+///   stronger statement: the user was asked, in person, and did not grant.
+///   Redirecting again is the non-terminating case, so the chain is bounded at
+///   one consent hop exactly as `crate::honour`'s is bounded at one login hop.
+///
+///   It must be the *consent* marker and not the login one
+///   (`crate::login_hop::CONSENT_HOP_MARKER`). A request carrying
+///   `prompt=consent` and `address` goes to the sign-in page first and comes
+///   back carrying the login marker with nobody having been asked about
+///   consent; read as a decline, that is `access_denied` for somebody who was
+///   never shown the question.
 /// * `prompt_none` last, because it only applies to a first attempt.
 ///
 /// `prompt_none` must be passed as `true` **only** when the relying party sent
@@ -148,7 +155,7 @@ pub enum Refusal {
 pub fn decide(
     requested: Requested,
     switch_is_off: bool,
-    return_leg: bool,
+    consent_leg: bool,
     prompt_none: bool,
 ) -> Decision {
     match requested {
@@ -169,7 +176,7 @@ pub fn decide(
         Requested::ConsentMissing => {
             if switch_is_off {
                 Decision::Refuse(Refusal::Disabled)
-            } else if return_leg {
+            } else if consent_leg {
                 Decision::Refuse(Refusal::Declined)
             } else if prompt_none {
                 Decision::Refuse(Refusal::ConsentRequired)

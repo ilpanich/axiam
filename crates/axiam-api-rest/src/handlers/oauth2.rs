@@ -130,6 +130,13 @@ pub struct AuthorizeQuery {
     /// strips it harms only itself.
     #[serde(rename = "axiam_login_hop")]
     pub login_hop: Option<String>,
+    /// W7 — the **consent** hop's loop guard (`axiam_consent_hop`).
+    ///
+    /// A second marker rather than a reuse of the one above, because the two
+    /// ceremonies answer different questions and a request can need both. See
+    /// `axiam_oauth2::login_hop::CONSENT_HOP_MARKER`.
+    #[serde(rename = "axiam_consent_hop")]
+    pub consent_hop: Option<String>,
 }
 
 /// Query parameter for the token endpoint tenant routing.
@@ -967,6 +974,7 @@ pub async fn authorize<C: Connection + Clone>(
                 authn_params,
                 request_object,
                 session_evidence,
+                consent_hop_return_leg: q.consent_hop.is_some(),
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
@@ -1022,6 +1030,7 @@ pub async fn authorize<C: Connection + Clone>(
                 authn_params,
                 request_object,
                 session_evidence,
+                consent_hop_return_leg: q.consent_hop.is_some(),
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
@@ -1129,8 +1138,16 @@ pub async fn authorize<C: Connection + Clone>(
                 required_acr = ?interaction.required_acr,
                 "an authorization request on the honour lane needs an interaction"
             );
-            let Some(return_to) = axiam_oauth2::login_hop::build_return_to(http_req.query_string())
-            else {
+            // W7 — a consent hop marks its own return leg. Same `return_to`
+            // machinery, same validation on both sides, one more marker; see
+            // `login_hop::CONSENT_HOP_MARKER` for why sharing the login one
+            // would answer the consent question with the login hop's evidence.
+            let built = if interaction.reason.requires_reauthentication() {
+                axiam_oauth2::login_hop::build_return_to(http_req.query_string())
+            } else {
+                axiam_oauth2::login_hop::build_consent_return_to(http_req.query_string())
+            };
+            let Some(return_to) = built else {
                 // Nothing safe to come back to, so there is nothing to send
                 // the browser away for. The relying party is told what is
                 // missing instead.

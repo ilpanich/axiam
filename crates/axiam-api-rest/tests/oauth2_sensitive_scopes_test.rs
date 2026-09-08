@@ -666,7 +666,7 @@ async fn a_return_leg_without_consent_is_access_denied_rather_than_a_second_redi
         &app,
         &token,
         &format!(
-            "{}&axiam_login_hop=1",
+            "{}&axiam_consent_hop=1",
             base_query(&client_id, "openid+address")
         ),
     )
@@ -1420,4 +1420,63 @@ async fn the_consent_list_marks_only_the_scope_releases_withdrawable() {
         .expect("the scope-release consent");
     assert_eq!(release["withdrawable"].as_bool(), Some(true));
     assert_eq!(release["version"].as_str(), Some("phone"));
+}
+
+/// A request needing **both** ceremonies gets both, in order, and the login
+/// marker is not mistaken for a consent one.
+///
+/// `prompt=consent` sends the browser to the sign-in page first — that is W4's
+/// treatment of it, and W7 does not change it, because a fresh credential check
+/// is still the only ceremony `prompt=consent` alone can be given when nothing
+/// consent-gated was requested. The leg that comes back carries
+/// `axiam_login_hop` and nobody has been asked about a postal address. Read as
+/// a consent leg it would be `access_denied` for somebody who was never shown
+/// the question; read correctly it is the consent screen.
+#[actix_web::test]
+async fn a_login_hop_marker_is_not_mistaken_for_a_consent_one() {
+    let fx = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(fx.db, auth);
+    let admin = admin_jwt(&auth, &fx);
+    enable_sensitive_scopes(&fx).await;
+    let client_id = create_client(&app, &admin, sensitive_client()).await;
+    let token = session_token(&fx, &auth).await;
+
+    // Leg 1: `prompt=consent` is an interaction, so the sign-in page.
+    let first = authorize(
+        &app,
+        &token,
+        &format!(
+            "{}&prompt=consent",
+            base_query(&client_id, "openid+address")
+        ),
+    )
+    .await;
+    let login = location(&first);
+    assert!(login.starts_with("/login?"), "{login}");
+    let leg2 = query_param(&login, "return_to").expect("a return_to");
+    assert!(leg2.contains("axiam_login_hop=1"), "{leg2}");
+    assert!(!leg2.contains("axiam_consent_hop"), "{leg2}");
+
+    // Leg 2: back from the sign-in page. The consent question has still not
+    // been asked, so it is asked now — not answered `access_denied`.
+    let second = authorize(&app, &token, leg2.split('?').nth(1).unwrap()).await;
+    let consent = location(&second);
+    assert!(
+        consent.starts_with("/consent?"),
+        "a login return leg must still reach the consent screen: {consent}"
+    );
+    let leg3 = query_param(&consent, "return_to").expect("a return_to");
+    assert!(leg3.contains("axiam_consent_hop=1"), "{leg3}");
+
+    // Leg 3: back from the consent page with nothing recorded — now it is a
+    // decline, and the chain stops.
+    let third = authorize(&app, &token, leg3.split('?').nth(1).unwrap()).await;
+    let final_location = location(&third);
+    assert!(final_location.starts_with(REDIRECT_URI), "{final_location}");
+    assert_eq!(
+        query_param(&final_location, "error").as_deref(),
+        Some("access_denied"),
+        "{final_location}"
+    );
 }

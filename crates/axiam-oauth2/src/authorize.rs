@@ -119,6 +119,18 @@ pub struct AuthorizeRequest {
     /// than collapsed by the caller into one that could be wrong. See
     /// `crate::sensitive::decide`.
     pub sensitive_scopes_switch_is_off: bool,
+    /// W7 — whether this request carries
+    /// [`crate::login_hop::CONSENT_HOP_MARKER`], i.e. has already been through
+    /// the **consent** page once.
+    ///
+    /// Distinct from [`Self::login_hop_return_leg`] on purpose: that one says
+    /// the browser has been to a first-party page, and this one says the end
+    /// user has been asked about consent and did not give it. A request
+    /// carrying `prompt=consent` and `address` needs both ceremonies, in that
+    /// order, and conflating the markers would answer the second question with
+    /// the first one's evidence — `access_denied` for somebody who was never
+    /// shown the question.
+    pub consent_hop_return_leg: bool,
     /// W4 — whether this request carries
     /// [`crate::login_hop::LOGIN_HOP_MARKER`], i.e. has already been through
     /// the sign-in page once.
@@ -423,7 +435,7 @@ where
         match crate::sensitive::decide(
             req.sensitive_scopes,
             req.sensitive_scopes_switch_is_off,
-            req.login_hop_return_leg,
+            req.consent_hop_return_leg,
             prompt_none,
         ) {
             crate::sensitive::Decision::Proceed => {}
@@ -834,6 +846,7 @@ mod tests {
             session_evidence: SessionEvidence::default(),
             sensitive_scopes: crate::sensitive::Requested::None,
             sensitive_scopes_switch_is_off: false,
+            consent_hop_return_leg: false,
             id_token_hint: None,
             inline_authn_params_beside_request_uri: false,
             login_hop_return_leg: false,

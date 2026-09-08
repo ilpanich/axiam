@@ -240,6 +240,36 @@ pub fn build_return_to(query: &str) -> Option<String> {
     Some(candidate)
 }
 
+/// The marker a **consent** hop carries (W7).
+///
+/// A second marker rather than a reuse of [`LOGIN_HOP_MARKER`], and the reason
+/// is a defect the shared one would have caused. The login marker means "this
+/// request has been through a first-party page once", and W7's termination rule
+/// needs something narrower: "this end user has already been *asked about
+/// consent* and did not give it". Those differ exactly when both ceremonies are
+/// needed — a request carrying `prompt=consent` and `address` goes to the
+/// sign-in page first, and comes back carrying the login marker without anybody
+/// having been asked a thing about consent. Read as a consent leg, that is
+/// `access_denied` for a user who was never shown the question.
+///
+/// With two markers each ceremony terminates on its own: at most one login hop
+/// and at most one consent hop per authorization request, in that order,
+/// because authentication has to be settled before there is a person to ask.
+pub const CONSENT_HOP_MARKER: &str = "axiam_consent_hop";
+
+/// [`build_return_to`], marked as the return leg of a **consent** hop.
+///
+/// The login marker is left alone: a request that has been through both pages
+/// carries both, and each rule reads its own.
+pub fn build_consent_return_to(query: &str) -> Option<String> {
+    if query.is_empty() {
+        return None;
+    }
+    let candidate = format!("{AUTHORIZE_PATH}?{query}&{CONSENT_HOP_MARKER}=1");
+    validate_return_to(&candidate).ok()?;
+    Some(candidate)
+}
+
 /// Build the `Location` that sends the browser to the SPA login page.
 ///
 /// Relative on purpose. The SPA and the API are one origin in every shipped

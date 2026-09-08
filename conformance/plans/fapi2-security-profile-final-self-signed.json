@@ -71,26 +71,22 @@
 
   "client": {
     "client_id": "${CLIENT_SELF_SIGNED_ID}",
-    "scope": "openid",
+    "scope": "openid profile",
     "certificate": {
       "cert": "${CLIENT_SELF_SIGNED_CERT_PEM}",
       "key": "${CLIENT_SELF_SIGNED_KEY_PEM}"
     },
-    "jwks": {
-      "keys": []
-    }
+    "jwks": ${CLIENT_SELF_SIGNED_JWKS}
   },
 
   "client2": {
     "client_id": "${CLIENT_MTLS_ID}",
-    "scope": "openid",
+    "scope": "openid profile",
     "certificate": {
       "cert": "${CLIENT_MTLS_CERT_PEM}",
       "key": "${CLIENT_MTLS_KEY_PEM}"
     },
-    "jwks": {
-      "keys": []
-    }
+    "jwks": ${CLIENT_MTLS_JWKS}
   },
 
   "mtls": {

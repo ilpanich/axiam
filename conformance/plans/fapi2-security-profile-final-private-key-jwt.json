@@ -111,13 +111,13 @@
 
   "client": {
     "client_id": "${CLIENT_PRIVATE_KEY_JWT_ID}",
-    "scope": "openid",
+    "scope": "openid profile",
     "jwks": ${CLIENT_PRIVATE_KEY_JWT_JWKS}
   },
 
   "client2": {
     "client_id": "${CLIENT_PRIVATE_KEY_JWT_2_ID}",
-    "scope": "openid",
+    "scope": "openid profile",
     "jwks": ${CLIENT_PRIVATE_KEY_JWT_2_JWKS}
   },
 

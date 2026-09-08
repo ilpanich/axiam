@@ -148,14 +148,26 @@ THUMBPRINT=$(openssl x509 -in "$CERTS/client-self-signed.crt" -outform der \
 
 REDIRECT="$SUITE/test/a/axiam-fapi2-mtls/callback"
 REDIRECT2="$SUITE/test/a/axiam-fapi2-self-signed/callback"
+# The third lane's callback. Its absence was invisible for as long as the
+# private_key_jwt clients could not authenticate at all: PAR answered
+# `401 invalid_client` before it ever looked at `redirect_uri`. With the
+# assertion verifier wired, the very next answer became
+# `400 invalid_request: redirect_uri is not registered for this client`, which
+# would have failed all 56 modules of that lane for a second reason.
+#
+# Every client gets all three. A plan's `client` and `client2` are drawn from
+# different lanes — the mTLS plan's client2 IS the self-signed client — so a
+# client that only knew its own lane's callback would break the cross-client
+# modules (`par-attempt-to-use-request_uri-for-different-client` and friends).
+REDIRECT3="$SUITE/test/a/axiam-fapi2-private-key-jwt/callback"
 
 echo "[register] creating the tls_client_auth client"
 MTLS_RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
-  --arg dn "$SUBJECT_DN" --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" '{
+  --arg dn "$SUBJECT_DN" --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" --arg r3 "$REDIRECT3" '{
     name: "axiam-conformance-mtls",
-    redirect_uris: [$r1, $r2],
+    redirect_uris: [$r1, $r2, $r3],
     grant_types: ["authorization_code", "refresh_token", "client_credentials"],
-    scopes: ["openid"],
+    scopes: ["openid", "profile"],
     profile: "fapi2",
     require_par: true,
     # W9 follow-up. Without this the FAPI lane cannot complete a single
@@ -175,11 +187,11 @@ echo "[register]   client_id=$CLIENT_MTLS_ID"
 
 echo "[register] creating the self_signed_tls_client_auth client"
 SS_RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
-  --arg tp "$THUMBPRINT" --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" '{
+  --arg tp "$THUMBPRINT" --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" --arg r3 "$REDIRECT3" '{
     name: "axiam-conformance-self-signed",
-    redirect_uris: [$r1, $r2],
+    redirect_uris: [$r1, $r2, $r3],
     grant_types: ["authorization_code", "refresh_token", "client_credentials"],
-    scopes: ["openid"],
+    scopes: ["openid", "profile"],
     profile: "fapi2",
     require_par: true,
     # W9 follow-up. Without this the FAPI lane cannot complete a single
@@ -196,6 +208,30 @@ SS_RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
 CLIENT_SELF_SIGNED_ID=$(jq -r '.client_id // empty' <<<"$SS_RESP")
 [ -n "$CLIENT_SELF_SIGNED_ID" ] || { echo "[register] failed: $SS_RESP" >&2; exit 1; }
 echo "[register]   client_id=$CLIENT_SELF_SIGNED_ID"
+
+# Signing keys for the mTLS lane's two clients.
+#
+# These are NOT credentials — an mTLS client authenticates with its certificate
+# and AXIAM is never given these key sets. They exist because the FAPI 2.0 plan
+# runs `ValidateClientPrivateKeysAreDifferent` as a setup step for *every*
+# module, whatever `client_auth_type` is: the profile's modules may sign a
+# request object, so the suite insists both test clients have a usable signing
+# key and that the two are not the same key.
+#
+# The mTLS plan shipped `"jwks": {"keys": []}` for both, so that step failed
+# with "no key available to sign jwt" and took six modules with it — including
+# `happy-flow`, which made the lane look far worse than it was.
+#
+# Only the PRIVATE halves are written: the suite signs with them, and there is
+# no counterpart to register because these clients prove themselves at the TLS
+# layer. Distinct kids, because "are these two clients different" is the exact
+# question the failing step asks.
+echo "[register] minting signing keys for the mTLS lane's two clients"
+MTLS_KEYS=$(python3 "$SCRIPTS/gen-client-jwks.py" --kid "axiam-conformance-mtls-sig")
+SS_KEYS=$(python3 "$SCRIPTS/gen-client-jwks.py" --kid "axiam-conformance-self-signed-sig")
+write_env \
+  "CLIENT_MTLS_JWKS=$(jq -c '.private' <<<"$MTLS_KEYS")" \
+  "CLIENT_SELF_SIGNED_JWKS=$(jq -c '.private' <<<"$SS_KEYS")"
 
 # ---------------------------------------------------------------------------
 # The private_key_jwt lane (RFC 7523 §2.2) — never provisioned until now
@@ -230,11 +266,11 @@ for n in 1 2; do
   # mistake everywhere else in this file.
   RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
     --arg name "axiam-conformance-pkjwt-$n" \
-    --arg jwks "$PUB" --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" '{
+    --arg jwks "$PUB" --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" --arg r3 "$REDIRECT3" '{
       name: $name,
-      redirect_uris: [$r1, $r2],
+      redirect_uris: [$r1, $r2, $r3],
       grant_types: ["authorization_code", "refresh_token", "client_credentials"],
-      scopes: ["openid"],
+      scopes: ["openid", "profile"],
       profile: "fapi2",
       require_par: true,
       browser_sso: true,

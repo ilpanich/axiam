@@ -151,8 +151,32 @@ if [ -z "${AXIAM_TENANT_ID:-}" ]; then
   echo "[serve]          Run 'just conformance-register' and restart this." >&2
 fi
 
+# Login rate limit — raised for the harness, and ONLY for the harness.
+#
+# `login_per_min` defaults to 10 per IP, which is a sensible production DoS
+# control and the wrong number for a conformance rig. The browser driver signs
+# in once per module (one context per test — see `drive-browser.mjs`), the suite
+# runs modules back-to-back, and a plan is dozens of modules. The run therefore
+# bursts well past ten sign-ins a minute from one address.
+#
+# What that looked like before this line existed: the driver's page showed
+# `rate_limit_exceeded` instead of the sign-in form, the authorization never
+# completed, and the module failed — `happy-flow` and
+# `user-rejects-authentication` among them, which reads as a protocol defect and
+# is a throttle. Roughly one authorization in seven was lost to it.
+#
+# This is NOT a relaxation of anything the suite measures. No OIDF module tests
+# login throughput or rate limiting; the limit sits on `/api/v1/auth/login`,
+# which is AXIAM's own sign-in page and not an OAuth2 or OIDC endpoint at all.
+# Every gate the profile does test — PAR, PKCE, client authentication,
+# sender-constraining — is untouched.
+#
+# Overridable, so an operator reproducing a throttling question can put it back.
+export AXIAM__RATE_LIMIT__LOGIN_PER_MIN="${AXIAM__RATE_LIMIT__LOGIN_PER_MIN:-600}"
+
 echo "[serve] issuer    $AXIAM__AUTH__OAUTH2_ISSUER_URL (served by the nginx sidecar)"
 echo "[serve] mTLS base $AXIAM__AUTH__OAUTH2_MTLS_BASE_URL"
+echo "[serve] login/min $AXIAM__RATE_LIMIT__LOGIN_PER_MIN (raised for the harness; see the comment)"
 echo "[serve] tenant    ${AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID:-<none — authorizations will fail>}"
 echo "[serve] listener  https://$AXIAM__SERVER__HOST:$AXIAM__SERVER__PORT (client_auth=$AXIAM__SERVER__TLS__CLIENT_AUTH)"
 echo "[serve] cert      $CERT"

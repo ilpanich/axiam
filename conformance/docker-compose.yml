@@ -32,8 +32,6 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-    ports:
-      - "${SUITE_PORT:-8442}:8443"
     environment:
       # The suite serves itself under a hostname that resolves to 127.0.0.1 by
       # public DNS (localhost.emobix.co.uk) — that is upstream's documented
@@ -42,21 +40,100 @@ services:
       # `localhost`. Not an outbound dependency at run time: only the DNS
       # lookup leaves the machine, and `/etc/hosts` can serve it offline.
       - BASE_URL=${SUITE_BASE_URL:-https://localhost.emobix.co.uk:8442}
-      - MONGODB_URI=mongodb://mongodb:27017/test_suite
-      # No hosted-mode auth: this is a local, single-operator run. Do NOT
-      # expose this port beyond the host — an unauthenticated conformance
+      # The suite's OWN mutual-TLS listener, which is a different thing from
+      # AXIAM's. It is not published to the host; it exists because the image's
+      # entrypoint always passes it and an unset value produces a broken
+      # property rather than an absent one.
+      - BASE_MTLS_URL=${SUITE_BASE_URL:-https://localhost.emobix.co.uk:8442}
+      # W9 correction. This was `MONGODB_URI=mongodb://mongodb:27017/test_suite`,
+      # which the image does not read: its entrypoint builds the URI itself from
+      # MONGODB_HOST. The old line was inert, and only the image's default
+      # (`mongodb`) happening to equal this compose file's service name kept the
+      # suite talking to a database at all.
+      - MONGODB_HOST=mongodb
+      # W9 correction, and the reason the suite would not boot at all.
+      #
+      # The entrypoint unconditionally passes -Doidc.gitlab.clientid and the
+      # three siblings from the environment. Unset, they become EMPTY rather
+      # than absent, which overrides the sane defaults baked into the jar's
+      # application.properties — and Spring Security then refuses to start:
+      #
+      #   Client id of registration 'gitlab' must not be empty.
+      #
+      # That reads like a missing credential and is the opposite: the values
+      # only need to be non-empty. Nothing ever authenticates with them,
+      # because a local run never uses the hosted-mode login. Placeholders are
+      # therefore correct, not a shortcut — but they are also why this port
+      # must NOT be exposed beyond the host: an unauthenticated conformance
       # suite will happily drive flows against whatever issuer it is given.
-      - FINTECHLABS_BASE_URL=${SUITE_BASE_URL:-https://localhost.emobix.co.uk:8442}
+      - OIDC_GITLAB_CLIENTID=local-run-unused
+      - OIDC_GITLAB_SECRET=local-run-unused
+      - OIDC_GOOGLE_CLIENTID=local-run-unused
+      - OIDC_GOOGLE_SECRET=local-run-unused
+      # Dev mode, the way this image can accept it. The entrypoint is a fixed
+      # `sh -c` string ending in `-jar …`, so a compose `command:` cannot append
+      # application arguments to it; JAVA_EXTRA_ARGS is spliced in before the
+      # jar, and Spring Boot reads a -D system property exactly as it reads the
+      # --flag upstream's compose passes. `startredir` sends a browser that
+      # lands on the bare base URL to the test list rather than a 404.
+      - JAVA_EXTRA_ARGS=-Dfintechlabs.devmode=true -Dfintechlabs.startredir=true
+    # W9. The application is reached by nginx as `http://server:8080` — that
+    # name is baked into the sidecar's nginx.conf, which is built upstream and
+    # not ours to edit. The service keeps its own name so `docker compose logs
+    # suite` and the recipes that use it still work, and gains the alias the
+    # proxy needs.
+    networks:
+      default:
+        aliases:
+          - server
     extra_hosts:
       # So AXIAM_ISSUER can name the host from inside the container on Linux,
       # where host.docker.internal is not automatic.
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsk https://localhost:8443/api/runner/available || exit 1"]
+      # Two corrections in one line, both found by the first run (W9).
+      #
+      # The previous probe asked for https://localhost:8443 inside this
+      # container, where nothing has ever listened — the application serves
+      # plain HTTP on 8080 and gets its TLS from the nginx sidecar. So the
+      # service could never become healthy, and `conformance-up` timed out
+      # after three minutes pointing at the logs rather than at this line.
+      #
+      # The header is the second half, and it is not a workaround. The suite
+      # REFUSES any request that did not arrive over TLS, and raises
+      # "A non-https request has been received by the conformance suite" for
+      # every path including this one — a deliberate refusal to be operated in
+      # cleartext, which is also why removing its proxy broke everything. The
+      # sidecar sets X-Forwarded-Proto on real traffic; the probe sets it
+      # itself, because it must bypass the sidecar to avoid a dependency cycle
+      # (nginx waits for this healthcheck).
+      test: ["CMD-SHELL", "curl -fs -H 'X-Forwarded-Proto: https' http://localhost:8080/api/runner/available || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 60s
+
+  # TLS for the suite (W9). Upstream's; see suite.env's SUITE_NGINX_IMAGE for
+  # why the earlier trim of this service was the reason the whole harness could
+  # not answer an HTTPS request.
+  nginx:
+    image: ${SUITE_NGINX_IMAGE:?set SUITE_NGINX_IMAGE (see conformance/suite.env)}
+    depends_on:
+      suite:
+        condition: service_healthy
+    ports:
+      # 8443 inside is the suite's ordinary listener. Upstream also exposes
+      # 8444 (its own mutual-TLS endpoint) and 8445; neither is published here,
+      # because an OP test plan never needs the suite to BE an mTLS server —
+      # AXIAM is the server under test — and 8444 is the port this harness
+      # gives AXIAM.
+      - "${SUITE_PORT:-8442}:8443"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsk https://localhost:8443/api/runner/available || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
 
 volumes:
   mongo-data:

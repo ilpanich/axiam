@@ -400,6 +400,31 @@ recommended method — and the reason (intermediaries log `Authorization`) — i
 `sdks/CONTRACT.md` §5 rule 3 and `docs/security-profiles.md`, not in this
 matrix, which records conformance rather than advice.
 
+## Conformance-suite execution — the first run (wave W9)
+
+These rows are a different kind of evidence from every row above them. The rest
+of this matrix records what AXIAM's own tests assert; these record what the
+**OpenID Foundation conformance suite** observed when it was pointed at a
+running deployment for the first time, on 2026-09-08, against suite
+`release-v5.2.4` (`sha256:3a2615ed…`).
+
+Three of them are `Gap`. That is the point of running the suite: each was a
+requirement no unit test had encoded, so nothing in this document could have
+been red about it beforehand. The full write-up, including the fourteen harness
+defects that had to be fixed before a single module executed, is in
+[`docs/conformance/README.md`](../conformance/README.md).
+
+| # | MUST | Spec Ref | Status | Evidence |
+|---|------|----------|--------|----------|
+| 141 | `code_challenge_methods_supported` is published in the discovery document, listing `S256`. AXIAM enforces PKCE and does not advertise it, so a relying party that selects its flow from metadata cannot discover the support that exists | RFC 8414 §2; RFC 7636 | **Gap** | `EnsureServerConfigurationSupportsCodeChallengeMethodS256`: `code_challenge_methods_supported: not found` — `fapi2-security-profile-final-discovery-end-point-verification`, run 2026-09-08 |
+| 142 | `token_endpoint_auth_signing_alg_values_supported` is published, naming the algorithms accepted for `private_key_jwt` client assertions | FAPI 2.0 §5.3.1.1; Discovery §3 | **Gap** | `FAPI2CheckDiscEndpointTokenEndpointAuthSigningAlgValuesSupported`: `not found` — same module, same run |
+| 143 | The location a discovery document is retrieved from corresponds to the `issuer` claim inside it. W7's tenant-scoped `?tenant_id=` URL breaks that correspondence, so the document that advertises `address` and `phone` cannot be a conformance plan's discovery URL. The scopes still function — the request-time gate and the userinfo release resolve the tenant from the **client** — but a caller reading the bare well-known URL is told they do not exist | Discovery §4.1 | **Gap** (design conflict; see note) | `CheckOauthDiscEndpointIssuer`: "issuer listed in the discovery document is not consistent with the location the discovery document was retrieved from" — same module, same run |
+| 144 | The FAPI 2.0 plan templates are accepted by the suite. All three carried `fapi_client_type` (a FAPI 1.0 variant the suite rejects) and two module-level variants a user may not supply, so **no FAPI plan had ever been creatable** and no module had ever executed from them | X5.2 harness | Pass (after W9 fix) | `conformance/plans/fapi2-*.json`; the plan now creates and runs 31 modules |
+| 145 | `sensitive_scopes_enabled` set at the **organization** level makes tenant-scoped discovery advertise `address` and `phone`, and the `phone_number`, `phone_number_verified` and `address` claims. Setting it on the tenant is refused — a tenant may turn its organization's decision off, never on | X7 G8; plan §4.8 | Pass | Verified live against the running deployment: bare document lists three scopes, `?tenant_id=` lists five and the three extra claims |
+| 146 | A Basic OP client registers with `profile: standard`, `browser_sso: true`, the five plan scopes and `client_secret_basic`, and all of it persists | W3 §4.0; W8 | Pass | `conformance/scripts/register-clients.sh basic`; row read back from `oauth2_client` after registration |
+| 147 | The conformance end user carries a phone number and an address. It takes two APIs: `POST /api/v1/users` cannot set either, and SCIM is the only write path W7 gave them — with a status update in between, because a REST-created user is `PendingVerification` and would start failing this plan's login within 24 hours | OIDC Core §5.1; SCIM 2.0 | Pass | `conformance/scripts/register-user.sh` |
+| 148 | An authorization module can be completed. The W3 login hop redirects to a **same-origin** `/login` (`LOGIN_PATH`), which the `axiam-server` binary does not serve — only the admin SPA does. A conformance target must therefore serve the SPA and the API on one origin. All 35 modules of the Basic OP plan need an authorization, and all 35 finished `WAITING` | plan §4.0 | **Open** | `docs/conformance/2026-09-08-first-run.md`; `crates/axiam-oauth2/src/login_hop.rs::LOGIN_PATH` |
+
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
 
 | # | Behaviour | Spec Ref | Status | Evidence |
@@ -533,3 +558,4 @@ matrix, which records conformance rather than advice.
 *Rows 90–103 added: wave W6 (`POST /oauth2/userinfo`) — 2026-09-07*
 *Rows 104–129 added: wave W7 (`address` and `phone` sensitive scopes) — 2026-09-08*
 *Rows 130–140 added: wave W8 (`client_secret_basic`) — 2026-09-08*
+*Rows 141–148 added: wave W9 (the first conformance-suite execution) — 2026-09-08*

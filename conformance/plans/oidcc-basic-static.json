@@ -1,0 +1,86 @@
+{
+  "_comment": [
+    "OIDF conformance test-plan configuration — OpenID Connect Core, Basic",
+    "Certification Profile, OpenID Provider (W9).",
+    "",
+    "Placeholders of the form ${NAME} are substituted by",
+    "conformance/scripts/render-plan.sh from conformance/suite.env and the",
+    "gitignored conformance/suite.local.env, so this file is committed with no",
+    "client ids, no secrets and no host-specific paths. The rendered copy lands",
+    "under conformance/.run/ (gitignored) and is what the suite actually reads.",
+    "",
+    "Plan name to select in the suite UI or the API:",
+    "  oidcc-basic-certification-test-plan",
+    "with variant { server_metadata: discovery, client_registration: static_client }.",
+    "Those two are the plan's ONLY plan-level variants — the suite lists them,",
+    "and supplying anything else is refused outright rather than ignored. The",
+    "FAPI templates in this directory learned that the expensive way; see their",
+    "_comment blocks.",
+    "",
+    "TWO CLIENTS, ONE DIFFERENCE. client and client2 differ only in how they",
+    "authenticate at the token endpoint: client_secret_basic (RFC 6749 §2.3.1,",
+    "the Authorization header) and client_secret_post (the body). That is the",
+    "point of running both — W8 was the first release in which AXIAM could",
+    "answer the header form at all, and this plan is its first exercise against",
+    "a real relying party. Everything else about the two registrations is",
+    "identical, so a difference in a result is attributable to the method.",
+    "",
+    "WHY THE DISCOVERY URL HAS NO tenant_id. W7 made the discovery document",
+    "tenant-aware through an optional `?tenant_id=` parameter, and the `address`",
+    "and `phone` scopes are advertised only when a tenant is named AND its",
+    "organization has sensitive_scopes_enabled. A conformance plan cannot use",
+    "that URL. The suite's CheckOauthDiscEndpointIssuer requires the location a",
+    "discovery document was retrieved from to correspond to the `issuer` claim",
+    "inside it — OIDC Discovery §4.1, which the suite enforces as an",
+    "impersonation defence — and a query parameter breaks the correspondence.",
+    "",
+    "So this plan reads the bare well-known URL, and `scopes_supported` will not",
+    "list `address` or `phone` even though the organization has enabled them and",
+    "the clients are registered for them. The scopes still WORK: the request-time",
+    "gate and the userinfo release are tenant-resolved from the client, not from",
+    "the discovery document. What is lost is the advertisement. Whether any",
+    "module treats that as a failure is a question this plan's run answers, and",
+    "the answer is written up in docs/conformance/ rather than assumed here.",
+    "",
+    "BROWSER LOGIN HOP. Both clients are registered browser_sso=true (W3, plan",
+    "§4.0), so the suite's cross-site redirect reaches AXIAM's sign-in page",
+    "instead of the 401 a non-browser_sso client gets. Without it every",
+    "authorization module in this plan is a manual cookie-pasting exercise. See",
+    "docs/admin/browser-login-hop.md for the cookie, the SameSite=Lax iframe",
+    "limitation and the 60-second PAR window."
+  ],
+
+  "alias": "axiam-oidcc-basic",
+  "description": "AXIAM — OpenID Connect Core, Basic Certification Profile, OP",
+
+  "server": {
+    "discoveryUrl": "${AXIAM_ISSUER}/.well-known/openid-configuration",
+
+    "acr_values": "urn:mace:incommon:iap:silver",
+
+    "login_hint": "${CONFORMANCE_USER}",
+
+    "ui_locales": "en"
+  },
+
+  "client": {
+    "client_id": "${CLIENT_BASIC_ID}",
+    "client_secret": "${CLIENT_BASIC_SECRET}",
+    "scope": "openid profile email address phone"
+  },
+
+  "client2": {
+    "client_id": "${CLIENT_BASIC_POST_ID}",
+    "client_secret": "${CLIENT_BASIC_POST_SECRET}",
+    "scope": "openid profile email address phone"
+  },
+
+  "resource": {
+    "resourceUrl": "${AXIAM_ISSUER}/oauth2/userinfo"
+  },
+
+  "variant": {
+    "server_metadata": "discovery",
+    "client_registration": "static_client"
+  }
+}

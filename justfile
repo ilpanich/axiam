@@ -662,8 +662,11 @@ bootstrap-local:
 #
 #   just conformance-certs      # throwaway client certs for both auth variants
 #   just conformance-up         # start the pinned suite (~60s to ready)
-#   just conformance-register   # create the two fapi2 clients, fill suite.env
-#   just conformance-run        # drive both test plans, collect results
+#   just conformance-serve      # run AXIAM with TLS as the system under test
+#   just conformance-register   # create the two fapi2 clients, fill suite.local.env
+#   just conformance-register-basic  # the Basic OP clients + test user (W9)
+#   just conformance-run        # drive the three FAPI plans, collect results
+#   just conformance-run-basic  # drive the OIDC Core Basic plan (W9)
 #   just conformance-report     # render docs/conformance/*.md — failures first
 #   just conformance-down
 
@@ -704,6 +707,8 @@ conformance-register:
 # methods. It needs no mTLS listener, which also makes it a diagnostic: if the
 # first two fail at client authentication and the third passes, the problem is
 # the listener's client-CA bundle rather than AXIAM.
+#
+# Drive the three FAPI 2.0 plans and collect their results.
 conformance-run:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -718,6 +723,34 @@ conformance-run:
         "conformance/.run/$(basename "$cfg")" "$PLAN_NAME" || rc=1
     done
     exit $rc
+
+# Register the Basic OP clients and the test user (W9).
+conformance-register-basic:
+    bash conformance/scripts/register-clients.sh basic
+
+# Run AXIAM as the system under test: TLS, a non-loopback bind, and an issuer
+# that matches the name the suite dials. See the script for why `just run-local`
+# cannot stand in for it.
+#
+# Run AXIAM with TLS as the system under test.
+conformance-serve:
+    bash conformance/scripts/serve-axiam.sh
+
+# Drive the OIDC Core Basic Certification plan (W9).
+#
+# Separate from `conformance-run` rather than another entry in its loop: it is a
+# different specification family with a different plan name and its own clients,
+# and the FAPI baseline's value depends on being re-runnable without dragging
+# this along.
+#
+# Drive the OIDC Core Basic Certification plan (W9).
+conformance-run-basic:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    PLAN_NAME="${CONFORMANCE_BASIC_PLAN_NAME:-oidcc-basic-certification-test-plan}"
+    cfg="conformance/plans/oidcc-basic-static.json"
+    bash conformance/scripts/render-plan.sh "$cfg" || exit 1
+    bash conformance/scripts/run-plan.sh "conformance/.run/$(basename "$cfg")" "$PLAN_NAME"
 
 # Render the collected results into docs/conformance/, failures first.
 conformance-report:

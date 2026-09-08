@@ -993,20 +993,68 @@ pub async fn authorize<C: Connection + Clone>(
                 ui_locales: q.ui_locales.as_deref(),
                 claims_locales: q.claims_locales.as_deref(),
             });
-            let (Some(response_type), Some(redirect_uri)) = (q.response_type, q.redirect_uri)
+            // Cloned into the scrutinee so the else-arm can still read
+            // `q.redirect_uri`: a `let`-else MOVES what it destructures, and
+            // the arm's whole job is to decide whether that URI is one this
+            // server may redirect an error to. Two small `Option<String>`
+            // clones on a request that is about to be refused.
+            let (Some(response_type), Some(redirect_uri)) =
+                (q.response_type.clone(), q.redirect_uri.clone())
             else {
+                // Which of the two is missing decides how the error travels,
+                // and until this wave it did not: both were answered with a
+                // JSON body in the browser's window.
+                //
+                // RFC 6749 §4.1.2.1 draws the line at whether the server can
+                // trust where it would be sending the browser. It MUST NOT
+                // redirect when the `redirect_uri` is missing or does not match
+                // a registered one — that is the open-redirect case, and a JSON
+                // body is the right answer. But when `client_id` names a real
+                // client and the `redirect_uri` is one it registered, the error
+                // MUST be delivered by redirecting, with `state` echoed, so the
+                // relying party learns what happened instead of the end user
+                // reading a machine-readable body they cannot act on.
+                //
+                // Found by the OpenID Foundation suite:
+                // `oidcc-response-type-missing` sends a valid client and a
+                // registered `redirect_uri` with no `response_type`, waited for
+                // a redirect that never came, and stalled the whole plan.
+                // `user.tenant_id`, NOT `q.tenant_id`. The query parameter is
+                // ignored on this arm for the reason stated where the principal
+                // was resolved: the tenant a token was minted for is the tenant
+                // it acts in, and letting a query parameter move it would be a
+                // tenant-crossing primitive handed to whoever holds the
+                // browser. Reintroducing it here — on a lookup that decides
+                // where a browser gets redirected — would be the worst place to
+                // reintroduce it.
+                let redirect_target = match &q.redirect_uri {
+                    Some(candidate) => state
+                        .oauth2_client_repo
+                        .get_by_client_id(user.tenant_id, &q.client_id)
+                        .await
+                        .ok()
+                        .filter(|client| client.redirect_uris.contains(candidate))
+                        .map(|_| candidate.clone()),
+                    None => None,
+                };
+
                 // A refused request object with no inline redirect_uri cannot
                 // be reported by redirecting — there is no validated URI to
                 // redirect to — so it is answered directly, with its own code
                 // rather than the generic complaint about missing parameters.
-                if let Some(object) = request_object {
-                    return build_oauth2_error_response(&object.into_error());
-                }
-                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
-                    "response_type and redirect_uri are required unless \
-                     request_uri is used"
-                        .into(),
-                ));
+                let error = match request_object {
+                    Some(object) => object.into_error(),
+                    None => OAuth2Error::InvalidRequest(
+                        "response_type is required unless request_uri is used".into(),
+                    ),
+                };
+
+                return match redirect_target {
+                    Some(uri) => {
+                        build_error_redirect(&uri, &error, q.state.as_deref(), &state.auth_config)
+                    }
+                    None => build_oauth2_error_response(&error),
+                };
             };
             AuthorizeRequest {
                 tenant_id: user.tenant_id,

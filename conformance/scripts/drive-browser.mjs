@@ -169,7 +169,19 @@ async function visit(context, url) {
       await page.locator('#consent-allow').click();
       await backAtSuite();
     } else if (outcome === 'timeout') {
-      throw new Error('neither the consent screen nor the suite callback appeared');
+      // Where the browser actually stopped, and what it was shown. Without
+      // this the driver reports "nothing appeared", which is true and useless:
+      // the first time this fired, the page was AXIAM answering
+      // `{"error":"invalid_request"}` as a BODY at the authorization endpoint
+      // instead of redirecting the error to the registered `redirect_uri`
+      // (RFC 6749 §4.1.2.1) — a real finding that the message hid.
+      const body = await page
+        .evaluate(() => document.body.innerText.slice(0, 300))
+        .catch(() => '<unreadable>');
+      throw new Error(
+        `stopped at ${page.url().split('?')[0]} — neither the consent screen ` +
+          `nor the suite callback appeared. Page said: ${body.replace(/\s+/g, ' ')}`,
+      );
     }
 
     // Landing back on the suite's callback is what tells it the hop finished.

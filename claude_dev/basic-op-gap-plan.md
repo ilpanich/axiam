@@ -1203,6 +1203,74 @@ automation block remains right and remains untried: a browser block that drives
 a page returning 404 automates nothing, so serving the SPA is the prerequisite
 and is the top follow-up.
 
+### W9 follow-up — what the second run cost, 2026-09-08
+
+The W9 amendment above named one follow-up ("serving the SPA is the prerequisite
+and is the top follow-up") and was right that it was the prerequisite. It was
+wrong that it was the only one. Between the committed tree and a module that
+reaches an assertion there were **five** independent blockers, each invisible
+behind the one before it — which is why the first report contained almost no
+information about AXIAM despite being 66 modules of red.
+
+1. **Nothing served `/login`.** As predicted. `conformance/nginx-axiam.conf` now
+   serves the admin SPA and proxies the API on the issuer origin.
+
+   It cannot be a proxy in front of *everything*, and the amendment did not
+   anticipate why: `axiam_oauth2::mtls` refuses a forwarded
+   `X-Client-Certificate` for OAuth2 client authentication by construction, so
+   terminating TLS ahead of the token endpoint would trade 65 stalled modules
+   for 31 unauthenticatable ones. The deployment splits the way RFC 8705 §5
+   designed it — front channel through the proxy, back channel on
+   `axiam-server`'s own listener, advertised as `mtls_endpoint_aliases`.
+
+2. **The FAPI clients were never registered `browser_sso`.** All 30 FAPI
+   authorization modules would have met a 401 rather than a sign-in page even
+   with the SPA served.
+
+3. **The suite's own browser automation cannot drive the SPA.** The amendment
+   said "a `browser` automation block in the plan remains right and remains
+   untried". It was tried, and it is wrong: the suite's runner is HtmlUnit,
+   which fetched `/login` and recorded the bare Vite `index.html`. Worse than
+   useless — a failed browser task INTERRUPTS the module, where no block leaves
+   it WAITING with a URL. The blocks are gone and
+   `conformance/scripts/drive-browser.mjs` drives the URLs in Chromium instead.
+
+4. **The harness was pointed at a tenant nothing lived in.** `suite.env`'s
+   hard-coded `AXIAM_TENANT_ID` was passed as `?tenant_id=` on every create, and
+   AXIAM ignores that parameter for an admin-session caller. Every client and
+   the test user were created in the admin's tenant while the harness believed
+   otherwise, and nothing failed loudly.
+
+5. **And the finding of record: the discovery document advertised endpoints
+   that could not be used at the URLs it advertised.** Every endpoint that
+   authenticates a client takes a required `tenant_id`; the document published
+   none of them. `POST` to the published `token_endpoint` answered
+   `400 Query deserialize error: missing field tenant_id`.
+
+   This is the same root cause as the amendment's "Risk 2 was real" paragraph,
+   and it is strictly larger than that paragraph understood: not "the URL that
+   advertises `address` and `phone` cannot be a plan's discovery URL", but **no
+   discovery-driven OIDC client of any kind could complete a flow against
+   AXIAM.** Resolved on the maintainer's instruction by publishing the tenant in
+   the endpoint URLs, with `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` naming the
+   tenant the bare document describes. No endpoint's behaviour changed; a
+   deployment that sets nothing serves the document it served before.
+
+Two AXIAM defects surfaced once modules could actually reach assertions, and
+they are the first conformance findings this project has that are about
+behaviour rather than metadata:
+
+- `code_challenge_methods_supported` and
+  `token_endpoint_auth_signing_alg_values_supported` were absent — both describe
+  behaviour AXIAM already had, so the code was conformant and the document was
+  not. Fixed; contract 1.42.
+- **The authorization endpoint answered an invalid request with a JSON body
+  instead of redirecting the error to the registered `redirect_uri`.** RFC 6749
+  §4.1.2.1 permits a direct answer only when the server cannot trust where it
+  would send the browser; with a valid `client_id` and a registered
+  `redirect_uri` the error MUST travel by redirect, with `state` echoed.
+  `oidcc-response-type-missing` waited for that redirect and stalled the plan.
+
 Rollback story per wave: every wave is additive with defaults equal to today,
 so reverting a wave is reverting a PR; schema v50/v51 columns are optional and
 the pre-migration decode path is specified (§4.3), so a rolled-back binary

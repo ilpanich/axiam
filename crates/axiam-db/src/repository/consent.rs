@@ -1,9 +1,9 @@
 //! SurrealDB implementation of [`ConsentRepository`].
 
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{Consent, CreateConsent};
-use axiam_core::repository::ConsentRepository;
+use axiam_core::repository::{ConsentRepository, OIDC_SCOPE_RELEASE_CONSENT_PREFIX};
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
@@ -129,6 +129,47 @@ impl<C: Connection> ConsentRepository for SurrealConsentRepository<C> {
             ip_address: row.ip_address,
             user_agent: row.user_agent,
         })
+    }
+
+    async fn withdraw(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        consent_type: &str,
+    ) -> AxiamResult<usize> {
+        // The namespace guard the trait's contract promises. Refused rather
+        // than silently matching nothing, because a caller that reached here
+        // with `terms_of_service` has a bug the caller needs to hear about —
+        // and because "deleted nothing" and "was not allowed to try" must not
+        // be the same answer.
+        if !consent_type.starts_with(OIDC_SCOPE_RELEASE_CONSENT_PREFIX) {
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "consent withdrawal is limited to the \
+                     {OIDC_SCOPE_RELEASE_CONSENT_PREFIX}… namespace; \
+                     {consent_type:?} is outside it"
+                ),
+            });
+        }
+
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "DELETE consent \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                 AND consent_type = $consent_type RETURN BEFORE",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("consent_type", consent_type.to_owned()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let removed: Vec<ConsentRow> = result.take(0).map_err(DbError::from)?;
+        Ok(removed.len())
     }
 
     async fn list_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<Vec<Consent>> {

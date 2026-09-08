@@ -1246,6 +1246,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             permissions: None,
             ext_exchange: None,
             cnf: None,
+            client_id: None,
             ext: None,
         };
         let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes()).unwrap();
@@ -1462,6 +1463,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             permissions: None,
             ext_exchange: None,
             cnf: None,
+            client_id: None,
             ext: None,
         })
     }

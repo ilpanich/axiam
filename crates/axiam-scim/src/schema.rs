@@ -158,6 +158,34 @@ fn schemas_list() -> serde_json::Value {
                     attr("primary", "boolean", false, false, "readWrite")
                 ]
             }),
+            // X7 G8 / W7. Advertised as RFC 7643 §4.1.2 defines them, with
+            // one deviation stated rather than hidden: AXIAM stores a single
+            // value for each, so a provisioning client sending several gets
+            // the primary one kept and the rest dropped. `type` is accepted
+            // and not stored — see `users::ScimPhoneInput`.
+            json!({
+                "name": "phoneNumbers", "type": "complex", "multiValued": true,
+                "required": false, "mutability": "readWrite", "returned": "default",
+                "uniqueness": "none",
+                "subAttributes": [
+                    attr("value", "string", false, false, "readWrite"),
+                    attr("primary", "boolean", false, false, "readWrite")
+                ]
+            }),
+            json!({
+                "name": "addresses", "type": "complex", "multiValued": true,
+                "required": false, "mutability": "readWrite", "returned": "default",
+                "uniqueness": "none",
+                "subAttributes": [
+                    attr("formatted", "string", false, false, "readWrite"),
+                    attr("streetAddress", "string", false, false, "readWrite"),
+                    attr("locality", "string", false, false, "readWrite"),
+                    attr("region", "string", false, false, "readWrite"),
+                    attr("postalCode", "string", false, false, "readWrite"),
+                    attr("country", "string", false, false, "readWrite"),
+                    attr("primary", "boolean", false, false, "readWrite")
+                ]
+            }),
             attr("active", "boolean", false, false, "readWrite"),
             attr("password", "string", false, false, "writeOnly"),
             json!({

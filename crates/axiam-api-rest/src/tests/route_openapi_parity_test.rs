@@ -88,6 +88,16 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     "/api/v1/account/export",
     "/api/v1/account/export/{token}",
     "/api/v1/account/delete",
+    // GDPR Art. 7 consent (X7 G8 / W7). The same category as the three above
+    // and, unlike them, with no "act on behalf of" branch at all: an
+    // administrator cannot consent for a data subject, because Art. 4(11)
+    // defines consent as an indication of the *subject's* wishes. There is
+    // deliberately no `user_id` parameter to try it with, so there is nothing
+    // a route-level permission could gate — the caller acts on their own
+    // record or not at all.
+    "/api/v1/account/consents",
+    "/api/v1/account/consents/oidc-scopes",
+    "/api/v1/account/consents/oidc-scopes/{client_id}",
     // UMA 2.0 Protection API (X2). Authenticated by the `ProtectionApiToken`
     // extractor — a client-credentials token carrying `uma_protection` — and
     // deliberately not permission-gated. The scope IS the gate: it is what an

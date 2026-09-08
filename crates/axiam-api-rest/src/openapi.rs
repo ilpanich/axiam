@@ -192,6 +192,11 @@ use crate::handlers;
         handlers::gdpr::download_account_export,
         handlers::gdpr::request_account_delete,
         handlers::gdpr::cancel_account_delete,
+        // GDPR Art. 7 consent (X7 G8 / W7) — the self-service list, and the
+        // grant and withdrawal the consent screen drives.
+        handlers::gdpr::list_own_consents,
+        handlers::gdpr::grant_oidc_scope_consent,
+        handlers::gdpr::withdraw_oidc_scope_consent,
         handlers::scim_tokens::create,
         handlers::scim_tokens::list,
         handlers::scim_tokens::revoke,
@@ -225,6 +230,13 @@ use crate::handlers;
         handlers::oauth2::discovery,
         handlers::oauth2::jwks,
         handlers::oauth2::userinfo,
+        // W7 — the POST method W6 added and could not document: annotating it
+        // regenerates `sdks/openapi.json`, and W6's environment could not
+        // build `--dump-openapi` (`protoc` absent ⇒ `axiam-api-grpc`'s build
+        // script fails). It can here, and this wave regenerates the spec
+        // anyway, so the gap §12 would otherwise have carried into W8 closes
+        // for the price of one annotation.
+        handlers::oauth2::userinfo_post,
         // UMA 2.0 (X2)
         handlers::uma::permission_request,
         handlers::uma::uma2_configuration,
@@ -511,6 +523,14 @@ use crate::handlers;
         axiam_oauth2::oidc::JwksDocument,
         axiam_oauth2::oidc::Jwk,
         axiam_oauth2::oidc::UserInfoResponse,
+        handlers::oauth2::UserInfoPostForm,
+        // W7 — the `address` claim's structure, referenced by
+        // `UserInfoResponse`. Without it the spec would name a schema it does
+        // not define, which is the one shape of drift the digest gate cannot
+        // catch by itself.
+        axiam_core::models::user::Address,
+        handlers::gdpr::ConsentView,
+        handlers::gdpr::GrantScopeConsent,
         // Settings
         axiam_core::models::settings::SecuritySettings,
         axiam_core::models::settings::SetOrgSettings,

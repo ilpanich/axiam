@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta12",
-    "x-axiam-spec-digest": "sha256:c8cfb18551f2ca996838e6a078e1f4aa5e69187533b031024bf21b4e1f4d2f1a"
+    "x-axiam-spec-digest": "sha256:40cea0ec22c43d143663417773ce1aed234aacf8b8683e5c5c65a92ca35a5027"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -18,9 +18,19 @@
         "tags": [
           "oidc"
         ],
-        "summary": "`GET /.well-known/openid-configuration` -- OIDC Discovery document.",
-        "description": "Returns the OpenID Provider metadata per OpenID Connect Discovery 1.0.\nThe issuer URL is taken from `AuthConfig::oauth2_issuer_url` when set,\nfalling back to `AuthConfig::jwt_issuer` otherwise.\n\nRFC 8705 §5 `mtls_endpoint_aliases` is included when — and only when —\n`AuthConfig::oauth2_mtls_base_url` names a separate mutual-TLS host.",
         "operationId": "discovery",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant whose OIDC capabilities the document should describe. Omit for the deployment-wide document.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OpenID Connect Discovery document",
@@ -55,6 +65,109 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/account/consents": {
+      "get": {
+        "tags": [
+          "gdpr"
+        ],
+        "summary": "`GET /api/v1/account/consents` — the caller's own consent records.",
+        "description": "Art. 7(1) says a controller must be able to demonstrate that consent was\ngiven; Art. 15(1)(a) says the subject may see what is held about them. This\nendpoint is the second, and it is also the page the withdrawal control\nlives on.",
+        "operationId": "list_own_consents",
+        "responses": {
+          "200": {
+            "description": "The caller's consent records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ConsentView"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/consents/oidc-scopes": {
+      "post": {
+        "tags": [
+          "gdpr"
+        ],
+        "summary": "`POST /api/v1/account/consents/oidc-scopes` — record a scope-release consent.",
+        "description": "What the SPA's consent screen calls when the end user says yes. Everything\nit accepts is checked against the registration rather than taken on trust,\nbecause a consent record is the thing UserInfo releases personal data on\nthe strength of:\n\n* the scopes must be sensitive ones — nothing else belongs in this\n  namespace, and a record naming `openid` would be a record that never\n  matches and never expires;\n* the client must exist in the caller's tenant;\n* the client must have every named scope **registered**, so a consent\n  cannot be recorded for a release the client could never have been\n  authorised for;\n* the tenant switch must be on, so consent collected while the capability\n  is off cannot sit waiting for somebody to turn it on.\n\nIdempotent: the `(tenant, user, type, version)` index makes a repeated\ngrant the same grant, and a second call is answered `200` rather than a\nconflict. A consent screen the user double-submits has consented once.",
+        "operationId": "grant_oidc_scope_consent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantScopeConsent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Consent recorded"
+          },
+          "400": {
+            "description": "Unknown client, unregistered scope, non-sensitive scope, or the capability is off"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/account/consents/oidc-scopes/{client_id}": {
+      "delete": {
+        "tags": [
+          "gdpr"
+        ],
+        "summary": "`DELETE /api/v1/account/consents/oidc-scopes/{client_id}` — withdraw.",
+        "description": "Art. 7(3): as easy to withdraw as to give. One call, no grace period, no\nconfirmation step, and it takes effect on the **next UserInfo call with the\ntoken the relying party already holds** — not on the next token. That is\nthe property T8.4 asserts, and it is why the release gate re-reads the\nrecord on every call rather than trusting the one taken at authorization.\n\nWithdraws every scope set consented to for this relying party, not one of\nthem: a subject saying \"stop giving my address to this app\" does not mean\n\"stop giving it under the two-scope record but carry on under the\none-scope one\".\n\nAnswers `200` whether or not anything was there, and says how many records\nwent. A subject who withdraws twice is not told off, and an attacker who\nguesses `client_id`s learns nothing from the status code — though they\nwould have to be the subject to ask at all.",
+        "operationId": "withdraw_oidc_scope_consent",
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "path",
+            "description": "The relying party to stop releasing to",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Consent withdrawn (or there was none)"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/account/delete": {
@@ -10564,6 +10677,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "axiam_consent_hop",
+            "in": "path",
+            "description": "W7 — the **consent** hop's loop guard (`axiam_consent_hop`).\n\nA second marker rather than a reuse of the one above, because the two\nceremonies answer different questions and a request can need both. See\n`axiam_oauth2::login_hop::CONSENT_HOP_MARKER`.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -11002,6 +11127,48 @@
             "bearer": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "oidc"
+        ],
+        "summary": "`POST /oauth2/userinfo` — the same endpoint, the other method (W6, plan\n§4.9 G10; OIDC Core §5.3, which says an OP MUST support both).",
+        "description": "# Why a second handler rather than a second extractor\n\nThe access token may arrive in the `Authorization` header (RFC 6750 §2.1) or\n— on POST only — in an `access_token` form field (§2.2). The second carrier\nlives in the body, which [`AuthenticatedUser`]'s `FromRequest` impl does not\nread and must not start reading: that impl is on the path `GET` takes, and\non the path every other authenticated route in the tree takes. Resolving the\ntoken here instead leaves all of them untouched, which is what makes \"GET\nbehaviour is unchanged\" a property of the routing table rather than a claim\nabout a shared code path. Both arms then hand the same\n[`AuthenticatedUser`] to the same [`userinfo_claims`].\n\n# The refusals, and where each is decided\n\n* **Two carriers, one request.** RFC 6750 §2: *\"Clients MUST NOT use more\n  than one method to transmit the token in each request.\"* A form field\n  presented together with an `Authorization` header is refused here with\n  `400 invalid_request`, and the refusal names neither token — it does not\n  read them at all, so there is nothing to leak into the body or the log.\n  The `axiam_access` cookie is refused alongside the form field for the same\n  reason even though it is not one of RFC 6750's methods: it is a second\n  credential naming a possibly different subject, and the alternative to\n  refusing is choosing silently between two identities.\n* **The cookie alone still authenticates, exactly as on GET.** That is\n  today's behaviour and invariant 4 keeps it. It is a CSRF surface in\n  principle — `/oauth2` is not wrapped in `CsrfMiddleware`, only `/api/v1`\n  is — and it fails closed in practice because `axiam_access` is\n  `SameSite=Strict` (`middleware::csrf::access_cookie`), so a cross-site\n  form POST carries no cookie and lands here unauthenticated. That is a\n  property of the cookie, not of this handler, so it is pinned by a test\n  rather than asserted by this comment\n  (`oauth2_userinfo_post_test.rs::the_access_cookie_is_strict_so_a_cross_site_post_cannot_be_authenticated_by_it`).\n* **`access_token` in the query string is never read** — on either method.\n  RFC 6750 §2.3 deprecates that form because it puts a credential in a URL,\n  a `Referer` and every access log in the path. Refusing it would mean\n  reading it first, and the parameter's problem is that it exists at all,\n  not that a server honours it. So there is no code here that looks at the\n  query string, and a `GET /oauth2/userinfo?access_token=…` is simply an\n  unauthenticated request with an odd URL.\n\n# An empty field is not a carrier\n\n`access_token=` transmits no token, so it is treated as absent rather than\nas a second method or as an invalid credential. A request carrying an empty\nfield and a real `Authorization` header is answered, not refused.",
+        "operationId": "userinfo_post",
+        "requestBody": {
+          "description": "RFC 6750 §2.2 form-encoded access token. Omit the body entirely to present the token in the Authorization header instead; presenting it both ways is refused.",
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/UserInfoPostForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "UserInfo response — byte-identical to what GET answers for the same token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserInfoResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The access token was presented by more than one method (RFC 6750 §2)"
+          },
+          "401": {
+            "description": "Invalid or missing access token"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/ready": {
@@ -11308,6 +11475,54 @@
           "service_account_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "Address": {
+        "type": "object",
+        "description": "The OIDC Core §5.1.1 `address` claim, stored as a typed record (X7 G8).\n\nEvery member is optional, exactly as §5.1.1 defines them, and the set is\n**closed**: the six members below are the whole of the claim, and the\ndatabase column is SCHEMAFULL with one sub-field each. That is the data\nminimisation argument made structural rather than written down — there is\nno shape in which an integration could park a passport number, a date of\nbirth or a free-form note on the user row and have it released under the\n`address` scope.\n\n`formatted` is the multi-line rendering §5.1.1 says a display surface should\nuse; the other five are its components. AXIAM never derives one from the\nother: what a provisioning client wrote is what a relying party is released,\nbecause inventing a `formatted` from components would put words AXIAM chose\ninto a claim the user consented to release.",
+        "properties": {
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Country name."
+          },
+          "formatted": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Full mailing address, formatted for display or use on a mailing label."
+          },
+          "locality": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "City or locality."
+          },
+          "postal_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Zip or postal code."
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "State, province, prefecture or region."
+          },
+          "street_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "House number, street name and unit, possibly on multiple lines."
           }
         }
       },
@@ -12112,6 +12327,34 @@
           },
           "token": {
             "type": "string"
+          }
+        }
+      },
+      "ConsentView": {
+        "type": "object",
+        "description": "One consent record, as the subject sees it.",
+        "required": [
+          "consent_type",
+          "version",
+          "accepted_at",
+          "withdrawable"
+        ],
+        "properties": {
+          "accepted_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "consent_type": {
+            "type": "string",
+            "description": "What was consented to, e.g. `terms_of_service` or\n`oidc_scope_release:<client_id>`."
+          },
+          "version": {
+            "type": "string",
+            "description": "The document version or, for a scope release, the consented scopes."
+          },
+          "withdrawable": {
+            "type": "boolean",
+            "description": "Whether this record can be withdrawn here.\n\n`false` for `terms_of_service`: withdrawing it is not a consent\noperation but an erasure, and it has its own endpoint with its own\ngrace period. Reported rather than silently absent so the self-service\npage can show the record and explain it."
           }
         }
       },
@@ -13894,6 +14137,27 @@
           }
         }
       },
+      "GrantScopeConsent": {
+        "type": "object",
+        "description": "Body for recording an OIDC scope-release consent.",
+        "required": [
+          "client_id",
+          "scopes"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "description": "The relying party the claims would be released to."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The sensitive scopes being consented to. Order does not matter; the\nrecord is written in the canonical order so that the same consent has\none name."
+          }
+        }
+      },
       "GrantedScope": {
         "type": "object",
         "description": "A scope named by a grant, resolved to something a human can read.",
@@ -15552,6 +15816,26 @@
           },
           "userinfo_endpoint": {
             "type": "string"
+          }
+        }
+      },
+      "OidcPolicy": {
+        "type": "object",
+        "description": "OpenID Connect surface controls (X7 G8, plan §4.6/§4.8).\n\nTwo settings that are not password rules, and are here because this is the\norg-baseline-plus-tenant-override surface every other per-tenant control\nlives on. They are also the two settings in this model that are *not* of\nthe same kind as each other, so it is worth saying which is which:\n\n* [`Self::sensitive_scopes_enabled`] **is** ordered. Releasing personal\n  data is the less-restrictive direction, so it is validated\n  disable-only — the mirror image of `mfa_enforced` — and a tenant can turn\n  its organization's decision off but never on.\n* [`Self::default_locale`] is **not** ordered, and no ordering is invented\n  for it. A language is a presentation preference; there is no sense in\n  which Italian is stricter than French. [`validate_tenant_override`]\n  therefore does not check it and [`clamp_overrides_to_org`] never clears\n  it. The model's rule is \"a tenant may only be more restrictive\", which\n  binds every field that *has* a restrictiveness; a field that has none\n  cannot violate it.",
+        "required": [
+          "sensitive_scopes_enabled"
+        ],
+        "properties": {
+          "default_locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The BCP 47 tag the sign-in page falls back to when the relying party's\n`ui_locales` selects nothing (W5's chain, plan §4.6).\n\n`None` means \"no tenant preference\", which lands on the deployment\ndefault (`en`) — the behaviour every deployment had before this field\nexisted. A tag this build does not ship also lands there: the parse is\nexact rather than a language lookup, so a stored `fr-CA` reads as\n\"somebody wrote something this binary does not ship\" rather than as a\nguess at French.\n\nStored as a string rather than as the `Locale` enum because that enum\nlives in `axiam-oauth2`, four layers above this crate, and the crate\nlayering points inward."
+          },
+          "sensitive_scopes_enabled": {
+            "type": "boolean",
+            "description": "Whether `address` and `phone` may be registered on a client, requested\nat the authorization endpoint, and released at UserInfo (X7 G8).\n\n**Off unless an organization turns it on.** The two scopes release a\npostal address and a telephone number — categories of personal data\nAXIAM has no other use for — so the deployment that has never thought\nabout them releases nothing, and the operator who has thought about\nthem says so once, at the organization level, where the lawful basis\nfor holding the data was decided.\n\nThe switch is a *capability*, not a grant: with it on, a client still\nhas to register the scope, the request still has to ask for it, and the\nuser still has to have consented. It is the first of four gates, and it\nis the only one an operator can close for everybody at once."
           }
         }
       },
@@ -17362,6 +17646,7 @@
           "opaque",
           "privacy",
           "webauthn",
+          "oidc",
           "created_at",
           "updated_at"
         ],
@@ -17388,6 +17673,9 @@
           },
           "notification": {
             "$ref": "#/components/schemas/NotificationPolicy"
+          },
+          "oidc": {
+            "$ref": "#/components/schemas/OidcPolicy"
           },
           "opaque": {
             "$ref": "#/components/schemas/OpaquePolicy"
@@ -17646,6 +17934,13 @@
             "format": "int32",
             "minimum": 0
           },
+          "default_locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "it"
+          },
           "deletion_grace_period_days": {
             "type": "integer",
             "format": "int32",
@@ -17733,6 +18028,10 @@
           },
           "require_uppercase": {
             "type": "boolean"
+          },
+          "sensitive_scopes_enabled": {
+            "type": "boolean",
+            "example": false
           },
           "webauthn_user_verification": {
             "type": "string",
@@ -18096,6 +18395,13 @@
             "format": "int32",
             "minimum": 0
           },
+          "default_locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The tenant's fallback UI language. Not ordered, therefore not validated\nagainst the baseline and never clamped — see [`OidcPolicy`]."
+          },
           "deletion_grace_period_days": {
             "type": [
               "integer",
@@ -18238,6 +18544,12 @@
             ]
           },
           "require_uppercase": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "sensitive_scopes_enabled": {
             "type": [
               "boolean",
               "null"
@@ -19380,6 +19692,17 @@
       "UpdateUser": {
         "type": "object",
         "properties": {
+          "address": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Address",
+                "description": "X7 G8. `Some(Some(val))` = set, `Some(None)` = clear, `None` = no change."
+              }
+            ]
+          },
           "email": {
             "type": [
               "string",
@@ -19429,6 +19752,21 @@
               "null"
             ],
             "description": "`Some(Some(val))` = set, `Some(None)` = clear, `None` = no change."
+          },
+          "phone_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "X7 G8. `Some(Some(val))` = set, `Some(None)` = clear, `None` = no change."
+          },
+          "phone_number_verified_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "X7 G8. `Some(Some(val))` = set, `Some(None)` = clear, `None` = no change."
           },
           "status": {
             "oneOf": [
@@ -19545,6 +19883,17 @@
           "updated_at"
         ],
         "properties": {
+          "address": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Address",
+                "description": "Postal address, released under the OIDC `address` scope (X7 G8).\n\nSame posture as [`Self::phone_number`]: stored to be released under\nconsent, read by nothing else."
+              }
+            ]
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -19600,6 +19949,21 @@
           "password_hash": {
             "type": "string"
           },
+          "phone_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "E.164 telephone number, released under the OIDC `phone` scope (X7 G8).\n\nPersonal data with no operational use inside AXIAM: nothing\nauthenticates against it, no notification is sent to it, and no lookup\nis keyed by it. It exists so that a relying party the user has\nconsented to can be told it, which is why it is written only by the\nadmin API and by SCIM and read only by the UserInfo endpoint."
+          },
+          "phone_number_verified_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When this number was verified, feeding the `phone_number_verified`\nclaim (OIDC Core §5.1).\n\nAXIAM ships no telephone verification ceremony, so this is written only\nby an administrator asserting an out-of-band check. `None` means the\nclaim is released as `false` — never omitted and never assumed true:\n§5.1 makes `phone_number_verified` a statement the OP is answerable\nfor, and the honest default for a verification that never happened is\n\"no\"."
+          },
           "scheduled_purge_at": {
             "type": [
               "string",
@@ -19633,15 +19997,39 @@
           }
         }
       },
+      "UserInfoPostForm": {
+        "type": "object",
+        "description": "The form body `POST /oauth2/userinfo` accepts (RFC 6750 §2.2).\n\nUnknown fields are ignored, as serde does by default: RFC 6750 §2.2 defines\none parameter and says nothing about others, and a UserInfo request that\nalso carried, say, a `client_id` is not malformed.",
+        "properties": {
+          "access_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The access token, per RFC 6750 §2.2."
+          }
+        }
+      },
       "UserInfoResponse": {
         "type": "object",
-        "description": "OIDC UserInfo response.",
+        "description": "OIDC UserInfo response.\n\n# The three W7 claims are absent unless four gates all said yes\n\n`phone_number`, `phone_number_verified` and `address` (X7 G8) are the only\nmembers of this type that are not derivable from the token alone. They are\npresent only when the tenant switch is on, the access token carries the\nscope, the relying party the token names holds a live consent record, and\nthat relying party is not on the `fapi2` profile — see\n`crate::sensitive` for why each of the four exists and who closes it.\n\n`Debug` is manual so that neither value can reach a log line through the\nmost natural diagnostic anybody writes, the same rule\n`axiam_core::models::user::User` follows.",
         "required": [
           "sub",
           "tenant_id",
           "org_id"
         ],
         "properties": {
+          "address": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Address",
+                "description": "OIDC Core §5.1.1, released under the `address` scope (X7 G8)."
+              }
+            ]
+          },
           "email": {
             "type": [
               "string",
@@ -19650,6 +20038,20 @@
           },
           "org_id": {
             "type": "string"
+          },
+          "phone_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1, released under the `phone` scope (X7 G8)."
+          },
+          "phone_number_verified": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether [`Self::phone_number`] has been verified out of band.\n\nEmitted **only alongside** the number, per OIDC Core §5.1: a\n`phone_number_verified` with no `phone_number` asserts something about\na value the relying party was not given. `false` rather than omitted\nwhen the number is present and unverified — that is a statement AXIAM\nis answerable for, and the honest one for a verification that never\nhappened."
           },
           "preferred_username": {
             "type": [

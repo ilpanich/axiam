@@ -738,12 +738,27 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     ) -> Result<serde_json::Value, AxiamError> {
         // Profile — no password_hash or mfa_secret.
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+        // W7 / X7 G8: `phone_number` and `address` are in the inventory
+        // because Art. 15(1) is about *all* personal data being processed,
+        // and these two are the most obviously personal columns on the row.
+        // The plan's §4.8 assumed they would be covered for free by "the
+        // existing export path"; the path is an explicit field list, so a
+        // column not named here is a column the subject is never shown. The
+        // same defect, in the same shape, as the two erasure statements.
+        //
+        // `phone_number_verified` rather than the timestamp, matching the
+        // claim the subject would have seen released: exporting the internal
+        // column name would describe AXIAM's storage rather than the subject's
+        // data.
         let profile = serde_json::json!({
             "id": user.id,
             "username": user.username,
             "email": user.email,
             "status": user.status,
             "mfa_enabled": user.mfa_enabled,
+            "phone_number": user.phone_number,
+            "phone_number_verified": user.phone_number_verified_at.is_some(),
+            "address": user.address,
             "metadata": user.metadata,
             "created_at": user.created_at,
             "updated_at": user.updated_at,

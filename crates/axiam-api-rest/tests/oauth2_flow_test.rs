@@ -2092,6 +2092,10 @@ async fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
             &client,
             Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
             &AuthnRequestParams::default(),
+            // W7 — the requested scopes. Empty here: this is P2, the `fapi2`
+            // golden path, and a request asking for nothing sensitive is what
+            // it has always been.
+            &[],
         )
         .is_ok(),
         "a fapi2 client sending none of the nine must pass the gate untouched"
@@ -2186,6 +2190,7 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
             &client,
             Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
             &AuthnRequestParams::parse(&raw),
+            &[],
         )
         .expect_err("a fapi2 client must be refused {name}");
         assert_eq!(err.error_code(), "invalid_request", "{name}");

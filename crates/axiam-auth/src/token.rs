@@ -142,6 +142,36 @@ pub struct AccessTokenClaims {
     /// refuse the token, not ignore the claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<CnfClaim>,
+    /// RFC 9068 §2.2 — the `client_id` this token was issued to (W7, X7 G8).
+    ///
+    /// Present on a token minted by the OAuth2 authorization-code grant and by
+    /// a refresh of one; absent everywhere else, including on every token
+    /// issued before this wave. Absent is not "unknown to be safe": a resource
+    /// server that needs to know which relying party is holding a token, and
+    /// finds no answer, must treat the answer as *no relying party it can
+    /// name*.
+    ///
+    /// # Why AXIAM needed it
+    ///
+    /// The UserInfo endpoint releases `phone_number` and `address` only while
+    /// a consent record exists, and a consent record names the relying party
+    /// it was given to (`axiam_oauth2::sensitive::consent_type`). Until this
+    /// claim existed, an access token identified its subject and its scopes
+    /// but not its audience-in-fact, so UserInfo could not tell whose consent
+    /// to look for — and "any consent this user ever gave" would release a
+    /// postal address to a client the user consented to a *different* client
+    /// receiving. The claim is what makes per-client consent enforceable at
+    /// the point of release rather than only at the point of authorization.
+    ///
+    /// It is also what makes M10 checkable: a `fapi2`-issued token is
+    /// recognisable as such at UserInfo, where no authorization request is in
+    /// hand and neither of the other two FAPI gates has run.
+    ///
+    /// A client-credentials token does not carry it, and does not need to: its
+    /// `sub` *is* the `client_id` ([`AccessTokenSpec::oauth2_client`]).
+    /// Duplicating it would create two fields that can disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
     /// X1 — custom claims contributed by a `token.pre_issue` reactor.
     ///
     /// # Why a nested object rather than flattened top-level claims
@@ -492,6 +522,7 @@ pub struct AccessTokenSpec {
     act: Option<ActClaim>,
     permissions: Option<Vec<RptPermission>>,
     ext_exchange: Option<ExtExchangeClaim>,
+    client_id: Option<String>,
 }
 
 impl AccessTokenSpec {
@@ -517,6 +548,7 @@ impl AccessTokenSpec {
             act: None,
             permissions: None,
             ext_exchange: None,
+            client_id: None,
         }
     }
 
@@ -600,6 +632,19 @@ impl AccessTokenSpec {
         } else {
             Some(scopes.join(" "))
         };
+        self
+    }
+
+    /// Name the relying party this token was issued to (RFC 9068 §2.2, W7).
+    ///
+    /// `None` reproduces the token every caller received before this method
+    /// existed, byte for byte, which is why the two OAuth2 issuance sites are
+    /// the only ones that call it: the claim is a fact about a grant, and a
+    /// token minted by a login, a device flow or an exchange has no relying
+    /// party to name.
+    #[must_use]
+    pub fn client_id(mut self, client_id: Option<&str>) -> Self {
+        self.client_id = client_id.map(str::to_owned);
         self
     }
 
@@ -709,6 +754,7 @@ impl AccessTokenSpec {
             ext_exchange: self.ext_exchange.clone(),
             cnf: self.cnf.clone(),
             ext: self.ext.clone(),
+            client_id: self.client_id.clone(),
         })
     }
 
@@ -798,11 +844,42 @@ pub fn issue_access_token_enriched(
     cnf: Option<CnfClaim>,
     ext: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<String, AuthError> {
+    issue_access_token_for_client(
+        user_id, tenant_id, org_id, scopes, config, jti, aud, cnf, ext, None,
+    )
+}
+
+/// [`issue_access_token_enriched`], naming the relying party the grant was
+/// made to (W7, RFC 9068 §2.2).
+///
+/// Passing `None` produces a byte-identical token to
+/// [`issue_access_token_enriched`], which is why *that* function is a one-line
+/// delegation rather than a copy — the same relationship, and for the same
+/// reason, that `cnf` and `ext` already have to the ones above them.
+///
+/// Only the OAuth2 authorization-code and refresh paths pass `Some`. Every
+/// other issuance site — login, WebAuthn, federation, device flow, token
+/// exchange — mints a token that no relying party was granted, and naming one
+/// would be asserting something untrue about it.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_access_token_for_client(
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+    jti: String,
+    aud: &str,
+    cnf: Option<CnfClaim>,
+    ext: Option<std::collections::BTreeMap<String, String>>,
+    client_id: Option<&str>,
+) -> Result<String, AuthError> {
     AccessTokenSpec::user(user_id, tenant_id, org_id, jti)
         .aud(aud)
         .scopes(scopes)
         .cnf(cnf)
         .ext(ext)
+        .client_id(client_id)
         .issue(config)
 }
 
@@ -2444,6 +2521,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             ext_exchange: None,
             cnf,
             ext: None,
+            client_id: None,
         }
     }
 
@@ -3010,5 +3088,95 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         )
         .expect("an unusable public key must not stop the private key signing");
         assert_eq!(jsonwebtoken::decode_header(&token).unwrap().kid, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // W7 / X7 G8 — the RFC 9068 §2.2 `client_id` claim
+    // -----------------------------------------------------------------------
+
+    /// The claim is absent unless a caller names a relying party, and a token
+    /// minted without one is **byte-identical** to what the same call produced
+    /// before W7. That is invariant 4 for the hottest path in the product:
+    /// every login, device flow, federation callback and exchange keeps
+    /// issuing exactly the token it issued.
+    #[test]
+    fn a_token_that_names_no_client_is_byte_identical_to_a_pre_w7_one() {
+        let config = test_config();
+        let (user, tenant, org) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let scopes = vec!["openid".to_owned()];
+        let jti = Uuid::new_v4().to_string();
+
+        let plain = AccessTokenSpec::user(user, tenant, org, jti.clone())
+            .scopes(&scopes)
+            .claims_at(&config, 1_700_000_000)
+            .unwrap();
+        let explicit_none = AccessTokenSpec::user(user, tenant, org, jti)
+            .scopes(&scopes)
+            .client_id(None)
+            .claims_at(&config, 1_700_000_000)
+            .unwrap();
+
+        assert_eq!(plain.client_id, None);
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            serde_json::to_string(&explicit_none).unwrap(),
+        );
+        assert!(
+            !serde_json::to_string(&plain).unwrap().contains("client_id"),
+            "an absent claim must be omitted, not serialised as null"
+        );
+    }
+
+    /// Naming a relying party puts it in the claims and nowhere else — the
+    /// `sub` still names the end user, which is what makes `client_id` a
+    /// statement about the *grant* rather than about the subject.
+    #[test]
+    fn naming_a_client_adds_the_claim_and_changes_nothing_else() {
+        let config = test_config();
+        let (user, tenant, org) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let jti = Uuid::new_v4().to_string();
+
+        let named = AccessTokenSpec::user(user, tenant, org, jti.clone())
+            .client_id(Some("oa_shop"))
+            .claims_at(&config, 1_700_000_000)
+            .unwrap();
+        let anonymous = AccessTokenSpec::user(user, tenant, org, jti)
+            .claims_at(&config, 1_700_000_000)
+            .unwrap();
+
+        assert_eq!(named.client_id.as_deref(), Some("oa_shop"));
+        assert_eq!(named.sub, user.to_string());
+        assert_eq!(named.aud, anonymous.aud);
+        assert_eq!(named.jti, anonymous.jti);
+        assert_eq!(named.exp, anonymous.exp);
+    }
+
+    /// A token issued before W7 has no such field, and must still decode. The
+    /// release gate reads the resulting `None` as "no relying party I can
+    /// name" and releases nothing — the fail-closed direction.
+    #[test]
+    fn a_pre_w7_token_decodes_with_no_client_id() {
+        let json = r#"{
+            "sub": "00000000-0000-0000-0000-000000000001",
+            "tenant_id": "00000000-0000-0000-0000-000000000002",
+            "org_id": "00000000-0000-0000-0000-000000000003",
+            "iss": "axiam-test", "iat": 0, "exp": 9999999999,
+            "jti": "j", "aud": "axiam:user"
+        }"#;
+        let claims: AccessTokenClaims = serde_json::from_str(json).unwrap();
+        assert_eq!(claims.client_id, None);
+    }
+
+    /// The client-credentials shape does not carry it, and does not need to:
+    /// its `sub` *is* the `client_id`, and two fields that can disagree is one
+    /// field too many.
+    #[test]
+    fn a_client_credentials_token_carries_no_separate_client_id() {
+        let config = test_config();
+        let claims = AccessTokenSpec::oauth2_client("oa_machine", Uuid::new_v4(), Uuid::new_v4())
+            .claims_at(&config, 1_700_000_000)
+            .unwrap();
+        assert_eq!(claims.sub, "oa_machine");
+        assert_eq!(claims.client_id, None);
     }
 }

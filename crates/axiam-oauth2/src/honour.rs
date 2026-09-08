@@ -137,6 +137,41 @@ pub enum Reason {
     HintMismatch,
     /// The requested authentication context class is not satisfied.
     AcrUnsatisfied,
+    /// W7 — the request asks for a GDPR-sensitive scope (`address`, `phone`)
+    /// that this end user has not consented to release to this client.
+    ///
+    /// The one variant this enum carries that [`evaluate`] never produces:
+    /// consent needs a database read, so `crate::sensitive` decides it and
+    /// `crate::authorize` raises it. It lives here anyway because it is the
+    /// same kind of thing as the other four — a reason the browser is being
+    /// sent to a first-party page before a code exists — and the caller that
+    /// renders the hop should have one exhaustive match, not two.
+    ///
+    /// It is also the only reason that is **not** a reason to distrust the
+    /// current session: the end user is signed in, and the question is what
+    /// they are willing to hand over. The redirect it produces therefore does
+    /// not carry `reauth`, unlike every other reason here.
+    ConsentRequired,
+}
+
+impl Reason {
+    /// Whether a hop for this reason should tell the sign-in page not to trust
+    /// what the browser already holds.
+    ///
+    /// True for the four authentication reasons — `prompt=login`, an
+    /// unsatisfiable `max_age`, a step-up, an `id_token_hint` naming somebody
+    /// else — because reusing the current session would return the same
+    /// unsatisfying session and the loop guard would have to catch it.
+    ///
+    /// False for [`Self::ConsentRequired`], and this is the whole reason the
+    /// method exists rather than the `true` the caller used to pass
+    /// unconditionally: signing the user in again does not answer a question
+    /// about consent, and making them re-enter a password to say yes to
+    /// releasing a postal address is a dark pattern with a spec citation
+    /// attached.
+    pub fn requires_reauthentication(self) -> bool {
+        !matches!(self, Self::ConsentRequired)
+    }
 }
 
 /// A login hop this evaluation is asking the caller to perform.

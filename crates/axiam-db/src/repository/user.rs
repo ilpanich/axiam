@@ -7,7 +7,7 @@
 use axiam_auth::password;
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
-use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
+use axiam_core::models::user::{Address, CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -42,6 +42,11 @@ struct UserRow {
     deletion_pending: Option<bool>,
     /// Scheduled purge date when deletion_pending is true (D-08).
     scheduled_purge_at: Option<DateTime<Utc>>,
+    /// X7 G8. `Option` for the reason the OPAQUE settings columns are: a row
+    /// written before v57 has no such column and must still deserialize.
+    phone_number: Option<String>,
+    phone_number_verified_at: Option<DateTime<Utc>>,
+    address: Option<AddressRow>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -67,6 +72,14 @@ impl std::fmt::Debug for UserRow {
             .field("email_verified_at", &self.email_verified_at)
             .field("deletion_pending", &self.deletion_pending)
             .field("scheduled_purge_at", &self.scheduled_purge_at)
+            // W7: the same argument as SEC-043's, for personal data rather
+            // than for ciphertext. Presence is diagnostic; the value is not.
+            .field(
+                "phone_number",
+                &self.phone_number.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("phone_number_verified_at", &self.phone_number_verified_at)
+            .field("address", &self.address.as_ref().map(|_| "[REDACTED]"))
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish_non_exhaustive()
@@ -97,6 +110,10 @@ struct UserRowWithId {
     deletion_pending: Option<bool>,
     /// Scheduled purge date when deletion_pending is true (D-08).
     scheduled_purge_at: Option<DateTime<Utc>>,
+    /// X7 G8. Hydrated on this path, unlike `mfa_secret`.
+    phone_number: Option<String>,
+    phone_number_verified_at: Option<DateTime<Utc>>,
+    address: Option<AddressRow>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -104,6 +121,9 @@ struct UserRowWithId {
 
 impl std::fmt::Debug for UserRowWithId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // W7: `phone_number` and `address` are hydrated on this path but never
+        // printed. Being in the projection and being in a log line are
+        // different decisions and this type makes both explicitly.
         f.debug_struct("UserRowWithId")
             .field("record_id", &self.record_id)
             .field("tenant_id", &self.tenant_id)
@@ -162,6 +182,62 @@ fn status_to_string(s: &UserStatus) -> &'static str {
     }
 }
 
+/// The `user.address` object, as SurrealDB stores it (W7, X7 G8).
+///
+/// A local row type rather than a `SurrealValue` derive on
+/// [`axiam_core::models::user::Address`] because the crate layering points
+/// inward: `axiam-core` is layer 0 and knows nothing about SurrealDB. Every
+/// other row struct in this file exists for the same reason.
+///
+/// The six members are the whole of OIDC Core §5.1.1, matching the schema's
+/// six sub-fields exactly. A member added on one side and not the other is a
+/// compile error here and a rejected write there.
+#[derive(Debug, Default, SurrealValue)]
+struct AddressRow {
+    formatted: Option<String>,
+    street_address: Option<String>,
+    locality: Option<String>,
+    region: Option<String>,
+    postal_code: Option<String>,
+    country: Option<String>,
+}
+
+impl From<AddressRow> for Address {
+    fn from(row: AddressRow) -> Self {
+        Self {
+            formatted: row.formatted,
+            street_address: row.street_address,
+            locality: row.locality,
+            region: row.region,
+            postal_code: row.postal_code,
+            country: row.country,
+        }
+    }
+}
+
+impl From<&Address> for AddressRow {
+    fn from(a: &Address) -> Self {
+        Self {
+            formatted: a.formatted.clone(),
+            street_address: a.street_address.clone(),
+            locality: a.locality.clone(),
+            region: a.region.clone(),
+            postal_code: a.postal_code.clone(),
+            country: a.country.clone(),
+        }
+    }
+}
+
+/// Decode a stored address, dropping one that has no members.
+///
+/// "Stored but empty" and "not stored" are the same state to every reader, and
+/// letting them differ would mean a UserInfo response could carry `"address":
+/// {}` — a claim asserting nothing, which OIDC Core §5.1 asks to be omitted
+/// rather than emitted hollow.
+fn decode_address(row: Option<AddressRow>) -> Option<Address> {
+    row.map(Address::from).filter(|a| !a.is_empty())
+}
+
 impl UserRow {
     fn into_user(self, id: Uuid) -> Result<User, DbError> {
         let tenant_id = parse_uuid(&self.tenant_id, "tenant_id")?;
@@ -181,6 +257,9 @@ impl UserRow {
             email_verified_at: self.email_verified_at,
             deletion_pending: self.deletion_pending.unwrap_or(false),
             scheduled_purge_at: self.scheduled_purge_at,
+            phone_number: self.phone_number,
+            phone_number_verified_at: self.phone_number_verified_at,
+            address: decode_address(self.address),
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -210,6 +289,22 @@ impl UserRowWithId {
             email_verified_at: self.email_verified_at,
             deletion_pending: self.deletion_pending.unwrap_or(false),
             scheduled_purge_at: self.scheduled_purge_at,
+            // W7 — hydrated here, unlike `mfa_secret` above, and the
+            // difference is worth stating because the two look alike.
+            // `mfa_secret` is a credential: a list response that carries it
+            // puts ciphertext where nothing needs it (SEC-043). A telephone
+            // number is profile data of the same kind as the `email` two
+            // fields up, and the projection was never the privacy boundary —
+            // `users:list` and `users:get` are held by the same operators, so
+            // omitting it here would protect nothing.
+            //
+            // It would, on the other hand, break SCIM: `GET /scim/v2/Users`
+            // reads this projection, and a resource that carries
+            // `phoneNumbers` when fetched by id and not when listed is a
+            // resource whose representation depends on how it was reached.
+            phone_number: self.phone_number,
+            phone_number_verified_at: self.phone_number_verified_at,
+            address: decode_address(self.address),
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -416,6 +511,19 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         if input.email_verified_at.is_some() {
             sets.push("email_verified_at = $email_verified_at");
         }
+        // W7 / X7 G8. Same `Option<Option<T>>` convention as the fields above:
+        // `Some(Some(v))` sets, `Some(None)` clears, `None` leaves alone. The
+        // clear direction is not decoration — it is how a data subject
+        // withdrawing a telephone number gets it removed rather than hidden.
+        if input.phone_number.is_some() {
+            sets.push("phone_number = $phone_number");
+        }
+        if input.phone_number_verified_at.is_some() {
+            sets.push("phone_number_verified_at = $phone_number_verified_at");
+        }
+        if input.address.is_some() {
+            sets.push("address = $address");
+        }
         sets.push("updated_at = time::now()");
 
         let query = format!(
@@ -467,6 +575,21 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         }
         if let Some(email_verified_at) = input.email_verified_at {
             builder = builder.bind(("email_verified_at", email_verified_at));
+        }
+        if let Some(phone_number) = input.phone_number {
+            builder = builder.bind(("phone_number", phone_number));
+        }
+        if let Some(phone_number_verified_at) = input.phone_number_verified_at {
+            builder = builder.bind(("phone_number_verified_at", phone_number_verified_at));
+        }
+        if let Some(address) = input.address {
+            // An address with no members is stored as absent, so that "has an
+            // address" and "the address says something" cannot disagree.
+            let row = address
+                .as_ref()
+                .filter(|a| !a.is_empty())
+                .map(AddressRow::from);
+            builder = builder.bind(("address", row));
         }
 
         let result = builder.await.map_err(DbError::from)?;
@@ -559,6 +682,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                  last_failed_login_at = NONE, \
                  failed_login_attempts = 0, \
                  email_verified_at = NONE, \
+                 phone_number = NONE, \
+                 phone_number_verified_at = NONE, \
+                 address = NONE, \
                  updated_at = time::now() \
                  WHERE tenant_id = $tenant_id RETURN BEFORE",
             )
@@ -662,6 +788,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         failed_login_attempts, last_failed_login_at, \
                         locked_until, email_verified_at, \
                         deletion_pending, scheduled_purge_at, \
+                        phone_number, phone_number_verified_at, address, \
                         metadata, created_at, updated_at \
                  FROM user \
                  WHERE tenant_id = $tenant_id AND status != 'Deleted'{search} \
@@ -811,6 +938,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                  last_failed_login_at = NONE, \
                  deletion_pending = false, \
                  scheduled_purge_at = NONE, \
+                 phone_number = NONE, \
+                 phone_number_verified_at = NONE, \
+                 address = NONE, \
                  status = 'Anonymized', \
                  updated_at = time::now() \
                  WHERE tenant_id = $tenant_id",

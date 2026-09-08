@@ -43,6 +43,40 @@ fn reject_opaque_without_keys<C: Connection + Clone>(
     Ok(())
 }
 
+/// Refuse a `default_locale` this build does not ship (W7, plan §4.6).
+///
+/// `validate_org_settings` cannot make this check either, and for a sharper
+/// version of the same reason `reject_opaque_without_keys` gives: the shipped
+/// locale list lives in `axiam_oauth2::locale`, which is *above* `axiam-core`
+/// in the crate layering, so the model literally cannot see it.
+///
+/// Refusing at the write rather than at the read is what makes the setting
+/// honest. `tenant_default_locale` treats an unshipped tag as no preference
+/// and falls back to `en` — the only safe thing it can do at that point — but
+/// an operator who typed `fr-CA` into the settings page and saw it saved would
+/// reasonably believe their sign-in pages were now in French. They would not
+/// be, and nothing would say so except a `warn!` in a log they are not
+/// reading. The error names the tags that do work.
+fn reject_unshipped_locale(tag: Option<&str>) -> Result<(), AxiamApiError> {
+    let Some(tag) = tag.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(());
+    };
+    if axiam_oauth2::locale::Locale::from_tag(tag).is_some() {
+        return Ok(());
+    }
+    Err(AxiamApiError(axiam_core::error::AxiamError::Validation {
+        message: format!(
+            "default_locale {tag:?} is not a language this build ships; the sign-in page \
+             would silently fall back to the deployment default. Shipped tags: {}",
+            axiam_oauth2::locale::ALL_LOCALES
+                .iter()
+                .map(|l| l.as_tag())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }))
+}
+
 /// Mint a tenant's OPAQUE key material now that OPAQUE is switched on.
 ///
 /// `opaque_server_setup` was created lazily, on the first `/auth/opaque/*`
@@ -308,6 +342,7 @@ pub async fn set_org_settings<C: Connection + Clone>(
 
     let input = body.into_inner();
     validate_org_settings(&input)?;
+    reject_unshipped_locale(input.default_locale.as_deref())?;
     reject_opaque_without_keys(input.opaque_mode, &state)?;
     let opaque_mode = input.opaque_mode;
     let opaque_suite = input.opaque_suite;
@@ -405,6 +440,7 @@ pub async fn set_tenant_settings<C: Connection + Clone>(
 
     // Validate: tenant can only be more restrictive than org
     validate_tenant_override(&org, &overrides)?;
+    reject_unshipped_locale(overrides.default_locale.as_deref())?;
 
     // The same runtime-serviceability guard as the org write, but keyed on the
     // override's own value rather than the merged one. A tenant that leaves
@@ -533,6 +569,7 @@ pub async fn set_tenant_override<C: Connection + Clone>(
     let overrides = body.into_inner();
     let org = state.settings_repo.get_org_settings(user.org_id).await?;
     validate_tenant_override(&org, &overrides)?;
+    reject_unshipped_locale(overrides.default_locale.as_deref())?;
     if let Some(mode) = overrides.opaque_mode {
         reject_opaque_without_keys(mode, &state)?;
     }

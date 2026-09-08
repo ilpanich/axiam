@@ -12,6 +12,11 @@
 - `crates/axiam-api-rest/src/handlers/oauth2.rs` — request-object classification (T12.*)
 - `crates/axiam-api-rest/tests/oauth2_userinfo_post_test.rs` — `POST /oauth2/userinfo`
   and the RFC 6750 carriers (W6, T10.*)
+- `crates/axiam-api-rest/tests/oauth2_sensitive_scopes_test.rs` — the `address` and
+  `phone` scopes end to end (W7, T8.*, M8, M10)
+- `crates/axiam-db/tests/w7_sensitive_columns_test.rs` — the storage, erasure and
+  projection of the two columns (W7)
+- `crates/axiam-oauth2/src/sensitive.rs` — the four gates, and which party closes each
 
 ---
 
@@ -288,6 +293,79 @@ only method-dependent input is the `req.method()` that row 100 exercises.
 `POST` optional at the authorization endpoint. The reasoning, and the condition
 that would reopen it, are in `claude_dev/basic-op-gap-plan.md` §4.9.
 
+## OpenID Connect Core 1.0 — the `address` and `phone` scopes (wave W7)
+
+OIDC Core §5.4 defines two scopes that release categories of personal data
+AXIAM has no other use for: a postal address and a telephone number. Nothing in
+this system authenticates against them, sends to them, or looks anything up by
+them. They exist to be released to a relying party the end user has agreed to,
+and everything below is the machinery that decides whether that has happened.
+
+**Four gates, each closed by a different party**, and every one of them is asked
+again at the moment of release rather than once at authorization:
+
+1. the **organization** enabled `sensitive_scopes_enabled` (off by default);
+2. the **operator** registered the scope on the client;
+3. the **end user** consented, per client and per scope set, and has not
+   withdrawn;
+4. the client is **not** on the `fapi2` profile.
+
+The five invariants this series carries hold as follows. **I1** — opt-in per
+client — is the registered scope set, which `authorize.rs` step 5 has always
+enforced. **I2** — refused on `fapi2` at both layers — is rows 112–114. **I3** —
+stricter default — is the switch, off in `system_defaults()`, in the migration's
+`DEFAULT false`, and in the settings row decoder's fallback. **I4** — nothing
+existing changes — is row 104, and it is structural rather than careful: the two
+scopes were unregistrable before this wave, so no client in any existing
+deployment carries them. **I5** — shared code only tightens — is additive
+columns, additive optional claims, an additive SCIM mapping and an additive
+discovery field.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 104 | No client registered before this wave can reach any of it: `address` and `phone` were unregistrable, so no authorization request could name them and pass the registered-scope check. Asserted in both halves — registration refused while the capability is off, and an unregistered scope answered `invalid_scope` exactly as before | plan invariant 4 | Pass (I4) | `oauth2_sensitive_scopes_test.rs::i4_the_scopes_are_unregistrable_and_unrequestable_with_the_switch_off` |
+| 105 | The tenant capability refuses the scopes at **registration** and again at the **authorization endpoint**, so a client registered while the capability was on is refused once it is turned off | plan §4.8 | Pass (T8.1) | `oauth2_sensitive_scopes_test.rs::t8_1_the_switch_refuses_registration_and_then_refuses_the_request` |
+| 106 | A tenant may switch the capability off for itself; the reverse — enabling what its organization forbade — is refused by the settings model, because releasing personal data is the less-restrictive direction | GDPR Art. 5(1)(c) | Pass | `oauth2_sensitive_scopes_test.rs::a_tenant_may_switch_the_capability_off_for_itself`; `settings.rs::a_tenant_may_not_enable_sensitive_scopes_its_org_disabled`, `::clamping_drops_a_tenant_optin_the_org_has_since_withdrawn` |
+| 107 | A first authorization for a client and scope set sends the browser to a **consent screen** — `/consent`, not the sign-in page, and carrying no `reauth`: the end user is signed in, and re-entering a password answers no question about consent | Core §3.1.2.1 | Pass (T8.2) | `oauth2_sensitive_scopes_test.rs::t8_2_a_first_authorization_asks_and_prompt_none_is_refused`; `ConsentPage.test.tsx` |
+| 108 | `prompt=none` on such a request is refused `consent_required` | Core §3.1.2.6 | Pass (T8.2) | same test |
+| 109 | The consent hop is bounded at one redirect: a request that comes back still unconsented is answered `access_denied` to the relying party, with its `state`, rather than redirected again | Core §3.1.2.6; plan §4.0 | Pass | `oauth2_sensitive_scopes_test.rs::a_return_leg_without_consent_is_access_denied_rather_than_a_second_redirect` |
+| 110 | Consent is per relying party and per scope set: another client asks for itself, and a client that later widens its request re-prompts rather than inheriting | GDPR Art. 4(11) ("specific") | Pass | `oauth2_sensitive_scopes_test.rs::consent_does_not_carry_from_one_relying_party_to_another`, `::widening_the_scope_set_asks_again` |
+| 111 | With consent recorded, UserInfo returns `phone_number`, `phone_number_verified` and `address`, and the **ID token carries none of them** — asserted by running the whole code flow and decoding what the relying party received | Core §5.4 (`OIDCCScopeAddress`, `OIDCCScopePhone`) | Pass (T8.3) | `oauth2_sensitive_scopes_test.rs::t8_3_userinfo_releases_the_claims_and_the_id_token_does_not` |
+| 112 | A `fapi2` client may not **register** either scope, on create or on the merged update path, whatever the tenant capability says | FAPI 2.0 §5.3.1 | Pass (T8.5, M8 layer 1) | `oauth2_sensitive_scopes_test.rs::t8_5_a_fapi2_client_may_not_register_a_sensitive_scope`; `fapi.rs::m8_fapi_plus_sensitive_scopes_is_refused_at_creation`, `::m8_fapi_plus_sensitive_scopes_is_refused_on_update` |
+| 113 | A `fapi2` **request** naming either scope is refused `invalid_scope` whatever the row says — including a row edited in the database past the registration gate, and including an honest row, so the two are indistinguishable to the relying party | FAPI 2.0 §5.3.1; plan §7 M8 | Pass (T8.5, M8 layer 2) | `fapi.rs::t8_5_a_fapi2_request_asking_for_a_sensitive_scope_is_refused_however_the_row_was_edited`, `::an_honest_fapi2_row_asking_for_a_sensitive_scope_is_refused_at_the_same_gate` |
+| 114 | A `fapi2`-issued access token releases neither claim at UserInfo, regardless of scope, capability or consent record — the third and last place the profile is asked, and the only one where no authorization request is in hand | plan §7 M10 | Pass (M10) | `oauth2_sensitive_scopes_test.rs::m10_a_fapi2_issued_token_releases_nothing_at_userinfo` |
+| 115 | Withdrawal takes effect on the **next UserInfo call with the same access token** — not on the next token. The release gate re-reads the record on every call, so a fifteen-minute token and a thirty-day refresh do not outlive the consent behind them | GDPR Art. 7(3) | Pass (T8.4) | `oauth2_sensitive_scopes_test.rs::t8_4_withdrawal_takes_effect_on_the_next_call_with_the_same_token`, `::withdrawal_removes_every_scope_set_for_that_client` |
+| 116 | Turning the capability off likewise stops release for tokens already in relying parties' hands | GDPR Art. 5(1)(c) | Pass | `oauth2_sensitive_scopes_test.rs::turning_the_switch_off_stops_release_for_tokens_already_issued` |
+| 117 | An access token that names **no** relying party releases nothing. That is every token issued before this wave, and every token minted by a login, a device flow or an exchange: there is no consent record such a token could be matched against, and "any consent this subject ever gave" would hand an address to a client the subject consented to a *different* client receiving | RFC 9068 §2.2; GDPR Art. 4(11) | Pass | `oauth2_sensitive_scopes_test.rs::a_token_naming_no_client_releases_nothing`; `token.rs::a_pre_w7_token_decodes_with_no_client_id` |
+| 118 | A release is audited as `userinfo.sensitive_claims_released` carrying the relying party and the claim **names**; neither value appears anywhere in the row. A call that releases nothing writes no row | GDPR Art. 5(1)(c); OWASP ASVS 5.0 V7 | Pass (T8.6) | `oauth2_sensitive_scopes_test.rs::t8_6_the_release_is_audited_by_claim_name_and_never_by_value`, `::a_call_that_releases_nothing_writes_no_release_row` |
+| 119 | Consent cannot be recorded for a scope the client has not registered, for a scope outside the two, or while the capability is off — so a record cannot exist for a release that could never have been authorised | GDPR Art. 4(11) | Pass | `oauth2_sensitive_scopes_test.rs::consent_cannot_be_recorded_for_a_scope_the_client_never_registered`, `::consent_cannot_be_recorded_while_the_capability_is_off` |
+| 120 | Withdrawal cannot reach the registration `terms_of_service` consent: the namespace guard is in the repository, so no caller can be the one that gets it wrong, and the invariant registration depends on (threat T-5-consent-gap) is untouched | GDPR Art. 7(1) | Pass | `oauth2_sensitive_scopes_test.rs::withdrawal_cannot_reach_the_registration_consent` |
+| 121 | Erasure removes both values. Both erasure statements and the Art. 15 export write **explicit column lists**, so a new column is not covered by them — the plan's §4.8 said otherwise. Asserted by erasing a subject who has both and reading the row back, on the Art. 17 pipeline and on the administrator's tombstone | GDPR Art. 17; Art. 15 | Pass | `axiam-db/tests/w7_sensitive_columns_test.rs::anonymisation_erases_the_telephone_number_and_the_postal_address`, `::the_admin_delete_tombstone_erases_them_too` |
+| 122 | Neither value reaches a log line through the most natural diagnostic anybody writes: `User`, `UserRow`, `UserRowWithId`, `UserInfoResponse` and the two SCIM output types all redact them in `Debug` while still showing presence | OWASP ASVS 5.0 V7 | Pass | `user.rs::debug_redacts_the_sensitive_columns_but_still_shows_presence`, `::debug_distinguishes_absent_from_redacted`; `w7_sensitive_columns_test.rs::the_listed_user_still_redacts_both_values_when_printed` |
+| 123 | The `address` column admits exactly the six OIDC §5.1.1 members and is **not** `FLEXIBLE`, so "the `address` scope releases a postal address and nothing else" is a property of the schema rather than of everybody's care | Core §5.1.1 | Pass | `schema.rs::the_address_column_admits_exactly_the_oidc_members` |
+| 124 | SCIM `phoneNumbers` and `addresses` map onto the same columns on create, replace and patch, and are returned on both the resource read and the list. Both are removable through SCIM, unlike `emails` | RFC 7643 §4.1.2 | Pass | `axiam-scim/src/users.rs`, `patch.rs`; `w7_sensitive_columns_test.rs::the_list_projection_carries_the_sensitive_columns_but_still_no_credential` |
+| 125 | Discovery advertises the two scopes and the three claims **only for a tenant that has the capability**. `GET /.well-known/openid-configuration` is not tenant-scoped — plan §6 assumed it was — so it gains an optional `tenant_id`, and a caller that omits it receives the document W6 served, byte for byte. An unknown tenant is answered identically rather than `404`, so discovery is not a tenant-enumeration oracle | Discovery §3; plan §6 | Pass | `oauth2_sensitive_scopes_test.rs::discovery_advertises_the_scopes_only_for_a_tenant_that_has_them` |
+| 126 | The GDPR self-service consent list marks the scope releases withdrawable and the registration consent not — withdrawing that one is an erasure, with its own endpoint and its own grace period. Plan §4.8 refers to this list as existing; it did not, and neither did any consent endpoint | GDPR Art. 7(1), Art. 15(1)(a) | Pass | `oauth2_sensitive_scopes_test.rs::the_consent_list_marks_only_the_scope_releases_withdrawable` |
+| 127 | `phone_number_verified` is emitted **only alongside** `phone_number`, and is `false` rather than omitted when the number is unverified. AXIAM ships no telephone verification ceremony, so the honest default for a verification that never happened is "no" | Core §5.1 | Pass | `oauth2_sensitive_scopes_test.rs::t8_3_userinfo_releases_the_claims_and_the_id_token_does_not` |
+| 128 | A request needing **both** ceremonies gets both, in order: `prompt=consent` with `address` goes to the sign-in page, and the leg that returns still reaches the consent screen rather than being read as a decline. The consent hop carries its own marker (`axiam_consent_hop`) for exactly this reason — the login marker means "has been through a first-party page", which is not the same statement as "was asked about consent and did not give it" | Core §3.1.2.1; plan §4.0 | Pass | `oauth2_sensitive_scopes_test.rs::a_login_hop_marker_is_not_mistaken_for_a_consent_one` |
+| 129 | A subject with no address or no telephone number simply has the claim omitted, not nulled or emitted hollow. The suite treats a missing scope claim as a WARNING (`AbstractOIDCCReturnedClaimsServerTest`), not a failure | Core §5.3.2 | Pass | `user.rs::address_omits_absent_members`, `::an_address_with_no_members_is_empty`; `w7_sensitive_columns_test.rs::an_empty_address_is_stored_as_no_address` |
+
+**Not asserted here, and stated rather than implied.**
+
+- **No conformance run.** Baseline run #0 has still never happened —
+  `docs/conformance/` does not exist — so nothing in this series has anything to
+  compare against, and no row above claims the suite passed. Each says what the
+  code does and names the test that shows it. The two module names in rows 111
+  and 112 are the modules these behaviours *would* be exercised by, not modules
+  that have been run.
+- **The consent ceremony is a first-party page, not a protocol artefact.**
+  Nothing in OIDC says what a consent screen must contain. Rows 107 and 110
+  assert the ceremony AXIAM chose; Art. 4(11) is the standard they are measured
+  against, not Core §3.1.2.1.
+- **No telephone verification exists.** `phone_number_verified` is written by an
+  administrator asserting an out-of-band check and by nothing else, which is why
+  row 127 is about the claim's honesty rather than about a ceremony.
+
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
 
 | # | Behaviour | Spec Ref | Status | Evidence |
@@ -316,14 +394,14 @@ that would reopen it, are in `claude_dev/basic-op-gap-plan.md` §4.9.
   `ignore` behaviour stays, and stays tested, because it remains the default.
 
 - **Not yet Basic OP.** These rows close the gates, the refusals, the session
-  record and now the login hop — not the certification. The remaining Basic OP
-  work — the honour lane, POST userinfo, the sensitive scopes,
-  `client_secret_basic` and the harness itself — is waves W5–W9 of
+  record, the login hop, the honour lane, `POST /oauth2/userinfo` and now the
+  sensitive scopes — not the certification. The remaining Basic OP work —
+  `client_secret_basic` and the harness itself — is waves W8 and W9 of
   `claude_dev/basic-op-gap-plan.md` §8. **No conformance run has been executed
-  against any of it:** there is no docker daemon in the environment these waves
-  were implemented in, `docs/conformance/` does not exist, and baseline run #0
+  against any of it:** `docs/conformance/` does not exist and baseline run #0
   has never happened, so runs #1 and #2 have nothing to be compared against
-  either.
+  either. Nothing in this file claims the suite passed; each row says what the
+  code does and names the test that shows it.
 
 - **The login hop reaches the parameters; W4 reads them.** Rows 47–59 make
   `prompt`, `max_age` and `id_token_hint` *reachable*, because there is now a
@@ -355,10 +433,21 @@ that would reopen it, are in `claude_dev/basic-op-gap-plan.md` §4.9.
   release until W7 defines the sensitive scopes; and `interaction_required`
   would make the honour lane unusable for every relying party whose library
   sends `prompt=consent` by reflex, which pushes operators back to `ignore`
-  where `max_age` and `prompt=none` are dropped silently too. W7 replaces the
-  ceremony behind the same redirect and no relying party has to change.
+  where `max_age` and `prompt=none` are dropped silently too.
 
-- **`consent_required` and `interaction_required` are unreachable in W4.**
+  **W7 did not supersede it, and this is the correction rather than the
+  omission.** W7 builds the consent screen, but the screen asks about a *scope
+  release*, and `prompt=consent` on its own requests no consent-gated scope —
+  so pointing it there would show a page that says "there is nothing to decide
+  here". W4's treatment therefore stands for `prompt=consent` alone. What W7
+  changes is the case where both apply: `prompt=consent` **with** `address` or
+  `phone` gets the sign-in page and then the consent screen, in that order, and
+  row 129 asserts the second is not skipped.
+
+- **`consent_required` was unreachable in W4 and is reachable from W7.**
+  It needs a consent-gated scope, and there were none until W7 defined the two;
+  row 108 is where it is now raised. `interaction_required` remains unreachable.
+  As W4 put it:
   `consent_required` needs a consent-gated scope and there are none until W7;
   every `prompt=none` refusal the honour lane can produce has a more specific
   name than `interaction_required`. Both variants exist in `OAuth2Error` — the
@@ -408,3 +497,4 @@ that would reopen it, are in `claude_dev/basic-op-gap-plan.md` §4.9.
 *Rows 60–80 added: X7.4 wave W4 — 2026-09-07*
 *Rows 81–89 added: wave W5 (cosmetic parameters + SPA i18n) — 2026-09-07*
 *Rows 90–103 added: wave W6 (`POST /oauth2/userinfo`) — 2026-09-07*
+*Rows 104–129 added: wave W7 (`address` and `phone` sensitive scopes) — 2026-09-08*

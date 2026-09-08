@@ -370,6 +370,54 @@ fn validate_grant_types(grant_types: &[String]) -> Result<(), AxiamApiError> {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// Refuse a registration that names a GDPR-sensitive scope while the tenant's
+/// capability is off (W7 / X7 G8, plan §4.8, test T8.1).
+///
+/// `axiam_oauth2::fapi::validate_registration` cannot make this check — it is
+/// a pure function of the registration, it lives four layers below this crate,
+/// and the answer depends on a settings row. So this is a second gate rather
+/// than a widening of the first, and the two refuse different things: that one
+/// refuses `address` on a `fapi2` row whatever the tenant says, this one
+/// refuses it on **any** row whose tenant has not enabled the capability.
+///
+/// Refusing at registration rather than only at the authorization endpoint is
+/// what makes the switch a switch. Without it, an operator could register the
+/// scope on a client while the capability was off and discover the refusal
+/// only when a user tried to sign in — and the request-time gate would be
+/// carrying the whole policy on its own.
+///
+/// It is *not* the only gate, and deliberately so: an operator who enables the
+/// capability, registers clients, and then disables it again leaves rows this
+/// check has already passed. `axiam_oauth2::sensitive::decide` refuses those at
+/// request time, and `release_sensitive_claims` refuses them again at UserInfo.
+async fn reject_sensitive_scopes_when_disabled<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    scopes: &[String],
+) -> Result<(), AxiamApiError> {
+    let wanted = axiam_oauth2::sensitive::requested(scopes);
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let tenant =
+        axiam_core::repository::TenantRepository::get_by_id(&state.tenant_repo, tenant_id).await?;
+    let settings = axiam_core::repository::SettingsRepository::get_effective_settings(
+        &state.settings_repo,
+        tenant.organization_id,
+        tenant_id,
+    )
+    .await?;
+    if settings.oidc.sensitive_scopes_enabled {
+        return Ok(());
+    }
+    Err(validation_err(format!(
+        "the scope(s) {} release personal data and are not enabled for this tenant; \
+         an organization administrator must set sensitive_scopes_enabled before a \
+         client may register them",
+        wanted.join(", ")
+    )))
+}
+
 /// `POST /api/v1/oauth2-clients`
 #[utoipa::path(
     post,
@@ -438,6 +486,8 @@ pub async fn create<C: Connection + Clone>(
     // client that predates X5.1 — passes without a check running.
     axiam_oauth2::fapi::validate_registration(&create)
         .map_err(|e| validation_err(e.to_string()))?;
+    // W7 — the tenant switch's registration half.
+    reject_sensitive_scopes_when_disabled(&state, user.tenant_id, &create.scopes).await?;
 
     let (client, raw_secret) = state.oauth2_client_repo.create(create).await?;
 
@@ -627,6 +677,11 @@ pub async fn update<C: Connection + Clone>(
             .with_update_applied(&update);
         axiam_oauth2::fapi::validate_registration(&merged)
             .map_err(|e| validation_err(e.to_string()))?;
+        // W7 — and on the update path too, on the **merged** row, so a patch
+        // that adds `address` to a client registered without it is refused by
+        // the same rule that would have refused it at creation. A gate that
+        // only ran on create is a gate with an `PATCH` around it.
+        reject_sensitive_scopes_when_disabled(&state, user.tenant_id, &merged.scopes).await?;
     }
 
     let client = state

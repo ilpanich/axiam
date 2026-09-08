@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The OpenID Connect `address` and `phone` scopes, behind four gates** (X7 G8)
+
+  OIDC Core §5.4 defines two scopes that release a postal address and a
+  telephone number. AXIAM holds neither for any purpose of its own — nothing
+  authenticates against them, nothing is sent to them, nothing is keyed by
+  them — so they are stored to be released to a relying party the end user has
+  agreed to, and to nothing else.
+
+  Four things must all be true before either claim reaches a relying party, and
+  a different party closes each: the **organization** enabled
+  `sensitive_scopes_enabled` (off by default, and the only *disable*-only
+  control in the settings model — a tenant may refuse a release its organization
+  allows and may never authorise one it forbade); the **operator** registered
+  the scope on the client; the **end user** consented, per client and per exact
+  scope set; and the client is not on the `fapi2` profile, which collects no
+  consent record.
+
+  All four are re-asked **at every UserInfo call**, not once at authorization.
+  An access token lives fifteen minutes and the refresh behind it thirty days,
+  so a decision taken at issuance would outlive the facts it rested on — which
+  is what makes withdrawal effective on the relying party's *next* request with
+  the token it already holds, rather than on its next token.
+
+  Claims are returned from **UserInfo only**, never in the ID token: an ID token
+  is a long-lived artefact relying parties log and cache. A release is audited
+  by claim **name** and never by value, because the audit log is append-only and
+  is itself exported to subjects under Art. 15.
+
+  **New self-service surface** (`GET /api/v1/account/consents`,
+  `POST`/`DELETE /api/v1/account/consents/oidc-scopes`) and a consent screen in
+  all five shipped languages. Withdrawal is one call, no confirmation step, no
+  grace period — Art. 7(3) asks for it to be as easy as giving.
+
+  `phoneNumbers` and `addresses` were silently dropped by SCIM and now map onto
+  the same columns on create, replace and patch. Provisioning them is not
+  authorising them: what a relying party receives is decided four gates later.
+
+  The discovery document advertises the two scopes and the three claims only for
+  a tenant that has them, through a new optional `tenant_id` — a caller that
+  omits it receives exactly the document it received before, and an unknown
+  tenant is answered identically rather than `404`, so discovery is not a
+  tenant-enumeration oracle.
+
+  **Nothing registered before this release changes behaviour**, and structurally
+  rather than carefully: the two scopes were unregistrable, so no existing
+  client carries them and no authorization request could name them.
+
+
 - Publish RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document
 
   AXIAM implemented both halves of RFC 8705 — §2 mutual-TLS client
@@ -49,6 +97,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The change is additive and server-side — every existing SDK keeps working
   unchanged against every existing deployment, because no deployment publishes
   the member until an operator configures it.
+
+### Fixed
+
+- **A new personal-data column on `user` was covered by neither erasure path nor
+  the Art. 15 export**
+
+  Both erasure statements — the Art. 17 pipeline's `anonymize_user` and the
+  administrator's tombstone behind `DELETE /api/v1/users/{id}` — and the export
+  job's `profile` section write **explicit column lists**. A column none of them
+  names survives erasure and never appears in an export.
+
+  This was latent rather than live: the columns it would have stranded
+  (`phone_number`, `address`) are added by this same release, and adding them
+  under the assumption that user-row fields are erased for free would have left
+  an erased subject holding a telephone number and a postal address
+  indefinitely, with the account hidden from the UI — which the tombstone's own
+  documentation calls "retention with the UI hidden, not erasure". All three
+  paths now name the columns, and the tests erase a subject who has both and
+  read the row back rather than inspecting the SQL, so a fourth erasure path
+  cannot pass by sharing a statement.
+
+  Recorded in `docs/compliance/gdpr-compliance.md` §1 and §2 as a warning to
+  whoever adds the next such column.
 
 ## [1.0.0-beta12] - 2026-09-06
 

@@ -98,6 +98,39 @@ pub struct AuthorizeRequest {
     /// the answer given to a client registered today, which is the one thing
     /// this plan does not do.
     pub inline_authn_params_beside_request_uri: bool,
+    /// W7 — what the handler resolved about this request's GDPR-sensitive
+    /// scopes (X7 G8, plan §4.8).
+    ///
+    /// Carried rather than looked up here for the reason
+    /// [`Self::session_evidence`] is: deciding needs the tenant's effective
+    /// settings and the user's consent records, and this service owns neither
+    /// repository. What it owns is the *order* — the decision has to be taken
+    /// after the client, the `redirect_uri` and the scopes are validated and
+    /// before a code exists, and this is the only place that is true.
+    ///
+    /// [`crate::sensitive::Requested::None`] for every request that asks for
+    /// no sensitive scope, which is every request in every deployment today.
+    pub sensitive_scopes: crate::sensitive::Requested,
+    /// W7 — whether the tenant's effective settings have the sensitive scopes
+    /// switched off.
+    ///
+    /// Separate from [`Self::sensitive_scopes`] so that the two facts, which
+    /// arrive from two different reads, are checked against each other rather
+    /// than collapsed by the caller into one that could be wrong. See
+    /// `crate::sensitive::decide`.
+    pub sensitive_scopes_switch_is_off: bool,
+    /// W7 — whether this request carries
+    /// [`crate::login_hop::CONSENT_HOP_MARKER`], i.e. has already been through
+    /// the **consent** page once.
+    ///
+    /// Distinct from [`Self::login_hop_return_leg`] on purpose: that one says
+    /// the browser has been to a first-party page, and this one says the end
+    /// user has been asked about consent and did not give it. A request
+    /// carrying `prompt=consent` and `address` needs both ceremonies, in that
+    /// order, and conflating the markers would answer the second question with
+    /// the first one's evidence — `access_denied` for somebody who was never
+    /// shown the question.
+    pub consent_hop_return_leg: bool,
     /// W4 — whether this request carries
     /// [`crate::login_hop::LOGIN_HOP_MARKER`], i.e. has already been through
     /// the sign-in page once.
@@ -255,6 +288,14 @@ where
             ));
         }
 
+        // Parsed here rather than at step 5 because the FAPI gate below reads
+        // it: W7's rule 4 refuses a `fapi2` request that asks for a sensitive
+        // scope, and it has to ask what the *request* wanted. Pure and
+        // allocation-cheap, and step 5 uses the same vector, so nothing is
+        // parsed twice and the two cannot come to disagree about what
+        // `scope=openid  profile` means.
+        let scopes = parse_scopes(req.scope.as_deref());
+
         // 2c. X5.1: under the FAPI 2.0 profile PKCE is required of *every*
         //     client, confidential ones included (FAPI 2.0 §5.3.1.2). A no-op
         //     for a `standard` client, which is every client that predates
@@ -264,6 +305,7 @@ where
             &client,
             req.code_challenge.as_deref(),
             &req.authn_params,
+            &scopes,
         )?;
 
         // 2d. X7 G12: request objects are refused, with the error code OIDC
@@ -288,8 +330,8 @@ where
             ));
         }
 
-        // 5. Resolve scopes and validate against client's registered scopes
-        let scopes = parse_scopes(req.scope.as_deref());
+        // 5. Validate the scopes (parsed above) against the client's
+        //    registered set.
         if req.scope.is_some() {
             let invalid: Vec<&str> = scopes
                 .iter()
@@ -368,6 +410,57 @@ where
         } else {
             None
         };
+
+        // 6c. W7 — the sensitive-scope consent gate (plan §4.8).
+        //
+        // **After** the honour lane, deliberately: a consent screen asks a
+        // person a question, and there is no person to ask until
+        // authentication has been settled. If W4's evaluation wanted an
+        // interaction it has already returned above, and the consent question
+        // is put on the leg that comes back.
+        //
+        // **Before** the code, for the reason the whole of 6b is placed where
+        // it is: an interaction that gates a release must not be asked for
+        // after the thing it gates has been minted.
+        //
+        // `prompt=none` is read only on the honour lane. A client registered
+        // `ignore` has the parameter dropped everywhere else in this server,
+        // and a wave that started reading it here would be breaking
+        // invariant 4 to do it.
+        let prompt_none = crate::fapi::honours_authn_params(&client)
+            && req
+                .authn_params
+                .prompt
+                .contains(&crate::authn_params::Prompt::None);
+        match crate::sensitive::decide(
+            req.sensitive_scopes,
+            req.sensitive_scopes_switch_is_off,
+            req.consent_hop_return_leg,
+            prompt_none,
+        ) {
+            crate::sensitive::Decision::Proceed => {}
+            crate::sensitive::Decision::AskForConsent => {
+                return Ok(AuthorizeOutcome::Interact(crate::honour::Interaction {
+                    required_acr: None,
+                    reason: crate::honour::Reason::ConsentRequired,
+                }));
+            }
+            crate::sensitive::Decision::Refuse(refusal) => {
+                return Err(match refusal {
+                    crate::sensitive::Refusal::Disabled => OAuth2Error::InvalidScope(
+                        "the address and phone scopes are not enabled for this tenant".into(),
+                    ),
+                    crate::sensitive::Refusal::ConsentRequired => OAuth2Error::ConsentRequired(
+                        "releasing the requested scopes needs the end user's consent, and \
+                         prompt=none forbids asking for it"
+                            .into(),
+                    ),
+                    crate::sensitive::Refusal::Declined => OAuth2Error::AccessDenied(
+                        "the end user did not consent to releasing the requested scopes".into(),
+                    ),
+                });
+            }
+        }
 
         // 7. Generate random authorization code
         let raw_code = generate_auth_code();
@@ -751,6 +844,9 @@ mod tests {
             authn_params: AuthnRequestParams::default(),
             request_object: None,
             session_evidence: SessionEvidence::default(),
+            sensitive_scopes: crate::sensitive::Requested::None,
+            sensitive_scopes_switch_is_off: false,
+            consent_hop_return_leg: false,
             id_token_hint: None,
             inline_authn_params_beside_request_uri: false,
             login_hop_return_leg: false,

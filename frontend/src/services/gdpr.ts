@@ -61,7 +61,62 @@ export const gdprService = {
         params: { token },
       })
       .then((r) => r.data),
+
+  // ─── GDPR Art. 7 consent (W7, X7 G8) ──────────────────────────────────
+
+  /** `GET /api/v1/account/consents` — the caller's own consent records. */
+  listConsents: (): Promise<ConsentRecord[]> =>
+    api.get<ConsentRecord[]>("/api/v1/account/consents").then((r) => r.data),
+
+  /**
+   * `POST /api/v1/account/consents/oidc-scopes` — record consent to release
+   * `address` / `phone` to one relying party.
+   *
+   * Idempotent server-side, so a double-submitted consent screen consents
+   * once.
+   */
+  grantScopeConsent: (
+    clientId: string,
+    scopes: string[],
+  ): Promise<GrantedConsent> =>
+    api
+      .post<GrantedConsent>("/api/v1/account/consents/oidc-scopes", {
+        client_id: clientId,
+        scopes,
+      })
+      .then((r) => r.data),
+
+  /**
+   * `DELETE /api/v1/account/consents/oidc-scopes/{client_id}` — withdraw.
+   *
+   * Art. 7(3): one call, no confirmation step, and it takes effect on the
+   * relying party's next UserInfo request with the token it already holds.
+   */
+  withdrawScopeConsent: (clientId: string): Promise<WithdrawnConsent> =>
+    api
+      .delete<WithdrawnConsent>(
+        `/api/v1/account/consents/oidc-scopes/${encodeURIComponent(clientId)}`,
+      )
+      .then((r) => r.data),
 };
+
+/** One row of `GET /api/v1/account/consents`. */
+export interface ConsentRecord {
+  consent_type: string;
+  version: string;
+  accepted_at: string;
+  /** `false` for `terms_of_service`, which has its own erasure endpoint. */
+  withdrawable: boolean;
+}
+
+export interface GrantedConsent {
+  consent_type: string;
+  version: string;
+}
+
+export interface WithdrawnConsent {
+  withdrawn: number;
+}
 
 /**
  * Trigger a browser download of the decrypted export JSON. Kept separate

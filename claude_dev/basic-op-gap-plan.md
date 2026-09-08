@@ -812,6 +812,97 @@ claims on the next call with the same access token. T8.5 `fapi2` client with
 `address` in `scopes` refused at registration; DB-edited row refused at
 request time. T8.6 audit event emitted, without claim values.
 
+---
+
+**W7 amendment — what landed, and the six places this section was wrong.**
+
+Written before W1–W6 landed, and six of its claims did not survive contact with
+the tree. Each is recorded here rather than quietly coded around, because a plan
+that is corrected silently is one the next wave trusts again.
+
+1. **The migration is v57, not "schema v51".** `SCHEMA_V51` is role assignments,
+   and the head of `crates/axiam-db/src/schema.rs` was v56. W5 deliberately
+   added none.
+
+2. **"Covered by the existing erasure and export paths because they are user-row
+   fields" is false, and it was the GDPR defect in this section.** Both erasure
+   statements (`anonymize_user`, and the administrator tombstone behind
+   `UserRepository::delete`) and `aggregate_export_data`'s `profile` section
+   write **explicit column lists**. A new column is touched by none of them. An
+   erased subject would have kept their telephone number and postal address
+   indefinitely with the account hidden from the UI — which the tombstone's own
+   doc comment calls "retention with the UI hidden, not erasure" — and the
+   Art. 15 export would never have shown them either. All three now name the
+   columns, and `crates/axiam-db/tests/w7_sensitive_columns_test.rs` proves it
+   by erasing a subject who has both and reading the row back, on each path,
+   rather than by inspecting SQL a fourth path would not share.
+
+3. **The discovery document is not tenant-scoped.** §6 heads its table
+   "tenant-scoped discovery document" and gates two rows on the tenant switch;
+   `GET /.well-known/openid-configuration` takes no tenant, is registered at the
+   host root, and reads only `AuthConfig`. (A note in `handlers/oauth2.rs`
+   dating from W3 said the same thing, and was wrong for the same reason.) The
+   endpoint therefore gains an **optional `tenant_id`**, named the way
+   `/oauth2/authorize`, `/oauth2/end_session` and `/oauth2/token` already name
+   one. Without it the document is byte-identical to W6's; an unknown tenant is
+   answered identically rather than `404`, so discovery is not a
+   tenant-enumeration oracle.
+
+4. **There was no "existing consent list", and no consent endpoint at all.**
+   `consent` rows were written by registration and read only by the Art. 15
+   export; `ConsentRepository` had `create` and `list_by_user` and nothing else.
+   So the Art. 7 self-service surface is new: a list, a grant, and a withdrawal.
+   `ConsentRepository::withdraw` is a delete confined **by the repository** to
+   the `oidc_scope_release:` namespace, so no caller can reach a
+   `terms_of_service` row however the call is written, and the invariant
+   registration depends on (threat T-5-consent-gap) is untouched. History lives
+   in the append-only audit log, which is where a history belongs; the table
+   holds live consent, because a table that answered with tombstones is one
+   where forgetting to filter them releases data the subject withdrew.
+
+5. **The registration half of the tenant switch had to be built.**
+   `fapi::validate_registration` is a pure function four layers below the
+   settings row and cannot see it, so "cannot be registered on a client" is a
+   second gate in the REST handler, on create **and** on the merged update path.
+
+6. **An access token did not identify the relying party it was granted to.**
+   Consent is per client, so UserInfo could not tell whose consent to look for —
+   and "any consent this subject ever gave" would release a postal address to a
+   client the subject consented to a *different* client receiving. The
+   authorization-code and refresh paths now stamp RFC 9068 §2.2's `client_id`
+   claim. A token that carries none — every token issued before W7, and every
+   token minted by a login, a device flow or an exchange — releases nothing.
+
+**Two things the section did not anticipate.**
+
+- **`prompt=consent` needs its own marker.** §4.2's W4 note says W7 "replaces
+  the ceremony behind the same redirect". It does not, and should not: the
+  consent screen asks about a *scope release*, and `prompt=consent` alone
+  requests none, so pointing it there would show a page saying "there is nothing
+  to decide here". W4's treatment stands for `prompt=consent` alone. What W7
+  had to fix is the case where both apply — such a request goes to the sign-in
+  page first and comes back carrying `axiam_login_hop`, and reading that as a
+  consent leg would answer `access_denied` to somebody who was never shown the
+  question. The consent hop therefore carries `axiam_consent_hop`, and each
+  ceremony terminates on its own.
+- **The list projection carries the columns.** `UserRowWithId` excludes
+  `mfa_secret` (SEC-043) and the same argument was tried for these two, then
+  dropped: a telephone number is profile data of the same kind as the `email`
+  beside it, `users:list` and `users:get` are held by the same operators so the
+  projection was never the privacy boundary, and omitting it would make
+  `GET /scim/v2/Users` return a resource whose representation depends on how it
+  was reached. Redaction in `Debug` is a separate decision and is kept.
+
+**Also picked up here:** §4.6's deferred `default_locale` on
+`TenantSettingsOverride`, refused at the settings API when the tag is one this
+build does not ship — so an operator who types `fr-CA` is told, rather than
+discovering from a `warn!` that their pages are still English.
+
+**Conformance evidence:** rows 104–129 of
+`docs/compliance/oidc-conformance.md`. **No conformance run:** baseline run #0
+still has never happened and `docs/conformance/` does not exist, so no row
+claims the suite passed.
+
 ### 4.9 G10/G11 — `POST /oauth2/userinfo` and `POST /oauth2/authorize` (found, not listed)
 
 - **G10 (required — the suite FAILS without it).** Register `POST` on
@@ -905,7 +996,7 @@ must start from this paragraph.
 | **G3/G4** `acr_values` / `claims.acr` / `acr` | same bundle; `acr_for(session.amr)`; step-up via `reauth&acr=` | same as G1 (`acr_values` and `claims` are security-bearing ⇒ refused on `fapi2` when present) | parser; step-up path; discovery `acr_values_supported` | ACR deception (echo), silent downgrade of essential | claim derived from evidence only (type-level); essential unmet ⇒ `unmet_authentication_requirements`; voluntary ⇒ truthful achieved value | T3.1–T3.5, M3 |
 | **G5** `login_hint` | same bundle; SPA prefill only | registration + edited-row rules (mechanism refused); parameter itself ignored on honest `fapi2` rows | SPA | enumeration, reflected XSS | no server lookup ⇒ uniform by construction; React value binding | T5.1–T5.2, M5 |
 | **G6/G7** `display` / `ui_locales` / `claims_locales` | same bundle; allow-listed tokens to SPA | as G5 | SPA | reflected XSS | allow-lists; raw value never rendered | T6.1–T6.2, M6 |
-| **G8** `address` / `phone` | tenant switch + registered scopes + consent record; userinfo-only release | `validate_registration` (`SensitiveScopesOnFapiClient`); `enforce_authorization_request` refuses the scopes on `fapi2` | `User` model/schema, userinfo, SCIM, discovery (tenant-gated), consent SPA | over-collection, no lawful basis, release after withdrawal | switch off by default; per-client; per-user consent record; immediate withdrawal; audit | T8.1–T8.6, M8 |
+| **G8** `address` / `phone` | tenant switch + registered scopes + consent record; userinfo-only release, all four re-asked at every call | `validate_registration` (`SensitiveScopesOnFapiClient`); `enforce_authorization_request` refuses the scopes on `fapi2`; `release_sensitive_claims` refuses a `fapi2`-issued token at UserInfo | `User` model/schema (v57), userinfo, access-token `client_id` claim, SCIM, discovery (`?tenant_id`), consent SPA + Art. 7 endpoints, both erasure paths, Art. 15 export | over-collection, no lawful basis, release after withdrawal | switch off by default; per-client; per-user consent record; immediate withdrawal; audit | T8.1–T8.6, M8, M10 |
 | **G9** `client_secret_basic` | new `ClientAuthMethod` variant; header parsed by REST layer; registration decides | **existing** `WeakClientAuth` + `enforce_token_request` `is_strong()` re-check | `ClientAuthMethod`, `TokenRequestContext`, four handlers, `authenticate_client_credential`, discovery | RFC 6749 §2.3.1 encoding bug; header leakage in logs/proxies; two-method confusion | form-urlencode before base64 (test with `%`, `+`, `:`); redaction test; body secret on a basic client ⇒ `invalid_request`; SDKs keep post | T9.1–T9.6, M9 |
 | **G10** POST userinfo | route + RFC 6750 §2.2 body token (POST only) | n/a (resource-server side; same for all lanes) | userinfo route/extractor | token in body logged | POST body only; both-methods ⇒ refuse | T10.1–T10.3 |
 | **G12** request objects | explicit `request_not_supported` / `request_uri_not_supported`; discovery says so | n/a — a refusal | `authorize` handler (classification before PAR consume), discovery | SSRF (if ever implemented), parameter confusion | **not implemented**, and §9 says why | T12.1–T12.3 |
@@ -919,8 +1010,8 @@ must start from this paragraph.
 | `request_parameter_supported` | add, `false` | global (truthful today) |
 | `claims_parameter_supported` | add, `false` | global (only `id_token.acr` is read; the RP is told not to rely on `claims`) |
 | `acr_values_supported` | add, `["urn:axiam:acr:1fa", "urn:axiam:acr:mfa"]` | global capability statement |
-| `claims_supported` | add `auth_time`, `acr`, `amr`; add `phone_number`, `phone_number_verified`, `address` | first three global; last three only when `oidc.sensitive_scopes_enabled` |
-| `scopes_supported` | add `address`, `phone` | tenant switch |
+| `claims_supported` | add `auth_time`, `acr`, `amr`; add `phone_number`, `phone_number_verified`, `address` | first three global; last three only when `sensitive_scopes_enabled` **and** the request named a `tenant_id` (W7: this document is not tenant-scoped — see §4.8's amendment) |
+| `scopes_supported` | add `address`, `phone` | as above |
 | `token_endpoint_auth_methods_supported` | add `client_secret_basic` | after escalation A |
 | `id_token_signing_alg_values_supported` | **unchanged** `["EdDSA"]` | — |
 
@@ -990,7 +1081,7 @@ and a diff in the report is a stop-the-line signal.
 | **W4** | Honour lane, security-bearing: `prompt`, `max_age`, `id_token_hint`, `acr`/`claims.acr`, step-up. T1.*, T2.1–T2.4, T2.7, T3.*, M1–M4 request halves | W3 | — |
 | **W5** | Honour lane, cosmetic: `login_hint`, `display`, `ui_locales`, `claims_locales` in the SPA — **plus the SPA i18n layer and five shipped locales** the row's `ui_locales` needs in order to select anything at all (§4.6's W5 amendment: widened at the maintainer's request; no v57 migration, tenant default deferred to W7). T5.*, T6.*, M5–M6 request halves | W4 | — |
 | **W6** | G10 `POST /oauth2/userinfo`: the route, the RFC 6750 §2.2 body carrier, the two-carrier refusal. T10.1–T10.3, the §2.3 and logging pins, the `SameSite=Strict` CSRF pin, DPoP and `cnf` on the new method. **G11 declined — §4.9 records why and what would reopen it** | W1 | — |
-| **W7** | G8 sensitive scopes: schema v51, tenant switch, consent screen, userinfo release, SCIM mapping, GDPR doc. T8.*, M8, M10 | W3 (consent screen rides the login hop) | — |
+| **W7** | G8 sensitive scopes — **landed**: schema **v57** (not v51), tenant switch `sensitive_scopes_enabled` on `OidcPolicy` (disable-only), registration gate, request-time gate, consent screen at `/consent` with its own hop marker, Art. 7 self-service consent endpoints (new — there was no consent list), userinfo-only release behind four gates re-asked at every call, RFC 9068 `client_id` claim, SCIM `phoneNumbers`/`addresses`, discovery gated by an **optional `tenant_id`** (the document was not tenant-scoped), erasure and Art. 15 export corrected, GDPR doc §3.1. Plus §4.6's deferred `default_locale`, and W6's undocumented `POST /oauth2/userinfo` annotated now that `--dump-openapi` builds. T8.1–T8.6, M8, M10, rows 104–129 | W3 (consent screen rides the login hop) | — |
 | **W8** | G9 `client_secret_basic` — decision A is **yes**, so this wave is in scope. T9.*, M9; contract 1.41 text; `openapi.json` | W1 | — |
 | **W9** | Basic OP harness: `conformance/plans/oidcc-basic-static.json` (plan `oidcc-basic-certification-test-plan`, variants `server_metadata=discovery`, `client_registration=static_client`; config `server.acr_values`, `server.login_hint`, `server.ui_locales`; two static clients, one `client_secret_basic`, one `client_secret_post`, both `standard`/`honour`/`browser_sso`, scopes `openid profile email address phone`, `grant_types` incl. `refresh_token`); `register-clients.sh` variant; test user with phone/address; run; `docs/conformance/` report; `docs/compliance/oidc-conformance.md` rows for the new modules | W1–W8 | **#3 final** — FAPI and Basic both green, on a digest-pinned image, per `fapi-certification-submission.md` |
 

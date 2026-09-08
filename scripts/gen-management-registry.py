@@ -431,6 +431,15 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("download_export", "GET", "/api/v1/account/export/{token}"),
             ("request_delete", "POST", "/api/v1/account/delete"),
             ("cancel_delete", "GET", "/api/v1/auth/account/delete/cancel"),
+            # W7 / X7 G8 — Art. 7 consent, the same self-service class as the
+            # four above: an SDK caller acts for the authenticated account and
+            # for no other. Withdrawal in particular belongs in every SDK,
+            # because Art. 7(3) asks for it to be as easy as giving, and a
+            # right that only the admin console can exercise is not.
+            ("list_consents", "GET", "/api/v1/account/consents"),
+            ("grant_scope_consent", "POST", "/api/v1/account/consents/oidc-scopes"),
+            ("withdraw_scope_consent", "DELETE",
+             "/api/v1/account/consents/oidc-scopes/{client_id}"),
         ],
     },
     "platform": {

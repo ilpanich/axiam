@@ -19,6 +19,7 @@ pub mod oidc;
 pub mod par;
 pub mod pkce;
 pub mod private_key_jwt;
+pub mod sensitive;
 pub mod token;
 pub mod token_exchange;
 pub mod uma;

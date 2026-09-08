@@ -2808,7 +2808,7 @@ pub trait AttestationMetadataSource: Send + Sync {
 // ---------------------------------------------------------------------------
 
 pub trait ConsentRepository: Send + Sync {
-    /// Record a new consent (immutable — no update/delete).
+    /// Record a new consent. Never updated in place.
     fn create(&self, input: CreateConsent) -> impl Future<Output = AxiamResult<Consent>> + Send;
 
     /// List all consent records for a user in a tenant.
@@ -2817,7 +2817,52 @@ pub trait ConsentRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Consent>>> + Send;
+
+    /// Withdraw every consent of one type for a user (GDPR Art. 7(3), X7 G8).
+    ///
+    /// Returns how many records were removed, so a caller can tell "withdrawn"
+    /// from "there was nothing to withdraw" without a second read.
+    ///
+    /// # Why this table gains a delete, and why that is not a hole
+    ///
+    /// The rest of this trait treats a consent record as write-once, and the
+    /// user table's `create_with_consent` depends on it: a user must never
+    /// exist without proof that they accepted the terms of service
+    /// (threat T-5-consent-gap). Art. 7(3) nevertheless requires that
+    /// withdrawing a consent be as easy as giving it, and X7 G8 releases a
+    /// postal address and a telephone number on the strength of a record in
+    /// this table — a record that must therefore be removable, immediately,
+    /// by the person it describes.
+    ///
+    /// The two are reconciled by **scope, not by trust**: implementations MUST
+    /// refuse a `consent_type` outside the
+    /// [`OIDC_SCOPE_RELEASE_CONSENT_PREFIX`] namespace, so no call to this
+    /// method can reach a `terms_of_service` row however it is written. The
+    /// invariant registration depends on is preserved by construction rather
+    /// than by every caller remembering it.
+    ///
+    /// The record of what happened is not lost with the row. Granting and
+    /// withdrawing both emit audit events, and the audit log is the
+    /// append-only, signature-chained store — which is where a history belongs.
+    /// This table holds *live* consent: the question the UserInfo endpoint asks
+    /// it is "may I release this now", and a table that answered with tombstones
+    /// would be one where forgetting to filter them releases data the subject
+    /// withdrew.
+    fn withdraw(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        consent_type: &str,
+    ) -> impl Future<Output = AxiamResult<usize>> + Send;
 }
+
+/// The `consent_type` namespace X7 G8's scope-release records live in.
+///
+/// The full type is this prefix followed by the `client_id`, so consent is per
+/// relying party: consenting to release a postal address to one client says
+/// nothing about any other. [`ConsentRepository::withdraw`] accepts only types
+/// inside this namespace.
+pub const OIDC_SCOPE_RELEASE_CONSENT_PREFIX: &str = "oidc_scope_release:";
 
 // ---------------------------------------------------------------------------
 // GDPR — Account Deletion (D-08/D-09)

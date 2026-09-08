@@ -7,6 +7,27 @@
 //! `username`, `active` <-> `status == Active`, `emails[primary]` <->
 //! `email`) is a direct field mapping.
 //!
+//! # `phoneNumbers` and `addresses` (X7 G8 / W7)
+//!
+//! Both were dropped on the floor until W7 — parsed by nobody, stored nowhere,
+//! and absent from every response. They now map onto real columns
+//! (`user.phone_number`, `user.address`), and the mapping is a rename rather
+//! than a translation because RFC 7643 §4.1.2's address members and OIDC
+//! Core §5.1.1's are the same six fields.
+//!
+//! **AXIAM keeps one of each.** OIDC Core §5.1 defines one `phone_number`
+//! claim and one `address` claim, so a multi-valued attribute would be storage
+//! with nothing to release it through; the entry marked `primary` wins, else
+//! the first, which is the rule `emails` already follows. `type` (`"work"`,
+//! `"home"`) is accepted and not stored, for the reason Art. 5(1)(c) gives:
+//! it is personal data nothing in this system reads.
+//!
+//! Provisioning them does **not** release them. What reaches a relying party
+//! is decided four gates later, at UserInfo, by the tenant switch, the
+//! client's registered scopes, the request's scopes and the subject's consent
+//! record — see `axiam_oauth2::sensitive`. An identity provider pushing a
+//! postal address is populating a profile, not authorising a disclosure.
+//!
 //! Every handler here mirrors the native `POST/GET/PUT/DELETE
 //! /api/v1/users` handlers (`axiam_api_rest::handlers::users`) for the parts
 //! B4 requires parity on: same `create_with_consent` GDPR path, the same
@@ -26,7 +47,7 @@ use actix_web::http::StatusCode;
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::password;
 use axiam_core::error::AxiamError;
-use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
+use axiam_core::models::user::{Address, CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{Pagination, UserRepository};
 use chrono::{DateTime, Utc};
 use secrecy::ExposeSecret;
@@ -66,6 +87,49 @@ pub struct ScimEmailInput {
     pub primary: Option<bool>,
 }
 
+/// RFC 7643 §4.1.2 `phoneNumbers` entry (X7 G8 / W7).
+///
+/// `type` is accepted and **not stored**. AXIAM holds one telephone number,
+/// because OIDC Core §5.1 defines one `phone_number` claim, and keeping a
+/// `"work"`/`"mobile"` label for a value whose label nothing reads would be
+/// storing personal data with no purpose — which is exactly what Art. 5(1)(c)
+/// asks a controller not to do. Accepted rather than refused because every
+/// identity provider sends it and refusing would fail the provisioning run.
+#[derive(Debug, Deserialize)]
+pub struct ScimPhoneInput {
+    pub value: String,
+    #[serde(default)]
+    pub primary: Option<bool>,
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+}
+
+/// RFC 7643 §4.1.2 `addresses` entry (X7 G8 / W7).
+///
+/// The five components plus `formatted` map one-to-one onto OIDC Core §5.1.1,
+/// which is why this mapping needed no translation table: SCIM's
+/// `streetAddress`/`locality`/`region`/`postalCode`/`country` and the OIDC
+/// members of the same names are the same fields, and RFC 7643 §4.1.2 says so.
+#[derive(Debug, Deserialize)]
+pub struct ScimAddressInput {
+    #[serde(default)]
+    pub formatted: Option<String>,
+    #[serde(default, rename = "streetAddress")]
+    pub street_address: Option<String>,
+    #[serde(default)]
+    pub locality: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default, rename = "postalCode")]
+    pub postal_code: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub primary: Option<bool>,
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+}
+
 fn default_active() -> bool {
     true
 }
@@ -83,6 +147,16 @@ pub struct ScimUserWrite {
     pub name: Option<ScimNameInput>,
     #[serde(default)]
     pub emails: Vec<ScimEmailInput>,
+    /// X7 G8 / W7. Absent and empty mean different things on `PUT`: absent is
+    /// "the provisioning client does not manage this attribute", empty is
+    /// "this user has none". Both are `Vec` here because RFC 7644 §3.5.1
+    /// defines `PUT` as a replace of the whole resource, so an attribute the
+    /// client omits *is* being set to nothing — and a provisioning run that
+    /// stops sending a telephone number is a run that means to remove it.
+    #[serde(default, rename = "phoneNumbers")]
+    pub phone_numbers: Vec<ScimPhoneInput>,
+    #[serde(default)]
+    pub addresses: Vec<ScimAddressInput>,
     #[serde(default = "default_active")]
     pub active: bool,
     /// Optional. Okta/Entra do not reliably send a real credential over
@@ -99,6 +173,48 @@ fn primary_email(emails: &[ScimEmailInput]) -> Option<String> {
         .find(|e| e.primary == Some(true))
         .or_else(|| emails.first())
         .map(|e| e.value.clone())
+}
+
+/// The one telephone number AXIAM keeps: the entry marked primary, else the
+/// first. The same rule [`primary_email`] uses, deliberately — a provisioning
+/// client that learns how AXIAM picks an email should not have to learn a
+/// second rule for a telephone number.
+///
+/// A blank `value` selects nothing rather than storing an empty string: an
+/// empty telephone number is an absent one, and storing it would make
+/// `phone_number_verified: false` appear for a claim with no value.
+fn primary_phone(phones: &[ScimPhoneInput]) -> Option<String> {
+    phones
+        .iter()
+        .find(|p| p.primary == Some(true))
+        .or_else(|| phones.first())
+        .map(|p| p.value.trim())
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+}
+
+/// The one address AXIAM keeps, chosen by the same rule, and dropped when
+/// every member of it is blank.
+fn primary_address(addresses: &[ScimAddressInput]) -> Option<Address> {
+    let chosen = addresses
+        .iter()
+        .find(|a| a.primary == Some(true))
+        .or_else(|| addresses.first())?;
+    let trim = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let address = Address {
+        formatted: trim(&chosen.formatted),
+        street_address: trim(&chosen.street_address),
+        locality: trim(&chosen.locality),
+        region: trim(&chosen.region),
+        postal_code: trim(&chosen.postal_code),
+        country: trim(&chosen.country),
+    };
+    (!address.is_empty()).then_some(address)
 }
 
 #[derive(Debug, Serialize)]
@@ -133,6 +249,66 @@ pub struct ScimEmail {
     primary: bool,
 }
 
+/// X7 G8 / W7. One entry, always primary, with no `type`: AXIAM holds one
+/// number and does not know what kind it is. Emitting a made-up `"work"` would
+/// be answering a question nobody asked it.
+#[derive(Serialize)]
+pub struct ScimPhone {
+    value: String,
+    primary: bool,
+}
+
+/// X7 G8 / W7. The `Debug` impls on both of these redact, for the reason
+/// `axiam_core::models::user::User`'s does — SCIM handlers log requests and
+/// responses at debug level in more deployments than not.
+impl std::fmt::Debug for ScimPhone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScimPhone")
+            .field("value", &"<redacted>")
+            .field("primary", &self.primary)
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+pub struct ScimAddress {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    formatted: Option<String>,
+    #[serde(rename = "streetAddress", skip_serializing_if = "Option::is_none")]
+    street_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    locality: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(rename = "postalCode", skip_serializing_if = "Option::is_none")]
+    postal_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    country: Option<String>,
+    primary: bool,
+}
+
+impl std::fmt::Debug for ScimAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScimAddress")
+            .field("primary", &self.primary)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<&Address> for ScimAddress {
+    fn from(a: &Address) -> Self {
+        Self {
+            formatted: a.formatted.clone(),
+            street_address: a.street_address.clone(),
+            locality: a.locality.clone(),
+            region: a.region.clone(),
+            postal_code: a.postal_code.clone(),
+            country: a.country.clone(),
+            primary: true,
+        }
+    }
+}
+
 /// Shared by `ScimUser` and `ScimGroup` (`groups.rs` constructs this
 /// directly — fields are `pub(crate)` for exactly that reuse).
 #[derive(Debug, Serialize)]
@@ -157,6 +333,12 @@ pub struct ScimUser {
     name: Option<ScimName>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     emails: Vec<ScimEmail>,
+    /// X7 G8 / W7. Omitted rather than emitted empty, per RFC 7643 §3.1:
+    /// "attributes that have no value SHOULD be omitted".
+    #[serde(rename = "phoneNumbers", skip_serializing_if = "Vec::is_empty")]
+    phone_numbers: Vec<ScimPhone>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    addresses: Vec<ScimAddress>,
     active: bool,
     meta: ScimMeta,
 }
@@ -182,6 +364,15 @@ impl ScimUser {
                     primary: true,
                 }]
             },
+            phone_numbers: user
+                .phone_number
+                .iter()
+                .map(|value| ScimPhone {
+                    value: value.clone(),
+                    primary: true,
+                })
+                .collect(),
+            addresses: user.address.iter().map(ScimAddress::from).collect(),
             active: user.status == UserStatus::Active,
             meta: ScimMeta {
                 resource_type: "User",
@@ -464,6 +655,12 @@ pub async fn create<C: Connection + Clone>(
             created.id,
             UpdateUser {
                 status: Some(final_status),
+                // W7 — written on the same follow-up update the status already
+                // needed, so provisioning a user with a telephone number costs
+                // no extra round trip. `Some(None)` when the client sent none,
+                // because a create is a statement about the whole resource.
+                phone_number: Some(primary_phone(&req.phone_numbers)),
+                address: Some(primary_address(&req.addresses)),
                 ..Default::default()
             },
         )
@@ -536,6 +733,14 @@ pub async fn replace<C: Connection + Clone>(
                 email: Some(email),
                 status: Some(status.clone()),
                 metadata: Some(metadata),
+                // W7 — `PUT` replaces the resource (RFC 7644 §3.5.1), so an
+                // omitted `phoneNumbers` clears the stored number rather than
+                // leaving it. That is the behaviour a provisioning client
+                // relies on to *remove* an attribute, and it is also what
+                // makes an identity provider the source of truth rather than
+                // one of two.
+                phone_number: Some(primary_phone(&req.phone_numbers)),
+                address: Some(primary_address(&req.addresses)),
                 ..Default::default()
             },
         )
@@ -703,6 +908,12 @@ pub async fn patch<C: Connection + Clone>(
         }),
         metadata: apply_user_delta_metadata(&current.metadata, &delta),
         password_hash,
+        // W7 — `None` when the PATCH said nothing about the attribute, which
+        // is the whole difference between PATCH and PUT: a partial update
+        // leaves an unmentioned telephone number alone, where a `PUT` that
+        // omits it clears it.
+        phone_number: delta.phone_number.clone(),
+        address: delta.address.clone(),
         ..Default::default()
     };
 

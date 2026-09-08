@@ -139,6 +139,58 @@ pub struct WebauthnPolicy {
     pub webauthn_user_verification: WebauthnUserVerification,
 }
 
+/// OpenID Connect surface controls (X7 G8, plan §4.6/§4.8).
+///
+/// Two settings that are not password rules, and are here because this is the
+/// org-baseline-plus-tenant-override surface every other per-tenant control
+/// lives on. They are also the two settings in this model that are *not* of
+/// the same kind as each other, so it is worth saying which is which:
+///
+/// * [`Self::sensitive_scopes_enabled`] **is** ordered. Releasing personal
+///   data is the less-restrictive direction, so it is validated
+///   disable-only — the mirror image of `mfa_enforced` — and a tenant can turn
+///   its organization's decision off but never on.
+/// * [`Self::default_locale`] is **not** ordered, and no ordering is invented
+///   for it. A language is a presentation preference; there is no sense in
+///   which Italian is stricter than French. [`validate_tenant_override`]
+///   therefore does not check it and [`clamp_overrides_to_org`] never clears
+///   it. The model's rule is "a tenant may only be more restrictive", which
+///   binds every field that *has* a restrictiveness; a field that has none
+///   cannot violate it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct OidcPolicy {
+    /// Whether `address` and `phone` may be registered on a client, requested
+    /// at the authorization endpoint, and released at UserInfo (X7 G8).
+    ///
+    /// **Off unless an organization turns it on.** The two scopes release a
+    /// postal address and a telephone number — categories of personal data
+    /// AXIAM has no other use for — so the deployment that has never thought
+    /// about them releases nothing, and the operator who has thought about
+    /// them says so once, at the organization level, where the lawful basis
+    /// for holding the data was decided.
+    ///
+    /// The switch is a *capability*, not a grant: with it on, a client still
+    /// has to register the scope, the request still has to ask for it, and the
+    /// user still has to have consented. It is the first of four gates, and it
+    /// is the only one an operator can close for everybody at once.
+    pub sensitive_scopes_enabled: bool,
+    /// The BCP 47 tag the sign-in page falls back to when the relying party's
+    /// `ui_locales` selects nothing (W5's chain, plan §4.6).
+    ///
+    /// `None` means "no tenant preference", which lands on the deployment
+    /// default (`en`) — the behaviour every deployment had before this field
+    /// existed. A tag this build does not ship also lands there: the parse is
+    /// exact rather than a language lookup, so a stored `fr-CA` reads as
+    /// "somebody wrote something this binary does not ship" rather than as a
+    /// guess at French.
+    ///
+    /// Stored as a string rather than as the `Locale` enum because that enum
+    /// lives in `axiam-oauth2`, four layers above this crate, and the crate
+    /// layering points inward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_locale: Option<String>,
+}
+
 // -----------------------------------------------------------------------
 // Scope enum
 // -----------------------------------------------------------------------
@@ -191,6 +243,7 @@ pub struct SecuritySettings {
     pub opaque: OpaquePolicy,
     pub privacy: PrivacyPolicy,
     pub webauthn: WebauthnPolicy,
+    pub oidc: OidcPolicy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -241,6 +294,11 @@ pub struct TenantSettingsOverride {
     // WebAuthn
     #[schema(value_type = Option<String>)]
     pub webauthn_user_verification: Option<WebauthnUserVerification>,
+    // OIDC (X7 G8 / plan §4.6). Disable-only; see `OidcPolicy`.
+    pub sensitive_scopes_enabled: Option<bool>,
+    /// The tenant's fallback UI language. Not ordered, therefore not validated
+    /// against the baseline and never clamped — see [`OidcPolicy`].
+    pub default_locale: Option<String>,
 }
 
 impl TenantSettingsOverride {
@@ -305,6 +363,15 @@ pub struct SetOrgSettings {
     #[serde(default)]
     #[schema(value_type = String, example = "preferred")]
     pub webauthn_user_verification: WebauthnUserVerification,
+    // OIDC — defaulted so a client written before X7 G8 keeps releasing no
+    // sensitive scope and expressing no locale preference, which is what every
+    // deployment did before the fields existed.
+    #[serde(default)]
+    #[schema(example = false)]
+    pub sensitive_scopes_enabled: bool,
+    #[serde(default)]
+    #[schema(example = "it")]
+    pub default_locale: Option<String>,
 }
 
 /// The erasure grace window a deployment gets when nothing says otherwise.
@@ -375,6 +442,13 @@ pub fn system_defaults() -> SetOrgSettings {
         // verification unconditionally, because there the key is the only
         // factor (see `WebauthnUserVerification`).
         webauthn_user_verification: WebauthnUserVerification::Preferred,
+        // OIDC — X7 G8's stricter default (invariant I3). `address` and
+        // `phone` release personal data, so the deployment that has never
+        // made a decision about them makes the one that releases nothing.
+        sensitive_scopes_enabled: false,
+        // No tenant preference: the sign-in page falls back to the deployment
+        // default, exactly as it did before W5 shipped the chain.
+        default_locale: None,
     }
 }
 
@@ -554,6 +628,15 @@ pub fn effective_settings(
             webauthn_user_verification: tenant_override
                 .webauthn_user_verification
                 .unwrap_or(org.webauthn.webauthn_user_verification),
+        },
+        oidc: OidcPolicy {
+            sensitive_scopes_enabled: tenant_override
+                .sensitive_scopes_enabled
+                .unwrap_or(org.oidc.sensitive_scopes_enabled),
+            default_locale: tenant_override
+                .default_locale
+                .clone()
+                .or_else(|| org.oidc.default_locale.clone()),
         },
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -750,6 +833,17 @@ pub fn clamp_overrides_to_org(
     }) {
         overrides.webauthn_user_verification = None;
         cleared.push("webauthn_user_verification");
+    }
+
+    // X7 G8, and the only *disable*-only control in the model: the org value
+    // `true` is the permissive one, so a tenant override of `false` is the
+    // tightening direction and is kept, while `Some(true)` against an org
+    // baseline of `false` is a tenant granting itself a release its
+    // organization did not authorise. `default_locale` is deliberately absent
+    // from this function — see `OidcPolicy`.
+    if !org.oidc.sensitive_scopes_enabled && overrides.sensitive_scopes_enabled == Some(true) {
+        overrides.sensitive_scopes_enabled = None;
+        cleared.push("sensitive_scopes_enabled");
     }
 
     cleared
@@ -975,6 +1069,24 @@ pub fn validate_tenant_override(
         ));
     }
 
+    // --- X7 G8 sensitive scopes: disable-only ---
+    //
+    // The mirror image of `check_enable_only`, and the only control in this
+    // model that runs that way, because it is the only one whose `true` is the
+    // permissive value. A tenant may refuse to release postal addresses and
+    // telephone numbers that its organization allows; it may not decide on its
+    // own to start releasing them. The lawful basis for holding the data was
+    // established at the organization level and the tenant does not get to
+    // widen it.
+    //
+    // `default_locale` is deliberately not checked here. See `OidcPolicy`.
+    if overrides.sensitive_scopes_enabled == Some(true) && !org.oidc.sensitive_scopes_enabled {
+        violations.push(
+            "sensitive_scopes_enabled: cannot enable at tenant level when disabled at org level              (the address and phone scopes release personal data under the organization's              lawful basis, not the tenant's)"
+                .into(),
+        );
+    }
+
     if !violations.is_empty() {
         return Err(AxiamError::Validation {
             message: format!(
@@ -1169,6 +1281,25 @@ pub fn diff_against_org(
             org.webauthn.webauthn_user_verification,
             tenant.webauthn.webauthn_user_verification
         ),
+        sensitive_scopes_enabled: diff!(
+            sensitive_scopes_enabled,
+            org.oidc.sensitive_scopes_enabled,
+            tenant.oidc.sensitive_scopes_enabled
+        ),
+        // Not the `diff!` macro: the override field is itself the value type
+        // (`Option<String>`), so `Some(tenant_value)` would be one `Option`
+        // too many. The consequence is that this function cannot express
+        // "the tenant explicitly has no locale while the organization has
+        // one" — an absent override means inherit, and clearing a tenant
+        // locale therefore restores the organization's. That is the same
+        // limitation every other field here has and it is the safe direction:
+        // a locale is a presentation preference, so inheriting one is never a
+        // policy failure.
+        default_locale: if tenant.oidc.default_locale != org.oidc.default_locale {
+            tenant.oidc.default_locale.clone()
+        } else {
+            None
+        },
     }
 }
 
@@ -1223,6 +1354,10 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
         },
         webauthn: WebauthnPolicy {
             webauthn_user_verification: input.webauthn_user_verification,
+        },
+        oidc: OidcPolicy {
+            sensitive_scopes_enabled: input.sensitive_scopes_enabled,
+            default_locale: input.default_locale.clone(),
         },
         created_at: now,
         updated_at: now,
@@ -2016,5 +2151,157 @@ mod tests {
             diff_against_org(&org, &merged).deletion_grace_period_days,
             Some(3)
         );
+    }
+
+    // -------------------------------------------------------------------
+    // X7 G8 — the sensitive-scopes switch and the tenant default locale
+    // -------------------------------------------------------------------
+
+    /// I3, at the model layer: a deployment that has configured nothing
+    /// releases no sensitive scope.
+    #[test]
+    fn sensitive_scopes_are_off_in_the_system_defaults() {
+        assert!(!system_defaults().sensitive_scopes_enabled);
+        assert!(!org_settings().oidc.sensitive_scopes_enabled);
+        assert_eq!(system_defaults().default_locale, None);
+    }
+
+    /// The switch is disable-only. A tenant may refuse a release its
+    /// organization allows; it may not authorise one its organization did not.
+    #[test]
+    fn a_tenant_may_not_enable_sensitive_scopes_its_org_disabled() {
+        let org = org_settings();
+        assert!(!org.oidc.sensitive_scopes_enabled);
+        let overrides = TenantSettingsOverride {
+            sensitive_scopes_enabled: Some(true),
+            ..Default::default()
+        };
+        let err = validate_tenant_override(&org, &overrides)
+            .expect_err("enabling a release the org disabled must be refused");
+        assert!(
+            err.to_string().contains("sensitive_scopes_enabled"),
+            "the violation must name the field: {err}"
+        );
+    }
+
+    /// The tightening direction is accepted, and it takes effect.
+    #[test]
+    fn a_tenant_may_disable_sensitive_scopes_its_org_enabled() {
+        let mut org = org_settings();
+        org.oidc.sensitive_scopes_enabled = true;
+        let overrides = TenantSettingsOverride {
+            sensitive_scopes_enabled: Some(false),
+            ..Default::default()
+        };
+        validate_tenant_override(&org, &overrides).expect("turning a release off must be allowed");
+        let merged = effective_settings(&org, &overrides, Uuid::nil(), Uuid::nil());
+        assert!(!merged.oidc.sensitive_scopes_enabled);
+    }
+
+    /// An organization that turns the switch back off takes it away from every
+    /// tenant that had opted in, rather than leaving them releasing data on a
+    /// baseline that no longer permits it. The clamp is what makes the
+    /// disable-only rule survive a baseline change, exactly as it does for
+    /// `mfa_enforced`.
+    #[test]
+    fn clamping_drops_a_tenant_optin_the_org_has_since_withdrawn() {
+        let org = org_settings();
+        let mut overrides = TenantSettingsOverride {
+            sensitive_scopes_enabled: Some(true),
+            ..Default::default()
+        };
+        let cleared = clamp_overrides_to_org(&org, &mut overrides);
+        assert!(cleared.contains(&"sensitive_scopes_enabled"));
+        assert_eq!(overrides.sensitive_scopes_enabled, None);
+        assert!(
+            !effective_settings(&org, &overrides, Uuid::nil(), Uuid::nil())
+                .oidc
+                .sensitive_scopes_enabled
+        );
+    }
+
+    /// A tenant that says `false` against an org that says `false` is not
+    /// cleared — it is already the restrictive value, and clearing it would
+    /// silently re-enable the tenant the day the org enables the switch.
+    #[test]
+    fn clamping_keeps_a_tenant_optout() {
+        let org = org_settings();
+        let mut overrides = TenantSettingsOverride {
+            sensitive_scopes_enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(clamp_overrides_to_org(&org, &mut overrides).is_empty());
+        assert_eq!(overrides.sensitive_scopes_enabled, Some(false));
+    }
+
+    /// `default_locale` has no restrictiveness ordering, so neither gate
+    /// touches it: any tag validates, and the clamp never clears it. This is
+    /// the property `OidcPolicy`'s docs claim, asserted rather than described.
+    #[test]
+    fn the_tenant_default_locale_is_neither_validated_nor_clamped() {
+        let org = org_settings();
+        let mut overrides = TenantSettingsOverride {
+            default_locale: Some("it".into()),
+            ..Default::default()
+        };
+        validate_tenant_override(&org, &overrides)
+            .expect("a locale cannot be less restrictive than another locale");
+        assert!(clamp_overrides_to_org(&org, &mut overrides).is_empty());
+        assert_eq!(overrides.default_locale.as_deref(), Some("it"));
+        assert_eq!(
+            effective_settings(&org, &overrides, Uuid::nil(), Uuid::nil())
+                .oidc
+                .default_locale
+                .as_deref(),
+            Some("it")
+        );
+    }
+
+    /// An absent tenant locale inherits the organization's, which is what
+    /// makes it a *default* rather than a per-tenant requirement.
+    #[test]
+    fn an_absent_tenant_locale_inherits_the_org_baseline() {
+        let mut org = org_settings();
+        org.oidc.default_locale = Some("de".into());
+        let merged = effective_settings(
+            &org,
+            &TenantSettingsOverride::default(),
+            Uuid::nil(),
+            Uuid::nil(),
+        );
+        assert_eq!(merged.oidc.default_locale.as_deref(), Some("de"));
+    }
+
+    /// I4 at this layer: an override written before X7 G8 existed carries
+    /// neither field, and merging it changes nothing.
+    #[test]
+    fn an_override_from_before_this_wave_still_deserialises_and_changes_nothing() {
+        let legacy: TenantSettingsOverride =
+            serde_json::from_str(r#"{"min_length": 16}"#).expect("a pre-W7 override must decode");
+        assert_eq!(legacy.sensitive_scopes_enabled, None);
+        assert_eq!(legacy.default_locale, None);
+        let org = org_settings();
+        let merged = effective_settings(&org, &legacy, Uuid::nil(), Uuid::nil());
+        assert_eq!(
+            merged.oidc, org.oidc,
+            "an override that says nothing about the OIDC policy must inherit all of it"
+        );
+    }
+
+    /// `diff_against_org` round-trips both fields, so the admin UI's
+    /// "what has this tenant changed" view does not lose them.
+    #[test]
+    fn diff_against_org_reports_both_oidc_fields() {
+        let mut org = org_settings();
+        org.oidc.sensitive_scopes_enabled = true;
+        let overrides = TenantSettingsOverride {
+            sensitive_scopes_enabled: Some(false),
+            default_locale: Some("fr".into()),
+            ..Default::default()
+        };
+        let merged = effective_settings(&org, &overrides, Uuid::nil(), Uuid::nil());
+        let diff = diff_against_org(&org, &merged);
+        assert_eq!(diff.sensitive_scopes_enabled, Some(false));
+        assert_eq!(diff.default_locale.as_deref(), Some("fr"));
     }
 }

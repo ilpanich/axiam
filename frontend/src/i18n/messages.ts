@@ -126,6 +126,20 @@ const en = {
   mfaPasskeyAction: "Use a passkey or security key instead",
   verifyAction: "Verify",
   verifying: "Verifying...",
+  // ─── Consent (W7, X7 G8) ────────────────────────────────────────────────
+  consentHeading: "Share your details?",
+  consentIntro:
+    "{client} is asking to see some of your details. Nothing is shared unless you allow it.",
+  consentPhone: "Your telephone number",
+  consentAddress: "Your postal address",
+  consentWithdrawNote:
+    "You can withdraw this at any time from Privacy & Data, and it takes effect immediately.",
+  consentAllowAction: "Allow",
+  consentDenyAction: "Not now",
+  consentSaving: "Saving...",
+  consentFailed: "Could not record your answer. Please try again.",
+  consentNothingToDo:
+    "There is nothing to decide here. You can close this page.",
 } as const;
 
 /** Every message the authentication surface can render. */
@@ -202,6 +216,18 @@ const it: Bundle = {
   mfaPasskeyAction: "Usa invece una passkey o una chiave di sicurezza",
   verifyAction: "Verifica",
   verifying: "Verifica in corso...",
+  consentHeading: "Vuoi condividere i tuoi dati?",
+  consentIntro:
+    "{client} chiede di vedere alcuni dei tuoi dati. Nulla viene condiviso se non lo consenti.",
+  consentPhone: "Il tuo numero di telefono",
+  consentAddress: "Il tuo indirizzo postale",
+  consentWithdrawNote:
+    "Puoi revocare il consenso in qualsiasi momento da Privacy e dati, con effetto immediato.",
+  consentAllowAction: "Consenti",
+  consentDenyAction: "Non ora",
+  consentSaving: "Salvataggio in corso...",
+  consentFailed: "Non è stato possibile registrare la tua risposta. Riprova.",
+  consentNothingToDo: "Non c'è nulla da decidere qui. Puoi chiudere questa pagina.",
 };
 
 /**
@@ -277,6 +303,18 @@ const fr: Bundle = {
   mfaPasskeyAction: "Utiliser plutôt une clé d'accès ou une clé de sécurité",
   verifyAction: "Vérifier",
   verifying: "Vérification en cours...",
+  consentHeading: "Partager vos informations ?",
+  consentIntro:
+    "{client} demande à consulter certaines de vos informations. Rien n'est partagé sans votre autorisation.",
+  consentPhone: "Votre numéro de téléphone",
+  consentAddress: "Votre adresse postale",
+  consentWithdrawNote:
+    "Vous pouvez retirer cette autorisation à tout moment depuis Confidentialité et données ; elle prend effet immédiatement.",
+  consentAllowAction: "Autoriser",
+  consentDenyAction: "Pas maintenant",
+  consentSaving: "Enregistrement...",
+  consentFailed: "Impossible d'enregistrer votre réponse. Veuillez réessayer.",
+  consentNothingToDo: "Il n'y a rien à décider ici. Vous pouvez fermer cette page.",
 };
 
 /**
@@ -355,6 +393,18 @@ const de: Bundle = {
     "Stattdessen einen Passkey oder Sicherheitsschlüssel verwenden",
   verifyAction: "Bestätigen",
   verifying: "Wird überprüft...",
+  consentHeading: "Ihre Daten freigeben?",
+  consentIntro:
+    "{client} möchte einige Ihrer Daten einsehen. Ohne Ihre Zustimmung wird nichts weitergegeben.",
+  consentPhone: "Ihre Telefonnummer",
+  consentAddress: "Ihre Postanschrift",
+  consentWithdrawNote:
+    "Sie können diese Zustimmung jederzeit unter Datenschutz und Daten widerrufen; sie wirkt sofort.",
+  consentAllowAction: "Zulassen",
+  consentDenyAction: "Jetzt nicht",
+  consentSaving: "Wird gespeichert...",
+  consentFailed: "Ihre Antwort konnte nicht gespeichert werden. Bitte versuchen Sie es erneut.",
+  consentNothingToDo: "Hier gibt es nichts zu entscheiden. Sie können diese Seite schließen.",
 };
 
 /**
@@ -429,6 +479,18 @@ const es: Bundle = {
   mfaPasskeyAction: "Usa una clave de acceso o una llave de seguridad",
   verifyAction: "Verificar",
   verifying: "Verificando...",
+  consentHeading: "¿Compartir tus datos?",
+  consentIntro:
+    "{client} solicita ver algunos de tus datos. No se comparte nada si no lo autorizas.",
+  consentPhone: "Tu número de teléfono",
+  consentAddress: "Tu dirección postal",
+  consentWithdrawNote:
+    "Puedes retirar esta autorización en cualquier momento desde Privacidad y datos, con efecto inmediato.",
+  consentAllowAction: "Permitir",
+  consentDenyAction: "Ahora no",
+  consentSaving: "Guardando...",
+  consentFailed: "No se ha podido registrar tu respuesta. Inténtalo de nuevo.",
+  consentNothingToDo: "Aquí no hay nada que decidir. Puedes cerrar esta página.",
 };
 
 /**

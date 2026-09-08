@@ -115,6 +115,13 @@ impl MemberRow {
             // Group queries do not fetch GDPR deletion fields — safe defaults.
             deletion_pending: false,
             scheduled_purge_at: None,
+            // W7 / X7 G8: nor the two GDPR-sensitive columns. Listing a
+            // group's members is not a reason to hydrate every member's
+            // telephone number and postal address — the same projection
+            // argument the user repository's list path makes.
+            phone_number: None,
+            phone_number_verified_at: None,
+            address: None,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,

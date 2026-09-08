@@ -5,7 +5,7 @@
 use axiam_auth::client_secret::{self, ClientSecretVerdict};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_access_token_enriched,
+    IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_access_token_for_client,
     issue_client_credentials_token_enriched, issue_id_token,
     issue_service_account_client_credentials_token_enriched, validate_access_token,
 };
@@ -1163,7 +1163,12 @@ where
                 &auth_code.scopes,
             )
             .await?;
-        let access_token = issue_access_token_enriched(
+        // W7 — the token names the relying party it was granted to
+        // (RFC 9068 §2.2). UserInfo needs it to know *whose* consent record to
+        // look for before releasing `phone_number` or `address`, and to
+        // recognise a `fapi2`-issued token at a point where no authorization
+        // request is in hand. See `AccessTokenClaims::client_id`.
+        let access_token = issue_access_token_for_client(
             auth_code.user_id,
             tenant_id,
             tenant.organization_id,
@@ -1173,6 +1178,7 @@ where
             axiam_auth::token::AUD_USER,
             cnf,
             ext,
+            Some(client_id),
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -1620,7 +1626,12 @@ where
             )
             .await?;
         let access_token = if let Some(user_id) = stored.user_id {
-            issue_access_token_enriched(
+            // W7 — carried across the rotation, because the grant it names is
+            // the same grant. A refreshed token that lost the claim would lose
+            // access to consented claims at UserInfo fifteen minutes after the
+            // consent was given, which the end user would experience as the
+            // consent not having worked.
+            issue_access_token_for_client(
                 user_id,
                 tenant_id,
                 tenant.organization_id,
@@ -1630,6 +1641,7 @@ where
                 axiam_auth::token::AUD_USER,
                 cnf,
                 ext,
+                Some(client_id),
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         } else {

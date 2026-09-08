@@ -82,7 +82,7 @@
 //! |---|---|---|
 //! | `fapi2` may not say `honour` | [`FapiRegistrationError::AuthnParamsOnFapiClient`] | refused + `error!`, as the row must have been edited in the database |
 //! | `fapi2` may not send the five *security-bearing* parameters | — (they are per-request) | `invalid_request`, naming each |
-//! | `fapi2` may not register `address`/`phone` | [`FapiRegistrationError::SensitiveScopesOnFapiClient`] | (userinfo release, a later wave) |
+//! | `fapi2` may not register `address`/`phone` | [`FapiRegistrationError::SensitiveScopesOnFapiClient`] | refused `invalid_scope` at the authorization endpoint whatever the row says, and never released at UserInfo (W7) |
 //!
 //! Two asymmetries in that table are deliberate. The four *cosmetic*
 //! parameters are not refused on an honest `fapi2` row — client libraries send
@@ -483,6 +483,16 @@ fn is_https_absolute(uri: &str) -> bool {
 ///    [`validate_registration`], so it was edited in the database. Refused and
 ///    logged at `error!`, mirroring [`enforce_token_request`]'s existing
 ///    defence-in-depth branch.
+/// 4. **A `fapi2` request asking for `address` or `phone`** (X7 G8, W7) is
+///    refused `invalid_scope`, whatever the client's row says it registered.
+///    [`validate_registration`] already refuses the combination on create and
+///    on update, so this arm is only reachable on a row that was edited in the
+///    database — and it is here for exactly that case. A FAPI deployment's
+///    data-minimisation posture must not depend on a row: the two scopes
+///    release personal data under a consent record the FAPI lane never
+///    collects, and "the registration says it is allowed" is not evidence
+///    that anybody consented. Logged at `error!` for the same reason rule 3
+///    is.
 ///
 /// The four *cosmetic* parameters (`login_hint`, `display`, `ui_locales`,
 /// `claims_locales`) are **not** refused on an honest `fapi2` row. Client
@@ -503,6 +513,7 @@ pub fn enforce_authorization_request(
     client: &OAuth2Client,
     code_challenge: Option<&str>,
     params: &AuthnRequestParams,
+    requested_scopes: &[String],
 ) -> Result<(), OAuth2Error> {
     if !client.profile.is_fapi2() {
         // Rule 3. Nothing is refused, nothing is honoured; the request
@@ -544,6 +555,29 @@ pub fn enforce_authorization_request(
         return Err(OAuth2Error::InvalidRequest(format!(
             "the parameter(s) {} are not supported for clients on the fapi2 profile",
             refused.join(", ")
+        )));
+    }
+
+    // Rule 4 (W7). Asked of the *request*, not of the registration: a `fapi2`
+    // row that carries the scope was edited past `validate_registration`, and
+    // a `fapi2` row that does not would already have been refused at
+    // `crate::authorize` step 5 as an unregistered scope. Both paths end here,
+    // which is why this reads the requested set rather than `client.scopes`.
+    let sensitive: Vec<&str> = SENSITIVE_SCOPES
+        .into_iter()
+        .filter(|sensitive| requested_scopes.iter().any(|s| s == sensitive))
+        .collect();
+    if !sensitive.is_empty() {
+        tracing::error!(
+            client_id = %client.client_id,
+            scopes = %sensitive.join(", "),
+            "an authorization request on the fapi2 profile asked for a GDPR-sensitive scope; \
+             the fapi2 lane collects no consent record for these scopes and will not release \
+             them"
+        );
+        return Err(OAuth2Error::InvalidScope(format!(
+            "the scope(s) {} are not supported for clients on the fapi2 profile",
+            sensitive.join(", ")
         )));
     }
 
@@ -863,7 +897,7 @@ mod tests {
     fn a_standard_client_needs_no_pkce_from_this_gate() {
         // SEC-025 still requires PKCE of public clients; this gate adds
         // nothing for a standard confidential client.
-        assert!(enforce_authorization_request(&base_client(), None, &no_params()).is_ok());
+        assert!(enforce_authorization_request(&base_client(), None, &no_params(), &[]).is_ok());
     }
 
     /// The positive regression test the whole design rests on: a client that
@@ -938,9 +972,9 @@ mod tests {
     #[test]
     fn fapi_requires_pkce_at_the_authorization_endpoint() {
         let c = fapi_client();
-        assert!(enforce_authorization_request(&c, None, &no_params()).is_err());
-        assert!(enforce_authorization_request(&c, Some(""), &no_params()).is_err());
-        assert!(enforce_authorization_request(&c, Some(PKCE), &no_params()).is_ok());
+        assert!(enforce_authorization_request(&c, None, &no_params(), &[]).is_err());
+        assert!(enforce_authorization_request(&c, Some(""), &no_params(), &[]).is_err());
+        assert!(enforce_authorization_request(&c, Some(PKCE), &no_params(), &[]).is_ok());
     }
 
     #[test]
@@ -1490,17 +1524,19 @@ mod tests {
                 with.browser_sso = true;
                 let params = one_param(name, value);
 
-                let without_pkce = enforce_authorization_request(&base, None, &params).is_err();
-                let with_pkce = enforce_authorization_request(&base, Some(PKCE), &params).is_err();
+                let without_pkce =
+                    enforce_authorization_request(&base, None, &params, &[]).is_err();
+                let with_pkce =
+                    enforce_authorization_request(&base, Some(PKCE), &params, &[]).is_err();
 
                 assert_eq!(
-                    enforce_authorization_request(&with, None, &params).is_err(),
+                    enforce_authorization_request(&with, None, &params, &[]).is_err(),
                     without_pkce,
                     "browser_sso changed the answer for {name}={value} on {} (no PKCE)",
                     base.profile.as_str()
                 );
                 assert_eq!(
-                    enforce_authorization_request(&with, Some(PKCE), &params).is_err(),
+                    enforce_authorization_request(&with, Some(PKCE), &params, &[]).is_err(),
                     with_pkce,
                     "browser_sso changed the answer for {name}={value} on {}",
                     base.profile.as_str()
@@ -1525,7 +1561,7 @@ mod tests {
             ("claims", r#"{"id_token":{"acr":{"essential":true}}}"#),
             ("id_token_hint", "ey.header.payload"),
         ] {
-            let err = enforce_authorization_request(&c, Some(PKCE), &one_param(name, value))
+            let err = enforce_authorization_request(&c, Some(PKCE), &one_param(name, value), &[])
                 .expect_err("{name} must be refused for a fapi2 client");
             assert_eq!(err.error_code(), "invalid_request", "{name}");
             assert!(
@@ -1547,7 +1583,7 @@ mod tests {
             ("claims", "{not json"),
         ] {
             assert!(
-                enforce_authorization_request(&c, Some(PKCE), &one_param(name, bad)).is_err(),
+                enforce_authorization_request(&c, Some(PKCE), &one_param(name, bad), &[]).is_err(),
                 "a fapi2 client sending a malformed {name} must still be refused"
             );
         }
@@ -1565,7 +1601,7 @@ mod tests {
             id_token_hint: Some("ey.hint"),
             ..Default::default()
         });
-        let err = enforce_authorization_request(&fapi_client(), Some(PKCE), &params)
+        let err = enforce_authorization_request(&fapi_client(), Some(PKCE), &params, &[])
             .expect_err("a fapi2 client sending all five must be refused");
         for name in ["prompt", "max_age", "acr_values", "claims", "id_token_hint"] {
             assert!(err.to_string().contains(name), "{name} missing from: {err}");
@@ -1587,7 +1623,7 @@ mod tests {
             ("claims_locales", "en"),
         ] {
             assert!(
-                enforce_authorization_request(&c, Some(PKCE), &one_param(name, value)).is_ok(),
+                enforce_authorization_request(&c, Some(PKCE), &one_param(name, value), &[]).is_ok(),
                 "{name} must be ignored, not refused, on an honest fapi2 row"
             );
         }
@@ -1607,7 +1643,7 @@ mod tests {
             one_param("login_hint", "ada@example.com"),
             one_param("display", "page"),
         ] {
-            let err = enforce_authorization_request(&c, Some(PKCE), &params)
+            let err = enforce_authorization_request(&c, Some(PKCE), &params, &[])
                 .expect_err("a tampered fapi2 row must be refused");
             assert_eq!(err.error_code(), "invalid_request");
         }
@@ -1638,7 +1674,7 @@ mod tests {
             claims_locales: Some("en"),
         });
         assert!(
-            enforce_authorization_request(&c, None, &everything).is_ok(),
+            enforce_authorization_request(&c, None, &everything, &[]).is_ok(),
             "a standard client must be untouched by the parameter gate, PKCE included"
         );
 
@@ -1651,7 +1687,7 @@ mod tests {
         });
         assert!(malformed.parse_error().is_some());
         assert!(
-            enforce_authorization_request(&c, None, &malformed).is_ok(),
+            enforce_authorization_request(&c, None, &malformed, &[]).is_ok(),
             "a parse error must not surface on the ignore lane"
         );
     }
@@ -1664,7 +1700,7 @@ mod tests {
     fn the_honour_lane_does_nothing_yet() {
         let mut c = base_client();
         c.authn_request_params = AuthnRequestParamsMode::Honour;
-        assert!(enforce_authorization_request(&c, None, &one_param("max_age", "0")).is_ok());
+        assert!(enforce_authorization_request(&c, None, &one_param("max_age", "0"), &[]).is_ok());
     }
 
     /// P2's unit-level half: a `fapi2` client sending none of the nine is
@@ -1674,7 +1710,7 @@ mod tests {
     #[test]
     fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
         let c = fapi_client();
-        assert!(enforce_authorization_request(&c, Some(PKCE), &no_params()).is_ok());
+        assert!(enforce_authorization_request(&c, Some(PKCE), &no_params(), &[]).is_ok());
         assert_eq!(validate_registration(&c), Ok(()));
     }
 
@@ -1736,7 +1772,7 @@ mod tests {
             let params = one_param(name, value);
 
             // Layer 2, the refusal.
-            let refusal = enforce_authorization_request(&fapi_client(), Some(PKCE), &params)
+            let refusal = enforce_authorization_request(&fapi_client(), Some(PKCE), &params, &[])
                 .expect_err(&format!("{row}: a fapi2 client must be refused {name}"));
             let message = refusal.to_string();
             assert!(
@@ -1746,7 +1782,7 @@ mod tests {
 
             // The I4 twin: the client every deployment holds today.
             assert!(
-                enforce_authorization_request(&base_client(), None, &params).is_ok(),
+                enforce_authorization_request(&base_client(), None, &params, &[]).is_ok(),
                 "{row} (I4): a standard/ignore client must be served exactly as before, \
                  whatever it sends"
             );
@@ -1777,13 +1813,13 @@ mod tests {
 
             let mut honour = base_client();
             honour.authn_request_params = AuthnRequestParamsMode::Honour;
-            let refusal = enforce_authorization_request(&honour, None, &params).expect_err(
+            let refusal = enforce_authorization_request(&honour, None, &params, &[]).expect_err(
                 &format!("{name}={value} must be refused on the honour lane"),
             );
             assert_eq!(refusal.error_code(), "invalid_request");
 
             assert!(
-                enforce_authorization_request(&base_client(), None, &params).is_ok(),
+                enforce_authorization_request(&base_client(), None, &params, &[]).is_ok(),
                 "{name}={value} must still be dropped for an ignore-lane client"
             );
         }
@@ -1803,9 +1839,124 @@ mod tests {
             ("login_hint", "ada@example.com"),
         ] {
             assert!(
-                enforce_authorization_request(&honour, None, &one_param(name, value)).is_ok(),
+                enforce_authorization_request(&honour, None, &one_param(name, value), &[]).is_ok(),
                 "{name}={value}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // W7 / M8 — the request-time half of the sensitive-scope refusal
+    // -----------------------------------------------------------------------
+
+    fn scope_set(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// M8, layer 2. A `fapi2` row that carries `address` or `phone` cannot
+    /// have come through `validate_registration` — it was edited in the
+    /// database — and the request is refused anyway. The refusal is
+    /// `invalid_scope`, which is what an unregistrable scope has always
+    /// earned, so the relying party learns nothing new about the row.
+    #[test]
+    fn t8_5_a_fapi2_request_asking_for_a_sensitive_scope_is_refused_however_the_row_was_edited() {
+        for scope in SENSITIVE_SCOPES {
+            let mut edited = fapi_client();
+            // The state `validate_registration` refuses, reached the only way
+            // it can be reached: by writing the row directly.
+            edited.scopes = scope_set(&["openid", scope]);
+            assert!(
+                validate_registration(&edited).is_err(),
+                "{scope}: the registration gate must refuse this row, which is what makes \
+                 reaching it evidence of a database edit"
+            );
+
+            let refusal = enforce_authorization_request(
+                &edited,
+                Some(PKCE),
+                &no_params(),
+                &scope_set(&["openid", scope]),
+            )
+            .expect_err("a fapi2 request asking for a sensitive scope must be refused");
+            assert_eq!(refusal.error_code(), "invalid_scope");
+            assert!(
+                refusal.to_string().contains(scope),
+                "the refusal must name the scope it refused: {refusal}"
+            );
+        }
+    }
+
+    /// The refusal does not depend on the row at all. An *honest* `fapi2`
+    /// client — one whose registration never carried the scope — that asks for
+    /// it is refused here too, rather than being allowed through to earn
+    /// `invalid_scope` from the unregistered-scope check further down. Same
+    /// error code either way, which is the point: a FAPI relying party cannot
+    /// use the two to tell what the row says.
+    #[test]
+    fn an_honest_fapi2_row_asking_for_a_sensitive_scope_is_refused_at_the_same_gate() {
+        let honest = fapi_client();
+        assert!(
+            validate_registration(&honest).is_ok(),
+            "the honest row must be a legal registration"
+        );
+        let refusal = enforce_authorization_request(
+            &honest,
+            Some(PKCE),
+            &no_params(),
+            &scope_set(&["openid", "address"]),
+        )
+        .expect_err("presence in the request is what is refused, not presence in the row");
+        assert_eq!(refusal.error_code(), "invalid_scope");
+    }
+
+    /// M8's I4 twin. A `standard` client is not touched by rule 4: whether it
+    /// may ask for `address` is decided by its own registered scope set at
+    /// `crate::authorize` step 5, exactly as every other scope always has
+    /// been, and by the tenant switch and the consent record after that.
+    #[test]
+    fn a_standard_client_is_not_refused_here() {
+        for scope in SENSITIVE_SCOPES {
+            assert!(
+                enforce_authorization_request(
+                    &base_client(),
+                    None,
+                    &no_params(),
+                    &scope_set(&["openid", scope]),
+                )
+                .is_ok(),
+                "{scope}: the fapi2 gate must decide nothing for a standard client"
+            );
+        }
+    }
+
+    /// A `fapi2` request that asks for nothing sensitive is unaffected — this
+    /// is P2, the FAPI golden path, for the one rule this wave added.
+    #[test]
+    fn a_fapi2_request_without_sensitive_scopes_is_unaffected() {
+        assert!(
+            enforce_authorization_request(
+                &fapi_client(),
+                Some(PKCE),
+                &no_params(),
+                &scope_set(&["openid", "profile", "email"]),
+            )
+            .is_ok()
+        );
+    }
+
+    /// A scope that merely *contains* a sensitive name is not one. The check
+    /// is equality on whole scope tokens, not a substring search, so a
+    /// deployment's own `phonebook:read` is unaffected.
+    #[test]
+    fn a_scope_that_only_looks_sensitive_is_not_refused() {
+        assert!(
+            enforce_authorization_request(
+                &fapi_client(),
+                Some(PKCE),
+                &no_params(),
+                &scope_set(&["openid", "phonebook:read", "addressbook"]),
+            )
+            .is_ok()
+        );
     }
 }

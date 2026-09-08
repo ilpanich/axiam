@@ -111,6 +111,24 @@ export const NAV_DESTINATIONS: NavDestination[] = [
     routePermission: null,
     inNav: false,
   },
+  // Reached only by redirect from `/oauth2/authorize`, never from the sidebar,
+  // and gated by nothing but a session: consenting to release one's own
+  // address or phone is the same self-service class as `/privacy`. Listed
+  // rather than exempted for the reason the profile pages are — a regression
+  // that put a permission in front of "consent to share your own details"
+  // would make the consent hop unreachable for exactly the users it is for,
+  // and that failure is invisible unless the matrix opens the page.
+  //
+  // Visited here with no query string, which is the "nothing to decide"
+  // branch: the assertion is that the route renders for every principal, not
+  // that a consent request can be reconstructed from a bare URL.
+  {
+    path: "/consent",
+    label: "Share your details",
+    navPermission: null,
+    routePermission: null,
+    inNav: false,
+  },
   {
     path: "/settings/webauthn-attestation-policy",
     label: "WebAuthn Attestation Policy",

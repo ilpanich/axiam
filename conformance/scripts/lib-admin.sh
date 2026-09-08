@@ -78,6 +78,49 @@ admin_login() {
   [ -n "$_ADMIN_CSRF" ] || { echo "[admin] no X-CSRF-Token on the login response" >&2; exit 1; }
   _ADMIN_MODE="session"
   echo "[admin] signed in as $user (session + CSRF)"
+
+  # --- resolve the tenant this session actually writes into ----------------
+  #
+  # This is not belt-and-braces; it fixes a silent, expensive failure.
+  #
+  # suite.env carried a hard-coded AXIAM_TENANT_ID, and the registrars passed it
+  # as `?tenant_id=` on every create. AXIAM IGNORES that parameter for an
+  # admin-session caller — the tenant a session acts in comes from the session,
+  # not from a query string a caller could move — so every conformance client
+  # and the test user were created in the ADMIN's tenant while the harness went
+  # on believing they were somewhere else. Nothing failed. The clients existed,
+  # the registrar printed their ids, and the authorization endpoint then
+  # answered `401 authentication_failed` for a client it could not find in the
+  # tenant it was asked about. That reads as a broken login hop and is a wrong
+  # constant.
+  #
+  # So the tenant is DISCOVERED, once, from the session that will do the
+  # writing, and recorded in the gitignored file. A committed UUID cannot be
+  # right for two deployments anyway.
+  #
+  # Note `tenant_slug` here is usually `organization`, not `default`: the
+  # bootstrap admin is an ORGANIZATION-level principal and its home tenant is
+  # the organization-scope row. The browser automation needs the slug, and
+  # guessing `default` puts the sign-in form in a tenant with no users in it.
+  local me
+  me=$(axiam_api GET "/api/v1/auth/me" 2>/dev/null || true)
+  local tid tslug
+  tid=$(jq -r '.user.tenant_id // empty' <<<"$me")
+  tslug=$(jq -r '.user.tenant_slug // empty' <<<"$me")
+  if [ -n "$tid" ]; then
+    if [ -n "${AXIAM_TENANT_ID:-}" ] && [ "$AXIAM_TENANT_ID" != "$tid" ]; then
+      echo "[admin] NOTE: AXIAM_TENANT_ID=$AXIAM_TENANT_ID is not this session's tenant;" >&2
+      echo "[admin]       using $tid ($tslug), which is where writes actually land." >&2
+    fi
+    AXIAM_TENANT_ID="$tid"
+    AXIAM_TENANT_SLUG="$tslug"
+    export AXIAM_TENANT_ID AXIAM_TENANT_SLUG
+    conf_write_local "AXIAM_TENANT_ID=$tid" "AXIAM_TENANT_SLUG=$tslug"
+    echo "[admin] tenant $tid ($tslug)"
+  else
+    echo "[admin] WARNING: could not read the session tenant from /api/v1/auth/me;" >&2
+    echo "[admin]          falling back to AXIAM_TENANT_ID=${AXIAM_TENANT_ID:-<unset>}" >&2
+  fi
 }
 
 # axiam_api <METHOD> <path> [json-body]

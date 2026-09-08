@@ -81,7 +81,7 @@
 
   "browser": [
     {
-      "match": "${AXIAM_ISSUER}/login*",
+      "match": "${AXIAM_ISSUER}/oauth2/authorize*",
       "tasks": [
         {
           "task": "Choose the workspace",
@@ -102,15 +102,11 @@
             ["text", "id", "password", "${CONFORMANCE_USER_PASSWORD}"],
             ["click", "id", "login-credentials-submit"]
           ]
-        }
-      ]
-    },
-    {
-      "match": "${AXIAM_ISSUER}/consent*",
-      "tasks": [
+        },
         {
           "task": "Grant the sensitive scopes",
           "match": "${AXIAM_ISSUER}/consent*",
+          "optional": true,
           "commands": [
             ["wait", "id", "consent-allow", 15],
             ["click", "id", "consent-allow"]

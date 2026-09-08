@@ -127,7 +127,7 @@
 
   "browser": [
     {
-      "match": "${AXIAM_ISSUER}/login*",
+      "match": "${AXIAM_ISSUER}/oauth2/authorize*",
       "tasks": [
         {
           "task": "Choose the workspace",

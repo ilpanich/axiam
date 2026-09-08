@@ -169,8 +169,25 @@ async fn sustained_overload_admits_configured_rate_times_sixty_per_minute() {
 
     let admitted_per_minute = admitted as f64 * 60.0 / elapsed;
     let expected_per_minute = f64::from(PER_SEC) * 60.0;
-    let low = expected_per_minute * 0.9;
-    let high = expected_per_minute * 1.1;
+    // The band is deliberately loose. This test exists to separate
+    // `per_sec × 60` from `per_sec` — a 60x error, three orders of magnitude
+    // wide — not to measure the governor to a few percent, and a tight band
+    // buys no extra protection against the bug it guards.
+    //
+    // What it actually measures is wall-clock throughput on a shared CI
+    // runner. The loop offers PER_TICK requests and then sleeps TICK, while
+    // the governor accrues roughly one token per TICK, so the observed rate
+    // tracks `1 / actual_tick_duration`. Tokens still accruing when a burst
+    // arrives are not carried forward in full, so sleep overshoot costs
+    // throughput close to linearly — and `tokio::time::sleep` overrunning a
+    // 5 ms tick by a tenth is unremarkable under runner contention.
+    //
+    // At ±10% this went red on a 13% overshoot (10582/min observed against a
+    // 10800 floor). ±25% absorbs that and still fails anything off by more
+    // than ~1.34x.
+    const TOLERANCE: f64 = 0.25;
+    let low = expected_per_minute * (1.0 - TOLERANCE);
+    let high = expected_per_minute * (1.0 + TOLERANCE);
     assert!(
         admitted_per_minute >= low && admitted_per_minute <= high,
         "expected ≈{expected_per_minute} admitted per minute (configured {PER_SEC}/s × 60, \

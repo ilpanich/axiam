@@ -269,6 +269,13 @@ fn many_less_restrictive_overrides_are_rejected() {
         // The org baseline here is `preferred`, and the one value below it
         // (`discouraged`) has its own case in `models::settings::tests`.
         webauthn_user_verification: None,
+        // X7 G8: the disable-only field. `Some(true)` against an org baseline
+        // of `false` *is* a violation, and it has its own case in
+        // `models::settings::tests`; here the point is that every *other*
+        // violation is reported together, so it is left inherited.
+        sensitive_scopes_enabled: None,
+        // Not ordered, so it can never be a violation. See `OidcPolicy`.
+        default_locale: None,
     };
     let err = validate_tenant_override(&org, &overrides)
         .unwrap_err()

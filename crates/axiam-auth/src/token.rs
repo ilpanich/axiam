@@ -2521,6 +2521,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             ext_exchange: None,
             cnf,
             ext: None,
+            client_id: None,
         }
     }
 
@@ -3087,5 +3088,95 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         )
         .expect("an unusable public key must not stop the private key signing");
         assert_eq!(jsonwebtoken::decode_header(&token).unwrap().kid, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // W7 / X7 G8 — the RFC 9068 §2.2 `client_id` claim
+    // -----------------------------------------------------------------------
+
+    /// The claim is absent unless a caller names a relying party, and a token
+    /// minted without one is **byte-identical** to what the same call produced
+    /// before W7. That is invariant 4 for the hottest path in the product:
+    /// every login, device flow, federation callback and exchange keeps
+    /// issuing exactly the token it issued.
+    #[test]
+    fn a_token_that_names_no_client_is_byte_identical_to_a_pre_w7_one() {
+        let config = test_config();
+        let (user, tenant, org) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let scopes = vec!["openid".to_owned()];
+        let jti = Uuid::new_v4().to_string();
+
+        let plain = AccessTokenSpec::user(user, tenant, org, jti.clone())
+            .scopes(&scopes)
+            .claims_at(&config, 1_700_000_000)
+            .unwrap();
+        let explicit_none = AccessTokenSpec::user(user, tenant, org, jti)
+            .scopes(&scopes)
+            .client_id(None)
+            .claims_at(&config, 1_700_000_000)
+            .unwrap();
+
+        assert_eq!(plain.client_id, None);
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            serde_json::to_string(&explicit_none).unwrap(),
+        );
+        assert!(
+            !serde_json::to_string(&plain).unwrap().contains("client_id"),
+            "an absent claim must be omitted, not serialised as null"
+        );
+    }
+
+    /// Naming a relying party puts it in the claims and nowhere else — the
+    /// `sub` still names the end user, which is what makes `client_id` a
+    /// statement about the *grant* rather than about the subject.
+    #[test]
+    fn naming_a_client_adds_the_claim_and_changes_nothing_else() {
+        let config = test_config();
+        let (user, tenant, org) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let jti = Uuid::new_v4().to_string();
+
+        let named = AccessTokenSpec::user(user, tenant, org, jti.clone())
+            .client_id(Some("oa_shop"))
+            .claims_at(&config, 1_700_000_000)
+            .unwrap();
+        let anonymous = AccessTokenSpec::user(user, tenant, org, jti)
+            .claims_at(&config, 1_700_000_000)
+            .unwrap();
+
+        assert_eq!(named.client_id.as_deref(), Some("oa_shop"));
+        assert_eq!(named.sub, user.to_string());
+        assert_eq!(named.aud, anonymous.aud);
+        assert_eq!(named.jti, anonymous.jti);
+        assert_eq!(named.exp, anonymous.exp);
+    }
+
+    /// A token issued before W7 has no such field, and must still decode. The
+    /// release gate reads the resulting `None` as "no relying party I can
+    /// name" and releases nothing — the fail-closed direction.
+    #[test]
+    fn a_pre_w7_token_decodes_with_no_client_id() {
+        let json = r#"{
+            "sub": "00000000-0000-0000-0000-000000000001",
+            "tenant_id": "00000000-0000-0000-0000-000000000002",
+            "org_id": "00000000-0000-0000-0000-000000000003",
+            "iss": "axiam-test", "iat": 0, "exp": 9999999999,
+            "jti": "j", "aud": "axiam:user"
+        }"#;
+        let claims: AccessTokenClaims = serde_json::from_str(json).unwrap();
+        assert_eq!(claims.client_id, None);
+    }
+
+    /// The client-credentials shape does not carry it, and does not need to:
+    /// its `sub` *is* the `client_id`, and two fields that can disagree is one
+    /// field too many.
+    #[test]
+    fn a_client_credentials_token_carries_no_separate_client_id() {
+        let config = test_config();
+        let claims = AccessTokenSpec::oauth2_client("oa_machine", Uuid::new_v4(), Uuid::new_v4())
+            .claims_at(&config, 1_700_000_000)
+            .unwrap();
+        assert_eq!(claims.sub, "oa_machine");
+        assert_eq!(claims.client_id, None);
     }
 }

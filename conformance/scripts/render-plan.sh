@@ -19,7 +19,9 @@ OUT="${2:-$HERE/.run/$(basename "$PLAN")}"
 [ -f "$PLAN" ] || { echo "[render-plan] no such plan: $PLAN" >&2; exit 1; }
 
 # shellcheck disable=SC1091
-set -a; . "$HERE/suite.env"; set +a
+SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPTS_DIR/lib-env.sh"
+conf_load
 
 mkdir -p "$(dirname "$OUT")"
 
@@ -42,20 +44,73 @@ read_pem() {
   python3 -c 'import json,sys; print(json.dumps(open(sys.argv[1]).read()))' "$path"
 }
 
-CLIENT_MTLS_CERT_PEM=$(read_pem "$CLIENT_MTLS_CERT" CLIENT_MTLS_CERT)
-CLIENT_MTLS_KEY_PEM=$(read_pem "$CLIENT_MTLS_KEY" CLIENT_MTLS_KEY)
-CLIENT_SELF_SIGNED_CERT_PEM=$(read_pem "$CLIENT_SELF_SIGNED_CERT" CLIENT_SELF_SIGNED_CERT)
-CLIENT_SELF_SIGNED_KEY_PEM=$(read_pem "$CLIENT_SELF_SIGNED_KEY" CLIENT_SELF_SIGNED_KEY)
-AXIAM_CA_PEM=$(read_pem "${AXIAM_CA:-certs/ca.crt}" AXIAM_CA)
+# W9. Which values a plan needs is a property of THAT PLAN, not of the harness.
+#
+# This block used to read five PEM files and demand three client ids for every
+# template, because every template was a FAPI one. The Basic OP plan has no
+# certificates at all and different client ids, so an unconditional list makes
+# it unrenderable — and the error it produced ("run 'just conformance-certs'")
+# pointed at a step that would not have helped.
+#
+# So: scan the template for the placeholders it actually contains, and require
+# only those. A plan that needs a PEM still fails loudly when the PEM is
+# missing; a plan that does not, no longer fails for a file it never mentions.
+# `_comment` is stripped BEFORE scanning. Every template opens with an essay
+# that contains the words "Placeholders of the form ${NAME}", and a naive scan
+# of the raw file dutifully demands a variable called NAME — a requirement
+# invented by the documentation describing the requirements.
+# `_comment` is stripped BEFORE scanning, and stripped TEXTUALLY.
+#
+# Two reasons, both learned the hard way. Every template opens with an essay
+# containing the words "Placeholders of the form ${NAME}", and a naive scan of
+# the raw file dutifully demands a variable called NAME — a requirement
+# invented by the documentation describing the requirements. And the strip
+# cannot go through a JSON parser, because a template is not valid JSON until
+# it is rendered: the private_key_jwt one substitutes an entire JWKS object
+# through an unquoted placeholder.
+NEEDED=$(python3 -c '
+import re, sys
+raw = open(sys.argv[1]).read()
+raw = re.sub(r"\"_comment\"\s*:\s*\[.*?\]\s*,", "", raw, flags=re.S)
+print("\n".join(sorted(set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)\}", raw)))))
+' "$PLAN")
 
-for required in AXIAM_ISSUER CLIENT_MTLS_ID CLIENT_SELF_SIGNED_ID; do
+needs() { printf '%s\n' "$NEEDED" | grep -qx "$1"; }
+
+# PEM placeholders are named <VAR>_PEM and are filled from the file named by
+# <VAR> in the config, so the template says what it wants and suite.env says
+# where it lives.
+PEM_VARS=""
+for v in $NEEDED; do
+  case "$v" in
+    *_PEM)
+      src_var="${v%_PEM}"
+      # AXIAM_CA_PEM comes from AXIAM_CA, whose default is the harness CA.
+      path="${!src_var:-}"
+      if [ -z "$path" ] && [ "$src_var" = "AXIAM_CA" ]; then path="certs/ca.crt"; fi
+      if [ -z "$path" ]; then
+        echo "[render-plan] $PLAN wants \${$v}, but $src_var is empty in suite.env" >&2
+        exit 1
+      fi
+      printf -v "$v" '%s' "$(read_pem "$path" "$src_var")"
+      export "${v?}"
+      PEM_VARS="$PEM_VARS $v"
+      ;;
+  esac
+done
+
+for required in $NEEDED; do
+  case "$required" in *_PEM) continue ;; esac
   if [ -z "${!required:-}" ]; then
-    echo "[render-plan] $required is empty in suite.env." >&2
-    echo "[render-plan] run 'just conformance-register' to provision the two FAPI clients," >&2
-    echo "[render-plan] or fill it in by hand if they already exist." >&2
+    echo "[render-plan] $required is empty in suite.env / suite.local.env (needed by $(basename "$PLAN"))." >&2
+    echo "[render-plan] run the matching registrar — 'just conformance-register' for the" >&2
+    echo "[render-plan] FAPI plans, 'just conformance-register-basic' for the Basic OP plan —" >&2
+    echo "[render-plan] or fill it in by hand if the client already exists." >&2
     exit 1
   fi
 done
+
+export CONFORMANCE_PEM_VARS="$PEM_VARS"
 
 # The PEM variables are already JSON string literals (quotes included), so they
 # substitute into a template position that is NOT itself quoted. The templates
@@ -70,11 +125,11 @@ raw = open(src).read()
 
 # Placeholders holding a JSON-encoded PEM must not sit inside quotes; every
 # other placeholder must.
-pem_vars = {
-    "CLIENT_MTLS_CERT_PEM", "CLIENT_MTLS_KEY_PEM",
-    "CLIENT_SELF_SIGNED_CERT_PEM", "CLIENT_SELF_SIGNED_KEY_PEM",
-    "AXIAM_CA_PEM",
-}
+# W9: discovered from the template rather than hard-coded, for the same reason
+# the shell half was — a new plan with a new PEM would otherwise render its
+# certificate as a double-quoted string and fail as invalid JSON forty lines
+# deep, which is a bad way to learn about a missing entry in a set literal.
+pem_vars = set(os.environ.get("CONFORMANCE_PEM_VARS", "").split())
 
 def substitute(match):
     name = match.group(1)

@@ -247,26 +247,72 @@ subsection carries the measured figures and is explicit about which of them are
 criterion micro-benchmarks rather than end-to-end measurements. A client that can
 do mTLS should.
 
-**No run has been performed yet.** As of this document's most recent revision the
-harness exists and has still not been executed against a live deployment — there
-is no docker daemon in the environment X5.1 was implemented in, either half.
-`docs/conformance/` therefore does not exist. The first person to run it should
-expect to find harness bugs, and should fix them here rather than working around
-them locally. This entry has not moved and is now the only one blocking
-submission.
+**The harness had never been executed, and it did not work (closed 2026-09-08,
+W9).** This entry used to say no run had been performed, because the
+environments X5.1 and X5.2 were written in had no docker daemon. It has now been
+run. The prediction it made — "the first person to run it should expect to find
+harness bugs, and should fix them here rather than working around them locally"
+— was correct, and understated: **fourteen** defects stood between the committed
+harness and a single executed module, and the three FAPI plan templates could
+not create a plan at all.
 
-That has a consequence the Basic OP plan's §8 sequencing depends on, and it is
-recorded here rather than left to be rediscovered: **baseline run #0 has not
-happened**, so runs #1 (W1) and #2 (W3) have not happened either, and neither
-was skipped by anyone's choice. There is nothing to compare against yet. The
-plan asks that each of them *equal* the baseline; until #0 exists, the argument
-that W1–W3 changed nothing on the FAPI lane rests on §8's construction — every
-addition is per-client opt-in or a refusal, and the FAPI plans run
-`openid: plain_oauth` (F12), so they exercise no OpenID Connect
-authentication-request parameter at all — plus the unit and integration pins
-listed in `docs/compliance/oidc-conformance.md`. Whoever first has a docker
-daemon should run #0 on `main` before running anything else, and commit the
-report.
+The full list, with what each one looked like when it bit, is in
+[`docs/conformance/README.md`](../docs/conformance/README.md). The four worth
+knowing before you touch this harness again:
+
+- **The suite image reference was wrong and the pin was unobtainable.**
+  `SUITE_IMAGE` named `ghcr.io/openid/conformance-suite`, which does not exist —
+  the pull fails with `denied`, which reads like a credentials problem and is
+  not one. The suite is published to `registry.gitlab.com`, exactly as
+  `suite.env`'s own comment always said. And the pinned tag `release-v5.1.34`
+  had been **reaped**: that registry retains only its most recent releases. This
+  file argued at length that pinning is what makes a result reproducible; a
+  *tag* pin is precisely what a retention policy can delete. The pin is now a
+  **digest**, with the tag kept as a human-readable label.
+- **The compose file could not start the suite.** It set `MONGODB_URI`, which
+  the image does not read; it left `OIDC_GITLAB_CLIENTID` unset, which the
+  entrypoint turns into an *empty* property that makes Spring refuse to boot;
+  and — the structural one — it had deliberately trimmed upstream's nginx
+  sidecar as "an httpd fronting a hosted deployment". That sidecar is where the
+  suite's TLS comes from. The application serves plain HTTP on 8080 and
+  **refuses any request that did not arrive over TLS**, so the trimmed compose
+  produced a suite that could not answer anything, on a port nothing published.
+- **The FAPI plans had never been runnable.** All three templates carried
+  `fapi_client_type`, a FAPI 1.0 variant the suite rejects outright, and
+  `fapi_request_method`/`fapi_response_mode`, which are module-level variants
+  the plan sets itself and refuses to accept from a user. Every one of the three
+  failed at *plan creation*, before a module existed to fail.
+- **`suite.env` is tracked, and the registrars rewrite it in place.** The FAPI
+  lane only ever wrote client ids so this stayed survivable; the Basic OP lane
+  writes client **secrets**. Configuration is now split — `suite.env` keeps the
+  reviewable shape, and the gitignored `suite.local.env` takes the values.
+
+**Baseline run #0 happened, and W9 absorbed it.** The plan's §8 asks for the
+FAPI plans to be run on `main` before anything else, and this is that run —
+performed first, from this branch's corrected harness, because the uncorrected
+one could not run at all. What that means for the comparison §8 wanted is
+honest but limited: **runs #1 and #2 still do not exist**, and cannot be
+reconstructed, because the harness that would have produced them was broken for
+the whole period they were supposed to cover. The argument that W1–W3 changed
+nothing on the FAPI lane therefore continues to rest where it always rested —
+on §8's construction (every addition is per-client opt-in or a refusal, and the
+FAPI plans run `openid: plain_oauth`, so they exercise no OpenID Connect
+authentication-request parameter at all) plus the unit and integration pins in
+`docs/compliance/oidc-conformance.md`. Run #0's real value is different and
+larger: it is the first evidence of what the FAPI lane actually does, and it
+found three genuine discovery-document gaps that no unit test had.
+
+**A conformance run needs a deployment that serves the admin SPA (open).** The
+W3 login hop redirects to `LOGIN_PATH`, a same-origin `/login`
+(`crates/axiam-oauth2/src/login_hop.rs`) — same-origin deliberately, since that
+is what keeps `return_to` path-only. The `axiam-server` binary alone does not
+serve that route, so `just conformance-serve` is sufficient for the metadata
+half of a plan (discovery, JWKS, token, userinfo) and **cannot complete a single
+authorization module**. Every one of the Basic OP plan's 35 modules needs an
+authorization, and all 35 sat in `WAITING`. Until a conformance target serves
+both the SPA and the API on one origin — which the production nginx image does —
+the interactive modules must be finished by hand, and `browser_sso` buys nothing
+in an unattended run. This is the entry now blocking a submission.
 
 ---
 

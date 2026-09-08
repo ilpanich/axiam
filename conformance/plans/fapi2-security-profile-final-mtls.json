@@ -18,14 +18,55 @@
     "Why 'pushed' rather than 'unsigned': FAPI 2.0 §5.3.1.2 requires PAR, and a",
     "fapi2-profile AXIAM client is registered require_par=true, so a plan run",
     "with an unpushed request method would fail every authorization step for a",
-    "reason that is the profile working correctly. See the runbook."
+    "reason that is the profile working correctly. See the runbook.",
+    "",
+    "W9 correction, found by the first run that ever submitted this plan to the",
+    "suite. The variant block carried `fapi_client_type`, which the suite",
+    "rejects outright:",
+    "",
+    "  Unknown variant parameter(s) [fapi_client_type] for plan",
+    "  'fapi2-security-profile-final-test-plan'",
+    "",
+    "so NO plan could be created from any of these three templates, and no FAPI",
+    "module has ever run from them. `fapi_client_type` is a FAPI 1.0 variant;",
+    "FAPI 2.0 expresses the same choice as `openid`, which these templates were",
+    "already setting to the same value, so removing it loses nothing.",
+    "`fapi_profile` is stated explicitly rather than left to default, because a",
+    "certification result should say which profile it certifies.",
+    "",
+    "And a second correction from the same run: `fapi_request_method` and",
+    "`fapi_response_mode` were removed as well. They are MODULE-level variants",
+    "that the plan fixes for each of its own modules, so supplying them here is",
+    "not merely redundant — the suite refuses the whole plan:",
+    "",
+    "  Variant 'fapi_request_method' has been set by user, but test plan",
+    "  already sets this variant for module",
+    "  'fapi2-security-profile-final-discovery-end-point-verification'",
+    "",
+    "The paragraph above about `pushed` still describes what happens; it is the",
+    "plan that arranges it, not this file.",
+    "",
+    "W9, third correction from the first run. The discovery URL carried",
+    "`?tenant_id=${AXIAM_TENANT_ID}` and the suite failed the very first module:",
+    "",
+    "  CheckOauthDiscEndpointIssuer: issuer listed in the discovery document is",
+    "  not consistent with the location the discovery document was retrieved",
+    "  from. These must match to prevent impersonation attacks.",
+    "",
+    "OIDC Discovery §4.1 ties the retrieval location to the `issuer` claim, and",
+    "a query parameter breaks that correspondence. W7 made the document",
+    "tenant-aware through exactly such a parameter, so a tenant-scoped discovery",
+    "URL cannot be a conformance plan's discoveryUrl. The FAPI lane loses",
+    "nothing by dropping it — it requests only `openid`, and the parameter's",
+    "sole effect is to advertise the `address` and `phone` scopes. What it costs",
+    "the BASIC lane is recorded in docs/conformance/ and in the plan's §4.10."
   ],
 
   "alias": "axiam-fapi2-mtls",
   "description": "AXIAM — FAPI 2.0 Security Profile (Final), mTLS client auth + mTLS sender-constraining",
 
   "server": {
-    "discoveryUrl": "${AXIAM_ISSUER}/.well-known/openid-configuration?tenant_id=${AXIAM_TENANT_ID}"
+    "discoveryUrl": "${AXIAM_ISSUER}/.well-known/openid-configuration"
   },
 
   "client": {
@@ -69,11 +110,8 @@
   },
 
   "variant": {
+    "fapi_profile": "plain_fapi",
     "client_auth_type": "mtls",
     "sender_constrain": "mtls",
-    "fapi_client_type": "plain_oauth",
-    "openid": "plain_oauth",
-    "fapi_request_method": "pushed",
-    "fapi_response_mode": "plain_response"
-  }
+    "openid": "plain_oauth"}
 }

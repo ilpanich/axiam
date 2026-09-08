@@ -8,7 +8,9 @@ summarised "42 tests" without saying which four were red would be exactly the
 kind of artifact this project exists not to produce.
 
 Reads `conformance/.run/results/*.results.json` (written by run-plan.sh) and
-writes `docs/conformance/<date>-<plan>.md` plus a combined index.
+writes `docs/conformance/<date>-<plan>.md` plus a combined `index.md`.
+Never `README.md`: that file is curated by hand (§X5.3 records the image digest
+there) and a generator must not overwrite it.
 
 Stdlib only, like report.py — no dependency to install before a report can be
 regenerated from artifacts somebody else sent you.
@@ -24,7 +26,23 @@ from collections import Counter
 
 # The suite's own vocabulary. Ordered worst-first, because that is the order a
 # reader needs them in.
-SEVERITY = ["FAILED", "COULD_NOT_START", "TIMEOUT", "INTERRUPTED", "WARNING", "REVIEW", "SKIPPED", "PASSED"]
+SEVERITY = [
+    "FAILED",
+    "COULD_NOT_START",
+    "TIMEOUT",
+    "INTERRUPTED",
+    # W9. Added because the first real run produced 35 of these and nothing
+    # else: every module of the Basic OP plan needs a browser to complete an
+    # authorization, and an unattended harness leaves them all here. It sorts
+    # BELOW the outright failures and above WARNING, because a waiting module
+    # is not evidence of anything — good or bad — and must not be counted as
+    # either.
+    "WAITING",
+    "WARNING",
+    "REVIEW",
+    "SKIPPED",
+    "PASSED",
+]
 
 # What each verdict actually means for a submission, in one line. A reader
 # looking at their first conformance report should not have to go and find the
@@ -36,6 +54,10 @@ MEANING = {
     "WARNING": "a non-fatal deviation; permitted, but worth understanding before submitting",
     "INTERRUPTED": "the module stopped before finishing (often an interactive step nobody completed)",
     "TIMEOUT": "the harness stopped waiting; usually an interactive module, occasionally a hang",
+    "WAITING": (
+        "the module is waiting for a browser to complete an authorization. "
+        "NOT a pass and NOT a failure — no assertion has been evaluated yet"
+    ),
     "COULD_NOT_START": "the suite refused to start the module — a configuration problem, not a result",
     "FAILED": "an assertion did not hold. This is a real finding.",
 }
@@ -178,8 +200,15 @@ def main() -> int:
         if bad or not modules:
             exit_code = 2
 
-    (out_dir / "README.md").write_text("\n".join(index) + "\n")
-    print(f"[report] wrote {out_dir / 'README.md'}")
+    # W9: `index.md`, not `README.md`.
+    #
+    # This wrote README.md and therefore CLOBBERED it — and README.md is the
+    # curated file: §X5.3 tells an operator to record the image digest there,
+    # and W9 put the harness findings log there. A generator that silently
+    # overwrites the one file a human is told to maintain is a generator that
+    # eats the evidence it exists to publish.
+    (out_dir / "index.md").write_text("\n".join(index) + "\n")
+    print(f"[report] wrote {out_dir / 'index.md'}")
     if exit_code:
         print("[report] at least one plan is not green — see the reports above", file=sys.stderr)
     return exit_code

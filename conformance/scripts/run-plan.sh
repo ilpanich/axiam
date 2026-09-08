@@ -20,7 +20,9 @@ PLAN_NAME="${2:?plan name, e.g. fapi2-security-profile-final-test-plan}"
 OUT_DIR="${3:-$HERE/.run/results}"
 
 # shellcheck disable=SC1091
-set -a; . "$HERE/suite.env"; set +a
+SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPTS_DIR/lib-env.sh"
+conf_load
 
 BASE="${SUITE_BASE_URL:-https://localhost.emobix.co.uk:8442}"
 mkdir -p "$OUT_DIR"
@@ -110,8 +112,21 @@ while IFS= read -r module; do
     sleep 2
   done
 
-  RESULT=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read() or "{}").get("result",""))' <<<"$INFO" 2>/dev/null || true)
-  echo "${RESULT:-${status:-TIMEOUT}}"
+  # `or ""` and not `.get("result","")`: a module that has not finished carries
+  # an explicit JSON null, and .get() returns the null rather than the default —
+  # so this printed the literal string "None" for every unfinished module, which
+  # is not a status the suite has ever produced and sent the first reader of
+  # these logs looking for it in upstream's source.
+  RESULT=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read() or "{}").get("result") or "")' <<<"$INFO" 2>/dev/null || true)
+
+  # A module still in WAITING is waiting for a BROWSER, not running slowly.
+  # Recording that distinctly is the difference between "AXIAM did not answer"
+  # and "nobody has completed the authorization yet" — the report grades those
+  # very differently, and conflating them is how an interactive module gets
+  # written up as a failure.
+  DISPLAY="${RESULT:-${status:-TIMEOUT}}"
+  [ -z "$RESULT" ] && [ "$status" = "WAITING" ] && DISPLAY="WAITING (interactive)"
+  echo "$DISPLAY"
   python3 - "$module" "$TEST_ID" "${status:-TIMEOUT}" "${RESULT:-}" >> "$RESULTS_JSON.tmp" <<'PY'
 import json, sys
 print(json.dumps({

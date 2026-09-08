@@ -1147,6 +1147,62 @@ and a diff in the report is a stop-the-line signal.
 | **W8** | G9 `client_secret_basic` — decision A is **yes**, so this wave is in scope. T9.*, M9; contract 1.41 text; `openapi.json` | W1 | — |
 | **W9** | Basic OP harness: `conformance/plans/oidcc-basic-static.json` (plan `oidcc-basic-certification-test-plan`, variants `server_metadata=discovery`, `client_registration=static_client`; config `server.acr_values`, `server.login_hint`, `server.ui_locales`; two static clients, one `client_secret_basic`, one `client_secret_post`, both `standard`/`honour`/`browser_sso`, scopes `openid profile email address phone`, `grant_types` incl. `refresh_token`); `register-clients.sh` variant; test user with phone/address; run; `docs/conformance/` report; `docs/compliance/oidc-conformance.md` rows for the new modules | W1–W8 | **#3 final** — FAPI and Basic both green, on a digest-pinned image, per `fapi-certification-submission.md` |
 
+### W9 amendment — what actually landed, 2026-09-08
+
+The W9 row above describes the artifacts, and those were built: the plan
+template, the two static clients, the test user with a phone number and an
+address, the registrar variant, the rows in
+`docs/compliance/oidc-conformance.md`, and the first report in
+`docs/conformance/`. Four things the row assumed turned out to be false, and
+they are recorded here rather than left for the next reader to rediscover.
+
+**W0 was absorbed, because it could be.** The row's gate says run #3 must have
+"FAPI and Basic both green", resting on baseline comparisons that did not
+exist — every previous session lacked a docker daemon. This one had one, so the
+FAPI plans were run first, from `main`'s harness, before anything Basic was
+touched. What that buys is less than §8 hoped and more than it feared: runs #1
+and #2 still do not exist and cannot be reconstructed, so the "W1–W3 changed
+nothing" argument continues to rest on §8's construction plus the unit pins —
+but the FAPI lane now has its first real evidence, and it found three genuine
+discovery-document gaps.
+
+**The FAPI harness had never worked.** This is the finding that most changes the
+picture. All three committed FAPI templates carried `fapi_client_type`, a FAPI
+1.0 variant the suite rejects outright, plus two module-level variants a user
+may not supply. Every one failed at *plan creation*. Thirteen further harness
+defects sat between the committed tree and a single executed module — a wrong
+registry, a reaped image tag, a compose file missing the TLS sidecar that makes
+the suite reachable at all, an admin credential shape AXIAM does not issue, and
+a config file that overrode the operator's environment. All are fixed in the
+harness and tabulated in `docs/conformance/README.md`. Any statement elsewhere
+resting on "the FAPI harness is ready" was resting on something untested.
+
+**Risk 2 was real, and it is a design conflict rather than a bug.** The suite
+*does* check that a discovery document's retrieval location corresponds to its
+`issuer` claim (`CheckOauthDiscEndpointIssuer`, OIDC Discovery §4.1). W7 made
+the document tenant-aware through a `?tenant_id=` query parameter, and that
+breaks the correspondence — so **the URL that advertises `address` and `phone`
+cannot be a conformance plan's discovery URL**. The plan therefore reads the
+bare well-known URL and the two sensitive scopes go unadvertised, while
+continuing to work: both gates resolve the tenant from the client, not from
+discovery. The three ways out (a tenant-aware issuer URL, a default tenant for
+the bare document, or an accepted and documented limitation) are set out in
+`docs/conformance/README.md`; none is taken here, because the choice is an
+architectural one about what an AXIAM issuer *is*, and it is larger than this
+wave.
+
+**`browser_sso` does not make the run unattended, for a reason no one had
+noticed.** The row and the runbook both treat W3's hop as what removes the
+manual click-through. It does not, in this deployment: the hop redirects to
+`LOGIN_PATH`, a *same-origin* `/login`, and the `axiam-server` binary does not
+serve that route — the admin SPA does. All 35 Basic modules require an
+authorization and all 35 finished `WAITING`. A conformance target must serve the
+SPA and the API on one origin, which the production nginx image already does.
+The plan's suggestion that `oidcc-basic-static.json` carry a `browser`
+automation block remains right and remains untried: a browser block that drives
+a page returning 404 automates nothing, so serving the SPA is the prerequisite
+and is the top follow-up.
+
 Rollback story per wave: every wave is additive with defaults equal to today,
 so reverting a wave is reverting a PR; schema v50/v51 columns are optional and
 the pre-migration decode path is specified (§4.3), so a rolled-back binary

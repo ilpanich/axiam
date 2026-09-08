@@ -50,7 +50,7 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use x509_parser::extensions::GeneralName;
-use x509_parser::prelude::parse_x509_certificate;
+use x509_parser::prelude::{X509Name, parse_x509_certificate};
 
 use crate::error::OAuth2Error;
 
@@ -103,8 +103,28 @@ pub struct PresentedCertificate {
 /// is the parse.
 #[derive(Debug, Clone)]
 pub struct CertificateIdentity {
-    /// Subject distinguished name in RFC 4514 string form.
+    /// Subject distinguished name as `x509_parser` renders it: attributes in
+    /// **certificate (DER) order**, separated by `", "`.
     pub subject_dn: String,
+    /// The same name in **RFC 2253** form: attributes in reverse order,
+    /// separated by `","` with no space.
+    ///
+    /// Both are carried because both are correct renderings of one name, and a
+    /// registration may legitimately hold either. RFC 2253 §2.1 specifies the
+    /// reversed order, and it is what `openssl x509 -nameopt rfc2253` prints —
+    /// which is what the operator guide tells operators to copy. `x509_parser`
+    /// prints DER order with a space.
+    ///
+    /// Until this field existed, only the first was compared, so a DN copied by
+    /// following the documentation could never match:
+    ///
+    ///     registered   O=axiam-conformance,CN=axiam-conformance-mtls
+    ///     compared to  CN=axiam-conformance-mtls, O=axiam-conformance
+    ///
+    /// Every `tls_client_auth` client onboarded that way authenticated nothing.
+    /// It cost the FAPI 2.0 conformance lane 89 module failures, all at PAR,
+    /// because every FAPI flow begins there.
+    pub subject_dn_rfc2253: String,
     /// `dNSName` SAN entries, in certificate order.
     pub san_dns: Vec<String>,
     /// `uniformResourceIdentifier` SAN entries, in certificate order.
@@ -147,8 +167,30 @@ impl PresentedCertificate {
             }
         }
 
+        // RFC 2253 §2.1: the RDNs are emitted in REVERSE of their encoded
+        // order, joined by `,` with no space. Built from the parsed RDN
+        // sequence rather than by rewriting the string above, because a DN
+        // component may legitimately contain an escaped comma and splitting a
+        // formatted DN on `,` would cut one in half.
+        //
+        // Each RDN is rendered by wrapping it in an `X509Name` of its own, so
+        // the LIBRARY does the RFC 4514 escaping and this code only decides the
+        // order and the separator. A single-RDN name renders with no separator
+        // in it at all, which is what makes joining on `,` exact: an escaped
+        // comma inside a value never reaches the join.
+        let subject_dn_rfc2253 = {
+            let mut parts: Vec<String> = cert
+                .subject()
+                .iter_rdn()
+                .map(|rdn| X509Name::new(vec![rdn.clone()], &[]).to_string())
+                .collect();
+            parts.reverse();
+            parts.join(",")
+        };
+
         Ok(CertificateIdentity {
             subject_dn: cert.subject().to_string(),
+            subject_dn_rfc2253,
             san_dns,
             san_uri,
         })
@@ -300,7 +342,18 @@ pub fn authenticate_mtls_client(
                 // which fails an onboarding rather than authenticating a
                 // stranger. The operator guide tells operators to copy the DN
                 // out of `openssl x509 -noout -subject -nameopt rfc2253`.
-                expected == identity.subject_dn
+                // Compared against BOTH renderings, and this is still an
+                // exact string match — no case folding, no whitespace
+                // stripping, no structural normalisation. The comment above
+                // argues against a normalising comparison and that argument
+                // stands; what changed is that the server now derives every
+                // form it is willing to accept FROM THE CERTIFICATE, and the
+                // registered value must equal one of them exactly.
+                //
+                // Two forms because both are correct renderings of one name and
+                // the operator guide documents the RFC 2253 one. Accepting only
+                // the other meant a DN copied as documented could never match.
+                expected == identity.subject_dn || expected == identity.subject_dn_rfc2253
             } else if let Some(expected) = non_empty(client.tls_client_auth_san_dns.as_deref()) {
                 // DNS names are case-insensitive (RFC 4343). No wildcard
                 // handling: a wildcard registered here would authenticate
@@ -500,6 +553,67 @@ mod tests {
         let mut c = client(ClientAuthMethod::TlsClientAuth);
         c.tls_client_auth_san_dns = Some("*.example.com".into());
         assert!(authenticate_mtls_client(&c, Some(&cert)).is_err());
+    }
+
+    /// The DN an operator is TOLD to register must authenticate.
+    ///
+    /// `subject_dn_match_is_exact` below builds its expectation from
+    /// `identity_of(&cert).subject_dn` — it compares the server against itself,
+    /// so it passes no matter which rendering the server happens to use, and it
+    /// passed throughout the period when no documented registration could work.
+    ///
+    /// This one hard-codes both strings. The first is what
+    /// `openssl x509 -noout -subject -nameopt rfc2253` prints, which is what the
+    /// operator guide says to copy; the second is what `x509_parser` renders.
+    /// They differ in RDN order (RFC 2253 §2.1 reverses it) and in the
+    /// separator, and both must authenticate.
+    #[test]
+    fn both_renderings_of_one_name_authenticate() {
+        // TWO RDNs, deliberately: a one-attribute name renders identically in
+        // both forms, so the single-RDN fixture the other tests use cannot
+        // observe an ordering difference at all. This mirrors the conformance
+        // client, whose subject is `/CN=axiam-conformance-mtls/O=axiam-conformance`.
+        let mut params =
+            rcgen::CertificateParams::new(vec!["client.example.com".to_string()]).unwrap();
+        let mut dn = rcgen::DistinguishedName::new();
+        dn.push(rcgen::DnType::CommonName, "axiam-conformance-mtls");
+        dn.push(rcgen::DnType::OrganizationName, "axiam-conformance");
+        params.distinguished_name = dn;
+        let key = rcgen::KeyPair::generate().unwrap();
+        let der = params.self_signed(&key).unwrap().der().to_vec();
+        let cert = PresentedCertificate::from_der(&der);
+        let identity = identity_of(&cert);
+
+        // Rendered by the library, DER order, ", " separated.
+        assert!(
+            identity.subject_dn.contains(", "),
+            "expected the x509_parser rendering, got {:?}",
+            identity.subject_dn
+        );
+        // RFC 2253: reversed, no space.
+        assert!(
+            !identity.subject_dn_rfc2253.contains(", "),
+            "RFC 2253 form must not contain a space separator, got {:?}",
+            identity.subject_dn_rfc2253
+        );
+
+        // The same attributes, in opposite orders.
+        let mut a: Vec<&str> = identity.subject_dn.split(", ").collect();
+        let mut b: Vec<&str> = identity.subject_dn_rfc2253.split(',').collect();
+        assert_eq!(a.len(), b.len(), "same number of RDNs");
+        b.reverse();
+        assert_eq!(a, b, "the two renderings must name the same RDNs");
+        a.reverse();
+
+        // And a client registered with EITHER string authenticates.
+        for dn in [&identity.subject_dn, &identity.subject_dn_rfc2253] {
+            let mut c = client(ClientAuthMethod::TlsClientAuth);
+            c.tls_client_auth_subject_dn = Some(dn.clone());
+            assert!(
+                authenticate_mtls_client(&c, Some(&cert)).is_ok(),
+                "a client registered with {dn:?} must authenticate"
+            );
+        }
     }
 
     #[test]

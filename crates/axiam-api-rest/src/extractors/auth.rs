@@ -238,76 +238,106 @@ impl actix_web::FromRequest for AuthenticatedUser {
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
         // Synchronous JWT/aud/jti extraction first (ends the `req` borrow before
-        // the async block). Clone the optional session validator (an Arc) so the
-        // returned future is `'static`.
+        // the async block). [`RequestScopeHandles`] clones the optional
+        // resolvers (each an `Arc`) so the returned future is `'static`.
         let user_result = extract_user(req);
-        let validator = req
-            .app_data::<web::Data<Arc<dyn SessionValidator>>>()
-            .map(|d| d.get_ref().clone());
-        let tenants = req
-            .app_data::<web::Data<Arc<dyn TenantScopeResolver>>>()
-            .map(|d| d.get_ref().clone());
-        let reach = req
-            .app_data::<web::Data<Arc<dyn PrincipalReachResolver>>>()
-            .map(|d| d.get_ref().clone());
-        // Read the header here, while `req` is still borrowed. A malformed
-        // value is dropped rather than refused: it names a tenant that cannot
-        // exist, so the request falls back to the caller's own tenant and is
-        // then denied by RBAC like any other over-reach.
-        let requested_tenant = req
-            .headers()
-            .get(ACTIVE_TENANT_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| Uuid::parse_str(v.trim()).ok());
+        let handles = RequestScopeHandles::read(req);
+        Box::pin(async move { handles.apply(user_result?).await })
+    }
+}
 
-        Box::pin(async move {
-            let mut user = user_result?;
+/// The request-scoped inputs the second half of authentication needs, lifted
+/// off the request while it is still borrowed.
+///
+/// It exists so that the asynchronous half of [`AuthenticatedUser`]'s
+/// extraction — session revocation, then active-tenant resolution — is *one*
+/// piece of code with two callers rather than two pieces that agree today.
+/// The second caller is [`authenticate_presented_token`], which authenticates a
+/// token that arrived in a request **body** (W6, plan §4.9 G10) and must reach
+/// exactly the same principal as the same token in a header would.
+struct RequestScopeHandles {
+    validator: Option<Arc<dyn SessionValidator>>,
+    tenants: Option<Arc<dyn TenantScopeResolver>>,
+    reach: Option<Arc<dyn PrincipalReachResolver>>,
+    requested_tenant: Option<Uuid>,
+}
 
-            // REQ-7 / D-15: reject access tokens whose session has been revoked
-            // (row deleted on password change/reset/MFA reset) or expired. The
-            // validator is optional so non-session test harnesses are unaffected;
-            // the production server (and session-security tests) always register it.
-            //
-            // Checked against the *principal's* tenant, which is where the
-            // session row is. It is the same value as `tenant_id` at this point
-            // — the header is applied below — but ordering matters: resolving
-            // the active tenant first would look the session up in whichever
-            // tenant the request asked to act on, and find none.
-            if let Some(validator) = validator
-                && !validator
-                    .is_session_active(user.principal_tenant_id, user.session_id)
-                    .await
+impl RequestScopeHandles {
+    fn read(req: &HttpRequest) -> Self {
+        Self {
+            validator: req
+                .app_data::<web::Data<Arc<dyn SessionValidator>>>()
+                .map(|d| d.get_ref().clone()),
+            tenants: req
+                .app_data::<web::Data<Arc<dyn TenantScopeResolver>>>()
+                .map(|d| d.get_ref().clone()),
+            reach: req
+                .app_data::<web::Data<Arc<dyn PrincipalReachResolver>>>()
+                .map(|d| d.get_ref().clone()),
+            // Read the header here, while `req` is still borrowed. A malformed
+            // value is dropped rather than refused: it names a tenant that
+            // cannot exist, so the request falls back to the caller's own
+            // tenant and is then denied by RBAC like any other over-reach.
+            requested_tenant: req
+                .headers()
+                .get(ACTIVE_TENANT_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| Uuid::parse_str(v.trim()).ok()),
+        }
+    }
+
+    async fn apply(self, mut user: AuthenticatedUser) -> Result<AuthenticatedUser, AxiamApiError> {
+        let Self {
+            validator,
+            tenants,
+            reach,
+            requested_tenant,
+        } = self;
+
+        // REQ-7 / D-15: reject access tokens whose session has been revoked
+        // (row deleted on password change/reset/MFA reset) or expired. The
+        // validator is optional so non-session test harnesses are unaffected;
+        // the production server (and session-security tests) always register it.
+        //
+        // Checked against the *principal's* tenant, which is where the
+        // session row is. It is the same value as `tenant_id` at this point
+        // — the header is applied below — but ordering matters: resolving
+        // the active tenant first would look the session up in whichever
+        // tenant the request asked to act on, and find none.
+        if let Some(validator) = validator
+            && !validator
+                .is_session_active(user.principal_tenant_id, user.session_id)
+                .await
+        {
+            return Err(AxiamError::AuthenticationFailed {
+                reason: "session revoked or expired".into(),
+            }
+            .into());
+        }
+
+        if let Some(target) = requested_tenant.filter(|t| *t != user.principal_tenant_id) {
+            user.tenant_id = resolve_active_tenant(&user, target, tenants.as_ref()).await?;
+            // ...and, for a principal whose roles name the tenants they
+            // reach, that the tenant named is one of them. See
+            // [`PrincipalReachResolver`] for why this is a courtesy refusal
+            // rather than the enforcement.
+            if let Some(reach) = reach
+                && let Some(reach) = reach.reach(user.principal_tenant_id, user.user_id).await
+                && !reach.includes(target)
             {
-                return Err(AxiamError::AuthenticationFailed {
-                    reason: "session revoked or expired".into(),
+                return Err(AxiamError::AuthorizationDenied {
+                    reason: "this account's roles do not reach the requested tenant".into(),
+                    action: None,
+                    resource_id: None,
                 }
                 .into());
             }
+            // Reached only when the resolution above confirmed the caller's
+            // own tenant is the organization scope — it refuses otherwise.
+            user.organization_level = true;
+        }
 
-            if let Some(target) = requested_tenant.filter(|t| *t != user.principal_tenant_id) {
-                user.tenant_id = resolve_active_tenant(&user, target, tenants.as_ref()).await?;
-                // ...and, for a principal whose roles name the tenants they
-                // reach, that the tenant named is one of them. See
-                // [`PrincipalReachResolver`] for why this is a courtesy refusal
-                // rather than the enforcement.
-                if let Some(reach) = reach
-                    && let Some(reach) = reach.reach(user.principal_tenant_id, user.user_id).await
-                    && !reach.includes(target)
-                {
-                    return Err(AxiamError::AuthorizationDenied {
-                        reason: "this account's roles do not reach the requested tenant".into(),
-                        action: None,
-                        resource_id: None,
-                    }
-                    .into());
-                }
-                // Reached only when the resolution above confirmed the caller's
-                // own tenant is the organization scope — it refuses otherwise.
-                user.organization_level = true;
-            }
-
-            Ok(user)
-        })
+        Ok(user)
     }
 }
 
@@ -437,8 +467,26 @@ pub(crate) fn parse_validated_claims(req: &HttpRequest) -> Result<ValidatedClaim
         credentials.to_owned()
     };
 
-    let validated = validate_access_token(&token, config).map_err(AxiamError::from)?;
-    enforce_sender_constraint(req, &token, &validated.0)?;
+    validate_presented_token(req, &token, config)
+}
+
+/// Validate a token this request presented, whatever carried it.
+///
+/// The tail of [`parse_validated_claims`], named so that it has a second caller:
+/// [`authenticate_presented_token`], for the RFC 6750 §2.2 form field that only
+/// `POST /oauth2/userinfo` accepts (W6, plan §4.9 G10). Splitting it changes
+/// nothing about the header and cookie carriers — the same two calls run in the
+/// same order, after the same `AuthConfig` lookup — and it means the body
+/// carrier cannot drift into being the lenient one, because there is no second
+/// copy of the signature check or of the `cnf` sender-constraint check to be
+/// lenient in.
+pub(crate) fn validate_presented_token(
+    req: &HttpRequest,
+    token: &str,
+    config: &AuthConfig,
+) -> Result<ValidatedClaims, AxiamApiError> {
+    let validated = validate_access_token(token, config).map_err(AxiamError::from)?;
+    enforce_sender_constraint(req, token, &validated.0)?;
     Ok(validated)
 }
 
@@ -660,7 +708,18 @@ fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
         .ok_or(AxiamError::Internal("missing auth config".into()))?;
 
     let validated = parse_validated_claims(req)?;
+    user_from_validated(validated, config)
+}
 
+/// Turn validated claims into the principal they describe.
+///
+/// Audience narrowing, then the three identifier claims, in that order — the
+/// order matters, because it is what makes a machine token's refusal say
+/// "audience mismatch" rather than something about its `sub`.
+fn user_from_validated(
+    validated: ValidatedClaims,
+    config: &AuthConfig,
+) -> Result<AuthenticatedUser, AxiamApiError> {
     let session_id = check_user_aud_and_parse_jti(&validated, config)?;
 
     let user_id =
@@ -687,6 +746,48 @@ fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
         session_id,
         claims: validated,
     })
+}
+
+/// Authenticate a request whose access token arrived in the request **body**
+/// (RFC 6750 §2.2) — the carrier `POST /oauth2/userinfo` accepts and no other
+/// route does (W6, plan §4.9 G10).
+///
+/// # Why this is a function and not an extractor
+///
+/// An extractor cannot see the body without consuming it, and the body of this
+/// route belongs to `web::Form`. More importantly, an extractor would sit in
+/// the chain that `GET /oauth2/userinfo` also uses, and the property this wave
+/// owes is that GET is *unchanged* — not "unchanged as far as we tested".
+/// Leaving [`AuthenticatedUser`]'s `FromRequest` impl exactly as it was makes
+/// that a property of the code rather than a claim about it.
+///
+/// # What it deliberately does not do
+///
+/// It does **not** consult the [`CachedUserIdentity`] the audit middleware
+/// leaves behind. That cache is keyed to nothing — it is whatever token the
+/// middleware found in the `Authorization` header or the `axiam_access` cookie
+/// — so honouring it here would authenticate a body-carried token as whoever
+/// the *header* named. The caller (`handlers::oauth2::userinfo_post`) already
+/// refuses a request that presents a token by more than one carrier, so the
+/// two can never disagree in practice; not reading the cache is what makes that
+/// a defence in depth rather than the only defence.
+///
+/// Everything after "where did the token come from" is the same code the
+/// extractor runs: [`validate_presented_token`] (signature, expiry, and the
+/// `cnf` sender-constraint check — so a DPoP- or mTLS-bound token is verified
+/// on POST exactly as on GET), [`user_from_validated`] (audience narrowing and
+/// the identifier claims), then [`RequestScopeHandles::apply`] (session
+/// revocation and active-tenant resolution).
+pub(crate) async fn authenticate_presented_token(
+    req: &HttpRequest,
+    token: &str,
+) -> Result<AuthenticatedUser, AxiamApiError> {
+    let config = req
+        .app_data::<web::Data<AuthConfig>>()
+        .ok_or(AxiamError::Internal("missing auth config".into()))?;
+    let validated = validate_presented_token(req, token, config)?;
+    let user = user_from_validated(validated, config)?;
+    RequestScopeHandles::read(req).apply(user).await
 }
 
 /// Enforce the audience narrowing policy for user-facing routes and

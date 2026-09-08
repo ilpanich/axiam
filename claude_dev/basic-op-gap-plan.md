@@ -823,10 +823,44 @@ request time. T8.6 audit event emitted, without claim values.
   Not per-client (it is the resource-server side of the token, the same for
   every lane) and it tightens nothing on the FAPI lane: a FAPI client's
   sender-constrained token is verified identically on POST. Tests T10.1–T10.3.
-- **G11 (optional — warning-only).** Register `POST` (form-encoded) on
-  `/oauth2/authorize` with the same parameter set. With `SameSite=Lax` a
-  cross-site POST carries no cookie, so the user sees the login page — which
-  is exactly what the module then does. Cheap; recommended; not required.
+- **G11 (optional — warning-only). Decided in W6: not done, and not
+  scheduled.** This bullet previously read "cheap; recommended; not required",
+  and it was wrong about the cheap part. The decision and its reasoning replace
+  it here rather than being left to drift.
+
+  `OIDCCEnsurePostRequestSucceeds` warns after 30 seconds; it does not fail, so
+  Basic OP certification is unaffected either way. RFC 6749 §3.1 says the
+  authorization endpoint MUST support `GET` and **MAY** support `POST`, so
+  declining is conformant rather than a gap that happens to be tolerated.
+
+  What makes it not cheap is the login hop W3 built and W4/W5 extended.
+  `axiam_oauth2::login_hop::build_return_to` takes
+  `http_req.query_string()`, and returns `None` for an empty one — so a
+  form-POST authorize would build no `return_to` at all and the hop would
+  decline to redirect. The request would die where a GET shows a sign-in page,
+  which is the opposite of what the module is checking. Making it work needs a
+  second carrier taught to `build_return_to`, to `validate_return_to`, and to
+  the `LOGIN_HOP_MARKER` loop guard, and then an answer for the return leg —
+  necessarily a `GET`, because it is a 302 — carrying parameters that arrived
+  in a body. There are only two answers and both are bad:
+
+  1. **Re-serialise the body into the `return_to` query string.** Every
+     authentication-request parameter goes back into a URL, and therefore into
+     the browser history and the sign-in page's `Referer` — the exposure a POST
+     binding exists to avoid. It would also hand `validate_return_to` a string
+     built from a body it has never had to reason about.
+  2. **Store the parameters server-side under a handle.** That is PAR
+     (RFC 9126), which AXIAM already implements, which FAPI 2.0 already
+     requires, and which RFC 9126 §1 offers for exactly this problem.
+
+  So the machinery cost lands squarely on the one code path W3, W4 and W5 have
+  already made subtle, to satisfy a warning, when the relying party that needs
+  it has PAR today. **Revisit condition,** so this is a decision and not a
+  refusal: if a future conformance run turns the warning into a failure, or a
+  deployment needs `form_post` request delivery, implement `POST
+  /oauth2/authorize` **for pushed requests only** — a body carrying nothing but
+  `client_id` and `request_uri` — so the hop still has no body parameters to
+  carry through it.
 
 ### 4.10 G12 — request objects: **reject, cleanly**
 
@@ -955,7 +989,7 @@ and a diff in the report is a stop-the-line signal.
 | **W3** | Gap 0: `axiam_op_session`, principal resolution behind `browser_sso`, SPA `/login?return_to`, `reauth`, loop guard. T0.1–T0.6, M7 | W1, W2 | **#2** — must equal #0 |
 | **W4** | Honour lane, security-bearing: `prompt`, `max_age`, `id_token_hint`, `acr`/`claims.acr`, step-up. T1.*, T2.1–T2.4, T2.7, T3.*, M1–M4 request halves | W3 | — |
 | **W5** | Honour lane, cosmetic: `login_hint`, `display`, `ui_locales`, `claims_locales` in the SPA — **plus the SPA i18n layer and five shipped locales** the row's `ui_locales` needs in order to select anything at all (§4.6's W5 amendment: widened at the maintainer's request; no v57 migration, tenant default deferred to W7). T5.*, T6.*, M5–M6 request halves | W4 | — |
-| **W6** | G10 POST userinfo (+ G11 optional). T10.* | W1 | — |
+| **W6** | G10 `POST /oauth2/userinfo`: the route, the RFC 6750 §2.2 body carrier, the two-carrier refusal. T10.1–T10.3, the §2.3 and logging pins, the `SameSite=Strict` CSRF pin, DPoP and `cnf` on the new method. **G11 declined — §4.9 records why and what would reopen it** | W1 | — |
 | **W7** | G8 sensitive scopes: schema v51, tenant switch, consent screen, userinfo release, SCIM mapping, GDPR doc. T8.*, M8, M10 | W3 (consent screen rides the login hop) | — |
 | **W8** | G9 `client_secret_basic` — decision A is **yes**, so this wave is in scope. T9.*, M9; contract 1.41 text; `openapi.json` | W1 | — |
 | **W9** | Basic OP harness: `conformance/plans/oidcc-basic-static.json` (plan `oidcc-basic-certification-test-plan`, variants `server_metadata=discovery`, `client_registration=static_client`; config `server.acr_values`, `server.login_hint`, `server.ui_locales`; two static clients, one `client_secret_basic`, one `client_secret_post`, both `standard`/`honour`/`browser_sso`, scopes `openid profile email address phone`, `grant_types` incl. `refresh_token`); `register-clients.sh` variant; test user with phone/address; run; `docs/conformance/` report; `docs/compliance/oidc-conformance.md` rows for the new modules | W1–W8 | **#3 final** — FAPI and Basic both green, on a digest-pinned image, per `fapi-certification-submission.md` |

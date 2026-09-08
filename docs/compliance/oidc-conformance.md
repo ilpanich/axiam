@@ -10,6 +10,8 @@
 - `crates/axiam-oauth2/src/fapi.rs` — the profile-confusion matrix (X7.1, plan §7)
 - `crates/axiam-oauth2/src/authn_params.rs` — the authentication-request parameter parser
 - `crates/axiam-api-rest/src/handlers/oauth2.rs` — request-object classification (T12.*)
+- `crates/axiam-api-rest/tests/oauth2_userinfo_post_test.rs` — `POST /oauth2/userinfo`
+  and the RFC 6750 carriers (W6, T10.*)
 
 ---
 
@@ -39,7 +41,11 @@
 | 15 | id_token MUST NOT use alg:none at service layer | Core §3.1.3.7 | Pass | `req5_oidc_e2e.rs::oidc_rejects_alg_none` (line 179) |
 | 16 | id_token MUST use EdDSA algorithm | Core §3.1.3.7 | Pass | `oauth2_flow_test.rs::oidc_jwks_endpoint` (alg=EdDSA) |
 
-## OpenID Connect Core 1.0 — UserInfo Endpoint
+## OpenID Connect Core 1.0 — UserInfo Endpoint (`GET`)
+
+These four rows are the invariant-4 twin of wave W6: `POST` was added beside
+`GET`, and a `GET` UserInfo request is byte-for-byte the request it was before.
+None of them moved, and none of them may.
 
 | # | MUST | Spec Ref | Status | Evidence |
 |---|------|----------|--------|----------|
@@ -231,6 +237,57 @@ default, English. The admin console is not translated — `ui_locales` is an
 authentication-request parameter and cannot reach it. Both are recorded in
 `claude_dev/basic-op-gap-plan.md` §4.6's W5 amendment, with the reasoning.
 
+## OpenID Connect Core 1.0 — the UserInfo endpoint on `POST` (wave W6)
+
+OIDC Core §5.3 requires an OP to accept both methods, and the two conformance
+modules `OIDCCUserInfoPostHeader` and `OIDCCUserInfoPostBody` fail without it.
+RFC 6750 gives `POST` a second carrier for the access token — an `access_token`
+form field (§2.2) beside the `Authorization` header (§2.1) — and forbids using
+more than one carrier in one request (§2).
+
+This is the **resource-server** side of a token, so unlike every other wave in
+this series it is not per client: there is no lane switch here, and invariants
+1, 2 and 3 (opt-in per client, refused on `fapi2`, stricter default) are `n/a`
+by design rather than by omission. Invariant 4 is the live one, and rows 17–20
+above are its twin. Invariant 5 holds because the code the two methods share
+was split, not changed: `parse_validated_claims` keeps reading the cookie and
+then the header in that order, and `enforce_sender_constraint` is reached by
+both carriers.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 90 | `POST /oauth2/userinfo` is routed and answers a valid request — the endpoint supports both methods | Core §5.3 (`OIDCCUserInfoPostHeader`) | Pass (T10.1) | `oauth2_userinfo_post_test.rs::t10_1_post_with_a_header_token_answers_exactly_what_get_answers` |
+| 91 | The `POST` answer is **byte-identical** to the `GET` answer for the same token — status, every header, and the body. Nothing about a UserInfo response depends on the method | Core §5.3 | Pass (T10.1, invariant 4) | same test (`Answer` equality) |
+| 92 | The access token is accepted in an `access_token` **form field**, and answers the same body as the header carrier | RFC 6750 §2.2 (`OIDCCUserInfoPostBody`) | Pass (T10.2) | `oauth2_userinfo_post_test.rs::t10_2_post_with_a_form_field_token_answers_the_same_body` |
+| 93 | A request presenting the token by **two** methods is refused `400 invalid_request`, and the refusal echoes neither token | RFC 6750 §2 | Pass (T10.3) | `oauth2_userinfo_post_test.rs::t10_3_two_carriers_is_refused_and_the_refusal_names_neither_token` |
+| 94 | The `axiam_access` cookie presented together with a form field is refused too — not an RFC 6750 method, but a second credential naming a possibly different subject | RFC 6750 §2 (extended) | Pass | `oauth2_userinfo_post_test.rs::a_cookie_and_a_form_field_together_are_refused_too` |
+| 95 | An **empty** `access_token` field transmits no token and is therefore not a second carrier: an empty field beside a real header is answered, not refused | RFC 6750 §2.2 | Pass | `oauth2_userinfo_post_test.rs::an_empty_form_field_is_not_a_second_carrier` |
+| 96 | `?access_token=…` authenticates **neither** method. The deprecated §2.3 form is never read rather than refused — refusing it would mean reading a credential out of a URL first | RFC 6750 §2.3 | Pass | `oauth2_userinfo_post_test.rs::a_query_string_access_token_authenticates_neither_method` |
+| 97 | A body-carried access token reaches no log line, on the success path or the failure path, at `TRACE` level — and no error body echoes it | OWASP ASVS 5.0 V7 / plan §4.9 hazard 1 | Pass | `oauth2_userinfo_post_test.rs::the_body_carried_credential_never_reaches_a_log` |
+| 98 | The form type's `Debug` redacts the token, so the most natural diagnostic line anyone would write cannot disclose it | plan §4.9 hazard 1 | Pass | `oauth2_userinfo_post_test.rs::the_form_type_redacts_its_token_when_printed` |
+| 99 | `/oauth2` carries no CSRF middleware and `parse_validated_claims` prefers the cookie, so a cookie-authenticated cross-site `POST` would disclose PII — it fails closed because `axiam_access` is `SameSite=Strict; HttpOnly`, pinned here rather than asserted in a comment. A **same-site** cookie `POST` does authenticate, which is what makes the attribute load-bearing | plan §4.9 hazard 2; SEC-046 | Pass | `oauth2_userinfo_post_test.rs::the_access_cookie_is_strict_so_a_cross_site_post_cannot_be_authenticated_by_it` |
+| 100 | A DPoP-bound token verifies on `POST` — on both carriers — and the **same proof minted for `GET` does not**. No method-specific branch was added: `verified_dpop_thumbprint` builds `htm` from `req.method()` and `htu` from the configured issuer plus `req.path()` (SEC-102) | RFC 9449 §7.1 | Pass | `oauth2_userinfo_post_test.rs::a_dpop_bound_token_verifies_on_post_and_only_with_a_post_proof` |
+| 101 | A certificate-bound token — the `fapi2` shape — presented on `POST` with no client certificate is refused, not read as unbound, and refused identically to the way `GET` refuses it. The positive direction needs a real TLS handshake: `TestRequest` cannot populate `conn_data`, so it is **not** asserted here | RFC 8705 §3.2 | Partial (negative direction only; see note) | `oauth2_userinfo_post_test.rs::an_mtls_bound_token_is_not_downgraded_to_a_bearer_token_on_post` |
+| 102 | An unauthenticated `POST` is the same 401 as an unauthenticated `GET`, byte for byte — the new method added no way in and no different refusal | Core §5.3; invariant 4 | Pass | `oauth2_userinfo_post_test.rs::an_unauthenticated_post_is_the_same_401_as_an_unauthenticated_get` |
+| 103 | The `DPoP` authorization scheme is still accepted on `POST`; the shared scheme parsing was not narrowed back to `Bearer` | RFC 9449 §7.1 | Pass | `oauth2_userinfo_post_test.rs::the_dpop_authorization_scheme_is_still_accepted_on_post` |
+
+**Row 101, stated rather than implied.** `enforce_sender_constraint` reads the
+verified client certificate from `HttpRequest::conn_data`, and actix-web's
+`TestRequest` constructs every request with `conn_data: None` and exposes no
+way to set it. A test asserting that a certificate-bound token *succeeds* on
+`POST` would need a TLS listener and a real handshake — an integration harness
+this repository does not have, for `GET` either. What is asserted instead is
+the direction a mistake would show up in: a `POST` arm that skipped the check
+would answer `200` to a bound token presented with no certificate, and it
+answers `401`. The structural argument behind it is that both methods reach
+`enforce_sender_constraint` through the same `validate_presented_token`, whose
+only method-dependent input is the `req.method()` that row 100 exercises.
+
+**`POST /oauth2/authorize` (G11) is not implemented, deliberately.**
+`OIDCCEnsurePostRequestSucceeds` warns; it does not fail. RFC 6749 §3.1 makes
+`POST` optional at the authorization endpoint. The reasoning, and the condition
+that would reopen it, are in `claude_dev/basic-op-gap-plan.md` §4.9.
+
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
 
 | # | Behaviour | Spec Ref | Status | Evidence |
@@ -350,3 +407,4 @@ authentication-request parameter and cannot reach it. Both are recorded in
 *Rows 47–59 added: X7.3 wave W3 — 2026-09-07*
 *Rows 60–80 added: X7.4 wave W4 — 2026-09-07*
 *Rows 81–89 added: wave W5 (cosmetic parameters + SPA i18n) — 2026-09-07*
+*Rows 90–103 added: wave W6 (`POST /oauth2/userinfo`) — 2026-09-07*

@@ -323,11 +323,13 @@ pub fn authenticate_mtls_client(
                 false
             }
         }
-        // Neither of these authenticates by certificate. Reaching here at all
+        // None of these authenticates by certificate. Reaching here at all
         // means a caller routed a non-mTLS client into the mTLS path, which the
         // `debug_assert` above catches in tests; in release the answer is
         // "not authenticated", never "authenticated by default".
-        ClientAuthMethod::ClientSecretPost | ClientAuthMethod::PrivateKeyJwt => false,
+        ClientAuthMethod::ClientSecretPost
+        | ClientAuthMethod::ClientSecretBasic
+        | ClientAuthMethod::PrivateKeyJwt => false,
     };
 
     if !matched {

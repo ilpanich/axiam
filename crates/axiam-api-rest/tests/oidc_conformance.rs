@@ -359,6 +359,60 @@ async fn discovery_doc_excludes_alg_none() {
 }
 
 // ---------------------------------------------------------------------------
+// W8 — the advertised client-authentication methods
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn discovery_advertises_every_implemented_client_auth_method() {
+    // OIDC Discovery §3: `token_endpoint_auth_methods_supported` is a
+    // capability statement about the *deployment*, not about any one client.
+    // A relying party reads it to decide how to authenticate, so a method the
+    // server accepts and does not advertise is unreachable in practice — which
+    // is exactly the state `client_secret_basic` was in before W8, and the
+    // reason 37 of the Basic OP plan's 38 modules could not run.
+    //
+    // The list is also asserted to be complete rather than merely to contain
+    // the new value: a method added to `ClientAuthMethod` and wired into
+    // `authenticate_client_credential` but never advertised is a silent
+    // half-landing, and this is where it stops.
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let _user_id = create_admin_user(&db, tenant_id).await;
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/.well-known/openid-configuration")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let doc: serde_json::Value = test::read_body_json(resp).await;
+    let methods: Vec<&str> = doc["token_endpoint_auth_methods_supported"]
+        .as_array()
+        .expect("token_endpoint_auth_methods_supported must be an array")
+        .iter()
+        .map(|v| v.as_str().expect("each method is a string"))
+        .collect();
+
+    assert_eq!(
+        methods,
+        vec![
+            "client_secret_post",
+            "client_secret_basic",
+            "tls_client_auth",
+            "self_signed_tls_client_auth",
+            "private_key_jwt",
+        ],
+        "the advertised methods, in the operator's order of preference —          `client_secret_post` stays first because the header channel is the one          intermediaries log (W8)"
+    );
+    assert!(
+        !methods.contains(&"none"),
+        "there is no public-client story; advertising `none` would claim one"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // OIDC Core §3.1.3.7 — id_token iss MUST match discovery issuer
 // ---------------------------------------------------------------------------
 

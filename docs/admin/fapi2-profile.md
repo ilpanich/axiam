@@ -501,6 +501,48 @@ surface, which has the method and URI. Certificate-bound tokens work on both.
 
 ---
 
+## `client_secret_basic` — accepted, and not recommended
+
+AXIAM accepts HTTP Basic client authentication (RFC 6749 §2.3.1): register a
+client with `"token_endpoint_auth_method": "client_secret_basic"` and it
+authenticates by putting `client_id:client_secret` in the `Authorization`
+header instead of the form body. It is advertised in
+`token_endpoint_auth_methods_supported`. It exists for third-party relying
+parties — and for the OpenID Foundation's Basic OP certification plan, 37 of
+whose 38 modules use it — that can speak nothing else.
+
+**It is not the method to choose for a first-party integration.** The
+credential is byte-for-byte the one `client_secret_post` uses; only the channel
+differs, and the channel is the whole difference:
+
+- Reverse proxies, load balancers, API gateways and APM agents log the
+  `Authorization` header **by default**. Almost none of them log form bodies.
+  Every hop between your client and AXIAM is a place a password-equivalent
+  secret can come to rest in a log you did not know you were writing.
+- AXIAM itself never logs it — the header value reaches no tracing span, and
+  the type carrying the decoded credential redacts its own `Debug`
+  (`crates/axiam-oauth2/src/client_secret_basic.rs`). That covers AXIAM and
+  nothing in front of it.
+
+So: prefer `client_secret_post` for a shared secret, and prefer one of the
+strong methods above — `private_key_jwt` or either mTLS variant — for anything
+that matters. If you do enable `client_secret_basic`, audit what your ingress
+logs first. AXIAM's own SDKs never send a Basic header, whatever the client is
+registered for (`sdks/CONTRACT.md` §5 rule 3).
+
+**A FAPI 2.0 client cannot use it.** `client_secret_basic` is a shared secret,
+so §5.3.1.1 refuses it exactly as it refuses `client_secret_post` — at
+registration, with `WeakClientAuth`, and again at request time.
+
+**The registration decides, and only the registration.** A client registered
+for `client_secret_post` that sends an `Authorization: Basic` header has it
+ignored (and a `warn` logged); a client registered for `client_secret_basic`
+that sends `client_secret` in the body is refused with `invalid_request`. There
+is no configuration in which both channels work: that would be an OR over two
+copies of the same credential, which is strictly weaker than either alone.
+
+---
+
 ## RFC 9207 `iss` — on by default, for everybody
 
 Every authorization response now carries an `iss` parameter naming the issuer,

@@ -10,7 +10,7 @@ use axiam_auth::token::{
     issue_service_account_client_credentials_token_enriched, validate_access_token,
 };
 use axiam_core::error::AxiamError;
-use axiam_core::models::oauth2_client::{CreateRefreshToken, OAuth2Client};
+use axiam_core::models::oauth2_client::{ClientAuthMethod, CreateRefreshToken, OAuth2Client};
 use axiam_core::models::reactor::{
     ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events,
 };
@@ -49,7 +49,14 @@ use crate::pkce;
 /// §4.1.2.1 requires informing the resource owner directly rather than
 /// redirecting, and no credential is presented — so "invalid client
 /// credentials" would be actively misleading there.
-const CLIENT_AUTH_FAILED: &str = "invalid client credentials";
+///
+/// W8 made it `pub`: the REST layer now refuses a malformed
+/// `Authorization: Basic` header before `TokenService` is ever reached, and
+/// that refusal must be worded identically to the ones raised here. A second
+/// copy of the string in `axiam-api-rest` would be a second thing to keep
+/// equal, and SEC-086's whole property is that these answers are
+/// indistinguishable.
+pub const CLIENT_AUTH_FAILED: &str = "invalid client credentials";
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -271,6 +278,62 @@ pub struct TokenRequestContext {
     pub client_assertion: Option<String>,
     /// The `client_assertion_type` form parameter.
     pub client_assertion_type: Option<String>,
+    /// W8 — the credentials decoded from an `Authorization: Basic` header
+    /// (RFC 6749 §2.3.1), if this request carried a well-formed one.
+    ///
+    /// The same discipline as [`Self::client_certificate`] and
+    /// [`Self::dpop_proof`]: the REST layer reads the header, hands it to
+    /// [`crate::client_secret_basic::parse_authorization_header`], and puts
+    /// the *decoded* result here. A malformed header never reaches this field
+    /// — it is answered at the edge with `invalid_client` and a
+    /// `WWW-Authenticate: Basic` challenge — so `None` unambiguously means
+    /// "no Basic credentials were presented" rather than "some were, badly".
+    ///
+    /// Presence here authenticates nothing on its own. Only a client whose
+    /// *registration* names `client_secret_basic` is authenticated from it
+    /// (SEC-093); for every other client this field is inert, and the
+    /// `client_secret_post` case logs a `warn` saying so.
+    pub basic_credentials: Option<crate::client_secret_basic::BasicCredentials>,
+}
+
+/// Which client id a token request is for, given a body parameter that may be
+/// absent and an `Authorization: Basic` header that may name one (W8, RFC 6749
+/// §2.3.1).
+///
+/// # Why the header may supply it at all
+///
+/// RFC 6749 §2.3.1 makes the body's `client_id` **optional** for a client
+/// authenticating with the header, and the OpenID Foundation's Basic OP suite
+/// takes it up: 37 of its 38 modules send the id only in the header. AXIAM's
+/// three grants each required `req.client_id`, so without this the new method
+/// would have been unusable by exactly the clients it was added for. The plan
+/// (§4.7) did not mention it; the tree did. See the W8 amendment in
+/// `claude_dev/basic-op-gap-plan.md` §4.7.
+///
+/// # Why disagreement is `invalid_request` and not a preference
+///
+/// A request naming `a` in the header and `b` in the body has made two claims
+/// of identity, and any rule for picking a winner is a rule an attacker can
+/// aim: whichever half a proxy, a log or an audit record reads, the other is
+/// the one that authenticated. Refusing is the only answer that cannot be
+/// exploited by arranging for the two readers to disagree.
+///
+/// It is refused **before** the client lookup, and that placement is load
+/// bearing: the question "do these two strings differ" is answered from the
+/// request alone, so it creates no client-existence oracle and SEC-086's
+/// ordering property is untouched.
+fn resolve_client_id<'a>(
+    from_body: Option<&'a str>,
+    ctx: &'a TokenRequestContext,
+) -> Result<&'a str, OAuth2Error> {
+    match (from_body, ctx.basic_client_id()) {
+        (Some(body), Some(header)) if body != header => Err(OAuth2Error::InvalidRequest(
+            "client_id in the Authorization header and in the request body disagree".into(),
+        )),
+        (Some(body), _) => Ok(body),
+        (None, Some(header)) => Ok(header),
+        (None, None) => Err(OAuth2Error::InvalidRequest("client_id is required".into())),
+    }
 }
 
 impl TokenRequestContext {
@@ -284,6 +347,31 @@ impl TokenRequestContext {
     /// The `jkt` of the verified DPoP proof, if any.
     pub fn dpop_thumbprint(&self) -> Option<&str> {
         self.dpop_proof.as_ref().map(|p| p.jkt.as_str())
+    }
+
+    /// The `client_id` an `Authorization: Basic` header named, if any.
+    ///
+    /// Deliberately *not* paired with a `basic_secret()` sibling: the client
+    /// id is a routing key that several call sites legitimately need, while
+    /// the secret has exactly one reader and reaches it through
+    /// [`crate::client_secret_basic::BasicCredentials::client_secret`].
+    pub fn basic_client_id(&self) -> Option<&str> {
+        self.basic_credentials.as_ref().map(|c| c.client_id())
+    }
+
+    /// Attach credentials decoded from an `Authorization: Basic` header.
+    ///
+    /// A builder method rather than a public field write at four call sites,
+    /// for the reason [`Self::with_assertion_from`] gives: a credential that
+    /// four endpoints must each remember to wire is one that three of them
+    /// eventually will not.
+    #[must_use]
+    pub fn with_basic_credentials(
+        mut self,
+        credentials: Option<crate::client_secret_basic::BasicCredentials>,
+    ) -> Self {
+        self.basic_credentials = credentials;
+        self
     }
 
     /// Copy the RFC 7521 assertion parameters out of a decoded token request.
@@ -682,9 +770,98 @@ where
                 .await;
         }
 
+        if client.token_endpoint_auth_method == ClientAuthMethod::ClientSecretBasic {
+            return self
+                .authenticate_client_secret_basic(tenant_id, client, presented_secret, ctx)
+                .await;
+        }
+
+        // `client_secret_post`. W8: a Basic header on this client is **not** a
+        // second way in. It is ignored — the registration decided which
+        // channel carries the credential — and said out loud, because the
+        // silent version of this is indistinguishable from the bug where the
+        // header quietly wins.
+        if ctx.basic_credentials.is_some() {
+            tracing::warn!(
+                client_id = %client.client_id,
+                "an Authorization header using the Basic scheme was presented by a client \
+                 registered for client_secret_post; it is ignored and the request is \
+                 authenticated by the form-body secret (SEC-093: the registration \
+                 decides). If this client meant to use HTTP Basic, register it for \
+                 client_secret_basic"
+            );
+        }
+
         let secret = presented_secret
             .ok_or_else(|| OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()))?;
         self.verify_client_secret(tenant_id, client, secret).await
+    }
+
+    /// `client_secret_basic` client authentication (W8, RFC 6749 §2.3.1).
+    ///
+    /// The credential is the same peppered-hash comparison
+    /// [`Self::verify_client_secret`] performs for `client_secret_post` — one
+    /// secret, two spellings — so this branch adds no cryptography and no new
+    /// rate-limit bucket. What it adds is the RFC's two negative rules.
+    ///
+    /// # The body secret is refused, *after* the header is verified
+    ///
+    /// RFC 6749 §2.3 forbids a client from using more than one
+    /// authentication method in one request, so a `client_secret` in the body
+    /// of a `client_secret_basic` client is `invalid_request`. The plan
+    /// (§4.7) specified that refusal; it did not specify where in the order it
+    /// goes, and the obvious placement — first — reopens SEC-086. `invalid_request`
+    /// would then be reachable *only* for a client that exists and is
+    /// registered for Basic, making both facts decidable by an unauthenticated
+    /// caller who sends a junk secret in each channel. Verifying the header
+    /// credential first means the malformed-request answer is only ever given
+    /// to a caller who has already proven possession of the secret, and
+    /// everybody else gets the same uniform `invalid_client`. See the W8
+    /// amendment in `claude_dev/basic-op-gap-plan.md` §4.7.
+    ///
+    /// # The header's client id must be the one being authenticated
+    ///
+    /// A header naming `a` and a body naming `b` is two claims of identity in
+    /// one request. It is refused *before* the lookup — see
+    /// [`resolve_client_id`], where it is decidable from the request alone —
+    /// so this method only ever sees an agreeing pair, and the equality check
+    /// here is the defence-in-depth restatement of that.
+    async fn authenticate_client_secret_basic(
+        &self,
+        tenant_id: Uuid,
+        client: &OAuth2Client,
+        presented_secret: Option<&str>,
+        ctx: &TokenRequestContext,
+    ) -> Result<(), OAuth2Error> {
+        let Some(credentials) = ctx.basic_credentials.as_ref() else {
+            // Registered for Basic, presented no Basic header. The body secret
+            // it may have sent instead is deliberately not consulted: that
+            // would be the OR over two credentials SEC-093 exists to prevent.
+            return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+        };
+
+        if credentials.client_id() != client.client_id {
+            return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+        }
+
+        self.verify_client_secret(tenant_id, client, credentials.client_secret())
+            .await?;
+
+        if presented_secret.is_some() {
+            tracing::warn!(
+                client_id = %client.client_id,
+                "a client_secret_basic client presented a client_secret in the request body as \
+                 well as in the Authorization header; RFC 6749 §2.3 permits exactly one \
+                 authentication method per request, so the request is refused"
+            );
+            return Err(OAuth2Error::InvalidRequest(
+                "a client may use only one authentication method per request (RFC 6749 §2.3): \
+                 remove client_secret from the request body"
+                    .into(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// `private_key_jwt` client authentication (X5.1, RFC 7523 §2.2).
@@ -1020,10 +1197,7 @@ where
             .redirect_uri
             .as_deref()
             .ok_or_else(|| OAuth2Error::InvalidRequest("redirect_uri is required".into()))?;
-        let client_id = req
-            .client_id
-            .as_deref()
-            .ok_or_else(|| OAuth2Error::InvalidRequest("client_id is required".into()))?;
+        let client_id = resolve_client_id(req.client_id.as_deref(), ctx)?;
 
         // Require client_secret — all clients are confidential (no
         // public-client distinction exists yet).
@@ -1039,14 +1213,18 @@ where
         // way; only this grant did not.
         //
         // X5.1 widens "presented a client_secret" to "presented *a*
-        // credential", because an mTLS client sends no secret at all. The
-        // widened check is still decidable **before** the lookup — it asks
-        // only what this request carries, never what this client registered —
-        // so SEC-086's property is preserved exactly: a caller with no
-        // credential gets one answer regardless of whether the client id
-        // exists.
+        // credential", because an mTLS client sends no secret at all. W8
+        // widens it once more, for the client that sent its secret in the
+        // `Authorization` header instead of the body. The widened check is
+        // still decidable **before** the lookup — it asks only what this
+        // request carries, never what this client registered — so SEC-086's
+        // property is preserved exactly: a caller with no credential gets one
+        // answer regardless of whether the client id exists.
         let client_secret = req.client_secret.as_deref();
-        if client_secret.is_none() && ctx.client_certificate.is_none() {
+        if client_secret.is_none()
+            && ctx.client_certificate.is_none()
+            && ctx.basic_credentials.is_none()
+        {
             return Err(OAuth2Error::InvalidClient(
                 "client authentication is required".into(),
             ));
@@ -1307,17 +1485,18 @@ where
         ctx: &TokenRequestContext,
     ) -> Result<TokenResponse, OAuth2Error> {
         let started = std::time::Instant::now();
-        let client_id = req
-            .client_id
-            .as_deref()
-            .ok_or_else(|| OAuth2Error::InvalidRequest("client_id is required".into()))?;
+        let client_id = resolve_client_id(req.client_id.as_deref(), ctx)?;
         // X5.1: as on the authorization-code grant, "presented a client_secret"
         // widens to "presented a credential", so an mTLS client that sends no
-        // secret is not turned away before its certificate is ever looked at.
-        // Still decidable from the request alone, so no client-existence
-        // oracle is created.
+        // secret is not turned away before its certificate is ever looked at,
+        // and (W8) neither is a client whose secret arrived in the
+        // `Authorization` header. Still decidable from the request alone, so
+        // no client-existence oracle is created.
         let client_secret = req.client_secret.as_deref();
-        if client_secret.is_none() && ctx.client_certificate.is_none() {
+        if client_secret.is_none()
+            && ctx.client_certificate.is_none()
+            && ctx.basic_credentials.is_none()
+        {
             return Err(OAuth2Error::InvalidClient(
                 "client authentication is required".into(),
             ));
@@ -1515,21 +1694,22 @@ where
             .refresh_token
             .as_deref()
             .ok_or_else(|| OAuth2Error::InvalidRequest("refresh_token is required".into()))?;
-        let client_id = req
-            .client_id
-            .as_deref()
-            .ok_or_else(|| OAuth2Error::InvalidRequest("client_id is required".into()))?;
+        let client_id = resolve_client_id(req.client_id.as_deref(), ctx)?;
 
         // Authenticate client BEFORE looking up the refresh token to
         // avoid a token-validity oracle (different error for valid vs
         // invalid tokens when client auth fails).
         //
         // X5.1: widened from "a client_secret" to "a credential" so an mTLS
-        // client is not turned away before its certificate is consulted. Still
-        // answered from the request alone, so the oracle this ordering exists
-        // to close stays closed.
+        // client is not turned away before its certificate is consulted; W8
+        // widens it again for a secret carried in the `Authorization` header.
+        // Still answered from the request alone, so the oracle this ordering
+        // exists to close stays closed.
         let client_secret_val = req.client_secret.as_deref();
-        if client_secret_val.is_none() && ctx.client_certificate.is_none() {
+        if client_secret_val.is_none()
+            && ctx.client_certificate.is_none()
+            && ctx.basic_credentials.is_none()
+        {
             return Err(OAuth2Error::InvalidClient(
                 "client authentication is required".into(),
             ));

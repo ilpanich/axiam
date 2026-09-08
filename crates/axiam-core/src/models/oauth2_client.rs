@@ -124,6 +124,30 @@ pub enum ClientAuthMethod {
     /// historical and default method.
     #[default]
     ClientSecretPost,
+    /// The same shared secret, presented in the `Authorization: Basic` header
+    /// (RFC 6749 §2.3.1) instead of the request body.
+    ///
+    /// # Why a second spelling of one credential exists
+    ///
+    /// It is the *default* client-authentication variant of the OpenID
+    /// Foundation's Basic OP certification plan — 37 of its 38 modules use it
+    /// — so a server that refuses it cannot be certified, however many
+    /// stronger methods it offers. Accepting it was escalated to the
+    /// maintainer rather than assumed, and answered yes on 2026-09-07
+    /// (`claude_dev/basic-op-gap-plan.md` §10 decision A).
+    ///
+    /// # Why it is not the recommended one
+    ///
+    /// The credential is identical; only the channel differs, and the header
+    /// channel is the one reverse proxies, load balancers and APM agents log
+    /// by default. That is why AXIAM's own SDKs are forbidden from sending it
+    /// (`sdks/CONTRACT.md` §5 rule 3) and why [`Self::ClientSecretPost`]
+    /// remains the default: this variant exists for third-party relying
+    /// parties that can speak nothing else.
+    ///
+    /// `is_strong()` is false, so FAPI 2.0 refuses it at registration and
+    /// again at request time with no new gate code.
+    ClientSecretBasic,
     /// PKI-based mutual TLS (RFC 8705 §2.1): the client presents a
     /// certificate issued by a CA the deployment's mTLS listener trusts, and
     /// AXIAM matches the *registered* expected subject DN or SAN against the
@@ -150,6 +174,7 @@ impl ClientAuthMethod {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ClientSecretPost => "client_secret_post",
+            Self::ClientSecretBasic => "client_secret_basic",
             Self::TlsClientAuth => "tls_client_auth",
             Self::SelfSignedTlsClientAuth => "self_signed_tls_client_auth",
             Self::PrivateKeyJwt => "private_key_jwt",
@@ -161,6 +186,7 @@ impl ClientAuthMethod {
     pub fn from_wire(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "client_secret_post" => Some(Self::ClientSecretPost),
+            "client_secret_basic" => Some(Self::ClientSecretBasic),
             "tls_client_auth" => Some(Self::TlsClientAuth),
             "self_signed_tls_client_auth" => Some(Self::SelfSignedTlsClientAuth),
             "private_key_jwt" => Some(Self::PrivateKeyJwt),
@@ -1039,6 +1065,7 @@ mod tests {
     fn client_auth_method_round_trips_through_its_wire_form() {
         for method in [
             ClientAuthMethod::ClientSecretPost,
+            ClientAuthMethod::ClientSecretBasic,
             ClientAuthMethod::TlsClientAuth,
             ClientAuthMethod::SelfSignedTlsClientAuth,
             ClientAuthMethod::PrivateKeyJwt,
@@ -1053,12 +1080,18 @@ mod tests {
 
     #[test]
     fn an_unrecognised_auth_method_is_refused() {
-        // `client_secret_basic` is the interesting one: it is a real RFC 6749
-        // method that this server does NOT implement, so accepting it as
-        // anything would claim support that does not exist.
+        // W8 — a deliberate, reviewed reversal. `client_secret_basic` used to
+        // head this list, with the comment "a real RFC 6749 method that this
+        // server does NOT implement, so accepting it as anything would claim
+        // support that does not exist". The server now implements it
+        // (maintainer decision A, 2026-09-07), so the claim is true and the
+        // value moves to the accepted list below. `none` does NOT move with
+        // it: there is still no public-client story, and the enum's own doc
+        // comment says why that absence is load-bearing rather than an
+        // oversight.
         for raw in [
-            "client_secret_basic",
             "none",
+            "client-secret-basic",
             "private-key-jwt",
             "tls_client_auth ",
             "",
@@ -1068,6 +1101,16 @@ mod tests {
             }
             assert_eq!(ClientAuthMethod::from_wire(raw), None, "raw = {raw:?}");
         }
+        assert_eq!(
+            ClientAuthMethod::from_wire("client_secret_basic"),
+            Some(ClientAuthMethod::ClientSecretBasic),
+        );
+        // Both spellings of the shared secret are weak, and neither is an
+        // mTLS method: this is the whole reason the FAPI gate needed no new
+        // code for the new variant.
+        assert!(!ClientAuthMethod::ClientSecretBasic.is_strong());
+        assert!(!ClientAuthMethod::ClientSecretBasic.is_mtls());
+        assert!(!ClientAuthMethod::ClientSecretBasic.is_private_key_jwt());
         // Pre-v38 rows have no column at all, and were doing client_secret_post.
         assert_eq!(
             ClientAuthMethod::default(),

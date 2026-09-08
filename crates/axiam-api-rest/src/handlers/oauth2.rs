@@ -8,6 +8,7 @@ use axiam_core::repository::{
 };
 use axiam_oauth2::authn_params::{AuthnRequestParams, RawAuthnParams};
 use axiam_oauth2::authorize::{AuthorizeRequest, RequestObject, SessionEvidence};
+use axiam_oauth2::client_secret_basic::BasicCredentials;
 use axiam_oauth2::device_service::{
     DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationRequest, DeviceAuthorizationResponse,
 };
@@ -18,8 +19,8 @@ use axiam_oauth2::oidc::{
     JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document_for,
 };
 use axiam_oauth2::token::{
-    IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest, TokenRequestContext,
-    TokenResponse,
+    CLIENT_AUTH_FAILED, IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest,
+    TokenRequestContext, TokenResponse,
 };
 use axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE;
 use axiam_oauth2::uma::UmaError;
@@ -1315,6 +1316,20 @@ pub async fn token<C: Connection + Clone>(
     form: web::Form<TokenRequest>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
+    // W8 / RFC 6749 §5.2 — the challenge is decided from the request,
+    // before the handler runs, and applied to whatever 401 it produces.
+    let challenge = client_auth_challenge(&req);
+    with_client_auth_challenge(token_inner(req, tenant_query, form, state).await, challenge)
+}
+
+/// The token endpoint proper. Split from [`token`] only so that the RFC 6749
+/// §5.2 challenge is applied to every one of its exits.
+async fn token_inner<C: Connection + Clone>(
+    req: HttpRequest,
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<TokenRequest>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
 
     let form = form.into_inner();
@@ -1377,7 +1392,10 @@ pub async fn token<C: Connection + Clone>(
     // performs no client authentication at all, so there is no registration
     // in hand for the profile gate to enforce and no party for a proof to
     // bind to.
-    let ctx = token_request_context(&req).with_assertion_from(&form);
+    let ctx = match token_request_context(&req) {
+        Ok(ctx) => ctx.with_assertion_from(&form),
+        Err(response) => return *response,
+    };
     let ctx = match dpop_from_request(&req, &state, tenant_id, ctx).await {
         Ok(ctx) => ctx,
         Err(response) => return *response,
@@ -1512,14 +1530,145 @@ pub async fn token<C: Connection + Clone>(
 /// deferred to `PresentedCertificate::identity`, which only the
 /// `tls_client_auth` branch calls, so a deployment running mTLS with ordinary
 /// secret-authenticating clients does not pay for a DN nobody reads.
-fn token_request_context(req: &HttpRequest) -> TokenRequestContext {
-    let Some(verified) = req.conn_data::<VerifiedClientCert>() else {
-        return TokenRequestContext::default();
-    };
-    TokenRequestContext {
-        client_certificate: Some(PresentedCertificate::from_der(&verified.der)),
+fn token_request_context(req: &HttpRequest) -> Result<TokenRequestContext, Box<HttpResponse>> {
+    // W8 — RFC 6749 §2.3.1. The header is read here and decoded by
+    // `axiam_oauth2::client_secret_basic`, so this crate owns "where the bytes
+    // came from" and that crate owns "what they mean". A malformed header is
+    // an error rather than an absence, for the same reason a bad DPoP proof is:
+    // treating it as "no credentials presented" would make a corrupt Basic
+    // header silently equivalent to sending none.
+    let basic = basic_credentials_from_request(req)?;
+
+    let certificate = req
+        .conn_data::<VerifiedClientCert>()
+        .map(|verified| PresentedCertificate::from_der(&verified.der));
+
+    Ok(TokenRequestContext {
+        client_certificate: certificate,
         ..TokenRequestContext::default()
     }
+    .with_basic_credentials(basic))
+}
+
+/// Decode an `Authorization: Basic` header, if one is present (W8, RFC 6749
+/// §2.3.1).
+///
+/// `Ok(None)` — no `Authorization` header, or one naming a different scheme.
+/// Not an error: four of AXIAM's five client-authentication methods put
+/// nothing in this header.
+///
+/// `Err(_)` — the client *did* attempt Basic authentication and got the
+/// encoding wrong. Answered with `invalid_client`, uniform with every other
+/// client-authentication failure (SEC-086): the four distinguishable causes in
+/// [`BasicAuthError`] are a `debug!` for the operator and nothing at all for
+/// the caller. RFC 6749 §5.2's `WWW-Authenticate: Basic` challenge is attached
+/// by [`with_client_auth_challenge`] on the way out, so it is impossible for
+/// one of these endpoints to answer a Basic attempt with a `Bearer` challenge.
+///
+/// A second `Authorization` header is refused rather than resolved. Taking the
+/// first would let an intermediary that appends a header decide which
+/// credential authenticates — the request-smuggling shape `dpop_from_request`
+/// refuses for the same reason.
+fn basic_credentials_from_request(
+    req: &HttpRequest,
+) -> Result<Option<BasicCredentials>, Box<HttpResponse>> {
+    use actix_web::http::header::AUTHORIZATION;
+
+    let Some(raw) = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return Ok(None);
+    };
+
+    match axiam_oauth2::client_secret_basic::parse_authorization_header(raw) {
+        // Not a Basic attempt. Nothing is refused here, including a request
+        // carrying several `Authorization` headers of some other scheme: the
+        // duplicate-header rule below exists to stop an intermediary choosing
+        // between two *credentials*, and this endpoint reads no credential
+        // from any other scheme. Refusing more widely would change the
+        // behaviour of requests no client sends today, which is I4's whole
+        // point.
+        None => Ok(None),
+        Some(Ok(credentials)) => {
+            // RFC 9110 §5.2 lets a recipient combine repeated field lines, and
+            // `Authorization` is not a list-valued field — so two of them is a
+            // malformed request, not a choice of credentials. Taking the first
+            // would let an intermediary that appends a header decide which
+            // credential authenticates, the request-smuggling shape
+            // `dpop_from_request` refuses for the same reason.
+            if req.headers().get_all(AUTHORIZATION).count() > 1 {
+                tracing::debug!(
+                    "more than one Authorization header on a request attempting Basic client \
+                     authentication; refusing rather than choosing which credential counts"
+                );
+                return Err(Box::new(build_oauth2_error_response(
+                    &OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()),
+                )));
+            }
+            Ok(Some(credentials))
+        }
+        Some(Err(cause)) => {
+            // The cause, never the header. `BasicAuthError` is four unit
+            // variants and carries no part of the credential, which is why it
+            // is safe to log at all.
+            tracing::debug!(
+                ?cause,
+                "an Authorization header using the Basic scheme could not be decoded (RFC 6749 \
+                 §2.3.1)"
+            );
+            Err(Box::new(build_oauth2_error_response(
+                &OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()),
+            )))
+        }
+    }
+}
+
+/// The `WWW-Authenticate` challenge this request must be answered with if it
+/// ends in a 401 (RFC 6749 §5.2).
+///
+/// The RFC's rule is that the challenge names *the scheme the client used*, so
+/// it is a property of the request and is computed before the handler runs —
+/// which is also why it survives every early return inside one.
+/// `None` means "the client did not authenticate through the `Authorization`
+/// header", and the endpoint's existing `Bearer realm="axiam"` stands.
+fn client_auth_challenge(req: &HttpRequest) -> Option<&'static str> {
+    use actix_web::http::header::AUTHORIZATION;
+    let raw = req.headers().get(AUTHORIZATION)?.to_str().ok()?;
+    // Deliberately keyed on the *scheme*, not on whether the credentials
+    // decoded: a client that sent a corrupt Basic header still used Basic, and
+    // RFC 6749 §5.2 says the challenge must tell it so.
+    axiam_oauth2::client_secret_basic::names_basic_scheme(raw)
+        .then_some(axiam_oauth2::client_secret_basic::BASIC_CHALLENGE)
+}
+
+/// Replace the `WWW-Authenticate` challenge on a 401 with the scheme the
+/// client actually used (RFC 6749 §5.2).
+///
+/// Applied at the four client-authenticating endpoints' single exit rather
+/// than at each of the thirty-odd `build_oauth2_error_response` call sites
+/// inside them. That placement is the point: a 401 raised by a path nobody
+/// thought about while writing this still gets the right challenge.
+///
+/// Nothing else about the response is touched, and a non-401 is returned
+/// unchanged — a challenge on a 200 or a 400 would be a protocol error of its
+/// own.
+fn with_client_auth_challenge(
+    mut resp: HttpResponse,
+    challenge: Option<&'static str>,
+) -> HttpResponse {
+    let Some(challenge) = challenge else {
+        return resp;
+    };
+    if resp.status() != actix_web::http::StatusCode::UNAUTHORIZED {
+        return resp;
+    }
+    resp.headers_mut().insert(
+        actix_web::http::header::WWW_AUTHENTICATE,
+        actix_web::http::header::HeaderValue::from_static(challenge),
+    );
+    resp
 }
 
 /// The `htu` a DPoP proof must name for this request (SEC-102, RFC 9449 §4.3
@@ -1871,12 +2020,31 @@ pub async fn revoke<C: Connection + Clone>(
     form: web::Form<RevokeRequest>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
+    // W8 / RFC 6749 §5.2 — the challenge is decided from the request,
+    // before the handler runs, and applied to whatever 401 it produces.
+    let challenge = client_auth_challenge(&http_req);
+    with_client_auth_challenge(
+        revoke_inner(http_req, tenant_query, form, state).await,
+        challenge,
+    )
+}
+
+/// See [`token_inner`] for why this split exists.
+async fn revoke_inner<C: Connection + Clone>(
+    http_req: HttpRequest,
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<RevokeRequest>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
 
     // SEC-093: carry the connection's client certificate through, so a client
     // registered for `tls_client_auth` can actually revoke. The assertion
     // parameters are folded in by `revoke_token` from the form.
-    let ctx = token_request_context(&http_req);
+    let ctx = match token_request_context(&http_req) {
+        Ok(ctx) => ctx,
+        Err(response) => return *response,
+    };
 
     match state
         .oauth2
@@ -1915,10 +2083,29 @@ pub async fn introspect<C: Connection + Clone>(
     form: web::Form<IntrospectRequest>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
+    // W8 / RFC 6749 §5.2 — the challenge is decided from the request,
+    // before the handler runs, and applied to whatever 401 it produces.
+    let challenge = client_auth_challenge(&http_req);
+    with_client_auth_challenge(
+        introspect_inner(http_req, tenant_query, form, state).await,
+        challenge,
+    )
+}
+
+/// See [`token_inner`] for why this split exists.
+async fn introspect_inner<C: Connection + Clone>(
+    http_req: HttpRequest,
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<IntrospectRequest>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
 
     // SEC-093 — as for `revoke`.
-    let ctx = token_request_context(&http_req);
+    let ctx = match token_request_context(&http_req) {
+        Ok(ctx) => ctx,
+        Err(response) => return *response,
+    };
 
     match state
         .oauth2
@@ -3408,6 +3595,22 @@ pub async fn pushed_authorization_request<C: Connection + Clone>(
     form: web::Form<PushedAuthorizationRequest>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
+    // W8 / RFC 6749 §5.2 — the challenge is decided from the request,
+    // before the handler runs, and applied to whatever 401 it produces.
+    let challenge = client_auth_challenge(&http_req);
+    with_client_auth_challenge(
+        pushed_authorization_request_inner(http_req, tenant_query, form, state).await,
+        challenge,
+    )
+}
+
+/// See [`token_inner`] for why this split exists.
+async fn pushed_authorization_request_inner<C: Connection + Clone>(
+    http_req: HttpRequest,
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<PushedAuthorizationRequest>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
     let req = form.into_inner();
 
@@ -3418,10 +3621,13 @@ pub async fn pushed_authorization_request<C: Connection + Clone>(
     // client authentication AND requires PAR, so a FAPI deployment whose PAR
     // endpoint accepted a shared secret was both an authentication downgrade
     // and a conformance failure.
-    let ctx = token_request_context(&http_req).with_assertion(
-        req.client_assertion.as_deref(),
-        req.client_assertion_type.as_deref(),
-    );
+    let ctx = match token_request_context(&http_req) {
+        Ok(ctx) => ctx.with_assertion(
+            req.client_assertion.as_deref(),
+            req.client_assertion_type.as_deref(),
+        ),
+        Err(response) => return *response,
+    };
     let client = match state
         .oauth2
         .token_service

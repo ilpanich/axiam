@@ -495,11 +495,67 @@ async fn invalid_client_returns_www_authenticate_header() {
         "401 invalid_client response must include WWW-Authenticate header"
     );
 
+    // RFC 6749 §5.2 also fixes *which* challenge: it must match the scheme
+    // the client used. This client authenticated through the form body, so
+    // the endpoint's own `Bearer realm="axiam"` stands. W8 extended the rule
+    // to the other direction — see the sibling test below.
+    assert_eq!(
+        resp.headers()
+            .get("WWW-Authenticate")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer realm=\"axiam\""),
+    );
+
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(
         body["error"], "invalid_client",
         "error body must be invalid_client"
     );
+}
+
+/// W8 — RFC 6749 §5.2's second half: "the authorization server MUST include
+/// the `WWW-Authenticate` response header field matching the authentication
+/// scheme used by the client".
+///
+/// A client that attempted HTTP Basic must be told `Basic`, not `Bearer`.
+/// Answering with the wrong scheme is not cosmetic: a conforming client
+/// reading a `Bearer` challenge is being told to retry with a token it does
+/// not have, and the OpenID Foundation's Basic OP suite checks the header.
+///
+/// The challenge is asserted here for a *malformed* header — a request
+/// refused at the edge, before `TokenService` is reached — because that is
+/// the path where it would be easiest to lose: the endpoint's own error
+/// builder never sees this request at all.
+#[actix_rt::test]
+async fn a_basic_attempt_is_challenged_with_basic() {
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    for header in ["Basic !!!not-base64!!!", "Basic bm8tY29sb24taGVyZQ=="] {
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+            .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+            .insert_header(("Authorization", header))
+            .set_payload("grant_type=client_credentials")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status().as_u16(), 401, "header {header:?}");
+        assert_eq!(
+            resp.headers()
+                .get("WWW-Authenticate")
+                .and_then(|v| v.to_str().ok()),
+            Some("Basic realm=\"axiam\""),
+            "header {header:?}"
+        );
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(
+            body["error"], "invalid_client",
+            "a malformed Basic header is refused uniformly (SEC-086); header {header:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

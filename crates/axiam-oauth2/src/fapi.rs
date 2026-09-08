@@ -362,7 +362,13 @@ pub fn validate_registration<'a>(
                 });
             }
         }
-        ClientAuthMethod::ClientSecretPost => {}
+        // Both shared-secret spellings register the same way: the secret is
+        // minted by the repository for every client, so there is nothing
+        // extra to validate. W8's `ClientSecretBasic` is enumerated rather
+        // than folded into a `_` arm deliberately — this `match` being
+        // exhaustive is what forces the next method added to the enum to be
+        // considered here, which is the mistake the module docs warn about.
+        ClientAuthMethod::ClientSecretPost | ClientAuthMethod::ClientSecretBasic => {}
     }
 
     // Thumbprints are validated whenever any are registered, even under
@@ -946,17 +952,27 @@ mod tests {
         );
     }
 
+    /// M9 / T9.5 — layer 1. Both spellings of a shared secret are refused, by
+    /// the same arm and with no new code: `validate_registration` asks
+    /// `is_strong()` rather than enumerating variants. W8 added
+    /// `ClientSecretBasic` to this list and nothing else to this function,
+    /// which is the property the parametrisation is here to demonstrate.
     #[test]
     fn fapi_with_secret_auth_is_refused() {
-        let mut c = fapi_client();
-        c.token_endpoint_auth_method = ClientAuthMethod::ClientSecretPost;
-        c.tls_client_auth_san_dns = None;
-        assert_eq!(
-            validate_registration(&c),
-            Err(FapiRegistrationError::WeakClientAuth {
-                method: ClientAuthMethod::ClientSecretPost
-            })
-        );
+        for method in [
+            ClientAuthMethod::ClientSecretPost,
+            ClientAuthMethod::ClientSecretBasic,
+        ] {
+            let mut c = fapi_client();
+            c.token_endpoint_auth_method = method;
+            c.tls_client_auth_san_dns = None;
+            assert_eq!(
+                validate_registration(&c),
+                Err(FapiRegistrationError::WeakClientAuth { method }),
+                "method = {}",
+                method.as_str()
+            );
+        }
     }
 
     #[test]
@@ -997,18 +1013,29 @@ mod tests {
     /// still be refused at request time rather than served.
     #[test]
     fn fapi_token_request_refuses_a_tampered_row() {
-        let mut weak_auth = fapi_client();
-        weak_auth.token_endpoint_auth_method = ClientAuthMethod::ClientSecretPost;
-        assert!(
-            enforce_token_request(
-                &weak_auth,
-                TokenRequestEvidence {
-                    presented_certificate: true,
-                    verified_dpop_proof: false,
-                }
-            )
-            .is_err()
-        );
+        // M9 / T9.6 — layer 2, parametrised over both weak methods. An
+        // operator who edits a row to `client_secret_basic` after
+        // registration gets the same `MTLS_AUTH_FAILED` and the same
+        // `error!`, because this gate also asks `is_strong()`.
+        for method in [
+            ClientAuthMethod::ClientSecretPost,
+            ClientAuthMethod::ClientSecretBasic,
+        ] {
+            let mut weak_auth = fapi_client();
+            weak_auth.token_endpoint_auth_method = method;
+            assert!(
+                enforce_token_request(
+                    &weak_auth,
+                    TokenRequestEvidence {
+                        presented_certificate: true,
+                        verified_dpop_proof: false,
+                    }
+                )
+                .is_err(),
+                "method = {}",
+                method.as_str()
+            );
+        }
 
         let mut unbound = fapi_client();
         unbound.tls_client_certificate_bound_access_tokens = false;
@@ -1166,19 +1193,25 @@ mod tests {
     }
 
     /// A secret is still not strong authentication, whichever constraint the
-    /// client pairs it with.
+    /// client pairs it with — and whichever channel it travels in (W8).
     #[test]
     fn dpop_does_not_make_a_secret_client_fapi() {
-        let mut c = base_client();
-        c.profile = ClientProfile::Fapi2;
-        c.require_par = true;
-        c.dpop_bound_access_tokens = true;
-        assert_eq!(
-            validate_registration(&c),
-            Err(FapiRegistrationError::WeakClientAuth {
-                method: ClientAuthMethod::ClientSecretPost
-            })
-        );
+        for method in [
+            ClientAuthMethod::ClientSecretPost,
+            ClientAuthMethod::ClientSecretBasic,
+        ] {
+            let mut c = base_client();
+            c.profile = ClientProfile::Fapi2;
+            c.require_par = true;
+            c.dpop_bound_access_tokens = true;
+            c.token_endpoint_auth_method = method;
+            assert_eq!(
+                validate_registration(&c),
+                Err(FapiRegistrationError::WeakClientAuth { method }),
+                "method = {}",
+                method.as_str()
+            );
+        }
     }
 
     /// The request-time gate must ask for the evidence the *registration* says

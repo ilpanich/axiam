@@ -751,6 +751,68 @@ contract minor bump (1.41) with **no SDK code change** and no downstream
 re-sync beyond the text. The escalation in §10 is about whether the maintainer
 accepts the header-leakage surface at all, not about SDK work.
 
+**W8 amendment — what landed, and the four places this section was incomplete.**
+
+The mechanism above survived contact with the tree; nothing in it was wrong.
+Four things it did not say were needed, and one of them is what makes the
+method usable at all.
+
+1. **The `client_id` may arrive in the header alone, and had to.** §4.7 said the
+   header's `client_id` "must equal the registered one", which presumes a body
+   parameter to compare against. RFC 6749 §2.3.1 makes that parameter
+   **optional** for a client authenticating through the header, and the Basic OP
+   suite takes it up — 37 of its 38 modules send the id only in the header.
+   AXIAM's three grants each did `req.client_id.as_deref().ok_or(…)`, so without
+   a change the new method would have been unusable by exactly the clients it
+   was added for. `resolve_client_id` (`token.rs`) now takes the body parameter
+   or the header's, refuses the two when they **disagree** with
+   `invalid_request`, and does so *before* the client lookup — a comparison of
+   two strings from the same request creates no client-existence oracle, so
+   SEC-086's ordering is untouched.
+
+2. **The two-method refusal is ordered after credential verification.** §4.7
+   specified `invalid_request` for a body `client_secret` on a
+   `client_secret_basic` client but not where in the order it goes, and the
+   obvious placement — first — reopens SEC-086: `invalid_request` would then be
+   reachable *only* for a client that exists and is registered for Basic, so a
+   caller sending junk in both channels could decide both facts. The refusal now
+   runs after `verify_client_secret` succeeds, which means the
+   malformed-request answer is only ever given to a caller who has already
+   proven possession of the secret, and everybody else gets the uniform
+   `invalid_client`. Pinned by
+   `client_secret_basic_test.rs::t9_3_a_wrong_basic_secret_plus_a_body_secret_reveals_nothing`.
+
+3. **The `WWW-Authenticate` scheme needed a structural change, not a call-site
+   one.** `build_oauth2_error_response` is called from ~35 places inside the
+   four endpoints, several of them refusals raised before any client is loaded,
+   so threading a challenge through them would have left the wrong scheme on
+   whichever path nobody thought about — including the malformed-header refusal,
+   which is the one path where a Basic client is guaranteed to be waiting for it.
+   Instead the four public handlers are now thin wrappers that compute the
+   challenge from the request, delegate to a private `*_inner`, and rewrite the
+   header on any 401 that comes back. The challenge is a property of the
+   request, which is exactly what RFC 6749 §5.2 says it is.
+
+4. **`revoke`, `introspect` and PAR keep `client_id` required in the body.**
+   §4.7 lists all four handlers as parsing the header, and they do — a
+   `client_secret_basic` client's *secret* is read from the header at each of
+   them. But `RevokeRequest`, `IntrospectRequest` and
+   `PushedAuthorizationRequest` type `client_id` as a required `String`, and
+   `sdks/CONTRACT.md` §5 rule 4 states that requirement normatively. Relaxing it
+   would be a wire-contract change with downstream SDK re-sync, which decision A
+   explicitly costs at zero, and none of the three endpoints appears in the
+   Basic OP plan. A Basic client calling them sends `client_id` in the body as
+   every client does today.
+
+Two smaller notes. The `Cargo.toml` `[lints]` opt-in was not touched — W8 adds
+one documented variant to `axiam-core`, not the 993 sites that crate's opt-in
+needs. And the admin UI gained the method in its selector
+(`frontend/src/services/oauth2clients.ts`, `OAuth2ClientsPage.tsx`): §4.7's I5
+touchpoint list did not mention the frontend, but `CLIENT_AUTH_METHODS` is a
+hand-maintained mirror of the backend enum, and leaving it stale would have made
+the method unregistrable from the admin UI while `STRONG_AUTH_METHODS`'
+allow-list shape meant the FAPI validation needed no edit at all.
+
 ### 4.8 G8 — `address` and `phone` scopes (GDPR item)
 
 **Mechanism.**

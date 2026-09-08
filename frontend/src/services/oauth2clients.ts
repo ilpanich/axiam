@@ -14,9 +14,18 @@ import { fetchAllPages } from "@/services/_pagination";
 export const CLIENT_PROFILES = ["standard", "fapi2"] as const;
 export type ClientProfile = (typeof CLIENT_PROFILES)[number];
 
-/** X5.1 — how a client authenticates at the token endpoint (RFC 8705 §2). */
+/**
+ * X5.1 — how a client authenticates at the token endpoint (RFC 8705 §2).
+ *
+ * Mirrors `ClientAuthMethod` in `crates/axiam-core/src/models/oauth2_client.rs`
+ * and is ordered the same way, which is the operator's order of preference
+ * rather than the enum's declaration order by accident: `client_secret_post`
+ * first because the header channel `client_secret_basic` uses is the one
+ * reverse proxies and APM agents log (W8).
+ */
 export const CLIENT_AUTH_METHODS = [
   "client_secret_post",
+  "client_secret_basic",
   "tls_client_auth",
   "self_signed_tls_client_auth",
   "private_key_jwt",
@@ -25,9 +34,10 @@ export type ClientAuthMethod = (typeof CLIENT_AUTH_METHODS)[number];
 
 /**
  * The two methods FAPI 2.0 §5.3.1.1 accepts, mirroring
- * `ClientAuthMethod::is_strong` on the backend. `client_secret_post` is the
- * only weak one, but this is written as an allow-list so a future strong
- * method joins by being listed rather than by not being excluded.
+ * `ClientAuthMethod::is_strong` on the backend. The two shared-secret
+ * spellings are the weak ones, but this is written as an allow-list so a
+ * future strong method joins by being listed rather than by not being
+ * excluded — which is also why W8's `client_secret_basic` needed no edit here.
  */
 export const STRONG_AUTH_METHODS: readonly ClientAuthMethod[] = [
   "tls_client_auth",

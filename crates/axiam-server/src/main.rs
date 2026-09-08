@@ -2465,7 +2465,15 @@ async fn main() -> std::io::Result<()> {
             if let Some(certs) = session.peer_certificates()
                 && let Some(leaf) = certs.first()
             {
-                match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref()) {
+                // Whether this certificate chained to a configured anchor
+                // cannot be read off the handshake result — rustls's
+                // `ClientCertVerified` carries no payload and the verifier is
+                // given no connection handle to key a side channel on — so it
+                // is re-derived here, where the peer chain is in hand. Free
+                // under every client-auth policy except `optional_self_signed`;
+                // see `axiam_server::tls::peer_certificate_trust`.
+                let trust = axiam_server::tls::peer_certificate_trust(leaf, &certs[1..]);
+                match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref(), trust) {
                     Ok(vc) => {
                         ext.insert(vc);
                     }

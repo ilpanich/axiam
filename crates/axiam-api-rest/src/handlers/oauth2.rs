@@ -1590,9 +1590,13 @@ fn token_request_context(req: &HttpRequest) -> Result<TokenRequestContext, Box<H
     // header silently equivalent to sending none.
     let basic = basic_credentials_from_request(req)?;
 
+    // The trust level travels with the certificate rather than being inferred
+    // here: `authenticate_mtls_client` refuses a self-asserted certificate for
+    // `tls_client_auth` (§2.1) and accepts one for `self_signed_tls_client_auth`
+    // (§2.2), and this is the seam that lets it tell them apart.
     let certificate = req
         .conn_data::<VerifiedClientCert>()
-        .map(|verified| PresentedCertificate::from_der(&verified.der));
+        .map(|verified| PresentedCertificate::from_der(&verified.der, verified.trust));
 
     Ok(TokenRequestContext {
         client_certificate: certificate,

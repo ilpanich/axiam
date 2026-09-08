@@ -99,14 +99,30 @@ export AXIAM__SERVER__TLS__ENABLED=true
 export AXIAM__SERVER__TLS__CERT_PATH="$CERT"
 export AXIAM__SERVER__TLS__KEY_PATH="$KEY"
 
-# `optional`, and this is load-bearing rather than lax. ONE listener serves both
-# lanes: the FAPI plans authenticate with a client certificate, and the Basic OP
-# plan's clients have none at all. `required` would refuse the Basic clients in
-# the handshake — forty failures for a reason that is this line — and `off`
-# would leave the FAPI clients with no way to present the credential they are
-# registered under. A presented certificate is still verified against the CA
-# below; `optional` widens who may connect, not who may authenticate.
-export AXIAM__SERVER__TLS__CLIENT_AUTH="${AXIAM__SERVER__TLS__CLIENT_AUTH:-optional}"
+# `optional_self_signed`, and every word of it is load-bearing rather than lax.
+#
+# ONE listener serves every lane. The FAPI plans authenticate with a client
+# certificate and the Basic OP plan's clients have none at all, so `required`
+# would refuse the Basic clients in the handshake — forty failures for a reason
+# that is this line — and `off` would leave the FAPI clients with no way to
+# present the credential they are registered under. That is why the `optional`
+# half.
+#
+# The `_self_signed` half is what lets the `self_signed_tls_client_auth` client
+# connect at all. Its certificate is self-signed BY DESIGN (RFC 8705 §2.2
+# identifies a client by its registered `x5t#S256`, not by an issuer), so a
+# chain-building verifier refuses it and rustls answers `bad_certificate`
+# before AXIAM sees a request. Under plain `optional` that was 34 of 37 FAPI 2.0
+# modules INTERRUPTED with no HTTP status at all; only
+# `discovery-end-point-verification` passed, because it is the one module that
+# presents no certificate.
+#
+# It does NOT widen who may authenticate. A certificate that chains to nothing
+# is marked self-asserted and can authenticate exactly one thing: an OAuth2
+# client registered for `self_signed_tls_client_auth` whose thumbprint matches.
+# `tls_client_auth` (§2.1) and device/IoT certificate authentication both refuse
+# it. The CA below still governs everything else.
+export AXIAM__SERVER__TLS__CLIENT_AUTH="${AXIAM__SERVER__TLS__CLIENT_AUTH:-optional_self_signed}"
 export AXIAM__SERVER__TLS__CLIENT_CA_PATH="$CA"
 
 # The issuer the suite will compare against. Must equal AXIAM_ISSUER in

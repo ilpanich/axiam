@@ -18,7 +18,7 @@
 use actix_web::HttpRequest;
 use actix_web::web;
 use axiam_core::error::AxiamError;
-use axiam_core::models::certificate::DeviceIdentity;
+use axiam_core::models::certificate::{CertTrust, DeviceIdentity};
 use sha2::{Digest, Sha256};
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -38,6 +38,16 @@ use crate::state::AppState;
 /// the verified peer chain — not a header — it is a trusted identity assertion.
 #[derive(Debug, Clone)]
 pub struct VerifiedClientCert {
+    /// What the TLS layer was able to say about this certificate: whether it
+    /// chained to a configured trust anchor, or was accepted self-asserted
+    /// under [`ClientAuth::OptionalSelfSigned`][cauth] (RFC 8705 §2.2).
+    ///
+    /// Every consumer must decide what it does with a
+    /// [`CertTrust::SelfAsserted`] certificate. Device authentication, in this
+    /// very module, refuses it.
+    ///
+    /// [cauth]: crate::config::ClientAuth::OptionalSelfSigned
+    pub trust: CertTrust,
     /// DER encoding of the verified leaf certificate.
     pub der: Vec<u8>,
     /// Subject Alternative Names (DNS/URI/RFC822/IP) parsed from the leaf, in
@@ -51,9 +61,16 @@ pub struct VerifiedClientCert {
 impl VerifiedClientCert {
     /// Parse SAN entries and the SPKI fingerprint from a DER-encoded leaf
     /// certificate. Returns an error string only if the DER cannot be parsed as
-    /// an X.509 certificate (rustls has already verified the chain by this
+    /// an X.509 certificate (rustls has already accepted the same bytes by this
     /// point, so this parse is expected to succeed).
-    pub fn from_der(der: &[u8]) -> Result<Self, String> {
+    ///
+    /// `trust` is not inferred, and there is no default: it is the caller's
+    /// statement of what the *handshake* established, and the only caller in a
+    /// position to know is `axiam-server`'s `on_connect` hook, which asks
+    /// `axiam_server::tls::peer_certificate_trust`. A defaulted parameter here
+    /// would have made [`CertTrust::ChainedToAnchor`] — the privileged value —
+    /// what a future call site gets by saying nothing.
+    pub fn from_der(der: &[u8], trust: CertTrust) -> Result<Self, String> {
         let (_, cert) =
             parse_x509_certificate(der).map_err(|e| format!("parse client cert DER: {e}"))?;
 
@@ -75,9 +92,62 @@ impl VerifiedClientCert {
         let spki_sha256 = hex::encode(Sha256::digest(cert.public_key().raw));
 
         Ok(Self {
+            trust,
             der: der.to_vec(),
             sans,
             spki_sha256,
+        })
+    }
+
+    /// Refuse this certificate for device/IoT authentication unless it chained
+    /// to a configured mTLS trust anchor.
+    ///
+    /// # Why this exists at all (B-06)
+    ///
+    /// Device authentication's entire trust model is that the certificate was
+    /// issued by a CA an administrator flagged as an `mtls_trust_anchor`; the
+    /// lookup it performs resolves the certificate against the tenant's issued
+    /// certificates. A [`CertTrust::SelfAsserted`] certificate carries no such
+    /// issuance — it is admitted to the handshake only under
+    /// [`ClientAuth::OptionalSelfSigned`][cauth], and only so that an RFC 8705
+    /// §2.2 OAuth2 client can present a credential whose SHA-256 an
+    /// administrator registered. Letting one through here would be the
+    /// native-listener twin of **B-06**, where a certificate under a
+    /// never-flagged CA authenticated through the proxy header, reopened on the
+    /// listener that was supposed to be the trustworthy one.
+    ///
+    /// # Why it is a separate method
+    ///
+    /// [`CertificateAuthenticated::extract`] needs an `AppState<C>` and a live
+    /// `DeviceAuthService`, so it is reachable only from an integration test —
+    /// and the native-mTLS branch is not reachable even from there, because
+    /// `actix_web::test` performs no TLS handshake and offers no way to
+    /// populate the connection extensions this branch reads. Pulling the
+    /// decision out gives it somewhere to be tested at all.
+    ///
+    /// [cauth]: crate::config::ClientAuth::OptionalSelfSigned
+    ///
+    /// # Errors
+    ///
+    /// [`AxiamError::AuthenticationFailed`] for a self-asserted certificate.
+    /// The message names the actual problem — no trusted issuer — rather than
+    /// falling through to the proxy-header branch's message, which would tell
+    /// an operator to go and set `TRUST_FORWARDED_CLIENT_CERT`: advice that
+    /// would not help here and would, if taken, make the deployment worse.
+    pub fn check_usable_for_device_auth(&self) -> Result<(), AxiamError> {
+        if self.trust.is_chained_to_anchor() {
+            return Ok(());
+        }
+        tracing::warn!(
+            "refusing device certificate authentication: the peer certificate chains to \
+             no configured mTLS trust anchor. Self-asserted certificates are accepted by \
+             the listener only for RFC 8705 §2.2 OAuth2 client authentication \
+             (self_signed_tls_client_auth)"
+        );
+        Err(AxiamError::AuthenticationFailed {
+            reason: "client certificate authentication requires a certificate issued by a \
+                     trusted mTLS certificate authority"
+                .into(),
         })
     }
 }
@@ -128,6 +198,10 @@ impl CertificateAuthenticated {
         // terminated upstream (no verified cert on this connection) AND the
         // operator has said that upstream is trusted to set the header.
         let identity_result = if let Some(verified) = req.conn_data::<VerifiedClientCert>() {
+            // A certificate that chains to nothing must not authenticate a
+            // device, however well-formed it is and whatever it says about
+            // itself. See `check_usable_for_device_auth` for why (B-06).
+            verified.check_usable_for_device_auth()?;
             service.authenticate_der(&verified.der).await
         } else {
             // A certificate is public data, and every check on the header path
@@ -309,7 +383,8 @@ mod tests {
             .expect("generate self-signed cert");
         let der = cert.cert.der().to_vec();
 
-        let parsed = VerifiedClientCert::from_der(&der).expect("parse DER");
+        let parsed =
+            VerifiedClientCert::from_der(&der, CertTrust::ChainedToAnchor).expect("parse DER");
         assert!(
             parsed.sans.iter().any(|s| s == "DNS:device.example.com"),
             "expected a DNS SAN entry, got: {:?}",
@@ -329,7 +404,78 @@ mod tests {
 
     #[test]
     fn from_der_rejects_garbage_bytes() {
-        let result = VerifiedClientCert::from_der(b"not a real certificate");
+        let result =
+            VerifiedClientCert::from_der(b"not a real certificate", CertTrust::SelfAsserted);
         assert!(result.is_err(), "garbage DER must fail to parse");
+    }
+
+    // -----------------------------------------------------------------------
+    // The B-06 guard: device authentication and self-asserted certificates.
+    //
+    // `client_auth = optional_self_signed` lets a certificate that chains to
+    // nothing complete a TLS handshake, so that an RFC 8705 §2.2 OAuth2 client
+    // can present the credential its registration is built around. Device
+    // authentication must be unaffected by that: its model is issuance by a
+    // flagged mTLS trust anchor, and a self-signed certificate has no issuer
+    // anybody flagged.
+    // -----------------------------------------------------------------------
+
+    fn device_cert(trust: CertTrust) -> VerifiedClientCert {
+        let cert = rcgen::generate_simple_self_signed(vec!["device.example.com".to_string()])
+            .expect("generate self-signed cert");
+        VerifiedClientCert::from_der(cert.cert.der().as_ref(), trust).expect("parse DER")
+    }
+
+    /// A self-asserted certificate cannot authenticate a device; a chained one
+    /// can.
+    ///
+    /// The certificates in both halves are generated the same way, so the only
+    /// difference between "refused" and "permitted" is what the TLS layer said
+    /// about the connection — which is the contract.
+    #[test]
+    fn device_auth_refuses_a_self_asserted_certificate() {
+        assert!(
+            device_cert(CertTrust::ChainedToAnchor)
+                .check_usable_for_device_auth()
+                .is_ok(),
+            "control: a certificate that chained to a configured anchor is device auth's \
+             normal case and must still pass"
+        );
+
+        let err = device_cert(CertTrust::SelfAsserted)
+            .check_usable_for_device_auth()
+            .expect_err("a certificate that chains to nothing must not authenticate a device");
+        assert!(
+            matches!(err, AxiamError::AuthenticationFailed { .. }),
+            "must fail authentication (401), not authorization or anything softer; got {err:?}"
+        );
+    }
+
+    /// The refusal must not send an operator to the wrong knob.
+    ///
+    /// Falling through to the proxy-header branch would have produced its error
+    /// text, which tells an operator to set
+    /// `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT`. That would not fix this —
+    /// there is no forwarded header on a native mTLS connection — and an
+    /// operator who took the advice would have widened a *different* trust
+    /// boundary while chasing this one. So the message is asserted, not just
+    /// the variant.
+    #[test]
+    fn the_device_auth_refusal_names_the_issuer_problem_not_the_header_knob() {
+        let AxiamError::AuthenticationFailed { reason } = device_cert(CertTrust::SelfAsserted)
+            .check_usable_for_device_auth()
+            .expect_err("must be refused")
+        else {
+            panic!("expected AuthenticationFailed");
+        };
+        assert!(
+            !reason.contains("TRUST_FORWARDED_CLIENT_CERT")
+                && !reason.contains("X-Client-Certificate"),
+            "the refusal must not point at the proxy-header configuration; got {reason:?}"
+        );
+        assert!(
+            reason.contains("certificate authority"),
+            "the refusal must say what is actually wrong — no trusted issuer; got {reason:?}"
+        );
     }
 }

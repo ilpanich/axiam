@@ -45,6 +45,7 @@
 //! JWKS-driven rotation: a self-signed client's new certificate must be
 //! registered rather than merely published. The operator guide says so.
 
+use axiam_core::models::certificate::CertTrust;
 use axiam_core::models::oauth2_client::{ClientAuthMethod, OAuth2Client};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
@@ -67,9 +68,12 @@ use crate::error::OAuth2Error;
 /// debugging a genuine onboarding problem can see them and an attacker cannot.
 pub(crate) const MTLS_AUTH_FAILED: &str = "invalid client credentials";
 
-/// A client certificate that the TLS layer verified on this connection.
+/// A client certificate that the TLS layer accepted on this connection.
 ///
-/// Constructed only from a chain rustls accepted.
+/// Constructed only from a certificate rustls accepted — which, under
+/// `client_auth = optional_self_signed`, includes one that chains to no
+/// configured anchor. [`Self::trust`] records which, and
+/// [`authenticate_mtls_client`] is where that distinction is spent.
 ///
 /// # Why the X.509 parse is lazy
 ///
@@ -93,6 +97,15 @@ pub struct PresentedCertificate {
     /// Base64url (no padding) SHA-256 digest of [`Self::der`] — the
     /// `x5t#S256` value of RFC 8705 §3.1.
     pub thumbprint_s256: String,
+    /// Whether the TLS layer built a chain for this certificate, or accepted
+    /// it self-asserted (RFC 8705 §2.2).
+    ///
+    /// The distinction is what keeps §2.1 and §2.2 apart at the one point
+    /// where it matters. It is *not* a property of the certificate — the same
+    /// bytes would be [`CertTrust::ChainedToAnchor`] on a listener whose
+    /// anchor set includes their issuer — so it has to be carried from the
+    /// handshake rather than recomputed here.
+    pub trust: CertTrust,
 }
 
 /// The identity fields of a certificate, parsed on demand.
@@ -134,14 +147,19 @@ pub struct CertificateIdentity {
 impl PresentedCertificate {
     /// Wrap a DER leaf certificate and compute its `x5t#S256` thumbprint.
     ///
+    /// `trust` says what the TLS handshake established about these bytes and
+    /// has no default: the two levels authorise different things, so the caller
+    /// states which one it observed. See [`CertTrust`].
+    ///
     /// Infallible: a SHA-256 over arbitrary bytes always succeeds, and the
     /// bytes are not interpreted here. Anything that needs them to be a
     /// well-formed certificate goes through [`Self::identity`], which reports
     /// the parse failure at the point where it actually matters.
-    pub fn from_der(der: &[u8]) -> Self {
+    pub fn from_der(der: &[u8], trust: CertTrust) -> Self {
         Self {
             der: der.to_vec(),
             thumbprint_s256: thumbprint_s256(der),
+            trust,
         }
     }
 
@@ -245,10 +263,15 @@ fn thumbprints_match(a: &str, b: &str) -> bool {
 ///    to make the state unreachable; this is the second line, because a row
 ///    edited directly in the database bypasses registration validation and the
 ///    failure mode of guessing here is *authenticating every certificate*.
-/// 3. **The certificate does not match.** A real certificate, verified by
+/// 3. **The certificate does not match.** A real certificate, accepted by
 ///    rustls, belonging to somebody else.
+/// 4. **The certificate is not trusted the way the method requires.** A
+///    `tls_client_auth` (§2.1) client presenting a certificate that chains to
+///    no configured anchor, which `client_auth = optional_self_signed` makes
+///    reachable. §2.1 matches a name a CA vouched for; a self-signed
+///    certificate vouches for itself.
 ///
-/// All three answer `invalid_client` with [`MTLS_AUTH_FAILED`]. See that
+/// All four answer `invalid_client` with [`MTLS_AUTH_FAILED`]. See that
 /// constant for why.
 pub fn authenticate_mtls_client(
     client: &OAuth2Client,
@@ -272,6 +295,13 @@ pub fn authenticate_mtls_client(
 
     let matched = match method {
         ClientAuthMethod::SelfSignedTlsClientAuth => {
+            // Deliberately indifferent to `cert.trust`. §2.2's credential is
+            // the certificate itself: the thumbprint comparison below *is* the
+            // authentication, and it is no weaker for the certificate having
+            // chained to a CA as well. This is the one branch a
+            // `CertTrust::SelfAsserted` certificate can reach, and reaching it
+            // still requires an administrator to have registered its exact
+            // SHA-256.
             let registered = &client.self_signed_tls_client_auth_thumbprints;
             if registered.is_empty() {
                 tracing::warn!(
@@ -289,6 +319,30 @@ pub fn authenticate_mtls_client(
             })
         }
         ClientAuthMethod::TlsClientAuth => {
+            // §2.1 is the PKI method, and its registered subject DN or SAN is
+            // an assertion *by a certificate authority*. A certificate that
+            // chains to nothing asserts its own subject, so matching a DN
+            // against one would authenticate whoever typed that DN into
+            // `openssl req -subj`.
+            //
+            // A no-op until `client_auth = optional_self_signed` existed —
+            // rustls could not have produced an unchained certificate, so this
+            // condition was unreachable. It is written as a guard rather than
+            // left to that invariant precisely because the invariant has now
+            // been made configurable, and the next thing to make it
+            // configurable again would not come past this file.
+            if !cert.trust.is_chained_to_anchor() {
+                tracing::warn!(
+                    client_id = %client.client_id,
+                    "tls_client_auth (RFC 8705 §2.1) refused: the presented certificate \
+                     chains to no configured trust anchor. §2.1 authenticates by a subject \
+                     DN or SAN vouched for by a CA; a client whose certificate is \
+                     self-signed must be registered for self_signed_tls_client_auth (§2.2) \
+                     with its certificate thumbprint"
+                );
+                return Err(OAuth2Error::InvalidClient(MTLS_AUTH_FAILED.into()));
+            }
+
             match client.mtls_binding_count() {
                 0 => {
                     tracing::warn!(
@@ -449,13 +503,30 @@ mod tests {
     }
 
     /// A real certificate, so the parser is exercised rather than mocked.
+    ///
+    /// Presented as [`CertTrust::ChainedToAnchor`], which is what every
+    /// certificate reaching this function carried before
+    /// `client_auth = optional_self_signed` existed. The bytes rcgen produces
+    /// are self-signed, but that is a property of the *fixture*, not of the
+    /// trust level: whether a certificate chained is a fact about the
+    /// listener's anchor set, and these tests are about DN and SAN matching.
+    /// The tests that care about the trust level state it explicitly through
+    /// [`cert_with_sans_trusted_as`].
     fn cert_with_sans(sans: &[&str]) -> (Vec<u8>, PresentedCertificate) {
+        cert_with_sans_trusted_as(sans, CertTrust::ChainedToAnchor)
+    }
+
+    /// The same fixture with the trust level spelled out.
+    fn cert_with_sans_trusted_as(
+        sans: &[&str],
+        trust: CertTrust,
+    ) -> (Vec<u8>, PresentedCertificate) {
         let generated = rcgen::generate_simple_self_signed(
             sans.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
         )
         .expect("generate self-signed cert");
         let der = generated.cert.der().to_vec();
-        (der.clone(), PresentedCertificate::from_der(&der))
+        (der.clone(), PresentedCertificate::from_der(&der, trust))
     }
 
     /// The parsed identity of a generated certificate, for the tests that need
@@ -487,7 +558,7 @@ mod tests {
     /// the parse failure surfaces. This is the seam the lazy parse introduced.
     #[test]
     fn garbage_der_yields_a_thumbprint_but_no_identity() {
-        let cert = PresentedCertificate::from_der(b"not a certificate");
+        let cert = PresentedCertificate::from_der(b"not a certificate", CertTrust::ChainedToAnchor);
         assert_eq!(cert.thumbprint_s256.len(), 43);
         assert!(cert.identity().is_err());
     }
@@ -496,7 +567,7 @@ mod tests {
     /// slip through the `tls_client_auth` branch on a parse it never did.
     #[test]
     fn garbage_der_cannot_authenticate_a_tls_client_auth_client() {
-        let cert = PresentedCertificate::from_der(b"not a certificate");
+        let cert = PresentedCertificate::from_der(b"not a certificate", CertTrust::ChainedToAnchor);
         let mut c = client(ClientAuthMethod::TlsClientAuth);
         c.tls_client_auth_san_dns = Some("client.example.com".into());
         assert!(authenticate_mtls_client(&c, Some(&cert)).is_err());
@@ -581,7 +652,7 @@ mod tests {
         params.distinguished_name = dn;
         let key = rcgen::KeyPair::generate().unwrap();
         let der = params.self_signed(&key).unwrap().der().to_vec();
-        let cert = PresentedCertificate::from_der(&der);
+        let cert = PresentedCertificate::from_der(&der, CertTrust::ChainedToAnchor);
         let identity = identity_of(&cert);
 
         // Rendered by the library, DER order, ", " separated.
@@ -614,6 +685,137 @@ mod tests {
                 "a client registered with {dn:?} must authenticate"
             );
         }
+    }
+
+    // -- RFC 8705's two trust models (§2.1 vs §2.2) ----------------------
+    //
+    // These pin the OPERATOR-FACING contract — "a self-signed certificate
+    // authenticates a §2.2 client and nothing else" — rather than the server's
+    // own idea of what it did. `subject_dn_match_is_exact` below is the
+    // cautionary example: it builds its expectation from `identity_of(&cert)`,
+    // so it compares the server against itself and passed throughout a period
+    // in which no documented registration could work.
+
+    /// A `tls_client_auth` (§2.1) client is refused a self-asserted
+    /// certificate **even when the DN matches exactly**.
+    ///
+    /// This is the guard, and the DN match is the whole point of the test: §2.1
+    /// authenticates by a name a certificate authority vouched for, and the one
+    /// thing an attacker can trivially do with a self-signed certificate is put
+    /// any name they like in it. `openssl req -subj "/CN=..."` is the entire
+    /// attack. So the registered DN matching must NOT be sufficient here — if
+    /// this test ever passes by having chosen a non-matching DN, it is testing
+    /// nothing.
+    #[test]
+    fn tls_client_auth_refuses_a_self_asserted_certificate_whose_dn_matches() {
+        let (der, _) = cert_with_sans(&["client.example.com"]);
+
+        let chained = PresentedCertificate::from_der(&der, CertTrust::ChainedToAnchor);
+        let self_asserted = PresentedCertificate::from_der(&der, CertTrust::SelfAsserted);
+
+        // One registration, used for both attempts, so the ONLY difference
+        // between the two outcomes below is the trust level.
+        let dn = identity_of(&chained).subject_dn_rfc2253;
+        let mut c = client(ClientAuthMethod::TlsClientAuth);
+        c.tls_client_auth_subject_dn = Some(dn.clone());
+
+        assert!(
+            authenticate_mtls_client(&c, Some(&chained)).is_ok(),
+            "control: the same certificate and the same registered DN {dn:?} must \
+             authenticate when the certificate chained to an anchor — otherwise the \
+             refusal below proves nothing"
+        );
+        assert!(
+            matches!(
+                authenticate_mtls_client(&c, Some(&self_asserted)),
+                Err(OAuth2Error::InvalidClient(_))
+            ),
+            "tls_client_auth must refuse a certificate that chains to no anchor, however \
+             exactly its subject DN matches what was registered"
+        );
+    }
+
+    /// The same guard on the SAN branches, which are separate code paths.
+    #[test]
+    fn tls_client_auth_refuses_a_self_asserted_certificate_whose_san_matches() {
+        let (_, cert) = cert_with_sans_trusted_as(&["client.example.com"], CertTrust::SelfAsserted);
+        let mut c = client(ClientAuthMethod::TlsClientAuth);
+        c.tls_client_auth_san_dns = Some("client.example.com".into());
+        assert!(
+            authenticate_mtls_client(&c, Some(&cert)).is_err(),
+            "a SAN in a self-signed certificate is a name its holder chose"
+        );
+    }
+
+    /// A `self_signed_tls_client_auth` (§2.2) client authenticates with a
+    /// self-asserted certificate whose thumbprint is registered.
+    ///
+    /// The defect this whole change exists for: AXIAM accepts a §2.2 client
+    /// registration, and before `client_auth = optional_self_signed` no such
+    /// client could complete a TLS handshake — every conformance module
+    /// INTERRUPTED with no HTTP status at all, because the connection died
+    /// before AXIAM saw a request.
+    ///
+    /// The registered thumbprint is computed the way an ADMINISTRATOR computes
+    /// it — `openssl x509 -outform der | sha256sum`, then base64url without
+    /// padding — rather than by asking the certificate for its own
+    /// `thumbprint_s256`. Reading it back off the value under test is exactly
+    /// the self-comparison that let two defects survive on this branch.
+    #[test]
+    fn self_signed_tls_client_auth_accepts_a_self_asserted_certificate() {
+        use base64::Engine as _;
+
+        let (der, cert) =
+            cert_with_sans_trusted_as(&["client.example.com"], CertTrust::SelfAsserted);
+
+        let registered = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(<Sha256 as Digest>::digest(&der));
+
+        let mut c = client(ClientAuthMethod::SelfSignedTlsClientAuth);
+        c.self_signed_tls_client_auth_thumbprints = vec![registered];
+
+        assert!(
+            authenticate_mtls_client(&c, Some(&cert)).is_ok(),
+            "a §2.2 client whose registered x5t#S256 matches must authenticate with a \
+             certificate that chains to nothing — that is the entire method"
+        );
+    }
+
+    /// ...and only that thumbprint. Accepting the certificate at the TLS layer
+    /// must not have made §2.2 accept *any* self-signed certificate: the
+    /// thumbprint comparison is the authentication.
+    #[test]
+    fn self_signed_tls_client_auth_refuses_an_unregistered_thumbprint() {
+        let (_, registered_cert) =
+            cert_with_sans_trusted_as(&["client.example.com"], CertTrust::SelfAsserted);
+        let (_, stranger) =
+            cert_with_sans_trusted_as(&["client.example.com"], CertTrust::SelfAsserted);
+
+        let mut c = client(ClientAuthMethod::SelfSignedTlsClientAuth);
+        c.self_signed_tls_client_auth_thumbprints = vec![registered_cert.thumbprint_s256.clone()];
+
+        assert!(
+            authenticate_mtls_client(&c, Some(&registered_cert)).is_ok(),
+            "control: the registered certificate authenticates"
+        );
+        assert!(
+            authenticate_mtls_client(&c, Some(&stranger)).is_err(),
+            "a DIFFERENT self-signed certificate with the same SAN must not authenticate; \
+             §2.2's credential is the thumbprint, not self-signedness"
+        );
+    }
+
+    /// A §2.2 client may also present a CA-issued certificate. Nothing in RFC
+    /// 8705 §2.2 requires the certificate to chain to nothing — it requires the
+    /// server to match it against what the client registered, which is what
+    /// this branch does either way.
+    #[test]
+    fn self_signed_tls_client_auth_also_accepts_a_chained_certificate() {
+        let (_, cert) =
+            cert_with_sans_trusted_as(&["client.example.com"], CertTrust::ChainedToAnchor);
+        let mut c = client(ClientAuthMethod::SelfSignedTlsClientAuth);
+        c.self_signed_tls_client_auth_thumbprints = vec![cert.thumbprint_s256.clone()];
+        assert!(authenticate_mtls_client(&c, Some(&cert)).is_ok());
     }
 
     #[test]

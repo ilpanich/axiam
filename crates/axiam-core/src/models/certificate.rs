@@ -472,6 +472,72 @@ pub struct CertificateBinding {
     pub created_at: DateTime<Utc>,
 }
 
+/// How much the TLS layer was able to say about a verified client certificate.
+///
+/// RFC 8705 defines **two** mutual-TLS client-authentication methods under one
+/// transport, and they do not share a trust model:
+///
+/// | Method | § | Trust model | Identity is |
+/// |---|---|---|---|
+/// | `tls_client_auth` | 2.1 | PKI — the certificate must chain to a trusted CA | the subject DN or a SAN |
+/// | `self_signed_tls_client_auth` | 2.2 | **no PKI at all** | the registered `x5t#S256` thumbprint |
+///
+/// A §2.2 certificate is self-signed *by design*: it chains to nothing, so no
+/// chain-building verifier can accept it. The listener can be configured to
+/// accept one anyway (`ClientAuth::OptionalSelfSigned` in `axiam-api-rest`'s
+/// `TlsConfig`), and this enum is how the fact travels from the handshake to
+/// the code that decides what the certificate is allowed to do.
+///
+/// # What an unchained certificate still proves
+///
+/// TLS 1.3's `CertificateVerify` message is a signature over the handshake
+/// transcript made with the leaf's private key, and rustls checks it whether or
+/// not a chain was built. So a self-asserted certificate still proves **the
+/// peer holds the corresponding private key**. What is given up is "a CA
+/// vouched for who this is" — which §2.2 replaces with "an administrator
+/// registered this exact thumbprint", and nothing else.
+///
+/// # Why this is an enum and not a `bool`
+///
+/// Every consumer has to state its choice at the point of use. The two levels
+/// are **not** interchangeable and exactly one AXIAM code path may accept the
+/// weaker one; see [`Self::SelfAsserted`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CertTrust {
+    /// rustls built and verified a chain from this leaf to a trust anchor in
+    /// the configured client-CA bundle.
+    ///
+    /// This is what *every* certificate reaching AXIAM carried before
+    /// `ClientAuth::OptionalSelfSigned` existed, and it is what `off`,
+    /// `optional` and `required` still produce without exception.
+    ChainedToAnchor,
+    /// The peer proved possession of the certificate's private key, but the
+    /// certificate chains to no configured trust anchor.
+    ///
+    /// **Usable by RFC 8705 §2.2 (`self_signed_tls_client_auth`) and by
+    /// nothing else.** Two paths must refuse it outright:
+    ///
+    /// - Device/IoT certificate authentication, whose entire model is that the
+    ///   certificate chains to a CA an administrator flagged as an mTLS trust
+    ///   anchor. Accepting a self-asserted certificate there is the
+    ///   native-listener twin of defect **B-06** (a certificate under a
+    ///   never-flagged CA authenticating through the proxy header).
+    /// - RFC 8705 §2.1 (`tls_client_auth`), whose registered subject DN or SAN
+    ///   is an assertion *by the CA*. An attacker can put any DN they like in a
+    ///   certificate they sign themselves.
+    SelfAsserted,
+}
+
+impl CertTrust {
+    /// Whether this certificate chained to a configured trust anchor.
+    ///
+    /// Spelled out rather than left to `== CertTrust::ChainedToAnchor` at each
+    /// call site so the refusals read as a single named condition.
+    pub fn is_chained_to_anchor(self) -> bool {
+        matches!(self, Self::ChainedToAnchor)
+    }
+}
+
 /// Identity resolved from a device certificate during mTLS authentication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceIdentity {

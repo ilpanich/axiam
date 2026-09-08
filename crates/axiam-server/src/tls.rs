@@ -18,6 +18,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use axiam_api_rest::config::{ClientAuth, TlsConfig};
+use axiam_core::models::certificate::CertTrust;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::danger::ClientCertVerifier;
@@ -303,6 +304,39 @@ fn install_reloadable_verifier(
     // `set` fails only if called twice, which means a second listener was
     // built. The first one is the one actix is serving on.
     let _ = LIVE_VERIFIER.set((verifier, provider));
+}
+
+/// Classify a peer certificate the live listener accepted (RFC 8705 §2.2).
+///
+/// Called from the `on_connect` hook, which is the first place after the
+/// handshake where the peer chain and the live verifier are both reachable.
+/// Returns [`CertTrust::ChainedToAnchor`] without doing any work under every
+/// client-auth policy except [`ClientAuth::OptionalSelfSigned`], because under
+/// those a peer certificate exists only if webpki built a chain for it.
+///
+/// # The no-verifier case
+///
+/// Unreachable: a peer certificate implies a TLS listener, and every TLS
+/// listener this binary builds installs its verifier here. If it is ever
+/// reached anyway the answer is [`CertTrust::SelfAsserted`], the *less*
+/// privileged of the two — a certificate classified that way can authenticate
+/// only an RFC 8705 §2.2 client whose thumbprint is registered, where one
+/// wrongly classified `ChainedToAnchor` would be admitted to device
+/// authentication and to `tls_client_auth`.
+pub fn peer_certificate_trust(
+    leaf: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+) -> CertTrust {
+    match LIVE_VERIFIER.get() {
+        Some((verifier, _)) => verifier.trust_of(leaf, intermediates),
+        None => {
+            tracing::warn!(
+                "a TLS connection presented a peer certificate but no client-certificate \
+                 verifier is installed in this process; treating it as self-asserted"
+            );
+            CertTrust::SelfAsserted
+        }
+    }
 }
 
 /// Install `pem` as the live client trust anchor set, without a restart.
@@ -775,12 +809,15 @@ pub fn spawn_leaf_reloader(interval_secs: u64) {
 #[derive(Debug)]
 pub struct ReloadableClientCertVerifier {
     anchors: ArcSwap<Anchors>,
-    /// Whether a verified client certificate is required once anchors exist.
+    /// The operator's client-authentication policy, fixed at construction.
     ///
-    /// Fixed at construction from `client_auth`: it is an operator's policy
-    /// decision, not a property of the anchor set, and changing it changes
-    /// whether unauthenticated clients can connect at all.
-    mandatory: bool,
+    /// It is a policy decision, not a property of the anchor set: it decides
+    /// whether unauthenticated clients can connect at all
+    /// ([`ClientAuth::Required`]) and whether a certificate that chains to
+    /// nothing may complete the handshake
+    /// ([`ClientAuth::OptionalSelfSigned`]). Reloading anchors must not be
+    /// able to change either.
+    policy: ClientAuth,
 }
 
 /// What the verifier currently trusts.
@@ -793,11 +830,20 @@ enum Anchors {
 }
 
 impl ReloadableClientCertVerifier {
-    /// An empty verifier that offers no client authentication.
-    pub fn empty(mandatory: bool) -> Self {
+    /// An empty verifier that offers no client authentication, governed by
+    /// `policy` once anchors are installed.
+    ///
+    /// Takes the [`ClientAuth`] value rather than the `mandatory` boolean it
+    /// used to, because there are now two independent things the policy
+    /// decides — whether a certificate is *required* and whether an unchained
+    /// one is *accepted* — and passing them separately would admit the pair
+    /// (required, accept-self-asserted), which is not a policy any variant of
+    /// [`ClientAuth`] can express and not one this code is willing to
+    /// implement.
+    pub fn empty(policy: ClientAuth) -> Self {
         Self {
             anchors: ArcSwap::from_pointee(Anchors::None),
-            mandatory,
+            policy,
         }
     }
 
@@ -819,7 +865,7 @@ impl ReloadableClientCertVerifier {
         let count = roots.len();
         let builder =
             WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone());
-        let verifier = if self.mandatory {
+        let verifier = if self.policy == ClientAuth::Required {
             builder.build()
         } else {
             builder.allow_unauthenticated().build()
@@ -845,6 +891,104 @@ impl ReloadableClientCertVerifier {
             Anchors::Some(v) => Some(Arc::clone(v)),
         }
     }
+
+    /// Would this leaf have chained to a currently-installed trust anchor?
+    ///
+    /// Answers the question `verify_client_cert` deliberately stops asking
+    /// under [`ClientAuth::OptionalSelfSigned`]. Under every other policy the
+    /// answer is known without asking — rustls only let the certificate
+    /// through *because* it chained — so this runs the extra chain validation
+    /// only in the mode that needs it.
+    ///
+    /// # Why the answer is re-derived rather than returned from the verifier
+    ///
+    /// It cannot be smuggled out of `verify_client_cert`. rustls's
+    /// `ClientCertVerified` is an opaque token carrying no payload, and the
+    /// verifier is handed no connection handle to key a side channel on — no
+    /// session id, no peer address, nothing that distinguishes one concurrent
+    /// handshake from another. So the trust level is recomputed where the peer
+    /// chain is next in hand: the `on_connect` hook, through
+    /// [`peer_certificate_trust`].
+    ///
+    /// Cost is one additional chain validation per mTLS connection (not per
+    /// request), and only under the new policy.
+    pub fn chains_to_anchor(
+        &self,
+        leaf: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+    ) -> bool {
+        match self.current() {
+            Some(v) => v
+                .verify_client_cert(leaf, intermediates, rustls::pki_types::UnixTime::now())
+                .is_ok(),
+            // No anchors installed: nothing to chain to. Reporting `false` is
+            // both the truth and the fail-closed answer.
+            None => false,
+        }
+    }
+
+    /// Classify a peer certificate rustls has already accepted.
+    ///
+    /// Under [`ClientAuth::Off`], [`ClientAuth::Optional`] and
+    /// [`ClientAuth::Required`] a peer certificate exists only if it chained,
+    /// so the answer is [`CertTrust::ChainedToAnchor`] with no work done at
+    /// all. Under [`ClientAuth::OptionalSelfSigned`] the chain is re-checked.
+    pub fn trust_of(
+        &self,
+        leaf: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+    ) -> CertTrust {
+        if !self.policy.accepts_self_asserted() {
+            return CertTrust::ChainedToAnchor;
+        }
+        if self.chains_to_anchor(leaf, intermediates) {
+            CertTrust::ChainedToAnchor
+        } else {
+            CertTrust::SelfAsserted
+        }
+    }
+}
+
+/// Reject a self-asserted certificate that is outside its validity window.
+///
+/// webpki performs this check as part of building a chain, so the branch that
+/// accepts a certificate *without* building one silently loses it. That would
+/// quietly turn "the certificate expired, rotate it" from an enforced rule into
+/// advice, and only for the clients whose certificates nobody else vouches for.
+///
+/// # What is deliberately not checked here
+///
+/// The **self-signature**. Under RFC 8705 §2.2 the certificate's identity is
+/// the SHA-256 of its DER, and possession of the matching private key is proven
+/// by TLS 1.3's `CertificateVerify` over the handshake transcript — which
+/// rustls checks regardless. A certificate whose self-signature did not verify
+/// would still have to be byte-identical to one an administrator registered
+/// before it authenticated anything, so verifying it would refuse a strictly
+/// empty set of attacks. Validity dates are different: they are the one
+/// property of the certificate body that an operator relies on being enforced.
+fn self_asserted_is_within_validity(
+    leaf: &CertificateDer<'_>,
+    now: rustls::pki_types::UnixTime,
+) -> Result<(), rustls::Error> {
+    use rustls::CertificateError;
+
+    let (_, cert) = x509_parser::prelude::parse_x509_certificate(leaf.as_ref())
+        .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+
+    // `UnixTime::as_secs` is seconds since the epoch; `ASN1Time::timestamp` is
+    // the same scale, signed because it can predate 1970.
+    let now = i64::try_from(now.as_secs())
+        .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+    let validity = cert.validity();
+    if now < validity.not_before.timestamp() {
+        return Err(rustls::Error::InvalidCertificate(
+            CertificateError::NotValidYet,
+        ));
+    }
+    if now > validity.not_after.timestamp() {
+        return Err(rustls::Error::InvalidCertificate(CertificateError::Expired));
+    }
+    Ok(())
 }
 
 impl ClientCertVerifier for ReloadableClientCertVerifier {
@@ -859,7 +1003,7 @@ impl ClientCertVerifier for ReloadableClientCertVerifier {
         // installed would refuse every connection to a server that cannot
         // verify anybody — a self-inflicted outage on a deployment that
         // un-flagged its last CA.
-        self.mandatory && self.current().is_some()
+        self.policy == ClientAuth::Required && self.current().is_some()
     }
 
     fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
@@ -877,14 +1021,36 @@ impl ClientCertVerifier for ReloadableClientCertVerifier {
         intermediates: &[CertificateDer<'_>],
         now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
-        match self.current() {
-            Some(v) => v.verify_client_cert(end_entity, intermediates, now),
+        let Some(v) = self.current() else {
             // Unreachable while rustls honours `offer_client_auth`, and a
             // refusal rather than an acceptance if it ever does not.
-            None => Err(rustls::Error::General(
+            return Err(rustls::Error::General(
                 "no client trust anchors are configured".into(),
-            )),
+            ));
+        };
+
+        let chained = v.verify_client_cert(end_entity, intermediates, now);
+        if chained.is_ok() || !self.policy.accepts_self_asserted() {
+            // Every policy that existed before `OptionalSelfSigned` takes this
+            // path and only this path: webpki's verdict, unmodified.
+            return chained;
         }
+
+        // RFC 8705 §2.2 (`ClientAuth::OptionalSelfSigned` only). The
+        // certificate chains to nothing, which for a self-signed client
+        // credential is not a defect but the design. Accept it so the request
+        // reaches the application, which is the only layer that can decide
+        // whether *this* client is one whose thumbprint was registered —
+        // `axiam_oauth2::mtls::authenticate_mtls_client`. Everything else
+        // treats it as if no certificate had been presented; see
+        // [`CertTrust::SelfAsserted`].
+        self_asserted_is_within_validity(end_entity, now)?;
+        tracing::debug!(
+            "accepting a client certificate that chains to no configured anchor \
+             (client_auth = optional_self_signed); it can authenticate only an \
+             RFC 8705 self_signed_tls_client_auth client with this exact thumbprint"
+        );
+        Ok(rustls::server::danger::ClientCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -1002,10 +1168,8 @@ pub fn build_rustls_server_config(tls: &TlsConfig) -> io::Result<ServerConfig> {
     // client certificate and can still be given anchors later — which matches
     // what `mtls_anchors::apply` already does at boot, where flagging a CA
     // upgrades an unset `Off` to `Optional`.
-    let reloadable = Arc::new(ReloadableClientCertVerifier::empty(
-        tls.client_auth == ClientAuth::Required,
-    ));
-    if tls.client_auth != ClientAuth::Off {
+    let reloadable = Arc::new(ReloadableClientCertVerifier::empty(tls.client_auth));
+    if tls.client_auth.requests_client_certificate() {
         // The bundle written by `mtls_anchors::apply` at boot, or one the
         // operator curated themselves.
         let roots = read_client_ca_roots(tls)?;
@@ -1577,7 +1741,7 @@ mod tests {
             };
             let roots = read_client_ca_roots(&tls)
                 .unwrap_or_else(|e| panic!("roots must read for {mode:?}: {e}"));
-            let verifier = ReloadableClientCertVerifier::empty(mode == ClientAuth::Required);
+            let verifier = ReloadableClientCertVerifier::empty(mode);
             let count = verifier
                 .replace(roots, &provider)
                 .unwrap_or_else(|e| panic!("verifier must build for {mode:?}: {e}"));
@@ -1608,7 +1772,7 @@ mod tests {
             ..TlsConfig::default()
         };
 
-        let verifier = ReloadableClientCertVerifier::empty(false);
+        let verifier = ReloadableClientCertVerifier::empty(ClientAuth::Optional);
         assert!(
             !verifier.offer_client_auth(),
             "a fresh verifier must behave exactly like with_no_client_auth()"
@@ -1648,7 +1812,7 @@ mod tests {
     fn an_empty_verifier_refuses_a_presented_certificate() {
         use rustls::pki_types::UnixTime;
 
-        let verifier = ReloadableClientCertVerifier::empty(false);
+        let verifier = ReloadableClientCertVerifier::empty(ClientAuth::Optional);
         // Never parsed: the None arm refuses before looking at the bytes, which
         // is the point — there is nothing to validate it against.
         let cert = CertificateDer::from(vec![0u8; 4]);
@@ -1669,7 +1833,7 @@ mod tests {
     /// actually fired.
     #[test]
     fn an_empty_verifier_still_advertises_signature_schemes() {
-        let verifier = ReloadableClientCertVerifier::empty(true);
+        let verifier = ReloadableClientCertVerifier::empty(ClientAuth::Required);
         assert!(
             !verifier.supported_verify_schemes().is_empty(),
             "an empty anchor set must still advertise the provider's schemes, or the \
@@ -1684,9 +1848,267 @@ mod tests {
     /// a self-inflicted outage on a deployment that just un-flagged its last CA.
     #[test]
     fn a_required_verifier_with_no_anchors_does_not_lock_everyone_out() {
-        let verifier = ReloadableClientCertVerifier::empty(true);
+        let verifier = ReloadableClientCertVerifier::empty(ClientAuth::Required);
         assert!(!verifier.offer_client_auth());
         assert!(!verifier.client_auth_mandatory());
+    }
+
+    // ---------------------------------------------------------------------
+    // RFC 8705 §2.2 — `client_auth = optional_self_signed`
+    //
+    // These pin the OPERATOR-FACING contract: which certificates a listener
+    // configured a particular way accepts, and what the application is then
+    // told about them. They deliberately do not assert on how the verifier
+    // arrives at the answer.
+    // ---------------------------------------------------------------------
+
+    /// A self-signed leaf that chains to nothing, valid `[from, to)` in whole
+    /// years.
+    ///
+    /// Fixed calendar dates rather than offsets from `now`, so "expired" and
+    /// "not yet valid" mean the same thing on every machine and in every year
+    /// this test runs. `rcgen::date_time_ymd` is used rather than the `time`
+    /// crate directly, which axiam-server does not depend on.
+    fn self_signed_leaf(from_year: i32, to_year: i32) -> (CertificateDer<'static>, KeyPair) {
+        let key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut params = CertificateParams::new(vec!["self-signed.example".to_string()]).unwrap();
+        params.is_ca = IsCa::NoCa;
+        params.not_before = rcgen::date_time_ymd(from_year, 1, 1);
+        params.not_after = rcgen::date_time_ymd(to_year, 1, 1);
+        let der = params.self_signed(&key).unwrap().der().clone();
+        (der, key)
+    }
+
+    /// In date on any plausible clock.
+    fn valid_self_signed_leaf() -> (CertificateDer<'static>, KeyPair) {
+        self_signed_leaf(2000, 2100)
+    }
+
+    /// A verifier with the test CA installed, under `policy`.
+    fn verifier_with_test_ca(pki: &TestPki, policy: ClientAuth) -> ReloadableClientCertVerifier {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let tls = TlsConfig {
+            enabled: true,
+            client_auth: policy,
+            client_ca_path: Some(write_tmp("ca", &pki.ca_pem)),
+            ..TlsConfig::default()
+        };
+        let verifier = ReloadableClientCertVerifier::empty(policy);
+        verifier
+            .replace(read_client_ca_roots(&tls).unwrap(), &provider)
+            .expect("the test CA must install");
+        verifier
+    }
+
+    /// THE DEFECT. A certificate that chains to nothing is refused under
+    /// `optional` and accepted under `optional_self_signed`.
+    ///
+    /// Under `optional` this refusal is what killed 34 of 37 FAPI 2.0
+    /// conformance modules: rustls answered `bad_certificate` and the
+    /// connection died before AXIAM saw a request, so every module reported
+    /// INTERRUPTED with no HTTP status at all.
+    ///
+    /// Both halves are asserted against ONE certificate and ONE anchor set, so
+    /// the only variable is the policy.
+    #[test]
+    fn a_self_signed_leaf_is_refused_under_optional_and_accepted_under_optional_self_signed() {
+        use rustls::pki_types::UnixTime;
+
+        let pki = gen_test_pki();
+        let (leaf, _key) = valid_self_signed_leaf();
+
+        assert!(
+            verifier_with_test_ca(&pki, ClientAuth::Optional)
+                .verify_client_cert(&leaf, &[], UnixTime::now())
+                .is_err(),
+            "`optional` must behave exactly as it did before this variant existed: a \
+             certificate that chains to no anchor is refused in the handshake"
+        );
+
+        assert!(
+            verifier_with_test_ca(&pki, ClientAuth::OptionalSelfSigned)
+                .verify_client_cert(&leaf, &[], UnixTime::now())
+                .is_ok(),
+            "`optional_self_signed` must accept a certificate that chains to nothing — \
+             an RFC 8705 §2.2 client has no other kind"
+        );
+    }
+
+    /// `required` is likewise untouched: it refuses an unchained certificate.
+    #[test]
+    fn a_self_signed_leaf_is_still_refused_under_required() {
+        use rustls::pki_types::UnixTime;
+
+        let pki = gen_test_pki();
+        assert!(
+            verifier_with_test_ca(&pki, ClientAuth::Required)
+                .verify_client_cert(&valid_self_signed_leaf().0, &[], UnixTime::now())
+                .is_err()
+        );
+    }
+
+    /// Accepting an unchained certificate must not mean accepting an
+    /// **expired** one.
+    ///
+    /// webpki checks validity as part of building a chain, so the branch that
+    /// skips chain-building silently loses that check unless it is written out.
+    /// Without this, "the certificate expired, rotate it" would quietly become
+    /// advice — and only for the clients whose certificates nobody vouches for.
+    #[test]
+    fn optional_self_signed_still_refuses_a_certificate_outside_its_validity_window() {
+        use rustls::pki_types::UnixTime;
+
+        let pki = gen_test_pki();
+        let verifier = verifier_with_test_ca(&pki, ClientAuth::OptionalSelfSigned);
+
+        assert!(
+            verifier
+                .verify_client_cert(&self_signed_leaf(2000, 2001).0, &[], UnixTime::now())
+                .is_err(),
+            "an EXPIRED self-signed certificate must be refused"
+        );
+        assert!(
+            verifier
+                .verify_client_cert(&self_signed_leaf(2200, 2201).0, &[], UnixTime::now())
+                .is_err(),
+            "a NOT-YET-VALID self-signed certificate must be refused"
+        );
+        assert!(
+            verifier
+                .verify_client_cert(&valid_self_signed_leaf().0, &[], UnixTime::now())
+                .is_ok(),
+            "control: the same shape of certificate, in date, is accepted — otherwise the \
+             two refusals above would pass for the wrong reason"
+        );
+        assert!(
+            verifier
+                .verify_client_cert(&CertificateDer::from(vec![0u8; 8]), &[], UnixTime::now())
+                .is_err(),
+            "bytes that are not a certificate must be refused, not waved through as \
+             `self-asserted`"
+        );
+    }
+
+    /// The trust level the application is told about.
+    ///
+    /// A CA-issued leaf is reported `ChainedToAnchor` under the new policy — the
+    /// point being that turning the policy on does not demote every client to
+    /// the weaker level and lock `tls_client_auth` and device authentication
+    /// out of the listener.
+    #[test]
+    fn trust_of_distinguishes_a_chained_leaf_from_a_self_asserted_one() {
+        let pki = gen_test_pki();
+        let chained = CertificateDer::pem_slice_iter(pki.client_cert_pem.as_bytes())
+            .next()
+            .unwrap()
+            .expect("the test client leaf must parse");
+        let (unchained, _key) = valid_self_signed_leaf();
+
+        let verifier = verifier_with_test_ca(&pki, ClientAuth::OptionalSelfSigned);
+        assert_eq!(verifier.trust_of(&chained, &[]), CertTrust::ChainedToAnchor);
+        assert_eq!(verifier.trust_of(&unchained, &[]), CertTrust::SelfAsserted);
+
+        assert!(verifier.chains_to_anchor(&chained, &[]));
+        assert!(!verifier.chains_to_anchor(&unchained, &[]));
+    }
+
+    /// Under every pre-existing policy `trust_of` answers `ChainedToAnchor`
+    /// without consulting the anchor set at all.
+    ///
+    /// Not an optimisation detail: under those policies rustls only produced a
+    /// peer certificate *because* it chained, so re-deriving the answer would
+    /// be asking a question already settled — and would answer it wrongly for a
+    /// certificate whose anchor was un-flagged between the handshake and the
+    /// first request.
+    #[test]
+    fn trust_of_is_free_and_unconditional_under_the_pre_existing_policies() {
+        let (unchained, _key) = valid_self_signed_leaf();
+        for policy in [ClientAuth::Off, ClientAuth::Optional, ClientAuth::Required] {
+            let verifier = ReloadableClientCertVerifier::empty(policy);
+            assert_eq!(
+                verifier.trust_of(&unchained, &[]),
+                CertTrust::ChainedToAnchor,
+                "under {policy:?} a peer certificate exists only because rustls chained it"
+            );
+        }
+    }
+
+    /// A handshake, end to end: a self-signed client certificate completes one
+    /// under `optional_self_signed` and is rejected under `optional`.
+    ///
+    /// The tests above call `verify_client_cert` directly. This one goes
+    /// through `build_rustls_server_config` and drives a real rustls TLS 1.3
+    /// handshake — which is what actually failed in the conformance run — and
+    /// then confirms the accepted certificate is exposed to the application as
+    /// a peer certificate rather than merely not refused.
+    #[test]
+    fn a_self_signed_client_completes_a_handshake_only_under_optional_self_signed() {
+        use rustls::pki_types::{PrivateKeyDer, ServerName};
+
+        let pki = gen_test_pki();
+        let (client_der, client_key) = valid_self_signed_leaf();
+
+        for (policy, should_connect) in [
+            (ClientAuth::Optional, false),
+            (ClientAuth::OptionalSelfSigned, true),
+        ] {
+            let tls = TlsConfig {
+                enabled: true,
+                cert_path: Some(write_tmp("srv-cert", &pki.server_cert_pem)),
+                key_path: Some(write_tmp("srv-key", &pki.server_key_pem)),
+                client_auth: policy,
+                client_ca_path: Some(write_tmp("ca", &pki.ca_pem)),
+                ..TlsConfig::default()
+            };
+            let server_config = build_rustls_server_config(&tls)
+                .unwrap_or_else(|e| panic!("server config must build for {policy:?}: {e}"));
+
+            let mut roots = RootCertStore::empty();
+            roots
+                .add(CertificateDer::from_pem_slice(pki.ca_pem.as_bytes()).unwrap())
+                .unwrap();
+            let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(
+                vec![client_der.clone()],
+                PrivateKeyDer::try_from(client_key.serialize_der()).unwrap(),
+            )
+            .unwrap();
+
+            let mut server = rustls::Connection::Server(
+                rustls::ServerConnection::new(Arc::new(server_config)).unwrap(),
+            );
+            let mut client = rustls::Connection::Client(
+                rustls::ClientConnection::new(
+                    Arc::new(client_config),
+                    ServerName::try_from("localhost").unwrap(),
+                )
+                .unwrap(),
+            );
+
+            let result = drive_handshake(&mut client, &mut server);
+            assert_eq!(
+                result.is_ok() && !server.is_handshaking(),
+                should_connect,
+                "a self-signed client certificate under {policy:?}: expected \
+                 connect={should_connect}, got {result:?}"
+            );
+
+            if should_connect {
+                let peer = server
+                    .peer_certificates()
+                    .expect("the accepted certificate must be exposed to the application");
+                assert_eq!(
+                    peer.first().expect("a leaf"),
+                    &client_der,
+                    "the peer certificate must be the one the client presented"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2377,8 +2799,11 @@ mod tests {
         let leaf = peer.first().expect("at least one peer cert");
 
         // SAN extraction (the axiam-api-rest side of D3) must find the URI SAN.
-        let verified = axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref())
-            .expect("verified client cert must parse");
+        // `ChainedToAnchor`: this handshake ran under `ClientAuth::Required`,
+        // so rustls built a chain for this leaf before letting it through.
+        let verified =
+            axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref(), CertTrust::ChainedToAnchor)
+                .expect("verified client cert must parse");
         assert!(
             verified
                 .sans

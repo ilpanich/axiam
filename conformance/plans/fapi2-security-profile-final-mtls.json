@@ -136,5 +136,5 @@
     "fapi_profile": "plain_fapi",
     "client_auth_type": "mtls",
     "sender_constrain": "mtls",
-    "openid": "plain_oauth"}
+    "openid": "openid_connect"}
 }

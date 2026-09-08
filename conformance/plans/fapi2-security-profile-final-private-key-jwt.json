@@ -152,5 +152,5 @@
     "fapi_profile": "plain_fapi",
     "client_auth_type": "private_key_jwt",
     "sender_constrain": "dpop",
-    "openid": "plain_oauth"}
+    "openid": "openid_connect"}
 }

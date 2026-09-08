@@ -661,7 +661,9 @@ bootstrap-local:
 # will save an evening.
 #
 #   just conformance-certs      # throwaway client certs for both auth variants
-#   just conformance-up         # start the pinned suite (~60s to ready)
+#   just conformance-frontend   # build the SPA the front door serves (needed
+#                               # for ANY module that completes an authorization)
+#   just conformance-up         # start the pinned suite + the AXIAM front door
 #   just conformance-serve      # run AXIAM with TLS as the system under test
 #   just conformance-register   # create the two fapi2 clients, fill suite.local.env
 #   just conformance-register-basic  # the Basic OP clients + test user (W9)
@@ -674,16 +676,52 @@ bootstrap-local:
 conformance-certs:
     bash conformance/scripts/gen-certs.sh
 
-# Start the pinned OIDF conformance suite.
+# Build the admin SPA the conformance front door serves.
+#
+# Not optional and not cosmetic: `/oauth2/authorize` redirects an
+# unauthenticated browser to a same-origin `/login`, which only the SPA serves.
+# The first conformance run finished 65 modules WAITING/INTERRUPTED for exactly
+# this reason. A dist built before the W3 login hop and the W7 consent screen is
+# a 404 wearing an index.html, so this rebuilds rather than reusing whatever is
+# on disk.
+#
+# Build the admin SPA the conformance front door serves.
+conformance-frontend:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd frontend
+    [ -d node_modules ] || npm ci
+    npm run build
+    echo "[conformance] SPA built into frontend/dist"
+
+# Start the pinned OIDF conformance suite and the AXIAM front door.
 conformance-up:
     #!/usr/bin/env bash
     set -euo pipefail
     set -a; . conformance/suite.env; set +a
+    # Pre-flight, because both of these fail as a container that will not start
+    # rather than as a message naming what is missing. The bind mounts are
+    # read-only, so docker creates a DIRECTORY where a missing file was named
+    # and nginx then serves an empty site with no error anyone reads.
+    for f in conformance/certs/server.crt conformance/certs/server.key conformance/certs/ca.crt; do
+      [ -f "$f" ] || { echo "[conformance] missing $f — run 'just conformance-certs'" >&2; exit 1; }
+    done
+    [ -f "conformance/${AXIAM_FRONTEND_DIST}/index.html" ] || {
+      echo "[conformance] no built SPA at conformance/${AXIAM_FRONTEND_DIST} — run 'just conformance-frontend'" >&2
+      exit 1
+    }
     docker compose -f conformance/docker-compose.yml up -d
     echo "[conformance] waiting for the suite to become ready (up to 3 min)…"
     for _ in $(seq 1 90); do
       if curl -sSk --max-time 5 "${SUITE_BASE_URL}/api/runner/available" >/dev/null 2>&1; then
         echo "[conformance] ready at ${SUITE_BASE_URL}"
+        # The front door is the other half of a usable rig, and a run that
+        # discovers it is down discovers it 35 stalled modules later.
+        if curl -sSk --max-time 5 "https://localhost:${AXIAM_TLS_PORT}/index.html" >/dev/null 2>&1; then
+          echo "[conformance] front door serving the SPA at https://localhost:${AXIAM_TLS_PORT}"
+        else
+          echo "[conformance] WARNING: nothing serving the SPA on ${AXIAM_TLS_PORT}; check 'docker compose -f conformance/docker-compose.yml logs axiam-frontend'" >&2
+        fi
         exit 0
       fi
       sleep 2

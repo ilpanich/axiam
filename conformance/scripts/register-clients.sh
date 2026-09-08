@@ -136,6 +136,13 @@ MTLS_RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
     scopes: ["openid"],
     profile: "fapi2",
     require_par: true,
+    # W9 follow-up. Without this the FAPI lane cannot complete a single
+    # authorization either: `/oauth2/authorize` answers a cross-site redirect
+    # from a client that is not `browser_sso` with a 401 JSON body, which is
+    # why 30 of the 31 modules in the 2026-09-08 run finished INTERRUPTED. It
+    # is not a relaxation of the profile — the return leg re-runs the PAR,
+    # PKCE and FAPI gates unchanged (basic-op-gap-plan.md §5, row G0).
+    browser_sso: true,
     token_endpoint_auth_method: "tls_client_auth",
     tls_client_auth_subject_dn: $dn,
     tls_client_certificate_bound_access_tokens: true
@@ -153,6 +160,13 @@ SS_RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
     scopes: ["openid"],
     profile: "fapi2",
     require_par: true,
+    # W9 follow-up. Without this the FAPI lane cannot complete a single
+    # authorization either: `/oauth2/authorize` answers a cross-site redirect
+    # from a client that is not `browser_sso` with a 401 JSON body, which is
+    # why 30 of the 31 modules in the 2026-09-08 run finished INTERRUPTED. It
+    # is not a relaxation of the profile — the return leg re-runs the PAR,
+    # PKCE and FAPI gates unchanged (basic-op-gap-plan.md §5, row G0).
+    browser_sso: true,
     token_endpoint_auth_method: "self_signed_tls_client_auth",
     self_signed_tls_client_auth_thumbprints: [$tp],
     tls_client_certificate_bound_access_tokens: true
@@ -161,6 +175,73 @@ CLIENT_SELF_SIGNED_ID=$(jq -r '.client_id // empty' <<<"$SS_RESP")
 [ -n "$CLIENT_SELF_SIGNED_ID" ] || { echo "[register] failed: $SS_RESP" >&2; exit 1; }
 echo "[register]   client_id=$CLIENT_SELF_SIGNED_ID"
 
-write_env "CLIENT_MTLS_ID=$CLIENT_MTLS_ID" "CLIENT_SELF_SIGNED_ID=$CLIENT_SELF_SIGNED_ID"
+# ---------------------------------------------------------------------------
+# The private_key_jwt lane (RFC 7523 §2.2) — never provisioned until now
+# ---------------------------------------------------------------------------
+#
+# `conformance-run` has always driven three plans and this script has always
+# created two clients, so the private-key-jwt plan could not run: its template
+# renders `${CLIENT_PRIVATE_KEY_JWT_ID}` into an empty string and the suite
+# refuses the configuration. That is a third of the FAPI 2.0 surface — the
+# OTHER client-authentication family the profile defines — and its absence was
+# invisible because the plan failed before reaching a module.
+#
+# TWO clients, not one, because the plan needs a second registration to prove
+# an assertion minted for one client is refused for another
+# (`ensure-authorization-code-is-bound-to-client` and its siblings). They are
+# generated with distinct kids for the same reason.
+#
+# The keypair is split at the trust boundary: AXIAM registers the PUBLIC set as
+# the client's credential, and the suite is handed the PRIVATE set because the
+# suite is the client and has to sign with it. `conf_write_local` puts the
+# private halves in the gitignored file — they are secrets, and suite.env is
+# tracked.
+echo "[register] creating the two private_key_jwt clients"
+for n in 1 2; do
+  KEYS=$(python3 "$SCRIPTS/gen-client-jwks.py" --kid "axiam-conformance-pkjwt-$n")
+  PUB=$(jq -c '.public' <<<"$KEYS")
+  PRIV=$(jq -c '.private' <<<"$KEYS")
+
+  # `jwks` is a STRING on the wire, not an object: OAuth2Client stores the key
+  # set verbatim so that what AXIAM verifies against is byte-for-byte what was
+  # registered. `--arg` (not `--argjson`) is therefore correct here and a
+  # mistake everywhere else in this file.
+  RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
+    --arg name "axiam-conformance-pkjwt-$n" \
+    --arg jwks "$PUB" --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" '{
+      name: $name,
+      redirect_uris: [$r1, $r2],
+      grant_types: ["authorization_code", "refresh_token", "client_credentials"],
+      scopes: ["openid"],
+      profile: "fapi2",
+      require_par: true,
+      browser_sso: true,
+      token_endpoint_auth_method: "private_key_jwt",
+      jwks: $jwks,
+      # The private_key_jwt plan runs sender_constrain=dpop — the other half of
+      # FAPI 2.0. Certificate-bound tokens belong to the mTLS lane; asking for
+      # both here would bind a token to a certificate this client never
+      # presents. (No apostrophes in this comment: it sits inside a
+      # single-quoted jq program.)
+      dpop_bound_access_tokens: true
+    }')")
+  ID=$(jq -r '.client_id // empty' <<<"$RESP")
+  [ -n "$ID" ] || { echo "[register] failed (pkjwt $n): $RESP" >&2; exit 1; }
+  echo "[register]   client_id=$ID"
+
+  if [ "$n" = 1 ]; then
+    PKJWT_1_ID="$ID"; PKJWT_1_JWKS="$PRIV"
+  else
+    PKJWT_2_ID="$ID"; PKJWT_2_JWKS="$PRIV"
+  fi
+done
+
+write_env \
+  "CLIENT_MTLS_ID=$CLIENT_MTLS_ID" \
+  "CLIENT_SELF_SIGNED_ID=$CLIENT_SELF_SIGNED_ID" \
+  "CLIENT_PRIVATE_KEY_JWT_ID=$PKJWT_1_ID" \
+  "CLIENT_PRIVATE_KEY_JWT_JWKS=$PKJWT_1_JWKS" \
+  "CLIENT_PRIVATE_KEY_JWT_2_ID=$PKJWT_2_ID" \
+  "CLIENT_PRIVATE_KEY_JWT_2_JWKS=$PKJWT_2_JWKS"
 
 echo "[register] suite.env updated. Next: just conformance-run"

@@ -135,5 +135,57 @@ services:
       retries: 30
       start_period: 20s
 
+  # ---------------------------------------------------------------------------
+  # The AXIAM conformance target's front door (the W9 follow-up).
+  # ---------------------------------------------------------------------------
+  #
+  # Not part of the OpenID Foundation suite — this is OUR side of the wire. It
+  # serves the admin SPA and proxies the API so that `/login` exists on the
+  # issuer origin, which is the single prerequisite for any module that needs an
+  # authorization to complete. See conformance/nginx-axiam.conf for why the
+  # backend is NOT wholly behind it (RFC 8705 §5 aliases, and mtls.rs's refusal
+  # of a forwarded client certificate).
+  #
+  # It has no `depends_on`: axiam-server runs on the HOST, started by
+  # `just conformance-serve`, so there is nothing in this file for it to wait
+  # for. nginx resolves host.docker.internal at request time, so starting in
+  # either order works and restarting the backend does not require restarting
+  # this.
+  axiam-frontend:
+    image: ${AXIAM_NGINX_IMAGE:?set AXIAM_NGINX_IMAGE (see conformance/suite.env)}
+    environment:
+      # Only AXIAM_-prefixed names are substituted into the template. Without
+      # the filter, envsubst would also replace nginx's own $$host,
+      # $$remote_addr and $$proxy_add_x_forwarded_for with the empty string
+      # wherever a same-named variable happened to exist — a failure that
+      # surfaces as mysteriously blank proxy headers rather than as an error.
+      # docker/nginx.conf.template documents the same guard.
+      NGINX_ENVSUBST_FILTER: "^AXIAM_"
+      AXIAM_MTLS_PORT: "${AXIAM_MTLS_PORT:?set AXIAM_MTLS_PORT}"
+    volumes:
+      # `templates/` is what the stock entrypoint envsubsts into conf.d.
+      - ./nginx-axiam.conf:/etc/nginx/templates/axiam.conf.template:ro
+      # The include is NOT a template: it holds nginx's own runtime variables
+      # and must reach nginx unsubstituted.
+      - ./nginx-axiam-backend.inc:/etc/nginx/axiam-backend.inc:ro
+      - ./certs:/etc/axiam/certs:ro
+      - ${AXIAM_FRONTEND_DIST:?set AXIAM_FRONTEND_DIST}:/usr/share/nginx/html:ro
+    ports:
+      # The issuer's port. AXIAM_ISSUER names this listener, not the backend's.
+      - "${AXIAM_TLS_PORT:?set AXIAM_TLS_PORT}:8444"
+    extra_hosts:
+      # How this container reaches axiam-server, which runs on the host.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      # Asks for the SPA shell, not the API: a green backend behind a sidecar
+      # that is serving nothing is the exact failure this service exists to
+      # prevent, and the previous harness's healthcheck probed the wrong
+      # listener entirely for three months.
+      test: ["CMD-SHELL", "curl -fsk https://localhost:8444/index.html >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
 volumes:
   mongo-data:

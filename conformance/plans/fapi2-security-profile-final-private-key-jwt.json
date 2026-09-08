@@ -125,6 +125,34 @@
     "resourceUrl": "${AXIAM_ISSUER}/oauth2/userinfo"
   },
 
+  "browser": [
+    {
+      "match": "${AXIAM_ISSUER}/login*",
+      "tasks": [
+        {
+          "task": "Choose the workspace",
+          "match": "${AXIAM_ISSUER}/login*",
+          "commands": [
+            ["wait", "id", "org-slug", 15],
+            ["text", "id", "org-slug", "${AXIAM_ORG_SLUG}"],
+            ["text", "id", "tenant-slug", "${AXIAM_TENANT_SLUG}"],
+            ["click", "id", "login-workspace-submit"]
+          ]
+        },
+        {
+          "task": "Sign in",
+          "match": "${AXIAM_ISSUER}/login*",
+          "commands": [
+            ["wait", "id", "login-credentials-submit", 15],
+            ["text", "id", "username", "${CONFORMANCE_USER}"],
+            ["text", "id", "password", "${CONFORMANCE_USER_PASSWORD}"],
+            ["click", "id", "login-credentials-submit"]
+          ]
+        }
+      ]
+    }
+  ],
+
   "variant": {
     "fapi_profile": "plain_fapi",
     "client_auth_type": "private_key_jwt",

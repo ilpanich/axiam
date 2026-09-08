@@ -793,7 +793,7 @@ export function LoginPage() {
                 </div>
               </div>
 
-              <Button type="submit" className="w-full mt-6">
+              <Button id="login-workspace-submit" type="submit" className="w-full mt-6">
                 {m.continueAction}
                 <ChevronRight size={16} aria-hidden="true" />
               </Button>
@@ -880,7 +880,7 @@ export function LoginPage() {
               >
                 {m.backAction}
               </Button>
-              <Button type="submit" className="flex-1" disabled={isLoading}>
+              <Button id="login-credentials-submit" type="submit" className="flex-1" disabled={isLoading}>
                 {isLoading ? (
                   <>
                     <Loader2
@@ -1059,7 +1059,7 @@ export function LoginPage() {
               >
                 {m.backAction}
               </Button>
-              <Button type="submit" className="flex-1" disabled={isLoading}>
+              <Button id="login-mfa-submit" type="submit" className="flex-1" disabled={isLoading}>
                 {isLoading ? (
                   <>
                     <Loader2

@@ -29,12 +29,14 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 cd "$ROOT"
 
-# shellcheck disable=SC1091
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=conformance/scripts/lib-env.sh
+# shellcheck disable=SC1091
 . "$SCRIPTS_DIR/lib-env.sh"
 conf_load
 
 : "${AXIAM_TLS_PORT:?set AXIAM_TLS_PORT in conformance/suite.env}"
+: "${AXIAM_MTLS_PORT:?set AXIAM_MTLS_PORT in conformance/suite.env}"
 
 resolve() { case "$1" in /*) echo "$1" ;; *) echo "$HERE/$1" ;; esac; }
 CERT="$(resolve "${AXIAM_SERVER_CERT:-certs/server.crt}")"
@@ -81,7 +83,18 @@ export AXIAM__AMQP__TLS__CA_CERT_PATH="${AXIAM__AMQP__TLS__CA_CERT_PATH:-$SECRET
 
 # --- what makes this a conformance target ---------------------------------
 export AXIAM__SERVER__HOST="${AXIAM__SERVER__HOST:-0.0.0.0}"
-export AXIAM__SERVER__PORT="$AXIAM_TLS_PORT"
+# The BACK channel's port, not the issuer's. AXIAM_TLS_PORT belongs to the
+# nginx sidecar (`conformance/nginx-axiam.conf`), which serves the admin SPA so
+# that the `/login` hop `/oauth2/authorize` redirects to actually exists — the
+# single reason 65 modules finished WAITING/INTERRUPTED in the first run.
+#
+# This listener stays a DIRECT rustls listener because it must: FAPI 2.0's
+# `tls_client_auth` and `self_signed_tls_client_auth` need the peer certificate
+# verified in the handshake, and `axiam_oauth2::mtls` refuses a forwarded
+# `X-Client-Certificate` header by construction, with no setting to enable it.
+# Discovery tells mTLS clients where to find this listener through RFC 8705 §5
+# `mtls_endpoint_aliases`, set below.
+export AXIAM__SERVER__PORT="$AXIAM_MTLS_PORT"
 export AXIAM__SERVER__TLS__ENABLED=true
 export AXIAM__SERVER__TLS__CERT_PATH="$CERT"
 export AXIAM__SERVER__TLS__KEY_PATH="$KEY"
@@ -100,7 +113,19 @@ export AXIAM__SERVER__TLS__CLIENT_CA_PATH="$CA"
 # suite.env; both are derived from AXIAM_TLS_PORT so they cannot drift.
 export AXIAM__AUTH__OAUTH2_ISSUER_URL="${AXIAM_ISSUER}"
 
-echo "[serve] issuer   $AXIAM__AUTH__OAUTH2_ISSUER_URL"
+# RFC 8705 §5. Set to this listener's own base URL, which is what makes the
+# split above legible to a client instead of merely true: the discovery document
+# gains `mtls_endpoint_aliases` naming the token, userinfo, PAR, introspection,
+# revocation and device-authorization endpoints on the mTLS host, while the
+# front channel (`authorization_endpoint`, `jwks_uri`, `end_session_endpoint`)
+# and the `issuer` itself stay on the origin the browser uses.
+#
+# Empty collapses the deployment to one listener and omits the member — a valid
+# deployment, and one where no mTLS client can authenticate through the proxy.
+export AXIAM__AUTH__OAUTH2_MTLS_BASE_URL="${AXIAM_MTLS_BASE_URL:-}"
+
+echo "[serve] issuer    $AXIAM__AUTH__OAUTH2_ISSUER_URL (served by the nginx sidecar)"
+echo "[serve] mTLS base $AXIAM__AUTH__OAUTH2_MTLS_BASE_URL"
 echo "[serve] listener  https://$AXIAM__SERVER__HOST:$AXIAM__SERVER__PORT (client_auth=$AXIAM__SERVER__TLS__CLIENT_AUTH)"
 echo "[serve] cert      $CERT"
 echo "[serve] client CA $CA"

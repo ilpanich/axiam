@@ -53,13 +53,39 @@ write_env() { conf_write_local "$@"; }
 # W9 — the Basic OP lane
 # ---------------------------------------------------------------------------
 if [ "$PROFILE" = "basic" ]; then
-  # Two clients that differ ONLY in token_endpoint_auth_method. That is the
-  # point: `oidcc-basic-certification-test-plan` treats client_secret_basic
-  # (RFC 6749 §2.3.1, the Authorization header) and client_secret_post (the
-  # body) as separate concerns, and W8 was the first time AXIAM could answer
-  # the first at all. Registering both from one function keeps every other
-  # field identical, so any difference in a result is attributable to the
-  # method rather than to a stray field.
+  # THREE clients, and which one goes in which config block is not
+  # interchangeable — the suite reads all three by name and two of them must
+  # use the SAME client authentication method.
+  #
+  #   config.client              -> `client`, client_secret_basic
+  #   config.client2             -> `client2`, ALSO client_secret_basic
+  #   config.client_secret_post  -> `client_secret_post`, the post method
+  #
+  # `client2` is the plan's SECOND client under the plan-level variant, which
+  # is client_secret_basic. `oidcc-refresh-token` runs its second half as
+  # client2 and authenticates it with an HTTP Basic header; when client2 was
+  # the post client AXIAM refused that header — correctly, and it says so:
+  # "an Authorization header using the Basic scheme was presented by a client
+  # registered for client_secret_post; it is ignored and the request is
+  # authenticated by the form-body secret (SEC-093: the registration decides)"
+  # — and the module failed CheckTokenEndpointHttpStatus200 with a 401. The
+  # server was right and the harness was wrong, which is why the fix is here.
+  #
+  # The post client belongs under a block named exactly `client_secret_post`.
+  # `OIDCCServerTestClientSecretPost.configureClient()` is one statement:
+  #
+  #     config.add("client", config.get("client_secret_post"))
+  #
+  # so with no such block `client` becomes JSON null and the next condition
+  # reports "As static client was selected, the test configuration must contain
+  # a client configuration" — a message about `client`, thrown because a
+  # DIFFERENT key was missing. An earlier session read that message literally,
+  # observed that `client` rendered fine, and recorded the module as
+  # not-root-caused.
+  #
+  # Registering all three from one function keeps every other field identical,
+  # so any difference in a result is attributable to the method rather than to
+  # a stray field.
   #
   # `standard` profile, NOT fapi2: the Basic profile requires neither PAR nor
   # certificate-bound tokens, and a fapi2 client would refuse the plan's
@@ -110,12 +136,52 @@ if [ "$PROFILE" = "basic" ]; then
       }')"
   }
 
+  # The organization switch that makes `address` and `phone` releasable at all.
+  #
+  # `docs/conformance/README.md` lists this as one of three things the recipes
+  # do not do for you, and the first run after that sentence was written duly
+  # did not do it: `oidcc-scope-address`, `oidcc-scope-phone` and
+  # `oidcc-scope-all` all reported UserInfo returning `sub, tenant_id, org_id`
+  # and nothing else, for a user who demonstrably had both a telephone number
+  # and a postal address. Nothing failed loudly — the first of the four release
+  # gates in `axiam_oauth2::sensitive` simply answered no, which is what it is
+  # for.
+  #
+  # A step a runbook asks a human to remember is a step that gets forgotten, so
+  # the registrar performs it. It is the operator decision the switch is meant
+  # to record, taken by the person setting up a conformance rig for a throwaway
+  # organization; `settings.oidc.sensitive_scopes_enabled` is read at release
+  # time from the TENANT, which inherits the organization's value.
+  #
+  # Read-modify-write, because the endpoint takes the whole settings document
+  # and a hand-built one would silently reset every other policy in it.
+  echo "[register] enabling sensitive scopes at the organization level"
+  ORG_ID=$(api GET "/api/v1/organizations" | jq -r --arg s "$AXIAM_ADMIN_ORG_SLUG" \
+    '.items[] | select(.slug == $s) | .id')
+  [ -n "$ORG_ID" ] || { echo "[register] no organization with slug $AXIAM_ADMIN_ORG_SLUG" >&2; exit 1; }
+  ORG_SETTINGS=$(api GET "/api/v1/organizations/$ORG_ID/settings")
+  UPDATED=$(jq '.oidc = ((.oidc // {}) + {sensitive_scopes_enabled: true})' <<<"$ORG_SETTINGS")
+  api PUT "/api/v1/organizations/$ORG_ID/settings" "$UPDATED" >/dev/null
+  CHECK=$(api GET "/api/v1/organizations/$ORG_ID/settings" | jq -r '.oidc.sensitive_scopes_enabled')
+  [ "$CHECK" = "true" ] || {
+    echo "[register] sensitive_scopes_enabled did not stick (got '$CHECK') — address/phone will be withheld" >&2
+    exit 1
+  }
+  echo "[register]   organization $ORG_ID: sensitive_scopes_enabled=true"
+
   echo "[register] creating the client_secret_basic client"
   B_RESP=$(mk_basic_client "axiam-conformance-basic" "client_secret_basic" "axiam-oidcc-basic")
   CLIENT_BASIC_ID=$(jq -r '.client_id // empty' <<<"$B_RESP")
   CLIENT_BASIC_SECRET=$(jq -r '.client_secret // empty' <<<"$B_RESP")
   [ -n "$CLIENT_BASIC_ID" ] || { echo "[register] failed: $B_RESP" >&2; exit 1; }
   echo "[register]   client_id=$CLIENT_BASIC_ID"
+
+  echo "[register] creating the second client_secret_basic client (the plan's client2)"
+  B2_RESP=$(mk_basic_client "axiam-conformance-basic-2" "client_secret_basic" "axiam-oidcc-basic")
+  CLIENT_BASIC_2_ID=$(jq -r '.client_id // empty' <<<"$B2_RESP")
+  CLIENT_BASIC_2_SECRET=$(jq -r '.client_secret // empty' <<<"$B2_RESP")
+  [ -n "$CLIENT_BASIC_2_ID" ] || { echo "[register] failed: $B2_RESP" >&2; exit 1; }
+  echo "[register]   client_id=$CLIENT_BASIC_2_ID"
 
   echo "[register] creating the client_secret_post client"
   P_RESP=$(mk_basic_client "axiam-conformance-basic-post" "client_secret_post" "axiam-oidcc-basic")
@@ -127,6 +193,8 @@ if [ "$PROFILE" = "basic" ]; then
   write_env \
     "CLIENT_BASIC_ID=$CLIENT_BASIC_ID" \
     "CLIENT_BASIC_SECRET=$CLIENT_BASIC_SECRET" \
+    "CLIENT_BASIC_2_ID=$CLIENT_BASIC_2_ID" \
+    "CLIENT_BASIC_2_SECRET=$CLIENT_BASIC_2_SECRET" \
     "CLIENT_BASIC_POST_ID=$CLIENT_BASIC_POST_ID" \
     "CLIENT_BASIC_POST_SECRET=$CLIENT_BASIC_POST_SECRET"
 
@@ -161,11 +229,33 @@ REDIRECT2="$SUITE/test/a/axiam-fapi2-self-signed/callback"
 # modules (`par-attempt-to-use-request_uri-for-different-client` and friends).
 REDIRECT3="$SUITE/test/a/axiam-fapi2-private-key-jwt/callback"
 
+# …and each of those three again with a query string on it.
+#
+# Not padding. Every FAPI plan's SECOND-client block sends
+# `callback?dummy1=lorem&dummy2=ipsum` and nothing else, which is the suite
+# checking RFC 6749 §3.1.2: a registered redirect_uri may carry a query
+# component, and the server must compare the whole thing rather than the path.
+# AXIAM compares the whole thing — correctly — so an unregistered dummy
+# variant is answered `400 invalid_request: redirect_uri is not registered for
+# this client` at PAR, and because every FAPI flow begins at PAR the module
+# dies there with no assertion about the behaviour it was written to test.
+# It cost `happy-flow` and `user-rejects-authentication` in the first run after
+# client authentication started working at all.
+#
+# Built as one JSON array rather than six `--arg`s: three registrations share
+# this list, and a list that has to be retyped three times is a list that will
+# eventually differ in one of them.
+DUMMY_QS='?dummy1=lorem&dummy2=ipsum'
+REDIRECT_URIS=$(jq -n \
+  --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" --arg r3 "$REDIRECT3" \
+  --arg q "$DUMMY_QS" \
+  '[$r1, $r2, $r3, ($r1 + $q), ($r2 + $q), ($r3 + $q)]')
+
 echo "[register] creating the tls_client_auth client"
 MTLS_RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
-  --arg dn "$SUBJECT_DN" --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" --arg r3 "$REDIRECT3" '{
+  --arg dn "$SUBJECT_DN" --argjson redirects "$REDIRECT_URIS" '{
     name: "axiam-conformance-mtls",
-    redirect_uris: [$r1, $r2, $r3],
+    redirect_uris: $redirects,
     grant_types: ["authorization_code", "refresh_token", "client_credentials"],
     scopes: ["openid", "profile"],
     profile: "fapi2",
@@ -187,9 +277,9 @@ echo "[register]   client_id=$CLIENT_MTLS_ID"
 
 echo "[register] creating the self_signed_tls_client_auth client"
 SS_RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
-  --arg tp "$THUMBPRINT" --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" --arg r3 "$REDIRECT3" '{
+  --arg tp "$THUMBPRINT" --argjson redirects "$REDIRECT_URIS" '{
     name: "axiam-conformance-self-signed",
-    redirect_uris: [$r1, $r2, $r3],
+    redirect_uris: $redirects,
     grant_types: ["authorization_code", "refresh_token", "client_credentials"],
     scopes: ["openid", "profile"],
     profile: "fapi2",
@@ -266,9 +356,9 @@ for n in 1 2; do
   # mistake everywhere else in this file.
   RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
     --arg name "axiam-conformance-pkjwt-$n" \
-    --arg jwks "$PUB" --arg r1 "$REDIRECT" --arg r2 "$REDIRECT2" --arg r3 "$REDIRECT3" '{
+    --arg jwks "$PUB" --argjson redirects "$REDIRECT_URIS" '{
       name: $name,
-      redirect_uris: [$r1, $r2, $r3],
+      redirect_uris: $redirects,
       grant_types: ["authorization_code", "refresh_token", "client_credentials"],
       scopes: ["openid", "profile"],
       profile: "fapi2",

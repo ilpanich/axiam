@@ -115,6 +115,106 @@ async function suiteJson(path) {
 }
 
 /**
+ * Screenshots taken at the two moments the suite may later ask to see, keyed by
+ * test id: `login` for the credentials form, `error` for a page AXIAM answered
+ * with instead of redirecting.
+ *
+ * Captured eagerly during the visit rather than fetched on demand, because by
+ * the time the placeholder is noticed the page has been closed — and the whole
+ * value of the evidence is that it is the page the driver actually saw.
+ */
+const shots = new Map();
+const remember = (testId, kind, png) => {
+  if (!png) return;
+  const forTest = shots.get(testId) ?? {};
+  forTest[kind] = png;
+  shots.set(testId, forTest);
+};
+const filled = new Set();
+
+/**
+ * Tell the suite a URL it handed out has been visited.
+ *
+ * Normally the suite learns this from the callback the flow ends at, so nothing
+ * needs to say it. One module has no callback to learn it from:
+ * `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds` sends the
+ * browser to the authorization endpoint and then waits — deliberately — for the
+ * login page to be REACHED and not completed, up to 120 seconds, before it
+ * issues the second request that is the actual subject of the test. With
+ * nothing reporting the visit it times out with "The initial authorization
+ * server login page was not visited within the 120 seconds timeout period",
+ * which reads as a driver that never got there and is a driver that got there
+ * and said nothing.
+ *
+ * `POST /api/runner/browser/{id}/visit` is the suite's own endpoint for this —
+ * `TestRunner.visitBrowserUrl` calls `BrowserControl.urlVisited(url)` — and it
+ * is the same fact the callback would have carried, reported by the only party
+ * that knows it.
+ */
+async function reportVisited(testId, url) {
+  const res = await fetch(
+    `${SUITE}/api/runner/browser/${testId}/visit?url=${encodeURIComponent(url)}`,
+    { method: 'POST' },
+  ).catch(() => undefined);
+  if (!res || !res.ok) {
+    console.error(`[drive] could not report the visit to the suite: ${res ? res.status : 'no response'}`);
+  }
+}
+
+/**
+ * Fill the suite's screenshot placeholders for one test.
+ *
+ * This is not cosmetic and it is not optional. `fireTestFinished()` sets the
+ * status to WAITING and hands the rest to a background finalisation task; a
+ * URL the suite handed out with a placeholder is not accounted for until the
+ * placeholder is filled, so the task never completes and the module sits at
+ * WAITING until the runner's timeout stops it. Four Basic OP modules finished
+ * every one of their assertions SUCCESS and were still recorded as WAITING for
+ * exactly this reason — `oidcc-prompt-login`, `oidcc-max-age-1`,
+ * `oidcc-ensure-registered-redirect-uri` and
+ * `oidcc-ensure-request-object-with-redirect-uri`.
+ *
+ * What is uploaded is a real screenshot of the page this driver was shown, so
+ * the evidence a certification reviewer opens is the evidence the run produced.
+ * The suite accepts jpeg or png up to 500KB and at most two images per test,
+ * which is why each placeholder is filled once and only from a shot that
+ * matches what the condition asked to see.
+ */
+async function fillPlaceholders(testId) {
+  let log;
+  try {
+    log = await suiteJson(`/api/log/${testId}`);
+  } catch {
+    return;
+  }
+  const forTest = shots.get(testId) ?? {};
+  for (const entry of log) {
+    const placeholder = entry.upload;
+    if (!placeholder || filled.has(placeholder)) continue;
+    const src = String(entry.src ?? '');
+    const png = /LoginPage|Login/i.test(src)
+      ? (forTest.login ?? forTest.error)
+      : (forTest.error ?? forTest.login);
+    if (!png) continue;
+    const res = await fetch(`${SUITE}/api/log/${testId}/images/${placeholder}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: `data:image/jpeg;base64,${png}`,
+    });
+    if (res.ok) {
+      filled.add(placeholder);
+      console.log(`[drive] uploaded evidence for ${src}`);
+    } else {
+      console.error(`[drive] placeholder ${placeholder} rejected: ${res.status}`);
+      // Marked done anyway: a rejected upload retried every two seconds for the
+      // rest of the run is noise, not resilience, and the module's verdict has
+      // already been decided by its assertions.
+      filled.add(placeholder);
+    }
+  }
+}
+
+/**
  * Every test instance in the newest plan.
  *
  * `length` has to be generous, and that is the whole point of this comment.
@@ -139,8 +239,51 @@ async function currentInstances() {
  * Everything is addressed by `id`. The labels are localised — W5 shipped five
  * locales — so text matching would bind this to whichever locale the run picked.
  */
-async function visit(context, url) {
+/**
+ * Modules whose whole subject is the user saying no.
+ *
+ * `ExpectAccessDeniedErrorFromAuthorizationEndpointDueToUserRejectingRequest`
+ * spells the requirement as an instruction to a person — "the tester MUST press
+ * 'cancel' on the login screen or deny consent so that an error is returned to
+ * the relying party" — so a driver that always signs in fails it by doing the
+ * one thing the module forbids. Matched on a suffix rather than a whole name
+ * because each FAPI variant prefixes its own plan name onto the module.
+ */
+const DECLINE_SUFFIX = 'user-rejects-authentication';
+
+/**
+ * The one module whose FIRST visit must stop at the login page.
+ *
+ * `FAPI2SPFinalPAREnsureServerAcceptsReusedRequestUriBeforeAuthenticationCompletion`
+ * checks that a `request_uri` may be presented twice as long as no
+ * authorization was completed in between. It expresses that as two visits: the
+ * first must reach the login page and go no further — the module waits up to
+ * 120 seconds for a screenshot of it, which is what tells the suite to issue
+ * the second — and only the second is signed in.
+ *
+ * Signing in on the first is not a slow failure but an immediate one, and the
+ * suite says so in as many words: "The user was authenticated on the initial
+ * visit to login page. This must not be attempted until the second visit."
+ */
+const STOP_AT_LOGIN_SUFFIX = 'par-ensure-reused-request-uri-prior-to-auth-completion-succeeds';
+
+/** How many URLs each test has been given, so "the first visit" is knowable. */
+const visitCounts = new Map();
+
+async function visit(context, url, testId, testName = '') {
+  const nth = (visitCounts.get(testId) ?? 0) + 1;
+  visitCounts.set(testId, nth);
+  const decline = testName.endsWith(DECLINE_SUFFIX);
+  const stopAtLogin = nth === 1 && testName.endsWith(STOP_AT_LOGIN_SUFFIX);
   const page = await context.newPage();
+  // JPEG rather than PNG, and the viewport rather than the full page: the
+  // suite caps an upload at 500KB and a full-page PNG of the SPA clears that
+  // on its own. Quality 60 is still legible evidence of which page was shown.
+  const shot = () =>
+    page
+      .screenshot({ type: 'jpeg', quality: 60 })
+      .then((b) => b.toString('base64'))
+      .catch(() => undefined);
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 
@@ -169,6 +312,35 @@ async function visit(context, url) {
 
     // Step 2, the credentials.
     await page.locator('#username').waitFor({ state: 'visible', timeout: 20_000 });
+    // Captured BEFORE anything is typed into it. `ExpectSecondLoginPage` asks
+    // for proof that the server asked the user to authenticate again, and a
+    // screenshot of a filled-in form does not show that any better than an
+    // empty one — while a shot taken after the click may catch the next page.
+    remember(testId, 'login', await shot());
+
+    // The first of this module's two visits: the login page is the whole
+    // destination. The shot above is the evidence the suite is waiting on, and
+    // `fillPlaceholders` uploads it on the next sweep — which is what releases
+    // the second visit, the one that does sign in.
+    if (stopAtLogin) {
+      await reportVisited(testId, url);
+      console.log(`[drive] reached the login page without signing in (${testName})`);
+      return true;
+    }
+
+    // The refusal, taken at the sign-in page rather than at consent. The FAPI
+    // plans ask for `openid profile` — neither is sensitive — so the consent
+    // screen never renders and `#consent-deny` is not reachable in this lane at
+    // all. `#login-decline` sends the browser back to `/oauth2/authorize` with
+    // the decline marker, and the server answers `access_denied` to the
+    // registered `redirect_uri`, which is the response the module is waiting on.
+    if (decline) {
+      await page.locator('#login-decline').click();
+      await page.waitForURL((u) => atSuite(u), { timeout: 45_000 });
+      console.log(`[drive] declined ${new URL(url).pathname}`);
+      return true;
+    }
+
     await page.locator('#username').fill(USER);
     await page.locator('#password').fill(PASSWORD);
     await page.locator('#login-credentials-submit').click();
@@ -202,6 +374,15 @@ async function visit(context, url) {
       const body = await page
         .evaluate(() => document.body.innerText.slice(0, 300))
         .catch(() => '<unreadable>');
+      // Two modules REACH this branch on purpose. `oidcc-ensure-registered-
+      // redirect-uri` and `oidcc-ensure-request-object-with-redirect-uri` send
+      // an unregistered `redirect_uri` and require the server NOT to redirect —
+      // so "neither the consent screen nor the suite callback appeared" is the
+      // correct outcome, and the page in front of us is the evidence the suite
+      // asked for. Keeping the shot before rethrowing is what lets
+      // `ExpectRedirectUriErrorPage` be answered; the throw still stands,
+      // because from this function's point of view the hop did not complete.
+      remember(testId, 'error', await shot());
       throw new Error(
         `stopped at ${page.url().split('?')[0]} — neither the consent screen ` +
           `nor the suite callback appeared. Page said: ${body.replace(/\s+/g, ' ')}`,
@@ -283,8 +464,14 @@ async function main() {
         // `oidcc-server`, failing the plan's happy path with an error it never
         // asked for — and looking exactly like an AXIAM defect.
         let status;
+        let testName = '';
         try {
-          status = (await suiteJson(`/api/info/${testId}`)).status;
+          // The whole record, not just the status: `testName` is what tells the
+          // driver whether this module wants the sign-in completed or refused,
+          // and it is already in this response.
+          const info = await suiteJson(`/api/info/${testId}`);
+          status = info.status;
+          testName = String(info.testName ?? '');
         } catch {
           continue;
         }
@@ -295,6 +482,8 @@ async function main() {
           const finished = contexts.get(testId);
           if (finished) {
             contexts.delete(testId);
+            shots.delete(testId);
+            visitCounts.delete(testId);
             await finished.close().catch(() => {});
           }
           continue;
@@ -312,8 +501,14 @@ async function main() {
           // Reused across every authorization this test performs, and closed
           // only when the test leaves WAITING for good — see `contextFor`.
           const context = await contextFor(testId);
-          if (await visit(context, url)) drove += 1;
+          if (await visit(context, url, testId, testName)) drove += 1;
         }
+
+        // After the URLs, not instead of them: a placeholder is only created
+        // once the condition that wants the screenshot has run, which is after
+        // the browser has been sent somewhere. Polled every sweep because a
+        // test may raise one at any point in its life.
+        await fillPlaceholders(testId);
       }
       if (ONCE) {
         console.log(`[drive] one sweep, ${drove} authorization(s) completed`);

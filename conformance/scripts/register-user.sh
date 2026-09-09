@@ -74,10 +74,13 @@ fi
 echo "[register-user] activating (a REST-created user is PendingVerification)"
 axiam_api PUT "/api/v1/users/$USER_ID$TENANT_QS" '{"status":"Active"}' >/dev/null
 
-echo "[register-user] setting phone and address over SCIM"
+echo "[register-user] setting name, phone and address over SCIM"
 SCIM=$(axiam_api PATCH "/scim/v2/Users/$USER_ID$TENANT_QS" "$(jq -n '{
   schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
   Operations: [
+    { op: "replace", path: "name.givenName", value: "Conformance" },
+    { op: "replace", path: "name.familyName", value: "Tester" },
+    { op: "replace", path: "name.formatted", value: "Conformance Tester" },
     { op: "replace", path: "phoneNumbers",
       value: [ { value: "+1 555 0100", type: "mobile", primary: true } ] },
     { op: "replace", path: "addresses",
@@ -99,6 +102,38 @@ if ! jq -e '.id // .schemas' >/dev/null 2>&1 <<<"$SCIM"; then
   exit 1
 fi
 
+# Read the values back, because the check above cannot tell success from
+# failure and the line below claims success.
+#
+# `.id // .schemas` matches a SCIM *error* too — an error document carries
+# `schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"]` — and it matched
+# something worse than an error: a `200 OK` echoing the unchanged user, which
+# is what AXIAM returned while `user_patch_is_noop` treated a phone-and-address
+# PATCH as a no-op. The script printed "is Active with a phone number and an
+# address" for a user who had neither, and the conformance modules that
+# depended on it reported an AXIAM defect in the release gates instead.
+#
+# A separate GET rather than reading the PATCH response: it is the stored state
+# these tests actually depend on, and only a read-back can distinguish "written"
+# from "echoed".
+VERIFY=$(axiam_api GET "/scim/v2/Users/$USER_ID$TENANT_QS")
+GOT_PHONE=$(jq -r '.phoneNumbers[0].value // empty' <<<"$VERIFY")
+GOT_ADDRESS=$(jq -r '.addresses[0].formatted // .addresses[0].streetAddress // empty' <<<"$VERIFY")
+GOT_NAME=$(jq -r '.name.formatted // empty' <<<"$VERIFY")
+if [ -z "$GOT_NAME" ]; then
+  # `oidcc-claims-essential` asks for `name` as an ESSENTIAL claim, and
+  # UserInfo can only release what SCIM provisioned into metadata.scim.
+  echo "[register-user] SCIM stored no name.formatted — oidcc-claims-essential needs it" >&2
+  exit 1
+fi
+if [ -z "$GOT_PHONE" ] || [ -z "$GOT_ADDRESS" ]; then
+  echo "[register-user] the SCIM patch reported success and stored nothing." >&2
+  echo "[register-user]   phoneNumbers: ${GOT_PHONE:-<absent>}" >&2
+  echo "[register-user]   addresses:    ${GOT_ADDRESS:-<absent>}" >&2
+  echo "[register-user] oidcc-scope-address, -phone and -all cannot pass without these." >&2
+  exit 1
+fi
+
 conf_write_local "CONFORMANCE_USER=$USER_EMAIL" "CONFORMANCE_USER_PASSWORD=$USER_PASS"
 
-echo "[register-user] $USER_EMAIL is Active with a phone number and an address"
+echo "[register-user] $USER_EMAIL is Active with a name, a phone number and an address"

@@ -69,7 +69,27 @@
     "scope": "openid profile email address phone"
   },
 
+  "_client2_comment": [
+    "client2 is the plan's SECOND client under the PLAN-LEVEL variant, which is",
+    "client_secret_basic — so it must be a client_secret_basic client, not the",
+    "post one. oidcc-refresh-token runs its second authorization as client2 and",
+    "sends an HTTP Basic header; a post-registered client2 makes AXIAM ignore",
+    "that header (SEC-093: the registration decides) and answer 401."
+  ],
   "client2": {
+    "client_id": "${CLIENT_BASIC_2_ID}",
+    "client_secret": "${CLIENT_BASIC_2_SECRET}",
+    "scope": "openid profile email address phone"
+  },
+
+  "_client_secret_post_comment": [
+    "The key name is load-bearing. OIDCCServerTestClientSecretPost.configureClient()",
+    "is one statement — config.add(\"client\", config.get(\"client_secret_post\")) —",
+    "so the block MUST be called client_secret_post. Without it `client` becomes",
+    "JSON null and GetStaticClientConfiguration reports a missing `client`, which",
+    "is a message about the wrong key."
+  ],
+  "client_secret_post": {
     "client_id": "${CLIENT_BASIC_POST_ID}",
     "client_secret": "${CLIENT_BASIC_POST_SECRET}",
     "scope": "openid profile email address phone"

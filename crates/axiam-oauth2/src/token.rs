@@ -58,6 +58,27 @@ use crate::pkce;
 /// indistinguishable.
 pub const CLIENT_AUTH_FAILED: &str = "invalid client credentials";
 
+/// How long a rotated refresh token stays usable after its successor is issued.
+///
+/// FAPI 2.0 Security Profile §5.3.2.1-9 requires the previous token to be
+/// accepted for a period after rotation; the OIDF module that checks it
+/// (`fapi2-security-profile-final-refresh-token`) sleeps thirty seconds and
+/// then replays the old token expecting a 200.
+///
+/// Sixty seconds, not thirty. The tested number is the suite's, not the
+/// profile's, and a grace period exactly as long as the test that measures it
+/// passes conformance by arriving first — a client on a slow link retrying the
+/// request whose response it lost has no such guarantee. Sixty is the smallest
+/// value that is comfortably longer than the observation and still far shorter
+/// than the thirty-day life of the token being retired.
+///
+/// Not configurable: a deployment that shortened it below the profile's floor
+/// would silently stop conforming, and one that lengthened it would widen the
+/// replay window for every tenant at once. If a deployment ever needs to differ
+/// this belongs in the client's own registration, where the FAPI profile switch
+/// already lives, rather than in a global.
+pub const REFRESH_ROTATION_GRACE_SECS: i64 = 60;
+
 // ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------
@@ -294,6 +315,14 @@ pub struct TokenRequestContext {
     /// (SEC-093); for every other client this field is inert, and the
     /// `client_secret_post` case logs a `warn` saying so.
     pub basic_credentials: Option<crate::client_secret_basic::BasicCredentials>,
+    /// The `sub` of [`Self::client_assertion`], for RFC 7521 §4.2's fallback.
+    ///
+    /// Derived by [`Self::with_assertion`] and by nothing else, so that it
+    /// cannot be set independently of the assertion it is supposed to describe.
+    /// It answers "which client row should be loaded" and never "which client
+    /// is authenticated" — see
+    /// [`crate::private_key_jwt::unverified_client_id`].
+    pub assertion_client_id: Option<String>,
 }
 
 /// Which client id a token request is for, given a body parameter that may be
@@ -332,7 +361,21 @@ fn resolve_client_id<'a>(
         )),
         (Some(body), _) => Ok(body),
         (None, Some(header)) => Ok(header),
-        (None, None) => Err(OAuth2Error::InvalidRequest("client_id is required".into())),
+        // RFC 7521 §4.2: "The `client_id` parameter is optional when using an
+        // assertion for client authentication." OIDC Core §9 then makes the
+        // assertion's `sub` the client identifier, so a `private_key_jwt`
+        // client that sends only `client_assertion` — which is what the OIDF
+        // FAPI 2.0 plan's DPoP lane does on every request — is identifying
+        // itself perfectly well and was being answered "client_id is required".
+        //
+        // The value routes the lookup and authenticates nothing:
+        // `authenticate_client_credential` still verifies the assertion against
+        // the loaded client's registered key and still requires `iss` and `sub`
+        // to equal that client's id, so naming somebody else here only picks
+        // the key the forgery is checked against.
+        (None, None) => ctx
+            .assertion_client_id()
+            .ok_or_else(|| OAuth2Error::InvalidRequest("client_id is required".into())),
     }
 }
 
@@ -357,6 +400,45 @@ impl TokenRequestContext {
     /// [`crate::client_secret_basic::BasicCredentials::client_secret`].
     pub fn basic_client_id(&self) -> Option<&str> {
         self.basic_credentials.as_ref().map(|c| c.client_id())
+    }
+
+    /// Whether this request carries **no** client credential of any kind.
+    ///
+    /// The guard three grants run before they look a client up, in one place.
+    ///
+    /// # Why it has to be one place
+    ///
+    /// It has been widened three times. X5.1 added the client certificate,
+    /// because an mTLS client sends no secret at all; W8 added the
+    /// `Authorization: Basic` header; and the third widening — the assertion —
+    /// was missed at all three sites at once, so a `private_key_jwt` client
+    /// presenting a perfectly good `client_assertion` and nothing else was
+    /// refused `invalid_client: client authentication is required` before
+    /// anything looked at it. `private_key_jwt` verification had been
+    /// implemented and wired; this guard sat in front of it. It cost every
+    /// module of the OIDF FAPI 2.0 DPoP lane.
+    ///
+    /// # What it still does not do
+    ///
+    /// It asks only what the REQUEST carries, never what the client
+    /// registered, so it stays decidable before the lookup and SEC-086's
+    /// property holds: a caller with no credential gets the same answer whether
+    /// or not the client id exists. Presence of a credential here authenticates
+    /// nothing — `authenticate_client_credential` decides that, against the
+    /// registration.
+    pub fn carries_no_client_credential(&self, body_secret: Option<&str>) -> bool {
+        body_secret.is_none()
+            && self.client_certificate.is_none()
+            && self.basic_credentials.is_none()
+            && self.client_assertion.is_none()
+    }
+
+    /// The client id an attached assertion claims, for routing only.
+    ///
+    /// See `crate::private_key_jwt::unverified_client_id` for why an unverified
+    /// value may be used to decide *which* client to load and for nothing else.
+    pub fn assertion_client_id(&self) -> Option<&str> {
+        self.assertion_client_id.as_deref()
     }
 
     /// Attach credentials decoded from an `Authorization: Basic` header.
@@ -404,6 +486,13 @@ impl TokenRequestContext {
         self.client_assertion_type = client_assertion_type
             .filter(|t| !t.is_empty())
             .map(str::to_owned);
+        // Derived here, once, so that every endpoint that attaches an assertion
+        // gets the RFC 7521 §4.2 fallback without four call sites remembering
+        // to — the same argument this builder exists for.
+        self.assertion_client_id = self
+            .client_assertion
+            .as_deref()
+            .and_then(crate::private_key_jwt::unverified_client_id);
         self
     }
 
@@ -1292,10 +1381,7 @@ where
         // property is preserved exactly: a caller with no credential gets one
         // answer regardless of whether the client id exists.
         let client_secret = req.client_secret.as_deref();
-        if client_secret.is_none()
-            && ctx.client_certificate.is_none()
-            && ctx.basic_credentials.is_none()
-        {
+        if ctx.carries_no_client_credential(client_secret) {
             return Err(OAuth2Error::InvalidClient(
                 "client authentication is required".into(),
             ));
@@ -1349,15 +1435,41 @@ where
         // an attacker from burning a valid code by intentionally
         // failing PKCE verification.
         let code_hash = crate::authorize::hash_code(code);
-        let auth_code = self
+        let auth_code = match self
             .code_repo
             .get_by_hash(tenant_id, &code_hash, client_id, redirect_uri)
             .await
-            .map_err(|_| {
-                OAuth2Error::InvalidGrant(
+        {
+            Ok(row) => row,
+            Err(_) => {
+                // RFC 6749 §10.5's revocation belongs HERE, not only on the
+                // `consume` failure below — and putting it only there made it
+                // unreachable for the case it was written for.
+                //
+                // `get_by_hash` requires `used = false`. A replayed code is
+                // therefore refused by this lookup and never reaches `consume`,
+                // so the revocation guarded by `consume` fired for a race and
+                // for nothing else. The observable consequence was that an
+                // access token minted from a replayed code kept working:
+                // `oidcc-codereuse-30seconds` and
+                // `fapi2-security-profile-final-attempt-reuse-authorization-code-after-one-second`
+                // both call the resource endpoint afterwards expecting 4xx and
+                // both got 200, and the server logged nothing at all — the
+                // revocation was running, finding no row, and returning quietly.
+                //
+                // Safe to call on every lookup failure, including the two that
+                // are not replays. `replayed_session` matches `used = true`
+                // together with the same client and redirect_uri pair, so an
+                // unknown or merely expired code selects nothing and revokes
+                // nothing; the cost is one read on a request that has already
+                // failed.
+                self.revoke_after_code_replay(tenant_id, &code_hash, client_id, redirect_uri)
+                    .await;
+                return Err(OAuth2Error::InvalidGrant(
                     "authorization code is invalid, expired, or already used".into(),
-                )
-            })?;
+                ));
+            }
+        };
 
         // Verify PKCE before consuming the code
         if let Some(ref challenge) = auth_code.code_challenge {
@@ -1492,11 +1604,8 @@ where
             Some(
                 issue_id_token(
                     auth_code.user_id,
-                    tenant_id,
-                    tenant.organization_id,
                     client_id,
                     auth_code.nonce.as_deref(),
-                    Some(&user.email),
                     Some(&user.username),
                     &auth_code.scopes,
                     &self.auth_config,
@@ -1581,10 +1690,7 @@ where
         // `Authorization` header. Still decidable from the request alone, so
         // no client-existence oracle is created.
         let client_secret = req.client_secret.as_deref();
-        if client_secret.is_none()
-            && ctx.client_certificate.is_none()
-            && ctx.basic_credentials.is_none()
-        {
+        if ctx.carries_no_client_credential(client_secret) {
             return Err(OAuth2Error::InvalidClient(
                 "client authentication is required".into(),
             ));
@@ -1794,10 +1900,7 @@ where
         // Still answered from the request alone, so the oracle this ordering
         // exists to close stays closed.
         let client_secret_val = req.client_secret.as_deref();
-        if client_secret_val.is_none()
-            && ctx.client_certificate.is_none()
-            && ctx.basic_credentials.is_none()
-        {
+        if ctx.carries_no_client_credential(client_secret_val) {
             return Err(OAuth2Error::InvalidClient(
                 "client authentication is required".into(),
             ));
@@ -1957,10 +2060,37 @@ where
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
-        // Now revoke the old refresh token (single-use rotation).
-        // If revoke fails, best-effort cleanup of the new token to
-        // avoid orphaned entries; then surface the appropriate error.
-        if let Err(revoke_err) = self.refresh_token_repo.revoke(tenant_id, &token_hash).await {
+        // Now retire the old refresh token.
+        //
+        // FAPI 2.0 Security Profile §5.3.2.1-9: an authorization server that
+        // rotates refresh tokens shall keep accepting the previous one for a
+        // short period after issuing its successor. So this SUPERSEDES rather
+        // than revokes — the old token stays usable for
+        // `REFRESH_ROTATION_GRACE_SECS` and then expires on the read path's
+        // existing expiry check.
+        //
+        // What that buys is the only recovery a client has from a rotation
+        // whose response it never received: under immediate revocation it holds
+        // a token the server has destroyed, has not been given the replacement,
+        // and can do nothing but start a whole new authorization. What it costs
+        // is a window in which a leaked refresh token is still usable — which
+        // is why the profile that requires it is also the profile that
+        // sender-constrains every token, so replaying one inside the window
+        // needs the client's private key as well.
+        //
+        // The failure handling below is unchanged, including its NotFound case:
+        // `supersede` reports NotFound on exactly the same condition `revoke`
+        // did — no live row matched — so a genuinely concurrent second use is
+        // still caught and still answered "already consumed".
+        if let Err(revoke_err) = self
+            .refresh_token_repo
+            .supersede(
+                tenant_id,
+                &token_hash,
+                Utc::now() + chrono::Duration::seconds(REFRESH_ROTATION_GRACE_SECS),
+            )
+            .await
+        {
             // Best-effort: delete the newly-created token so it
             // doesn't linger as an orphan.
             if let Err(cleanup_err) = self
@@ -2009,11 +2139,8 @@ where
                 Some(
                     issue_id_token(
                         uid,
-                        tenant_id,
-                        tenant.organization_id,
                         client_id,
-                        None, // no nonce for refresh
-                        Some(&user.email),
+                        None,
                         Some(&user.username),
                         &stored.scopes,
                         &self.auth_config,

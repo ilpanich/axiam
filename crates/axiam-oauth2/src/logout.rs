@@ -394,10 +394,7 @@ mod tests {
         expired_cfg.access_token_lifetime_secs = 1;
         let token = axiam_auth::token::issue_id_token(
             sub,
-            Uuid::new_v4(),
-            Uuid::new_v4(),
             "rp-1",
-            None,
             None,
             None,
             &[],
@@ -420,10 +417,7 @@ mod tests {
         let cfg = test_config();
         let token = axiam_auth::token::issue_id_token(
             Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
             "rp-1",
-            None,
             None,
             None,
             &[],

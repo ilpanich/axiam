@@ -1164,3 +1164,85 @@ mod tests {
         );
     }
 }
+
+/// The `client_id` an assertion *claims*, read before anything is verified.
+///
+/// # Why reading an unverified JWT here is not a hole
+///
+/// RFC 7521 §4.2 makes `client_id` optional when a client authenticates with an
+/// assertion, and OIDC Core §9 makes the assertion's `sub` the client's
+/// identifier. So when the body carries no `client_id` there is exactly one
+/// place left to learn which client row to load, and it is inside a token
+/// nobody has checked yet.
+///
+/// That is safe because of what happens next and only because of it: the row
+/// this names is loaded, and [`verify_client_assertion`] then verifies the
+/// signature **against that row's registered key** and re-checks that `iss` and
+/// `sub` equal that client id. An attacker who writes somebody else's client id
+/// into a `sub` has chosen which public key their forgery will be checked
+/// against, and it will not be theirs. The value is a routing hint, never a
+/// credential.
+///
+/// The one thing this must not do is grow a second use. It is deliberately not
+/// exposed as "the client id of an assertion" — nothing downstream may treat
+/// the result as established, and `verify_client_assertion` remains the only
+/// function that decides whose assertion this is.
+///
+/// `None` for anything that is not a JWT with a string `sub`: three
+/// dot-separated parts, a base64url payload, an object with a `sub`. A caller
+/// receiving `None` is in exactly the position it was in before — no client id
+/// from anywhere — and answers as it always did.
+#[must_use]
+pub fn unverified_client_id(assertion: &str) -> Option<String> {
+    use base64::Engine as _;
+
+    let payload = assertion.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let sub = value.get("sub")?.as_str()?;
+    (!sub.is_empty()).then(|| sub.to_owned())
+}
+
+#[cfg(test)]
+mod unverified_client_id_tests {
+    use super::*;
+
+    fn jwt_with(payload: &serde_json::Value) -> String {
+        use base64::Engine as _;
+        let b64 = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        format!(
+            "{}.{}.{}",
+            b64(br#"{"alg":"RS256","typ":"JWT"}"#),
+            b64(payload.to_string().as_bytes()),
+            b64(b"not-a-real-signature"),
+        )
+    }
+
+    #[test]
+    fn it_reads_the_sub_and_nothing_else() {
+        let jwt = jwt_with(&serde_json::json!({"iss": "oa_other", "sub": "oa_me"}));
+        assert_eq!(unverified_client_id(&jwt).as_deref(), Some("oa_me"));
+    }
+
+    /// Every shape that is not "a JWT with a string `sub`" answers `None`, so a
+    /// caller can treat the absence of a client id uniformly rather than
+    /// discovering a new failure mode per malformed input.
+    #[test]
+    fn anything_else_is_no_client_id() {
+        use base64::Engine as _;
+        let b64 = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        for bad in [
+            String::new(),
+            "not-a-jwt".to_owned(),
+            "only.two".to_owned(),
+            format!("{}.{}.{}", b64(b"{}"), b64(b"not base64 json"), b64(b"s")),
+            jwt_with(&serde_json::json!({"iss": "oa_me"})),
+            jwt_with(&serde_json::json!({"sub": 42})),
+            jwt_with(&serde_json::json!({"sub": ""})),
+        ] {
+            assert_eq!(unverified_client_id(&bad), None, "input: {bad}");
+        }
+    }
+}

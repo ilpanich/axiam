@@ -138,6 +138,14 @@ pub struct AuthorizeQuery {
     /// `axiam_oauth2::login_hop::CONSENT_HOP_MARKER`.
     #[serde(rename = "axiam_consent_hop")]
     pub consent_hop: Option<String>,
+    /// The sign-in page's Cancel, coming back (`axiam_user_declined`).
+    ///
+    /// Read on the anonymous path only, and answered with `access_denied` to a
+    /// registered `redirect_uri`. See
+    /// `axiam_oauth2::login_hop::USER_DECLINED_MARKER` for why refusing is a
+    /// protocol outcome rather than an abandoned tab.
+    #[serde(rename = "axiam_user_declined")]
+    pub user_declined: Option<String>,
 }
 
 /// Query parameter for the token endpoint tenant routing.
@@ -457,6 +465,63 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         // `axiam_op_session` cookie: the cookie is not read, because reading it
         // is what `browser_sso` opts into.
         return Err(Box::new(auth_error.error_response()));
+    }
+
+    // The person said no.
+    //
+    // Answered here, before the session cookie is consulted, because the answer
+    // does not depend on it: somebody who cancels the sign-in page has by
+    // definition not signed in, and asking whether they might have a session
+    // from some earlier request would let a stale cookie turn a refusal into a
+    // grant. The two conditions above still apply first — an unknown client and
+    // a client that never opted into the hop are answered exactly as they are
+    // today, because this endpoint must not become an oracle for either.
+    //
+    // Delivered by redirect on the same terms as every other authorization
+    // error (RFC 6749 §4.1.2.1): only to a `redirect_uri` this client
+    // registered, compared exactly, with the request's own `state`. An
+    // unregistered or absent one is answered directly, because a refusal is
+    // still not a licence to send a browser somewhere the client never named.
+    if axiam_oauth2::login_hop::user_declined(q.user_declined.as_deref()) {
+        let refusal = OAuth2Error::AccessDenied(
+            "the end user declined the authorization request at the sign-in page".into(),
+        );
+
+        // Where to answer, and with whose `state` — and for a pushed request
+        // neither comes from the query string.
+        //
+        // RFC 9126 §1: the pushed copy is the request. A FAPI client sends
+        // `client_id` and `request_uri` to the authorization endpoint and may
+        // send nothing else, so reading `state` off the query answered a
+        // refusal with no `state` at all — which the suite reports as
+        // `CheckStateInAuthorizationResponse: State was passed in request, but
+        // is missing from response`, and which a relying party would be right
+        // to discard as an unsolicited response (RFC 6749 §10.12).
+        //
+        // Consuming the `request_uri` here is correct rather than merely
+        // convenient: it is single-use, and this request has just been answered
+        // terminally. Leaving it spendable would let the same pushed request be
+        // presented again after its user said no.
+        let pushed = match q.request_uri.as_deref() {
+            Some(uri) => state
+                .oauth2
+                .par_service
+                .consume(tenant_id, &q.client_id, uri)
+                .await
+                .ok(),
+            None => None,
+        };
+        let (redirect_uri, echo_state) = match pushed.as_ref() {
+            Some(p) => (Some(p.redirect_uri.as_str()), p.state.as_deref()),
+            None => (q.redirect_uri.as_deref(), q.state.as_deref()),
+        };
+
+        return Err(Box::new(match redirect_uri {
+            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
+                build_error_redirect(uri, &refusal, echo_state, &state.auth_config)
+            }
+            _ => build_oauth2_error_response(&refusal),
+        }));
     }
 
     // The cookie, and whether it still names a live session in this tenant.
@@ -2425,7 +2490,7 @@ async fn userinfo_claims_for<C: Connection + Clone>(
 
     // Fetch user details for email/username when the relevant
     // scopes are present.
-    let (email, preferred_username) = if has_scope("email") || has_scope("profile") {
+    let (email, profile) = if has_scope("email") || has_scope("profile") {
         // UserInfo describes the SUBJECT of the token, and that account lives in
         // the tenant the subject inhabits — never one it happens to be acting
         // on. The two differ only for an organization-level principal whose
@@ -2438,12 +2503,18 @@ async fn userinfo_claims_for<C: Connection + Clone>(
         {
             Ok(u) => (
                 if has_scope("email") {
-                    Some(u.email)
+                    // Both members or neither: `email_verified` describes
+                    // `email`, so they are produced by one branch rather than
+                    // by two that could drift apart.
+                    Some((u.email, u.email_verified_at.is_some()))
                 } else {
                     None
                 },
                 if has_scope("profile") {
-                    Some(u.username)
+                    Some((
+                        u.username,
+                        axiam_core::models::user::ProfileNames::from_metadata(&u.metadata),
+                    ))
                 } else {
                     None
                 },
@@ -2470,8 +2541,18 @@ async fn userinfo_claims_for<C: Connection + Clone>(
 
     HttpResponse::Ok().json(UserInfoResponse {
         sub: user.user_id.to_string(),
-        email,
-        preferred_username,
+        email: email.as_ref().map(|(address, _)| address.clone()),
+        email_verified: email.as_ref().map(|&(_, verified)| verified),
+        preferred_username: profile.as_ref().map(|(username, _)| username.clone()),
+        // Absent, not null, when SCIM never provisioned them — OIDC Core
+        // §5.3.2: a claim the OP cannot assert is omitted.
+        name: profile.as_ref().and_then(|(_, names)| names.name.clone()),
+        given_name: profile
+            .as_ref()
+            .and_then(|(_, names)| names.given_name.clone()),
+        family_name: profile
+            .as_ref()
+            .and_then(|(_, names)| names.family_name.clone()),
         phone_number: released.phone_number,
         phone_number_verified: released.phone_number_verified,
         address: released.address,
@@ -3616,6 +3697,21 @@ pub struct PushedAuthorizationRequest {
     pub display: Option<String>,
     pub ui_locales: Option<String>,
     pub claims_locales: Option<String>,
+    /// RFC 9126 §2.1 — the one authorization parameter a client may NOT push.
+    ///
+    /// Modelled so that it can be refused. Leaving it off the struct made
+    /// `serde` drop it silently and the endpoint answer `201` to a request the
+    /// specification says must be rejected:
+    ///
+    /// > The `request_uri` authorization request parameter is one exception,
+    /// > and it MUST NOT be provided.
+    ///
+    /// Refusing matters beyond conformance. A `request_uri` accepted here would
+    /// be a pushed request that names another pushed request, and the second
+    /// would inherit the client authentication of the first — a chain whose
+    /// authenticated origin is a different request from the one finally
+    /// presented at the authorization endpoint.
+    pub request_uri: Option<String>,
 }
 
 /// `POST /oauth2/par` success body (RFC 9126 §2.2).
@@ -3713,6 +3809,20 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
 ) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
     let req = form.into_inner();
+
+    // RFC 9126 §2.1-2, answered before anything else is looked at.
+    //
+    // Ahead of client authentication deliberately, and it costs nothing: the
+    // refusal names a parameter the caller sent rather than anything about the
+    // client, so it is not an oracle, and a request that cannot be honoured
+    // whoever sent it should not first consume an authentication.
+    if req.request_uri.is_some() {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+            "request_uri must not be provided to the pushed authorization request endpoint \
+             (RFC 9126 §2.1)"
+                .into(),
+        ));
+    }
 
     // One client-authentication path in the codebase, shared with the token
     // endpoint, rather than a second one to keep correct — and since SEC-093

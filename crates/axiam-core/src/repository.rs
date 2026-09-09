@@ -1521,6 +1521,42 @@ pub trait RefreshTokenRepository: Send + Sync {
         token_hash: &str,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
+    /// Rotate a refresh token out of use, leaving it usable until `grace_until`.
+    ///
+    /// # Why rotation is not revocation
+    ///
+    /// FAPI 2.0 Security Profile §5.3.2.1-9 requires an authorization server
+    /// that rotates refresh tokens to keep accepting the previous one for a
+    /// short period after the new one is issued. The case it exists for is a
+    /// client that never received the rotation response — a dropped connection
+    /// after the server committed the write — which under immediate revocation
+    /// is locked out permanently, holding a token the server has destroyed and
+    /// no way to ask for another.
+    ///
+    /// # Why this is expressed as an expiry and not a second flag
+    ///
+    /// [`Self::get_by_token_hash`] already refuses an expired token, so a
+    /// shortened `expires_at` needs no new condition on the read path, no new
+    /// column, and no change to the several other callers of [`Self::revoke`]
+    /// — every one of which means "this grant is over" rather than "this token
+    /// has been succeeded", and none of which should acquire a grace period by
+    /// sharing a code path with this.
+    ///
+    /// Implementations MUST only ever bring `expires_at` forward. A refresh
+    /// token issued with thirty days on it must not have its life *extended*
+    /// to the grace instant by a rotation, and a caller passing a distant
+    /// `grace_until` must not be able to resurrect one that has already run
+    /// out.
+    ///
+    /// Returns `NotFound` when no live token matched, exactly as
+    /// [`Self::revoke`] does, so that concurrent use is still detectable.
+    fn supersede(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+        grace_until: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
     /// Revoke all refresh tokens for a given client within a tenant.
     fn revoke_all_for_client(
         &self,

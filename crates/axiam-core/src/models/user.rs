@@ -333,3 +333,98 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The names a provisioning client stores, read where a token is answered
+// ---------------------------------------------------------------------------
+
+/// The single `metadata` key everything SCIM writes lives under.
+///
+/// SCIM stores `externalId` and `name.*` inside the generic `metadata` column
+/// rather than in new schema, all under one top-level key so it can never
+/// collide with what another feature writes there.
+///
+/// The constant lives in `axiam-core` (layer 0) rather than in `axiam-scim`
+/// because it has two readers on opposite sides of the crate graph: the SCIM
+/// surface writes it (layer 7) and the OIDC UserInfo endpoint reads it (layer
+/// 6). A layer-6 crate cannot depend on a layer-7 one —
+/// `scripts/check-crate-layering.py` fails CI on it — so a second copy of the
+/// string was the only alternative, and a second copy of a storage key is the
+/// kind of duplicate that stops being equal quietly.
+pub const SCIM_METADATA_KEY: &str = "scim";
+
+/// Read `metadata.scim.<field>` as a string.
+///
+/// `None` when the key is absent, when `metadata` is not an object, or when
+/// the value is not a string — a provisioning client that wrote a number where
+/// a name belongs has written no name.
+#[must_use]
+pub fn scim_metadata_str(metadata: &serde_json::Value, field: &str) -> Option<String> {
+    metadata
+        .get(SCIM_METADATA_KEY)?
+        .get(field)?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// The OIDC Core §5.1 name claims AXIAM actually holds, from SCIM's `name.*`.
+///
+/// # Why these three and no more
+///
+/// `profile` scope promises fifteen claims. AXIAM stores three of them, and it
+/// stores them because SCIM provisioning has somewhere to put `name.formatted`,
+/// `name.givenName` and `name.familyName`. The other twelve — `birthdate`,
+/// `gender`, `zoneinfo`, `picture` and the rest — have no column and no
+/// provisioning path, and inventing values for them would be worse than
+/// omitting them: OIDC Core §5.3.2 says a claim the OP cannot assert is simply
+/// absent, and the conformance suite treats absence as a review item rather
+/// than a failure.
+///
+/// What is NOT acceptable is holding a name and not releasing it, which is
+/// where this started: the `oidcc-claims-essential` module asks for `name` as
+/// an essential claim, AXIAM had one provisioned over SCIM, and UserInfo
+/// answered without it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileNames {
+    /// OIDC `name` — SCIM `name.formatted`.
+    pub name: Option<String>,
+    /// OIDC `given_name` — SCIM `name.givenName`.
+    pub given_name: Option<String>,
+    /// OIDC `family_name` — SCIM `name.familyName`.
+    pub family_name: Option<String>,
+}
+
+impl ProfileNames {
+    /// Read them out of a user's `metadata`.
+    ///
+    /// `name` falls back to "given family" when SCIM stored the parts without
+    /// a formatted whole. A provisioning client is not obliged to send
+    /// `name.formatted`, and a relying party asking for `name` should not be
+    /// told AXIAM knows nothing about a subject whose first and last names it
+    /// is holding. Composed only when at least one part exists, so a user with
+    /// no name at all still yields `None` rather than an empty string.
+    #[must_use]
+    pub fn from_metadata(metadata: &serde_json::Value) -> Self {
+        let given_name = scim_metadata_str(metadata, "givenName");
+        let family_name = scim_metadata_str(metadata, "familyName");
+        let name = scim_metadata_str(metadata, "formatted").or_else(|| {
+            let joined = [given_name.as_deref(), family_name.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!joined.is_empty()).then_some(joined)
+        });
+        Self {
+            name,
+            given_name,
+            family_name,
+        }
+    }
+
+    /// Whether nothing at all was stored.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none() && self.given_name.is_none() && self.family_name.is_none()
+    }
+}

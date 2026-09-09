@@ -437,6 +437,26 @@ impl RefreshTokenRepository for MockRefreshRepo {
             RevokeMode::Db => Err(AxiamError::Database("revoke failed".into())),
         }
     }
+    /// Shares `RevokeMode` with [`Self::revoke`] deliberately.
+    ///
+    /// Rotation calls this instead of `revoke` now, and every existing test
+    /// that asserts what a failing retirement does — `NotFound` becoming
+    /// "already consumed", a database error becoming a server error — is
+    /// asserting about rotation. Pointing both at the same knob keeps those
+    /// tests testing the path they were written for rather than one that is no
+    /// longer taken.
+    async fn supersede(
+        &self,
+        _t: Uuid,
+        _h: &str,
+        _grace_until: chrono::DateTime<chrono::Utc>,
+    ) -> AxiamResult<()> {
+        match self.revoke {
+            RevokeMode::Ok => Ok(()),
+            RevokeMode::NotFound => Err(not_found()),
+            RevokeMode::Db => Err(AxiamError::Database("supersede failed".into())),
+        }
+    }
     async fn revoke_all_for_client(&self, _t: Uuid, _c: &str) -> AxiamResult<()> {
         unimplemented!()
     }

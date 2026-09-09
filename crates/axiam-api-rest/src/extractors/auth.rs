@@ -682,9 +682,30 @@ async fn resolve_active_tenant_for(
     Ok(target)
 }
 
+/// The audit middleware's cached identity, with the check a cache must not skip.
+///
+/// Signature, expiry and issuer are facts about the token and are not rechecked
+/// — that is what the cache is for. The `cnf` sender constraint is a fact about
+/// *this request*: which certificate the connection presented, which DPoP proof
+/// accompanied it. Reading it from a cache would be reading it from the wrong
+/// request, so it is enforced here every time the cache is used.
+///
+/// Both callers go through this rather than reading the extension directly,
+/// because the version that read it directly is the version that shipped the
+/// hole: a certificate-bound token was accepted through the plain front door
+/// with no certificate anywhere near it.
+fn cached_identity(req: &HttpRequest) -> Result<Option<Arc<CachedUserIdentity>>, AxiamApiError> {
+    let cached = req.extensions().get::<Arc<CachedUserIdentity>>().cloned();
+    let Some(cached) = cached else {
+        return Ok(None);
+    };
+    enforce_sender_constraint(req, &cached.token, &cached.claims.0)?;
+    Ok(Some(cached))
+}
+
 fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
     // Try to reuse claims cached by the audit middleware.
-    if let Some(cached) = req.extensions().get::<Arc<CachedUserIdentity>>() {
+    if let Some(cached) = cached_identity(req)? {
         let config = req
             .app_data::<web::Data<AuthConfig>>()
             .ok_or(AxiamError::Internal("missing auth config".into()))?;
@@ -1005,7 +1026,7 @@ fn extract_principal(req: &HttpRequest) -> Result<AuthenticatedPrincipal, AxiamA
         .app_data::<web::Data<AuthConfig>>()
         .ok_or(AxiamError::Internal("missing auth config".into()))?;
 
-    let validated = match req.extensions().get::<Arc<CachedUserIdentity>>() {
+    let validated = match cached_identity(req)? {
         Some(cached) => cached.claims.clone(),
         None => parse_validated_claims(req)?,
     };

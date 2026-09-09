@@ -382,6 +382,10 @@ fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid, Uuid)
         tenant_id,
         org_id,
         claims: validated,
+        // Carried, not re-derived downstream: the extractor that consumes this
+        // must enforce the `cnf` sender constraint, which this middleware
+        // deliberately does not, and a DPoP proof binds to the token's hash.
+        token: credentials,
     });
 
     req.extensions_mut().insert(identity);

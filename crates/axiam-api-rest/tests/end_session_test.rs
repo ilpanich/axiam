@@ -211,10 +211,7 @@ async fn new_session(f: &Fixture) -> Uuid {
 fn id_token_for(f: &Fixture, client_id: &str, session_id: Option<Uuid>) -> String {
     issue_id_token(
         f.user_id,
-        f.tenant_id,
-        f.org_id,
         client_id,
-        None,
         None,
         None,
         &["openid".to_string()],
@@ -343,10 +340,7 @@ async fn an_unverifiable_hint_ends_nothing() {
     let other = test_auth_config();
     let forged = issue_id_token(
         f.user_id,
-        f.tenant_id,
-        f.org_id,
         &f.client_id,
-        None,
         None,
         None,
         &["openid".to_string()],

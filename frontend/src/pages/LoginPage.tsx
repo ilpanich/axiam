@@ -880,6 +880,40 @@ export function LoginPage() {
               >
                 {m.backAction}
               </Button>
+              {/*
+                RFC 6749 §4.1.2.1 / OIDC Core §3.1.2.6 — refusing is a protocol
+                outcome and needs somewhere to be expressed.
+
+                Rendered only when `returnTo` names a pending authorization
+                request. On an ordinary sign-in there is nothing to decline and
+                nobody to tell, so the button would be a second, quieter "Back".
+
+                It navigates rather than calling an API: the destination is
+                `/oauth2/authorize`, the server's route and not this
+                application's, exactly as the success path at `resume` does. The
+                marker is appended to the value `sanitizeReturnTo` returned, so
+                what is navigated to is the validated string plus one parameter
+                this page controls — never a URL assembled from the query.
+              */}
+              {returnTo && (
+                <Button
+                  id="login-decline"
+                  type="button"
+                  variant="outline"
+                  className="flex-1"
+                  disabled={isLoading}
+                  onClick={() => {
+                    const target = sanitizeReturnTo(returnTo);
+                    if (!target) return;
+                    clearReauthAttempts(target);
+                    window.location.assign(
+                      `${target}${target.includes("?") ? "&" : "?"}axiam_user_declined=1`,
+                    );
+                  }}
+                >
+                  {m.cancelAuthorizationAction}
+                </Button>
+              )}
               <Button id="login-credentials-submit" type="submit" className="flex-1" disabled={isLoading}>
                 {isLoading ? (
                   <>

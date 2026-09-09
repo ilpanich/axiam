@@ -19,6 +19,27 @@ pub enum OAuth2Error {
     InvalidGrant(String),
     #[error("invalid_client: {0}")]
     InvalidClient(String),
+    /// RFC 9449 §5 — a DPoP proof was required and was missing or unusable.
+    ///
+    /// # Why this is not `invalid_client`
+    ///
+    /// It was, and it was wrong in both directions. A `private_key_jwt` client
+    /// that presented a perfectly valid assertion and no proof was told
+    /// `invalid_client: invalid client credentials`, which names the one thing
+    /// that was not the problem — so the client cannot tell what to fix, and an
+    /// operator reading logs sees an authentication failure that did not
+    /// happen. RFC 9449 §5 gives the code for exactly this case, and §7.1 gives
+    /// the same code for a proof that fails verification at a resource.
+    ///
+    /// The OIDF FAPI 2.0 DPoP lane checks it by name:
+    /// `CheckTokenEndpointReturnedInvalidRequestGrantOrDPopProofError` accepts
+    /// `invalid_request`, `invalid_grant` or `invalid_dpop_proof` and rejects
+    /// anything else, `invalid_client` included.
+    ///
+    /// Carries HTTP **400**, not 401: 401 is for a failure to authenticate the
+    /// client (RFC 6749 §5.2), and this is a client that authenticated.
+    #[error("invalid_dpop_proof: {0}")]
+    InvalidDpopProof(String),
     #[error("invalid_request: {0}")]
     InvalidRedirectUri(String),
     /// B5 — the client is registered `require_par` and sent its parameters
@@ -194,6 +215,7 @@ impl OAuth2Error {
             Self::InvalidScope(_) => "invalid_scope",
             Self::InvalidGrant(_) => "invalid_grant",
             Self::InvalidClient(_) => "invalid_client",
+            Self::InvalidDpopProof(_) => "invalid_dpop_proof",
             Self::InvalidRedirectUri(_) => "invalid_request",
             Self::ParRequired(_) => "invalid_request",
             Self::UnsupportedGrantType => "unsupported_grant_type",

@@ -765,9 +765,18 @@ pub fn enforce_token_request(
         ));
     }
 
+    // RFC 9449 §5's own code, not `invalid_client`. The client authenticated;
+    // what is missing is the proof that binds the token it is asking for to a
+    // key it holds. See `OAuth2Error::InvalidDpopProof`.
+    //
+    // The certificate branch above deliberately keeps `invalid_client`: RFC
+    // 8705 defines no dedicated code, and a certificate that was required and
+    // not presented really is a failure of the transport-level credential.
     if client.dpop_bound_access_tokens && !evidence.verified_dpop_proof {
-        return Err(OAuth2Error::InvalidClient(
-            crate::mtls::MTLS_AUTH_FAILED.into(),
+        return Err(OAuth2Error::InvalidDpopProof(
+            "this client's access tokens are DPoP-bound, so the request must carry a \
+             DPoP proof (RFC 9449 §5)"
+                .into(),
         ));
     }
 

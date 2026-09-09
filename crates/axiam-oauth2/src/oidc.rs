@@ -444,7 +444,21 @@ pub fn build_discovery_document_for(
             "iat".into(),
             "nonce".into(),
             "email".into(),
+            // OIDC Core §5.1 — advertised because UserInfo releases it
+            // whenever it releases `email`, and a relying party reading
+            // `claims_supported` to decide whether it can trust an address
+            // needs to know the verification status is available.
+            "email_verified".into(),
             "preferred_username".into(),
+            // The three name claims SCIM provisioning can fill
+            // (`axiam_core::models::user::ProfileNames`). The other twelve of
+            // the `profile` scope's fifteen are deliberately absent: AXIAM has
+            // no column for them, and advertising a claim the server cannot
+            // assert is the discovery-document equivalent of returning `null`
+            // for it.
+            "name".into(),
+            "given_name".into(),
+            "family_name".into(),
             "tenant_id".into(),
             "org_id".into(),
             // X7 — the three authentication-evidence claims. Advertised as
@@ -591,8 +605,40 @@ pub struct UserInfoResponse {
     pub sub: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    /// Whether [`Self::email`] has been verified (OIDC Core §5.1).
+    ///
+    /// Emitted only alongside the address, for [`Self::phone_number_verified`]'s
+    /// reason: it is a statement *about* a value, and making it about one the
+    /// relying party was not given asserts nothing it can act on.
+    ///
+    /// `email` scope promises both members, and the OIDF suite says so —
+    /// `VerifyScopesReturnedInUserInfoClaims` listed `email_verified` as
+    /// missing while `email` itself was released. AXIAM has always held the
+    /// fact (`User::email_verified_at`); it simply had nowhere to put it.
+    ///
+    /// `false` rather than omitted when the address is present and
+    /// unverified. AXIAM does run an email verification ceremony, so unlike
+    /// the telephone case this is a claim with a real ceremony behind it, and
+    /// "we have not verified this" is the answer a relying party needs in
+    /// order to decide whether to trust the address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email_verified: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_username: Option<String>,
+    /// OIDC Core §5.1 `name`, released under the `profile` scope.
+    ///
+    /// These three come from SCIM's `name.*`, which is the only place AXIAM
+    /// holds a human name — see `axiam_core::models::user::ProfileNames` for
+    /// why they are the only three of the fifteen `profile` claims that appear
+    /// here, and why inventing the others would be worse than omitting them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// OIDC Core §5.1 `given_name` — SCIM `name.givenName`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub given_name: Option<String>,
+    /// OIDC Core §5.1 `family_name` — SCIM `name.familyName`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family_name: Option<String>,
     /// OIDC Core §5.1, released under the `phone` scope (X7 G8).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phone_number: Option<String>,
@@ -618,7 +664,11 @@ impl std::fmt::Debug for UserInfoResponse {
         f.debug_struct("UserInfoResponse")
             .field("sub", &self.sub)
             .field("email", &self.email)
+            .field("email_verified", &self.email_verified)
             .field("preferred_username", &self.preferred_username)
+            .field("name", &self.name)
+            .field("given_name", &self.given_name)
+            .field("family_name", &self.family_name)
             .field(
                 "phone_number",
                 &self.phone_number.as_ref().map(|_| "<redacted>"),

@@ -939,3 +939,140 @@ async fn an_mtls_bound_token_is_not_downgraded_to_a_bearer_token_on_post() {
         "the body carrier refuses it in the same words"
     );
 }
+
+/// A certificate-bound token stays bound when an upstream middleware has
+/// already cached the identity.
+///
+/// # The hole this closes
+///
+/// `an_mtls_bound_token_is_not_downgraded_to_a_bearer_token_on_post` asserts
+/// the right property against a request that could never have exhibited the
+/// defect. The audit middleware caches a `CachedUserIdentity` after checking a
+/// token's signature and expiry — and nothing else — and `extract_user` then
+/// used those claims and never reached `enforce_sender_constraint`. The test
+/// app installs no audit middleware, so the cache was always absent and the
+/// slow path was always taken.
+///
+/// Every route reached through `AuthenticatedUser` was affected. The OIDF FAPI
+/// 2.0 lane found it at UserInfo: `EnsureHttpStatusCodeIs4xx` presented a
+/// certificate-bound access token through the plain front door, where no client
+/// certificate exists at all, and was answered `200` with the subject's claims.
+///
+/// So this test does the one thing the other cannot: it puts the cache there.
+/// The token, the assertion and the expected answer are otherwise identical, so
+/// a difference between the two is a difference in the code path and nothing
+/// else.
+#[actix_rt::test]
+async fn a_cached_identity_does_not_launder_a_bound_token_into_a_bearer_token() {
+    use actix_web::HttpMessage as _;
+    use actix_web::dev::Service as _;
+    use axiam_auth::token::{CachedUserIdentity, validate_access_token};
+
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let token = issue_access_token_bound(
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid".to_owned()],
+        &auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+        Some(CnfClaim::from_certificate_thumbprint(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )),
+    )
+    .unwrap();
+
+    // Stands in for the audit middleware: validates signature and expiry, and
+    // caches. Exactly what the real one does, including what it leaves out.
+    let cached = Arc::new(CachedUserIdentity {
+        user_id,
+        tenant_id,
+        org_id,
+        claims: validate_access_token(&token, &auth).unwrap(),
+        token: token.clone(),
+    });
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(AppState::for_test(db.clone(), auth.clone())))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .wrap_fn(move |req, srv| {
+                req.extensions_mut().insert(cached.clone());
+                srv.call(req)
+            })
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+
+    // No client certificate can reach a `TestRequest` — `conn_data` is always
+    // `None` — which is precisely the situation the FAPI module created by
+    // dialling the front door, and precisely the situation that must be
+    // refused.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "a cached identity must not turn a certificate-bound token into a bearer token"
+    );
+
+    // The control, on the same app and the same cache: an UNBOUND token is
+    // still served. Without it this test would also pass if the cached path
+    // had been broken outright rather than made to check the binding.
+    let unbound = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid".to_owned()],
+        &auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+    )
+    .unwrap();
+    let unbound_cached = Arc::new(CachedUserIdentity {
+        user_id,
+        tenant_id,
+        org_id,
+        claims: validate_access_token(&unbound, &auth).unwrap(),
+        token: unbound.clone(),
+    });
+    let control_app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(AppState::for_test(db.clone(), auth.clone())))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .wrap_fn(move |req, srv| {
+                req.extensions_mut().insert(unbound_cached.clone());
+                srv.call(req)
+            })
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+    let ok = test::call_service(
+        &control_app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {unbound}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        ok.status().as_u16(),
+        200,
+        "an unbound token is unaffected — the cache is still a cache"
+    );
+}

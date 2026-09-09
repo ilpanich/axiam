@@ -434,6 +434,7 @@ async fn middleware_reuses_cached_identity() {
         tenant_id,
         org_id,
         claims,
+        token: token.clone(),
     });
 
     let repo = RecordingRepo::new();

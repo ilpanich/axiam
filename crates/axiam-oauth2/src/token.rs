@@ -1481,6 +1481,52 @@ where
             }
         }
 
+        // RFC 9449 §10, and beside PKCE for the same reason PKCE is here.
+        //
+        //   When a token request is received, the authorization server computes
+        //   the JWK Thumbprint of the proof-of-possession public key in the DPoP
+        //   proof and verifies that it matches the dpop_jkt parameter value in
+        //   the authorization request.  If they do not match, it MUST reject
+        //   the request.
+        //
+        // `auth_code.dpop_jkt` is that parameter value as it stood when the
+        // client committed to it — whether it arrived as the `dpop_jkt`
+        // parameter or as the thumbprint of a DPoP proof presented at the PAR
+        // endpoint, which §10.1 says binds identically ("behave as if the
+        // contained public key's thumbprint was provided using dpop_jkt").
+        //
+        // Three cases, and only the first is new behaviour:
+        //
+        //   - bound, and the proof's key differs (or there is no proof at all)
+        //     — refuse. A code pinned to a key is worthless to whoever holds
+        //     the code without the key, which is the entire point of §10.
+        //   - bound, and the keys match — proceed.
+        //   - not bound — proceed, and let `certificate_binding_for` apply
+        //     whatever the *registration* requires. A client that never used
+        //     the parameter sees exactly the answer it saw before §10 existed.
+        //
+        // `invalid_grant` rather than `invalid_dpop_proof`: the proof is
+        // perfectly valid — `dpop_from_request` already verified its
+        // signature, `htm`, `htu` and freshness — and what fails is the
+        // *grant*, which is bound to a key this caller has not demonstrated.
+        // Saying `invalid_dpop_proof` would send an honest client debugging
+        // its proof generation over a code it should simply push again.
+        if let Some(ref bound_jkt) = auth_code.dpop_jkt {
+            let presented = ctx.dpop_thumbprint();
+            if presented != Some(bound_jkt.as_str()) {
+                tracing::debug!(
+                    client_id = %client_id,
+                    presented = presented.unwrap_or("<none>"),
+                    "authorization code is bound to a DPoP key the token request did not prove"
+                );
+                return Err(OAuth2Error::InvalidGrant(
+                    "this authorization code is bound to a DPoP key (RFC 9449 §10); the token \
+                     request must carry a DPoP proof for that same key"
+                        .into(),
+                ));
+            }
+        }
+
         // Now atomically consume (mark as used) the code.
         if self
             .code_repo
@@ -2425,6 +2471,7 @@ mod tests {
             auth_time,
             acr: acr.map(str::to_owned),
             amr,
+            dpop_jkt: None,
             expires_at: Utc::now(),
             used: false,
             created_at: Utc::now(),

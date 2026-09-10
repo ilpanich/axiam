@@ -141,6 +141,21 @@ pub struct AuthorizeRequest {
     /// survives one interaction is answered rather than retried. See
     /// [`crate::honour`].
     pub login_hop_return_leg: bool,
+    /// RFC 9449 §10 — the DPoP key this authorization is pinned to, if any.
+    ///
+    /// Resolved by the handler, which is the only layer holding both of
+    /// §10's carriers: the `dpop_jkt` request parameter and the thumbprint of
+    /// a `DPoP` proof presented at the PAR endpoint. Snapshotted onto the
+    /// authorization code below and compared at redemption — the comparison
+    /// is the whole of §10.1, and it can only happen at the token endpoint,
+    /// which is why the value has to survive the round trip through the
+    /// browser rather than be re-derived there.
+    ///
+    /// Read from the *pushed* copy when there is one, never from the query
+    /// string beside a `request_uri`, for the reason `state` and `nonce` are:
+    /// a key the client pinned under client authentication must not be
+    /// substitutable by the browser that merely carries the handle.
+    pub dpop_jkt: Option<String>,
 }
 
 /// What an authorization request earned (W4, plan §4.2).
@@ -504,6 +519,12 @@ where
                 // no session to speak for.
                 acr,
                 amr: req.session_evidence.amr,
+                // RFC 9449 §10.1 — snapshotted for the same reason
+                // `code_challenge` is: it is a commitment the client made
+                // under client authentication, and the token request that
+                // redeems this code has to be checked against the commitment
+                // as it stood then, not against anything it sends now.
+                dpop_jkt: req.dpop_jkt,
                 expires_at,
             })
             .await
@@ -683,6 +704,7 @@ mod tests {
                 auth_time: input.auth_time,
                 acr: input.acr,
                 amr: input.amr,
+                dpop_jkt: input.dpop_jkt,
                 expires_at: input.expires_at,
                 used: false,
                 created_at: Utc::now(),
@@ -882,6 +904,7 @@ mod tests {
             id_token_hint: None,
             inline_authn_params_beside_request_uri: false,
             login_hop_return_leg: false,
+            dpop_jkt: None,
         }
     }
 

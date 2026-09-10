@@ -102,6 +102,14 @@ pub struct PushedRequest {
     pub display: Option<String>,
     pub ui_locales: Option<String>,
     pub claims_locales: Option<String>,
+    /// RFC 9449 §10 — the DPoP key this request binds its authorization to.
+    ///
+    /// Already *resolved* by the caller: the handler is where both inputs
+    /// exist (the `dpop_jkt` form parameter and the `DPoP` header's verified
+    /// thumbprint), and §10.1's rule that the two must agree is a refusal the
+    /// endpoint owes the client before anything is stored. What arrives here
+    /// is the single key the authorization is bound to, or `None`.
+    pub dpop_jkt: Option<String>,
 }
 
 /// What `/oauth2/par` answers with (RFC 9126 §2.2).
@@ -193,6 +201,7 @@ where
                     display: req.display,
                     ui_locales: req.ui_locales,
                     claims_locales: req.claims_locales,
+                    dpop_jkt: req.dpop_jkt,
                 },
                 expires_at,
             })

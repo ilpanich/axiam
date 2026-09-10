@@ -738,6 +738,16 @@ pub struct AuthorizationCode {
     /// X7.2 — the methods [`Self::auth_time`] refers to, snapshotted with it.
     #[serde(default)]
     pub amr: Vec<Amr>,
+    /// RFC 9449 §10 — the DPoP key thumbprint this code is bound to, if any.
+    ///
+    /// The token endpoint refuses to redeem the code unless the DPoP proof on
+    /// the token request is signed by this key. `None` means the client never
+    /// pinned one, and the code then redeems against whatever proof its
+    /// registration already required — which is the behaviour every code had
+    /// before this field existed, and stays correct for a client that does
+    /// not use the parameter.
+    #[serde(default)]
+    pub dpop_jkt: Option<String>,
     pub expires_at: DateTime<Utc>,
     pub used: bool,
     pub created_at: DateTime<Utc>,
@@ -764,6 +774,8 @@ pub struct CreateAuthorizationCode {
     pub acr: Option<String>,
     /// X7.2 — see [`AuthorizationCode::amr`].
     pub amr: Vec<Amr>,
+    /// RFC 9449 §10 — see [`AuthorizationCode::dpop_jkt`].
+    pub dpop_jkt: Option<String>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -967,6 +979,21 @@ pub struct PushedAuthParams {
     /// OIDC Core §5.2 `claims_locales`.
     #[serde(default)]
     pub claims_locales: Option<String>,
+    /// RFC 9449 §10 — the DPoP key this authorization is bound to.
+    ///
+    /// Holds the *effective* binding, not the parameter: it is the explicit
+    /// `dpop_jkt` when the client sent one, and otherwise the thumbprint of
+    /// the DPoP proof the client presented at the PAR endpoint — §10.1 makes
+    /// the second bind just as firmly as the first. Storing the resolution
+    /// rather than its two inputs is what lets the token endpoint ask one
+    /// question, "does this proof's key match?", instead of re-deriving which
+    /// mechanism was in play from evidence it no longer holds.
+    ///
+    /// `#[serde(default)]` for the reason every field above it carries one: a
+    /// row pushed before this field existed has no binding, and an absent
+    /// binding reads correctly as "this client pinned no key".
+    #[serde(default)]
+    pub dpop_jkt: Option<String>,
 }
 
 /// Input for creating a pushed authorization request.

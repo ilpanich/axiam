@@ -106,6 +106,14 @@ struct PushedAuthParamsRow {
     ui_locales: Option<String>,
     #[surreal(default)]
     claims_locales: Option<String>,
+    /// RFC 9449 §10 — the DPoP key the pushed request bound itself to.
+    ///
+    /// No migration: `pushed_auth_request.params` is `TYPE object FLEXIBLE`,
+    /// so a new key inside it needs no `DEFINE FIELD`. `#[surreal(default)]`
+    /// carries a row pushed before the field existed, and such a row pinned
+    /// no key.
+    #[surreal(default)]
+    dpop_jkt: Option<String>,
 }
 
 impl From<PushedAuthParams> for PushedAuthParamsRow {
@@ -127,6 +135,7 @@ impl From<PushedAuthParams> for PushedAuthParamsRow {
             display: p.display,
             ui_locales: p.ui_locales,
             claims_locales: p.claims_locales,
+            dpop_jkt: p.dpop_jkt,
         }
     }
 }
@@ -150,6 +159,7 @@ impl From<PushedAuthParamsRow> for PushedAuthParams {
             display: p.display,
             ui_locales: p.ui_locales,
             claims_locales: p.claims_locales,
+            dpop_jkt: p.dpop_jkt,
         }
     }
 }

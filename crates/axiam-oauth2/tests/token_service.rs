@@ -620,6 +620,7 @@ fn make_auth_code(scopes: &[&str], challenge: Option<&str>) -> AuthorizationCode
         auth_time: None,
         acr: None,
         amr: vec![],
+        dpop_jkt: None,
         expires_at: Utc::now() + chrono::Duration::minutes(10),
         used: false,
         created_at: Utc::now(),
@@ -1175,6 +1176,123 @@ async fn auth_code_refresh_create_failure_is_server_error() {
             .error_code(),
         "server_error"
     );
+}
+
+// ---------------------------------------------------------------------------
+// RFC 9449 §10 — the authorization code's binding to a DPoP key
+// ---------------------------------------------------------------------------
+//
+// §10: "When a token request is received, the authorization server computes
+// the JWK Thumbprint of the proof-of-possession public key in the DPoP proof
+// and verifies that it matches the dpop_jkt parameter value in the
+// authorization request. If they do not match, it MUST reject the request."
+//
+// The four tests below are the whole truth table of that sentence, and the
+// fourth — an unbound code — is the non-regression claim: every client that
+// has never sent `dpop_jkt` must be answered exactly as it was before §10 was
+// implemented.
+
+/// The thumbprints are 43-character base64url, as `jwk_thumbprint` produces;
+/// nothing here parses them, but a test that used `"a"`/`"b"` would pass just
+/// as well against an implementation comparing prefixes.
+const KEY_A: &str = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
+const KEY_B: &str = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs";
+
+/// A request that arrived carrying a verified DPoP proof for `jkt`.
+///
+/// Built directly rather than by verifying a real proof because
+/// `TokenRequestContext::dpop_proof` is documented to carry a *conclusion*:
+/// what this file is testing is what the token service does with a thumbprint,
+/// and `dpop::verify_dpop_proof`'s own tests are what establish that the
+/// thumbprint is right.
+fn proof_for(jkt: &str) -> TokenRequestContext {
+    TokenRequestContext {
+        dpop_proof: Some(axiam_oauth2::dpop::VerifiedDpopProof {
+            jkt: jkt.into(),
+            jti: "jti-for-this-request".into(),
+            iat: Utc::now().timestamp(),
+        }),
+        ..TokenRequestContext::default()
+    }
+}
+
+fn code_bound_to(jkt: Option<&str>) -> AuthorizationCode {
+    let mut code = make_auth_code(&["profile"], None);
+    code.dpop_jkt = jkt.map(str::to_owned);
+    code
+}
+
+#[tokio::test]
+async fn a_code_bound_to_a_dpop_key_refuses_a_proof_for_a_different_key() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(code_bound_to(Some(KEY_A))),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &proof_for(KEY_B))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.error_code(),
+        "invalid_grant",
+        "a code pinned to another key is an unredeemable grant, not a bad proof: \
+         the proof presented here is perfectly well-formed"
+    );
+}
+
+#[tokio::test]
+async fn a_code_bound_to_a_dpop_key_refuses_a_token_request_with_no_proof_at_all() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(code_bound_to(Some(KEY_A))),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.error_code(),
+        "invalid_grant",
+        "an absent proof must not read as a matching one — that is the case a \
+         stolen code actually presents"
+    );
+}
+
+#[tokio::test]
+async fn a_code_bound_to_a_dpop_key_redeems_against_a_proof_for_that_key() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(code_bound_to(Some(KEY_A))),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &proof_for(KEY_A))
+        .await
+        .expect("the bound key was proven; the code must redeem");
+    assert_eq!(resp.scope.as_deref(), Some("profile"));
+}
+
+/// The non-regression claim, stated as a test rather than left to inference:
+/// a code carrying no binding redeems with no proof, exactly as every code
+/// issued before schema v58 does.
+#[tokio::test]
+async fn an_unbound_code_still_redeems_with_no_dpop_proof() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(code_bound_to(None)),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+        .await
+        .expect("an unbound code must be unaffected by RFC 9449 §10");
+    assert_eq!(resp.token_type, "Bearer");
 }
 
 // ---------------------------------------------------------------------------

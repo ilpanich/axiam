@@ -106,6 +106,15 @@ pub struct AuthorizeQuery {
     pub display: Option<String>,
     pub ui_locales: Option<String>,
     pub claims_locales: Option<String>,
+    /// RFC 9449 §10 — the JWK thumbprint of the key the client will prove
+    /// possession of at the token endpoint.
+    ///
+    /// Declared here as well as on the PAR body because §10 defines it as an
+    /// *authorization request* parameter, and Figure 25 shows it on a plain
+    /// `GET /authorize`. It is read only on the inline branch: beside a
+    /// `request_uri` the pushed copy wins, like every other parameter, so a
+    /// browser cannot re-pin somebody's pushed request to a key of its own.
+    pub dpop_jkt: Option<String>,
     /// W3 — which tenant this authorization request is for, read **only** when
     /// the request carries no authenticated principal (plan §4.0).
     ///
@@ -1044,6 +1053,13 @@ pub async fn authorize<C: Connection + Clone>(
                 request_object,
                 session_evidence,
                 consent_hop_return_leg: q.consent_hop.is_some(),
+                // RFC 9449 §10 — from the PUSHED copy, never the query string,
+                // for exactly the reason `state` and `nonce` are just above.
+                // The PAR endpoint already resolved §10.1's two carriers into
+                // one value under client authentication; a query-string
+                // `dpop_jkt` here is a browser proposing a key, which is the
+                // substitution the binding exists to prevent.
+                dpop_jkt: params.dpop_jkt,
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
@@ -1148,6 +1164,12 @@ pub async fn authorize<C: Connection + Clone>(
                 request_object,
                 session_evidence,
                 consent_hop_return_leg: q.consent_hop.is_some(),
+                // RFC 9449 §10, Figure 25 — the parameter on a plain
+                // authorization request. Taken at face value: it is only a
+                // *commitment*, and the client makes the commitment harder to
+                // meet, never easier. A caller who pins a key they do not hold
+                // has locked themselves out of their own code and nobody else.
+                dpop_jkt: q.dpop_jkt,
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
@@ -1823,16 +1845,37 @@ const DPOP_HEADER: &str = "DPoP";
 /// The response header carrying a nonce challenge (RFC 9449 §8).
 const DPOP_NONCE_HEADER: &str = "DPoP-Nonce";
 
-/// Verify the `DPoP` header, if one is present, and fold the result into the
-/// token-endpoint context (X5.1, RFC 9449 §4.3).
+/// Fold a verified `DPoP` proof into the token-endpoint context (X5.1).
+///
+/// All of the verification is [`verify_dpop_header`]; this is the one line of
+/// token-endpoint-specific work, kept separate so that the PAR endpoint —
+/// which needs the proof's thumbprint but has no `TokenRequestContext` to put
+/// it in — reaches the same verification rather than a second copy of it.
+async fn dpop_from_request<C: Connection + Clone>(
+    req: &HttpRequest,
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    mut ctx: TokenRequestContext,
+) -> Result<TokenRequestContext, Box<HttpResponse>> {
+    let Some(verified) = verify_dpop_header(req, state, tenant_id).await? else {
+        return Ok(ctx);
+    };
+    ctx.dpop_proof = Some(verified);
+    Ok(ctx)
+}
+
+/// Verify the `DPoP` header, if one is present (X5.1, RFC 9449 §4.3).
+///
+/// `Ok(None)` means no header arrived. `Err` means one arrived and did not
+/// verify, and carries the response to send.
 ///
 /// Two properties this function exists to hold, both of which are easy to lose
 /// by writing the obvious thing instead:
 ///
 /// 1. **A proof that fails verification is an error, not an absence.** Returning
-///    a context with `dpop_proof: None` for a *bad* proof would be silently
-///    equivalent to not sending one — so a client that sent a forged proof would
-///    get whatever an unbound client gets. The `Err` arm is what stops that.
+///    `Ok(None)` for a *bad* proof would be silently equivalent to not sending
+///    one — so a client that sent a forged proof would get whatever an unbound
+///    client gets. The `Err` arm is what stops that.
 /// 2. **An absent header is not an error here.** Whether this particular client
 ///    needed a proof is `fapi::enforce_token_request`'s question and
 ///    `certificate_binding_for`'s, both of which read the *registration*. Making
@@ -1843,12 +1886,16 @@ const DPOP_NONCE_HEADER: &str = "DPoP-Nonce";
 /// client-assertion path uses. A proof whose `jti` cannot be recorded is
 /// refused rather than accepted: failing open would turn a database blip into
 /// an unlimited replay window.
-async fn dpop_from_request<C: Connection + Clone>(
+///
+/// Shared with `/oauth2/par` since RFC 9449 §10.1, which requires the PAR
+/// endpoint to check a proof "as defined in Section 4.3" — the same check,
+/// with `htu` naming the PAR path because [`dpop_htu`] reads it from the
+/// request.
+async fn verify_dpop_header<C: Connection + Clone>(
     req: &HttpRequest,
     state: &AppState<C>,
     tenant_id: Uuid,
-    mut ctx: TokenRequestContext,
-) -> Result<TokenRequestContext, Box<HttpResponse>> {
+) -> Result<Option<axiam_oauth2::dpop::VerifiedDpopProof>, Box<HttpResponse>> {
     use axiam_core::repository::{ProofKind, ProofReplayRepository};
     use axiam_oauth2::dpop::{self, DpopExpectation};
 
@@ -1859,7 +1906,7 @@ async fn dpop_from_request<C: Connection + Clone>(
         .map(str::trim)
         .filter(|v| !v.is_empty())
     else {
-        return Ok(ctx);
+        return Ok(None);
     };
 
     // RFC 9449 §4.3 step 2: more than one DPoP header is a malformed request,
@@ -1952,8 +1999,7 @@ async fn dpop_from_request<C: Connection + Clone>(
         }
     }
 
-    ctx.dpop_proof = Some(verified);
-    Ok(ctx)
+    Ok(Some(verified))
 }
 
 /// RFC 9449 §7.1 error response, optionally carrying a nonce challenge.
@@ -3712,6 +3758,14 @@ pub struct PushedAuthorizationRequest {
     /// authenticated origin is a different request from the one finally
     /// presented at the authorization endpoint.
     pub request_uri: Option<String>,
+    /// RFC 9449 §10 — the JWK thumbprint of the key the client will prove
+    /// possession of at the token endpoint.
+    ///
+    /// One of the two carriers §10.1 requires an AS supporting both PAR and
+    /// DPoP to accept; the other is a `DPoP` header on this same request. When
+    /// both arrive they must agree, and the handler refuses the request when
+    /// they do not.
+    pub dpop_jkt: Option<String>,
 }
 
 /// `POST /oauth2/par` success body (RFC 9126 §2.2).
@@ -3852,6 +3906,10 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
         Ok(client) => client,
         Err(e) => return build_oauth2_error_response(&e),
     };
+    // Cloned because `client.client_id` is moved into the pushed request
+    // below, and the §10.1 refusal between here and there wants to name the
+    // client it is refusing.
+    let client_id_for_log = client.client_id.clone();
 
     // Keyed by the authenticated client and counted AFTER authentication, for
     // the same reasons as the token exchange: PAR always carries credentials
@@ -3871,6 +3929,50 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
                 error_description: "PAR rate limit exceeded for this client".into(),
             });
     }
+
+    // RFC 9449 §10.1 — resolve the DPoP key this authorization binds to.
+    //
+    //   Both mechanisms MUST be supported by an authorization server that
+    //   supports PAR and DPoP.  If both mechanisms are used at the same time,
+    //   the authorization server MUST reject the request if the JWK Thumbprint
+    //   in dpop_jkt does not match the public key in the DPoP header.
+    //
+    // Deliberately after client authentication and after the rate limit.
+    // Verifying a proof *records its `jti`*, so doing it earlier would let an
+    // unauthenticated caller write to the replay table at will — and the
+    // refusals below describe a key, which is a fact about the caller and not
+    // about the client registration, so nothing is leaked by the wait.
+    //
+    // The header alone binds just as firmly as the parameter alone: §10.1 says
+    // the server "MUST further behave as if the contained public key's
+    // thumbprint was provided using dpop_jkt". That is the whole reason this
+    // resolves to a single value rather than carrying both onward — by the
+    // time the token endpoint asks, there is only one right answer and no
+    // benefit in it having to reconstruct which carrier produced it.
+    let proof_jkt = match verify_dpop_header(&http_req, &state, tenant_id).await {
+        Ok(verified) => verified.map(|v| v.jkt),
+        Err(response) => return *response,
+    };
+    let dpop_jkt = match (req.dpop_jkt.as_deref(), proof_jkt.as_deref()) {
+        (Some(param), Some(proof)) if param != proof => {
+            tracing::debug!(
+                client_id = %client_id_for_log,
+                "PAR carried a dpop_jkt naming a different key from the DPoP proof; refusing"
+            );
+            return *dpop_error_response(
+                "invalid_dpop_proof",
+                "dpop_jkt does not match the key of the DPoP proof on this request \
+                 (RFC 9449 §10.1)",
+                None,
+            );
+        }
+        // Either they agree, or exactly one arrived, or neither did. In all
+        // three the parameter wins where it exists and the proof supplies the
+        // binding where it does not — which is the same value in the agreeing
+        // case, so the arms need not be distinguished.
+        (Some(param), _) => Some(param.to_owned()),
+        (None, proof) => proof.map(str::to_owned),
+    };
 
     match state
         .oauth2
@@ -3894,6 +3996,7 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
             display: req.display,
             ui_locales: req.ui_locales,
             claims_locales: req.claims_locales,
+            dpop_jkt,
         })
         .await
     {

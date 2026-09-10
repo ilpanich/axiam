@@ -58,7 +58,7 @@ use crate::helpers::{CountRow, is_transaction_conflict, take_first_or_not_found}
 /// relying on how the deserializer treats an unexpected key.
 const CONSUME_FIELDS: &str = "meta::id(id) AS record_id, tenant_id, client_id, user_id, \
      code_hash, redirect_uri, scopes, code_challenge, code_challenge_method, nonce, \
-     session_id, auth_time, acr, amr, expires_at, used, created_at";
+     session_id, auth_time, acr, amr, dpop_jkt, expires_at, used, created_at";
 
 /// Parse an optional stored UUID.
 ///
@@ -97,6 +97,11 @@ struct AuthCodeRow {
     acr: Option<String>,
     #[surreal(default)]
     amr: Option<Vec<String>>,
+    /// RFC 9449 §10 — the DPoP key this code is bound to (schema v58).
+    /// `#[surreal(default)]` because v58 adds no backfill: a code written
+    /// before it pinned no key, and absent is the value that says so.
+    #[surreal(default)]
+    dpop_jkt: Option<String>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -125,6 +130,11 @@ struct AuthCodeRowWithId {
     acr: Option<String>,
     #[surreal(default)]
     amr: Option<Vec<String>>,
+    /// RFC 9449 §10 — the DPoP key this code is bound to (schema v58).
+    /// `#[surreal(default)]` because v58 adds no backfill: a code written
+    /// before it pinned no key, and absent is the value that says so.
+    #[surreal(default)]
+    dpop_jkt: Option<String>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -156,6 +166,7 @@ impl AuthCodeRowWithId {
                 .amr
                 .map(|raw| Amr::decode_list(&raw))
                 .unwrap_or_default(),
+            dpop_jkt: self.dpop_jkt,
             expires_at: self.expires_at,
             used: self.used,
             created_at: self.created_at,
@@ -199,6 +210,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
                  auth_time = $auth_time, \
                  acr = $acr, \
                  amr = $amr, \
+                 dpop_jkt = $dpop_jkt, \
                  expires_at = $expires_at, \
                  used = false",
             )
@@ -216,6 +228,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             .bind(("auth_time", input.auth_time))
             .bind(("acr", input.acr))
             .bind(("amr", Amr::encode_list(&input.amr)))
+            .bind(("dpop_jkt", input.dpop_jkt))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -250,6 +263,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
                 .amr
                 .map(|raw| Amr::decode_list(&raw))
                 .unwrap_or_default(),
+            dpop_jkt: row.dpop_jkt,
             expires_at: row.expires_at,
             used: row.used,
             created_at: row.created_at,

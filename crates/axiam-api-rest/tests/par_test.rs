@@ -625,6 +625,197 @@ async fn the_pushed_state_is_used_not_a_query_string_copy() {
 // Discovery
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// RFC 9449 §10.1 — the two carriers of a DPoP key binding, and their agreement
+// ---------------------------------------------------------------------------
+//
+//   Both mechanisms MUST be supported by an authorization server that supports
+//   PAR and DPoP.  If both mechanisms are used at the same time, the
+//   authorization server MUST reject the request if the JWK Thumbprint in
+//   dpop_jkt does not match the public key in the DPoP header.
+//
+// "Both mechanisms MUST be supported" is why there is a test per carrier and
+// not only one for the refusal: an implementation that honoured `dpop_jkt` and
+// ignored the header would pass the mismatch test and still be wrong, because
+// §10.1 says the header alone must "behave as if the contained public key's
+// thumbprint was provided using dpop_jkt".
+
+/// An Ed25519 keypair, its JWK, and that JWK's RFC 7638 thumbprint.
+struct ProofKey {
+    encoding: jsonwebtoken::EncodingKey,
+    jwk: Value,
+    jkt: String,
+}
+
+fn proof_key() -> ProofKey {
+    use base64::Engine as _;
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("generate Ed25519");
+    let encoding = jsonwebtoken::EncodingKey::from_ed_pem(kp.serialize_pem().as_bytes())
+        .expect("encoding key");
+    let spki = kp.public_key_raw();
+    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&spki[spki.len() - 32..]);
+    let jwk = serde_json::json!({ "kty": "OKP", "crv": "Ed25519", "x": x });
+    let parsed: jsonwebtoken::jwk::Jwk =
+        serde_json::from_value(jwk.clone()).expect("a well-formed OKP JWK");
+    let jkt = axiam_oauth2::jose::jwk_thumbprint(&parsed).expect("thumbprint");
+    ProofKey { encoding, jwk, jkt }
+}
+
+/// A DPoP proof for `POST /oauth2/par`.
+///
+/// `htu` is built from the same two pieces `dpop_htu` uses on the server side
+/// — the configured issuer and the request path — and deliberately carries no
+/// `?tenant_id=`: RFC 9449 §4.2 defines `htu` as the target URI without its
+/// query, and a proof that included one would be testing the wrong thing.
+fn par_proof(key: &ProofKey, issuer: &str) -> String {
+    let header: jsonwebtoken::Header = serde_json::from_value(serde_json::json!({
+        "typ": axiam_oauth2::dpop::DPOP_TYP,
+        "alg": "EdDSA",
+        "jwk": key.jwk,
+    }))
+    .expect("proof header");
+    let claims = serde_json::json!({
+        "jti": Uuid::new_v4().to_string(),
+        "htm": "POST",
+        "htu": format!("{issuer}/oauth2/par"),
+        "iat": chrono::Utc::now().timestamp(),
+    });
+    jsonwebtoken::encode(&header, &claims, &key.encoding).expect("sign the proof")
+}
+
+/// POST a pushed authorization request carrying an optional `DPoP` header.
+macro_rules! par_with_proof {
+    ($app:expr, $f:expr, $extra:expr, $proof:expr) => {{
+        let body = format!(
+            "client_id={}&client_secret={}&response_type=code&redirect_uri={}{}",
+            $f.client_id,
+            $f.client_secret,
+            enc(REDIRECT_URI),
+            $extra
+        );
+        let mut req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/par?tenant_id={}", $f.tenant_id))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"));
+        if let Some(proof) = $proof {
+            req = req.insert_header(("DPoP", proof));
+        }
+        let resp = test::call_service(&$app, req.set_payload(body).to_request()).await;
+        let status = resp.status().as_u16();
+        let json: Value = test::read_body_json(resp).await;
+        (status, json)
+    }};
+}
+
+/// Read back the binding the endpoint actually stored.
+async fn stored_dpop_jkt(f: &Fixture, request_uri: &str) -> Option<String> {
+    let repo = SurrealPushedAuthRequestRepository::new(f.db.clone());
+    repo.consume(f.tenant_id, &hash_request_uri(request_uri))
+        .await
+        .unwrap()
+        .expect("the pushed request must exist")
+        .params
+        .dpop_jkt
+}
+
+#[actix_web::test]
+async fn a_dpop_jkt_naming_a_different_key_from_the_proof_is_refused() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let key = proof_key();
+    let other = proof_key();
+    assert_ne!(key.jkt, other.jkt, "two generated keys must differ");
+
+    let (status, body) = par_with_proof!(
+        app,
+        f,
+        format!("&dpop_jkt={}", enc(&other.jkt)),
+        Some(par_proof(&key, f.auth.effective_issuer()))
+    );
+
+    assert_eq!(
+        status, 400,
+        "§10.1 requires the request to be rejected, and 201 was the defect \
+         `ensure-mismatched-dpop-jkt-fails` reported: {body}"
+    );
+    assert_eq!(body["error"], "invalid_dpop_proof", "body: {body}");
+}
+
+#[actix_web::test]
+async fn a_dpop_jkt_that_agrees_with_the_proof_is_accepted_and_bound() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let key = proof_key();
+
+    let (status, body) = par_with_proof!(
+        app,
+        f,
+        format!("&dpop_jkt={}", enc(&key.jkt)),
+        Some(par_proof(&key, f.auth.effective_issuer()))
+    );
+
+    assert_eq!(status, 201, "body: {body}");
+    assert_eq!(
+        stored_dpop_jkt(&f, body["request_uri"].as_str().unwrap()).await,
+        Some(key.jkt),
+        "agreement must bind, not merely pass"
+    );
+}
+
+/// The header on its own binds — §10.1's "behave as if the contained public
+/// key's thumbprint was provided using dpop_jkt".
+#[actix_web::test]
+async fn a_dpop_proof_with_no_dpop_jkt_parameter_still_binds_the_request() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let key = proof_key();
+
+    let (status, body) =
+        par_with_proof!(app, f, "", Some(par_proof(&key, f.auth.effective_issuer())));
+
+    assert_eq!(status, 201, "body: {body}");
+    assert_eq!(
+        stored_dpop_jkt(&f, body["request_uri"].as_str().unwrap()).await,
+        Some(key.jkt),
+        "a proof at PAR binds the code even though no dpop_jkt parameter was sent"
+    );
+}
+
+/// The parameter on its own binds, with no proof anywhere — the plain §10 case.
+#[actix_web::test]
+async fn a_dpop_jkt_parameter_with_no_proof_still_binds_the_request() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let key = proof_key();
+
+    let (status, body) = par_with_proof!(
+        app,
+        f,
+        format!("&dpop_jkt={}", enc(&key.jkt)),
+        None::<String>
+    );
+
+    assert_eq!(status, 201, "body: {body}");
+    assert_eq!(
+        stored_dpop_jkt(&f, body["request_uri"].as_str().unwrap()).await,
+        Some(key.jkt)
+    );
+}
+
+/// The non-regression control: a push with neither carrier binds nothing, so
+/// every client registered today redeems its codes exactly as before.
+#[actix_web::test]
+async fn a_push_with_neither_carrier_binds_no_key() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (status, body) = par!(app, f, f.client_id, f.client_secret, "");
+    assert_eq!(status, 201, "body: {body}");
+    assert_eq!(
+        stored_dpop_jkt(&f, body["request_uri"].as_str().unwrap()).await,
+        None
+    );
+}
+
 #[actix_web::test]
 async fn discovery_advertises_the_par_endpoint() {
     let f = setup().await;

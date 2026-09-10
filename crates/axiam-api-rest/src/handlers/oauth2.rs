@@ -988,14 +988,17 @@ pub async fn authorize<C: Connection + Clone>(
                     if axiam_oauth2::login_hop::is_return_leg(q.login_hop.as_deref())
                         && axiam_oauth2::par::is_request_uri_gone(&e) =>
                 {
-                    return build_oauth2_error_response(&OAuth2Error::InvalidRequestUri(
-                        "the pushed authorization request expired while signing in \
+                    return authorize_error_response(
+                        &http_req,
+                        &OAuth2Error::InvalidRequestUri(
+                            "the pushed authorization request expired while signing in \
                          (a request_uri lives 60 seconds); push it again and restart \
                          the authorization request"
-                            .into(),
-                    ));
+                                .into(),
+                        ),
+                    );
                 }
-                Err(e) => return build_oauth2_error_response(&e),
+                Err(e) => return authorize_error_response(&http_req, &e),
             };
 
             // X7.1 — parsed from the *pushed* copy, never from the query
@@ -1137,7 +1140,7 @@ pub async fn authorize<C: Connection + Clone>(
                     Some(uri) => {
                         build_error_redirect(&uri, &error, q.state.as_deref(), &state.auth_config)
                     }
-                    None => build_oauth2_error_response(&error),
+                    None => authorize_error_response(&http_req, &error),
                 };
             };
             AuthorizeRequest {
@@ -1410,7 +1413,7 @@ pub async fn authorize<C: Connection + Clone>(
                 // very channel the setting forbids.
                 OAuth2Error::InvalidClient(_)
                 | OAuth2Error::InvalidRedirectUri(_)
-                | OAuth2Error::ParRequired(_) => build_oauth2_error_response(&e),
+                | OAuth2Error::ParRequired(_) => authorize_error_response(&http_req, &e),
                 _ => {
                     // These errors occur after client+redirect_uri
                     // were validated — safe to redirect.
@@ -3531,6 +3534,95 @@ async fn handle_token_exchange<C: Connection + Clone>(
 /// RFC 6749 §5.2.  Although the token endpoint uses `client_secret_post`,
 /// RFC 6749 §5.2 still requires the 401 response to include
 /// `WWW-Authenticate` indicating the authentication scheme.
+/// Whether this request came from something that will *render* the answer.
+///
+/// Only an explicit `text/html` in `Accept` counts. A missing header, `*/*`
+/// (curl's default) or an API client's `application/json` all keep the JSON
+/// body byte-for-byte, so nothing that integrates against AXIAM today can
+/// observe this.
+fn prefers_html(req: &HttpRequest) -> bool {
+    req.headers()
+        .get(actix_web::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| {
+            accept
+                .split(',')
+                .any(|part| part.trim().starts_with("text/html"))
+        })
+}
+
+/// The five characters that turn text into markup.
+///
+/// Written out rather than pulled from a crate because the set is closed and
+/// the reason it exists should be visible at the point of use: an
+/// `error_description` is not always AXIAM's own prose — `par_form_error`
+/// forwards actix's message, which quotes a field name the caller chose.
+fn escape_html(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// An authorization-endpoint refusal, rendered for whoever asked.
+///
+/// # Why the authorization endpoint gets its own
+///
+/// `/oauth2/authorize` is the one OAuth2 endpoint a **person** arrives at.
+/// When a refusal cannot be redirected to the client — RFC 6749 §4.1.2.1 for a
+/// bad `redirect_uri` or `client_id`, and every `request_uri` failure, where
+/// the redirect target is precisely what could not be resolved — the
+/// specification says the server "SHOULD inform the resource owner of the
+/// error". A `Content-Type: application/json` body informs a developer reading
+/// a browser window; it does not inform a resource owner.
+///
+/// It is also what a certification reviewer is looking at. Five OIDF modules
+/// end in REVIEW with instructions of the form "it must show an error page
+/// saying the request_uri is invalid - upload a screenshot of the error page",
+/// and the screenshot they were being handed was a raw JSON object.
+///
+/// # What it does not do
+///
+/// It does not change a single byte for a non-browser caller, and it does not
+/// invent content: the page renders the same `error` and `error_description`
+/// the JSON carries, escaped, and nothing else. In particular it echoes no
+/// `state`, no `redirect_uri` and no `request_uri` — the rule
+/// [`logged_out_page`] states and for the same reason, since those are
+/// attacker-supplied strings and this page is served from AXIAM's own origin.
+fn authorize_error_response(req: &HttpRequest, e: &OAuth2Error) -> HttpResponse {
+    if !prefers_html(req) {
+        return build_oauth2_error_response(e);
+    }
+    let status = match e {
+        OAuth2Error::InvalidClient(_) => actix_web::http::StatusCode::UNAUTHORIZED,
+        OAuth2Error::ServerError(_) => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+        _ => actix_web::http::StatusCode::BAD_REQUEST,
+    };
+    let code = escape_html(e.error_code());
+    let description = escape_html(&e.error_description());
+    HttpResponse::build(status)
+        .append_header(("Cache-Control", "no-store"))
+        .append_header(("Pragma", "no-cache"))
+        .content_type("text/html; charset=utf-8")
+        .body(format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+             <title>This authorization request cannot be completed</title></head>\
+             <body><h1>This authorization request cannot be completed</h1>\
+             <p>{description}</p><p><small>Error code: <code>{code}</code></small></p>\
+             <p>Nothing has been shared with the application that sent you here. \
+             Return to it and start again.</p></body></html>"
+        ))
+}
+
 fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
     let status = match e {
         OAuth2Error::InvalidClient(_) => actix_web::http::StatusCode::UNAUTHORIZED,

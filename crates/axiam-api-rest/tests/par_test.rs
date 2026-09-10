@@ -816,6 +816,90 @@ async fn a_push_with_neither_carrier_binds_no_key() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The authorization endpoint answers a person in a language they can read
+// ---------------------------------------------------------------------------
+//
+// Five OIDF modules end in REVIEW with instructions of the form "it must show
+// an error page saying the request_uri is invalid - upload a screenshot of the
+// error page". The screenshot they were handed was a raw JSON object.
+
+#[actix_web::test]
+async fn a_browser_gets_a_readable_page_when_a_request_uri_cannot_be_resolved() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let bogus = format!("{REQUEST_URI_PREFIX}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?client_id={}&request_uri={}",
+            f.client_id,
+            enc(&bogus)
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", user_token(&f))))
+        .insert_header((
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status().as_u16(), 400);
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        content_type.starts_with("text/html"),
+        "a browser must be answered with a page, got {content_type}"
+    );
+
+    let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+    assert!(body.starts_with("<!doctype html"), "body: {body}");
+    assert!(
+        body.contains("Error code: <code>invalid_request</code>"),
+        "the page must still name the error code a developer needs: {body}"
+    );
+    // The reviewer is told to look for a page that says the request_uri is
+    // invalid. Asserting on the rendered words is the only way this test
+    // fails when the page stops saying so.
+    assert!(
+        body.contains("request_uri"),
+        "the page must say what was wrong: {body}"
+    );
+}
+
+/// The same refusal, to an API client, is byte-for-byte what it was before the
+/// page existed. This is the non-regression half: content negotiation is only
+/// safe if the un-negotiated answer is untouched.
+#[actix_web::test]
+async fn a_non_browser_still_gets_the_json_error_object() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let bogus = format!("{REQUEST_URI_PREFIX}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    for accept in ["application/json", "*/*"] {
+        let req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!(
+                "/oauth2/authorize?client_id={}&request_uri={}",
+                f.client_id,
+                enc(&bogus)
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", user_token(&f))))
+            .insert_header(("Accept", accept))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 400);
+        let body: Value = test::read_body_json(resp).await;
+        assert_eq!(
+            body["error"], "invalid_request",
+            "Accept: {accept} must keep the JSON object"
+        );
+    }
+}
+
 #[actix_web::test]
 async fn discovery_advertises_the_par_endpoint() {
     let f = setup().await;

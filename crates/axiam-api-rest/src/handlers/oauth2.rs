@@ -529,7 +529,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
                 build_error_redirect(uri, &refusal, echo_state, &state.auth_config)
             }
-            _ => build_oauth2_error_response(&refusal),
+            _ => authorize_error_response(http_req, &refusal),
         }));
     }
 
@@ -627,7 +627,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
                 build_error_redirect(uri, &refusal, q.state.as_deref(), &state.auth_config)
             }
-            _ => build_oauth2_error_response(&refusal),
+            _ => authorize_error_response(http_req, &refusal),
         }));
     }
 
@@ -642,7 +642,8 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             "an authorization request returned from the login hop still \
              carrying no OP session; refusing to redirect again"
         );
-        return Err(Box::new(build_oauth2_error_response(
+        return Err(Box::new(authorize_error_response(
+            http_req,
             &OAuth2Error::LoginRequired(
                 "the sign-in did not establish a session for this tenant at this \
                  origin; sign in again from the relying party, and check that the \

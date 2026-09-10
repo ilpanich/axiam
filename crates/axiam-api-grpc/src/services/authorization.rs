@@ -436,6 +436,9 @@ mod tests {
             ext_exchange: None,
             cnf: None,
             client_id: None,
+            // OIDC Core §5.5: this fixture is not issued from an authorization
+            // request, so it carries no `claims` request to hand on.
+            axiam_requested_claims: None,
             ext: None,
         });
 

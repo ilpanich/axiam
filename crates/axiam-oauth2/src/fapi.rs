@@ -1627,8 +1627,11 @@ mod tests {
 
     // -- X7.1: the matrix, request-time halves ----------------------------
 
-    /// M1-M4 request half. The five security-bearing parameters are refused on
-    /// a `fapi2` client, one at a time, whichever it is.
+    /// M1-M4 request half. The security-bearing parameters are refused on a
+    /// `fapi2` client, one at a time, whichever it is.
+    ///
+    /// `claims` is deliberately not in this list — see
+    /// [`a_fapi2_client_may_send_claims_because_it_is_honoured`].
     #[test]
     fn m1_m4_security_bearing_parameters_are_refused_for_a_fapi_client() {
         let c = fapi_client();
@@ -1638,7 +1641,6 @@ mod tests {
             ("max_age", "0"),
             ("max_age", "3600"),
             ("acr_values", "urn:axiam:acr:mfa"),
-            ("claims", r#"{"id_token":{"acr":{"essential":true}}}"#),
             ("id_token_hint", "ey.header.payload"),
         ] {
             let err = enforce_authorization_request(&c, Some(PKCE), &one_param(name, value), &[])
@@ -1657,11 +1659,7 @@ mod tests {
     #[test]
     fn a_malformed_security_bearing_parameter_is_still_refused_for_fapi() {
         let c = fapi_client();
-        for (name, bad) in [
-            ("max_age", "tomorrow"),
-            ("prompt", "teleport"),
-            ("claims", "{not json"),
-        ] {
+        for (name, bad) in [("max_age", "tomorrow"), ("prompt", "teleport")] {
             assert!(
                 enforce_authorization_request(&c, Some(PKCE), &one_param(name, bad), &[]).is_err(),
                 "a fapi2 client sending a malformed {name} must still be refused"
@@ -1669,7 +1667,7 @@ mod tests {
         }
     }
 
-    /// All five at once are all named, so one refusal tells an operator the
+    /// All of them at once are all named, so one refusal tells an operator the
     /// whole story.
     #[test]
     fn the_refusal_names_every_offending_parameter() {
@@ -1682,9 +1680,56 @@ mod tests {
             ..Default::default()
         });
         let err = enforce_authorization_request(&fapi_client(), Some(PKCE), &params, &[])
-            .expect_err("a fapi2 client sending all five must be refused");
-        for name in ["prompt", "max_age", "acr_values", "claims", "id_token_hint"] {
+            .expect_err("a fapi2 client sending the refused set must be refused");
+        for name in ["prompt", "max_age", "acr_values", "id_token_hint"] {
             assert!(err.to_string().contains(name), "{name} missing from: {err}");
+        }
+        assert!(
+            !err.to_string().contains("claims"),
+            "`claims` is honoured, so it must not appear in a refusal: {err}"
+        );
+    }
+
+    /// A `fapi2` client may send `claims`, because AXIAM honours it.
+    ///
+    /// This is the one member of the old refused five that changed side, and
+    /// the reason is the whole rationale of the gate: it refuses parameters it
+    /// would otherwise **drop**, because dropping `max_age` manufactures a
+    /// freshness guarantee nobody gave. `claims` is no longer dropped — OIDC
+    /// Core §5.5's `userinfo` member is implemented in
+    /// `crate::claims_request` — so refusing it would now be turning away a
+    /// request AXIAM can answer truthfully.
+    ///
+    /// Found by the OIDF suite: `test-claims-parameter-identity-claims` was
+    /// SKIPPED for as long as discovery said `claims_parameter_supported:
+    /// false`, and the moment that became true the module ran and was refused
+    /// at the authorization endpoint.
+    ///
+    /// The data-minimisation property that made `claims` look dangerous is
+    /// untouched, and asserted below: `claims_request::RELEASABLE` cannot
+    /// unlock the consent-gated claims for anybody.
+    #[test]
+    fn a_fapi2_client_may_send_claims_because_it_is_honoured() {
+        let c = fapi_client();
+        for value in [
+            r#"{"userinfo":{"name":{"essential":true}}}"#,
+            r#"{"id_token":{"acr":{"essential":true}}}"#,
+            // Malformed, and still not grounds for refusal on this parameter:
+            // an unusable `claims` asks for nothing, which is what
+            // `claims_request::userinfo_claims` returns for it.
+            "{not json",
+        ] {
+            assert!(
+                enforce_authorization_request(&c, Some(PKCE), &one_param("claims", value), &[])
+                    .is_ok(),
+                "a fapi2 client sending claims={value} must be allowed through"
+            );
+        }
+        for consent_gated in ["phone_number", "phone_number_verified", "address"] {
+            assert!(
+                !crate::claims_request::RELEASABLE.contains(&consent_gated),
+                "{consent_gated} must stay unreachable through the claims parameter"
+            );
         }
     }
 
@@ -1846,7 +1891,9 @@ mod tests {
             ("M2", "max_age", "0"),
             ("M2", "max_age", "3600"),
             ("M3", "acr_values", "urn:axiam:acr:mfa"),
-            ("M3", "claims", r#"{"id_token":{"acr":{"essential":true}}}"#),
+            // `claims` was an M3 row until AXIAM began honouring it — see
+            // `a_fapi2_client_may_send_claims_because_it_is_honoured`, which
+            // now owns that case and asserts the opposite verdict.
             ("M4", "id_token_hint", "ey.header.payload"),
         ] {
             let params = one_param(name, value);

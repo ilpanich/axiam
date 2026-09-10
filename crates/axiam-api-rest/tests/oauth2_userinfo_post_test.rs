@@ -158,6 +158,17 @@ macro_rules! test_app {
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
+                // RFC 9449 §11.1. The extractors fail closed for a request
+                // carrying a DPoP proof when no guard is registered, so this
+                // is not optional decoration: without it every DPoP test here
+                // is a 401 that says nothing about DPoP. The real repository,
+                // against the migrated in-memory database, because a stub
+                // would not exercise the UNIQUE index that actually decides a
+                // replay.
+                .app_data(web::Data::new(Arc::new(
+                    axiam_db::SurrealProofReplayRepository::new($db.clone()),
+                )
+                    as Arc<dyn axiam_api_rest::DpopReplayGuard>))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
@@ -755,6 +766,103 @@ fn dpop_proof(key: &ProofKey, htm: &str, token: &str) -> String {
         "ath": axiam_oauth2::jose::access_token_hash(token),
     });
     jsonwebtoken::encode(&header, &claims, &key.encoding).expect("sign the proof")
+}
+
+/// RFC 9449 §11.1 — a proof is single-use at the resource endpoint too.
+///
+/// The token endpoint has recorded proof `jti`s since X5.1; this path did not,
+/// and said so in a comment. Inside the 60-second freshness window a captured
+/// proof for the same method and URI, replayed with the same token, was
+/// accepted a second time — which is what the OIDF `dpop-negative-tests`
+/// module measured as a 200 where DPOP-7.1 wants 400 or 401.
+///
+/// The two halves are asserted separately on purpose. A test that only
+/// replayed a proof would pass against a server that refused *every* proof, so
+/// the first request establishes that a good proof still works and the second
+/// establishes that the same one no longer does.
+#[actix_rt::test]
+async fn a_dpop_proof_is_single_use_at_the_resource_endpoint() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let key = proof_key();
+    let token = issue_access_token_bound(
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid".to_owned()],
+        &auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+        Some(CnfClaim::from_dpop_thumbprint(key.jkt.clone())),
+    )
+    .unwrap();
+    let app = test_app!(db, auth);
+
+    // One proof, sent twice — the same bytes, which is exactly what an
+    // attacker who captured it would have.
+    let proof = dpop_proof(&key, "POST", &token);
+    let send = |proof: String| {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("DPoP {token}")))
+            .insert_header(("DPoP", proof))
+            .to_request()
+    };
+
+    let first = test::call_service(&app, send(proof.clone())).await;
+    assert_eq!(
+        first.status().as_u16(),
+        200,
+        "the first use of a valid proof must still work"
+    );
+
+    let replay = test::call_service(&app, send(proof)).await;
+    assert_eq!(
+        replay.status().as_u16(),
+        401,
+        "the second use of the same proof must be refused (RFC 9449 §11.1)"
+    );
+}
+
+/// ...and single-use means *that* proof, not that key. A client makes a fresh
+/// proof per request and must not be locked out by its own previous one.
+#[actix_rt::test]
+async fn a_second_proof_from_the_same_key_is_not_a_replay() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let key = proof_key();
+    let token = issue_access_token_bound(
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid".to_owned()],
+        &auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+        Some(CnfClaim::from_dpop_thumbprint(key.jkt.clone())),
+    )
+    .unwrap();
+    let app = test_app!(db, auth);
+
+    for attempt in 1..=3 {
+        // `dpop_proof` mints a fresh `jti` each call, as a real client does.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(USERINFO)
+                .insert_header(("Authorization", format!("DPoP {token}")))
+                .insert_header(("DPoP", dpop_proof(&key, "POST", &token)))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "request {attempt} used a new proof and must be served"
+        );
+    }
 }
 
 /// A DPoP-bound token verifies on POST — and the proof must say `htm=POST`.

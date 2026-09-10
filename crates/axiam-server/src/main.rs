@@ -1019,6 +1019,23 @@ async fn main() -> std::io::Result<()> {
     // X5.1 — the single-use `jti` store shared by RFC 7523 client assertions
     // and RFC 9449 DPoP proofs.
     let proof_replay_repo = SurrealProofReplayRepository::new(pool.handle_for_repo());
+    // RFC 9449 §11.1: makes a DPoP proof single-use at the *resource*
+    // endpoints, which the token endpoint has done since X5.1 and the
+    // extractors could not — recording a `jti` is a write, and they verified
+    // proofs synchronously. Registered as its own app_data for the same reason
+    // `session_validator` is: the extractors are non-generic and cannot name
+    // `AppState<C>`.
+    //
+    // Cloned from `proof_replay_repo` rather than built beside it, so that the
+    // resource endpoints and the token endpoint share one store *by
+    // construction*. A proof is single-use, not single-use per endpoint, and
+    // two stores would let one proof be spent once at each.
+    //
+    // Without it the extractors fail closed for any request presenting a DPoP
+    // proof — the correct direction, and the reason this sits on the next line
+    // rather than somewhere it could be forgotten.
+    let dpop_replay_guard: std::sync::Arc<dyn axiam_api_rest::DpopReplayGuard> =
+        std::sync::Arc::new(proof_replay_repo.clone());
     // NEW-4: durable AMQP nonce store for replay protection, shared by the
     // authz + audit consumers and swept by the periodic cleanup task.
     let amqp_nonce_repo = SurrealAmqpNonceRepository::new(pool.handle_for_repo());
@@ -2433,6 +2450,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(rest_authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(session_validator.clone()))
+            .app_data(web::Data::new(dpop_replay_guard.clone()))
             .app_data(web::Data::new(tenant_scope_resolver.clone()))
             .app_data(web::Data::new(principal_reach_resolver.clone()))
             .app_data(web::Data::new(scim_token_resolver.clone()))

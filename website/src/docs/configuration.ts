@@ -262,6 +262,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "https://mtls.iam.acme.dev",
           ],
           [
+            "AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID",
+            "Tenant that the bare discovery document describes when the caller names none. Every client-authenticating OAuth2 endpoint takes a required `tenant_id`, so a relying party that reads the document and uses the URLs verbatim is otherwise refused. Set it on a single-tenant deployment — the shape an OP is certified as. Leave unset when one issuer serves many tenants: it only changes what the document publishes, never how an endpoint behaves, and a request arriving without `tenant_id` is still refused.",
+            "0b5f4d2e-6c31-4a8e-9f77-2d1c8a4b6e90",
+          ],
+          [
             "AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS",
             "Cache-Control max-age on the JWKS endpoint, in seconds.",
             "300",

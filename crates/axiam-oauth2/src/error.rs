@@ -243,16 +243,155 @@ impl OAuth2Error {
     pub fn error_description(&self) -> String {
         let full = self.to_string();
         // Display format is "error_code: message"; extract the message part.
-        match full.split_once(": ") {
-            Some((_, msg)) => msg.to_string(),
-            None => full,
+        let msg = match full.split_once(": ") {
+            Some((_, msg)) => msg,
+            None => &full,
+        };
+        nqschar(msg)
+    }
+}
+
+/// Render text as RFC 6749 §5.2 `error_description`.
+///
+/// The grammar is not advisory and it is narrower than "text":
+///
+/// ```text
+/// error_description = 1*NQSCHAR
+/// NQSCHAR           = %x20-21 / %x23-5B / %x5D-7E
+/// ```
+///
+/// Printable US-ASCII, minus `"` (%x22) and `\` (%x5C) — the two characters
+/// that would need escaping inside the JSON string the field is delivered in.
+/// Everything above %x7E is excluded, which rules out every character this
+/// codebase reaches for when it writes prose: `§`, `—`, curly quotes, `…`.
+///
+/// # Why here and not at the call sites
+///
+/// Because there are hundreds of call sites and one of this function. A
+/// message is written by whoever is fixing the bug it describes, in the house
+/// style of the file around it, and that style cites specifications as `§`.
+/// Asking every future author to remember a character-set rule from RFC 6749
+/// is asking for the defect back; `error_description()` is the one place every
+/// one of those strings passes through on its way to a client.
+///
+/// It is a real defect and not pedantry. The OIDF module
+/// `fapi2-security-profile-final-ensure-holder-of-key-required` fails on
+/// exactly this, and it failed on a description that had just been *corrected*
+/// to say `RFC 9449 §5` — the section reference is what broke it.
+///
+/// # Transliterated, not stripped
+///
+/// The characters that actually occur are given ASCII spellings rather than
+/// dropped, because the description exists to be read by an integrator: "RFC
+/// 9449 5" and "RFC 9449 section 5" are not equally useful, and a message with
+/// its punctuation silently deleted reads like a corrupted string. Anything
+/// not spelled out here is replaced by a single `?`, which is visible — a
+/// dropped character is not, and an invisible truncation is how a message
+/// comes to mean something it did not say.
+pub fn nqschar(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    for c in msg.chars() {
+        match c {
+            // The permitted set, verbatim.
+            '\x20'..='\x21' | '\x23'..='\x5b' | '\x5d'..='\x7e' => out.push(c),
+            // Excluded by NQSCHAR even though they are ASCII.
+            '"' => out.push('\''),
+            '\\' => out.push('/'),
+            // Whitespace a multi-line Rust string literal picks up.
+            '\n' | '\r' | '\t' => out.push(' '),
+            // The house style's punctuation, spelled out.
+            '§' => out.push_str("section "),
+            '—' | '–' => out.push('-'),
+            '‘' | '’' => out.push('\''),
+            '“' | '”' => out.push('\''),
+            '…' => out.push_str("..."),
+            '\u{a0}' => out.push(' '),
+            _ => out.push('?'),
         }
     }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The character set is the whole of the rule, so it is asserted as the
+    /// whole of the rule rather than by example.
+    #[test]
+    fn nqschar_admits_exactly_the_rfc6749_set() {
+        for c in '\u{0}'..='\u{ff}' {
+            let permitted = matches!(c, '\x20'..='\x21' | '\x23'..='\x5b' | '\x5d'..='\x7e');
+            let rendered = nqschar(&c.to_string());
+            if permitted {
+                assert_eq!(rendered, c.to_string(), "{c:?} is NQSCHAR and must survive");
+            } else {
+                assert!(
+                    rendered.chars().all(|r| matches!(
+                        r,
+                        '\x20'..='\x21' | '\x23'..='\x5b' | '\x5d'..='\x7e'
+                    )),
+                    "{c:?} rendered as {rendered:?}, which is not NQSCHAR"
+                );
+            }
+        }
+    }
+
+    /// The description that actually failed
+    /// `fapi2-security-profile-final-ensure-holder-of-key-required`, and what
+    /// it has to become.
+    #[test]
+    fn a_section_sign_becomes_a_readable_word_not_a_hole() {
+        let described = OAuth2Error::InvalidDpopProof(
+            "this client's access tokens are DPoP-bound, so the request must carry a \
+             DPoP proof (RFC 9449 §5)"
+                .into(),
+        )
+        .error_description();
+        assert!(
+            described.ends_with("(RFC 9449 section 5)"),
+            "the reference must survive in a form an integrator can act on: {described}"
+        );
+        assert!(described.is_ascii());
+    }
+
+    /// Every variant that carries a message, rendered — because the rule binds
+    /// the field and not one variant of it.
+    #[test]
+    fn every_error_description_is_nqschar() {
+        let prose = "an em dash — a section §7 — curly ‘quotes’ and an ellipsis…";
+        for e in [
+            OAuth2Error::InvalidRequest(prose.into()),
+            OAuth2Error::UnauthorizedClient(prose.into()),
+            OAuth2Error::AccessDenied(prose.into()),
+            OAuth2Error::InvalidScope(prose.into()),
+            OAuth2Error::InvalidGrant(prose.into()),
+            OAuth2Error::InvalidClient(prose.into()),
+            OAuth2Error::InvalidDpopProof(prose.into()),
+            OAuth2Error::ServerError(prose.into()),
+        ] {
+            let d = e.error_description();
+            assert!(
+                d.chars()
+                    .all(|c| matches!(c, '\x20'..='\x21' | '\x23'..='\x5b' | '\x5d'..='\x7e')),
+                "{d:?} escaped the NQSCHAR rule"
+            );
+        }
+    }
+
+    /// A quote and a backslash are ASCII and still excluded — the two the JSON
+    /// string would have had to escape.
+    #[test]
+    fn the_two_excluded_ascii_characters_are_replaced_not_kept() {
+        let d = OAuth2Error::InvalidRequest(r#"missing field "redirect_uri" in a\path"#.into())
+            .error_description();
+        assert!(!d.contains('"'), "{d}");
+        assert!(!d.contains('\\'), "{d}");
+        assert!(
+            d.contains("redirect_uri"),
+            "the message must still say what it said: {d}"
+        );
+    }
 
     /// The OIDC interaction vocabulary, pinned as strings.
     ///

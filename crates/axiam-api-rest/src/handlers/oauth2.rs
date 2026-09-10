@@ -2017,7 +2017,12 @@ fn dpop_error_response(error: &str, description: &str, nonce: Option<String>) ->
     }
     Box::new(builder.json(serde_json::json!({
         "error": error,
-        "error_description": description,
+        // Through the same renderer `OAuth2Error::error_description` uses.
+        // This path builds its body directly rather than from an
+        // `OAuth2Error`, and RFC 6749 §5.2's character set binds the *field*,
+        // not the type that happened to produce it — a §-carrying description
+        // written here would be exactly the defect fixed there.
+        "error_description": axiam_oauth2::error::nqschar(description),
     })))
 }
 

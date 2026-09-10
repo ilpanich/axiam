@@ -240,6 +240,130 @@ impl std::fmt::Debug for User {
 
 #[cfg(test)]
 mod tests {
+    use super::{OIDC_METADATA_KEY, ProfileClaims, SCIM_METADATA_KEY};
+    use serde_json::json;
+
+    /// All twelve, from the two buckets, in one go — because the failure this
+    /// guards against is a claim silently not wired, and a test per claim is a
+    /// test somebody forgets to add the thirteenth time.
+    #[test]
+    fn every_profile_claim_is_read_from_the_bucket_that_holds_it() {
+        let metadata = json!({
+            SCIM_METADATA_KEY: {
+                "formatted": "Ada Lovelace",
+                "givenName": "Ada",
+                "familyName": "Lovelace",
+                "middleName": "Byron",
+                "nickName": "Ada",
+                "profileUrl": "https://example.test/ada",
+                "photos": [{ "value": "https://example.test/ada.png", "type": "photo" }],
+                "timezone": "Europe/London",
+                "locale": "en-GB",
+            },
+            OIDC_METADATA_KEY: {
+                "website": "https://example.test/",
+                "gender": "female",
+                "birthdate": "1815-12-10",
+            },
+        });
+        let c = ProfileClaims::from_metadata(&metadata);
+        assert_eq!(c.name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(c.given_name.as_deref(), Some("Ada"));
+        assert_eq!(c.family_name.as_deref(), Some("Lovelace"));
+        assert_eq!(c.middle_name.as_deref(), Some("Byron"));
+        assert_eq!(c.nickname.as_deref(), Some("Ada"));
+        assert_eq!(c.profile.as_deref(), Some("https://example.test/ada"));
+        assert_eq!(c.picture.as_deref(), Some("https://example.test/ada.png"));
+        assert_eq!(c.website.as_deref(), Some("https://example.test/"));
+        assert_eq!(c.gender.as_deref(), Some("female"));
+        assert_eq!(c.birthdate.as_deref(), Some("1815-12-10"));
+        assert_eq!(c.zoneinfo.as_deref(), Some("Europe/London"));
+        assert_eq!(c.locale.as_deref(), Some("en-GB"));
+        assert!(!c.is_empty());
+    }
+
+    /// A deployment that does not run SCIM can still hold a complete profile.
+    #[test]
+    fn the_oidc_bucket_alone_fills_every_claim_scim_would_have() {
+        let metadata = json!({
+            OIDC_METADATA_KEY: {
+                "name": "Ada Lovelace",
+                "given_name": "Ada",
+                "family_name": "Lovelace",
+                "middle_name": "Byron",
+                "nickname": "Ada",
+                "profile": "https://example.test/ada",
+                "picture": "https://example.test/ada.png",
+                "zoneinfo": "Europe/London",
+                "locale": "en-GB",
+            },
+        });
+        let c = ProfileClaims::from_metadata(&metadata);
+        for (claim, got) in [
+            ("name", c.name.as_deref()),
+            ("given_name", c.given_name.as_deref()),
+            ("family_name", c.family_name.as_deref()),
+            ("middle_name", c.middle_name.as_deref()),
+            ("nickname", c.nickname.as_deref()),
+            ("profile", c.profile.as_deref()),
+            ("picture", c.picture.as_deref()),
+            ("zoneinfo", c.zoneinfo.as_deref()),
+            ("locale", c.locale.as_deref()),
+        ] {
+            assert!(got.is_some(), "{claim} must fall back to the oidc bucket");
+        }
+    }
+
+    /// The precedence is one way round and must stay that way: SCIM is what a
+    /// directory synchronises, so a value it overwrote must not be shadowed by
+    /// an older one somebody wrote by hand.
+    #[test]
+    fn scim_wins_over_the_oidc_bucket_where_both_hold_a_claim() {
+        let metadata = json!({
+            SCIM_METADATA_KEY: { "nickName": "from-scim", "locale": "en-GB" },
+            OIDC_METADATA_KEY: { "nickname": "from-oidc", "locale": "it-IT" },
+        });
+        let c = ProfileClaims::from_metadata(&metadata);
+        assert_eq!(c.nickname.as_deref(), Some("from-scim"));
+        assert_eq!(c.locale.as_deref(), Some("en-GB"));
+    }
+
+    /// A subject AXIAM knows nothing about yields nothing — not empty strings,
+    /// which UserInfo would then emit as claims it cannot assert.
+    #[test]
+    fn an_unprovisioned_subject_yields_no_claims_at_all() {
+        assert!(ProfileClaims::from_metadata(&json!({})).is_empty());
+        assert!(ProfileClaims::from_metadata(&json!(null)).is_empty());
+        assert!(ProfileClaims::from_metadata(&json!({"scim": {}})).is_empty());
+    }
+
+    /// `photos` is multi-valued in SCIM; a client that wrote a bare string is
+    /// still understood, because refusing it would drop a picture AXIAM holds.
+    #[test]
+    fn a_picture_is_read_from_either_shape_scim_allows() {
+        let array = json!({ SCIM_METADATA_KEY: { "photos": [{"value": "https://a.test/p"}] } });
+        let flat = json!({ SCIM_METADATA_KEY: { "photos": "https://a.test/p" } });
+        assert_eq!(
+            ProfileClaims::from_metadata(&array).picture.as_deref(),
+            Some("https://a.test/p")
+        );
+        assert_eq!(
+            ProfileClaims::from_metadata(&flat).picture.as_deref(),
+            Some("https://a.test/p")
+        );
+    }
+
+    /// The composed fallback, kept from `ProfileNames`: a provisioning client
+    /// is not obliged to send `name.formatted`.
+    #[test]
+    fn name_is_composed_from_the_parts_when_no_formatted_whole_was_stored() {
+        let m = json!({ SCIM_METADATA_KEY: { "givenName": "Ada", "familyName": "Lovelace" } });
+        assert_eq!(
+            ProfileClaims::from_metadata(&m).name.as_deref(),
+            Some("Ada Lovelace")
+        );
+    }
+
     use super::*;
 
     fn a_user() -> User {
@@ -367,34 +491,112 @@ pub fn scim_metadata_str(metadata: &serde_json::Value, field: &str) -> Option<St
         .map(str::to_owned)
 }
 
-/// The OIDC Core §5.1 name claims AXIAM actually holds, from SCIM's `name.*`.
+/// The key `metadata` sub-object holding OIDC standard claims SCIM has no
+/// field for.
 ///
-/// # Why these three and no more
+/// SCIM 2.0's core `User` schema covers most of OIDC Core §5.1 — `nickName`,
+/// `profileUrl`, `photos`, `locale`, `timezone`, `name.middleName` all have
+/// homes — but defines nothing for `website`, `gender` or `birthdate`.
+/// Rather than bend SCIM attributes into meaning something they do not, those
+/// live here, under a bucket named for the specification that defines them.
+pub const OIDC_METADATA_KEY: &str = "oidc";
+
+/// Read `metadata.oidc.<field>` as a string.
+#[must_use]
+pub fn oidc_metadata_str(metadata: &serde_json::Value, field: &str) -> Option<String> {
+    metadata
+        .get(OIDC_METADATA_KEY)?
+        .get(field)?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// SCIM `photos` — multi-valued, so the first entry's `value` — falling back
+/// to a plain string for a provisioning client that wrote one.
+fn scim_photo(metadata: &serde_json::Value) -> Option<String> {
+    let photos = metadata.get(SCIM_METADATA_KEY)?.get("photos")?;
+    if let Some(s) = photos.as_str() {
+        return Some(s.to_owned());
+    }
+    photos
+        .as_array()?
+        .first()?
+        .get("value")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// The OIDC Core §5.1 claims the `profile` scope promises, as AXIAM holds them.
 ///
-/// `profile` scope promises fifteen claims. AXIAM stores three of them, and it
-/// stores them because SCIM provisioning has somewhere to put `name.formatted`,
-/// `name.givenName` and `name.familyName`. The other twelve — `birthdate`,
-/// `gender`, `zoneinfo`, `picture` and the rest — have no column and no
-/// provisioning path, and inventing values for them would be worse than
-/// omitting them: OIDC Core §5.3.2 says a claim the OP cannot assert is simply
-/// absent, and the conformance suite treats absence as a review item rather
-/// than a failure.
+/// # Where each one comes from
 ///
-/// What is NOT acceptable is holding a name and not releasing it, which is
-/// where this started: the `oidcc-claims-essential` module asks for `name` as
-/// an essential claim, AXIAM had one provisioned over SCIM, and UserInfo
-/// answered without it.
+/// SCIM is the system of record wherever SCIM defines a field, because SCIM is
+/// how users are provisioned and a second source would be a second answer:
+///
+/// | claim         | source                        |
+/// |---------------|-------------------------------|
+/// | `name`        | SCIM `name.formatted`         |
+/// | `given_name`  | SCIM `name.givenName`         |
+/// | `family_name` | SCIM `name.familyName`        |
+/// | `middle_name` | SCIM `name.middleName`        |
+/// | `nickname`    | SCIM `nickName`               |
+/// | `profile`     | SCIM `profileUrl`             |
+/// | `picture`     | SCIM `photos[0].value`        |
+/// | `zoneinfo`    | SCIM `timezone`               |
+/// | `locale`      | SCIM `locale`                 |
+/// | `website`     | `metadata.oidc.website`       |
+/// | `gender`      | `metadata.oidc.gender`        |
+/// | `birthdate`   | `metadata.oidc.birthdate`     |
+///
+/// The last three have no SCIM equivalent — see [`OIDC_METADATA_KEY`].
+/// `updated_at` is deliberately absent: it is `User::updated_at`, a column,
+/// and reading it from metadata would let a provisioning client assert when
+/// AXIAM last changed its own row.
+///
+/// # SCIM wins, `metadata.oidc` fills in
+///
+/// Every claim above also reads from `metadata.oidc.<claim>` when SCIM has
+/// nothing, so a deployment that does not run SCIM at all can still hold a
+/// complete profile through the admin API. The precedence is one way round and
+/// stays that way: where SCIM defines the attribute SCIM is the system of
+/// record, because SCIM is what a directory synchronises and a value it
+/// overwrote must not be shadowed by an older one somebody wrote by hand.
+///
+/// # Absent, never invented
+///
+/// Every field is `Option` and an absent one is omitted from UserInfo rather
+/// than emitted as `null`. OIDC Core §5.3.2 is explicit that a claim the OP
+/// cannot assert is simply not there, and a `null` would be AXIAM asserting it
+/// knows the subject has no name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProfileNames {
+pub struct ProfileClaims {
     /// OIDC `name` — SCIM `name.formatted`.
     pub name: Option<String>,
     /// OIDC `given_name` — SCIM `name.givenName`.
     pub given_name: Option<String>,
     /// OIDC `family_name` — SCIM `name.familyName`.
     pub family_name: Option<String>,
+    /// OIDC `middle_name` — SCIM `name.middleName`.
+    pub middle_name: Option<String>,
+    /// OIDC `nickname` — SCIM `nickName`.
+    pub nickname: Option<String>,
+    /// OIDC `profile` — SCIM `profileUrl`.
+    pub profile: Option<String>,
+    /// OIDC `picture` — SCIM `photos`.
+    pub picture: Option<String>,
+    /// OIDC `website` — `metadata.oidc.website`.
+    pub website: Option<String>,
+    /// OIDC `gender` — `metadata.oidc.gender`.
+    pub gender: Option<String>,
+    /// OIDC `birthdate` — `metadata.oidc.birthdate`, an ISO 8601 `YYYY-MM-DD`.
+    pub birthdate: Option<String>,
+    /// OIDC `zoneinfo` — SCIM `timezone`, an IANA zone such as `Europe/Rome`.
+    pub zoneinfo: Option<String>,
+    /// OIDC `locale` — SCIM `locale`, a BCP 47 tag such as `en-GB`.
+    pub locale: Option<String>,
 }
 
-impl ProfileNames {
+impl ProfileClaims {
     /// Read them out of a user's `metadata`.
     ///
     /// `name` falls back to "given family" when SCIM stored the parts without
@@ -416,15 +618,30 @@ impl ProfileNames {
             (!joined.is_empty()).then_some(joined)
         });
         Self {
-            name,
-            given_name,
-            family_name,
+            name: name.or_else(|| oidc_metadata_str(metadata, "name")),
+            given_name: given_name.or_else(|| oidc_metadata_str(metadata, "given_name")),
+            family_name: family_name.or_else(|| oidc_metadata_str(metadata, "family_name")),
+            middle_name: scim_metadata_str(metadata, "middleName")
+                .or_else(|| oidc_metadata_str(metadata, "middle_name")),
+            nickname: scim_metadata_str(metadata, "nickName")
+                .or_else(|| oidc_metadata_str(metadata, "nickname")),
+            profile: scim_metadata_str(metadata, "profileUrl")
+                .or_else(|| oidc_metadata_str(metadata, "profile")),
+            picture: scim_photo(metadata).or_else(|| oidc_metadata_str(metadata, "picture")),
+            // No SCIM equivalent at all — see `OIDC_METADATA_KEY`.
+            website: oidc_metadata_str(metadata, "website"),
+            gender: oidc_metadata_str(metadata, "gender"),
+            birthdate: oidc_metadata_str(metadata, "birthdate"),
+            zoneinfo: scim_metadata_str(metadata, "timezone")
+                .or_else(|| oidc_metadata_str(metadata, "zoneinfo")),
+            locale: scim_metadata_str(metadata, "locale")
+                .or_else(|| oidc_metadata_str(metadata, "locale")),
         }
     }
 
     /// Whether nothing at all was stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.name.is_none() && self.given_name.is_none() && self.family_name.is_none()
+        *self == Self::default()
     }
 }

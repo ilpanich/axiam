@@ -621,6 +621,7 @@ fn make_auth_code(scopes: &[&str], challenge: Option<&str>) -> AuthorizationCode
         acr: None,
         amr: vec![],
         dpop_jkt: None,
+        requested_userinfo_claims: Vec::new(),
         expires_at: Utc::now() + chrono::Duration::minutes(10),
         used: false,
         created_at: Utc::now(),

@@ -58,7 +58,8 @@ use crate::helpers::{CountRow, is_transaction_conflict, take_first_or_not_found}
 /// relying on how the deserializer treats an unexpected key.
 const CONSUME_FIELDS: &str = "meta::id(id) AS record_id, tenant_id, client_id, user_id, \
      code_hash, redirect_uri, scopes, code_challenge, code_challenge_method, nonce, \
-     session_id, auth_time, acr, amr, dpop_jkt, expires_at, used, created_at";
+     session_id, auth_time, acr, amr, dpop_jkt, requested_userinfo_claims, expires_at, used, \
+     created_at";
 
 /// Parse an optional stored UUID.
 ///
@@ -102,6 +103,11 @@ struct AuthCodeRow {
     /// before it pinned no key, and absent is the value that says so.
     #[surreal(default)]
     dpop_jkt: Option<String>,
+    /// OIDC Core §5.5 — claims asked for by name (schema v59).
+    /// `#[surreal(default)]` because v59 adds no backfill: a code written
+    /// before it asked for none, and absent is the value that says so.
+    #[surreal(default)]
+    requested_userinfo_claims: Option<Vec<String>>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -135,6 +141,11 @@ struct AuthCodeRowWithId {
     /// before it pinned no key, and absent is the value that says so.
     #[surreal(default)]
     dpop_jkt: Option<String>,
+    /// OIDC Core §5.5 — claims asked for by name (schema v59).
+    /// `#[surreal(default)]` because v59 adds no backfill: a code written
+    /// before it asked for none, and absent is the value that says so.
+    #[surreal(default)]
+    requested_userinfo_claims: Option<Vec<String>>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -167,6 +178,7 @@ impl AuthCodeRowWithId {
                 .map(|raw| Amr::decode_list(&raw))
                 .unwrap_or_default(),
             dpop_jkt: self.dpop_jkt,
+            requested_userinfo_claims: self.requested_userinfo_claims.unwrap_or_default(),
             expires_at: self.expires_at,
             used: self.used,
             created_at: self.created_at,
@@ -211,6 +223,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
                  acr = $acr, \
                  amr = $amr, \
                  dpop_jkt = $dpop_jkt, \
+                 requested_userinfo_claims = $requested_userinfo_claims, \
                  expires_at = $expires_at, \
                  used = false",
             )
@@ -229,6 +242,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             .bind(("acr", input.acr))
             .bind(("amr", Amr::encode_list(&input.amr)))
             .bind(("dpop_jkt", input.dpop_jkt))
+            .bind(("requested_userinfo_claims", input.requested_userinfo_claims))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -264,6 +278,7 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
                 .map(|raw| Amr::decode_list(&raw))
                 .unwrap_or_default(),
             dpop_jkt: row.dpop_jkt,
+            requested_userinfo_claims: row.requested_userinfo_claims.unwrap_or_default(),
             expires_at: row.expires_at,
             used: row.used,
             created_at: row.created_at,

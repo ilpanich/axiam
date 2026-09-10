@@ -134,6 +134,61 @@ if [ -z "$GOT_PHONE" ] || [ -z "$GOT_ADDRESS" ]; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# The rest of the OIDC Core §5.1 `profile` claims.
+# ---------------------------------------------------------------------------
+#
+# `oidcc-scope-profile` and `oidcc-scope-all` check UserInfo against the FULL
+# fifteen claims the `profile` scope promises, and warn listing every one that
+# is missing. SCIM's core schema has no `website`, `gender` or `birthdate`, and
+# AXIAM's SCIM PATCH does not yet accept `nickName`, `profileUrl`, `photos`,
+# `timezone`, `locale` or `name.middleName` — so all of them are provisioned
+# through the admin API into `metadata.oidc`, which
+# `axiam_core::models::user::ProfileClaims` reads as the fallback for every
+# claim. SCIM still wins wherever SCIM holds a value; nothing set above is
+# overwritten here.
+#
+# Read-modify-write rather than a bare PUT: `metadata` is replaced wholesale by
+# the update endpoint, so writing only the `oidc` bucket would delete the
+# `scim` one the block above just filled — taking the name, phone and address
+# with it.
+echo "[register-user] provisioning the remaining profile claims into metadata.oidc"
+CURRENT_META=$(axiam_api GET "/api/v1/users/$USER_ID$TENANT_QS" | jq -c '.metadata // {}')
+MERGED_META=$(jq -c --argjson cur "$CURRENT_META" -n '$cur + {
+  oidc: {
+    middle_name: "Quality",
+    nickname:    "Connie",
+    profile:     "https://conformance.example/profile/connie",
+    picture:     "https://conformance.example/profile/connie.png",
+    website:     "https://conformance.example/",
+    gender:      "other",
+    birthdate:   "1990-07-04",
+    zoneinfo:    "Europe/Rome",
+    locale:      "en-GB"
+  }
+}')
+axiam_api PUT "/api/v1/users/$USER_ID$TENANT_QS" \
+  "$(jq -nc --argjson m "$MERGED_META" '{metadata: $m}')" >/dev/null
+
+# Read back, for the reason the SCIM block reads back: a 200 that echoed the
+# unchanged user is indistinguishable from a write, and the line below claims
+# a write happened.
+PROFILE_VERIFY=$(axiam_api GET "/api/v1/users/$USER_ID$TENANT_QS")
+MISSING=""
+for claim in middle_name nickname profile picture website gender birthdate zoneinfo locale; do
+  got=$(jq -r --arg c "$claim" '.metadata.oidc[$c] // empty' <<<"$PROFILE_VERIFY")
+  [ -z "$got" ] && MISSING="$MISSING $claim"
+done
+# The SCIM bucket must have survived the wholesale metadata replacement.
+STILL_NAMED=$(jq -r '.metadata.scim.formatted // empty' <<<"$PROFILE_VERIFY")
+if [ -n "$MISSING" ] || [ -z "$STILL_NAMED" ]; then
+  echo "[register-user] the profile-claim write did not stick." >&2
+  [ -n "$MISSING" ] && echo "[register-user]   missing:$MISSING" >&2
+  [ -z "$STILL_NAMED" ] && echo "[register-user]   metadata.scim.formatted was lost in the merge" >&2
+  echo "[register-user] oidcc-scope-profile and -scope-all cannot pass without these." >&2
+  exit 1
+fi
+
 conf_write_local "CONFORMANCE_USER=$USER_EMAIL" "CONFORMANCE_USER_PASSWORD=$USER_PASS"
 
-echo "[register-user] $USER_EMAIL is Active with a name, a phone number and an address"
+echo "[register-user] $USER_EMAIL is Active with the full profile, a phone number and an address"

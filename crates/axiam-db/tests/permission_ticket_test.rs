@@ -574,6 +574,7 @@ mod single_use_serialisation {
                 acr: None,
                 amr: vec![],
                 dpop_jkt: None,
+                requested_userinfo_claims: Vec::new(),
                 expires_at: Utc::now() + Duration::seconds(60),
             })
             .await
@@ -637,6 +638,7 @@ mod single_use_serialisation {
             acr: None,
             amr: vec![],
             dpop_jkt: None,
+            requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now() + Duration::seconds(60),
         })
         .await

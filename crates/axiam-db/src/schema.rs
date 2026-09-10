@@ -332,6 +332,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "dpop_authorization_code_key_binding",
         sql: SCHEMA_V58,
     },
+    Migration {
+        version: 59,
+        name: "oidc_requested_userinfo_claims",
+        sql: SCHEMA_V59,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3233,6 +3238,22 @@ const SCHEMA_V58: &str = "\
 DEFINE FIELD IF NOT EXISTS dpop_jkt ON TABLE oauth2_auth_code TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v59 — OIDC Core §5.5: claims this authorization asked for by name
+// -----------------------------------------------------------------------
+//
+// One optional array, no backfill, no index — v58's shape and v58's reasons.
+//
+// `option<array>` rather than `array DEFAULT []`: a code written before this
+// migration asked for no claims by name, and absent says that exactly. A
+// `DEFAULT []` would be the same statement in a form that requires every
+// existing row to be rewritten to make it.
+const SCHEMA_V59: &str = "\
+DEFINE FIELD IF NOT EXISTS requested_userinfo_claims ON TABLE oauth2_auth_code \
+    TYPE option<array>;
+DEFINE FIELD IF NOT EXISTS requested_userinfo_claims.* ON TABLE oauth2_auth_code TYPE string;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3420,8 +3441,8 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&58),
-            "v58 is the newest migration (RFC 9449 §10's dpop_jkt binding). This \
+            Some(&59),
+            "v59 is the newest migration (OIDC Core §5.5 requested claims). This \
              assertion is a tripwire, not bookkeeping: bumping it is how a new \
              migration is declared deliberate rather than merged in by accident."
         );

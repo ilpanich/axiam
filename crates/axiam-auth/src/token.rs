@@ -95,6 +95,21 @@ pub struct AccessTokenClaims {
     /// carries the same value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sid: Option<String>,
+    /// OIDC Core §5.5 — UserInfo claims this grant asked for by name.
+    ///
+    /// An AXIAM private claim, prefixed because RFC 9068 §2.2 asks a JWT
+    /// access token not to collide with the registered space and §5.5 defines
+    /// no claim for carrying this. It is the *request*, resolved and filtered
+    /// at the authorization endpoint
+    /// (`axiam_oauth2::claims_request::userinfo_claims`) — never a value, and
+    /// never something UserInfo may widen: UserInfo reads it to decide whether
+    /// to release a claim it already holds.
+    ///
+    /// Absent for every token issued from a grant that sent no `claims`
+    /// parameter, which keeps every token AXIAM issued before §5.5 support
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axiam_requested_claims: Option<Vec<String>>,
     /// Token audience — `"axiam:user"` or `"axiam:m2m"`.
     ///
     /// `None` means the token was issued before Phase 4 and should be treated
@@ -554,6 +569,7 @@ pub struct AccessTokenSpec {
     permissions: Option<Vec<RptPermission>>,
     ext_exchange: Option<ExtExchangeClaim>,
     client_id: Option<String>,
+    requested_userinfo_claims: Option<Vec<String>>,
 }
 
 impl AccessTokenSpec {
@@ -581,6 +597,7 @@ impl AccessTokenSpec {
             permissions: None,
             ext_exchange: None,
             client_id: None,
+            requested_userinfo_claims: None,
         }
     }
 
@@ -741,6 +758,18 @@ impl AccessTokenSpec {
     /// correct for client-credentials and wrong for anything a user signed in
     /// for. See [`AccessTokenClaims::sid`].
     #[must_use]
+    /// OIDC Core §5.5 — the UserInfo claims this grant asked for by name.
+    ///
+    /// An empty slice leaves the claim absent, so a grant that sent no
+    /// `claims` parameter produces a byte-identical token to one issued before
+    /// this method existed. That is the same property `cnf`, `ext` and
+    /// `client_id` each preserve, and it is what lets the OAuth2 paths call
+    /// this unconditionally.
+    pub fn requested_userinfo_claims(mut self, claims: &[String]) -> Self {
+        self.requested_userinfo_claims = (!claims.is_empty()).then(|| claims.to_vec());
+        self
+    }
+
     pub fn session(mut self, session_id: Option<Uuid>) -> Self {
         self.sid = session_id.map(|s| s.to_string());
         self
@@ -800,6 +829,7 @@ impl AccessTokenSpec {
             cnf: self.cnf.clone(),
             ext: self.ext.clone(),
             client_id: self.client_id.clone(),
+            axiam_requested_claims: self.requested_userinfo_claims.clone(),
         })
     }
 
@@ -2643,6 +2673,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 
     fn claims_with_cnf(cnf: Option<CnfClaim>) -> AccessTokenClaims {
         AccessTokenClaims {
+            axiam_requested_claims: None,
             sub: Uuid::new_v4().to_string(),
             tenant_id: Uuid::new_v4().to_string(),
             org_id: Uuid::new_v4().to_string(),

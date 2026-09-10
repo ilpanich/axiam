@@ -1063,6 +1063,13 @@ pub async fn authorize<C: Connection + Clone>(
                 // `dpop_jkt` here is a browser proposing a key, which is the
                 // substitution the binding exists to prevent.
                 dpop_jkt: params.dpop_jkt,
+                // OIDC Core §5.5 — from the PUSHED copy, like every other
+                // parameter beside a `request_uri`.
+                requested_userinfo_claims: params
+                    .claims
+                    .as_deref()
+                    .map(axiam_oauth2::claims_request::userinfo_claims)
+                    .unwrap_or_default(),
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
@@ -1173,6 +1180,16 @@ pub async fn authorize<C: Connection + Clone>(
                 // meet, never easier. A caller who pins a key they do not hold
                 // has locked themselves out of their own code and nobody else.
                 dpop_jkt: q.dpop_jkt,
+                // OIDC Core §5.5, from the query string. Parsed rather than
+                // trusted: `userinfo_claims` filters to the claims AXIAM will
+                // release on a request alone, so a client naming
+                // `phone_number` here gets what it would have got before —
+                // nothing, unless the consent ceremony ran.
+                requested_userinfo_claims: q
+                    .claims
+                    .as_deref()
+                    .map(axiam_oauth2::claims_request::userinfo_claims)
+                    .unwrap_or_default(),
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
@@ -2542,9 +2559,30 @@ async fn userinfo_claims_for<C: Connection + Clone>(
 
     let has_scope = |s: &str| scopes.iter().any(|sc| sc == s);
 
+    // OIDC Core §5.5 — claims this grant asked for by name, resolved at the
+    // authorization endpoint and carried in the token. Already filtered to
+    // what AXIAM will release on a request alone
+    // (`axiam_oauth2::claims_request::RELEASABLE`), so nothing here has to
+    // re-decide whether a claim is consent-gated: `phone_number`,
+    // `phone_number_verified` and `address` can never appear in this list, and
+    // `release_sensitive_claims` below is untouched by it.
+    let requested: &[String] = user
+        .claims
+        .0
+        .axiam_requested_claims
+        .as_deref()
+        .unwrap_or(&[]);
+    let asked_for = |c: &str| requested.iter().any(|r| r == c);
+    // A claim is released when the scope that bundles it was granted, **or**
+    // when it was asked for by name. §5.5 is an alternative to the scope, not
+    // a filter on it — a client may use either.
+    let release = |claim: &str, scope: &str| has_scope(scope) || asked_for(claim);
+
     // Fetch user details for email/username when the relevant
     // scopes are present.
-    let (email, profile) = if has_scope("email") || has_scope("profile") {
+    // The user row is needed by every releasable claim, so it is read when any
+    // of them might be released rather than when a particular scope is present.
+    let (email, profile) = if has_scope("email") || has_scope("profile") || !requested.is_empty() {
         // UserInfo describes the SUBJECT of the token, and that account lives in
         // the tenant the subject inhabits — never one it happens to be acting
         // on. The two differ only for an organization-level principal whose
@@ -2556,7 +2594,7 @@ async fn userinfo_claims_for<C: Connection + Clone>(
             .await
         {
             Ok(u) => (
-                if has_scope("email") {
+                if release("email", "email") || asked_for("email_verified") {
                     // Both members or neither: `email_verified` describes
                     // `email`, so they are produced by one branch rather than
                     // by two that could drift apart.
@@ -2564,14 +2602,15 @@ async fn userinfo_claims_for<C: Connection + Clone>(
                 } else {
                     None
                 },
-                if has_scope("profile") {
-                    Some((
-                        u.username,
-                        axiam_core::models::user::ProfileNames::from_metadata(&u.metadata),
-                    ))
-                } else {
-                    None
-                },
+                // Read whenever *any* profile claim might be released. Which
+                // ones actually appear is decided per claim below, because
+                // §5.5 lets a client ask for `nickname` without asking for
+                // `name`.
+                Some((
+                    u.username,
+                    axiam_core::models::user::ProfileClaims::from_metadata(&u.metadata),
+                    u.updated_at,
+                )),
             ),
             Err(e) => {
                 tracing::error!(
@@ -2595,18 +2634,77 @@ async fn userinfo_claims_for<C: Connection + Clone>(
 
     HttpResponse::Ok().json(UserInfoResponse {
         sub: user.user_id.to_string(),
-        email: email.as_ref().map(|(address, _)| address.clone()),
-        email_verified: email.as_ref().map(|&(_, verified)| verified),
-        preferred_username: profile.as_ref().map(|(username, _)| username.clone()),
+        email: email
+            .as_ref()
+            .filter(|_| release("email", "email"))
+            .map(|(address, _)| address.clone()),
+        email_verified: email
+            .as_ref()
+            .filter(|_| release("email_verified", "email"))
+            .map(|&(_, verified)| verified),
+        preferred_username: profile
+            .as_ref()
+            .filter(|_| release("preferred_username", "profile"))
+            .map(|(username, _, _)| username.clone()),
         // Absent, not null, when SCIM never provisioned them — OIDC Core
         // §5.3.2: a claim the OP cannot assert is omitted.
-        name: profile.as_ref().and_then(|(_, names)| names.name.clone()),
+        name: profile
+            .as_ref()
+            .filter(|_| release("name", "profile"))
+            .and_then(|(_, c, _)| c.name.clone()),
         given_name: profile
             .as_ref()
-            .and_then(|(_, names)| names.given_name.clone()),
+            .filter(|_| release("given_name", "profile"))
+            .and_then(|(_, c, _)| c.given_name.clone()),
         family_name: profile
             .as_ref()
-            .and_then(|(_, names)| names.family_name.clone()),
+            .filter(|_| release("family_name", "profile"))
+            .and_then(|(_, c, _)| c.family_name.clone()),
+        middle_name: profile
+            .as_ref()
+            .filter(|_| release("middle_name", "profile"))
+            .and_then(|(_, c, _)| c.middle_name.clone()),
+        nickname: profile
+            .as_ref()
+            .filter(|_| release("nickname", "profile"))
+            .and_then(|(_, c, _)| c.nickname.clone()),
+        profile: profile
+            .as_ref()
+            .filter(|_| release("profile", "profile"))
+            .and_then(|(_, c, _)| c.profile.clone()),
+        picture: profile
+            .as_ref()
+            .filter(|_| release("picture", "profile"))
+            .and_then(|(_, c, _)| c.picture.clone()),
+        website: profile
+            .as_ref()
+            .filter(|_| release("website", "profile"))
+            .and_then(|(_, c, _)| c.website.clone()),
+        gender: profile
+            .as_ref()
+            .filter(|_| release("gender", "profile"))
+            .and_then(|(_, c, _)| c.gender.clone()),
+        birthdate: profile
+            .as_ref()
+            .filter(|_| release("birthdate", "profile"))
+            .and_then(|(_, c, _)| c.birthdate.clone()),
+        zoneinfo: profile
+            .as_ref()
+            .filter(|_| release("zoneinfo", "profile"))
+            .and_then(|(_, c, _)| c.zoneinfo.clone()),
+        locale: profile
+            .as_ref()
+            .filter(|_| release("locale", "profile"))
+            .and_then(|(_, c, _)| c.locale.clone()),
+        // OIDC Core §5.1 wants a NumericDate, not an RFC 3339 string.
+        //
+        // Scope-only: `updated_at` describes when the profile last changed, so
+        // releasing it to a client that was granted no profile claim would
+        // answer a question it did not ask and could not interpret.
+        updated_at: profile
+            .as_ref()
+            .filter(|_| has_scope("profile"))
+            .map(|&(_, _, at)| at.timestamp()),
         phone_number: released.phone_number,
         phone_number_verified: released.phone_number_verified,
         address: released.address,

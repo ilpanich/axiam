@@ -450,15 +450,25 @@ pub fn build_discovery_document_for(
             // needs to know the verification status is available.
             "email_verified".into(),
             "preferred_username".into(),
-            // The three name claims SCIM provisioning can fill
-            // (`axiam_core::models::user::ProfileNames`). The other twelve of
-            // the `profile` scope's fifteen are deliberately absent: AXIAM has
-            // no column for them, and advertising a claim the server cannot
-            // assert is the discovery-document equivalent of returning `null`
-            // for it.
+            // The `profile` scope's claims, all of which AXIAM can now hold
+            // and release — see `axiam_core::models::user::ProfileClaims` for
+            // where each is stored. Advertised because a relying party reads
+            // `claims_supported` to decide what it can ask for; a claim listed
+            // here is one AXIAM *can* assert, not one every subject has, and
+            // §5.3.2 governs the difference at release time.
             "name".into(),
             "given_name".into(),
             "family_name".into(),
+            "middle_name".into(),
+            "nickname".into(),
+            "profile".into(),
+            "picture".into(),
+            "website".into(),
+            "gender".into(),
+            "birthdate".into(),
+            "zoneinfo".into(),
+            "locale".into(),
+            "updated_at".into(),
             "tenant_id".into(),
             "org_id".into(),
             // X7 — the three authentication-evidence claims. Advertised as
@@ -493,7 +503,12 @@ pub fn build_discovery_document_for(
         ],
         authorization_response_iss_parameter_supported: true,
         request_parameter_supported: false,
-        claims_parameter_supported: false,
+        // OIDC Core §5.5. `true` since AXIAM honours the `userinfo` member of
+        // the `claims` parameter — see `crate::claims_request`, which also
+        // documents the claims it will and will not unlock. Advertising this
+        // is what tells a relying party it may ask for a claim by name instead
+        // of asking for the scope that bundles it.
+        claims_parameter_supported: true,
         acr_values_supported: vec![ACR_SINGLE_FACTOR.into(), ACR_MULTI_FACTOR.into()],
         tls_client_certificate_bound_access_tokens: true,
         dpop_signing_alg_values_supported: vec!["PS256".into(), "ES256".into(), "EdDSA".into()],
@@ -627,10 +642,11 @@ pub struct UserInfoResponse {
     pub preferred_username: Option<String>,
     /// OIDC Core §5.1 `name`, released under the `profile` scope.
     ///
-    /// These three come from SCIM's `name.*`, which is the only place AXIAM
-    /// holds a human name — see `axiam_core::models::user::ProfileNames` for
-    /// why they are the only three of the fifteen `profile` claims that appear
-    /// here, and why inventing the others would be worse than omitting them.
+    /// This and the eleven that follow are
+    /// `axiam_core::models::user::ProfileClaims`, which documents where each
+    /// one is stored. Every one is omitted rather than `null` when AXIAM holds
+    /// nothing: §5.3.2 says a claim the OP cannot assert is simply absent, and
+    /// a `null` would be AXIAM asserting the subject has no name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// OIDC Core §5.1 `given_name` — SCIM `name.givenName`.
@@ -639,6 +655,44 @@ pub struct UserInfoResponse {
     /// OIDC Core §5.1 `family_name` — SCIM `name.familyName`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub family_name: Option<String>,
+    /// OIDC Core §5.1 `middle_name` — SCIM `name.middleName`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub middle_name: Option<String>,
+    /// OIDC Core §5.1 `nickname` — SCIM `nickName`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    /// OIDC Core §5.1 `profile` — SCIM `profileUrl`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// OIDC Core §5.1 `picture` — SCIM `photos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+    /// OIDC Core §5.1 `website` — `metadata.oidc.website`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    /// OIDC Core §5.1 `gender` — `metadata.oidc.gender`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gender: Option<String>,
+    /// OIDC Core §5.1 `birthdate` — `metadata.oidc.birthdate`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub birthdate: Option<String>,
+    /// OIDC Core §5.1 `zoneinfo` — SCIM `timezone`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zoneinfo: Option<String>,
+    /// OIDC Core §5.1 `locale` — SCIM `locale`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    /// OIDC Core §5.1 `updated_at` — seconds since the epoch.
+    ///
+    /// From `User::updated_at`, a column, and deliberately not from metadata:
+    /// it says when AXIAM last changed the row, which is not something a
+    /// provisioning client should be able to assert about AXIAM.
+    ///
+    /// A NumericDate, per §5.1's own table — an RFC 3339 string here is the
+    /// obvious and wrong thing, and `EnsureUserInfoUpdatedAtValid` is the
+    /// module that says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
     /// OIDC Core §5.1, released under the `phone` scope (X7 G8).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phone_number: Option<String>,
@@ -669,6 +723,18 @@ impl std::fmt::Debug for UserInfoResponse {
             .field("name", &self.name)
             .field("given_name", &self.given_name)
             .field("family_name", &self.family_name)
+            .field("middle_name", &self.middle_name)
+            .field("nickname", &self.nickname)
+            .field("profile", &self.profile)
+            .field("picture", &self.picture)
+            .field("website", &self.website)
+            .field("gender", &self.gender)
+            // A date of birth is personal data in the GDPR sense, so it gets
+            // `phone_number`'s treatment rather than `given_name`'s.
+            .field("birthdate", &self.birthdate.as_ref().map(|_| "<redacted>"))
+            .field("zoneinfo", &self.zoneinfo)
+            .field("locale", &self.locale)
+            .field("updated_at", &self.updated_at)
             .field(
                 "phone_number",
                 &self.phone_number.as_ref().map(|_| "<redacted>"),
@@ -1109,8 +1175,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 
     // -- X7: discovery statics --------------------------------------------
 
-    /// The three new capability statements, and the one that is deliberately
-    /// **absent**. `request_uri_parameter_supported` defaults to `true`, which
+    /// The capability statements, and the one that is deliberately **absent**.
+    /// `request_uri_parameter_supported` defaults to `true`, which
     /// is the truthful answer — AXIAM does accept `request_uri`, for the PAR
     /// handles RFC 9126 defines — so publishing `false` would tell a
     /// conforming client not to use PAR, which FAPI 2.0 requires of it.
@@ -1118,14 +1184,19 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     fn discovery_tells_the_truth_about_request_objects_and_claims() {
         let doc = doc(None);
         assert!(!doc.request_parameter_supported);
-        assert!(!doc.claims_parameter_supported);
+        assert!(doc.claims_parameter_supported);
 
         let json = serde_json::to_value(&doc).expect("the document serialises");
         assert_eq!(
             json["request_parameter_supported"],
             serde_json::json!(false)
         );
-        assert_eq!(json["claims_parameter_supported"], serde_json::json!(false));
+        // OIDC Core §5.5 is implemented for the `userinfo` member — see
+        // `crate::claims_request` — so this now publishes `true`. It is
+        // asserted on the serialised document as well as the struct because a
+        // relying party reads the JSON, and a `skip_serializing_if` added here
+        // by accident would make the capability invisible.
+        assert_eq!(json["claims_parameter_supported"], serde_json::json!(true));
         assert!(
             json.get("request_uri_parameter_supported").is_none(),
             "request_uri_parameter_supported must be omitted, not published false: \

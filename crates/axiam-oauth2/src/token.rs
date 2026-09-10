@@ -1587,23 +1587,35 @@ where
         // look for before releasing `phone_number` or `address`, and to
         // recognise a `fapi2`-issued token at a point where no authorization
         // request is in hand. See `AccessTokenClaims::client_id`.
-        let access_token = issue_access_token_for_client(
+        //
+        // Built from `AccessTokenSpec` rather than through
+        // `issue_access_token_for_client`, which every other issuance site
+        // still uses. That wrapper already carries eleven parameters, and OIDC
+        // Core §5.5 would have made twelve — the builder exists so that a
+        // capability only this path needs does not become an argument every
+        // caller has to pass `None` for.
+        let access_token = axiam_auth::token::AccessTokenSpec::user(
             auth_code.user_id,
             tenant_id,
             tenant.organization_id,
-            &auth_code.scopes,
-            &self.auth_config,
             uuid::Uuid::new_v4().to_string(),
-            axiam_auth::token::AUD_USER,
-            cnf,
-            ext,
-            Some(client_id),
-            // The session this authorization was performed in. `jti` stays a
-            // unique per-token id; the session travels in `sid`, which is what
-            // the session-revocation check reads. Without it this token is
-            // refused at every session-validated endpoint, UserInfo included.
-            auth_code.session_id,
         )
+        .aud(axiam_auth::token::AUD_USER)
+        .scopes(&auth_code.scopes)
+        .cnf(cnf)
+        .ext(ext)
+        .client_id(Some(client_id))
+        // The session this authorization was performed in. `jti` stays a
+        // unique per-token id; the session travels in `sid`, which is what
+        // the session-revocation check reads. Without it this token is
+        // refused at every session-validated endpoint, UserInfo included.
+        .session(auth_code.session_id)
+        // OIDC Core §5.5 — the claims this authorization asked for by name,
+        // resolved at the authorization endpoint and carried on the code.
+        // Empty for every grant that sent no `claims` parameter, and an empty
+        // list leaves the token byte-identical to what it was before §5.5.
+        .requested_userinfo_claims(&auth_code.requested_userinfo_claims)
+        .issue(&self.auth_config)
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
         // Only issue a refresh token when the client is authorized
@@ -2472,6 +2484,7 @@ mod tests {
             acr: acr.map(str::to_owned),
             amr,
             dpop_jkt: None,
+            requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now(),
             used: false,
             created_at: Utc::now(),

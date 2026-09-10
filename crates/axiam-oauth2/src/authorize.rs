@@ -156,6 +156,15 @@ pub struct AuthorizeRequest {
     /// a key the client pinned under client authentication must not be
     /// substitutable by the browser that merely carries the handle.
     pub dpop_jkt: Option<String>,
+    /// OIDC Core §5.5 — the UserInfo claims this request asked for by name.
+    ///
+    /// Resolved by the handler through [`crate::claims_request::userinfo_claims`],
+    /// which is where the raw `claims` parameter is parsed and filtered to what
+    /// AXIAM will release on a request alone. Snapshotted onto the
+    /// authorization code for the same reason `dpop_jkt` is: UserInfo runs on
+    /// a later request that holds nothing but an access token, so anything it
+    /// must honour has to survive the round trip rather than be re-derived.
+    pub requested_userinfo_claims: Vec<String>,
 }
 
 /// What an authorization request earned (W4, plan §4.2).
@@ -525,6 +534,7 @@ where
                 // redeems this code has to be checked against the commitment
                 // as it stood then, not against anything it sends now.
                 dpop_jkt: req.dpop_jkt,
+                requested_userinfo_claims: req.requested_userinfo_claims,
                 expires_at,
             })
             .await
@@ -705,6 +715,7 @@ mod tests {
                 acr: input.acr,
                 amr: input.amr,
                 dpop_jkt: input.dpop_jkt,
+                requested_userinfo_claims: input.requested_userinfo_claims,
                 expires_at: input.expires_at,
                 used: false,
                 created_at: Utc::now(),
@@ -905,6 +916,7 @@ mod tests {
             inline_authn_params_beside_request_uri: false,
             login_hop_return_leg: false,
             dpop_jkt: None,
+            requested_userinfo_claims: Vec::new(),
         }
     }
 

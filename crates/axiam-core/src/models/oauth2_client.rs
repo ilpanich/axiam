@@ -748,6 +748,16 @@ pub struct AuthorizationCode {
     /// not use the parameter.
     #[serde(default)]
     pub dpop_jkt: Option<String>,
+    /// OIDC Core §5.5 — the UserInfo claims this authorization asked for by
+    /// name, over and above what its scopes grant.
+    ///
+    /// Resolved at the authorization endpoint, where the `claims` request
+    /// parameter arrives, and carried here because UserInfo runs on a later
+    /// request that holds nothing but an access token. Empty for every request
+    /// that sent no `claims` parameter, which is every request a client
+    /// written before §5.5 support makes.
+    #[serde(default)]
+    pub requested_userinfo_claims: Vec<String>,
     pub expires_at: DateTime<Utc>,
     pub used: bool,
     pub created_at: DateTime<Utc>,
@@ -776,6 +786,8 @@ pub struct CreateAuthorizationCode {
     pub amr: Vec<Amr>,
     /// RFC 9449 §10 — see [`AuthorizationCode::dpop_jkt`].
     pub dpop_jkt: Option<String>,
+    /// OIDC Core §5.5 — see [`AuthorizationCode::requested_userinfo_claims`].
+    pub requested_userinfo_claims: Vec<String>,
     pub expires_at: DateTime<Utc>,
 }
 

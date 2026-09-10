@@ -197,6 +197,178 @@ fn token_with_scopes(
     .unwrap()
 }
 
+/// Give the test user a SCIM-provisioned name.
+///
+/// `setup_db` creates them with `metadata: None`, which is the right default
+/// for most of this file — several tests assert that UserInfo says nothing it
+/// was not told. The §5.5 tests need something to release, so they provision
+/// it themselves rather than changing the shared fixture out from under the
+/// tests that depend on its emptiness.
+async fn give_the_user_a_name(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) {
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                metadata: Some(serde_json::json!({
+                    "scim": { "formatted": "Alice Liddell", "givenName": "Alice",
+                              "familyName": "Liddell", "nickName": "Ally" }
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("provisioning a name must succeed");
+}
+
+/// A token whose grant asked for claims by name (OIDC Core §5.5).
+///
+/// Built through `AccessTokenSpec` because that is the seam the OAuth2 token
+/// endpoint uses for exactly this, and a test that minted the claim some other
+/// way would not be exercising the path a real token takes.
+fn token_requesting_claims(
+    auth: &AuthConfig,
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[&str],
+    requested: &[&str],
+) -> String {
+    let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+    let requested: Vec<String> = requested.iter().map(|s| (*s).to_owned()).collect();
+    axiam_auth::token::AccessTokenSpec::user(user_id, tenant_id, org_id, Uuid::new_v4().to_string())
+        .aud(AUD_USER)
+        .scopes(&scopes)
+        .requested_userinfo_claims(&requested)
+        .issue(auth)
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// OIDC Core §5.5 — claims requested by name
+// ---------------------------------------------------------------------------
+
+/// `oidcc-claims-essential` in miniature: `scope=openid` alone, `name`
+/// requested through the `claims` parameter, and UserInfo must answer with it.
+///
+/// The control matters as much as the claim. The same token *without* the
+/// request must not carry `name`, or this test would pass against a server
+/// that simply released the profile to everybody — which is the failure mode
+/// worth guarding, since it is the easy way to make the module go green.
+#[actix_rt::test]
+async fn a_claim_requested_by_name_is_released_without_the_scope_that_bundles_it() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    give_the_user_a_name(&db, tenant_id, user_id).await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let asked = token_requesting_claims(&auth, user_id, tenant_id, org_id, &["openid"], &["name"]);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {asked}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        body.get("name").is_some(),
+        "an essential `name` was requested by the grant: {body}"
+    );
+
+    // The control: same scopes, no request.
+    let plain = token_with_scopes(&auth, user_id, tenant_id, org_id, &["openid"]);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {plain}")))
+            .to_request(),
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        body.get("name").is_none(),
+        "`openid` alone must not release the profile: {body}"
+    );
+}
+
+/// Asking for one claim by name releases that claim, not the profile.
+#[actix_rt::test]
+async fn requesting_one_claim_does_not_release_the_rest_of_the_profile() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    give_the_user_a_name(&db, tenant_id, user_id).await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let token = token_requesting_claims(
+        &auth,
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid"],
+        &["nickname"],
+    );
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    for withheld in ["name", "given_name", "family_name", "preferred_username"] {
+        assert!(
+            body.get(withheld).is_none(),
+            "{withheld} was not asked for and must not appear: {body}"
+        );
+    }
+}
+
+/// A consent-gated claim cannot be reached by naming it. The filter that makes
+/// this true lives in `axiam_oauth2::claims_request::RELEASABLE`, but the
+/// property belongs here: this is the endpoint that would leak.
+#[actix_rt::test]
+async fn a_consent_gated_claim_is_not_released_by_requesting_it() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    // Minted directly with the sensitive names in the list — i.e. assuming the
+    // authorization-endpoint filter had been bypassed entirely — so that
+    // UserInfo is tested rather than the filter.
+    let token = token_requesting_claims(
+        &auth,
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid"],
+        &["phone_number", "phone_number_verified", "address"],
+    );
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    for sensitive in ["phone_number", "phone_number_verified", "address"] {
+        assert!(
+            body.get(sensitive).is_none(),
+            "{sensitive} is consent-gated and a request must not reach past it: {body}"
+        );
+    }
+}
+
 /// The RFC 6750 §2.2 body, as a client would send it.
 #[derive(serde::Serialize)]
 struct FormBody<'a> {

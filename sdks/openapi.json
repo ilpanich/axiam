@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta12",
-    "x-axiam-spec-digest": "sha256:9fc576c3ed92ef76c405540713f75e68acbb3e9f39afde6644d31282b2ef7fae"
+    "x-axiam-spec-digest": "sha256:246dcf1d5c2d8da139b749b1bfec4826830cb01ed6c1598257989add6aef627e"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -10654,6 +10654,18 @@
             }
           },
           {
+            "name": "dpop_jkt",
+            "in": "path",
+            "description": "RFC 9449 §10 — the JWK thumbprint of the key the client will prove\npossession of at the token endpoint.\n\nDeclared here as well as on the PAR body because §10 defines it as an\n*authorization request* parameter, and Figure 25 shows it on a plain\n`GET /authorize`. It is read only on the inline branch: beside a\n`request_uri` the pushed copy wins, like every other parameter, so a\nbrowser cannot re-pin somebody's pushed request to a key of its own.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "tenant_id",
             "in": "path",
             "description": "W3 — which tenant this authorization request is for, read **only** when\nthe request carries no authenticated principal (plan §4.0).\n\nEvery session, client and code in AXIAM is tenant-scoped, and until this\nwave the tenant came exclusively from the caller's own access token. An\nanonymous browser has no token, so the login hop cannot even look up the\nclient whose `browser_sso` field decides how to answer it — hence a\nparameter, the same way `/oauth2/end_session` and `/oauth2/token` already\ntake one, and the same way the tenant-scoped discovery document is\nfetched.\n\n**Ignored whenever a principal was resolved from a token**, which is\nevery request that works today: the token's tenant wins, unconditionally,\nexactly as before. A request that omits it and has no principal is\nanswered with today's 401 — so a client registered today, which has never\nsent it, cannot observe that it exists.",
@@ -10682,6 +10694,18 @@
             "name": "axiam_consent_hop",
             "in": "path",
             "description": "W7 — the **consent** hop's loop guard (`axiam_consent_hop`).\n\nA second marker rather than a reuse of the one above, because the two\nceremonies answer different questions and a request can need both. See\n`axiam_oauth2::login_hop::CONSENT_HOP_MARKER`.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "axiam_user_declined",
+            "in": "path",
+            "description": "The sign-in page's Cancel, coming back (`axiam_user_declined`).\n\nRead on the anonymous path only, and answered with `access_denied` to a\nregistered `redirect_uri`. See\n`axiam_oauth2::login_hop::USER_DECLINED_MARKER` for why refusing is a\nprotocol outcome rather than an abandoned tab.",
             "required": true,
             "schema": {
               "type": [
@@ -16804,6 +16828,13 @@
               "null"
             ]
           },
+          "dpop_jkt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 9449 §10 — the JWK thumbprint of the key the client will prove\npossession of at the token endpoint.\n\nOne of the two carriers §10.1 requires an AS supporting both PAR and\nDPoP to accept; the other is a `DPoP` header on this same request. When\nboth arrive they must agree, and the handler refuses the request when\nthey do not."
+          },
           "id_token_hint": {
             "type": [
               "string",
@@ -16836,6 +16867,13 @@
           },
           "redirect_uri": {
             "type": "string"
+          },
+          "request_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 9126 §2.1 — the one authorization parameter a client may NOT push.\n\nModelled so that it can be refused. Leaving it off the struct made\n`serde` drop it silently and the endpoint answer `201` to a request the\nspecification says must be rejected:\n\n> The `request_uri` authorization request parameter is one exception,\n> and it MUST NOT be provided.\n\nRefusing matters beyond conformance. A `request_uri` accepted here would\nbe a pushed request that names another pushed request, and the second\nwould inherit the client authentication of the first — a chain whose\nauthenticated origin is a different request from the one finally\npresented at the authorization endpoint."
           },
           "response_type": {
             "type": "string"
@@ -20047,11 +20085,74 @@
               }
             ]
           },
+          "birthdate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `birthdate` — `metadata.oidc.birthdate`."
+          },
           "email": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "email_verified": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether [`Self::email`] has been verified (OIDC Core §5.1).\n\nEmitted only alongside the address, for [`Self::phone_number_verified`]'s\nreason: it is a statement *about* a value, and making it about one the\nrelying party was not given asserts nothing it can act on.\n\n`email` scope promises both members, and the OIDF suite says so —\n`VerifyScopesReturnedInUserInfoClaims` listed `email_verified` as\nmissing while `email` itself was released. AXIAM has always held the\nfact (`User::email_verified_at`); it simply had nowhere to put it.\n\n`false` rather than omitted when the address is present and\nunverified. AXIAM does run an email verification ceremony, so unlike\nthe telephone case this is a claim with a real ceremony behind it, and\n\"we have not verified this\" is the answer a relying party needs in\norder to decide whether to trust the address."
+          },
+          "family_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `family_name` — SCIM `name.familyName`."
+          },
+          "gender": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `gender` — `metadata.oidc.gender`."
+          },
+          "given_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `given_name` — SCIM `name.givenName`."
+          },
+          "locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `locale` — SCIM `locale`."
+          },
+          "middle_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `middle_name` — SCIM `name.middleName`."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `name`, released under the `profile` scope.\n\nThis and the eleven that follow are\n`axiam_core::models::user::ProfileClaims`, which documents where each\none is stored. Every one is omitted rather than `null` when AXIAM holds\nnothing: §5.3.2 says a claim the OP cannot assert is simply absent, and\na `null` would be AXIAM asserting the subject has no name."
+          },
+          "nickname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `nickname` — SCIM `nickName`."
           },
           "org_id": {
             "type": "string"
@@ -20070,17 +20171,53 @@
             ],
             "description": "Whether [`Self::phone_number`] has been verified out of band.\n\nEmitted **only alongside** the number, per OIDC Core §5.1: a\n`phone_number_verified` with no `phone_number` asserts something about\na value the relying party was not given. `false` rather than omitted\nwhen the number is present and unverified — that is a statement AXIAM\nis answerable for, and the honest one for a verification that never\nhappened."
           },
+          "picture": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `picture` — SCIM `photos`."
+          },
           "preferred_username": {
             "type": [
               "string",
               "null"
             ]
           },
+          "profile": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `profile` — SCIM `profileUrl`."
+          },
           "sub": {
             "type": "string"
           },
           "tenant_id": {
             "type": "string"
+          },
+          "updated_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "OIDC Core §5.1 `updated_at` — seconds since the epoch.\n\nFrom `User::updated_at`, a column, and deliberately not from metadata:\nit says when AXIAM last changed the row, which is not something a\nprovisioning client should be able to assert about AXIAM.\n\nA NumericDate, per §5.1's own table — an RFC 3339 string here is the\nobvious and wrong thing, and `EnsureUserInfoUpdatedAtValid` is the\nmodule that says so."
+          },
+          "website": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `website` — `metadata.oidc.website`."
+          },
+          "zoneinfo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OIDC Core §5.1 `zoneinfo` — SCIM `timezone`."
           }
         }
       },

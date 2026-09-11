@@ -1357,15 +1357,34 @@ async fn discovery_advertises_the_scopes_only_for_a_tenant_that_has_them() {
 
     // An unknown tenant is answered with the deployment-wide document rather
     // than a 404, so discovery is not a tenant-enumeration oracle.
+    let unknown_tenant = Uuid::new_v4();
     let unknown = fetch(format!(
-        "/.well-known/openid-configuration?tenant_id={}",
-        Uuid::new_v4()
+        "/.well-known/openid-configuration?tenant_id={unknown_tenant}"
     ))
     .await;
     assert!(!scopes_of(&unknown).contains(&"address".to_string()));
+
+    // The two documents are no longer byte-identical: discovery now publishes
+    // the tenant in the endpoint URLs it advertises, so that a relying party
+    // that reads the document and uses the URLs verbatim is not refused for a
+    // missing `tenant_id`. The echoed value is the one the *caller* supplied,
+    // so it says nothing about whether that tenant exists.
+    //
+    // Strip that one caller-supplied value and the documents must still be
+    // identical. That is the property worth asserting — a difference anywhere
+    // else is the server telling an anonymous caller whether a tenant is real,
+    // which is exactly the oracle answering unknown tenants at all is meant to
+    // deny.
+    let normalised: serde_json::Value = serde_json::from_str(
+        &serde_json::to_string(&unknown)
+            .expect("the discovery document round-trips")
+            .replace(&format!("?tenant_id={unknown_tenant}"), ""),
+    )
+    .expect("the discovery document round-trips");
     assert_eq!(
-        unknown, still_anonymous,
-        "an unknown tenant must be indistinguishable from no tenant"
+        normalised, still_anonymous,
+        "an unknown tenant must be indistinguishable from no tenant, except \
+         for the tenant_id the caller supplied"
     );
 }
 

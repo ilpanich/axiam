@@ -33,6 +33,25 @@ pub enum DbError {
     /// HTTP status is unchanged (still 5xx) — this is a log-clarity fix only.
     #[error("Data serialization error: {0}")]
     Serialization(String),
+
+    /// An optimistic-concurrency write conflict that survived every retry
+    /// [`crate::helpers::retry_on_write_conflict`] was willing to spend on it.
+    ///
+    /// Distinct from [`DbError::Migration`] for the same reason
+    /// [`DbError::Serialization`] is (QUAL-03/D-10): a contended write is not a
+    /// schema-migration failure, and reporting it as one sent an operator
+    /// looking for a broken migration when the datastore had merely said "this
+    /// transaction can be retried". Reaching this variant means contention is
+    /// sustained rather than incidental — the retries are exhausted, not
+    /// skipped — which is a capacity signal worth being able to grep for.
+    ///
+    /// Falls through the same `other => AxiamError::Database` catch-all below,
+    /// so the observable HTTP status is unchanged (still 5xx). Narrowing it to
+    /// a 503 with `Retry-After` would be defensible and is deliberately NOT
+    /// done here: that is a client-visible contract change, and this variant
+    /// exists to stop mislabeling one.
+    #[error("Write conflict: {0}")]
+    Conflict(String),
 }
 
 impl From<DbError> for AxiamError {

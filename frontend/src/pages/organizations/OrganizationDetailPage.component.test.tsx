@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter } from "react-router";
@@ -10,6 +10,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import { OrganizationDetailPage } from "./OrganizationDetailPage";
 import { makeClient } from "@/test/renderWithProviders";
+import { setToastDispatch } from "@/hooks/useToast";
 import type {
   Organization,
   Tenant,
@@ -815,5 +816,282 @@ describe("OrganizationDetailPage — small branches", () => {
       })
     );
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+});
+
+// ─── mTLS trust anchors, key custody, and the ways out of a dialog ────────────
+//
+// Two CA actions were untested end-to-end, and both are ones whose *report* is
+// the feature: the mTLS toggle changes what the next boot trusts, so a silent
+// flip leaves an operator debugging a device against a server that has not
+// been told about the CA; and a custody migration is the only alternative to
+// re-issuing every leaf under a trust anchor.
+
+describe("OrganizationDetailPage — CA trust anchors and key custody", () => {
+  afterEach(() => {
+    setToastDispatch(null);
+  });
+
+  async function goToCerts(certList: unknown[]) {
+    routeGet({ [URLS.org]: org, [URLS.certs]: certList });
+    renderDetail();
+    await screen.findByText("Widgets Inc");
+    await userEvent.click(screen.getByRole("tab", { name: "CA Certificates" }));
+  }
+
+  it("says the trust change applies at the next start rather than now", async () => {
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    apiMock.put.mockResolvedValue(
+      res({
+        ca_certificate_id: "c1",
+        mtls_trust_anchor: true,
+        restart_required: true,
+        message: "CN=Root CA will be trusted for mTLS after the next restart.",
+      })
+    );
+    await goToCerts(certs);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Trust CN=Root CA for mTLS" })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/organizations/o1/ca-certificates/c1/mtls-trust-anchor",
+        { enabled: true }
+      )
+    );
+    expect(toastSpy).toHaveBeenCalledWith({
+      description: "CN=Root CA will be trusted for mTLS after the next restart.",
+      variant: "default",
+    });
+  });
+
+  it("marks withdrawing a trust anchor as the destructive direction", async () => {
+    // Removing a root is the change that can lock working devices out, so it
+    // is reported differently from adding one.
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    apiMock.put.mockResolvedValue(
+      res({
+        ca_certificate_id: "c1",
+        mtls_trust_anchor: false,
+        restart_required: true,
+        message: "CN=Root CA will no longer be trusted for mTLS.",
+      })
+    );
+    await goToCerts([{ ...certs[0], mtls_trust_anchor: true }]);
+
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Stop trusting CN=Root CA for mTLS",
+      })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/organizations/o1/ca-certificates/c1/mtls-trust-anchor",
+        { enabled: false }
+      )
+    );
+    expect(toastSpy).toHaveBeenCalledWith({
+      description: "CN=Root CA will no longer be trusted for mTLS.",
+      variant: "destructive",
+    });
+  });
+
+  it("refuses to offer a revoked CA as a trust anchor", async () => {
+    // A revoked CA in the client trust store would let a certificate the
+    // operator has already disowned authenticate a client.
+    await goToCerts(certs);
+    expect(
+      await screen.findByRole("button", { name: "Trust CN=Old CA for mTLS" })
+    ).toBeDisabled();
+  });
+
+  it("reports the server's reason when a trust change is refused", async () => {
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    apiMock.put.mockRejectedValue({
+      response: {
+        status: 409,
+        data: { message: "This CA holds no key usable as a trust anchor" },
+      },
+    });
+    await goToCerts(certs);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Trust CN=Root CA for mTLS" })
+    );
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith({
+        description: "This CA holds no key usable as a trust anchor",
+        variant: "destructive",
+      })
+    );
+  });
+
+  it("moves a database-held signing key to Vault and names both ends", async () => {
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    apiMock.post.mockResolvedValue(
+      res({
+        ca_certificate_id: "c1",
+        previous_custody: "database",
+        key_custody: "vault",
+        key_locator: "axiam/ca/c1",
+      })
+    );
+    await goToCerts([{ ...certs[0], key_custody: "database" }]);
+
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Move the signing key for CN=Root CA out of the database",
+      })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/organizations/o1/ca-certificates/c1/migrate-custody"
+      )
+    );
+    expect(toastSpy).toHaveBeenCalledWith({
+      description:
+        "Signing key moved from In database to In Vault. Effective immediately.",
+    });
+  });
+
+  it("offers the migration only where it would improve custody", async () => {
+    // `external` has no key to move, and `vault_pki` never hands its key over
+    // — which is the stronger property, not one to migrate away from.
+    await goToCerts([
+      { ...certs[0], key_custody: "vault" },
+      { ...certs[1], id: "c3", subject: "CN=External CA", key_custody: "external" },
+    ]);
+    await screen.findByText("CN=Root CA");
+
+    expect(
+      screen.queryByRole("button", { name: /Move the signing key/ })
+    ).not.toBeInTheDocument();
+  });
+
+  it("reports the server's reason when a custody migration is refused", async () => {
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    apiMock.post.mockRejectedValue({
+      response: {
+        status: 503,
+        data: { message: "Vault is not configured for this deployment" },
+      },
+    });
+    await goToCerts([{ ...certs[0], key_custody: "database" }]);
+
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Move the signing key for CN=Root CA out of the database",
+      })
+    );
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith({
+        description: "Vault is not configured for this deployment",
+        variant: "destructive",
+      })
+    );
+  });
+
+  it("shows a CA's details and closes them again", async () => {
+    await goToCerts(certs);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "View CN=Root CA" })
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("abcdef0123456789deadbeef")).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+  });
+
+  it("discards a half-filled generate form when dismissed", async () => {
+    await goToCerts([]);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Generate Certificate/ })
+    );
+    let dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText(/^Subject/), "CN=Scratch");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /Generate Certificate/ })
+    );
+    dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText(/^Subject/)).toHaveValue("");
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("discards a half-filled import form when dismissed", async () => {
+    await goToCerts([]);
+    await userEvent.click(await screen.findByRole("button", { name: /Import CA/ }));
+    let dialog = screen.getByRole("dialog");
+    const pem = within(dialog).getByLabelText("CA certificate (PEM) *");
+    await userEvent.type(pem, "not-a-pem");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /Import CA/ }));
+    dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText("CA certificate (PEM) *")).toHaveValue("");
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("cancels a revocation without revoking", async () => {
+    await goToCerts(certs);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Revoke CN=Root CA" })
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+});
+
+describe("OrganizationDetailPage — tenant dialog dismissal", () => {
+  it("closes the edit-tenant dialog without saving", async () => {
+    routeGet({ [URLS.org]: org, [URLS.tenants]: tenants });
+    renderDetail();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Prod" }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("closes the delete-tenant confirmation without deleting", async () => {
+    routeGet({ [URLS.org]: org, [URLS.tenants]: tenants });
+    renderDetail();
+    await userEvent.click(await screen.findByRole("button", { name: "Delete Prod" }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+    expect(apiMock.delete).not.toHaveBeenCalled();
   });
 });

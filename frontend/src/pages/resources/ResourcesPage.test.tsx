@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiMock, res } from "@/test/apiMock";
 
@@ -7,6 +7,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import { ResourcesPage } from "./ResourcesPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
+import { setToastDispatch } from "@/hooks/useToast";
 
 const resources = [
   {
@@ -40,6 +41,10 @@ const resources = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+afterEach(() => {
+  setToastDispatch(null);
 });
 
 describe("ResourcesPage", () => {
@@ -234,5 +239,157 @@ describe("ResourcesPage", () => {
       "title",
       "Registered through the UMA Protection API by resource-server-1",
     );
+  });
+});
+
+// ─── Selection, the tree's own delete, and the ways out of a dialog ───────────
+//
+// Selecting a node in the tree is what drives the two panels beside it, and it
+// clears the deny badges from the previous selection — a preview left over from
+// another resource is a wrong answer rendered confidently. The tree's delete
+// button, the validation on edit, and all three dismissals were untested.
+
+describe("ResourcesPage — selection, tree actions and dismissal", () => {
+  it("selecting a resource in the tree drives the panels beside it", async () => {
+    apiMock.get.mockResolvedValue(res(resources));
+    renderWithProviders(<ResourcesPage />);
+
+    const tree = await screen.findByRole("tree");
+    await userEvent.click(within(tree).getByText("Gateway"));
+    expect(await screen.findByText(/Scopes — Gateway/)).toBeInTheDocument();
+
+    await userEvent.click(within(tree).getByText("Legacy"));
+    expect(await screen.findByText(/Scopes — Legacy/)).toBeInTheDocument();
+  });
+
+  it("returns to the tree view after switching to the list", async () => {
+    apiMock.get.mockResolvedValue(res(resources));
+    renderWithProviders(<ResourcesPage />);
+    await screen.findByText("Gateway");
+
+    await userEvent.click(screen.getByRole("button", { name: "List view" }));
+    expect(screen.queryByRole("tree")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Tree view" }));
+    expect(await screen.findByRole("tree")).toBeInTheDocument();
+  });
+
+  it("deletes from the tree's own action button", async () => {
+    apiMock.get.mockResolvedValue(res(resources));
+    apiMock.delete.mockResolvedValue(res(undefined));
+    renderWithProviders(<ResourcesPage />);
+
+    await screen.findByText("Gateway");
+    await userEvent.click(screen.getByRole("button", { name: "Delete Legacy" }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/resources/r3")
+    );
+  });
+
+  it("toasts the server's reason when a resource cannot be deleted", async () => {
+    // A resource with children or live grants is refused server-side, and the
+    // confirmation offers no inline place to say so.
+    apiMock.get.mockResolvedValue(res(resources));
+    apiMock.delete.mockRejectedValue({
+      response: {
+        status: 409,
+        data: { message: "Resource has child resources" },
+      },
+    });
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    renderWithProviders(<ResourcesPage />);
+
+    await screen.findByText("Gateway");
+    await userEvent.click(screen.getByRole("button", { name: "Delete Gateway" }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" })
+    );
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith({
+        description: "Resource has child resources",
+        variant: "destructive",
+      })
+    );
+  });
+
+  it("refuses an edit that blanks the name", async () => {
+    apiMock.get.mockResolvedValue(res(resources));
+    renderWithProviders(<ResourcesPage />);
+
+    await screen.findByText("Gateway");
+    await userEvent.click(screen.getByRole("button", { name: "Edit Gateway" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.clear(within(dialog).getByLabelText("Name *"));
+    // The name input is `required`, so a button click would be stopped by
+    // native constraint validation before the component's own check runs.
+    fireEvent.submit(dialog.querySelector("form")!);
+
+    expect(await screen.findByText("Name is required.")).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("refuses an edit whose custom type is left blank", async () => {
+    apiMock.get.mockResolvedValue(res(resources));
+    renderWithProviders(<ResourcesPage />);
+
+    await screen.findByText("Gateway");
+    // "Legacy" carries a non-standard type, so its editor opens on "custom".
+    await userEvent.click(screen.getByRole("button", { name: "Edit Legacy" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.clear(within(dialog).getByPlaceholderText("Enter custom type"));
+    fireEvent.submit(dialog.querySelector("form")!);
+
+    expect(await screen.findByText("Resource type is required.")).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("discards a half-filled create form when dismissed", async () => {
+    apiMock.get.mockResolvedValue(res(resources));
+    renderWithProviders(<ResourcesPage />);
+
+    await screen.findByText("Gateway");
+    await userEvent.click(screen.getByRole("button", { name: /New Resource/ }));
+    let dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Half typed");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /New Resource/ }));
+    dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText("Name *")).toHaveValue("");
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("closes the edit and delete dialogs without writing", async () => {
+    apiMock.get.mockResolvedValue(res(resources));
+    renderWithProviders(<ResourcesPage />);
+
+    await screen.findByText("Gateway");
+    await userEvent.click(screen.getByRole("button", { name: "Edit Gateway" }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Delete Gateway" }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    expect(apiMock.put).not.toHaveBeenCalled();
+    expect(apiMock.delete).not.toHaveBeenCalled();
   });
 });

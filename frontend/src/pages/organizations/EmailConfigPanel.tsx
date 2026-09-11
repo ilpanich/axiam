@@ -480,9 +480,7 @@ export function OrgEmailConfigPanel({ orgId }: { orgId: string }) {
       void saved;
     },
     onError: (err: unknown) =>
-      setError(
-        err instanceof Error ? err.message : "Failed to save email configuration."
-      ),
+      setError(getApiErrorMessage(err, "Failed to save email configuration.")),
   });
 
   const deleteMutation = useMutation({
@@ -498,11 +496,7 @@ export function OrgEmailConfigPanel({ orgId }: { orgId: string }) {
     },
     onError: (err: unknown) => {
       setConfirmDelete(false);
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to delete email configuration."
-      );
+      setError(getApiErrorMessage(err, "Failed to delete email configuration."));
     },
   });
 
@@ -749,9 +743,7 @@ export function TenantEmailConfigPanel({ tenantId }: { tenantId: string }) {
       setForm((prev) => ({ ...prev, smtpPassword: "", apiKey: "" }));
     },
     onError: (err: unknown) =>
-      setError(
-        err instanceof Error ? err.message : "Failed to save email override."
-      ),
+      setError(getApiErrorMessage(err, "Failed to save email override.")),
   });
 
   const deleteMutation = useMutation({
@@ -768,9 +760,7 @@ export function TenantEmailConfigPanel({ tenantId }: { tenantId: string }) {
     },
     onError: (err: unknown) => {
       setConfirmDelete(false);
-      setError(
-        err instanceof Error ? err.message : "Failed to remove email override."
-      );
+      setError(getApiErrorMessage(err, "Failed to remove email override."));
     },
   });
 

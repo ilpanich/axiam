@@ -1,0 +1,101 @@
+{
+  "version": 2,
+  "ok": true,
+  "shape": "package",
+  "anchor": "not_provided",
+  "learningsUnmerged": [],
+  "stages": {
+    "build": {
+      "ok": true,
+      "exit": 0,
+      "skipped": null
+    },
+    "diff": {
+      "ok": true,
+      "exit": 0,
+      "skipped": null
+    },
+    "validate": {
+      "ok": true,
+      "exit": 0,
+      "skipped": null
+    },
+    "capture": {
+      "ok": true,
+      "exit": 0,
+      "skipped": null
+    }
+  },
+  "verification": {
+    "unchanged": [],
+    "changed": [],
+    "added": [
+      "ActionBadge",
+      "AppLayout",
+      "Badge",
+      "Button",
+      "Card",
+      "ConfirmDialog",
+      "DataTable",
+      "ForbiddenPage",
+      "FormDialog",
+      "InfoRow",
+      "Input",
+      "Label",
+      "PageHeader",
+      "PasswordPolicyChecker",
+      "PublicLayout",
+      "ResourceTree",
+      "SearchInput",
+      "SecretRevealModal",
+      "SectionCard",
+      "Sidebar",
+      "StatusBadge",
+      "Textarea",
+      "Toaster",
+      "ToggleField",
+      "Topbar",
+      "TotpSetupPanel",
+      "UserSearchDialog"
+    ],
+    "removed": [],
+    "pendingGrade": [],
+    "canary": null
+  },
+  "upload": {
+    "any": true,
+    "components": [
+      "ActionBadge",
+      "AppLayout",
+      "Badge",
+      "Button",
+      "Card",
+      "ConfirmDialog",
+      "DataTable",
+      "ForbiddenPage",
+      "FormDialog",
+      "InfoRow",
+      "Input",
+      "Label",
+      "PageHeader",
+      "PasswordPolicyChecker",
+      "PublicLayout",
+      "ResourceTree",
+      "SearchInput",
+      "SecretRevealModal",
+      "SectionCard",
+      "Sidebar",
+      "StatusBadge",
+      "Textarea",
+      "Toaster",
+      "ToggleField",
+      "Topbar",
+      "TotpSetupPanel",
+      "UserSearchDialog"
+    ],
+    "deletePaths": [],
+    "bundle": true,
+    "styling": true,
+    "aux": true
+  }
+}

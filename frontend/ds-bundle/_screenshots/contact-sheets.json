@@ -1,0 +1,39 @@
+[
+  {
+    "sheet": 1,
+    "components": [
+      "ActionBadge",
+      "AppLayout",
+      "Badge",
+      "Button",
+      "Card",
+      "ConfirmDialog",
+      "DataTable",
+      "ForbiddenPage",
+      "FormDialog",
+      "InfoRow",
+      "Input",
+      "Label",
+      "PageHeader",
+      "PasswordPolicyChecker",
+      "PublicLayout",
+      "ResourceTree"
+    ]
+  },
+  {
+    "sheet": 2,
+    "components": [
+      "SearchInput",
+      "SecretRevealModal",
+      "SectionCard",
+      "Sidebar",
+      "StatusBadge",
+      "Textarea",
+      "Toaster",
+      "ToggleField",
+      "Topbar",
+      "TotpSetupPanel",
+      "UserSearchDialog"
+    ]
+  }
+]

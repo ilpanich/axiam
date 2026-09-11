@@ -1,0 +1,252 @@
+{
+  "global": "AxiamUI",
+  "pkg": "frontend",
+  "pkgDir": "/home/emanuele/git/priv/axiam/frontend",
+  "extraEntries": [
+    "./.design-sync/preview-frame.tsx"
+  ],
+  "exported": [
+    "AxiamSurface",
+    "Link",
+    "MemoryRouter",
+    "NavLink",
+    "Navigate",
+    "Outlet",
+    "QueryClient",
+    "QueryClientProvider",
+    "Route",
+    "RouterProvider",
+    "Routes",
+    "createMemoryRouter",
+    "setToastDispatch",
+    "useAuthStore",
+    "useLocation",
+    "useMatches",
+    "useMutation",
+    "useNavigate",
+    "useQuery",
+    "useQueryClient",
+    "useToast"
+  ],
+  "storybookStatic": null,
+  "keyRecipe": 7,
+  "cfgSliceGlobal": "e811fa15632075f3c7417bf67760090f68a863353d3f532f27940a51d40cb985",
+  "components": [
+    {
+      "name": "ActionBadge",
+      "group": "data-display",
+      "srcSha": null,
+      "sourceKey": "7bcd52feb9c5c518",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "AppLayout",
+      "group": "layout",
+      "srcSha": null,
+      "sourceKey": "adf577de57bbbb00",
+      "cfgSlice": "2805395c5ec329765895dd25dda4f587c939c09a7c2865df563cf46a999a49d2",
+      "stories": []
+    },
+    {
+      "name": "Badge",
+      "group": "primitives",
+      "srcSha": null,
+      "sourceKey": "55f1f4b1265c402a",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Button",
+      "group": "primitives",
+      "srcSha": null,
+      "sourceKey": "4231c375656a0a00",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Card",
+      "group": "primitives",
+      "srcSha": null,
+      "sourceKey": "518651be51ad341d",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "ConfirmDialog",
+      "group": "overlays",
+      "srcSha": null,
+      "sourceKey": "a398329487c6e90e",
+      "cfgSlice": "92a71f0620ab35c79910801ce968831eb652d8116c55fa17a3e9b841d8781a8b",
+      "stories": []
+    },
+    {
+      "name": "DataTable",
+      "group": "data-display",
+      "srcSha": null,
+      "sourceKey": "e849f9ac4ea2c075",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "ForbiddenPage",
+      "group": "auth",
+      "srcSha": null,
+      "sourceKey": "26893605a20d12ee",
+      "cfgSlice": "f2aab668841055f980af73b8e33b861a65b30a3878f47561df8cf0c2dc14ac8c",
+      "stories": []
+    },
+    {
+      "name": "FormDialog",
+      "group": "forms",
+      "srcSha": null,
+      "sourceKey": "04558c6ca037db67",
+      "cfgSlice": "ed150790b49002ce30f97960f28c515fa2fc92c8237670af172eedb1bd954622",
+      "stories": []
+    },
+    {
+      "name": "InfoRow",
+      "group": "data-display",
+      "srcSha": null,
+      "sourceKey": "c92a70064233d867",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Input",
+      "group": "primitives",
+      "srcSha": null,
+      "sourceKey": "625014c0395a9b9c",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Label",
+      "group": "primitives",
+      "srcSha": null,
+      "sourceKey": "4b390e4d25354310",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "PageHeader",
+      "group": "data-display",
+      "srcSha": null,
+      "sourceKey": "ebc9510b364d58d2",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "PasswordPolicyChecker",
+      "group": "forms",
+      "srcSha": null,
+      "sourceKey": "0948aed222c4d62c",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "PublicLayout",
+      "group": "layout",
+      "srcSha": null,
+      "sourceKey": "f32367817bebad65",
+      "cfgSlice": "7eea6d3f75d9b421a31db29ed1fa969a4d82f32c30c8559e19b87f492e70302c",
+      "stories": []
+    },
+    {
+      "name": "ResourceTree",
+      "group": "data-display",
+      "srcSha": null,
+      "sourceKey": "a8cdd95344251b58",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "SearchInput",
+      "group": "forms",
+      "srcSha": null,
+      "sourceKey": "1e376a0ecd16adea",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "SecretRevealModal",
+      "group": "overlays",
+      "srcSha": null,
+      "sourceKey": "aa45a84718a352e0",
+      "cfgSlice": "ed150790b49002ce30f97960f28c515fa2fc92c8237670af172eedb1bd954622",
+      "stories": []
+    },
+    {
+      "name": "SectionCard",
+      "group": "data-display",
+      "srcSha": null,
+      "sourceKey": "9a2b50fadf120de7",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Sidebar",
+      "group": "layout",
+      "srcSha": null,
+      "sourceKey": "e58aee512ca69c25",
+      "cfgSlice": "2cd66a99a15145bf4124e52bdf1ea7f361b1d2b5643c6837276643ae692d56fb",
+      "stories": []
+    },
+    {
+      "name": "StatusBadge",
+      "group": "data-display",
+      "srcSha": null,
+      "sourceKey": "c407da2396c4a9ef",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Textarea",
+      "group": "primitives",
+      "srcSha": null,
+      "sourceKey": "871c1663d6b50696",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Toaster",
+      "group": "overlays",
+      "srcSha": null,
+      "sourceKey": "7f19569d81c36e8d",
+      "cfgSlice": "2d74546258ab1be36a4088995c16eb2e9f85f8f49de808332a65f9236100ca8a",
+      "stories": []
+    },
+    {
+      "name": "ToggleField",
+      "group": "forms",
+      "srcSha": null,
+      "sourceKey": "c974d7d6713dd6e4",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Topbar",
+      "group": "layout",
+      "srcSha": null,
+      "sourceKey": "45934540c3e69d6e",
+      "cfgSlice": "9aeb74aa2b01cf739e64c940c5d78a0a78323116b1d8ced4b84715a3f43a9457",
+      "stories": []
+    },
+    {
+      "name": "TotpSetupPanel",
+      "group": "auth",
+      "srcSha": null,
+      "sourceKey": "637e0f919d50ed56",
+      "cfgSlice": "2ce8ef3a219221d3bddca34693028ed486cf282cf6979c132c819bac3ebb40a5",
+      "stories": []
+    },
+    {
+      "name": "UserSearchDialog",
+      "group": "overlays",
+      "srcSha": null,
+      "sourceKey": "231d64749bc7be0b",
+      "cfgSlice": "ed150790b49002ce30f97960f28c515fa2fc92c8237670af172eedb1bd954622",
+      "stories": []
+    }
+  ]
+}

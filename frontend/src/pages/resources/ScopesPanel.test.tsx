@@ -124,3 +124,172 @@ describe("ScopesPanel", () => {
     ).toBeInTheDocument();
   });
 });
+
+// ─── Failures, descriptions, and the ways out ─────────────────────────────────
+//
+// Each of the three writes reports a refusal twice — inline in the dialog it
+// came from, and as a toast — because a dialog that stays open with no message
+// reads as a click that did nothing. None of those paths were exercised, nor
+// was the description field, nor any of the three dismissals.
+
+describe("ScopesPanel — failures and dismissal", () => {
+  it("sends the description along with the name", async () => {
+    apiMock.get.mockResolvedValue(res([]));
+    apiMock.post.mockResolvedValue(res({ ...scopes[0], id: "s2" }));
+    renderWithProviders(<ScopesPanel resourceId="r1" resourceName="Billing" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /New Scope/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "refunds");
+    await userEvent.type(
+      within(dialog).getByLabelText("Description"),
+      "Issuing refunds",
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith("/api/v1/resources/r1/scopes", {
+        name: "refunds",
+        description: "Issuing refunds",
+      })
+    );
+  });
+
+  it("keeps the create dialog open and says why when the name is taken", async () => {
+    apiMock.get.mockResolvedValue(res(scopes));
+    apiMock.post.mockRejectedValue({
+      response: {
+        status: 409,
+        data: { message: "A scope named invoices already exists on this resource" },
+      },
+    });
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    renderWithProviders(<ScopesPanel resourceId="r1" resourceName="Billing" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /New Scope/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "invoices");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    expect(
+      await screen.findByText(/A scope named invoices already exists/)
+    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(toastSpy).toHaveBeenCalledWith({
+      description: "A scope named invoices already exists on this resource",
+      variant: "destructive",
+    });
+  });
+
+  it("keeps the edit dialog open and says why when a rename is refused", async () => {
+    apiMock.get.mockResolvedValue(res(scopes));
+    apiMock.put.mockRejectedValue({
+      response: { status: 403, data: { message: "Scope is managed by the organization" } },
+    });
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    renderWithProviders(<ScopesPanel resourceId="r1" resourceName="Billing" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit scope invoices" })
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Save Changes" })
+    );
+
+    expect(
+      await screen.findByText("Scope is managed by the organization")
+    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(toastSpy).toHaveBeenCalledWith({
+      description: "Scope is managed by the organization",
+      variant: "destructive",
+    });
+  });
+
+  it("refuses a rename that blanks the name", async () => {
+    apiMock.get.mockResolvedValue(res(scopes));
+    renderWithProviders(<ScopesPanel resourceId="r1" resourceName="Billing" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit scope invoices" })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.clear(within(dialog).getByLabelText("Name *"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+
+    expect(await screen.findByText("Name is required.")).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("toasts the server's reason when a delete is refused", async () => {
+    apiMock.get.mockResolvedValue(res(scopes));
+    apiMock.delete.mockRejectedValue({
+      response: { status: 409, data: { message: "Scope is referenced by 3 grants" } },
+    });
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    renderWithProviders(<ScopesPanel resourceId="r1" resourceName="Billing" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Delete scope invoices" })
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" })
+    );
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith({
+        description: "Scope is referenced by 3 grants",
+        variant: "destructive",
+      })
+    );
+  });
+
+  it("discards a half-filled create form when dismissed", async () => {
+    apiMock.get.mockResolvedValue(res([]));
+    renderWithProviders(<ScopesPanel resourceId="r1" resourceName="Billing" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /New Scope/ }));
+    let dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "half-typed");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /New Scope/ }));
+    dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText("Name *")).toHaveValue("");
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("closes the edit and delete dialogs without writing", async () => {
+    apiMock.get.mockResolvedValue(res(scopes));
+    renderWithProviders(<ScopesPanel resourceId="r1" resourceName="Billing" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit scope invoices" })
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Delete scope invoices" })
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    expect(apiMock.put).not.toHaveBeenCalled();
+    expect(apiMock.delete).not.toHaveBeenCalled();
+  });
+});

@@ -131,8 +131,10 @@ pub struct CertificateIdentity {
     /// Until this field existed, only the first was compared, so a DN copied by
     /// following the documentation could never match:
     ///
-    ///     registered   O=axiam-conformance,CN=axiam-conformance-mtls
-    ///     compared to  CN=axiam-conformance-mtls, O=axiam-conformance
+    /// ```text
+    /// registered   O=axiam-conformance,CN=axiam-conformance-mtls
+    /// compared to  CN=axiam-conformance-mtls, O=axiam-conformance
+    /// ```
     ///
     /// Every `tls_client_auth` client onboarded that way authenticated nothing.
     /// It cost the FAPI 2.0 conformance lane 89 module failures, all at PAR,

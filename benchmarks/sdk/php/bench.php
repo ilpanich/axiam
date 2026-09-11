@@ -86,9 +86,18 @@ function zero_ops(): array
 
 function sdk_version(): string
 {
+    // run.sh resolves the sibling checkout's version and exports it
+    // (../_sdkversion.sh). It wins over Composer's runtime metadata because a
+    // path/dev install reports a branch name ("dev-claude/…"), which says
+    // nothing about which release was measured.
+    $fromEnv = getenv('AXIAM_SDK_VERSION');
+    if (is_string($fromEnv) && $fromEnv !== '') {
+        return $fromEnv;
+    }
+
     // Resolve the installed SDK version if Composer's runtime metadata is
     // available (path/dev installs report e.g. "dev-main"); fall back to the
-    // last known alpha tag otherwise.
+    // last known release tag otherwise.
     if (class_exists(\Composer\InstalledVersions::class)) {
         try {
             $v = \Composer\InstalledVersions::getPrettyVersion('axiam/axiam-sdk');
@@ -100,7 +109,7 @@ function sdk_version(): string
         }
     }
 
-    return '1.0.0-alpha2';
+    return '1.0.0-beta12';
 }
 
 /**

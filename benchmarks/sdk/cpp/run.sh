@@ -7,6 +7,14 @@
 # unavailable — a build failure here must never break the aggregator run.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# The SDK version this bench reports is READ from the sibling checkout it
+# builds against, not declared as a literal in the harness — see
+# ../_sdkversion.sh for why eight of these literals had gone stale at once.
+# Sourced before any `cd`, like _tlspaths.sh, and a no-op when the checkout
+# is absent (the bench then keeps its own fallback literal).
+# shellcheck disable=SC1091
+source "$HERE/../_sdkversion.sh"; export_sdk_version cpp
 cd "$HERE"
 # shellcheck disable=SC1091
 source "$HERE/../_pending.sh"

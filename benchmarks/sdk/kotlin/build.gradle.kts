@@ -14,9 +14,11 @@ repositories {
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
     // The AXIAM Kotlin SDK. Resolved from the sibling axiam-kotlin-sdk checkout via the
-    // includeBuild composite in settings.gradle.kts until the alpha package is published
-    // to Maven Central. Swap to a plain version bump once it is (see TODO.md).
-    implementation("io.github.ilpanich:axiam-sdk-kotlin:1.0.0-alpha13")
+    // includeBuild composite in settings.gradle.kts until the package is published to
+    // Maven Central — dependencySubstitution replaces this coordinate whatever version
+    // it names, so the literal below matters only for a build with no sibling checkout.
+    // Swap to a plain version bump once the package is on Maven Central (see TODO.md).
+    implementation("io.github.ilpanich:axiam-sdk-kotlin:1.0.0-beta12")
 }
 
 kotlin {

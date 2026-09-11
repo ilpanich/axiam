@@ -4,16 +4,30 @@ The protocol-level scenarios (`benchmarks/scenarios/`) measure the **server**. T
 SDK harness measures the **client**: how much latency/CPU each official AXIAM SDK
 adds on top of the raw wire calls, so users can pick an SDK knowing its overhead.
 
-All 7 SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go — the `ilpanich/axiam-<lang>-sdk`
-repositories) are implemented and conform to `sdks/CONTRACT.md`, and **all seven
-bench directories are now wired** against their real SDK (`python/`, `typescript/`,
-`rust/`, `go/`, `java/`, `csharp/`, `php/`). Each emits an `ok` record when its
-SDK package/toolchain is installed and a seeded target is reachable, and degrades
-to a `pending` (toolchain/package missing) or `error` (server unreachable / grant
-missing) record otherwise. The compiled-language benches depend on their SDK via a
-local path/replace/project reference (see each `sdk/<lang>/TODO.md`) so they build
-against the sibling `axiam-<lang>-sdk` checkout when the package is not yet on the
-public registry.
+All 11 SDKs (Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++ —
+the `ilpanich/axiam-<lang>-sdk` repositories) are implemented and conform to
+`sdks/CONTRACT.md`, and **all eleven bench directories are wired** against their
+real SDK. Each emits an `ok` record when its SDK package/toolchain is installed
+and a seeded target is reachable, and degrades to a `pending` (toolchain/package
+missing) or `error` (server unreachable / grant missing) record otherwise. The
+compiled-language benches depend on their SDK via a local path/replace/project
+reference (see each `sdk/<lang>/TODO.md`) so they build against the sibling
+`axiam-<lang>-sdk` checkout when the package is not yet on the public registry.
+
+### `sdk_version` is read, not declared
+
+The record field that says which SDK produced a measurement is resolved by
+[`_sdkversion.sh`](_sdkversion.sh) from the sibling checkout the bench actually
+built against — the package manifest where one carries a version, the newest
+released `## [x.y.z]` CHANGELOG heading for the five SDKs that publish from a
+git tag. `run.sh` exports it as `AXIAM_SDK_VERSION`; each bench prefers that
+over the literal it keeps as a fallback for a published-package run.
+
+This is not cosmetic. Eight of the eleven benches used to hardcode the version,
+and every one of those literals was stale by `1.0.0-beta12` (`1.0.0-alpha2`,
+`-alpha7`, `-alpha12`, `-alpha13`, `1.0.0a2`). A literal cannot go red, so an
+entire SDK matrix would have been published attributing beta12 numbers to alphas
+that no longer existed. `test-sdk-version.sh` pins the resolution.
 
 ## What each SDK bench must do
 
@@ -395,14 +409,16 @@ single-pass behavior.
 
 ## Running a wired SDK bench
 
-All seven benches are wired. To run one you need its toolchain and the SDK
+All eleven benches are wired. To run one you need its toolchain and the SDK
 package resolvable:
 
 1. Each compiled-language manifest (`Cargo.toml` / `go.mod` / `pom.xml` /
    `*.csproj` / `composer.json`) references its SDK via a local path/replace/
    project reference to the sibling `axiam-<lang>-sdk` checkout, so it builds even
-   before the alpha package is published to the public registry. Swap that for the
+   before the package is published to the public registry. Swap that for the
    published package reference once available (see each `sdk/<lang>/TODO.md`).
+   Whichever is used, the record's `sdk_version` names the checkout resolved at
+   run time (`_sdkversion.sh`), not a version written into the manifest.
 2. `cd benchmarks && just sdk=<lang> sdk-bench` prints one `axiam.sdk-bench/v1`
    record. `just sdk-bench-all` runs every language and folds the results in.
 3. The stdout JSON contract is fixed — do not add or rename fields the aggregator

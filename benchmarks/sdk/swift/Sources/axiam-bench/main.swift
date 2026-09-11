@@ -187,8 +187,11 @@ func emit(status: String, ops: [String: OpResult], iterations: Int, concurrency:
     let output = BenchOutput(
         schema: "axiam.sdk-bench/v1",
         sdk: "swift",
-        // Kept in sync with axiam-swift-sdk/CHANGELOG.md's latest entry.
-        sdk_version: "1.0.0-alpha12",
+        // Resolved from the sibling checkout by run.sh (../_sdkversion.sh), which
+        // reads axiam-swift-sdk/CHANGELOG.md's newest released heading — the SDK
+        // publishes from a git tag and carries no version in Package.swift. The
+        // literal is the fallback when no checkout sits beside the bench.
+        sdk_version: env("AXIAM_SDK_VERSION", "1.0.0-beta12"),
         language_runtime: swiftRuntimeVersion(),
         target: env("BENCH_TARGET", "axiam"),
         profile: env("BENCH_PROFILE", "p0-plaintext"),

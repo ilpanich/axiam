@@ -119,7 +119,9 @@ function emit(status, ops, iterations, concurrency, notes) {
   const { cpuMsTotal, rssMiBPeak } = clientResourceUsage();
   console.log(JSON.stringify({
     schema: "axiam.sdk-bench/v1", sdk: "typescript",
-    sdk_version: "1.0.0-alpha2", language_runtime: `node ${process.version}`,
+    // Resolved from the sibling checkout by run.sh (../_sdkversion.sh); the
+    // literal is the fallback when the bench runs against a published package.
+    sdk_version: env("AXIAM_SDK_VERSION", "1.0.0-beta12"), language_runtime: `node ${process.version}`,
     target: env("BENCH_TARGET", "axiam"), profile: env("BENCH_PROFILE", "p0-plaintext"),
     status, iterations, concurrency,
     ops, client_cpu_ms_total: cpuMsTotal, client_rss_mib_peak: rssMiBPeak, notes,

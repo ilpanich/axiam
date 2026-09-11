@@ -73,6 +73,33 @@ profiles/certs/client.key
 > These are **test-only** certificates with short lifetimes. Never reuse them
 > outside the benchmark sandbox. The directory is gitignored.
 
+## Client IP and the rate limiters
+
+`p1`–`p3` put an nginx edge in front of `axiam-server`; `p0` talks to the
+server's own listener directly. That makes the TLS profiles a one-reverse-proxy
+topology — the same one `docs/deployment/README.md` ships — and a proxy that
+does not forward the client address makes every request look like it came from
+the proxy.
+
+Each edge conf therefore sets `X-Forwarded-For` (`$proxy_add_x_forwarded_for`),
+and the target compose leaves `AXIAM__RATE_LIMIT__TRUSTED_HOPS` at its default
+`0`, which is the value that topology calls for (`TRUSTED_HOPS` = proxies − 1 —
+see [Deriving `TRUSTED_HOPS`](../../docs/deployment/README.md#deriving-trusted_hops)).
+The two go together: with the header present and `TRUSTED_HOPS = 0` the server
+keys on the real client address, exercising `XForwardedForKeyExtractor` exactly
+as a production deployment does.
+
+**This moves no measured number.** k6 drives every VU from a single host, so
+there is one client address either way and a `rl=prod` pass still fills one
+bucket — which is what `runner/rl_prod_check.py` compares against the configured
+limit. What it changes is *which code path* is measured, and that matters
+because the mismatched version of it is silent: the R-4 hardening logs a WARN
+and increments `axiam_rate_limit_xff_discarded_total` only when a header is
+present and discarded. A request carrying **no** `X-Forwarded-For` is
+deliberately not counted (a client with no proxy in front of it is not a
+misconfiguration), so the previous configuration collapsed the keying and said
+nothing about it.
+
 ## Reading the security-cost output
 
 The report prints, per (target, scenario), a small table:

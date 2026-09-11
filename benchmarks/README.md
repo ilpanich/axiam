@@ -12,12 +12,19 @@ dimensions:
    authentication and TLS 1.3-only), measuring the cost of stronger security.
 
 It also includes **per-SDK client-side benchmarks**, so the client overhead of each
-official AXIAM SDK (Rust, TypeScript, Python, Java, C#, PHP, Go — each published from
-its own `ilpanich/axiam-<lang>-sdk` repository) can be measured against the raw
-protocol baseline. All 7 SDKs are implemented and **all 7 bench harnesses are wired
-to their SDKs** (see `sdk/README.md`); each builds against the sibling SDK checkout
-via a local path/replace/project reference until the alpha package lands on the
-public registry.
+official AXIAM SDK can be measured against the raw protocol baseline. There are
+**eleven** — Rust, TypeScript, Python, Java, Kotlin, C#, PHP, Go, Swift, C and C++,
+each published from its own `ilpanich/axiam-<lang>-sdk` repository — and **all eleven
+bench harnesses are wired to their SDKs** (see `sdk/README.md`). Seven of them
+(Rust, TypeScript, Python, Java, C#, PHP, Go) implement the full CONTRACT §1–§11
+surface including gRPC and AMQP; Kotlin, Swift, C and C++ cover the REST surface,
+which is the whole of what the four contractual bench ops need.
+
+Each bench builds against the sibling SDK checkout via a local
+path/replace/project reference until the package lands on the public registry,
+and **reports the version of that checkout** rather than a literal frozen into
+the harness (`sdk/_sdkversion.sh`) — so a record always names the SDK release it
+actually measured.
 
 ## Why a custom framework?
 
@@ -82,10 +89,11 @@ benchmarks/
 │   ├── run-benchmark.sh      # orchestrator: target × profile × scenario matrix
 │   ├── seed.sh               # provision org/tenant/user/client per target
 │   └── report.py             # aggregate raw results → comparative report
-├── sdk/                      # per-language SDK client-side benchmarks (scaffolds)
+├── sdk/                      # per-language SDK client-side benchmarks
 │   ├── HARNESS-SPEC.md       # the JSON contract every SDK bench must emit
+│   ├── _sdkversion.sh        # resolves each bench's SDK version from its checkout
 │   ├── run-all.sh
-│   └── {rust,typescript,python,go,java,csharp,php}/
+│   └── {rust,typescript,python,go,java,kotlin,csharp,php,swift,c,cpp}/
 └── results/                  # run outputs (gitignored)
 ```
 
@@ -278,18 +286,19 @@ additionally re-scans the finished archive for `SECRET`/`PASSWORD` content
 |-----------------------------------|--------------------------------------------------------------|
 | k6 protocol scenarios             | Implemented (HTTP); authz check + batch scenarios over both REST and gRPC |
 | AXIAM target + seeding            | Implemented (prebuilt ghcr image by default, local build fallback); seeds org/tenant/admin via the gated bootstrap flow plus a resource/role/grant for authz checks |
-| Keycloak / Zitadel targets        | Implemented (Keycloak 26.7.0, Zitadel v4.15.2)               |
+| Keycloak / Zitadel targets        | Implemented (Keycloak 26.7.0, Zitadel v4.16.2 — the pins in `targets/*/docker-compose.yml`) |
 | Security profile matrix           | Implemented (p0–p3); mTLS requires per-target cert wiring; SDK benches cover p0–p2 (no SDK client-cert option yet) |
 | Resource sampler + report         | Implemented (stdlib python, no external deps)                 |
-| SDK client benchmarks             | All 7 wired to their SDKs (see `sdk/README.md`)              |
+| SDK client benchmarks             | All 11 wired to their SDKs, each reporting its checkout's own version (see `sdk/README.md`) |
 | AMQP async-authz benchmarking     | Out of scope for v1.0-beta (see below)                        |
 
 > Every SDK bench builds against its sibling `ilpanich/axiam-<lang>-sdk` checkout
-> via a local path/replace/project reference until the alpha package is published —
+> via a local path/replace/project reference until the package is published —
 > see each language's `sdk/<lang>/TODO.md`. `sdk/HARNESS-SPEC.md` documents the
-> shared result contract every bench emits. As of run 3 no SDK bench has yet
-> produced a validated `status: "ok"` record against a live target — that is
-> tracked as task G10 below.
+> shared result contract every bench emits. G10 is closed: seven benches have
+> produced validated `status: "ok"` records against a live target, and
+> `sdk/README.md`'s H8 table says which, at which profile, and what still blocks
+> the rest.
 
 ## Targeted investigation runs
 

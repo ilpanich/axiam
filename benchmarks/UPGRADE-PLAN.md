@@ -1,5 +1,12 @@
 # Benchmark Suite — Verification Report & Upgrade Plan
 
+> **Superseded as the current picture by
+> [`VERIFICATION-2026-09-11.md`](VERIFICATION-2026-09-11.md).** This file stays as
+> the record of the 2026-07-17 review — its P0–P2 items were implemented and its
+> findings are stated against the server and SDKs *of that date* (contract 1.1,
+> seven SDKs, `1.0.0-alpha3`). It is deliberately not retrofitted: read it as
+> history, and the 2026-09 report for what is true now.
+
 > **Status: IMPLEMENTED on this branch (2026-07-17).** P0–P2 below are done; P3 remains an
 > optional backlog. Two things surfaced during implementation that this plan had not called out:
 > (a) `/api/v1/auth/login` delivers tokens **only via Set-Cookie** and every non-GET under

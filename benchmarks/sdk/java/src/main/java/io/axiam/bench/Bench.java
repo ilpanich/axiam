@@ -321,7 +321,9 @@ public final class Bench {
         sb.append("{\n");
         sb.append("  \"schema\": \"axiam.sdk-bench/v1\",\n");
         sb.append("  \"sdk\": \"java\",\n");
-        sb.append("  \"sdk_version\": \"1.0.0-alpha2\",\n");
+        // Resolved from the sibling checkout by run.sh (../_sdkversion.sh); the
+        // literal is the fallback for a run against a published artifact.
+        sb.append("  \"sdk_version\": ").append(jsonString(env("AXIAM_SDK_VERSION", "1.0.0-beta12"))).append(",\n");
         sb.append("  \"language_runtime\": ").append(jsonString("java " + System.getProperty("java.version"))).append(",\n");
         sb.append("  \"target\": ").append(jsonString(TARGET)).append(",\n");
         sb.append("  \"profile\": ").append(jsonString(PROFILE)).append(",\n");

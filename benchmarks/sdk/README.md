@@ -4,22 +4,32 @@ Measures the **client-side** overhead each official AXIAM SDK adds on top of the
 raw protocol calls, so users can choose an SDK with eyes open.
 
 - The contract every SDK bench emits is defined in [`HARNESS-SPEC.md`](HARNESS-SPEC.md).
-- **All 7 primary-language benches are wired** to their real SDK: `python/` and
-  `typescript/` against the `axiam-sdk` PyPI/npm packages (a local install/link
-  step in `run.sh` when the published package isn't resolvable yet), and
-  `rust/`, `go/`, `java/`, `csharp/`, `php/` against their sibling
-  `ilpanich/axiam-<lang>-sdk` checkout via a local path/replace/project
-  reference (so they build before the alpha package is on the public registry —
-  swap to the published package when available, per each `TODO.md`). Four more
-  scaffolds (`kotlin/`, `c/`, `cpp/`, `swift/`) exist beyond the 7 primary
-  languages; `kotlin/` has validated `ok` records here too, the other three are
-  wired but unverified on this host (no toolchain).
+- **All 11 benches are wired** to their real SDK: `python/` and `typescript/`
+  against the `axiam-sdk` PyPI/npm packages (a local install/link step in
+  `run.sh` when the published package isn't resolvable yet), and the other nine
+  against their sibling `ilpanich/axiam-<lang>-sdk` checkout via a local
+  path/replace/project reference (so they build before the package is on the
+  public registry — swap to the published package when available, per each
+  `TODO.md`). Seven are the full-transport SDKs (`rust`, `typescript`,
+  `python`, `java`, `csharp`, `php`, `go`); `kotlin`, `swift`, `c` and `cpp`
+  are REST-only, which covers every contractual bench op. `kotlin/` has
+  validated `ok` records here too; `swift/`, `c/` and `cpp/` are wired but
+  unverified on this host (no toolchain).
+- **Each bench reports the SDK version it was built against**, resolved from
+  that sibling checkout by `_sdkversion.sh` rather than declared as a literal.
+  Eight of the eleven used to carry a literal, and all eight had gone stale by
+  `1.0.0-beta12` — see that file's header.
 - Each emits `status: "ok"` when its toolchain + SDK are installed and a seeded
   target is reachable; otherwise a `pending` (toolchain/package missing) or `error`
   (server unreachable / missing grant) record.
 
-All 7 SDKs (`ilpanich/axiam-{rust,typescript,python,java,csharp,php,go}-sdk`) are
-implemented and conform to `sdks/CONTRACT.md`.
+All 11 SDKs
+(`ilpanich/axiam-{rust,typescript,python,java,kotlin,csharp,php,go,swift,c,cplusplus}-sdk`)
+are implemented and conform to `sdks/CONTRACT.md`, re-synced to **SDK contract
+1.42** on 2026-09-11. None of 1.42's changes touch the four contractual bench
+ops — `dpop_jkt` on PAR, two RFC 8414 discovery members and the ID token's
+dropped `tenant_id`/`org_id`/`email` are all outside `login`/`refresh`/
+`check_access`/`batch_check` — so no bench glue changed with it.
 
 ## H8 status (measured on this host, not aspirational)
 

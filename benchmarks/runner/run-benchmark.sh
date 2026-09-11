@@ -242,7 +242,7 @@ fi
 # "this product has no such endpoint". That is exactly the confusion this list
 # exists to prevent, and it is why a capability gap belongs here rather than in
 # a scenario-side guard.
-AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js scim_provisioning.js oauth2_client_credentials_reactor_hook.js authz_nested_grpc.js opaque_login_start.js opaque_register_start.js"
+AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js oauth2_authorize.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js scim_provisioning.js oauth2_client_credentials_reactor_hook.js authz_nested_grpc.js opaque_login_start.js opaque_register_start.js"
 
 # D4: Zitadel's gRPC identity scenario (AuthService/GetMyUser, the gRPC
 # counterpart of userinfo.js — see scenarios/zitadel_userinfo_grpc.js and
@@ -261,7 +261,7 @@ ZITADEL_ONLY_SCENARIOS="zitadel_userinfo_grpc.js"
 # R5.2's six additions all mint or spend a token against the seeded client
 # (device_authorization.js/device_flow_poll.js use client_id only, per RFC
 # 8628's public-client design, but still need the client seeded to exist).
-OAUTH2_SCENARIOS="oauth2_client_credentials.js oauth2_client_credentials_reactor_hook.js token_introspection.js token_refresh.js userinfo.js oauth2_revoke.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js"
+OAUTH2_SCENARIOS="oauth2_client_credentials.js oauth2_client_credentials_reactor_hook.js token_introspection.js token_refresh.js userinfo.js oauth2_revoke.js oauth2_authorize.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js"
 skip_oauth2() {
   [ "${BENCH_SKIP_OAUTH2:-0}" = "1" ] && return 0
   [ "$TARGET" = "axiam" ] && [ -z "${BENCH_CLIENT_SECRET:-}" ] && return 0
@@ -316,7 +316,18 @@ skip_oauth2() {
 # publish than the old one, not a better one: it looks like a hook cost and is
 # actually a timeout. Blocker 1 (no admin-session helper in lib/auth.js) is
 # untouched. So this stays listed, for two reasons that are both still real.
-PENDING_SCENARIOS="scim_provisioning.js oauth2_client_credentials_reactor_hook.js"
+# 2026-09-11: oauth2_authorize.js — the OpenID Connect authorization endpoint,
+# unmeasured until the Basic OP waves (W1–W7) made it the largest body of new
+# server work in the release. Pending for the ONE reason scim_provisioning.js is
+# pending, and no other: it has never executed against a live server. Its query
+# parameters, expected `302`, bearer authentication and the seed fixtures it
+# relies on were all checked statically against the handlers and the seed (the
+# scenario header lists exactly what was checked against what), and every one
+# matches — but "matches on inspection" is not "runs green".
+#
+# To close: run it once with BENCH_ENABLE_PENDING_SCENARIOS=1. If it passes,
+# drop it from the list in that same commit.
+PENDING_SCENARIOS="scim_provisioning.js oauth2_client_credentials_reactor_hook.js oauth2_authorize.js"
 
 # N1: scenarios that are complete and runnable but are NOT default-matrix
 # cells — they are rungs of a labelled sweep whose meaning comes from the knob

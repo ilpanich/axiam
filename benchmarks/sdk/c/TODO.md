@@ -15,7 +15,7 @@ CONTRACT.md §1 ops — `axiam_login`, `axiam_refresh`, `axiam_check_access`,
   `LD_LIBRARY_PATH` juggling, and disables the SDK's own tests/examples.
   Swap `add_subdirectory()` for
   `find_package(axiam-c-sdk CONFIG REQUIRED)` against an installed/published
-  package once the alpha is resolvable via vcpkg/Conan/apt.
+  package once the release is resolvable via vcpkg/Conan/apt.
 - All four ops are timed with a **plain serial loop** (not just `refresh`,
   which HARNESS-SPEC.md requires to be serial for every SDK). This is the
   explicitly-allowed simplification for the C harness — see the comment at

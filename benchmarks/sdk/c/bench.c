@@ -415,7 +415,11 @@ static void emit_record(const cfg_t *cfg, const char *status, int iterations, in
     printf("{\n");
     printf("  \"schema\": \"axiam.sdk-bench/v1\",\n");
     printf("  \"sdk\": \"c\",\n");
-    printf("  \"sdk_version\": \"%s\",\n", axiam_version());
+    /* `axiam_version()` is the SDK's own compiled-in AXIAM_VERSION macro and
+       already carries the pre-release qualifier, so this bench never had a
+       stale literal to fix. AXIAM_SDK_VERSION still wins when run.sh resolved
+       one, so an operator who pins a label pins it for all eleven benches. */
+    printf("  \"sdk_version\": \"%s\",\n", getenv_or("AXIAM_SDK_VERSION", axiam_version()));
     printf("  \"language_runtime\": \"c11 (%s)\",\n", AXIAM_BENCH_COMPILER);
     printf("  \"target\": \"%s\",\n", cfg->target);
     printf("  \"profile\": \"%s\",\n", cfg->profile);

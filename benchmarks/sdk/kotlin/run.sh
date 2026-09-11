@@ -28,6 +28,14 @@
 # only way a language bench can wedge a sweep.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# The SDK version this bench reports is READ from the sibling checkout it
+# builds against, not declared as a literal in the harness — see
+# ../_sdkversion.sh for why eight of these literals had gone stale at once.
+# Sourced before any `cd`, like _tlspaths.sh, and a no-op when the checkout
+# is absent (the bench then keeps its own fallback literal).
+# shellcheck disable=SC1091
+source "$HERE/../_sdkversion.sh"; export_sdk_version kotlin
 # Resolve the TLS input paths (BENCH_CA_CERT and, for p3-mtls,
 # BENCH_CLIENT_CERT/BENCH_CLIENT_KEY) to absolute paths before `cd "$HERE"` —
 # profiles/*.env sets them relative to benchmarks/ (the caller's cwd), and

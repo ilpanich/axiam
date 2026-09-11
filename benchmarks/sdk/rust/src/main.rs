@@ -395,7 +395,11 @@ fn emit(
     let record = serde_json::json!({
         "schema": "axiam.sdk-bench/v1",
         "sdk": "rust",
-        "sdk_version": "1.0.0-alpha7",
+        // The SDK build actually measured. `run.sh` resolves it from the sibling
+        // checkout and exports AXIAM_SDK_VERSION (../_sdkversion.sh); the literal
+        // below is only the fallback for a bench run against a published crate
+        // with no source tree beside it.
+        "sdk_version": env("AXIAM_SDK_VERSION", "1.0.0-beta12"),
         "language_runtime": "rust (cargo)",
         "target": target,
         "profile": profile,

@@ -265,7 +265,11 @@ void emit(const std::string& status, const std::vector<std::pair<std::string, Op
     j << "{\n"
       << "  \"schema\": \"axiam.sdk-bench/v1\",\n"
       << "  \"sdk\": \"cpp\",\n"
-      << "  \"sdk_version\": \"" << axiam::kVersion << "\",\n"
+      // `axiam::kVersion` is the CMake project version and so carries no
+      // pre-release qualifier ("1.0.0", not "1.0.0-beta12"): it names the ABI,
+      // not the release. AXIAM_SDK_VERSION, resolved by run.sh from the sibling
+      // checkout (../_sdkversion.sh), names the release, and is preferred.
+      << "  \"sdk_version\": \"" << json_escape(env_str("AXIAM_SDK_VERSION", axiam::kVersion)) << "\",\n"
       << "  \"language_runtime\": \"" << json_escape(
              "g++ " + std::to_string(__GNUC__) + "." + std::to_string(__GNUC_MINOR__) +
              "." + std::to_string(__GNUC_PATCHLEVEL__) + " (C++" +

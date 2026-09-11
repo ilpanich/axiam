@@ -1,7 +1,8 @@
 # Java SDK benchmark — now wired
 
-The Java bench glue is wired to the real SDK
-(`io.github.ilpanich:axiam-sdk:1.0.0-alpha2`, jar).
+The Java bench glue is wired to the real SDK (`io.github.ilpanich:axiam-sdk`,
+jar). `run.sh` builds against whatever version the sibling checkout declares —
+see the `${axiam.sdk.version}` note below — so no version is pinned here.
 
 - **Entrypoint:** `src/main/java/io/axiam/bench/Bench.java` (main class
   `io.axiam.bench.Bench`). It reads the `BENCH_*` / `SDK_BENCH_*` env, times the

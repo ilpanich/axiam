@@ -13,9 +13,9 @@ canonical CONTRACT.md §1 ops — `login`, `refresh`, `check_access`,
   `[workspace]` table keeps this crate a standalone workspace so the parent
   `axiam/` workspace never absorbs it.
 - For a reproducible published build, swap the path dep for the crates.io
-  release pinned to **`=1.0.0-alpha7`** (the first alpha that builds under
+  release pinned to **`=1.0.0-beta12`** (alphas before `1.0.0-alpha7` fail under
   edition 2024):
-  `axiam-sdk = { version = "=1.0.0-alpha7", default-features = false, features = ["rest"] }`
+  `axiam-sdk = { version = "=1.0.0-beta12", default-features = false, features = ["rest"] }`
 - `refresh` is timed serially (concurrency 1) because the SDK single-flight-
   guards refresh; the other three ops run at `SDK_BENCH_CONCURRENCY`.
 - On setup failure (server down / bad creds / non-UUID `BENCH_RESOURCE_ID`) it

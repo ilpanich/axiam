@@ -32,7 +32,7 @@
       CONTRACT.md §6.1 — `clientCertificate(byte[], byte[])` did not exist
       there, and mTLS could never have been wired.
     -->
-    <axiam.sdk.version>1.0.0-alpha21</axiam.sdk.version>
+    <axiam.sdk.version>1.0.0-beta12</axiam.sdk.version>
   </properties>
 
   <dependencies>

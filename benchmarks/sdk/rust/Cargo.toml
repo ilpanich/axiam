@@ -7,8 +7,8 @@
 #
 # For a reproducible, published build, pin the SDK to the crates.io release
 # instead of the path dep, e.g.:
-#   axiam-sdk = { version = "=1.0.0-alpha7", default-features = false, features = ["rest"] }
-# (earlier alphas fail under edition 2024; `=1.0.0-alpha7` is the first that builds).
+#   axiam-sdk = { version = "=1.0.0-beta12", default-features = false, features = ["rest"] }
+# (the current release; alphas before `1.0.0-alpha7` fail under edition 2024).
 [workspace]
 
 [package]

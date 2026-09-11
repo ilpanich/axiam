@@ -8,10 +8,10 @@ product `AxiamSDK`). It times the four canonical CONTRACT.md §1 ops (`login`, `
 ## Layout
 - `Package.swift` depends on the SDK via a local path dependency on the sibling checkout
   (`../../../../axiam-swift-sdk`), mirroring the go/rust/csharp benches' relative
-  sibling-path convention, because the tagged release (`1.0.0-alpha12`) may not be
+  sibling-path convention, because the tagged release (`1.0.0-beta12`) may not be
   resolvable from this sandbox. Swap it for the git reference in the SDK's README once
   published:
-  `.package(url: "https://github.com/ilpanich/axiam-swift-sdk.git", from: "1.0.0-alpha12")`.
+  `.package(url: "https://github.com/ilpanich/axiam-swift-sdk.git", from: "1.0.0-beta12")`.
 - `Sources/axiam-bench/main.swift` is the entrypoint (executable target `axiam-bench`, run
   with `swift run -c release axiam-bench`).
 - `run.sh` builds in release config and `exec`s `swift run -c release axiam-bench`; it falls

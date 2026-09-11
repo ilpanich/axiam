@@ -166,6 +166,40 @@ describe("redactSecrets", () => {
     expect(redactSecrets('{"apiKey":"sg-live-456"}')).not.toContain("sg-live-456");
   });
 
+  // The gap this closed: `\b` treats `_` as a word character, so a bare
+  // `\bpassword\b` never matched inside `smtp_password` — the exact key shape a
+  // gateway produces when it echoes a rejected body back. Measured before the
+  // fix: `password=…` was redacted and `smtp_password=…` went through whole.
+  it("redacts a secret whose key carries a prefix", () => {
+    const prefixed: [string, string][] = [
+      ['{"smtp_password":"hunter2"}', "hunter2"],
+      ['{"smtpPassword":"hunter2"}', "hunter2"],
+      ["db_password=pw-live-1", "pw-live-1"],
+      ['{"provider_api_key":"sg-live-789"}', "sg-live-789"],
+      ["oauth_client_secret=s3cr3t-value", "s3cr3t-value"],
+      ['{"mail_refresh_token":"rt-abc"}', "rt-abc"],
+    ];
+    for (const [message, secret] of prefixed) {
+      expect(redactSecrets(message)).not.toContain(secret);
+    }
+  });
+
+  // The other half of the same rule, and the reason the prefix wildcard is safe:
+  // a secret word only counts when it ENDS the key. `password_policy` is a
+  // setting name, not a credential, and the trailing `\b` is what tells them
+  // apart — it fails against the `_` that follows. Without this the widened
+  // pattern would start mangling configuration errors, which is the failure
+  // mode that makes people stop trusting the UI and open the network tab.
+  it("does not treat a key that merely STARTS with a secret word as a secret", () => {
+    for (const m of [
+      "password_policy: strict",
+      "password_min_length=12",
+      "secret_rotation_days: 90",
+    ]) {
+      expect(redactSecrets(m)).toBe(m);
+    }
+  });
+
   it("truncates a body long enough to be an echoed payload", () => {
     const out = redactSecrets("x".repeat(2000));
     expect(out.length).toBeLessThan(600);

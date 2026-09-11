@@ -68,11 +68,48 @@ const SECRET_PATTERNS: readonly { re: RegExp; label: string }[] = [
     label: "[redacted: private key]",
   },
   // `"password": "..."` / `client_secret=...` and friends, as they appear when
-  // a request body or query string is echoed back. The key must be one of the
-  // named secrets, so `scim:provision` and `provisioning_token bound to them`
-  // — both real substrings of messages this app shows — are left intact.
+  // a request body or query string is echoed back.
+  //
+  // # The key may carry a prefix, and that is the whole point of `[A-Za-z0-9_]*`
+  //
+  // This used to be a bare `\b(password|api_key|…)\b`. Underscore is a WORD
+  // character, so `\bpassword\b` does not match inside `smtp_password` — and
+  // `smtp_password` is exactly the shape a gateway echoing a rejected request
+  // body produces. Measured before this change: `password=…` redacted,
+  // `smtp_password=…` and `smtpPassword=…` straight through. The docstring
+  // below says this function exists because "the body is not always written by
+  // AXIAM at all — a reverse proxy, a load balancer, or a gateway can answer
+  // instead", and those are precisely the writers that use a prefixed key.
+  //
+  // So the key is now "any word-characters ending in one of the named secrets",
+  // which covers `smtp_password`, `smtpPassword` (the `i` flag does the
+  // camelCase half), `provider_api_key` and `oauth_client_secret`. The prefix
+  // subsumes the old explicit `client_secret` / `private_key` spellings, which
+  // are kept only as their own bare forms.
+  //
+  // # What still holds it back
+  //
+  // Widening the KEY does not widen what counts as a match, because the
+  // `\s*[:=]` is unchanged: a secret word must still be followed by an
+  // assignment. That is what keeps the two real messages this app shows intact,
+  // and both are pinned in apiError.test.ts:
+  //
+  //   * "password too short: minimum 12, got 4" — `password` is followed by
+  //     ` too`, not by `:` or `=`.
+  //   * "…does not hold scim:provision, so a token bound to them could not
+  //     provision anything" — `provision` is not one of the named secrets, and
+  //     `provisioning_token` here is followed by a space and a word.
+  //
+  // `password_policy_violation` also survives, for a third reason worth naming:
+  // the trailing `\b` fails against the `_` that follows `password`, so a
+  // compound name whose secret word is a PREFIX is not treated as a secret. It
+  // is only a secret when the word ENDS the key.
+  //
+  // Checked for catastrophic backtracking before landing (2000-char runs of
+  // word characters, near-miss prefixes, 300 keys in one message): flat, and no
+  // slower than the pattern it replaces.
   {
-    re: /"?\b(password|api_key|apiKey|client_secret|clientSecret|secret|private_key|privateKey|provisioning_token|refresh_token|access_token)\b"?\s*[:=]\s*"?[^"',;&}\s]+/gi,
+    re: /"?\b([A-Za-z0-9_]*(?:password|api_?key|client_?secret|private_?key|provisioning_token|refresh_token|access_token|secret))\b"?\s*[:=]\s*"?[^"',;&}\s]+/gi,
     label: "$1=[redacted]",
   },
 ];

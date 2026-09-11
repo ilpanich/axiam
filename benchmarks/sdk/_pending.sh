@@ -6,13 +6,21 @@ emit_pending() {
   local sdk="${1:?sdk name}"
   # Every SDK is released; report its real version even in the pending fallback
   # (this path is now only hit when a package/tooling isn't installed locally).
-  local ver
-  case "$sdk" in
-    rust) ver="1.0.0-alpha7" ;;
-    python) ver="1.0.0a2" ;;
-    swift) ver="1.0.0-alpha12" ;;
-    *) ver="1.0.0-alpha2" ;;
-  esac
+  #
+  # Resolved from the sibling checkout rather than from a literal map. The map
+  # this replaces read `rust) 1.0.0-alpha7 / python) 1.0.0a2 / swift)
+  # 1.0.0-alpha12 / *) 1.0.0-alpha2` — every entry stale by the time the SDKs
+  # reached 1.0.0-beta12, and a `pending` record carrying a wrong version is
+  # the one kind that no one re-reads, because nothing measured it. The
+  # fallback is now a *shape*, not a version: `unknown`, which is honest and
+  # cannot silently age.
+  local ver="${AXIAM_SDK_VERSION:-}"
+  if [ -z "$ver" ]; then
+    # shellcheck source=/dev/null
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_sdkversion.sh"
+    ver="$(resolve_sdk_version "$sdk")"
+  fi
+  [ -n "$ver" ] || ver="unknown"
   cat <<EOF
 {
   "schema": "axiam.sdk-bench/v1",

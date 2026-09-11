@@ -15,13 +15,13 @@
 
   <ItemGroup>
     <!-- Preferred: reference the sibling checkout of the SDK directly. The
-         1.0.0-alpha2 release may not be published to NuGet yet, and a source
-         reference lets the bench track the exact SDK under test. -->
+         release may not be published to NuGet yet, and a source reference lets
+         the bench track the exact SDK under test. -->
     <ProjectReference Include="../../../../axiam-csharp-sdk/Axiam.Sdk/Axiam.Sdk.csproj" />
 
-    <!-- Alternative once Axiam.Sdk 1.0.0-alpha2 is on NuGet: drop the
-         ProjectReference above and uncomment the PackageReference below.
-    <PackageReference Include="Axiam.Sdk" Version="1.0.0-alpha2" />
+    <!-- Alternative once Axiam.Sdk is on NuGet: drop the ProjectReference
+         above and uncomment the PackageReference below.
+    <PackageReference Include="Axiam.Sdk" Version="1.0.0-beta12" />
     -->
   </ItemGroup>
 

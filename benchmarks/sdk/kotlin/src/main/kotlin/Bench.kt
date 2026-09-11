@@ -284,7 +284,9 @@ private fun render(status: String, ops: Map<String, Stats>, iterations: Int, con
     sb.append("{\n")
     sb.append("  \"schema\": \"axiam.sdk-bench/v1\",\n")
     sb.append("  \"sdk\": \"kotlin\",\n")
-    sb.append("  \"sdk_version\": \"1.0.0-alpha13\",\n")
+    // Resolved from the sibling checkout by run.sh (../_sdkversion.sh); the
+    // literal is the fallback for a run against a published artifact.
+    sb.append("  \"sdk_version\": ").append(jsonString(env("AXIAM_SDK_VERSION", "1.0.0-beta12"))).append(",\n")
     sb.append("  \"language_runtime\": ")
         .append(jsonString("kotlin ${KotlinVersion.CURRENT} (jvm ${System.getProperty("java.version")})"))
         .append(",\n")

@@ -1,6 +1,6 @@
 # Kotlin SDK benchmark — now wired
 
-The Kotlin bench glue is wired to the real SDK (`io.github.ilpanich:axiam-sdk-kotlin:1.0.0-alpha13`).
+The Kotlin bench glue is wired to the real SDK (`io.github.ilpanich:axiam-sdk-kotlin`).
 
 - **Entrypoint:** `src/main/kotlin/Bench.kt` (top-level `fun main()`, compiled to
   `io.axiam.bench.BenchKt`). It reads the `BENCH_*` / `SDK_BENCH_*` env, times the four
@@ -8,10 +8,10 @@ The Kotlin bench glue is wired to the real SDK (`io.github.ilpanich:axiam-sdk-ko
   measured loop (bounded-concurrency coroutines), and prints one `axiam.sdk-bench/v1` JSON
   record to stdout. `refresh` runs serially (concurrency 1, single-flight-guarded); the
   others run at `SDK_BENCH_CONCURRENCY`.
-- **SDK dependency:** `build.gradle.kts` depends on `io.github.ilpanich:axiam-sdk-kotlin:1.0.0-alpha13`.
+- **SDK dependency:** `build.gradle.kts` depends on `io.github.ilpanich:axiam-sdk-kotlin:1.0.0-beta12`.
   `settings.gradle.kts` resolves it via an `includeBuild("../../../../axiam-kotlin-sdk")`
   composite build with an explicit `dependencySubstitution`, so it builds against the
-  sibling `axiam-kotlin-sdk` checkout even before the alpha package is published to Maven
+  sibling `axiam-kotlin-sdk` checkout even before the package is published to Maven
   Central — no separate local-publish step needed (Gradle composite builds substitute the
   dependency with the included project's own compiled output). Swap the version pin for the
   published-package version once `axiam-sdk-kotlin` is live on Maven Central, and drop the

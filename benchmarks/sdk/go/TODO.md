@@ -9,7 +9,9 @@ the four canonical CONTRACT.md §1 ops (`login`, `refresh`, `check_access`,
 ## Layout
 - `go.mod` depends on the SDK via a `replace` directive pointing at the sibling
   checkout (`../../../../axiam-go-sdk`), because the tagged release
-  (`v1.0.0-alpha2`) may not be on the module proxy.
+  (`v1.0.0-beta12`) may not be on the module proxy. The `require` line's version
+  is irrelevant under that `replace`; the record's `sdk_version` is resolved from
+  the checkout by `../_sdkversion.sh`.
 - `main.go` is the entrypoint (`package main`, run with `go run .`).
 - `run.sh` runs `go mod tidy` defensively (self-heals a stale `go.sum` when
   network access is available; otherwise falls through to the committed

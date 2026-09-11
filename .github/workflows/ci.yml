@@ -659,6 +659,15 @@ jobs:
       - name: SDK median-of-N provenance self-test
         working-directory: benchmarks
         run: bash sdk/test-median-provenance.sh
+      # The record field that says WHICH SDK a measurement came from. Eight of
+      # the eleven benches used to hardcode it and all eight were stale by
+      # 1.0.0-beta12 — a literal cannot go red, so a whole matrix would have
+      # been published attributing beta12 numbers to alphas. sdk/_sdkversion.sh
+      # reads it from the checkout instead; this pins that reading against
+      # synthetic manifests. Hermetic: no SDK checkouts, no toolchains.
+      - name: SDK version-resolution self-test
+        working-directory: benchmarks
+        run: bash sdk/test-sdk-version.sh
       # M1: an extension-less `--scenario` must be normalized BEFORE
       # filter_scenarios() runs — otherwise it matches none of the
       # `.js`-suffixed filter lists and silently bypasses every one of them,
@@ -689,9 +698,14 @@ jobs:
       # but the runner is 1 000+ lines of bash that only ever executes inside a
       # multi-hour matrix run — a syntax error there is otherwise discovered at
       # the worst possible moment.
-      - name: Runner scripts parse
+      #
+      # The SDK harness earns the same gate for the same reason: its eleven
+      # `run.sh` scripts and four shared `_*.sh` helpers only execute inside an
+      # SDK sweep, and a syntax error in one of the helpers breaks all eleven
+      # at once.
+      - name: Runner and SDK harness scripts parse
         working-directory: benchmarks
-        run: for f in runner/*.sh; do bash -n "$f"; done
+        run: for f in runner/*.sh sdk/*.sh sdk/*/run.sh; do bash -n "$f"; done
 
   limiter-tests:
     name: Rate Limiter Test Suite

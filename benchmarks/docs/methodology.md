@@ -56,6 +56,7 @@ Each cell produces one **result record** (JSON) under `results/`.
 | `authz_check_grpc.js`           | Low-latency authorization decision             | gRPC          | AXIAM-only*  |
 | `authz_batch_grpc.js`           | Batch authorization decision                    | gRPC          | AXIAM-only*  |
 | `oauth2_revoke.js`              | Token revocation (RFC 7009)                    | HTTP/OAuth2   | AXIAM-only*  |
+| `oauth2_authorize.js`           | OIDC authorization request, code issued (RFC 6749 §4.1.1) | HTTP/OIDC | AXIAM-only*§ |
 | `device_authorization.js`       | Device grant, authorization request (RFC 8628) | HTTP/OAuth2   | AXIAM-only*  |
 | `device_verify.js`              | Device grant, user-code lookup                 | HTTP/REST     | AXIAM-only*  |
 | `device_flow_poll.js`           | Device grant, token polling (`authorization_pending`) | HTTP/OAuth2 | AXIAM-only* |
@@ -116,11 +117,17 @@ deliberately never walks. `authz_nested_rest.js` is wired for all three targets;
 quoting any cross-target number from either — the three arms do not run the same
 product mechanism.
 
-§ Written against a documented contract the deployment cannot satisfy yet, and
-skipped unless `BENCH_ENABLE_PENDING_SCENARIOS=1`. Each file's header carries the
-current blocker; `run-benchmark.sh`'s `PENDING_SCENARIOS` is the list. A pending
-scenario is removed from that list in the same commit that closes the LAST thing
-it was pending on, never the first.
+§ Not yet a matrix cell, and skipped unless `BENCH_ENABLE_PENDING_SCENARIOS=1`.
+Two distinct reasons live under this mark, and the difference matters when
+reading one: either the deployment cannot satisfy the scenario's contract yet
+(`oauth2_client_credentials_reactor_hook.js` — nothing answers the reactor
+queue), or it can and the scenario has simply never been executed against a
+live server (`scim_provisioning.js`, `oauth2_authorize.js` — both checked
+statically against the real handlers, neither run). The second kind is closed by
+one supervised run, not by code. Each file's header carries its own blocker;
+`run-benchmark.sh`'s `PENDING_SCENARIOS` is the list. A pending scenario is
+removed from that list in the same commit that closes the LAST thing it was
+pending on, never the first.
 
 A comparable gRPC "introspect" scenario was considered and deliberately
 **not** added: Zitadel's `session.v2.SessionService` (`GetSession`,

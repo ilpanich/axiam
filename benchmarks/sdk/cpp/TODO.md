@@ -14,7 +14,7 @@ stdout (see `../HARNESS-SPEC.md`).
   Override the path with `-DAXIAM_CPP_SDK_DIR=<path>` if your checkout lives
   elsewhere. For a reproducible published build, swap this for
   `find_package(axiam-cpp-sdk CONFIG REQUIRED)` (vcpkg manifest mode — see the
-  SDK's `vcpkg.json`, currently pinned to `1.0.0-alpha12`) once the package is
+  SDK's `vcpkg.json`) once the package is
   published to a registry this environment can reach.
 - `axiam::Client` is a thin handle over a mutex-guarded impl (§9 single-flight
   refresh guard), so one shared `Client` (copied into each op's lambda) can be

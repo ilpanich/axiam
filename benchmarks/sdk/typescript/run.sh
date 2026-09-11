@@ -9,6 +9,14 @@
 # whenever node_modules/axiam-sdk is missing, then run bench.mjs.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# The SDK version this bench reports is READ from the sibling checkout it
+# builds against, not declared as a literal in the harness — see
+# ../_sdkversion.sh for why eight of these literals had gone stale at once.
+# Sourced before any `cd`, like _tlspaths.sh, and a no-op when the checkout
+# is absent (the bench then keeps its own fallback literal).
+# shellcheck disable=SC1091
+source "$HERE/../_sdkversion.sh"; export_sdk_version typescript
 SIBLING_SDK="${AXIAM_TYPESCRIPT_SDK_DIR:-$HERE/../../../../axiam-typescript-sdk}"
 
 if ! command -v node >/dev/null 2>&1; then

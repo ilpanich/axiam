@@ -310,7 +310,9 @@ def emit(status, ops, iterations, concurrency, notes):
     cpu_ms_total, rss_mib_peak = client_resource_usage()
     print(json.dumps({
         "schema": "axiam.sdk-bench/v1", "sdk": "python",
-        "sdk_version": "1.0.0a2",
+        # Resolved from the sibling checkout by run.sh (../_sdkversion.sh), in
+        # PEP 440 spelling; the literal is the fallback for a published-package run.
+        "sdk_version": os.environ.get("AXIAM_SDK_VERSION") or "1.0.0b12",
         "language_runtime": f"python {platform.python_version()}",
         "target": os.environ.get("BENCH_TARGET", "axiam"),
         "profile": os.environ.get("BENCH_PROFILE", "p0-plaintext"),

@@ -171,9 +171,11 @@ func zeroOps() map[string]opResult {
 func emit(status string, ops map[string]opResult, iterations, concurrency int, notes string) {
 	cpuMs, rssMiB := clientResourceUsage()
 	out := output{
-		Schema:           "axiam.sdk-bench/v1",
-		SDK:              "go",
-		SDKVersion:       "1.0.0-alpha2",
+		Schema: "axiam.sdk-bench/v1",
+		SDK:    "go",
+		// Resolved from the sibling checkout by run.sh (../_sdkversion.sh); the
+		// literal is the fallback for a run against a published module.
+		SDKVersion:       env("AXIAM_SDK_VERSION", "1.0.0-beta12"),
 		LanguageRuntime:  runtime.Version(),
 		Target:           env("BENCH_TARGET", "axiam"),
 		Profile:          env("BENCH_PROFILE", "p0-plaintext"),

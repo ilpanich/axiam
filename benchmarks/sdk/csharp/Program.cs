@@ -112,7 +112,9 @@ void Emit(string status, Dictionary<string, object?> ops, int iterations, int co
     {
         ["schema"] = "axiam.sdk-bench/v1",
         ["sdk"] = "csharp",
-        ["sdk_version"] = "1.0.0-alpha2",
+        // Resolved from the sibling checkout by run.sh (../_sdkversion.sh); the
+        // literal is the fallback for a run against a published package.
+        ["sdk_version"] = Env("AXIAM_SDK_VERSION", "1.0.0-beta12"),
         ["language_runtime"] = $".NET {Environment.Version}",
         ["target"] = Env("BENCH_TARGET", "axiam"),
         ["profile"] = Env("BENCH_PROFILE", "p0-plaintext"),

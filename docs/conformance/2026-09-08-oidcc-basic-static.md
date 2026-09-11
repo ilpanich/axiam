@@ -1,54 +1,63 @@
 # oidcc-basic-certification-test-plan
 
-- **Plan id**: `d14A9qlsKqZNU`
+- **Plan id**: `VSWejcydXoQZv`
 - **Modules**: 35
-- **Passed**: 0/35
+- **Passed**: 16/35
 
-**32 module(s) did not pass.** A submission built on this run would be a submission with 32 open question(s).
+**18 module(s) did not pass.** A submission built on this run would be a submission with 18 open question(s).
 
 ## Verdict summary
 
 | Verdict | Count | What it means |
 |---|---:|---|
-| `FAILED` | 1 | an assertion did not hold. This is a real finding. |
-| `SKIPPED` | 3 | not applicable to this variant |
-| `NONE` | 31 | (unrecognised verdict — read the suite log) |
+| `FAILED` | 5 | an assertion did not hold. This is a real finding. |
+| `WAITING` | 5 | the module is waiting for a browser to complete an authorization. NOT a pass and NOT a failure — no assertion has been evaluated yet |
+| `WARNING` | 8 | a non-fatal deviation; permitted, but worth understanding before submitting |
+| `SKIPPED` | 1 | not applicable to this variant |
+| `PASSED` | 16 | the module's assertions all held |
 
 ## Modules that did not pass
 
 | Module | Verdict | Suite log |
 |---|---|---|
-| `oidcc-server-client-secret-post` | `FAILED` | `ytFd1riYLBJ03LF` |
-| `oidcc-server` | `NONE` | `ERtJcO4R0iXKLzP` |
-| `oidcc-response-type-missing` | `NONE` | `5zZvvCCqx9hd2pg` |
-| `oidcc-userinfo-get` | `NONE` | `5swtzvifEVYBXlv` |
-| `oidcc-userinfo-post-header` | `NONE` | `1h6voYnUdtyqTQZ` |
-| `oidcc-userinfo-post-body` | `NONE` | `DCnRXs7pMPTf52f` |
-| `oidcc-ensure-request-without-nonce-succeeds-for-code-flow` | `NONE` | `3JiWnYS1KBg9VAs` |
-| `oidcc-scope-profile` | `NONE` | `xUfFo73dnySZKTS` |
-| `oidcc-scope-email` | `NONE` | `ytJOLBNnB5QBTI9` |
-| `oidcc-alternate-happy-flow` | `NONE` | `Ub4j0UGFaLHRljr` |
-| `oidcc-display-page` | `NONE` | `cZaFDP4RvBDHMnO` |
-| `oidcc-display-popup` | `NONE` | `VXvNIPpliSsEF39` |
-| `oidcc-prompt-login` | `NONE` | `LFwEWiGGyQhOgUA` |
-| `oidcc-prompt-none-not-logged-in` | `NONE` | `XHxFFogaf1ueYfE` |
-| `oidcc-prompt-none-logged-in` | `NONE` | `F6Skxcn2msKfUDI` |
-| `oidcc-max-age-1` | `NONE` | `8teDcGBhWMJ59l3` |
-| `oidcc-max-age-10000` | `NONE` | `Voo6nZgCm2jfyVY` |
-| `oidcc-ensure-request-with-unknown-parameter-succeeds` | `NONE` | `g4ikT0yI043jGm4` |
-| `oidcc-id-token-hint` | `NONE` | `1shvUAHb3Xmygy3` |
-| `oidcc-login-hint` | `NONE` | `Wq30RL1J3p6G1LX` |
-| `oidcc-ui-locales` | `NONE` | `jgMhgQUsOk242dC` |
-| `oidcc-claims-locales` | `NONE` | `xNfhwDfF6433P0r` |
-| `oidcc-ensure-request-with-acr-values-succeeds` | `NONE` | `H7qY7TjgZEnuKm1` |
-| `oidcc-codereuse` | `NONE` | `TSLVyKnrDDgNfFW` |
-| `oidcc-codereuse-30seconds` | `NONE` | `wx7Ck0T9kNIFJKR` |
-| `oidcc-ensure-registered-redirect-uri` | `NONE` | `QIS4SlquVsRpZY3` |
-| `oidcc-ensure-post-request-succeeds` | `NONE` | `eEqc7hAu0vEYLIk` |
-| `oidcc-unsigned-request-object-supported-correctly-or-rejected-as-unsupported` | `NONE` | `rep13LGxZ8IvIpC` |
-| `oidcc-claims-essential` | `NONE` | `K0hGbV7n3K5t0sB` |
-| `oidcc-ensure-request-object-with-redirect-uri` | `NONE` | `YkzYb4BXBUJhQhN` |
-| `oidcc-refresh-token` | `NONE` | `rYEsgxeFBsedsJ8` |
-| `oidcc-ensure-request-with-valid-pkce-succeeds` | `NONE` | `y74EmovYW6icBGa` |
+| `oidcc-prompt-none-logged-in` | `FAILED` | `XfJO21X9wYe1naY` |
+| `oidcc-max-age-10000` | `FAILED` | `ttoJId8AFOYQBTB` |
+| `oidcc-id-token-hint` | `FAILED` | `ctRTHsXDdaI0rmr` |
+| `oidcc-server-client-secret-post` | `FAILED` | `roPUxxELptgJKRj` |
+| `oidcc-refresh-token` | `FAILED` | `mW64QMgPaWmYcN5` |
+| `oidcc-scope-email` | `WAITING` | `f763TILzDVKCrdy` |
+| `oidcc-prompt-login` | `WAITING` | `IxxlnX6TUvYNUJV` |
+| `oidcc-max-age-1` | `WAITING` | `JouIPJBlWaV04Be` |
+| `oidcc-ensure-registered-redirect-uri` | `WAITING` | `46JT45SUJvKeXbK` |
+| `oidcc-ensure-request-object-with-redirect-uri` | `WAITING` | `8ByYr46ms2A0zK4` |
+| `oidcc-server` | `WARNING` | `TSJzsApHuDgu0V3` |
+| `oidcc-scope-profile` | `WARNING` | `XcANPBgKfyy0ZcY` |
+| `oidcc-scope-address` | `WARNING` | `z9Px6k3cfoAhAbq` |
+| `oidcc-scope-phone` | `WARNING` | `qRUhfCzLR77Mvxb` |
+| `oidcc-scope-all` | `WARNING` | `fRgsLU6bwWc7cax` |
+| `oidcc-alternate-happy-flow` | `WARNING` | `tNCdxJY2yYqEaDj` |
+| `oidcc-codereuse-30seconds` | `WARNING` | `FvdHILiAxX7Q2lz` |
+| `oidcc-claims-essential` | `WARNING` | `ECjAg9txkGe1c8Y` |
 
 Open a suite log with `<SUITE_BASE_URL>/log-detail.html?log=<id>`. See [`claude_dev/fapi-conformance-runbook.md`](../../claude_dev/fapi-conformance-runbook.md) for how to read one and how to re-run a single module.
+
+<details><summary>Modules that passed</summary>
+
+- `oidcc-response-type-missing`
+- `oidcc-userinfo-get`
+- `oidcc-userinfo-post-header`
+- `oidcc-userinfo-post-body`
+- `oidcc-ensure-request-without-nonce-succeeds-for-code-flow`
+- `oidcc-display-page`
+- `oidcc-display-popup`
+- `oidcc-prompt-none-not-logged-in`
+- `oidcc-ensure-request-with-unknown-parameter-succeeds`
+- `oidcc-login-hint`
+- `oidcc-ui-locales`
+- `oidcc-claims-locales`
+- `oidcc-ensure-request-with-acr-values-succeeds`
+- `oidcc-codereuse`
+- `oidcc-ensure-post-request-succeeds`
+- `oidcc-ensure-request-with-valid-pkce-succeeds`
+
+</details>

@@ -1470,6 +1470,32 @@ pub trait AuthorizationCodeRepository: Send + Sync {
         redirect_uri: &str,
     ) -> impl Future<Output = AxiamResult<AuthorizationCode>> + Send;
 
+    /// The session an **already-redeemed** code was issued from, if this hash
+    /// names one.
+    ///
+    /// Called only after [`Self::consume`] has refused, to tell a *replay* —
+    /// a code that existed and has been spent — apart from a hash that names
+    /// nothing. RFC 6749 §10.5 asks an authorization server that sees a code
+    /// used twice to "revoke (when possible) all tokens previously issued
+    /// based on that authorization code", and the session is what AXIAM can
+    /// revoke: an access token is a stateless JWT, but every resource request
+    /// already checks that the session in its `sid` is still live.
+    ///
+    /// `Ok(None)` for an unknown hash, which is what an attacker guessing
+    /// codes produces. Deliberately **not** an error: nothing to revoke is the
+    /// ordinary answer here, and the token endpoint says `invalid_grant`
+    /// either way, so this cannot become an oracle for which codes exist.
+    ///
+    /// Expiry is not filtered. A replay of a code that has since expired is
+    /// still a replay, and the tokens it minted may still be live.
+    fn replayed_session(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
+    ) -> impl Future<Output = AxiamResult<Option<Uuid>>> + Send;
+
     /// Delete expired and already-used codes (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
@@ -1493,6 +1519,42 @@ pub trait RefreshTokenRepository: Send + Sync {
         &self,
         tenant_id: Uuid,
         token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Rotate a refresh token out of use, leaving it usable until `grace_until`.
+    ///
+    /// # Why rotation is not revocation
+    ///
+    /// FAPI 2.0 Security Profile §5.3.2.1-9 requires an authorization server
+    /// that rotates refresh tokens to keep accepting the previous one for a
+    /// short period after the new one is issued. The case it exists for is a
+    /// client that never received the rotation response — a dropped connection
+    /// after the server committed the write — which under immediate revocation
+    /// is locked out permanently, holding a token the server has destroyed and
+    /// no way to ask for another.
+    ///
+    /// # Why this is expressed as an expiry and not a second flag
+    ///
+    /// [`Self::get_by_token_hash`] already refuses an expired token, so a
+    /// shortened `expires_at` needs no new condition on the read path, no new
+    /// column, and no change to the several other callers of [`Self::revoke`]
+    /// — every one of which means "this grant is over" rather than "this token
+    /// has been succeeded", and none of which should acquire a grace period by
+    /// sharing a code path with this.
+    ///
+    /// Implementations MUST only ever bring `expires_at` forward. A refresh
+    /// token issued with thirty days on it must not have its life *extended*
+    /// to the grace instant by a rotation, and a caller passing a distant
+    /// `grace_until` must not be able to resurrect one that has already run
+    /// out.
+    ///
+    /// Returns `NotFound` when no live token matched, exactly as
+    /// [`Self::revoke`] does, so that concurrent use is still detectable.
+    fn supersede(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+        grace_until: chrono::DateTime<chrono::Utc>,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Revoke all refresh tokens for a given client within a tenant.

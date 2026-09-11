@@ -149,9 +149,30 @@ impl<'a> From<&'a PushedAuthParams> for RawAuthnParams<'a> {
     }
 }
 
-/// The five parameters that change what a token means, in the order the gate
-/// reports them.
-const SECURITY_BEARING: [&str; 5] = ["prompt", "max_age", "acr_values", "claims", "id_token_hint"];
+/// The parameters a `fapi2` client is refused for sending, in the order the
+/// gate reports them.
+///
+/// # Why `claims` is no longer one of them
+///
+/// The list is not "parameters that matter". It is the parameters AXIAM
+/// **drops**, and dropping is what makes them dangerous: ignoring `max_age`
+/// tells a relying party it got a freshness guarantee it did not get, and
+/// refusing is the only honest answer available to a server that will not
+/// honour the parameter.
+///
+/// `claims` was on that list for exactly that reason and is not any more,
+/// because AXIAM now honours the `userinfo` member of it
+/// (`crate::claims_request`, OIDC Core §5.5). There is no silent downgrade
+/// left to prevent: a `fapi2` client that sends `claims` gets the claims it
+/// asked for, or gets nothing extra, and either way is told the truth.
+///
+/// The data-minimisation rule that made `claims` look dangerous is enforced
+/// where it belongs and still holds: `claims_request::RELEASABLE` cannot
+/// unlock `phone_number`, `phone_number_verified` or `address` for anybody,
+/// FAPI or not, because those run a consent ceremony the FAPI lane never
+/// collects. Rule 4 of `fapi::enforce_authorization_request` refuses those
+/// scopes to a `fapi2` request independently.
+const SECURITY_BEARING: [&str; 4] = ["prompt", "max_age", "acr_values", "id_token_hint"];
 
 /// The parsed bundle.
 ///
@@ -552,8 +573,9 @@ mod tests {
         );
     }
 
-    /// `claims` asking only for members AXIAM does not implement is not an
-    /// error — discovery already says `claims_parameter_supported: false`.
+    /// `claims` asking for no `id_token.acr` is not an error: that one member
+    /// is all this module promises to read. The `userinfo` members are read
+    /// elsewhere, by `crate::claims_request`.
     #[test]
     fn a_claims_document_without_an_acr_member_is_not_malformed() {
         let p = parse(RawAuthnParams {
@@ -562,7 +584,10 @@ mod tests {
         });
         assert!(p.parse_error().is_none());
         assert_eq!(p.claims_acr, None);
-        assert_eq!(p.security_bearing_present(), vec!["claims"]);
+        assert!(
+            p.security_bearing_present().is_empty(),
+            "`claims` is honoured now, so sending it is not grounds for refusal"
+        );
     }
 
     #[test]
@@ -634,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn all_five_security_bearing_parameters_are_reported() {
+    fn every_security_bearing_parameter_is_reported() {
         let p = parse(RawAuthnParams {
             prompt: Some("login"),
             max_age: Some("60"),
@@ -645,7 +670,9 @@ mod tests {
         });
         assert_eq!(
             p.security_bearing_present(),
-            ["prompt", "max_age", "acr_values", "claims", "id_token_hint"]
+            ["prompt", "max_age", "acr_values", "id_token_hint"],
+            "`claims` is sent here and deliberately not reported: it is \
+             honoured rather than dropped, so there is no downgrade to refuse"
         );
         assert!(p.parse_error().is_none());
     }

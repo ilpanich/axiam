@@ -257,6 +257,52 @@ pub fn build_return_to(query: &str) -> Option<String> {
 /// because authentication has to be settled before there is a person to ask.
 pub const CONSENT_HOP_MARKER: &str = "axiam_consent_hop";
 
+/// The sign-in page's **Cancel**, on its way back to the authorization request.
+///
+/// # Why the protocol needs a way to say no
+///
+/// RFC 6749 §4.1.2.1 and OIDC Core §3.1.2.6 both require `access_denied` to be
+/// returned to the relying party when the end user refuses the request, and
+/// until this marker existed AXIAM had no way for them to refuse one. The
+/// consent screen has a decline button, but it is shown only when a *sensitive*
+/// scope is asked for; a request for `openid profile` reached a sign-in page
+/// whose only two outcomes were "authenticate" and "close the tab". Closing the
+/// tab is not a protocol answer: the relying party is left waiting on a
+/// response that will never arrive, and cannot tell a refusal from a crash.
+///
+/// The OIDF suite states the same requirement as an instruction to a human —
+/// `fapi2-security-profile-final-user-rejects-authentication` says "the tester
+/// MUST press 'cancel' on the login screen or deny consent" — and there was no
+/// cancel to press.
+///
+/// # Why a third marker rather than a value on the login one
+///
+/// It answers a different question. [`LOGIN_HOP_MARKER`] means "this browser
+/// has been sent to sign in once already", which is a statement about
+/// termination; this one means "the person said no", which is a statement about
+/// the outcome, and a request can legitimately carry both. Folding them into
+/// one parameter would make `axiam_login_hop=declined` mean two things at once
+/// and put the loop guard at the mercy of how the decline was spelled.
+///
+/// # What it can and cannot cause
+///
+/// Exactly one thing: `access_denied`, delivered to a `redirect_uri` this
+/// client registered, with the request's own `state`. It is read only on the
+/// anonymous path — a request that resolved a principal from a token ignores it
+/// entirely — and it is not a credential, so forging it onto somebody else's
+/// authorization URL achieves what closing their tab already achieved, only
+/// politely.
+pub const USER_DECLINED_MARKER: &str = "axiam_user_declined";
+
+/// Did the person at the sign-in page decline this authorization request?
+///
+/// Any present value counts, for [`is_return_leg`]'s reason: the marker is a
+/// statement that the cancel control was used, and a browser that rewrote its
+/// value to `0` has still used it.
+pub fn user_declined(marker: Option<&str>) -> bool {
+    marker.is_some()
+}
+
 /// [`build_return_to`], marked as the return leg of a **consent** hop.
 ///
 /// The login marker is left alone: a request that has been through both pages

@@ -36,6 +36,12 @@ actix-tls = { version = "3", features = ["rustls-0_23"] }
 # PEM parsing uses rustls-pki-types' `PemObject` (re-exported by rustls) rather
 # than the unmaintained rustls-pemfile (RUSTSEC-2025-0134).
 rustls = { workspace = true, features = ["ring"] }
+
+# The `optional_self_signed` client-auth policy accepts a certificate webpki
+# never chain-builds, so the validity-window check webpki would have performed
+# as part of that has to be performed explicitly. Same parser the rest of the
+# workspace uses on X.509 bytes.
+x509-parser = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

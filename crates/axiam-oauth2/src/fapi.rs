@@ -765,9 +765,18 @@ pub fn enforce_token_request(
         ));
     }
 
+    // RFC 9449 §5's own code, not `invalid_client`. The client authenticated;
+    // what is missing is the proof that binds the token it is asking for to a
+    // key it holds. See `OAuth2Error::InvalidDpopProof`.
+    //
+    // The certificate branch above deliberately keeps `invalid_client`: RFC
+    // 8705 defines no dedicated code, and a certificate that was required and
+    // not presented really is a failure of the transport-level credential.
     if client.dpop_bound_access_tokens && !evidence.verified_dpop_proof {
-        return Err(OAuth2Error::InvalidClient(
-            crate::mtls::MTLS_AUTH_FAILED.into(),
+        return Err(OAuth2Error::InvalidDpopProof(
+            "this client's access tokens are DPoP-bound, so the request must carry a \
+             DPoP proof (RFC 9449 §5)"
+                .into(),
         ));
     }
 
@@ -810,6 +819,44 @@ pub const fn wants_certificate_binding(client: &OAuth2Client) -> bool {
 /// the resource server (`axiam_auth::token::verify_token_binding`).
 pub const fn wants_dpop_binding(client: &OAuth2Client) -> bool {
     client.dpop_bound_access_tokens
+}
+
+/// FAPI 2.0's ceiling on how long an authorization code may live.
+///
+/// FAPI 2.0 Security Profile Final §5.3.2.1, authorization server clause 11:
+/// "shall issue authorization codes with a maximum lifetime of 60 seconds".
+/// The rationale is in the profile's own §NOTE on authorization-code CSRF —
+/// the code's validity window *is* the window in which the attack has to land,
+/// so shortening it is a mitigation rather than housekeeping.
+pub const FAPI2_MAX_AUTH_CODE_LIFETIME_SECS: u64 = 60;
+
+/// How long an authorization code issued to `client` may live.
+///
+/// A FAPI 2.0 client gets the smaller of the deployment's configured lifetime
+/// and [`FAPI2_MAX_AUTH_CODE_LIFETIME_SECS`]; every other client gets exactly
+/// what the operator configured.
+///
+/// # Why this is a cap rather than a new default
+///
+/// `auth_code_lifetime_secs` defaults to 600, which is what OAuth 2.0 §4.1.2
+/// recommends as a *maximum* ("a maximum authorization code lifetime of 10
+/// minutes is RECOMMENDED") and is a perfectly ordinary value for a
+/// non-FAPI deployment. Lowering it globally would shorten the window for
+/// every existing client to satisfy a profile none of them are on — and a
+/// user who takes 90 seconds between the consent screen and the client's
+/// redemption is not an attacker.
+///
+/// Taking the minimum rather than forcing 60 also means an operator who has
+/// deliberately configured something shorter keeps it. A cap that raised a
+/// 30-second lifetime to 60 would be a profile making a deployment *less*
+/// strict, which is not what a security profile is for.
+#[must_use]
+pub fn auth_code_lifetime_secs(client: &OAuth2Client, configured: u64) -> u64 {
+    if client.profile.is_fapi2() {
+        configured.min(FAPI2_MAX_AUTH_CODE_LIFETIME_SECS)
+    } else {
+        configured
+    }
 }
 
 #[cfg(test)]
@@ -1580,8 +1627,11 @@ mod tests {
 
     // -- X7.1: the matrix, request-time halves ----------------------------
 
-    /// M1-M4 request half. The five security-bearing parameters are refused on
-    /// a `fapi2` client, one at a time, whichever it is.
+    /// M1-M4 request half. The security-bearing parameters are refused on a
+    /// `fapi2` client, one at a time, whichever it is.
+    ///
+    /// `claims` is deliberately not in this list — see
+    /// [`a_fapi2_client_may_send_claims_because_it_is_honoured`].
     #[test]
     fn m1_m4_security_bearing_parameters_are_refused_for_a_fapi_client() {
         let c = fapi_client();
@@ -1591,7 +1641,6 @@ mod tests {
             ("max_age", "0"),
             ("max_age", "3600"),
             ("acr_values", "urn:axiam:acr:mfa"),
-            ("claims", r#"{"id_token":{"acr":{"essential":true}}}"#),
             ("id_token_hint", "ey.header.payload"),
         ] {
             let err = enforce_authorization_request(&c, Some(PKCE), &one_param(name, value), &[])
@@ -1610,11 +1659,7 @@ mod tests {
     #[test]
     fn a_malformed_security_bearing_parameter_is_still_refused_for_fapi() {
         let c = fapi_client();
-        for (name, bad) in [
-            ("max_age", "tomorrow"),
-            ("prompt", "teleport"),
-            ("claims", "{not json"),
-        ] {
+        for (name, bad) in [("max_age", "tomorrow"), ("prompt", "teleport")] {
             assert!(
                 enforce_authorization_request(&c, Some(PKCE), &one_param(name, bad), &[]).is_err(),
                 "a fapi2 client sending a malformed {name} must still be refused"
@@ -1622,7 +1667,7 @@ mod tests {
         }
     }
 
-    /// All five at once are all named, so one refusal tells an operator the
+    /// All of them at once are all named, so one refusal tells an operator the
     /// whole story.
     #[test]
     fn the_refusal_names_every_offending_parameter() {
@@ -1635,9 +1680,56 @@ mod tests {
             ..Default::default()
         });
         let err = enforce_authorization_request(&fapi_client(), Some(PKCE), &params, &[])
-            .expect_err("a fapi2 client sending all five must be refused");
-        for name in ["prompt", "max_age", "acr_values", "claims", "id_token_hint"] {
+            .expect_err("a fapi2 client sending the refused set must be refused");
+        for name in ["prompt", "max_age", "acr_values", "id_token_hint"] {
             assert!(err.to_string().contains(name), "{name} missing from: {err}");
+        }
+        assert!(
+            !err.to_string().contains("claims"),
+            "`claims` is honoured, so it must not appear in a refusal: {err}"
+        );
+    }
+
+    /// A `fapi2` client may send `claims`, because AXIAM honours it.
+    ///
+    /// This is the one member of the old refused five that changed side, and
+    /// the reason is the whole rationale of the gate: it refuses parameters it
+    /// would otherwise **drop**, because dropping `max_age` manufactures a
+    /// freshness guarantee nobody gave. `claims` is no longer dropped — OIDC
+    /// Core §5.5's `userinfo` member is implemented in
+    /// `crate::claims_request` — so refusing it would now be turning away a
+    /// request AXIAM can answer truthfully.
+    ///
+    /// Found by the OIDF suite: `test-claims-parameter-identity-claims` was
+    /// SKIPPED for as long as discovery said `claims_parameter_supported:
+    /// false`, and the moment that became true the module ran and was refused
+    /// at the authorization endpoint.
+    ///
+    /// The data-minimisation property that made `claims` look dangerous is
+    /// untouched, and asserted below: `claims_request::RELEASABLE` cannot
+    /// unlock the consent-gated claims for anybody.
+    #[test]
+    fn a_fapi2_client_may_send_claims_because_it_is_honoured() {
+        let c = fapi_client();
+        for value in [
+            r#"{"userinfo":{"name":{"essential":true}}}"#,
+            r#"{"id_token":{"acr":{"essential":true}}}"#,
+            // Malformed, and still not grounds for refusal on this parameter:
+            // an unusable `claims` asks for nothing, which is what
+            // `claims_request::userinfo_claims` returns for it.
+            "{not json",
+        ] {
+            assert!(
+                enforce_authorization_request(&c, Some(PKCE), &one_param("claims", value), &[])
+                    .is_ok(),
+                "a fapi2 client sending claims={value} must be allowed through"
+            );
+        }
+        for consent_gated in ["phone_number", "phone_number_verified", "address"] {
+            assert!(
+                !crate::claims_request::RELEASABLE.contains(&consent_gated),
+                "{consent_gated} must stay unreachable through the claims parameter"
+            );
         }
     }
 
@@ -1799,7 +1891,9 @@ mod tests {
             ("M2", "max_age", "0"),
             ("M2", "max_age", "3600"),
             ("M3", "acr_values", "urn:axiam:acr:mfa"),
-            ("M3", "claims", r#"{"id_token":{"acr":{"essential":true}}}"#),
+            // `claims` was an M3 row until AXIAM began honouring it — see
+            // `a_fapi2_client_may_send_claims_because_it_is_honoured`, which
+            // now owns that case and asserts the opposite verdict.
             ("M4", "id_token_hint", "ey.header.payload"),
         ] {
             let params = one_param(name, value);
@@ -1991,5 +2085,41 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // -- authorization code lifetime (FAPI 2.0 §5.3.2.1) --------------------
+
+    /// The operator-facing contract, hard-coded rather than derived: AXIAM's
+    /// default is 600 seconds and FAPI 2.0 caps a code at 60. Asserting the
+    /// numbers means a future change to either one has to come here and say so.
+    #[test]
+    fn a_fapi2_client_gets_a_sixty_second_code_from_the_default_config() {
+        assert_eq!(auth_code_lifetime_secs(&fapi_client(), 600), 60);
+    }
+
+    /// The cap applies to FAPI clients only. Lowering it for everybody would
+    /// shorten the window for every client in every existing deployment to
+    /// satisfy a profile none of them are on.
+    #[test]
+    fn a_non_fapi_client_keeps_the_configured_lifetime() {
+        assert_eq!(auth_code_lifetime_secs(&base_client(), 600), 600);
+    }
+
+    /// A cap, not a setting: an operator who deliberately configured something
+    /// shorter than 60 keeps it. Raising it to 60 would be a security profile
+    /// making a deployment *less* strict.
+    #[test]
+    fn a_shorter_configured_lifetime_survives_the_fapi_cap() {
+        assert_eq!(auth_code_lifetime_secs(&fapi_client(), 30), 30);
+        assert_eq!(auth_code_lifetime_secs(&base_client(), 30), 30);
+    }
+
+    /// The boundary the conformance suite actually probes: it waits 62 seconds
+    /// and expects the code to be dead. Exactly 60 must therefore be the
+    /// ceiling, not one second more.
+    #[test]
+    fn the_cap_is_sixty_not_sixty_one() {
+        assert_eq!(FAPI2_MAX_AUTH_CODE_LIFETIME_SECS, 60);
+        assert_eq!(auth_code_lifetime_secs(&fapi_client(), 61), 60);
     }
 }

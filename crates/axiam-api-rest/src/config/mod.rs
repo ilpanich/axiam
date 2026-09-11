@@ -97,6 +97,67 @@ pub enum ClientAuth {
     /// handshake is rejected if the client presents no certificate or an
     /// unverifiable one (`WebPkiClientVerifier::builder(..).build()`).
     Required,
+    /// Like [`Self::Optional`], **plus** accept a client certificate that
+    /// chains to no configured anchor at all — RFC 8705 §2.2
+    /// (`self_signed_tls_client_auth`) and nothing else.
+    ///
+    /// The configuration value is `optional_self_signed`:
+    ///
+    /// ```text
+    /// AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed
+    /// ```
+    ///
+    /// Spelled with an explicit `#[serde(rename)]` because this enum's
+    /// `rename_all = "lowercase"` would otherwise have made it
+    /// `optionalselfsigned`, which is not a word and would be transcribed
+    /// wrongly by roughly everyone who had to type it once.
+    ///
+    /// # Why a fourth variant rather than a flag on `Optional`
+    ///
+    /// A `self_signed_tls_client_auth` client cannot complete a TLS handshake
+    /// with a chain-building verifier: its certificate is self-signed *by
+    /// design*, so webpki returns an error and rustls sends `bad_certificate`
+    /// before AXIAM sees a request. Fixing that inside `Optional` would change
+    /// what every existing mTLS deployment accepts. This variant is a value no
+    /// deployment sets today, which is what makes the change non-regressive
+    /// rather than merely tested: [`Self::Off`], [`Self::Optional`] and
+    /// [`Self::Required`] are byte-for-byte unaffected.
+    ///
+    /// # What accepting an unchained certificate does and does not grant
+    ///
+    /// It grants exactly one thing: the ability to authenticate as an OAuth2
+    /// client whose SHA-256 thumbprint an administrator registered. TLS 1.3's
+    /// `CertificateVerify` still proves the peer holds the private key, so the
+    /// certificate is not anonymous — it simply carries no CA's opinion of who
+    /// its holder is. Every other consumer of a peer certificate (device/IoT
+    /// authentication, RFC 8705 §2.1 `tls_client_auth`) refuses it; see
+    /// [`axiam_core::models::certificate::CertTrust`].
+    ///
+    /// Client authentication stays **optional** in the handshake, never
+    /// mandatory, for the same reason [`Self::Optional`] exists: one listener
+    /// serves both the certificate-authenticating clients and the ones that
+    /// present no certificate at all.
+    #[serde(rename = "optional_self_signed")]
+    OptionalSelfSigned,
+}
+
+impl ClientAuth {
+    /// Whether this policy makes the listener request a client certificate.
+    ///
+    /// True for everything except [`Self::Off`]. The call sites that used to
+    /// spell this `!= ClientAuth::Off` would each have had to grow the new
+    /// variant by hand, and one of them is "read the client-CA bundle at
+    /// startup" — the failure mode of forgetting it there is a listener that
+    /// silently trusts no anchors.
+    pub fn requests_client_certificate(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// Whether an unchained (self-signed) client certificate may complete the
+    /// handshake — RFC 8705 §2.2.
+    pub fn accepts_self_asserted(self) -> bool {
+        matches!(self, Self::OptionalSelfSigned)
+    }
 }
 
 /// Default [`TlsConfig::reload_interval_secs`]: one hour.
@@ -136,7 +197,9 @@ pub struct TlsConfig {
     pub http2: bool,
     /// Native client-certificate (mTLS) policy (D3). Default `off` keeps the
     /// server-auth-only behaviour. `optional`/`required` build the rustls config
-    /// with a `WebPkiClientVerifier` over [`Self::client_ca_path`].
+    /// with a `WebPkiClientVerifier` over [`Self::client_ca_path`];
+    /// `optional_self_signed` additionally accepts a certificate that chains to
+    /// nothing, for RFC 8705 §2.2 clients (see [`ClientAuth`]).
     pub client_auth: ClientAuth,
     /// Path to the PEM CA bundle used to verify client certificates. Required
     /// (and must be readable) when `client_auth` is `optional` or `required`;
@@ -251,16 +314,54 @@ mod tests {
         assert!(TlsConfig::default().client_ca_path.is_none());
     }
 
+    /// The four values an operator may write, spelled exactly as the
+    /// documentation tells them to.
+    ///
+    /// Hard-coded strings rather than a serde round trip: the point is what an
+    /// operator has to type into
+    /// `AXIAM__SERVER__TLS__CLIENT_AUTH`, and a round trip would agree with
+    /// whatever the server happens to emit — including
+    /// `optionalselfsigned`, which `rename_all = "lowercase"` would have
+    /// produced and which nobody would guess.
     #[test]
-    fn client_auth_parses_all_three_values() {
+    fn client_auth_parses_all_four_documented_values() {
         for (raw, expected) in [
             ("\"off\"", ClientAuth::Off),
             ("\"optional\"", ClientAuth::Optional),
             ("\"required\"", ClientAuth::Required),
+            ("\"optional_self_signed\"", ClientAuth::OptionalSelfSigned),
         ] {
             let parsed: ClientAuth =
                 serde_json::from_str(raw).unwrap_or_else(|e| panic!("{raw} must parse: {e}"));
             assert_eq!(parsed, expected, "{raw}");
+        }
+    }
+
+    /// The three pre-existing policies must not have acquired the new
+    /// behaviour, and the new one must not have acquired `required`'s.
+    ///
+    /// This is the whole non-regression claim, stated as one table: a
+    /// deployment that never changes its configuration cannot reach any of the
+    /// new code, because `accepts_self_asserted()` is what every new branch is
+    /// gated on.
+    #[test]
+    fn only_the_new_variant_accepts_a_self_asserted_certificate() {
+        for (policy, requests_cert, accepts_self_asserted) in [
+            (ClientAuth::Off, false, false),
+            (ClientAuth::Optional, true, false),
+            (ClientAuth::Required, true, false),
+            (ClientAuth::OptionalSelfSigned, true, true),
+        ] {
+            assert_eq!(
+                policy.requests_client_certificate(),
+                requests_cert,
+                "{policy:?}.requests_client_certificate()"
+            );
+            assert_eq!(
+                policy.accepts_self_asserted(),
+                accepts_self_asserted,
+                "{policy:?}.accepts_self_asserted()"
+            );
         }
     }
 

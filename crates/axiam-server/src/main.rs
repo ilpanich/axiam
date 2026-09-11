@@ -1019,6 +1019,23 @@ async fn main() -> std::io::Result<()> {
     // X5.1 — the single-use `jti` store shared by RFC 7523 client assertions
     // and RFC 9449 DPoP proofs.
     let proof_replay_repo = SurrealProofReplayRepository::new(pool.handle_for_repo());
+    // RFC 9449 §11.1: makes a DPoP proof single-use at the *resource*
+    // endpoints, which the token endpoint has done since X5.1 and the
+    // extractors could not — recording a `jti` is a write, and they verified
+    // proofs synchronously. Registered as its own app_data for the same reason
+    // `session_validator` is: the extractors are non-generic and cannot name
+    // `AppState<C>`.
+    //
+    // Cloned from `proof_replay_repo` rather than built beside it, so that the
+    // resource endpoints and the token endpoint share one store *by
+    // construction*. A proof is single-use, not single-use per endpoint, and
+    // two stores would let one proof be spent once at each.
+    //
+    // Without it the extractors fail closed for any request presenting a DPoP
+    // proof — the correct direction, and the reason this sits on the next line
+    // rather than somewhere it could be forgotten.
+    let dpop_replay_guard: std::sync::Arc<dyn axiam_api_rest::DpopReplayGuard> =
+        std::sync::Arc::new(proof_replay_repo.clone());
     // NEW-4: durable AMQP nonce store for replay protection, shared by the
     // authz + audit consumers and swept by the periodic cleanup task.
     let amqp_nonce_repo = SurrealAmqpNonceRepository::new(pool.handle_for_repo());
@@ -1071,7 +1088,37 @@ async fn main() -> std::io::Result<()> {
     )
     // X1 — the same gate `AuthService` holds, so `token.pre_issue` and
     // `login.post_auth` share one routing table and one per-tenant cap.
-    .with_reactor_gate(Arc::clone(&reactor_gate));
+    .with_reactor_gate(Arc::clone(&reactor_gate))
+    // X5.1 — `private_key_jwt` (RFC 7523 §2.2), one of FAPI 2.0's two
+    // client-authentication families.
+    //
+    // Without this the crypto still exists and nothing can reach it:
+    // `TokenService` answers a client registered for the method with
+    // "no assertion verifier configured" and refuses — deliberately, rather
+    // than falling back to another credential — so the effect of not wiring it
+    // is that no client anywhere can authenticate this way. The whole
+    // 56-module FAPI `private_key_jwt` conformance lane failed on that one
+    // missing line.
+    //
+    // The JWKS cache is the FEDERATION one, shared with the OIDC IdP handlers
+    // on purpose: a client's `jwks_uri` is a URL the server fetches on demand,
+    // which is the same SEC-054 SSRF surface whichever feature asked for it,
+    // and a second cache would be a second place for a guard to be missing.
+    .with_assertion_verifier(Arc::new(
+        axiam_oauth2::private_key_jwt::JwksAssertionVerifier::new(
+            (*jwks_cache).clone(),
+            http_client.clone(),
+            proof_replay_repo.clone(),
+            config.auth.oauth2_issuer_url.clone(),
+            // The token endpoint, for clients following OIDC Core §9 rather
+            // than RFC 7523. A FAPI 2.0 client is held to the issuer alone —
+            // `JwksAssertionVerifier` decides that from the client's profile.
+            vec![format!(
+                "{}/oauth2/token",
+                config.auth.oauth2_issuer_url.trim_end_matches('/')
+            )],
+        ),
+    ));
 
     // B2 — device authorization grant (RFC 8628).
     //
@@ -2403,6 +2450,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(rest_authz.clone()))
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(web::Data::new(session_validator.clone()))
+            .app_data(web::Data::new(dpop_replay_guard.clone()))
             .app_data(web::Data::new(tenant_scope_resolver.clone()))
             .app_data(web::Data::new(principal_reach_resolver.clone()))
             .app_data(web::Data::new(scim_token_resolver.clone()))
@@ -2435,7 +2483,15 @@ async fn main() -> std::io::Result<()> {
             if let Some(certs) = session.peer_certificates()
                 && let Some(leaf) = certs.first()
             {
-                match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref()) {
+                // Whether this certificate chained to a configured anchor
+                // cannot be read off the handshake result — rustls's
+                // `ClientCertVerified` carries no payload and the verifier is
+                // given no connection handle to key a side channel on — so it
+                // is re-derived here, where the peer chain is in hand. Free
+                // under every client-auth policy except `optional_self_signed`;
+                // see `axiam_server::tls::peer_certificate_trust`.
+                let trust = axiam_server::tls::peer_certificate_trust(leaf, &certs[1..]);
+                match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref(), trust) {
                     Ok(vc) => {
                         ext.insert(vc);
                     }

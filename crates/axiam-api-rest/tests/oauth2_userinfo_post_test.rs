@@ -158,6 +158,17 @@ macro_rules! test_app {
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
+                // RFC 9449 §11.1. The extractors fail closed for a request
+                // carrying a DPoP proof when no guard is registered, so this
+                // is not optional decoration: without it every DPoP test here
+                // is a 401 that says nothing about DPoP. The real repository,
+                // against the migrated in-memory database, because a stub
+                // would not exercise the UNIQUE index that actually decides a
+                // replay.
+                .app_data(web::Data::new(Arc::new(
+                    axiam_db::SurrealProofReplayRepository::new($db.clone()),
+                )
+                    as Arc<dyn axiam_api_rest::DpopReplayGuard>))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
@@ -184,6 +195,178 @@ fn token_with_scopes(
         AUD_USER,
     )
     .unwrap()
+}
+
+/// Give the test user a SCIM-provisioned name.
+///
+/// `setup_db` creates them with `metadata: None`, which is the right default
+/// for most of this file — several tests assert that UserInfo says nothing it
+/// was not told. The §5.5 tests need something to release, so they provision
+/// it themselves rather than changing the shared fixture out from under the
+/// tests that depend on its emptiness.
+async fn give_the_user_a_name(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) {
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                metadata: Some(serde_json::json!({
+                    "scim": { "formatted": "Alice Liddell", "givenName": "Alice",
+                              "familyName": "Liddell", "nickName": "Ally" }
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("provisioning a name must succeed");
+}
+
+/// A token whose grant asked for claims by name (OIDC Core §5.5).
+///
+/// Built through `AccessTokenSpec` because that is the seam the OAuth2 token
+/// endpoint uses for exactly this, and a test that minted the claim some other
+/// way would not be exercising the path a real token takes.
+fn token_requesting_claims(
+    auth: &AuthConfig,
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[&str],
+    requested: &[&str],
+) -> String {
+    let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+    let requested: Vec<String> = requested.iter().map(|s| (*s).to_owned()).collect();
+    axiam_auth::token::AccessTokenSpec::user(user_id, tenant_id, org_id, Uuid::new_v4().to_string())
+        .aud(AUD_USER)
+        .scopes(&scopes)
+        .requested_userinfo_claims(&requested)
+        .issue(auth)
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// OIDC Core §5.5 — claims requested by name
+// ---------------------------------------------------------------------------
+
+/// `oidcc-claims-essential` in miniature: `scope=openid` alone, `name`
+/// requested through the `claims` parameter, and UserInfo must answer with it.
+///
+/// The control matters as much as the claim. The same token *without* the
+/// request must not carry `name`, or this test would pass against a server
+/// that simply released the profile to everybody — which is the failure mode
+/// worth guarding, since it is the easy way to make the module go green.
+#[actix_rt::test]
+async fn a_claim_requested_by_name_is_released_without_the_scope_that_bundles_it() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    give_the_user_a_name(&db, tenant_id, user_id).await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let asked = token_requesting_claims(&auth, user_id, tenant_id, org_id, &["openid"], &["name"]);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {asked}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        body.get("name").is_some(),
+        "an essential `name` was requested by the grant: {body}"
+    );
+
+    // The control: same scopes, no request.
+    let plain = token_with_scopes(&auth, user_id, tenant_id, org_id, &["openid"]);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {plain}")))
+            .to_request(),
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        body.get("name").is_none(),
+        "`openid` alone must not release the profile: {body}"
+    );
+}
+
+/// Asking for one claim by name releases that claim, not the profile.
+#[actix_rt::test]
+async fn requesting_one_claim_does_not_release_the_rest_of_the_profile() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    give_the_user_a_name(&db, tenant_id, user_id).await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let token = token_requesting_claims(
+        &auth,
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid"],
+        &["nickname"],
+    );
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    for withheld in ["name", "given_name", "family_name", "preferred_username"] {
+        assert!(
+            body.get(withheld).is_none(),
+            "{withheld} was not asked for and must not appear: {body}"
+        );
+    }
+}
+
+/// A consent-gated claim cannot be reached by naming it. The filter that makes
+/// this true lives in `axiam_oauth2::claims_request::RELEASABLE`, but the
+/// property belongs here: this is the endpoint that would leak.
+#[actix_rt::test]
+async fn a_consent_gated_claim_is_not_released_by_requesting_it() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    // Minted directly with the sensitive names in the list — i.e. assuming the
+    // authorization-endpoint filter had been bypassed entirely — so that
+    // UserInfo is tested rather than the filter.
+    let token = token_requesting_claims(
+        &auth,
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid"],
+        &["phone_number", "phone_number_verified", "address"],
+    );
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    for sensitive in ["phone_number", "phone_number_verified", "address"] {
+        assert!(
+            body.get(sensitive).is_none(),
+            "{sensitive} is consent-gated and a request must not reach past it: {body}"
+        );
+    }
 }
 
 /// The RFC 6750 §2.2 body, as a client would send it.
@@ -757,6 +940,103 @@ fn dpop_proof(key: &ProofKey, htm: &str, token: &str) -> String {
     jsonwebtoken::encode(&header, &claims, &key.encoding).expect("sign the proof")
 }
 
+/// RFC 9449 §11.1 — a proof is single-use at the resource endpoint too.
+///
+/// The token endpoint has recorded proof `jti`s since X5.1; this path did not,
+/// and said so in a comment. Inside the 60-second freshness window a captured
+/// proof for the same method and URI, replayed with the same token, was
+/// accepted a second time — which is what the OIDF `dpop-negative-tests`
+/// module measured as a 200 where DPOP-7.1 wants 400 or 401.
+///
+/// The two halves are asserted separately on purpose. A test that only
+/// replayed a proof would pass against a server that refused *every* proof, so
+/// the first request establishes that a good proof still works and the second
+/// establishes that the same one no longer does.
+#[actix_rt::test]
+async fn a_dpop_proof_is_single_use_at_the_resource_endpoint() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let key = proof_key();
+    let token = issue_access_token_bound(
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid".to_owned()],
+        &auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+        Some(CnfClaim::from_dpop_thumbprint(key.jkt.clone())),
+    )
+    .unwrap();
+    let app = test_app!(db, auth);
+
+    // One proof, sent twice — the same bytes, which is exactly what an
+    // attacker who captured it would have.
+    let proof = dpop_proof(&key, "POST", &token);
+    let send = |proof: String| {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("DPoP {token}")))
+            .insert_header(("DPoP", proof))
+            .to_request()
+    };
+
+    let first = test::call_service(&app, send(proof.clone())).await;
+    assert_eq!(
+        first.status().as_u16(),
+        200,
+        "the first use of a valid proof must still work"
+    );
+
+    let replay = test::call_service(&app, send(proof)).await;
+    assert_eq!(
+        replay.status().as_u16(),
+        401,
+        "the second use of the same proof must be refused (RFC 9449 §11.1)"
+    );
+}
+
+/// ...and single-use means *that* proof, not that key. A client makes a fresh
+/// proof per request and must not be locked out by its own previous one.
+#[actix_rt::test]
+async fn a_second_proof_from_the_same_key_is_not_a_replay() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let key = proof_key();
+    let token = issue_access_token_bound(
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid".to_owned()],
+        &auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+        Some(CnfClaim::from_dpop_thumbprint(key.jkt.clone())),
+    )
+    .unwrap();
+    let app = test_app!(db, auth);
+
+    for attempt in 1..=3 {
+        // `dpop_proof` mints a fresh `jti` each call, as a real client does.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(USERINFO)
+                .insert_header(("Authorization", format!("DPoP {token}")))
+                .insert_header(("DPoP", dpop_proof(&key, "POST", &token)))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "request {attempt} used a new proof and must be served"
+        );
+    }
+}
+
 /// A DPoP-bound token verifies on POST — and the proof must say `htm=POST`.
 ///
 /// `verified_dpop_thumbprint` builds its expectation from
@@ -937,5 +1217,142 @@ async fn an_mtls_bound_token_is_not_downgraded_to_a_bearer_token_on_post() {
     assert_eq!(
         post_header, post_body,
         "the body carrier refuses it in the same words"
+    );
+}
+
+/// A certificate-bound token stays bound when an upstream middleware has
+/// already cached the identity.
+///
+/// # The hole this closes
+///
+/// `an_mtls_bound_token_is_not_downgraded_to_a_bearer_token_on_post` asserts
+/// the right property against a request that could never have exhibited the
+/// defect. The audit middleware caches a `CachedUserIdentity` after checking a
+/// token's signature and expiry — and nothing else — and `extract_user` then
+/// used those claims and never reached `enforce_sender_constraint`. The test
+/// app installs no audit middleware, so the cache was always absent and the
+/// slow path was always taken.
+///
+/// Every route reached through `AuthenticatedUser` was affected. The OIDF FAPI
+/// 2.0 lane found it at UserInfo: `EnsureHttpStatusCodeIs4xx` presented a
+/// certificate-bound access token through the plain front door, where no client
+/// certificate exists at all, and was answered `200` with the subject's claims.
+///
+/// So this test does the one thing the other cannot: it puts the cache there.
+/// The token, the assertion and the expected answer are otherwise identical, so
+/// a difference between the two is a difference in the code path and nothing
+/// else.
+#[actix_rt::test]
+async fn a_cached_identity_does_not_launder_a_bound_token_into_a_bearer_token() {
+    use actix_web::HttpMessage as _;
+    use actix_web::dev::Service as _;
+    use axiam_auth::token::{CachedUserIdentity, validate_access_token};
+
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let token = issue_access_token_bound(
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid".to_owned()],
+        &auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+        Some(CnfClaim::from_certificate_thumbprint(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )),
+    )
+    .unwrap();
+
+    // Stands in for the audit middleware: validates signature and expiry, and
+    // caches. Exactly what the real one does, including what it leaves out.
+    let cached = Arc::new(CachedUserIdentity {
+        user_id,
+        tenant_id,
+        org_id,
+        claims: validate_access_token(&token, &auth).unwrap(),
+        token: token.clone(),
+    });
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(AppState::for_test(db.clone(), auth.clone())))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .wrap_fn(move |req, srv| {
+                req.extensions_mut().insert(cached.clone());
+                srv.call(req)
+            })
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+
+    // No client certificate can reach a `TestRequest` — `conn_data` is always
+    // `None` — which is precisely the situation the FAPI module created by
+    // dialling the front door, and precisely the situation that must be
+    // refused.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "a cached identity must not turn a certificate-bound token into a bearer token"
+    );
+
+    // The control, on the same app and the same cache: an UNBOUND token is
+    // still served. Without it this test would also pass if the cached path
+    // had been broken outright rather than made to check the binding.
+    let unbound = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &["openid".to_owned()],
+        &auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+    )
+    .unwrap();
+    let unbound_cached = Arc::new(CachedUserIdentity {
+        user_id,
+        tenant_id,
+        org_id,
+        claims: validate_access_token(&unbound, &auth).unwrap(),
+        token: unbound.clone(),
+    });
+    let control_app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(AppState::for_test(db.clone(), auth.clone())))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .wrap_fn(move |req, srv| {
+                req.extensions_mut().insert(unbound_cached.clone());
+                srv.call(req)
+            })
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+    let ok = test::call_service(
+        &control_app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Authorization", format!("Bearer {unbound}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        ok.status().as_u16(),
+        200,
+        "an unbound token is unaffected — the cache is still a cache"
     );
 }

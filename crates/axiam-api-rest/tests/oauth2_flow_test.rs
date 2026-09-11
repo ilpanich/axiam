@@ -921,9 +921,31 @@ async fn refresh_token_grant() {
     );
 }
 
+/// After rotation the old refresh token is *retired on a short clock*, not
+/// destroyed.
+///
+/// This test used to assert that the second use was refused outright. FAPI 2.0
+/// Security Profile §5.3.2.1-9 requires the opposite: an authorization server
+/// that rotates refresh tokens has to keep accepting the previous one for a
+/// period afterwards, so that a client whose rotation response was lost in
+/// transit can retry rather than restart the whole authorization. AXIAM now
+/// supersedes instead of revoking (`axiam_oauth2::token::
+/// REFRESH_ROTATION_GRACE_SECS`), and the OIDF module that measures it
+/// (`fapi2-security-profile-final-refresh-token`) sleeps thirty seconds before
+/// replaying the old token and expects a 200.
+///
+/// So the behaviour under test changed, and asserting a 200 alone would leave
+/// nothing behind: a server that simply never retired the old token would pass
+/// it. The property that still has to hold is that the old token's life was
+/// brought *forward* to the grace instant — thirty days became sixty seconds —
+/// and that is what the second half asserts, by reading the row back.
 #[actix_rt::test]
-async fn refresh_token_rotation_invalidates_old() {
-    // After rotation, the old refresh token must be rejected.
+async fn refresh_token_rotation_retires_old_on_the_grace_clock() {
+    use axiam_auth::token::hash_refresh_token;
+    use axiam_core::repository::RefreshTokenRepository;
+    use axiam_db::repository::SurrealRefreshTokenRepository;
+    use axiam_oauth2::token::REFRESH_ROTATION_GRACE_SECS;
+
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
@@ -960,7 +982,8 @@ async fn refresh_token_rotation_invalidates_old() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
 
-    // Try the old refresh token again — must fail
+    // Try the old refresh token again — inside the grace window it is still
+    // accepted, which is what §5.3.2.1-9 asks for.
     let form = format!(
         "grant_type=refresh_token&refresh_token={old_refresh}\
          &client_id={client_id}&client_secret={client_secret}"
@@ -972,9 +995,27 @@ async fn refresh_token_rotation_invalidates_old() {
         .set_payload(form)
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 400);
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["error"], "invalid_grant");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "a superseded refresh token stays usable for the grace period"
+    );
+
+    // …but only on the grace clock. The row must have been brought forward to
+    // roughly now + REFRESH_ROTATION_GRACE_SECS, rather than keeping the
+    // thirty-day life it was issued with. Read it back rather than waiting.
+    let repo = SurrealRefreshTokenRepository::new(db.clone());
+    let stored = repo
+        .get_by_token_hash(tenant_id, &hash_refresh_token(&old_refresh))
+        .await
+        .expect("the superseded row is still readable inside the window");
+    let remaining = (stored.expires_at - chrono::Utc::now()).num_seconds();
+    assert!(
+        remaining <= REFRESH_ROTATION_GRACE_SECS,
+        "a superseded refresh token must expire within the grace window, \
+         but {remaining}s remain (grace is {REFRESH_ROTATION_GRACE_SECS}s) — \
+         rotation left it with its original life"
+    );
 }
 
 // ===========================================================================
@@ -2102,14 +2143,23 @@ async fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
     );
 }
 
-/// M1-M4's HTTP shape: a `fapi2` client that *does* send one of the five
+/// M1-M4's HTTP shape: a `fapi2` client that *does* send one of the
 /// security-bearing parameters is refused with `invalid_request`, rather than
 /// being told a freshness or authentication guarantee it did not get.
 ///
 /// Driven through the authorization service's own gate for the reason P2
 /// gives: a `fapi2` client needs PAR and mTLS, which this harness has no
 /// listener for. The refusal's *wire* shape is covered by the handler's
-/// existing error-response tests, which all five reach by the same path.
+/// existing error-response tests, which all of them reach by the same path.
+///
+/// `claims` was a fifth case here and is deliberately no longer one. It is
+/// refused when AXIAM would *drop* it, and AXIAM now honours its `userinfo`
+/// member (OIDC Core §5.5, `axiam_oauth2::claims_request`), so there is no
+/// silent downgrade left for the refusal to prevent. The decision and its
+/// boundaries — including that a `claims` carrying `id_token.acr` is also
+/// allowed through — are stated and tested in
+/// `axiam_oauth2::fapi::tests::a_fapi2_client_may_send_claims_because_it_is_honoured`,
+/// which is where a change to it belongs.
 #[actix_rt::test]
 async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
     use axiam_core::models::oauth2_client::{
@@ -2147,7 +2197,7 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
         updated_at: chrono::Utc::now(),
     };
 
-    let cases: [(&str, RawAuthnParams<'_>); 5] = [
+    let cases: [(&str, RawAuthnParams<'_>); 4] = [
         (
             "prompt",
             RawAuthnParams {
@@ -2170,13 +2220,6 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
             },
         ),
         (
-            "claims",
-            RawAuthnParams {
-                claims: Some(r#"{"id_token":{"acr":{"essential":true}}}"#),
-                ..Default::default()
-            },
-        ),
-        (
             "id_token_hint",
             RawAuthnParams {
                 id_token_hint: Some("ey.header.payload"),
@@ -2186,13 +2229,16 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
     ];
 
     for (name, raw) in cases {
-        let err = enforce_authorization_request(
+        // `expect_err` takes a literal, so the {name} it used to carry reached
+        // the failure output verbatim and named nothing.
+        let Err(err) = enforce_authorization_request(
             &client,
             Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
             &AuthnRequestParams::parse(&raw),
             &[],
-        )
-        .expect_err("a fapi2 client must be refused {name}");
+        ) else {
+            panic!("a fapi2 client must be refused {name}");
+        };
         assert_eq!(err.error_code(), "invalid_request", "{name}");
         assert!(err.to_string().contains(name), "{name} unnamed in: {err}");
     }
@@ -2212,6 +2258,15 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
 /// emitting it are two decisions, and this wave takes only the first. A client
 /// on the `ignore` lane — which is every client that exists — is told nothing
 /// new.
+///
+/// The expected set is no longer literally "what it carried before X7.2":
+/// `tenant_id`, `org_id` and `email` left the ID token afterwards, for an
+/// unrelated reason (OIDC Core §5.4 — see `IdTokenClaims::tenant_id` and
+/// `IdTokenClaims::email`, and the two OIDF modules that name them). That
+/// change moved the baseline; it did not weaken what this test is for. The
+/// assertion is still on the *exact* set, so the three members X7.2 could
+/// wrongly add — `auth_time`, `acr`, `amr` — still fail it the moment one
+/// appears, which is the property being guarded.
 #[actix_rt::test]
 async fn t2_6_an_ignore_lane_client_gets_the_same_id_token_though_the_session_now_has_evidence() {
     use axiam_core::models::session::{Amr, CreateSession};
@@ -2356,18 +2411,15 @@ async fn t2_6_an_ignore_lane_client_gets_the_same_id_token_though_the_session_no
         members,
         [
             "aud",
-            "email",
             "exp",
             "iat",
             "iss",
             "nonce",
-            "org_id",
             "preferred_username",
             "sid",
             "sub",
-            "tenant_id",
         ],
-        "an ignore-lane client's ID token must carry exactly the members it \
-         carried before X7.2 — no auth_time, no acr, no amr, and no nulls"
+        "an ignore-lane client's ID token must carry exactly this set — \
+         no auth_time, no acr, no amr, and no nulls"
     );
 }

@@ -10,7 +10,13 @@
 
 use serde_json::{Map, Value};
 
-const SCIM_KEY: &str = "scim";
+/// Re-exported from `axiam-core` rather than declared here.
+///
+/// The OIDC UserInfo endpoint reads what this module writes, and it lives in
+/// `axiam-api-rest` (layer 6) which cannot depend on this crate (layer 7). One
+/// definition, in the layer both can reach. See
+/// `axiam_core::models::user::SCIM_METADATA_KEY`.
+use axiam_core::models::user::SCIM_METADATA_KEY as SCIM_KEY;
 
 /// Read `metadata.scim.<field>` as a string, or `None` if absent/not a string.
 pub fn get_str(metadata: &Value, field: &str) -> Option<String> {

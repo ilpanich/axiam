@@ -71,26 +71,22 @@
 
   "client": {
     "client_id": "${CLIENT_SELF_SIGNED_ID}",
-    "scope": "openid",
+    "scope": "openid profile",
     "certificate": {
       "cert": "${CLIENT_SELF_SIGNED_CERT_PEM}",
       "key": "${CLIENT_SELF_SIGNED_KEY_PEM}"
     },
-    "jwks": {
-      "keys": []
-    }
+    "jwks": ${CLIENT_SELF_SIGNED_JWKS}
   },
 
   "client2": {
     "client_id": "${CLIENT_MTLS_ID}",
-    "scope": "openid",
+    "scope": "openid profile",
     "certificate": {
       "cert": "${CLIENT_MTLS_CERT_PEM}",
       "key": "${CLIENT_MTLS_KEY_PEM}"
     },
-    "jwks": {
-      "keys": []
-    }
+    "jwks": ${CLIENT_MTLS_JWKS}
   },
 
   "mtls": {
@@ -105,13 +101,52 @@
     "ca": "${AXIAM_CA_PEM}"
   },
 
+  "_resource_comment": [
+    "The mTLS ALIAS, not the issuer origin, and RFC 8705 §5 is the reason.",
+    "An access token this lane mints is certificate-bound, so it is usable only",
+    "on a connection that presents the certificate its `cnf.x5t#S256` names —",
+    "which the front door on AXIAM_TLS_PORT terminates and never forwards. AXIAM",
+    "publishes the alternative in `mtls_endpoint_aliases.userinfo_endpoint`,",
+    "which is exactly what §5 requires an AS that binds tokens to publish, and",
+    "this is the value it carries.",
+    "",
+    "Pointing this at the issuer origin instead was invisible for as long as the",
+    "binding was not enforced: the plain endpoint answered 200, every module",
+    "that ends by calling the protected resource passed, and the two that assert",
+    "a 4xx for a MISMATCHED certificate passed nothing — there was no",
+    "certificate to mismatch. Ten modules changed verdict the day enforcement",
+    "was fixed, all of them from a green that meant nothing."
+  ],
   "resource": {
-    "resourceUrl": "${AXIAM_ISSUER}/oauth2/userinfo"
+    "resourceUrl": "${AXIAM_MTLS_BASE_URL}/oauth2/userinfo"
   },
+
+  "_browser_comment": [
+    "There is deliberately NO `browser` automation block here, and this is the",
+    "one place in the harness where the right answer is to do less.",
+    "",
+    "The suite's built-in WebRunner is HtmlUnit. Pointed at AXIAM's /login it",
+    "fetched the document and stopped: the page it recorded is the bare Vite",
+    "index.html with a <script type=module> in it, and every element the",
+    "automation was told to fill (`org-slug`, `username`) belongs to a React",
+    "tree HtmlUnit never built. `wait id org-slug 15` therefore timed out, and",
+    "a failed browser task INTERRUPTS the module — strictly worse than no block",
+    "at all, which merely leaves it WAITING with a URL for somebody to visit.",
+    "",
+    "So the visit is done by a real browser instead:",
+    "conformance/scripts/drive-browser.mjs polls",
+    "GET /api/runner/browser/<testId> for URLs the suite is waiting on and",
+    "drives them in Chromium. Run it beside `conformance-run`; see",
+    "`just conformance-drive`.",
+    "",
+    "This is a statement about the SUITE, not about AXIAM: a JavaScript sign-in",
+    "page is what a modern OP has, and the OpenID Foundation expects the",
+    "interactive hops of a certification run to be completed in a browser."
+  ],
 
   "variant": {
     "fapi_profile": "plain_fapi",
     "client_auth_type": "mtls",
     "sender_constrain": "mtls",
-    "openid": "plain_oauth"}
+    "openid": "openid_connect"}
 }

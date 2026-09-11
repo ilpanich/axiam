@@ -313,16 +313,46 @@ pub fn is_dpop_scheme(scheme: &str) -> bool {
 }
 
 /// RFC 9449 §4.3 step 9: compare `htu` with query and fragment removed.
-///
-/// Kept as a plain string operation rather than a URL parse. A parser would
-/// normalise — default ports, percent-encoding, case in the host — and every
-/// one of those normalisations is a place where two strings that are not equal
-/// become equal. The direction of the risk matters: an over-strict comparison
-/// fails an onboarding, an over-lenient one accepts a proof minted for a
-/// different endpoint.
 fn strip_query_and_fragment(uri: &str) -> &str {
     let end = uri.find(['?', '#']).unwrap_or(uri.len());
     &uri[..end]
+}
+
+/// `htu` in the canonical form RFC 9449 §4.3 asks the comparison to use.
+///
+///   To reduce the likelihood of false negatives, servers SHOULD employ
+///   syntax-based normalization (Section 6.2.2 of [RFC3986]) and scheme-based
+///   normalization (Section 6.2.3 of [RFC3986]) before comparing the htu claim.
+///
+/// An earlier revision compared the raw strings and said so in a comment,
+/// on the argument that any normalisation is "a place where two strings that
+/// are not equal become equal". That argument does not survive contact with
+/// what these two particular normalisations do. They map a URI to *the*
+/// canonical spelling of the resource it denotes, so two URIs compare equal
+/// exactly when they name the same endpoint — which is the question step 9
+/// is asking. A proof minted for `/oauth2/token` still fails at
+/// `/oauth2/revoke`, because those are different resources and normalisation
+/// does not make them one; what stops failing is `:443`, an upper-case host,
+/// and a path the client's own URL joiner left a `..` in.
+///
+/// **Strict on the way out.** A URI either side cannot parse is not silently
+/// treated as normalised-to-itself, because `Url::parse` is doing the work
+/// that decides what "the same endpoint" means. Both sides fall back to the
+/// raw stripped strings together, so an unparseable `htu` is compared exactly
+/// — never more leniently than before this function existed.
+fn normalised_htu(uri: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let stripped = strip_query_and_fragment(uri);
+    match url::Url::parse(stripped) {
+        // `Url` normalises on parse: lower-cases the scheme and host
+        // (§6.2.2.1), removes dot segments from the path (§6.2.2.3), drops a
+        // default port and gives an empty path its `/` (§6.2.3). Percent-
+        // encoding it leaves alone, which is the half of §6.2.2.2 not worth a
+        // hand-rolled decoder: it can only produce more false negatives, never
+        // a false positive.
+        Ok(parsed) => Cow::Owned(parsed.as_str().trim_end_matches('#').to_owned()),
+        Err(_) => Cow::Borrowed(stripped),
+    }
 }
 
 /// A JWK is public if it carries none of the private members RFC 7518 defines.
@@ -437,12 +467,12 @@ pub fn verify_dpop_proof(
             got: claims.htm,
         });
     }
-    let expected_htu = strip_query_and_fragment(expect.htu);
-    let presented_htu = strip_query_and_fragment(&claims.htu);
+    let expected_htu = normalised_htu(expect.htu);
+    let presented_htu = normalised_htu(&claims.htu);
     if presented_htu != expected_htu {
         return Err(DpopError::UriMismatch {
-            expected: expected_htu.to_owned(),
-            got: presented_htu.to_owned(),
+            expected: expected_htu.into_owned(),
+            got: presented_htu.into_owned(),
         });
     }
 
@@ -756,18 +786,72 @@ mod tests {
         assert!(verify_dpop_proof(&proof, &with_query).is_ok());
     }
 
-    /// ...but it must not ignore anything else. A proof for `/oauth2/token`
-    /// must not satisfy a request to `/oauth2/token/../revoke`.
+    /// RFC 9449 §4.3: "servers SHOULD employ syntax-based normalization
+    /// (Section 6.2.2 of [RFC3986]) and scheme-based normalization (Section
+    /// 6.2.3 of [RFC3986]) before comparing the htu claim."
+    ///
+    /// Every case here is a client that called the right endpoint and spelled
+    /// it a legal second way — which before this was a 401 an integrator could
+    /// not act on, and which the OIDF `dpop-negative-tests` module reports.
     #[test]
-    fn htu_comparison_does_not_normalise_paths() {
+    fn htu_comparison_normalises_before_comparing() {
+        for spelled in [
+            // §6.2.2.3 — a `..` a URL joiner left behind.
+            "https://as.example/oauth2/token/../token",
+            // §6.2.2.1 — the host is case-insensitive.
+            "https://AS.EXAMPLE/oauth2/token",
+            // §6.2.3 — https's default port is not part of the identity.
+            "https://as.example:443/oauth2/token",
+            // §6.2.2.1 — so is the scheme.
+            "HTTPS://as.example/oauth2/token",
+        ] {
+            let key = ed25519_key();
+            let mut c = claims(NOW);
+            c["htu"] = json!(spelled);
+            let proof = sign(&key, proof_header(&key), c);
+            assert!(
+                verify_dpop_proof(&proof, &expectation(NOW)).is_ok(),
+                "{spelled} names the very endpoint this request reached"
+            );
+        }
+    }
+
+    /// ...and normalisation must not make two endpoints into one. This is the
+    /// property the old string comparison was protecting, kept: canonical
+    /// forms are equal only when the resources are the same.
+    #[test]
+    fn normalisation_does_not_make_a_different_endpoint_match() {
+        for other in [
+            "https://as.example/oauth2/revoke",
+            "https://as.example/oauth2/token/../revoke",
+            "https://elsewhere.example/oauth2/token",
+            "http://as.example/oauth2/token",
+            "https://as.example:8443/oauth2/token",
+        ] {
+            let key = ed25519_key();
+            let mut c = claims(NOW);
+            c["htu"] = json!(other);
+            let proof = sign(&key, proof_header(&key), c);
+            assert!(
+                matches!(
+                    verify_dpop_proof(&proof, &expectation(NOW)),
+                    Err(DpopError::UriMismatch { .. })
+                ),
+                "{other} is a different resource from the token endpoint"
+            );
+        }
+    }
+
+    /// An `htu` no parser accepts is compared exactly, never more leniently
+    /// than the raw comparison this replaced.
+    #[test]
+    fn an_unparseable_htu_is_still_refused() {
         let key = ed25519_key();
         let mut c = claims(NOW);
-        c["htu"] = json!("https://as.example/oauth2/token/../revoke");
+        c["htu"] = json!("not a URI at all");
         let proof = sign(&key, proof_header(&key), c);
-        let expect =
-            DpopExpectation::at_token_endpoint("POST", "https://as.example/oauth2/revoke", NOW);
         assert!(matches!(
-            verify_dpop_proof(&proof, &expect),
+            verify_dpop_proof(&proof, &expectation(NOW)),
             Err(DpopError::UriMismatch { .. })
         ));
     }

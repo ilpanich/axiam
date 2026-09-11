@@ -106,6 +106,15 @@ pub struct AuthorizeQuery {
     pub display: Option<String>,
     pub ui_locales: Option<String>,
     pub claims_locales: Option<String>,
+    /// RFC 9449 §10 — the JWK thumbprint of the key the client will prove
+    /// possession of at the token endpoint.
+    ///
+    /// Declared here as well as on the PAR body because §10 defines it as an
+    /// *authorization request* parameter, and Figure 25 shows it on a plain
+    /// `GET /authorize`. It is read only on the inline branch: beside a
+    /// `request_uri` the pushed copy wins, like every other parameter, so a
+    /// browser cannot re-pin somebody's pushed request to a key of its own.
+    pub dpop_jkt: Option<String>,
     /// W3 — which tenant this authorization request is for, read **only** when
     /// the request carries no authenticated principal (plan §4.0).
     ///
@@ -138,6 +147,14 @@ pub struct AuthorizeQuery {
     /// `axiam_oauth2::login_hop::CONSENT_HOP_MARKER`.
     #[serde(rename = "axiam_consent_hop")]
     pub consent_hop: Option<String>,
+    /// The sign-in page's Cancel, coming back (`axiam_user_declined`).
+    ///
+    /// Read on the anonymous path only, and answered with `access_denied` to a
+    /// registered `redirect_uri`. See
+    /// `axiam_oauth2::login_hop::USER_DECLINED_MARKER` for why refusing is a
+    /// protocol outcome rather than an abandoned tab.
+    #[serde(rename = "axiam_user_declined")]
+    pub user_declined: Option<String>,
 }
 
 /// Query parameter for the token endpoint tenant routing.
@@ -459,6 +476,63 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         return Err(Box::new(auth_error.error_response()));
     }
 
+    // The person said no.
+    //
+    // Answered here, before the session cookie is consulted, because the answer
+    // does not depend on it: somebody who cancels the sign-in page has by
+    // definition not signed in, and asking whether they might have a session
+    // from some earlier request would let a stale cookie turn a refusal into a
+    // grant. The two conditions above still apply first — an unknown client and
+    // a client that never opted into the hop are answered exactly as they are
+    // today, because this endpoint must not become an oracle for either.
+    //
+    // Delivered by redirect on the same terms as every other authorization
+    // error (RFC 6749 §4.1.2.1): only to a `redirect_uri` this client
+    // registered, compared exactly, with the request's own `state`. An
+    // unregistered or absent one is answered directly, because a refusal is
+    // still not a licence to send a browser somewhere the client never named.
+    if axiam_oauth2::login_hop::user_declined(q.user_declined.as_deref()) {
+        let refusal = OAuth2Error::AccessDenied(
+            "the end user declined the authorization request at the sign-in page".into(),
+        );
+
+        // Where to answer, and with whose `state` — and for a pushed request
+        // neither comes from the query string.
+        //
+        // RFC 9126 §1: the pushed copy is the request. A FAPI client sends
+        // `client_id` and `request_uri` to the authorization endpoint and may
+        // send nothing else, so reading `state` off the query answered a
+        // refusal with no `state` at all — which the suite reports as
+        // `CheckStateInAuthorizationResponse: State was passed in request, but
+        // is missing from response`, and which a relying party would be right
+        // to discard as an unsolicited response (RFC 6749 §10.12).
+        //
+        // Consuming the `request_uri` here is correct rather than merely
+        // convenient: it is single-use, and this request has just been answered
+        // terminally. Leaving it spendable would let the same pushed request be
+        // presented again after its user said no.
+        let pushed = match q.request_uri.as_deref() {
+            Some(uri) => state
+                .oauth2
+                .par_service
+                .consume(tenant_id, &q.client_id, uri)
+                .await
+                .ok(),
+            None => None,
+        };
+        let (redirect_uri, echo_state) = match pushed.as_ref() {
+            Some(p) => (Some(p.redirect_uri.as_str()), p.state.as_deref()),
+            None => (q.redirect_uri.as_deref(), q.state.as_deref()),
+        };
+
+        return Err(Box::new(match redirect_uri {
+            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
+                build_error_redirect(uri, &refusal, echo_state, &state.auth_config)
+            }
+            _ => authorize_error_response(http_req, &refusal),
+        }));
+    }
+
     // The cookie, and whether it still names a live session in this tenant.
     let presented = http_req.cookie(crate::middleware::csrf::COOKIE_OP_SESSION);
     let resolved = match presented.as_ref() {
@@ -553,7 +627,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
                 build_error_redirect(uri, &refusal, q.state.as_deref(), &state.auth_config)
             }
-            _ => build_oauth2_error_response(&refusal),
+            _ => authorize_error_response(http_req, &refusal),
         }));
     }
 
@@ -568,7 +642,8 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             "an authorization request returned from the login hop still \
              carrying no OP session; refusing to redirect again"
         );
-        return Err(Box::new(build_oauth2_error_response(
+        return Err(Box::new(authorize_error_response(
+            http_req,
             &OAuth2Error::LoginRequired(
                 "the sign-in did not establish a session for this tenant at this \
                  origin; sign in again from the relying party, and check that the \
@@ -839,15 +914,11 @@ pub async fn authorize<C: Connection + Clone>(
     };
 
     // X7 G12 (plan §4.10). Classify request objects FIRST, before the PAR
-    // branch below, for two reasons. A `request_uri` that is not a PAR handle
-    // would otherwise fall into `par_service.consume` and come back as a
-    // generic `invalid_request`, losing the code OIDC Core §3.1.2.6 defines
-    // and a conformance suite matches on; and a non-PAR `request_uri` sent
-    // alongside inline parameters would earn the "must not be combined"
-    // refusal, which describes a rule that is beside the point when the
-    // parameter is not supported at all.
+    // branch below: a `request_uri` that is not a PAR handle would otherwise
+    // fall into `par_service.consume` and come back as a generic
+    // `invalid_request`, losing the code OIDC Core §3.1.2.6 defines and a
+    // conformance suite matches on.
     //
-    // Both forms are refused either way — this only decides *which* refusal.
     // The marker travels on the `AuthorizeRequest` rather than being answered
     // here so that the client and its `redirect_uri` are validated first: a
     // refusal is redirected only to a URI the client actually registered, and
@@ -859,11 +930,31 @@ pub async fn authorize<C: Connection + Clone>(
     // parameters came inline or through PAR.
     let session_evidence = resolve_session_evidence(&state, user.tenant_id, user.session_id).await;
 
-    // B5 / RFC 9126 §4. The two forms do not mix: a request carrying both a
-    // `request_uri` and inline parameters is refused rather than merged.
-    // Merging is exactly where parameter confusion lives — an attacker
-    // supplies the inline value they want and lets the pushed copy satisfy
-    // whatever check reads the other one.
+    // B5. The pushed copy wins; the query string's copies are IGNORED, not
+    // merged and not refused.
+    //
+    // The distinction is the whole of RFC 9101 §6.3, which RFC 9126 §4 adopts
+    // by reference ("build an authorization request as defined in [RFC9101]"):
+    //
+    //   The authorization server MUST extract the set of authorization request
+    //   parameters from the Request Object value. The authorization server MUST
+    //   only use the parameters in the Request Object, even if the same
+    //   parameter is provided in the query parameter.
+    //
+    // and §5 says in terms that a client MAY send them duplicated. So a
+    // duplicated `response_type`/`redirect_uri`/`scope`/`code_challenge` is a
+    // conformant request, and an earlier revision of this handler refused it —
+    // which failed every FAPI 2.0 authorization module, since the OIDF suite
+    // sends exactly that shape.
+    //
+    // The security argument the refusal was built on is sound and is satisfied
+    // by ignoring rather than refusing: parameter confusion needs the inline
+    // value to be *read* by something, and nothing below reads it. Every field
+    // of the request comes from `params`, the pushed copy — as `state` and
+    // `nonce` already did, for exactly this reason. `client_id` is the one
+    // parameter that is still compared rather than ignored, because §6.3
+    // requires the two to be identical; `par_service.consume` does that by
+    // scoping the handle to the client that pushed it.
     //
     // A refused request object takes the inline branch whatever it carried:
     // there is nothing to consume, and the branch exists only to reach the
@@ -874,19 +965,6 @@ pub async fn authorize<C: Connection + Clone>(
     };
     let req = match request_uri {
         Some(request_uri) => {
-            if axiam_oauth2::par::has_inline_params(
-                q.response_type.as_deref(),
-                q.redirect_uri.as_deref(),
-                q.scope.as_deref(),
-                q.code_challenge.as_deref(),
-            ) {
-                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
-                    "request_uri must not be combined with inline \
-                     authorization parameters"
-                        .into(),
-                ));
-            }
-
             let params = match state
                 .oauth2
                 .par_service
@@ -911,14 +989,17 @@ pub async fn authorize<C: Connection + Clone>(
                     if axiam_oauth2::login_hop::is_return_leg(q.login_hop.as_deref())
                         && axiam_oauth2::par::is_request_uri_gone(&e) =>
                 {
-                    return build_oauth2_error_response(&OAuth2Error::InvalidRequestUri(
-                        "the pushed authorization request expired while signing in \
+                    return authorize_error_response(
+                        &http_req,
+                        &OAuth2Error::InvalidRequestUri(
+                            "the pushed authorization request expired while signing in \
                          (a request_uri lives 60 seconds); push it again and restart \
                          the authorization request"
-                            .into(),
-                    ));
+                                .into(),
+                        ),
+                    );
                 }
-                Err(e) => return build_oauth2_error_response(&e),
+                Err(e) => return authorize_error_response(&http_req, &e),
             };
 
             // X7.1 — parsed from the *pushed* copy, never from the query
@@ -976,6 +1057,20 @@ pub async fn authorize<C: Connection + Clone>(
                 request_object,
                 session_evidence,
                 consent_hop_return_leg: q.consent_hop.is_some(),
+                // RFC 9449 §10 — from the PUSHED copy, never the query string,
+                // for exactly the reason `state` and `nonce` are just above.
+                // The PAR endpoint already resolved §10.1's two carriers into
+                // one value under client authentication; a query-string
+                // `dpop_jkt` here is a browser proposing a key, which is the
+                // substitution the binding exists to prevent.
+                dpop_jkt: params.dpop_jkt,
+                // OIDC Core §5.5 — from the PUSHED copy, like every other
+                // parameter beside a `request_uri`.
+                requested_userinfo_claims: params
+                    .claims
+                    .as_deref()
+                    .map(axiam_oauth2::claims_request::userinfo_claims)
+                    .unwrap_or_default(),
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
@@ -993,20 +1088,68 @@ pub async fn authorize<C: Connection + Clone>(
                 ui_locales: q.ui_locales.as_deref(),
                 claims_locales: q.claims_locales.as_deref(),
             });
-            let (Some(response_type), Some(redirect_uri)) = (q.response_type, q.redirect_uri)
+            // Cloned into the scrutinee so the else-arm can still read
+            // `q.redirect_uri`: a `let`-else MOVES what it destructures, and
+            // the arm's whole job is to decide whether that URI is one this
+            // server may redirect an error to. Two small `Option<String>`
+            // clones on a request that is about to be refused.
+            let (Some(response_type), Some(redirect_uri)) =
+                (q.response_type.clone(), q.redirect_uri.clone())
             else {
+                // Which of the two is missing decides how the error travels,
+                // and until this wave it did not: both were answered with a
+                // JSON body in the browser's window.
+                //
+                // RFC 6749 §4.1.2.1 draws the line at whether the server can
+                // trust where it would be sending the browser. It MUST NOT
+                // redirect when the `redirect_uri` is missing or does not match
+                // a registered one — that is the open-redirect case, and a JSON
+                // body is the right answer. But when `client_id` names a real
+                // client and the `redirect_uri` is one it registered, the error
+                // MUST be delivered by redirecting, with `state` echoed, so the
+                // relying party learns what happened instead of the end user
+                // reading a machine-readable body they cannot act on.
+                //
+                // Found by the OpenID Foundation suite:
+                // `oidcc-response-type-missing` sends a valid client and a
+                // registered `redirect_uri` with no `response_type`, waited for
+                // a redirect that never came, and stalled the whole plan.
+                // `user.tenant_id`, NOT `q.tenant_id`. The query parameter is
+                // ignored on this arm for the reason stated where the principal
+                // was resolved: the tenant a token was minted for is the tenant
+                // it acts in, and letting a query parameter move it would be a
+                // tenant-crossing primitive handed to whoever holds the
+                // browser. Reintroducing it here — on a lookup that decides
+                // where a browser gets redirected — would be the worst place to
+                // reintroduce it.
+                let redirect_target = match &q.redirect_uri {
+                    Some(candidate) => state
+                        .oauth2_client_repo
+                        .get_by_client_id(user.tenant_id, &q.client_id)
+                        .await
+                        .ok()
+                        .filter(|client| client.redirect_uris.contains(candidate))
+                        .map(|_| candidate.clone()),
+                    None => None,
+                };
+
                 // A refused request object with no inline redirect_uri cannot
                 // be reported by redirecting — there is no validated URI to
                 // redirect to — so it is answered directly, with its own code
                 // rather than the generic complaint about missing parameters.
-                if let Some(object) = request_object {
-                    return build_oauth2_error_response(&object.into_error());
-                }
-                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
-                    "response_type and redirect_uri are required unless \
-                     request_uri is used"
-                        .into(),
-                ));
+                let error = match request_object {
+                    Some(object) => object.into_error(),
+                    None => OAuth2Error::InvalidRequest(
+                        "response_type is required unless request_uri is used".into(),
+                    ),
+                };
+
+                return match redirect_target {
+                    Some(uri) => {
+                        build_error_redirect(&uri, &error, q.state.as_deref(), &state.auth_config)
+                    }
+                    None => authorize_error_response(&http_req, &error),
+                };
             };
             AuthorizeRequest {
                 tenant_id: user.tenant_id,
@@ -1032,6 +1175,22 @@ pub async fn authorize<C: Connection + Clone>(
                 request_object,
                 session_evidence,
                 consent_hop_return_leg: q.consent_hop.is_some(),
+                // RFC 9449 §10, Figure 25 — the parameter on a plain
+                // authorization request. Taken at face value: it is only a
+                // *commitment*, and the client makes the commitment harder to
+                // meet, never easier. A caller who pins a key they do not hold
+                // has locked themselves out of their own code and nobody else.
+                dpop_jkt: q.dpop_jkt,
+                // OIDC Core §5.5, from the query string. Parsed rather than
+                // trusted: `userinfo_claims` filters to the claims AXIAM will
+                // release on a request alone, so a client naming
+                // `phone_number` here gets what it would have got before —
+                // nothing, unless the consent ceremony ran.
+                requested_userinfo_claims: q
+                    .claims
+                    .as_deref()
+                    .map(axiam_oauth2::claims_request::userinfo_claims)
+                    .unwrap_or_default(),
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
@@ -1272,7 +1431,7 @@ pub async fn authorize<C: Connection + Clone>(
                 // very channel the setting forbids.
                 OAuth2Error::InvalidClient(_)
                 | OAuth2Error::InvalidRedirectUri(_)
-                | OAuth2Error::ParRequired(_) => build_oauth2_error_response(&e),
+                | OAuth2Error::ParRequired(_) => authorize_error_response(&http_req, &e),
                 _ => {
                     // These errors occur after client+redirect_uri
                     // were validated — safe to redirect.
@@ -1539,9 +1698,13 @@ fn token_request_context(req: &HttpRequest) -> Result<TokenRequestContext, Box<H
     // header silently equivalent to sending none.
     let basic = basic_credentials_from_request(req)?;
 
+    // The trust level travels with the certificate rather than being inferred
+    // here: `authenticate_mtls_client` refuses a self-asserted certificate for
+    // `tls_client_auth` (§2.1) and accepts one for `self_signed_tls_client_auth`
+    // (§2.2), and this is the seam that lets it tell them apart.
     let certificate = req
         .conn_data::<VerifiedClientCert>()
-        .map(|verified| PresentedCertificate::from_der(&verified.der));
+        .map(|verified| PresentedCertificate::from_der(&verified.der, verified.trust));
 
     Ok(TokenRequestContext {
         client_certificate: certificate,
@@ -1703,16 +1866,37 @@ const DPOP_HEADER: &str = "DPoP";
 /// The response header carrying a nonce challenge (RFC 9449 §8).
 const DPOP_NONCE_HEADER: &str = "DPoP-Nonce";
 
-/// Verify the `DPoP` header, if one is present, and fold the result into the
-/// token-endpoint context (X5.1, RFC 9449 §4.3).
+/// Fold a verified `DPoP` proof into the token-endpoint context (X5.1).
+///
+/// All of the verification is [`verify_dpop_header`]; this is the one line of
+/// token-endpoint-specific work, kept separate so that the PAR endpoint —
+/// which needs the proof's thumbprint but has no `TokenRequestContext` to put
+/// it in — reaches the same verification rather than a second copy of it.
+async fn dpop_from_request<C: Connection + Clone>(
+    req: &HttpRequest,
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    mut ctx: TokenRequestContext,
+) -> Result<TokenRequestContext, Box<HttpResponse>> {
+    let Some(verified) = verify_dpop_header(req, state, tenant_id).await? else {
+        return Ok(ctx);
+    };
+    ctx.dpop_proof = Some(verified);
+    Ok(ctx)
+}
+
+/// Verify the `DPoP` header, if one is present (X5.1, RFC 9449 §4.3).
+///
+/// `Ok(None)` means no header arrived. `Err` means one arrived and did not
+/// verify, and carries the response to send.
 ///
 /// Two properties this function exists to hold, both of which are easy to lose
 /// by writing the obvious thing instead:
 ///
 /// 1. **A proof that fails verification is an error, not an absence.** Returning
-///    a context with `dpop_proof: None` for a *bad* proof would be silently
-///    equivalent to not sending one — so a client that sent a forged proof would
-///    get whatever an unbound client gets. The `Err` arm is what stops that.
+///    `Ok(None)` for a *bad* proof would be silently equivalent to not sending
+///    one — so a client that sent a forged proof would get whatever an unbound
+///    client gets. The `Err` arm is what stops that.
 /// 2. **An absent header is not an error here.** Whether this particular client
 ///    needed a proof is `fapi::enforce_token_request`'s question and
 ///    `certificate_binding_for`'s, both of which read the *registration*. Making
@@ -1723,12 +1907,16 @@ const DPOP_NONCE_HEADER: &str = "DPoP-Nonce";
 /// client-assertion path uses. A proof whose `jti` cannot be recorded is
 /// refused rather than accepted: failing open would turn a database blip into
 /// an unlimited replay window.
-async fn dpop_from_request<C: Connection + Clone>(
+///
+/// Shared with `/oauth2/par` since RFC 9449 §10.1, which requires the PAR
+/// endpoint to check a proof "as defined in Section 4.3" — the same check,
+/// with `htu` naming the PAR path because [`dpop_htu`] reads it from the
+/// request.
+async fn verify_dpop_header<C: Connection + Clone>(
     req: &HttpRequest,
     state: &AppState<C>,
     tenant_id: Uuid,
-    mut ctx: TokenRequestContext,
-) -> Result<TokenRequestContext, Box<HttpResponse>> {
+) -> Result<Option<axiam_oauth2::dpop::VerifiedDpopProof>, Box<HttpResponse>> {
     use axiam_core::repository::{ProofKind, ProofReplayRepository};
     use axiam_oauth2::dpop::{self, DpopExpectation};
 
@@ -1739,7 +1927,7 @@ async fn dpop_from_request<C: Connection + Clone>(
         .map(str::trim)
         .filter(|v| !v.is_empty())
     else {
-        return Ok(ctx);
+        return Ok(None);
     };
 
     // RFC 9449 §4.3 step 2: more than one DPoP header is a malformed request,
@@ -1832,8 +2020,7 @@ async fn dpop_from_request<C: Connection + Clone>(
         }
     }
 
-    ctx.dpop_proof = Some(verified);
-    Ok(ctx)
+    Ok(Some(verified))
 }
 
 /// RFC 9449 §7.1 error response, optionally carrying a nonce challenge.
@@ -1851,7 +2038,12 @@ fn dpop_error_response(error: &str, description: &str, nonce: Option<String>) ->
     }
     Box::new(builder.json(serde_json::json!({
         "error": error,
-        "error_description": description,
+        // Through the same renderer `OAuth2Error::error_description` uses.
+        // This path builds its body directly rather than from an
+        // `OAuth2Error`, and RFC 6749 §5.2's character set binds the *field*,
+        // not the type that happened to produce it — a §-carrying description
+        // written here would be exactly the defect fixed there.
+        "error_description": axiam_oauth2::error::nqschar(description),
     })))
 }
 
@@ -2191,7 +2383,19 @@ pub async fn discovery<C: Connection + Clone>(
     // wave: the document such a caller receives is byte-identical to the one
     // W6 served. See `build_discovery_document_for` for why omitting is the
     // truthful answer rather than the cautious one.
-    let sensitive_scopes_enabled = match query.tenant_id {
+    // The tenant this document describes: the one the caller named, else the
+    // deployment's configured default (`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`,
+    // unset on a multi-tenant deployment). `None` reproduces the pre-existing
+    // document exactly, endpoint for endpoint.
+    //
+    // ONE value for both halves of the document, deliberately: the endpoints it
+    // publishes and the scopes it advertises must describe the same tenant. A
+    // document offering `address` for tenant X while pointing its token
+    // endpoint at tenant Y would be internally inconsistent in a way no client
+    // could detect and every client would trust.
+    let described_tenant = query.tenant_id.or_else(|| auth_config.default_tenant_id());
+
+    let sensitive_scopes_enabled = match described_tenant {
         None => false,
         Some(tenant_id) => match state.tenant_repo.get_by_id(tenant_id).await {
             Ok(tenant) => axiam_core::repository::SettingsRepository::get_effective_settings(
@@ -2218,6 +2422,7 @@ pub async fn discovery<C: Connection + Clone>(
         issuer,
         auth_config.mtls_base_url(),
         sensitive_scopes_enabled,
+        described_tenant,
     ) {
         Ok(doc) => doc,
         Err(e) => {
@@ -2355,9 +2560,30 @@ async fn userinfo_claims_for<C: Connection + Clone>(
 
     let has_scope = |s: &str| scopes.iter().any(|sc| sc == s);
 
+    // OIDC Core §5.5 — claims this grant asked for by name, resolved at the
+    // authorization endpoint and carried in the token. Already filtered to
+    // what AXIAM will release on a request alone
+    // (`axiam_oauth2::claims_request::RELEASABLE`), so nothing here has to
+    // re-decide whether a claim is consent-gated: `phone_number`,
+    // `phone_number_verified` and `address` can never appear in this list, and
+    // `release_sensitive_claims` below is untouched by it.
+    let requested: &[String] = user
+        .claims
+        .0
+        .axiam_requested_claims
+        .as_deref()
+        .unwrap_or(&[]);
+    let asked_for = |c: &str| requested.iter().any(|r| r == c);
+    // A claim is released when the scope that bundles it was granted, **or**
+    // when it was asked for by name. §5.5 is an alternative to the scope, not
+    // a filter on it — a client may use either.
+    let release = |claim: &str, scope: &str| has_scope(scope) || asked_for(claim);
+
     // Fetch user details for email/username when the relevant
     // scopes are present.
-    let (email, preferred_username) = if has_scope("email") || has_scope("profile") {
+    // The user row is needed by every releasable claim, so it is read when any
+    // of them might be released rather than when a particular scope is present.
+    let (email, profile) = if has_scope("email") || has_scope("profile") || !requested.is_empty() {
         // UserInfo describes the SUBJECT of the token, and that account lives in
         // the tenant the subject inhabits — never one it happens to be acting
         // on. The two differ only for an organization-level principal whose
@@ -2369,16 +2595,23 @@ async fn userinfo_claims_for<C: Connection + Clone>(
             .await
         {
             Ok(u) => (
-                if has_scope("email") {
-                    Some(u.email)
+                if release("email", "email") || asked_for("email_verified") {
+                    // Both members or neither: `email_verified` describes
+                    // `email`, so they are produced by one branch rather than
+                    // by two that could drift apart.
+                    Some((u.email, u.email_verified_at.is_some()))
                 } else {
                     None
                 },
-                if has_scope("profile") {
-                    Some(u.username)
-                } else {
-                    None
-                },
+                // Read whenever *any* profile claim might be released. Which
+                // ones actually appear is decided per claim below, because
+                // §5.5 lets a client ask for `nickname` without asking for
+                // `name`.
+                Some((
+                    u.username,
+                    axiam_core::models::user::ProfileClaims::from_metadata(&u.metadata),
+                    u.updated_at,
+                )),
             ),
             Err(e) => {
                 tracing::error!(
@@ -2402,8 +2635,77 @@ async fn userinfo_claims_for<C: Connection + Clone>(
 
     HttpResponse::Ok().json(UserInfoResponse {
         sub: user.user_id.to_string(),
-        email,
-        preferred_username,
+        email: email
+            .as_ref()
+            .filter(|_| release("email", "email"))
+            .map(|(address, _)| address.clone()),
+        email_verified: email
+            .as_ref()
+            .filter(|_| release("email_verified", "email"))
+            .map(|&(_, verified)| verified),
+        preferred_username: profile
+            .as_ref()
+            .filter(|_| release("preferred_username", "profile"))
+            .map(|(username, _, _)| username.clone()),
+        // Absent, not null, when SCIM never provisioned them — OIDC Core
+        // §5.3.2: a claim the OP cannot assert is omitted.
+        name: profile
+            .as_ref()
+            .filter(|_| release("name", "profile"))
+            .and_then(|(_, c, _)| c.name.clone()),
+        given_name: profile
+            .as_ref()
+            .filter(|_| release("given_name", "profile"))
+            .and_then(|(_, c, _)| c.given_name.clone()),
+        family_name: profile
+            .as_ref()
+            .filter(|_| release("family_name", "profile"))
+            .and_then(|(_, c, _)| c.family_name.clone()),
+        middle_name: profile
+            .as_ref()
+            .filter(|_| release("middle_name", "profile"))
+            .and_then(|(_, c, _)| c.middle_name.clone()),
+        nickname: profile
+            .as_ref()
+            .filter(|_| release("nickname", "profile"))
+            .and_then(|(_, c, _)| c.nickname.clone()),
+        profile: profile
+            .as_ref()
+            .filter(|_| release("profile", "profile"))
+            .and_then(|(_, c, _)| c.profile.clone()),
+        picture: profile
+            .as_ref()
+            .filter(|_| release("picture", "profile"))
+            .and_then(|(_, c, _)| c.picture.clone()),
+        website: profile
+            .as_ref()
+            .filter(|_| release("website", "profile"))
+            .and_then(|(_, c, _)| c.website.clone()),
+        gender: profile
+            .as_ref()
+            .filter(|_| release("gender", "profile"))
+            .and_then(|(_, c, _)| c.gender.clone()),
+        birthdate: profile
+            .as_ref()
+            .filter(|_| release("birthdate", "profile"))
+            .and_then(|(_, c, _)| c.birthdate.clone()),
+        zoneinfo: profile
+            .as_ref()
+            .filter(|_| release("zoneinfo", "profile"))
+            .and_then(|(_, c, _)| c.zoneinfo.clone()),
+        locale: profile
+            .as_ref()
+            .filter(|_| release("locale", "profile"))
+            .and_then(|(_, c, _)| c.locale.clone()),
+        // OIDC Core §5.1 wants a NumericDate, not an RFC 3339 string.
+        //
+        // Scope-only: `updated_at` describes when the profile last changed, so
+        // releasing it to a client that was granted no profile claim would
+        // answer a question it did not ask and could not interpret.
+        updated_at: profile
+            .as_ref()
+            .filter(|_| has_scope("profile"))
+            .map(|&(_, _, at)| at.timestamp()),
         phone_number: released.phone_number,
         phone_number_verified: released.phone_number_verified,
         address: released.address,
@@ -3331,6 +3633,95 @@ async fn handle_token_exchange<C: Connection + Clone>(
 /// RFC 6749 §5.2.  Although the token endpoint uses `client_secret_post`,
 /// RFC 6749 §5.2 still requires the 401 response to include
 /// `WWW-Authenticate` indicating the authentication scheme.
+/// Whether this request came from something that will *render* the answer.
+///
+/// Only an explicit `text/html` in `Accept` counts. A missing header, `*/*`
+/// (curl's default) or an API client's `application/json` all keep the JSON
+/// body byte-for-byte, so nothing that integrates against AXIAM today can
+/// observe this.
+fn prefers_html(req: &HttpRequest) -> bool {
+    req.headers()
+        .get(actix_web::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| {
+            accept
+                .split(',')
+                .any(|part| part.trim().starts_with("text/html"))
+        })
+}
+
+/// The five characters that turn text into markup.
+///
+/// Written out rather than pulled from a crate because the set is closed and
+/// the reason it exists should be visible at the point of use: an
+/// `error_description` is not always AXIAM's own prose — `par_form_error`
+/// forwards actix's message, which quotes a field name the caller chose.
+fn escape_html(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// An authorization-endpoint refusal, rendered for whoever asked.
+///
+/// # Why the authorization endpoint gets its own
+///
+/// `/oauth2/authorize` is the one OAuth2 endpoint a **person** arrives at.
+/// When a refusal cannot be redirected to the client — RFC 6749 §4.1.2.1 for a
+/// bad `redirect_uri` or `client_id`, and every `request_uri` failure, where
+/// the redirect target is precisely what could not be resolved — the
+/// specification says the server "SHOULD inform the resource owner of the
+/// error". A `Content-Type: application/json` body informs a developer reading
+/// a browser window; it does not inform a resource owner.
+///
+/// It is also what a certification reviewer is looking at. Five OIDF modules
+/// end in REVIEW with instructions of the form "it must show an error page
+/// saying the request_uri is invalid - upload a screenshot of the error page",
+/// and the screenshot they were being handed was a raw JSON object.
+///
+/// # What it does not do
+///
+/// It does not change a single byte for a non-browser caller, and it does not
+/// invent content: the page renders the same `error` and `error_description`
+/// the JSON carries, escaped, and nothing else. In particular it echoes no
+/// `state`, no `redirect_uri` and no `request_uri` — the rule
+/// [`logged_out_page`] states and for the same reason, since those are
+/// attacker-supplied strings and this page is served from AXIAM's own origin.
+fn authorize_error_response(req: &HttpRequest, e: &OAuth2Error) -> HttpResponse {
+    if !prefers_html(req) {
+        return build_oauth2_error_response(e);
+    }
+    let status = match e {
+        OAuth2Error::InvalidClient(_) => actix_web::http::StatusCode::UNAUTHORIZED,
+        OAuth2Error::ServerError(_) => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+        _ => actix_web::http::StatusCode::BAD_REQUEST,
+    };
+    let code = escape_html(e.error_code());
+    let description = escape_html(&e.error_description());
+    HttpResponse::build(status)
+        .append_header(("Cache-Control", "no-store"))
+        .append_header(("Pragma", "no-cache"))
+        .content_type("text/html; charset=utf-8")
+        .body(format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+             <title>This authorization request cannot be completed</title></head>\
+             <body><h1>This authorization request cannot be completed</h1>\
+             <p>{description}</p><p><small>Error code: <code>{code}</code></small></p>\
+             <p>Nothing has been shared with the application that sent you here. \
+             Return to it and start again.</p></body></html>"
+        ))
+}
+
 fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
     let status = match e {
         OAuth2Error::InvalidClient(_) => actix_web::http::StatusCode::UNAUTHORIZED,
@@ -3548,6 +3939,29 @@ pub struct PushedAuthorizationRequest {
     pub display: Option<String>,
     pub ui_locales: Option<String>,
     pub claims_locales: Option<String>,
+    /// RFC 9126 §2.1 — the one authorization parameter a client may NOT push.
+    ///
+    /// Modelled so that it can be refused. Leaving it off the struct made
+    /// `serde` drop it silently and the endpoint answer `201` to a request the
+    /// specification says must be rejected:
+    ///
+    /// > The `request_uri` authorization request parameter is one exception,
+    /// > and it MUST NOT be provided.
+    ///
+    /// Refusing matters beyond conformance. A `request_uri` accepted here would
+    /// be a pushed request that names another pushed request, and the second
+    /// would inherit the client authentication of the first — a chain whose
+    /// authenticated origin is a different request from the one finally
+    /// presented at the authorization endpoint.
+    pub request_uri: Option<String>,
+    /// RFC 9449 §10 — the JWK thumbprint of the key the client will prove
+    /// possession of at the token endpoint.
+    ///
+    /// One of the two carriers §10.1 requires an AS supporting both PAR and
+    /// DPoP to accept; the other is a `DPoP` header on this same request. When
+    /// both arrive they must agree, and the handler refuses the request when
+    /// they do not.
+    pub dpop_jkt: Option<String>,
 }
 
 /// `POST /oauth2/par` success body (RFC 9126 §2.2).
@@ -3557,6 +3971,38 @@ pub struct PushedAuthorizationResponse {
     pub request_uri: String,
     /// Seconds until the `request_uri` expires.
     pub expires_in: i64,
+}
+
+/// Render a malformed PAR body as an OAuth2 error object (RFC 9126 §2.3).
+///
+/// # Why this exists
+///
+/// `web::Form` rejects a body it cannot deserialize *before* the handler runs,
+/// and actix's default rendering is `400` with a `text/plain` body — for a
+/// missing `redirect_uri`, literally:
+///
+/// ```text
+/// Parse error: missing field `redirect_uri`.
+/// ```
+///
+/// RFC 9126 §2.3 says the PAR endpoint's error response is the token
+/// endpoint's: a JSON object carrying `error` and optionally
+/// `error_description`. A client cannot act on prose, and a conformance suite
+/// reports it as "Pushed Authorization did not return a JSON object" — which
+/// is what two FAPI 2.0 modules did.
+///
+/// The description is deliberately actix's own message: the caller already
+/// controls every byte of the body being described, so naming the field it got
+/// wrong tells an attacker nothing and saves an integrator an afternoon.
+///
+/// Wired at the route rather than inside the handler because the handler is
+/// never reached — see `crate::server`'s `/par` resource.
+pub fn par_form_error(
+    err: actix_web::error::UrlencodedError,
+    _req: &HttpRequest,
+) -> actix_web::Error {
+    let body = build_oauth2_error_response(&OAuth2Error::InvalidRequest(err.to_string()));
+    actix_web::error::InternalError::from_response(err, body).into()
 }
 
 /// `POST /oauth2/par` — RFC 9126 (B5).
@@ -3614,6 +4060,20 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
     let tenant_id = tenant_query.into_inner().tenant_id;
     let req = form.into_inner();
 
+    // RFC 9126 §2.1-2, answered before anything else is looked at.
+    //
+    // Ahead of client authentication deliberately, and it costs nothing: the
+    // refusal names a parameter the caller sent rather than anything about the
+    // client, so it is not an oracle, and a request that cannot be honoured
+    // whoever sent it should not first consume an authentication.
+    if req.request_uri.is_some() {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+            "request_uri must not be provided to the pushed authorization request endpoint \
+             (RFC 9126 §2.1)"
+                .into(),
+        ));
+    }
+
     // One client-authentication path in the codebase, shared with the token
     // endpoint, rather than a second one to keep correct — and since SEC-093
     // that path honours the registered `token_endpoint_auth_method`. PAR is
@@ -3642,6 +4102,10 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
         Ok(client) => client,
         Err(e) => return build_oauth2_error_response(&e),
     };
+    // Cloned because `client.client_id` is moved into the pushed request
+    // below, and the §10.1 refusal between here and there wants to name the
+    // client it is refusing.
+    let client_id_for_log = client.client_id.clone();
 
     // Keyed by the authenticated client and counted AFTER authentication, for
     // the same reasons as the token exchange: PAR always carries credentials
@@ -3661,6 +4125,50 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
                 error_description: "PAR rate limit exceeded for this client".into(),
             });
     }
+
+    // RFC 9449 §10.1 — resolve the DPoP key this authorization binds to.
+    //
+    //   Both mechanisms MUST be supported by an authorization server that
+    //   supports PAR and DPoP.  If both mechanisms are used at the same time,
+    //   the authorization server MUST reject the request if the JWK Thumbprint
+    //   in dpop_jkt does not match the public key in the DPoP header.
+    //
+    // Deliberately after client authentication and after the rate limit.
+    // Verifying a proof *records its `jti`*, so doing it earlier would let an
+    // unauthenticated caller write to the replay table at will — and the
+    // refusals below describe a key, which is a fact about the caller and not
+    // about the client registration, so nothing is leaked by the wait.
+    //
+    // The header alone binds just as firmly as the parameter alone: §10.1 says
+    // the server "MUST further behave as if the contained public key's
+    // thumbprint was provided using dpop_jkt". That is the whole reason this
+    // resolves to a single value rather than carrying both onward — by the
+    // time the token endpoint asks, there is only one right answer and no
+    // benefit in it having to reconstruct which carrier produced it.
+    let proof_jkt = match verify_dpop_header(&http_req, &state, tenant_id).await {
+        Ok(verified) => verified.map(|v| v.jkt),
+        Err(response) => return *response,
+    };
+    let dpop_jkt = match (req.dpop_jkt.as_deref(), proof_jkt.as_deref()) {
+        (Some(param), Some(proof)) if param != proof => {
+            tracing::debug!(
+                client_id = %client_id_for_log,
+                "PAR carried a dpop_jkt naming a different key from the DPoP proof; refusing"
+            );
+            return *dpop_error_response(
+                "invalid_dpop_proof",
+                "dpop_jkt does not match the key of the DPoP proof on this request \
+                 (RFC 9449 §10.1)",
+                None,
+            );
+        }
+        // Either they agree, or exactly one arrived, or neither did. In all
+        // three the parameter wins where it exists and the proof supplies the
+        // binding where it does not — which is the same value in the agreeing
+        // case, so the arms need not be distinguished.
+        (Some(param), _) => Some(param.to_owned()),
+        (None, proof) => proof.map(str::to_owned),
+    };
 
     match state
         .oauth2
@@ -3684,6 +4192,7 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
             display: req.display,
             ui_locales: req.ui_locales,
             claims_locales: req.claims_locales,
+            dpop_jkt,
         })
         .await
     {

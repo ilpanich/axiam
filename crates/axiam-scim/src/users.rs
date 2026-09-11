@@ -834,12 +834,43 @@ async fn revoke_live_credentials<C: Connection + Clone>(
     }
 }
 
+/// Whether a parsed PATCH asks for no change at all.
+///
+/// # Every settable field has to appear here
+///
+/// This is the guard that decides whether `update` is called, so a field the
+/// list forgets is a field a PATCH cannot write — and it fails in the worst
+/// possible way, with `200 OK` and the unchanged resource echoed back. A caller
+/// that sets only that attribute is told it succeeded.
+///
+/// `phone_number` and `address` (X7 G8 / W7) were added to `UpdateUser` and to
+/// the PATCH parser and not to this list, so `PATCH /scim/v2/Users/{id}` with
+/// `phoneNumbers` and `addresses` — nothing else — answered 200, wrote nothing,
+/// and the OIDF `oidcc-scope-address` and `oidcc-scope-phone` modules then
+/// reported UserInfo withholding claims for a user who did not in fact have
+/// them. Four release gates were examined before the missing line was found,
+/// because every one of them was working.
 fn user_patch_is_noop(u: &UpdateUser) -> bool {
-    u.username.is_none()
-        && u.email.is_none()
-        && u.status.is_none()
-        && u.metadata.is_none()
-        && u.password_hash.is_none()
+    // Destructured rather than field-tested, so that adding a field to
+    // `UpdateUser` fails to compile here instead of silently becoming
+    // unwritable. The `..` cases are the ones SCIM never sets.
+    let UpdateUser {
+        username,
+        email,
+        status,
+        metadata,
+        password_hash,
+        phone_number,
+        address,
+        ..
+    } = u;
+    username.is_none()
+        && email.is_none()
+        && status.is_none()
+        && metadata.is_none()
+        && password_hash.is_none()
+        && phone_number.is_none()
+        && address.is_none()
 }
 
 fn apply_user_delta_metadata(current: &Value, delta: &UserPatchDelta) -> Option<Value> {

@@ -398,18 +398,21 @@ async fn another_client_cannot_spend_a_request_uri() {
 }
 
 // ---------------------------------------------------------------------------
-// The two parameter channels do not mix
+// The two parameter channels do not mix — the pushed one wins
 // ---------------------------------------------------------------------------
 
 #[actix_web::test]
-async fn request_uri_combined_with_inline_params_is_refused() {
-    // Merging is where parameter confusion lives: the attacker supplies the
-    // inline value they want and lets the pushed copy satisfy whatever check
-    // reads the other one. So both-present is an error, not a merge.
+async fn request_uri_combined_with_inline_params_is_accepted() {
+    // RFC 9101 §5: a client MAY duplicate the pushed parameters in the query
+    // string. §6.3: the authorization server MUST only use the ones from the
+    // pushed request. RFC 9126 §4 adopts both by reference.
+    //
+    // This is the operator-facing contract, and it is hard-coded here rather
+    // than derived from the handler: an earlier revision refused these
+    // requests, which failed every FAPI 2.0 authorization module because the
+    // OIDF conformance suite sends exactly this shape.
     let f = setup().await;
     let app = test_app!(f);
-    let (_, body) = par!(app, f, f.client_id, f.client_secret, "");
-    let uri = body["request_uri"].as_str().unwrap().to_string();
 
     for extra in [
         "&response_type=code",
@@ -417,6 +420,9 @@ async fn request_uri_combined_with_inline_params_is_refused() {
         "&scope=openid",
         "&code_challenge=abc",
     ] {
+        // A fresh handle per iteration: a request_uri is single-use.
+        let (_, body) = par!(app, f, f.client_id, f.client_secret, "");
+        let uri = body["request_uri"].as_str().unwrap().to_string();
         let query = format!(
             "client_id={}&request_uri={}{}",
             f.client_id,
@@ -425,10 +431,93 @@ async fn request_uri_combined_with_inline_params_is_refused() {
         );
         assert_eq!(
             authorize!(app, &f, query),
-            400,
-            "inline param {extra} must not be accepted alongside request_uri"
+            302,
+            "duplicated inline param {extra} must be ignored, not refused"
         );
     }
+}
+
+#[actix_web::test]
+async fn a_query_string_copy_cannot_override_the_pushed_parameters() {
+    // The other half of §6.3, and the reason ignoring is as safe as refusing:
+    // the inline value is never read, so it cannot be the one that decides
+    // where the browser is sent. `state` is the observable proof — it is the
+    // only pushed parameter that comes back out in the redirect.
+    let f = setup().await;
+    let app = test_app!(f);
+    let (_, body) = par!(app, f, f.client_id, f.client_secret, "&state=pushed-state");
+    let uri = body["request_uri"].as_str().unwrap().to_string();
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?client_id={}&request_uri={}&state=attacker-state\
+             &scope=openid&response_type=code",
+            f.client_id,
+            enc(&uri)
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", user_token(&f))))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let location = resp
+        .headers()
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        location.contains("state=pushed-state"),
+        "the pushed state must win over a query-string copy, got {location}"
+    );
+    assert!(
+        !location.contains("attacker-state"),
+        "the query-string state must not reach the redirect, got {location}"
+    );
+}
+
+/// RFC 9126 §2.3 — the PAR endpoint's error response is the token endpoint's:
+/// a JSON object. A body `web::Form` cannot deserialize is rejected before the
+/// handler runs, and actix's default rendering is `text/plain` ("Parse error:
+/// missing field `redirect_uri`."), which two FAPI 2.0 modules reported as
+/// "Pushed Authorization did not return a JSON object".
+#[actix_web::test]
+async fn a_body_that_does_not_deserialize_still_gets_a_json_oauth2_error() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    // Well-formed urlencoding, missing a required field — the shape that
+    // reaches the extractor's error path rather than the handler's.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/par?tenant_id={}", f.tenant_id))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(format!(
+            "client_id={}&client_secret={}&response_type=code",
+            f.client_id, f.client_secret
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("application/json"),
+        "PAR must answer errors as JSON, got content-type {content_type}"
+    );
+
+    // `read_body_json` would panic on the plain-text body this test exists to
+    // prevent, so the assertion above is not redundant with this one.
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(
+        body["error"], "invalid_request",
+        "RFC 9126 §2.3 error object, got {body}"
+    );
 }
 
 #[actix_web::test]
@@ -535,6 +624,281 @@ async fn the_pushed_state_is_used_not_a_query_string_copy() {
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// RFC 9449 §10.1 — the two carriers of a DPoP key binding, and their agreement
+// ---------------------------------------------------------------------------
+//
+//   Both mechanisms MUST be supported by an authorization server that supports
+//   PAR and DPoP.  If both mechanisms are used at the same time, the
+//   authorization server MUST reject the request if the JWK Thumbprint in
+//   dpop_jkt does not match the public key in the DPoP header.
+//
+// "Both mechanisms MUST be supported" is why there is a test per carrier and
+// not only one for the refusal: an implementation that honoured `dpop_jkt` and
+// ignored the header would pass the mismatch test and still be wrong, because
+// §10.1 says the header alone must "behave as if the contained public key's
+// thumbprint was provided using dpop_jkt".
+
+/// An Ed25519 keypair, its JWK, and that JWK's RFC 7638 thumbprint.
+struct ProofKey {
+    encoding: jsonwebtoken::EncodingKey,
+    jwk: Value,
+    jkt: String,
+}
+
+fn proof_key() -> ProofKey {
+    use base64::Engine as _;
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("generate Ed25519");
+    let encoding = jsonwebtoken::EncodingKey::from_ed_pem(kp.serialize_pem().as_bytes())
+        .expect("encoding key");
+    let spki = kp.public_key_raw();
+    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&spki[spki.len() - 32..]);
+    let jwk = serde_json::json!({ "kty": "OKP", "crv": "Ed25519", "x": x });
+    let parsed: jsonwebtoken::jwk::Jwk =
+        serde_json::from_value(jwk.clone()).expect("a well-formed OKP JWK");
+    let jkt = axiam_oauth2::jose::jwk_thumbprint(&parsed).expect("thumbprint");
+    ProofKey { encoding, jwk, jkt }
+}
+
+/// A DPoP proof for `POST /oauth2/par`.
+///
+/// `htu` is built from the same two pieces `dpop_htu` uses on the server side
+/// — the configured issuer and the request path — and deliberately carries no
+/// `?tenant_id=`: RFC 9449 §4.2 defines `htu` as the target URI without its
+/// query, and a proof that included one would be testing the wrong thing.
+fn par_proof(key: &ProofKey, issuer: &str) -> String {
+    let header: jsonwebtoken::Header = serde_json::from_value(serde_json::json!({
+        "typ": axiam_oauth2::dpop::DPOP_TYP,
+        "alg": "EdDSA",
+        "jwk": key.jwk,
+    }))
+    .expect("proof header");
+    let claims = serde_json::json!({
+        "jti": Uuid::new_v4().to_string(),
+        "htm": "POST",
+        "htu": format!("{issuer}/oauth2/par"),
+        "iat": chrono::Utc::now().timestamp(),
+    });
+    jsonwebtoken::encode(&header, &claims, &key.encoding).expect("sign the proof")
+}
+
+/// POST a pushed authorization request carrying an optional `DPoP` header.
+macro_rules! par_with_proof {
+    ($app:expr, $f:expr, $extra:expr, $proof:expr) => {{
+        let body = format!(
+            "client_id={}&client_secret={}&response_type=code&redirect_uri={}{}",
+            $f.client_id,
+            $f.client_secret,
+            enc(REDIRECT_URI),
+            $extra
+        );
+        let mut req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/par?tenant_id={}", $f.tenant_id))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"));
+        if let Some(proof) = $proof {
+            req = req.insert_header(("DPoP", proof));
+        }
+        let resp = test::call_service(&$app, req.set_payload(body).to_request()).await;
+        let status = resp.status().as_u16();
+        let json: Value = test::read_body_json(resp).await;
+        (status, json)
+    }};
+}
+
+/// Read back the binding the endpoint actually stored.
+async fn stored_dpop_jkt(f: &Fixture, request_uri: &str) -> Option<String> {
+    let repo = SurrealPushedAuthRequestRepository::new(f.db.clone());
+    repo.consume(f.tenant_id, &hash_request_uri(request_uri))
+        .await
+        .unwrap()
+        .expect("the pushed request must exist")
+        .params
+        .dpop_jkt
+}
+
+#[actix_web::test]
+async fn a_dpop_jkt_naming_a_different_key_from_the_proof_is_refused() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let key = proof_key();
+    let other = proof_key();
+    assert_ne!(key.jkt, other.jkt, "two generated keys must differ");
+
+    let (status, body) = par_with_proof!(
+        app,
+        f,
+        format!("&dpop_jkt={}", enc(&other.jkt)),
+        Some(par_proof(&key, f.auth.effective_issuer()))
+    );
+
+    assert_eq!(
+        status, 400,
+        "§10.1 requires the request to be rejected, and 201 was the defect \
+         `ensure-mismatched-dpop-jkt-fails` reported: {body}"
+    );
+    assert_eq!(body["error"], "invalid_dpop_proof", "body: {body}");
+}
+
+#[actix_web::test]
+async fn a_dpop_jkt_that_agrees_with_the_proof_is_accepted_and_bound() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let key = proof_key();
+
+    let (status, body) = par_with_proof!(
+        app,
+        f,
+        format!("&dpop_jkt={}", enc(&key.jkt)),
+        Some(par_proof(&key, f.auth.effective_issuer()))
+    );
+
+    assert_eq!(status, 201, "body: {body}");
+    assert_eq!(
+        stored_dpop_jkt(&f, body["request_uri"].as_str().unwrap()).await,
+        Some(key.jkt),
+        "agreement must bind, not merely pass"
+    );
+}
+
+/// The header on its own binds — §10.1's "behave as if the contained public
+/// key's thumbprint was provided using dpop_jkt".
+#[actix_web::test]
+async fn a_dpop_proof_with_no_dpop_jkt_parameter_still_binds_the_request() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let key = proof_key();
+
+    let (status, body) =
+        par_with_proof!(app, f, "", Some(par_proof(&key, f.auth.effective_issuer())));
+
+    assert_eq!(status, 201, "body: {body}");
+    assert_eq!(
+        stored_dpop_jkt(&f, body["request_uri"].as_str().unwrap()).await,
+        Some(key.jkt),
+        "a proof at PAR binds the code even though no dpop_jkt parameter was sent"
+    );
+}
+
+/// The parameter on its own binds, with no proof anywhere — the plain §10 case.
+#[actix_web::test]
+async fn a_dpop_jkt_parameter_with_no_proof_still_binds_the_request() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let key = proof_key();
+
+    let (status, body) = par_with_proof!(
+        app,
+        f,
+        format!("&dpop_jkt={}", enc(&key.jkt)),
+        None::<String>
+    );
+
+    assert_eq!(status, 201, "body: {body}");
+    assert_eq!(
+        stored_dpop_jkt(&f, body["request_uri"].as_str().unwrap()).await,
+        Some(key.jkt)
+    );
+}
+
+/// The non-regression control: a push with neither carrier binds nothing, so
+/// every client registered today redeems its codes exactly as before.
+#[actix_web::test]
+async fn a_push_with_neither_carrier_binds_no_key() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (status, body) = par!(app, f, f.client_id, f.client_secret, "");
+    assert_eq!(status, 201, "body: {body}");
+    assert_eq!(
+        stored_dpop_jkt(&f, body["request_uri"].as_str().unwrap()).await,
+        None
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The authorization endpoint answers a person in a language they can read
+// ---------------------------------------------------------------------------
+//
+// Five OIDF modules end in REVIEW with instructions of the form "it must show
+// an error page saying the request_uri is invalid - upload a screenshot of the
+// error page". The screenshot they were handed was a raw JSON object.
+
+#[actix_web::test]
+async fn a_browser_gets_a_readable_page_when_a_request_uri_cannot_be_resolved() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let bogus = format!("{REQUEST_URI_PREFIX}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?client_id={}&request_uri={}",
+            f.client_id,
+            enc(&bogus)
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", user_token(&f))))
+        .insert_header((
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status().as_u16(), 400);
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        content_type.starts_with("text/html"),
+        "a browser must be answered with a page, got {content_type}"
+    );
+
+    let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+    assert!(body.starts_with("<!doctype html"), "body: {body}");
+    assert!(
+        body.contains("Error code: <code>invalid_request</code>"),
+        "the page must still name the error code a developer needs: {body}"
+    );
+    // The reviewer is told to look for a page that says the request_uri is
+    // invalid. Asserting on the rendered words is the only way this test
+    // fails when the page stops saying so.
+    assert!(
+        body.contains("request_uri"),
+        "the page must say what was wrong: {body}"
+    );
+}
+
+/// The same refusal, to an API client, is byte-for-byte what it was before the
+/// page existed. This is the non-regression half: content negotiation is only
+/// safe if the un-negotiated answer is untouched.
+#[actix_web::test]
+async fn a_non_browser_still_gets_the_json_error_object() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let bogus = format!("{REQUEST_URI_PREFIX}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    for accept in ["application/json", "*/*"] {
+        let req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!(
+                "/oauth2/authorize?client_id={}&request_uri={}",
+                f.client_id,
+                enc(&bogus)
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", user_token(&f))))
+            .insert_header(("Accept", accept))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 400);
+        let body: Value = test::read_body_json(resp).await;
+        assert_eq!(
+            body["error"], "invalid_request",
+            "Accept: {accept} must keep the JSON object"
+        );
+    }
+}
 
 #[actix_web::test]
 async fn discovery_advertises_the_par_endpoint() {

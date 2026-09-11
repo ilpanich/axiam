@@ -20,6 +20,8 @@ OUT="${2:-$HERE/.run/$(basename "$PLAN")}"
 
 # shellcheck disable=SC1091
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=conformance/scripts/lib-env.sh
+# shellcheck disable=SC1091
 . "$SCRIPTS_DIR/lib-env.sh"
 conf_load
 
@@ -71,7 +73,7 @@ read_pem() {
 NEEDED=$(python3 -c '
 import re, sys
 raw = open(sys.argv[1]).read()
-raw = re.sub(r"\"_comment\"\s*:\s*\[.*?\]\s*,", "", raw, flags=re.S)
+raw = re.sub(r"\"_[a-z_]*comment\"\s*:\s*\[.*?\]\s*,", "", raw, flags=re.S)
 print("\n".join(sorted(set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)\}", raw)))))
 ' "$PLAN")
 
@@ -150,9 +152,13 @@ except json.JSONDecodeError as e:
     sys.stderr.write("[render-plan] this is a bug in the template, not in your setup\n")
     sys.exit(1)
 
-# The suite ignores unknown keys, but `_comment` is ours and there is no reason
-# to ship an essay to the test runner.
-parsed.pop("_comment", None)
+# The suite ignores unknown keys, but these are ours and there is no reason to
+# ship an essay to the test runner. Any `_*comment` key, because a template may
+# carry more than one — `_browser_comment` explains why there is deliberately no
+# `browser` block, and that explanation belongs next to the absence rather than
+# in a file somebody would have to know to open.
+for key in [k for k in parsed if k.startswith("_") and k.endswith("comment")]:
+    parsed.pop(key)
 
 with open(dst, "w") as f:
     json.dump(parsed, f, indent=2)

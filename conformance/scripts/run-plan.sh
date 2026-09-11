@@ -98,10 +98,16 @@ while IFS= read -r module; do
     continue
   fi
 
-  # Poll to completion. The cap is generous because an interactive module sits
-  # in WAITING until a human acts; `conformance-report` reports what was still
-  # waiting rather than this loop pretending it finished.
-  deadline=$(( $(date +%s) + ${CONFORMANCE_MODULE_TIMEOUT:-180} ))
+  # Poll to completion.
+  #
+  # The cap is generous for two reasons. An interactive module sits in WAITING
+  # until the browser driver acts; and several FAPI modules *deliberately*
+  # sleep — `ensure-token-endpoint-fails-with-expired-auth-code` waits 62
+  # seconds for a code to expire, and the `request_uri` expiry modules wait out
+  # the 60-second PAR window. 180 seconds was tight enough that a module doing
+  # one of those plus a sign-in hop could reach the deadline while still
+  # perfectly healthy.
+  deadline=$(( $(date +%s) + ${CONFORMANCE_MODULE_TIMEOUT:-300} ))
   status=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
     INFO=$("${CURL[@]}" "$BASE/api/info/$TEST_ID" 2>/dev/null || echo '{}')
@@ -111,6 +117,24 @@ while IFS= read -r module; do
     esac
     sleep 2
   done
+
+  # A module that reached the deadline is still RUNNING or WAITING inside the
+  # suite, and the plan's `alias` is a single callback path that exactly one
+  # test may own. Starting the next module while this one still holds it makes
+  # the suite evict this one — "Stopping test due to alias conflict - before
+  # this test finished" — which is how a timed-out module took its *successor's*
+  # start with it and why ten modules across the two lanes carried that message
+  # rather than a verdict.
+  #
+  # So hand the alias back explicitly instead of letting the next `POST
+  # /api/runner` take it. Best-effort and deliberately unchecked: if the suite
+  # version in use does not expose this, the run is exactly as it was before.
+  case "$status" in
+    FINISHED|INTERRUPTED) ;;
+    *)
+      "${CURL[@]}" -X DELETE "$BASE/api/runner/$TEST_ID" >/dev/null 2>&1 || true
+      ;;
+  esac
 
   # `or ""` and not `.get("result","")`: a module that has not finished carries
   # an explicit JSON null, and .get() returns the null rather than the default —

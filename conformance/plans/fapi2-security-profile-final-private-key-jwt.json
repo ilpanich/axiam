@@ -111,13 +111,13 @@
 
   "client": {
     "client_id": "${CLIENT_PRIVATE_KEY_JWT_ID}",
-    "scope": "openid",
+    "scope": "openid profile",
     "jwks": ${CLIENT_PRIVATE_KEY_JWT_JWKS}
   },
 
   "client2": {
     "client_id": "${CLIENT_PRIVATE_KEY_JWT_2_ID}",
-    "scope": "openid",
+    "scope": "openid profile",
     "jwks": ${CLIENT_PRIVATE_KEY_JWT_2_JWKS}
   },
 
@@ -125,9 +125,32 @@
     "resourceUrl": "${AXIAM_ISSUER}/oauth2/userinfo"
   },
 
+  "_browser_comment": [
+    "There is deliberately NO `browser` automation block here, and this is the",
+    "one place in the harness where the right answer is to do less.",
+    "",
+    "The suite's built-in WebRunner is HtmlUnit. Pointed at AXIAM's /login it",
+    "fetched the document and stopped: the page it recorded is the bare Vite",
+    "index.html with a <script type=module> in it, and every element the",
+    "automation was told to fill (`org-slug`, `username`) belongs to a React",
+    "tree HtmlUnit never built. `wait id org-slug 15` therefore timed out, and",
+    "a failed browser task INTERRUPTS the module — strictly worse than no block",
+    "at all, which merely leaves it WAITING with a URL for somebody to visit.",
+    "",
+    "So the visit is done by a real browser instead:",
+    "conformance/scripts/drive-browser.mjs polls",
+    "GET /api/runner/browser/<testId> for URLs the suite is waiting on and",
+    "drives them in Chromium. Run it beside `conformance-run`; see",
+    "`just conformance-drive`.",
+    "",
+    "This is a statement about the SUITE, not about AXIAM: a JavaScript sign-in",
+    "page is what a modern OP has, and the OpenID Foundation expects the",
+    "interactive hops of a certification run to be completed in a browser."
+  ],
+
   "variant": {
     "fapi_profile": "plain_fapi",
     "client_auth_type": "private_key_jwt",
     "sender_constrain": "dpop",
-    "openid": "plain_oauth"}
+    "openid": "openid_connect"}
 }

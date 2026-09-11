@@ -45,6 +45,138 @@ pub trait SessionValidator: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 }
 
+/// Object-safe per-request DPoP replay guard (RFC 9449 §11.1).
+///
+/// Here for the same reason [`SessionValidator`] is: the check belongs to the
+/// connection-agnostic extractors, and `ProofReplayRepository::insert_proof_jti`
+/// is a native `async fn` (RPITIT), which is not dyn-safe. Same boxed-future
+/// seam, same registration.
+///
+/// # Why the resource server needs its own
+///
+/// The token endpoint has recorded proof `jti`s since X5.1. The resource
+/// endpoint did not, and `enforce_sender_constraint` documented the gap
+/// honestly rather than hiding it: within the freshness window a captured
+/// proof for the same method and URI, replayed with the same token, was
+/// accepted a second time. RFC 9449 §11.1 is what closes it, and the OIDF
+/// module `dpop-negative-tests` measures it — "DPoP reuse, Second use of the
+/// same jti" expected 400 or 401 and got 200.
+pub trait DpopReplayGuard: Send + Sync {
+    /// Record a verified proof's `jti`, scoped to its key.
+    ///
+    /// `Ok(())` the first time the tuple is seen, `Err(ReplayDetected)` on
+    /// every later one — decided by a UNIQUE index rather than a preceding
+    /// read, so two concurrent replays cannot both win.
+    fn record_proof<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        jkt: &'a str,
+        jti: &'a str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AxiamError>> + Send + 'a>>;
+}
+
+impl<C: Connection> DpopReplayGuard for axiam_db::SurrealProofReplayRepository<C> {
+    fn record_proof<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        jkt: &'a str,
+        jti: &'a str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AxiamError>> + Send + 'a>> {
+        use axiam_core::repository::{ProofKind, ProofReplayRepository};
+        // The same table, kind and scope the token endpoint writes. One
+        // namespace on purpose: a proof is single-use, not single-use *per
+        // endpoint*, and two namespaces would let a proof minted for the token
+        // endpoint be replayed once more at the resource endpoint.
+        Box::pin(self.insert_proof_jti(tenant_id, ProofKind::DpopProof, jkt, jti, expires_at))
+    }
+}
+
+/// A DPoP proof that [`enforce_sender_constraint`] verified, waiting to be
+/// made single-use by [`record_verified_proof`].
+///
+/// Stashed on the request rather than returned, because verification happens
+/// in a synchronous helper called from several places and the recording is an
+/// `await` that can only happen in the extractor's async tail. Carrying the
+/// *verified* proof means the async half never re-verifies and never has to
+/// trust anything it did not check itself.
+#[derive(Clone)]
+pub(crate) struct PendingDpopProof {
+    pub(crate) tenant_id: Uuid,
+    pub(crate) proof: axiam_oauth2::dpop::VerifiedDpopProof,
+}
+
+/// Make a verified DPoP proof single-use (RFC 9449 §11.1).
+///
+/// A no-op for every request that presented no proof, which is every request
+/// to an unbound token — so this adds no read, no write and no latency to the
+/// ordinary path.
+///
+/// # Fail-closed, deliberately
+///
+/// A proof that verified but whose `jti` cannot be recorded is **refused**,
+/// including when no [`DpopReplayGuard`] is registered at all. This is the
+/// token endpoint's rule (`dpop_from_request`: "failing open would turn a
+/// database blip into an unlimited replay window") applied at the other end of
+/// the same mechanism. It costs nothing on any deployment that wires the
+/// guard, and it means a deployment that forgets to cannot quietly serve
+/// replayable proofs.
+pub(crate) async fn record_verified_proof(
+    pending: Option<PendingDpopProof>,
+    guard: Option<Arc<dyn DpopReplayGuard>>,
+) -> Result<(), AxiamApiError> {
+    let Some(pending) = pending else {
+        return Ok(());
+    };
+
+    let Some(guard) = guard else {
+        tracing::error!(
+            "a DPoP proof verified but no DpopReplayGuard is registered; refusing rather \
+             than accepting a proof that cannot be made single-use (RFC 9449 §11.1)"
+        );
+        return Err(AxiamError::AuthenticationFailed {
+            reason: "DPoP replay protection is unavailable".into(),
+        }
+        .into());
+    };
+
+    let expires_at = pending
+        .proof
+        .replay_expiry(axiam_oauth2::dpop::DEFAULT_PROOF_MAX_AGE_SECS);
+    match guard
+        .record_proof(
+            pending.tenant_id,
+            &pending.proof.jkt,
+            &pending.proof.jti,
+            expires_at,
+        )
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(AxiamError::ReplayDetected) => {
+            tracing::warn!(
+                jkt = %pending.proof.jkt,
+                "a DPoP proof was replayed at a resource endpoint; refusing"
+            );
+            Err(AxiamError::AuthenticationFailed {
+                reason: "this DPoP proof has already been used".into(),
+            }
+            .into())
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "could not record a DPoP proof's jti at a resource endpoint; refusing"
+            );
+            Err(AxiamError::AuthenticationFailed {
+                reason: "the DPoP proof could not be verified".into(),
+            }
+            .into())
+        }
+    }
+}
+
 impl<C: Connection> SessionValidator for SurrealSessionRepository<C> {
     fn is_session_active<'a>(
         &'a self,
@@ -260,6 +392,12 @@ struct RequestScopeHandles {
     tenants: Option<Arc<dyn TenantScopeResolver>>,
     reach: Option<Arc<dyn PrincipalReachResolver>>,
     requested_tenant: Option<Uuid>,
+    /// RFC 9449 §11.1 — the proof `extract_user` verified, and the guard that
+    /// makes it single-use. Lifted here for the same reason everything else
+    /// is: the recording is an `await`, and the request is only borrowed on
+    /// the synchronous side.
+    dpop: Option<PendingDpopProof>,
+    replay_guard: Option<Arc<dyn DpopReplayGuard>>,
 }
 
 impl RequestScopeHandles {
@@ -283,6 +421,12 @@ impl RequestScopeHandles {
                 .get(ACTIVE_TENANT_HEADER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| Uuid::parse_str(v.trim()).ok()),
+            // Read AFTER `extract_user` has run, which is the order
+            // `from_request` establishes — the stash does not exist before it.
+            dpop: req.extensions().get::<PendingDpopProof>().cloned(),
+            replay_guard: req
+                .app_data::<web::Data<Arc<dyn DpopReplayGuard>>>()
+                .map(|d| d.get_ref().clone()),
         }
     }
 
@@ -292,7 +436,16 @@ impl RequestScopeHandles {
             tenants,
             reach,
             requested_tenant,
+            dpop,
+            replay_guard,
         } = self;
+
+        // RFC 9449 §11.1, first: it is the credential check, and a replayed
+        // proof should be refused before the session store is consulted on its
+        // behalf. Reached only when a proof actually verified — see
+        // `record_verified_proof`, which is a no-op otherwise, so no request to
+        // an unbound token pays anything for this.
+        record_verified_proof(dpop, replay_guard).await?;
 
         // REQ-7 / D-15: reject access tokens whose session has been revoked
         // (row deleted on password change/reset/MFA reset) or expired. The
@@ -416,10 +569,25 @@ pub struct AuthenticatedServiceAccount {
 
 impl actix_web::FromRequest for AuthenticatedServiceAccount {
     type Error = AxiamApiError;
-    type Future = std::future::Ready<Result<Self, Self::Error>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
-        std::future::ready(extract_service_account(req))
+        // Was `Ready`, i.e. wholly synchronous, until RFC 9449 §11.1 needed a
+        // write. A machine token can carry `cnf` exactly as a user token can —
+        // `extract_service_account` goes through the same
+        // `validate_presented_token` — so leaving this one synchronous would
+        // have left every m2m route as the replayable way in, which is the
+        // shape of gap this change exists to close.
+        let account = extract_service_account(req);
+        let dpop = req.extensions().get::<PendingDpopProof>().cloned();
+        let replay_guard = req
+            .app_data::<web::Data<Arc<dyn DpopReplayGuard>>>()
+            .map(|d| d.get_ref().clone());
+        Box::pin(async move {
+            let account = account?;
+            record_verified_proof(dpop, replay_guard).await?;
+            Ok(account)
+        })
     }
 }
 
@@ -506,17 +674,22 @@ pub(crate) fn validate_presented_token(
 /// being read. That is the property `an_unbound_token_is_never_asked_for_a_proof`
 /// pins, and it is the one this function is most likely to break.
 ///
-/// # The replay caveat, stated rather than hidden
+/// # Replay protection is the async half's job
 ///
 /// The proof's signature, `typ`, `alg`, `htm`, `htu`, `iat` freshness, `ath` and
-/// `jkt` are all checked. Its `jti` is **not** recorded here, because actix
-/// extractors are synchronous and the replay store is not. Within the 60-second
-/// freshness window a captured proof for *this exact method and URI*, presented
-/// with *the same token*, would therefore be accepted a second time on this
-/// path. The token endpoint — which is async and does hold the repository —
-/// does record it. This is exactly the limitation §21.7.2's row 8 requires an
-/// implementation to document rather than paper over, and closing it means
-/// moving this check into middleware that can await.
+/// `jkt` are all checked *here*, synchronously, because every caller of this
+/// function is synchronous. Making the proof **single-use** needs a write, so
+/// it happens in [`record_verified_proof`], which the extractors await after
+/// this returns; this function's part is to leave the verified proof behind in
+/// a [`PendingDpopProof`] for it.
+///
+/// Until that split existed, the `jti` was not recorded on this path at all —
+/// documented at the time as a known limitation, and measured as one by the
+/// OIDF `dpop-negative-tests` module, which replayed a proof inside the
+/// freshness window and got 200 where DPOP-7.1 wants 400 or 401. The two
+/// halves are deliberately ordered: verification first, recording second, so
+/// that a forged proof carrying somebody else's `jwk` and an arbitrary `jti`
+/// cannot burn that victim's `jti` space.
 fn enforce_sender_constraint(
     req: &HttpRequest,
     token: &str,
@@ -533,7 +706,26 @@ fn enforce_sender_constraint(
         .conn_data::<crate::extractors::cert_auth::VerifiedClientCert>()
         .map(|v| axiam_oauth2::mtls::thumbprint_s256(&v.der));
 
-    let dpop_thumbprint = verified_dpop_thumbprint(req, token);
+    // The whole proof, not just its thumbprint: the `jti` is what
+    // `record_verified_proof` needs, and re-deriving it there would mean
+    // verifying the proof twice — or, worse, reading a `jti` off a proof this
+    // half had not checked.
+    let verified_proof = verified_dpop_proof(req, token);
+    let dpop_thumbprint = verified_proof.as_ref().map(|p| p.jkt.clone());
+    if let Some(proof) = verified_proof {
+        // An unparseable `tenant_id` cannot be stashed, and a proof that
+        // cannot be scoped to a tenant cannot be recorded — so it is refused
+        // here rather than left to be silently skipped later. A token whose
+        // own `tenant_id` will not parse has already failed
+        // `validate_access_token`, so this arm is unreachable in practice and
+        // is written as a refusal rather than an `unwrap` for that reason.
+        let tenant_id =
+            Uuid::parse_str(&claims.tenant_id).map_err(|_| AxiamError::AuthenticationFailed {
+                reason: "token carries an unusable tenant".into(),
+            })?;
+        req.extensions_mut()
+            .insert(PendingDpopProof { tenant_id, proof });
+    }
 
     verify_token_binding(
         claims,
@@ -546,7 +738,7 @@ fn enforce_sender_constraint(
     Ok(())
 }
 
-/// The `jkt` of a DPoP proof on this request that **verified**, or `None`.
+/// A DPoP proof on this request that **verified**, or `None`.
 ///
 /// `None` for "no proof", "malformed proof" and "proof that failed
 /// verification" alike, which is the correct collapsing: every one of them means
@@ -555,7 +747,15 @@ fn enforce_sender_constraint(
 /// all three. Returning a thumbprint from an unverified proof — the obvious
 /// shortcut, since the `jkt` is right there in the header — would turn DPoP
 /// into a self-signed permission slip.
-fn verified_dpop_thumbprint(req: &HttpRequest, token: &str) -> Option<String> {
+///
+/// The whole proof is returned rather than its `jkt` because
+/// [`record_verified_proof`] needs the `jti` and `iat` too, and the one thing it
+/// must never do is read them from a proof nobody checked. Only a `Some` from
+/// here is ever recorded.
+fn verified_dpop_proof(
+    req: &HttpRequest,
+    token: &str,
+) -> Option<axiam_oauth2::dpop::VerifiedDpopProof> {
     use axiam_oauth2::dpop::{DpopExpectation, verify_dpop_proof};
 
     let raw = req
@@ -592,7 +792,7 @@ fn verified_dpop_thumbprint(req: &HttpRequest, token: &str) -> Option<String> {
     );
 
     match verify_dpop_proof(raw, &expect) {
-        Ok(proof) => Some(proof.jkt),
+        Ok(proof) => Some(proof),
         Err(e) => {
             tracing::debug!(error = %e, "a DPoP proof on a resource request did not verify");
             None
@@ -682,9 +882,30 @@ async fn resolve_active_tenant_for(
     Ok(target)
 }
 
+/// The audit middleware's cached identity, with the check a cache must not skip.
+///
+/// Signature, expiry and issuer are facts about the token and are not rechecked
+/// — that is what the cache is for. The `cnf` sender constraint is a fact about
+/// *this request*: which certificate the connection presented, which DPoP proof
+/// accompanied it. Reading it from a cache would be reading it from the wrong
+/// request, so it is enforced here every time the cache is used.
+///
+/// Both callers go through this rather than reading the extension directly,
+/// because the version that read it directly is the version that shipped the
+/// hole: a certificate-bound token was accepted through the plain front door
+/// with no certificate anywhere near it.
+fn cached_identity(req: &HttpRequest) -> Result<Option<Arc<CachedUserIdentity>>, AxiamApiError> {
+    let cached = req.extensions().get::<Arc<CachedUserIdentity>>().cloned();
+    let Some(cached) = cached else {
+        return Ok(None);
+    };
+    enforce_sender_constraint(req, &cached.token, &cached.claims.0)?;
+    Ok(Some(cached))
+}
+
 fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
     // Try to reuse claims cached by the audit middleware.
-    if let Some(cached) = req.extensions().get::<Arc<CachedUserIdentity>>() {
+    if let Some(cached) = cached_identity(req)? {
         let config = req
             .app_data::<web::Data<AuthConfig>>()
             .ok_or(AxiamError::Internal("missing auth config".into()))?;
@@ -846,9 +1067,23 @@ fn check_user_aud_and_parse_jti(
         }
     }
 
-    Uuid::parse_str(&validated.0.jti).map_err(|_| {
+    // `sid` first, `jti` second — and the order is the fix, not a preference.
+    //
+    // A login-issued token sets `jti` to its session's id, which is the
+    // contract `AccessTokenClaims::jti` documents and what this function
+    // originally read. An OAuth2 access token cannot: `jti` must be unique per
+    // token and one session issues many, so the authorization-code path minted
+    // a random one. `is_session_active` then looked up a session that had never
+    // existed and refused every OAuth2 token with "session revoked or expired"
+    // — which meant UserInfo did not work for any OIDC client.
+    //
+    // Falling back to `jti` is what keeps every token issued before `sid`
+    // existed working exactly as it did, so this needs no migration and no
+    // flag day.
+    let raw = validated.0.sid.as_deref().unwrap_or(&validated.0.jti);
+    Uuid::parse_str(raw).map_err(|_| {
         AxiamError::AuthenticationFailed {
-            reason: "invalid jti".into(),
+            reason: "invalid session identifier".into(),
         }
         .into()
     })
@@ -991,7 +1226,7 @@ fn extract_principal(req: &HttpRequest) -> Result<AuthenticatedPrincipal, AxiamA
         .app_data::<web::Data<AuthConfig>>()
         .ok_or(AxiamError::Internal("missing auth config".into()))?;
 
-    let validated = match req.extensions().get::<Arc<CachedUserIdentity>>() {
+    let validated = match cached_identity(req)? {
         Some(cached) => cached.claims.clone(),
         None => parse_validated_claims(req)?,
     };
@@ -1070,9 +1305,20 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
             .get(ACTIVE_TENANT_HEADER)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| Uuid::parse_str(v.trim()).ok());
+        // RFC 9449 §11.1 — read after `extract_principal` has run, which is
+        // what puts the stash there. Same rule as `AuthenticatedUser`: these
+        // endpoints are resource endpoints too, and a proof that is
+        // single-use on one route and replayable on another is not
+        // single-use.
+        let dpop = req.extensions().get::<PendingDpopProof>().cloned();
+        let replay_guard = req
+            .app_data::<web::Data<Arc<dyn DpopReplayGuard>>>()
+            .map(|d| d.get_ref().clone());
 
         Box::pin(async move {
             let mut principal = principal_result?;
+
+            record_verified_proof(dpop, replay_guard).await?;
 
             // A user token reaching these endpoints must satisfy exactly the
             // same session-revocation rule it would on any other route
@@ -1185,6 +1431,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             auth_code_lifetime_secs: 600,
             oauth2_issuer_url: String::new(),
             oauth2_mtls_base_url: String::new(),
+            oauth2_default_tenant_id: String::new(),
             sso_spa_origins: Vec::new(),
             email_verification_grace_period_hours: 24,
             password_reset_token_expiry_hours: 1,
@@ -1232,6 +1479,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
 
         let now = Utc::now().timestamp();
         let claims = AccessTokenClaims {
+            axiam_requested_claims: None,
             sub: Uuid::new_v4().to_string(),
             tenant_id: Uuid::new_v4().to_string(),
             org_id: Uuid::new_v4().to_string(),
@@ -1239,6 +1487,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             iat: now,
             exp: now + 900,
             jti: Uuid::new_v4().to_string(),
+            sid: None,
             aud: None, // no audience
             scope: None,
             sub_kind: SubjectKind::User,
@@ -1449,6 +1698,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
 
         let now = Utc::now().timestamp();
         ValidatedClaims(AccessTokenClaims {
+            axiam_requested_claims: None,
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
             org_id: org_id.to_string(),
@@ -1456,6 +1706,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             iat: now,
             exp: now + 900,
             jti: Uuid::new_v4().to_string(),
+            sid: None,
             aud: Some("axiam:user".into()),
             scope: None,
             sub_kind: SubjectKind::User,

@@ -3,6 +3,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde::Serialize;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Discovery Document (RFC 8414 / OpenID Connect Discovery 1.0)
@@ -165,6 +166,32 @@ pub struct OidcDiscoveryDocument {
     /// RSA will hit first, and the reason advertising the list matters rather
     /// than merely advertising support.
     pub dpop_signing_alg_values_supported: Vec<String>,
+    /// RFC 8414 §2 / RFC 7636 §4.3 — the PKCE transformations AXIAM accepts.
+    ///
+    /// `S256`, and only `S256`: `authorize` refuses `plain` outright, so a
+    /// list carrying it would be a lie the client discovers one redirect
+    /// later.
+    ///
+    /// Its **absence** was a real finding of the first FAPI 2.0 conformance
+    /// run (`EnsureServerConfigurationSupportsCodeChallengeMethodS256`
+    /// reported NOT FOUND). RFC 8414 defines no default for this member, so
+    /// silence does not mean "S256" — it means a conforming client cannot
+    /// establish that PKCE is available at all, which for a profile that
+    /// *requires* PKCE is a failed check rather than a cosmetic omission.
+    pub code_challenge_methods_supported: Vec<String>,
+    /// RFC 8414 §2 — the JWS algorithms AXIAM accepts on a `private_key_jwt`
+    /// client assertion.
+    ///
+    /// Derived from [`crate::jose::permitted_algorithm_names`] rather than
+    /// written out here, so the advertisement cannot drift from the verifier
+    /// that has to honour it.
+    ///
+    /// Also absent until the first conformance run named it
+    /// (`FAPI2CheckDiscEndpointTokenEndpointAuthSigningAlgValuesSupported`).
+    /// The member is required once an assertion-based method is advertised,
+    /// and `token_endpoint_auth_methods_supported` above advertises
+    /// `private_key_jwt` unconditionally.
+    pub token_endpoint_auth_signing_alg_values_supported: Vec<String>,
     /// RFC 8705 §5 — the mTLS-specific endpoint URLs, when this deployment
     /// terminates mutual TLS somewhere other than the issuer's own host.
     /// Absent (not `null`) when it does not.
@@ -190,6 +217,42 @@ macro_rules! endpoint {
     };
 }
 
+/// Append `?tenant_id=<uuid>` to an endpoint URL, when this document describes
+/// one tenant.
+///
+/// # Why an endpoint URL carries a query string at all
+///
+/// Because AXIAM's OAuth2 endpoints need one, and OIDC Discovery exists so that
+/// a relying party needs nothing else. Every endpoint that authenticates a
+/// *client* — token, PAR, introspection, revocation, device authorization,
+/// end-session — takes a **required** `tenant_id`, and `/oauth2/authorize`
+/// needs one for a request with no principal, which is every browser arriving
+/// from a relying party. Until this function existed the document advertised
+/// all of them bare, so a client that followed the document exactly got
+/// `400 Query deserialize error: missing field tenant_id` at the token
+/// endpoint. That is what the first OpenID Foundation conformance run hit, and
+/// it is equally what any third-party client would hit.
+///
+/// RFC 6749 §3.1 and §3.2 both allow these endpoints to include a query
+/// component and require the client to **retain** it when adding parameters of
+/// its own, so this is the mechanism the specification provides rather than a
+/// workaround for the lack of one.
+///
+/// `userinfo_endpoint` and `jwks_uri` are deliberately NOT passed through here:
+/// UserInfo resolves the tenant from the bearer token that authenticates the
+/// call, and a JWKS is a deployment-wide document. Adding a parameter neither
+/// reads would be noise a client has to carry.
+fn tenant_scoped(url: String, tenant_id: Option<Uuid>) -> String {
+    match tenant_id {
+        // Every caller passes a URL this module just built from a validated
+        // issuer, so none of them already carries a query — `?` is correct and
+        // `&` would be wrong. Asserted by
+        // `every_tenant_scoped_endpoint_has_exactly_one_query_string`.
+        Some(id) => format!("{url}?tenant_id={id}"),
+        None => url,
+    }
+}
+
 /// Build the RFC 8705 §5 aliases for a base URL, or `None` when there is no
 /// separate mTLS host.
 ///
@@ -199,7 +262,10 @@ macro_rules! endpoint {
 /// dropping it on a typo would produce exactly the failure the operator
 /// configured it to prevent — and would do so invisibly, since a client cannot
 /// tell an absent alias from one the server meant to send.
-fn build_mtls_aliases(mtls_base_url: Option<&str>) -> Result<Option<MtlsEndpointAliases>, String> {
+fn build_mtls_aliases(
+    mtls_base_url: Option<&str>,
+    tenant_id: Option<Uuid>,
+) -> Result<Option<MtlsEndpointAliases>, String> {
     let Some(base) = mtls_base_url else {
         return Ok(None);
     };
@@ -232,13 +298,24 @@ fn build_mtls_aliases(mtls_base_url: Option<&str>) -> Result<Option<MtlsEndpoint
         );
     }
 
+    // An alias must be usable on arrival, and every one of these but UserInfo
+    // authenticates a client and therefore needs the tenant. An alias that
+    // omitted it would be strictly worse than no alias: RFC 8705 §5 tells an
+    // mTLS client it MUST use these, so it would follow a URL that cannot work
+    // and would have no conventional endpoint to fall back to.
     Ok(Some(MtlsEndpointAliases {
-        token_endpoint: endpoint!(base, "/oauth2/token"),
+        token_endpoint: tenant_scoped(endpoint!(base, "/oauth2/token"), tenant_id),
         userinfo_endpoint: endpoint!(base, "/oauth2/userinfo"),
-        revocation_endpoint: endpoint!(base, "/oauth2/revoke"),
-        introspection_endpoint: endpoint!(base, "/oauth2/introspect"),
-        device_authorization_endpoint: endpoint!(base, "/oauth2/device_authorization"),
-        pushed_authorization_request_endpoint: endpoint!(base, "/oauth2/par"),
+        revocation_endpoint: tenant_scoped(endpoint!(base, "/oauth2/revoke"), tenant_id),
+        introspection_endpoint: tenant_scoped(endpoint!(base, "/oauth2/introspect"), tenant_id),
+        device_authorization_endpoint: tenant_scoped(
+            endpoint!(base, "/oauth2/device_authorization"),
+            tenant_id,
+        ),
+        pushed_authorization_request_endpoint: tenant_scoped(
+            endpoint!(base, "/oauth2/par"),
+            tenant_id,
+        ),
     }))
 }
 
@@ -257,7 +334,7 @@ pub fn build_discovery_document(
     issuer: &str,
     mtls_base_url: Option<&str>,
 ) -> Result<OidcDiscoveryDocument, String> {
-    build_discovery_document_for(issuer, mtls_base_url, false)
+    build_discovery_document_for(issuer, mtls_base_url, false, None)
 }
 
 /// [`build_discovery_document`], told whether the tenant this document
@@ -290,21 +367,32 @@ pub fn build_discovery_document_for(
     issuer: &str,
     mtls_base_url: Option<&str>,
     sensitive_scopes_enabled: bool,
+    tenant_id: Option<Uuid>,
 ) -> Result<OidcDiscoveryDocument, String> {
     let issuer = issuer.trim_end_matches('/');
-    let mtls_endpoint_aliases = build_mtls_aliases(mtls_base_url)?;
+    let mtls_endpoint_aliases = build_mtls_aliases(mtls_base_url, tenant_id)?;
     let mut doc = OidcDiscoveryDocument {
         issuer: issuer.to_string(),
-        authorization_endpoint: format!("{issuer}/oauth2/authorize"),
-        token_endpoint: endpoint!(issuer, "/oauth2/token"),
+        // `tenant_scoped` on everything that authenticates a client, and its
+        // doc comment is where the argument lives. UserInfo and the JWKS are
+        // bare on purpose: one resolves the tenant from its bearer token, the
+        // other is deployment-wide.
+        authorization_endpoint: tenant_scoped(format!("{issuer}/oauth2/authorize"), tenant_id),
+        token_endpoint: tenant_scoped(endpoint!(issuer, "/oauth2/token"), tenant_id),
         userinfo_endpoint: endpoint!(issuer, "/oauth2/userinfo"),
         jwks_uri: format!("{issuer}/oauth2/jwks"),
-        revocation_endpoint: endpoint!(issuer, "/oauth2/revoke"),
-        introspection_endpoint: endpoint!(issuer, "/oauth2/introspect"),
-        device_authorization_endpoint: endpoint!(issuer, "/oauth2/device_authorization"),
-        pushed_authorization_request_endpoint: endpoint!(issuer, "/oauth2/par"),
+        revocation_endpoint: tenant_scoped(endpoint!(issuer, "/oauth2/revoke"), tenant_id),
+        introspection_endpoint: tenant_scoped(endpoint!(issuer, "/oauth2/introspect"), tenant_id),
+        device_authorization_endpoint: tenant_scoped(
+            endpoint!(issuer, "/oauth2/device_authorization"),
+            tenant_id,
+        ),
+        pushed_authorization_request_endpoint: tenant_scoped(
+            endpoint!(issuer, "/oauth2/par"),
+            tenant_id,
+        ),
         require_pushed_authorization_requests: false,
-        end_session_endpoint: format!("{issuer}/oauth2/end_session"),
+        end_session_endpoint: tenant_scoped(format!("{issuer}/oauth2/end_session"), tenant_id),
         backchannel_logout_supported: true,
         backchannel_logout_session_supported: true,
         response_types_supported: vec!["code".into()],
@@ -356,7 +444,31 @@ pub fn build_discovery_document_for(
             "iat".into(),
             "nonce".into(),
             "email".into(),
+            // OIDC Core §5.1 — advertised because UserInfo releases it
+            // whenever it releases `email`, and a relying party reading
+            // `claims_supported` to decide whether it can trust an address
+            // needs to know the verification status is available.
+            "email_verified".into(),
             "preferred_username".into(),
+            // The `profile` scope's claims, all of which AXIAM can now hold
+            // and release — see `axiam_core::models::user::ProfileClaims` for
+            // where each is stored. Advertised because a relying party reads
+            // `claims_supported` to decide what it can ask for; a claim listed
+            // here is one AXIAM *can* assert, not one every subject has, and
+            // §5.3.2 governs the difference at release time.
+            "name".into(),
+            "given_name".into(),
+            "family_name".into(),
+            "middle_name".into(),
+            "nickname".into(),
+            "profile".into(),
+            "picture".into(),
+            "website".into(),
+            "gender".into(),
+            "birthdate".into(),
+            "zoneinfo".into(),
+            "locale".into(),
+            "updated_at".into(),
             "tenant_id".into(),
             "org_id".into(),
             // X7 — the three authentication-evidence claims. Advertised as
@@ -391,10 +503,17 @@ pub fn build_discovery_document_for(
         ],
         authorization_response_iss_parameter_supported: true,
         request_parameter_supported: false,
-        claims_parameter_supported: false,
+        // OIDC Core §5.5. `true` since AXIAM honours the `userinfo` member of
+        // the `claims` parameter — see `crate::claims_request`, which also
+        // documents the claims it will and will not unlock. Advertising this
+        // is what tells a relying party it may ask for a claim by name instead
+        // of asking for the scope that bundles it.
+        claims_parameter_supported: true,
         acr_values_supported: vec![ACR_SINGLE_FACTOR.into(), ACR_MULTI_FACTOR.into()],
         tls_client_certificate_bound_access_tokens: true,
         dpop_signing_alg_values_supported: vec!["PS256".into(), "ES256".into(), "EdDSA".into()],
+        code_challenge_methods_supported: vec!["S256".into()],
+        token_endpoint_auth_signing_alg_values_supported: crate::jose::permitted_algorithm_names(),
         mtls_endpoint_aliases,
     };
     if sensitive_scopes_enabled {
@@ -501,8 +620,79 @@ pub struct UserInfoResponse {
     pub sub: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    /// Whether [`Self::email`] has been verified (OIDC Core §5.1).
+    ///
+    /// Emitted only alongside the address, for [`Self::phone_number_verified`]'s
+    /// reason: it is a statement *about* a value, and making it about one the
+    /// relying party was not given asserts nothing it can act on.
+    ///
+    /// `email` scope promises both members, and the OIDF suite says so —
+    /// `VerifyScopesReturnedInUserInfoClaims` listed `email_verified` as
+    /// missing while `email` itself was released. AXIAM has always held the
+    /// fact (`User::email_verified_at`); it simply had nowhere to put it.
+    ///
+    /// `false` rather than omitted when the address is present and
+    /// unverified. AXIAM does run an email verification ceremony, so unlike
+    /// the telephone case this is a claim with a real ceremony behind it, and
+    /// "we have not verified this" is the answer a relying party needs in
+    /// order to decide whether to trust the address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email_verified: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_username: Option<String>,
+    /// OIDC Core §5.1 `name`, released under the `profile` scope.
+    ///
+    /// This and the eleven that follow are
+    /// `axiam_core::models::user::ProfileClaims`, which documents where each
+    /// one is stored. Every one is omitted rather than `null` when AXIAM holds
+    /// nothing: §5.3.2 says a claim the OP cannot assert is simply absent, and
+    /// a `null` would be AXIAM asserting the subject has no name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// OIDC Core §5.1 `given_name` — SCIM `name.givenName`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub given_name: Option<String>,
+    /// OIDC Core §5.1 `family_name` — SCIM `name.familyName`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family_name: Option<String>,
+    /// OIDC Core §5.1 `middle_name` — SCIM `name.middleName`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub middle_name: Option<String>,
+    /// OIDC Core §5.1 `nickname` — SCIM `nickName`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    /// OIDC Core §5.1 `profile` — SCIM `profileUrl`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// OIDC Core §5.1 `picture` — SCIM `photos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+    /// OIDC Core §5.1 `website` — `metadata.oidc.website`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    /// OIDC Core §5.1 `gender` — `metadata.oidc.gender`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gender: Option<String>,
+    /// OIDC Core §5.1 `birthdate` — `metadata.oidc.birthdate`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub birthdate: Option<String>,
+    /// OIDC Core §5.1 `zoneinfo` — SCIM `timezone`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zoneinfo: Option<String>,
+    /// OIDC Core §5.1 `locale` — SCIM `locale`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    /// OIDC Core §5.1 `updated_at` — seconds since the epoch.
+    ///
+    /// From `User::updated_at`, a column, and deliberately not from metadata:
+    /// it says when AXIAM last changed the row, which is not something a
+    /// provisioning client should be able to assert about AXIAM.
+    ///
+    /// A NumericDate, per §5.1's own table — an RFC 3339 string here is the
+    /// obvious and wrong thing, and `EnsureUserInfoUpdatedAtValid` is the
+    /// module that says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
     /// OIDC Core §5.1, released under the `phone` scope (X7 G8).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phone_number: Option<String>,
@@ -528,7 +718,23 @@ impl std::fmt::Debug for UserInfoResponse {
         f.debug_struct("UserInfoResponse")
             .field("sub", &self.sub)
             .field("email", &self.email)
+            .field("email_verified", &self.email_verified)
             .field("preferred_username", &self.preferred_username)
+            .field("name", &self.name)
+            .field("given_name", &self.given_name)
+            .field("family_name", &self.family_name)
+            .field("middle_name", &self.middle_name)
+            .field("nickname", &self.nickname)
+            .field("profile", &self.profile)
+            .field("picture", &self.picture)
+            .field("website", &self.website)
+            .field("gender", &self.gender)
+            // A date of birth is personal data in the GDPR sense, so it gets
+            // `phone_number`'s treatment rather than `given_name`'s.
+            .field("birthdate", &self.birthdate.as_ref().map(|_| "<redacted>"))
+            .field("zoneinfo", &self.zoneinfo)
+            .field("locale", &self.locale)
+            .field("updated_at", &self.updated_at)
             .field(
                 "phone_number",
                 &self.phone_number.as_ref().map(|_| "<redacted>"),
@@ -556,6 +762,157 @@ mod tests {
         build_discovery_document(ISSUER, mtls).expect("valid inputs build a document")
     }
 
+    const TENANT: Uuid = Uuid::from_u128(0x01a0813a_cd24_7632_9d6f_439f872d861e);
+
+    fn doc_for_tenant(mtls: Option<&str>) -> OidcDiscoveryDocument {
+        build_discovery_document_for(ISSUER, mtls, false, Some(TENANT))
+            .expect("valid inputs build a document")
+    }
+
+    /// The endpoints that authenticate a **client** all take a required
+    /// `tenant_id`, and `/oauth2/authorize` needs one for a request with no
+    /// principal — which is every browser arriving from a relying party.
+    /// Publishing them bare is what made the first conformance run unable to
+    /// complete a single authorization: a client that did exactly what OIDC
+    /// Discovery says to do got `400 missing field tenant_id`.
+    #[test]
+    fn every_client_authenticating_endpoint_carries_the_tenant() {
+        let doc = doc_for_tenant(None);
+        let expected = format!("?tenant_id={TENANT}");
+
+        for (name, url) in [
+            ("authorization_endpoint", &doc.authorization_endpoint),
+            ("token_endpoint", &doc.token_endpoint),
+            ("revocation_endpoint", &doc.revocation_endpoint),
+            ("introspection_endpoint", &doc.introspection_endpoint),
+            (
+                "device_authorization_endpoint",
+                &doc.device_authorization_endpoint,
+            ),
+            (
+                "pushed_authorization_request_endpoint",
+                &doc.pushed_authorization_request_endpoint,
+            ),
+            ("end_session_endpoint", &doc.end_session_endpoint),
+        ] {
+            assert!(
+                url.ends_with(&expected),
+                "{name} must name the tenant it belongs to, got {url}"
+            );
+        }
+    }
+
+    /// UserInfo resolves the tenant from the bearer token that authenticates
+    /// the call, and a JWKS is deployment-wide. Neither reads the parameter, so
+    /// neither should carry it — and the `issuer` must stay bare or it stops
+    /// matching the `iss` of every token AXIAM mints.
+    #[test]
+    fn userinfo_jwks_and_the_issuer_stay_bare() {
+        let doc = doc_for_tenant(Some(MTLS));
+
+        for (name, url) in [
+            ("issuer", &doc.issuer),
+            ("userinfo_endpoint", &doc.userinfo_endpoint),
+            ("jwks_uri", &doc.jwks_uri),
+            (
+                "mtls userinfo_endpoint",
+                &doc.mtls_endpoint_aliases
+                    .as_ref()
+                    .expect("aliases present")
+                    .userinfo_endpoint,
+            ),
+        ] {
+            assert!(
+                !url.contains("tenant_id"),
+                "{name} does not read tenant_id and must not carry it: {url}"
+            );
+        }
+    }
+
+    /// RFC 8705 §5 tells an mTLS client it MUST use these, so an alias that
+    /// omitted the tenant would be strictly worse than no alias at all: the
+    /// client would follow a URL that cannot work, with no conventional
+    /// endpoint left to fall back to.
+    #[test]
+    fn the_mtls_aliases_carry_the_tenant_too() {
+        let aliases = doc_for_tenant(Some(MTLS))
+            .mtls_endpoint_aliases
+            .expect("aliases present");
+        let expected = format!("?tenant_id={TENANT}");
+
+        for (name, url) in [
+            ("token", &aliases.token_endpoint),
+            ("revocation", &aliases.revocation_endpoint),
+            ("introspection", &aliases.introspection_endpoint),
+            (
+                "device_authorization",
+                &aliases.device_authorization_endpoint,
+            ),
+            ("par", &aliases.pushed_authorization_request_endpoint),
+        ] {
+            assert!(
+                url.starts_with(MTLS) && url.ends_with(&expected),
+                "the {name} alias must be on the mTLS host AND name the tenant, got {url}"
+            );
+        }
+    }
+
+    /// Naming no tenant must reproduce the document exactly as it was before
+    /// this change — that is what every multi-tenant deployment keeps getting,
+    /// and it is the property that makes the new setting safe to leave unset.
+    #[test]
+    fn a_document_that_names_no_tenant_carries_no_query_string() {
+        let doc = doc(Some(MTLS));
+        let json = serde_json::to_value(&doc).expect("document serialises");
+
+        for (key, value) in json.as_object().expect("an object") {
+            let Some(text) = value.as_str() else { continue };
+            assert!(
+                !text.contains('?'),
+                "{key} gained a query string on the tenantless document: {text}"
+            );
+        }
+    }
+
+    /// `tenant_scoped` appends with `?`, which is only correct because every
+    /// URL handed to it was built here from a bare issuer. This is the test
+    /// that fails if somebody gives one of them a query string of its own and
+    /// produces `...?a=1?tenant_id=...`, which parses as a path and points
+    /// nowhere.
+    #[test]
+    fn every_tenant_scoped_endpoint_has_exactly_one_query_string() {
+        let doc = doc_for_tenant(Some(MTLS));
+        let json = serde_json::to_value(&doc).expect("document serialises");
+
+        let mut urls: Vec<String> = json
+            .as_object()
+            .expect("an object")
+            .values()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        urls.extend(
+            json["mtls_endpoint_aliases"]
+                .as_object()
+                .expect("aliases object")
+                .values()
+                .filter_map(|v| v.as_str().map(str::to_owned)),
+        );
+
+        for url in urls {
+            assert!(
+                url.matches('?').count() <= 1,
+                "more than one query separator in {url}"
+            );
+            if url.contains('?') {
+                let parsed = url::Url::parse(&url).expect("a tenant-scoped endpoint parses");
+                let pairs: Vec<_> = parsed.query_pairs().collect();
+                assert_eq!(pairs.len(), 1, "exactly one parameter in {url}");
+                assert_eq!(pairs[0].0, "tenant_id");
+                assert_eq!(pairs[0].1, TENANT.to_string());
+            }
+        }
+    }
+
     #[test]
     fn discovery_document_has_required_fields() {
         let doc = doc(None);
@@ -566,6 +923,58 @@ mod tests {
         );
         assert!(doc.response_types_supported.contains(&"code".into()));
         assert!(doc.scopes_supported.contains(&"openid".into()));
+    }
+
+    /// The two members the first FAPI 2.0 conformance run reported NOT FOUND
+    /// (`fapi2-security-profile-final-discovery-end-point-verification`,
+    /// 2026-09-08). Pinned together because they failed together and because
+    /// each is a *required* member of a profile AXIAM already implements —
+    /// the code was conformant, the document describing it was not.
+    #[test]
+    fn discovery_advertises_pkce_and_assertion_signing_algorithms() {
+        let doc = doc(None);
+
+        assert_eq!(
+            doc.code_challenge_methods_supported,
+            ["S256"],
+            "authorize refuses `plain`, so S256 alone is the truthful list"
+        );
+        assert_eq!(
+            doc.token_endpoint_auth_signing_alg_values_supported,
+            crate::jose::permitted_algorithm_names(),
+            "the advertisement must be the verifier's own profile, not a copy of it"
+        );
+
+        // Advertising an assertion-signing profile is only required because a
+        // method that uses one is advertised. If that ever stops being true
+        // this test should be the thing that notices.
+        assert!(
+            doc.token_endpoint_auth_methods_supported
+                .contains(&"private_key_jwt".to_string()),
+            "the signing-alg member exists to serve private_key_jwt"
+        );
+    }
+
+    /// Both members must survive serialisation as JSON arrays. RFC 8414 gives
+    /// neither a default, so a client reads absence as "unsupported" — which
+    /// is exactly the failure this pair of members was added to fix, and would
+    /// be reintroduced by a stray `skip_serializing_if`.
+    #[test]
+    fn the_new_members_are_present_in_the_serialised_document() {
+        let json = serde_json::to_value(doc(None)).expect("document serialises");
+
+        for member in [
+            "code_challenge_methods_supported",
+            "token_endpoint_auth_signing_alg_values_supported",
+        ] {
+            let value = json
+                .get(member)
+                .unwrap_or_else(|| panic!("{member} must be present: {json}"));
+            let array = value
+                .as_array()
+                .unwrap_or_else(|| panic!("{member} must be a JSON array, got {value}"));
+            assert!(!array.is_empty(), "{member} must not be empty");
+        }
     }
 
     /// RFC 8705 §5 makes the member OPTIONAL, and a *present* one is an
@@ -766,8 +1175,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 
     // -- X7: discovery statics --------------------------------------------
 
-    /// The three new capability statements, and the one that is deliberately
-    /// **absent**. `request_uri_parameter_supported` defaults to `true`, which
+    /// The capability statements, and the one that is deliberately **absent**.
+    /// `request_uri_parameter_supported` defaults to `true`, which
     /// is the truthful answer — AXIAM does accept `request_uri`, for the PAR
     /// handles RFC 9126 defines — so publishing `false` would tell a
     /// conforming client not to use PAR, which FAPI 2.0 requires of it.
@@ -775,14 +1184,19 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     fn discovery_tells_the_truth_about_request_objects_and_claims() {
         let doc = doc(None);
         assert!(!doc.request_parameter_supported);
-        assert!(!doc.claims_parameter_supported);
+        assert!(doc.claims_parameter_supported);
 
         let json = serde_json::to_value(&doc).expect("the document serialises");
         assert_eq!(
             json["request_parameter_supported"],
             serde_json::json!(false)
         );
-        assert_eq!(json["claims_parameter_supported"], serde_json::json!(false));
+        // OIDC Core §5.5 is implemented for the `userinfo` member — see
+        // `crate::claims_request` — so this now publishes `true`. It is
+        // asserted on the serialised document as well as the struct because a
+        // relying party reads the JSON, and a `skip_serializing_if` added here
+        // by accident would make the capability invisible.
+        assert_eq!(json["claims_parameter_supported"], serde_json::json!(true));
         assert!(
             json.get("request_uri_parameter_supported").is_none(),
             "request_uri_parameter_supported must be omitted, not published false: \

@@ -74,10 +74,13 @@ fi
 echo "[register-user] activating (a REST-created user is PendingVerification)"
 axiam_api PUT "/api/v1/users/$USER_ID$TENANT_QS" '{"status":"Active"}' >/dev/null
 
-echo "[register-user] setting phone and address over SCIM"
+echo "[register-user] setting name, phone and address over SCIM"
 SCIM=$(axiam_api PATCH "/scim/v2/Users/$USER_ID$TENANT_QS" "$(jq -n '{
   schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
   Operations: [
+    { op: "replace", path: "name.givenName", value: "Conformance" },
+    { op: "replace", path: "name.familyName", value: "Tester" },
+    { op: "replace", path: "name.formatted", value: "Conformance Tester" },
     { op: "replace", path: "phoneNumbers",
       value: [ { value: "+1 555 0100", type: "mobile", primary: true } ] },
     { op: "replace", path: "addresses",
@@ -99,6 +102,93 @@ if ! jq -e '.id // .schemas' >/dev/null 2>&1 <<<"$SCIM"; then
   exit 1
 fi
 
+# Read the values back, because the check above cannot tell success from
+# failure and the line below claims success.
+#
+# `.id // .schemas` matches a SCIM *error* too — an error document carries
+# `schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"]` — and it matched
+# something worse than an error: a `200 OK` echoing the unchanged user, which
+# is what AXIAM returned while `user_patch_is_noop` treated a phone-and-address
+# PATCH as a no-op. The script printed "is Active with a phone number and an
+# address" for a user who had neither, and the conformance modules that
+# depended on it reported an AXIAM defect in the release gates instead.
+#
+# A separate GET rather than reading the PATCH response: it is the stored state
+# these tests actually depend on, and only a read-back can distinguish "written"
+# from "echoed".
+VERIFY=$(axiam_api GET "/scim/v2/Users/$USER_ID$TENANT_QS")
+GOT_PHONE=$(jq -r '.phoneNumbers[0].value // empty' <<<"$VERIFY")
+GOT_ADDRESS=$(jq -r '.addresses[0].formatted // .addresses[0].streetAddress // empty' <<<"$VERIFY")
+GOT_NAME=$(jq -r '.name.formatted // empty' <<<"$VERIFY")
+if [ -z "$GOT_NAME" ]; then
+  # `oidcc-claims-essential` asks for `name` as an ESSENTIAL claim, and
+  # UserInfo can only release what SCIM provisioned into metadata.scim.
+  echo "[register-user] SCIM stored no name.formatted — oidcc-claims-essential needs it" >&2
+  exit 1
+fi
+if [ -z "$GOT_PHONE" ] || [ -z "$GOT_ADDRESS" ]; then
+  echo "[register-user] the SCIM patch reported success and stored nothing." >&2
+  echo "[register-user]   phoneNumbers: ${GOT_PHONE:-<absent>}" >&2
+  echo "[register-user]   addresses:    ${GOT_ADDRESS:-<absent>}" >&2
+  echo "[register-user] oidcc-scope-address, -phone and -all cannot pass without these." >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# The rest of the OIDC Core §5.1 `profile` claims.
+# ---------------------------------------------------------------------------
+#
+# `oidcc-scope-profile` and `oidcc-scope-all` check UserInfo against the FULL
+# fifteen claims the `profile` scope promises, and warn listing every one that
+# is missing. SCIM's core schema has no `website`, `gender` or `birthdate`, and
+# AXIAM's SCIM PATCH does not yet accept `nickName`, `profileUrl`, `photos`,
+# `timezone`, `locale` or `name.middleName` — so all of them are provisioned
+# through the admin API into `metadata.oidc`, which
+# `axiam_core::models::user::ProfileClaims` reads as the fallback for every
+# claim. SCIM still wins wherever SCIM holds a value; nothing set above is
+# overwritten here.
+#
+# Read-modify-write rather than a bare PUT: `metadata` is replaced wholesale by
+# the update endpoint, so writing only the `oidc` bucket would delete the
+# `scim` one the block above just filled — taking the name, phone and address
+# with it.
+echo "[register-user] provisioning the remaining profile claims into metadata.oidc"
+CURRENT_META=$(axiam_api GET "/api/v1/users/$USER_ID$TENANT_QS" | jq -c '.metadata // {}')
+MERGED_META=$(jq -c --argjson cur "$CURRENT_META" -n '$cur + {
+  oidc: {
+    middle_name: "Quality",
+    nickname:    "Connie",
+    profile:     "https://conformance.example/profile/connie",
+    picture:     "https://conformance.example/profile/connie.png",
+    website:     "https://conformance.example/",
+    gender:      "other",
+    birthdate:   "1990-07-04",
+    zoneinfo:    "Europe/Rome",
+    locale:      "en-GB"
+  }
+}')
+axiam_api PUT "/api/v1/users/$USER_ID$TENANT_QS" \
+  "$(jq -nc --argjson m "$MERGED_META" '{metadata: $m}')" >/dev/null
+
+# Read back, for the reason the SCIM block reads back: a 200 that echoed the
+# unchanged user is indistinguishable from a write, and the line below claims
+# a write happened.
+PROFILE_VERIFY=$(axiam_api GET "/api/v1/users/$USER_ID$TENANT_QS")
+MISSING=""
+for claim in middle_name nickname profile picture website gender birthdate zoneinfo locale; do
+  got=$(jq -r --arg c "$claim" '.metadata.oidc[$c] // empty' <<<"$PROFILE_VERIFY")
+  [ -z "$got" ] && MISSING="$MISSING $claim"
+done
+# The SCIM bucket must have survived the wholesale metadata replacement.
+STILL_NAMED=$(jq -r '.metadata.scim.formatted // empty' <<<"$PROFILE_VERIFY")
+if [ -n "$MISSING" ] || [ -z "$STILL_NAMED" ]; then
+  echo "[register-user] the profile-claim write did not stick." >&2
+  [ -n "$MISSING" ] && echo "[register-user]   missing:$MISSING" >&2
+  [ -z "$STILL_NAMED" ] && echo "[register-user]   metadata.scim.formatted was lost in the merge" >&2
+  echo "[register-user] oidcc-scope-profile and -scope-all cannot pass without these." >&2
+  exit 1
+fi
+
 conf_write_local "CONFORMANCE_USER=$USER_EMAIL" "CONFORMANCE_USER_PASSWORD=$USER_PASS"
 
-echo "[register-user] $USER_EMAIL is Active with a phone number and an address"
+echo "[register-user] $USER_EMAIL is Active with the full profile, a phone number and an address"

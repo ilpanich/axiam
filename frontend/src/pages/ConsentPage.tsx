@@ -140,11 +140,17 @@ export function ConsentPage() {
         </p>
       )}
 
+      {/* Stable ids, following this codebase's convention of `id` on
+          interactive elements rather than a `data-testid` layer. They are the
+          only handles an OIDF conformance run has on this screen: the suite's
+          browser automation addresses elements by id, and the button labels are
+          localised (W5 shipped five locales), so text-matching would bind the
+          conformance rig to whichever locale the run happened to pick. */}
       <div className="mt-6 flex gap-3">
-        <button type="button" onClick={allow} disabled={saving}>
+        <button id="consent-allow" type="button" onClick={allow} disabled={saving}>
           {saving ? m.consentSaving : m.consentAllowAction}
         </button>
-        <button type="button" onClick={resume} disabled={saving}>
+        <button id="consent-deny" type="button" onClick={resume} disabled={saving}>
           {m.consentDenyAction}
         </button>
       </div>

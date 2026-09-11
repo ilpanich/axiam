@@ -86,7 +86,25 @@ path, rest = sys.argv[1], sys.argv[2:]
 src = open(path).read()
 for pair in rest:
     k, _, v = pair.partition("=")
-    line = f"{k}={v}"
+    # SINGLE-QUOTE the value, always.
+    #
+    # This file is `source`d, so an unquoted value goes through the shell's
+    # quote removal and word splitting. Most values here survive that —
+    # a client id is `[A-Za-z0-9_]` — but a JWKS does not:
+    #
+    #     written:  CLIENT_..._JWKS={"keys":[{"kty":"EC", ...}]}
+    #     sourced:  {keys:[{kty:EC, ...}]}
+    #
+    # Every double quote gone, and what reaches the plan template is a string
+    # that is no longer JSON. The private_key_jwt plan then fails to render with
+    # "Expecting property name enclosed in double quotes", which reads as a
+    # broken template and is a quoting bug two files away.
+    #
+    # Single quotes because the values are JSON and secrets: JSON strings never
+    # contain a raw single quote, and the `'"'"'` dance below handles one
+    # anyway rather than trusting that.
+    quoted = "'" + v.replace("'", "'\"'\"'") + "'"
+    line = f"{k}={quoted}"
     if re.search(rf"^{re.escape(k)}=.*$", src, flags=re.M):
         src = re.sub(rf"^{re.escape(k)}=.*$", line, src, flags=re.M)
     else:

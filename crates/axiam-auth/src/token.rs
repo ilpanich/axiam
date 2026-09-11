@@ -65,6 +65,51 @@ pub struct AccessTokenClaims {
     /// revocation tolerates this by treating the jti-to-session relationship
     /// as advisory.
     pub jti: String,
+    /// OIDC session identifier — the `session.id` this token was issued from.
+    ///
+    /// # Why this exists alongside `jti`
+    ///
+    /// The `jti` doc above states the intended contract: for a user-flow token
+    /// it *equals* the issuing session's id. Every login path honours it. The
+    /// OAuth2 authorization-code and refresh paths did not — they minted a
+    /// random `jti`, because a `jti` must be unique per token and a session
+    /// issues many — so `is_session_active` looked up a session that had never
+    /// existed and refused the token with "session revoked or expired".
+    ///
+    /// The effect was that **no OAuth2 access token could be used at
+    /// `/oauth2/userinfo`**, which is to say UserInfo did not work for any OIDC
+    /// client. Found by the OpenID Foundation suite: eight of the first eleven
+    /// Basic OP modules failed on `EnsureHttpStatusCodeIs200` against the
+    /// resource endpoint, all with the same 401.
+    ///
+    /// So the session travels in its own claim and `jti` goes back to being
+    /// what RFC 7519 §4.1.7 says it is — a unique id for *this token*. Readers
+    /// prefer `sid` and fall back to `jti`, which keeps every token issued
+    /// before this claim existed working exactly as it did.
+    ///
+    /// `None` for a token with no session behind it: client-credentials, an
+    /// RPT, a token exchange. Those are not weakened by the absence — there is
+    /// no session to revoke.
+    ///
+    /// Named `sid` to match OIDC Core §2's ID-token claim, which already
+    /// carries the same value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
+    /// OIDC Core §5.5 — UserInfo claims this grant asked for by name.
+    ///
+    /// An AXIAM private claim, prefixed because RFC 9068 §2.2 asks a JWT
+    /// access token not to collide with the registered space and §5.5 defines
+    /// no claim for carrying this. It is the *request*, resolved and filtered
+    /// at the authorization endpoint
+    /// (`axiam_oauth2::claims_request::userinfo_claims`) — never a value, and
+    /// never something UserInfo may widen: UserInfo reads it to decide whether
+    /// to release a claim it already holds.
+    ///
+    /// Absent for every token issued from a grant that sent no `claims`
+    /// parameter, which keeps every token AXIAM issued before §5.5 support
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axiam_requested_claims: Option<Vec<String>>,
     /// Token audience — `"axiam:user"` or `"axiam:m2m"`.
     ///
     /// `None` means the token was issued before Phase 4 and should be treated
@@ -515,6 +560,7 @@ pub struct AccessTokenSpec {
     org_id: Uuid,
     scope: Option<String>,
     jti: String,
+    sid: Option<String>,
     aud: String,
     expiry: Expiry,
     cnf: Option<CnfClaim>,
@@ -523,6 +569,7 @@ pub struct AccessTokenSpec {
     permissions: Option<Vec<RptPermission>>,
     ext_exchange: Option<ExtExchangeClaim>,
     client_id: Option<String>,
+    requested_userinfo_claims: Option<Vec<String>>,
 }
 
 impl AccessTokenSpec {
@@ -541,6 +588,7 @@ impl AccessTokenSpec {
             org_id,
             scope: None,
             jti,
+            sid: None,
             aud: aud.to_owned(),
             expiry: Expiry::FromConfig,
             cnf: None,
@@ -549,6 +597,7 @@ impl AccessTokenSpec {
             permissions: None,
             ext_exchange: None,
             client_id: None,
+            requested_userinfo_claims: None,
         }
     }
 
@@ -702,6 +751,30 @@ impl AccessTokenSpec {
         self
     }
 
+    /// Bind this token to the session it was issued from (`sid`).
+    ///
+    /// Call it wherever a session exists. Omitting it does not fail — it
+    /// produces a token nothing can revoke ahead of its expiry, which is
+    /// correct for client-credentials and wrong for anything a user signed in
+    /// for. See [`AccessTokenClaims::sid`].
+    #[must_use]
+    /// OIDC Core §5.5 — the UserInfo claims this grant asked for by name.
+    ///
+    /// An empty slice leaves the claim absent, so a grant that sent no
+    /// `claims` parameter produces a byte-identical token to one issued before
+    /// this method existed. That is the same property `cnf`, `ext` and
+    /// `client_id` each preserve, and it is what lets the OAuth2 paths call
+    /// this unconditionally.
+    pub fn requested_userinfo_claims(mut self, claims: &[String]) -> Self {
+        self.requested_userinfo_claims = (!claims.is_empty()).then(|| claims.to_vec());
+        self
+    }
+
+    pub fn session(mut self, session_id: Option<Uuid>) -> Self {
+        self.sid = session_id.map(|s| s.to_string());
+        self
+    }
+
     /// Expire `secs` after issuance instead of after
     /// `config.access_token_lifetime_secs`.
     #[must_use]
@@ -746,6 +819,7 @@ impl AccessTokenSpec {
             iat: now,
             exp,
             jti: self.jti.clone(),
+            sid: self.sid.clone(),
             aud: Some(self.aud.clone()),
             scope: self.scope.clone(),
             sub_kind: self.sub_kind,
@@ -755,6 +829,7 @@ impl AccessTokenSpec {
             cnf: self.cnf.clone(),
             ext: self.ext.clone(),
             client_id: self.client_id.clone(),
+            axiam_requested_claims: self.requested_userinfo_claims.clone(),
         })
     }
 
@@ -844,8 +919,13 @@ pub fn issue_access_token_enriched(
     cnf: Option<CnfClaim>,
     ext: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<String, AuthError> {
+    // No `sid`, deliberately. Every caller of this wrapper is a login path,
+    // and a login path passes the session's own id as `jti` — the contract
+    // `AccessTokenClaims::jti` documents. The reader falls back to `jti` when
+    // `sid` is absent, so these tokens resolve to the same session they always
+    // did, and no login path had to change for the OAuth2 fix.
     issue_access_token_for_client(
-        user_id, tenant_id, org_id, scopes, config, jti, aud, cnf, ext, None,
+        user_id, tenant_id, org_id, scopes, config, jti, aud, cnf, ext, None, None,
     )
 }
 
@@ -873,6 +953,7 @@ pub fn issue_access_token_for_client(
     cnf: Option<CnfClaim>,
     ext: Option<std::collections::BTreeMap<String, String>>,
     client_id: Option<&str>,
+    session_id: Option<Uuid>,
 ) -> Result<String, AuthError> {
     AccessTokenSpec::user(user_id, tenant_id, org_id, jti)
         .aud(aud)
@@ -880,6 +961,10 @@ pub fn issue_access_token_for_client(
         .cnf(cnf)
         .ext(ext)
         .client_id(client_id)
+        // The authorization-code and refresh paths both have a session and
+        // both pass it. Without this the token is unusable at every
+        // session-validated endpoint, UserInfo included.
+        .session(session_id)
         .issue(config)
 }
 
@@ -1254,12 +1339,58 @@ pub struct IdTokenClaims {
     /// logging out on their laptop asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sid: Option<String>,
-    /// Tenant ID (UUID string).
-    pub tenant_id: String,
-    /// Organization ID (UUID string).
-    pub org_id: String,
-    /// User email — included only when `email` scope is requested.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Tenant ID (UUID string) — **never emitted; retained to read old tokens**.
+    ///
+    /// # Why it stopped being emitted
+    ///
+    /// It is an AXIAM extension claim, and OIDC Core §5.4 places
+    /// scope-requested claims at the UserInfo endpoint for the authorization
+    /// code flow. The OIDF suite calls an unrequested claim out by name —
+    /// `EnsureIdTokenDoesNotContainNonRequestedClaims: id_token contains
+    /// non-requested claim 'tenant_id'` — in both the Basic OP and the FAPI 2.0
+    /// lanes, with the reasoning that an ID token is often forwarded as proof
+    /// of an authentication event, so anything in it travels further than the
+    /// relying party that asked for it.
+    ///
+    /// # Why this costs no relying party anything
+    ///
+    /// `sdks/CONTRACT.md` binds both identifiers to two other places, and
+    /// neither moves: an SDK resolves them "from the access-token claims
+    /// returned by login", and `UserInfo { sub, tenant_id, org_id, … }` still
+    /// carries both as always-present members. The ID token was a third copy
+    /// that nothing was specified to read.
+    ///
+    /// # Why the field survives
+    ///
+    /// `Option` + `default` so that `axiam_oauth2::logout` can still decode an
+    /// ID token minted before this change — an `id_token_hint` is presented by
+    /// a relying party holding a token AXIAM issued at some earlier point, and
+    /// a required member would make every one of those a decode failure at
+    /// exactly the moment somebody is trying to log out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// Organization ID (UUID string) — never emitted; see [`Self::tenant_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// User email — **never emitted**; `email` scope is answered at UserInfo.
+    ///
+    /// OIDC Core §5.4 again, and the suite states the consequence rather than
+    /// the rule: "as per the spec link for this response_type scope=email is a
+    /// short hand for 'please give me access to the user's email address in the
+    /// userinfo response'… it could be a bug in the server and may result in
+    /// user data being exposed in unintended ways if the relying party did not
+    /// expect the email to be in the id_token, and then uses the id_token to
+    /// provide proof of the authentication event to other parties."
+    /// (`EnsureIdTokenDoesNotContainEmailForScopeEmail`, oidcc-alternate-happy-flow.)
+    ///
+    /// `preferred_username` is deliberately NOT treated the same way. The suite
+    /// accepts it under `scope=profile` — it appears in a passing FAPI
+    /// happy-flow's supplied claim set and is not flagged — because §5.4 lets an
+    /// OP place profile claims in the ID token, and only `email` carries the
+    /// specific warning above.
+    ///
+    /// Retained, `Option` + `default`, for [`Self::tenant_id`]'s decode reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     /// Preferred username — included only when `profile` scope is requested.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1288,9 +1419,11 @@ pub struct IdTokenClaims {
 
 /// Issue a signed OIDC ID token (EdDSA / Ed25519).
 ///
-/// The token includes standard OIDC claims plus AXIAM-specific
-/// `tenant_id` and `org_id`. Profile/email claims are gated behind
-/// the corresponding scopes.
+/// The token carries standard OIDC claims only. `tenant_id`, `org_id` and
+/// `email` are deliberately NOT among them — see [`IdTokenClaims::tenant_id`]
+/// and [`IdTokenClaims::email`] for the OIDC Core §5.4 argument and for why no
+/// relying party loses anything. `preferred_username` is still gated behind
+/// `scope=profile`, which §5.4 permits.
 ///
 /// `evidence` (X7.2) contributes `auth_time`, `acr` and `amr`, each emitted
 /// only when it carries a value. Every caller in this wave passes
@@ -1300,11 +1433,8 @@ pub struct IdTokenClaims {
 #[allow(clippy::too_many_arguments)]
 pub fn issue_id_token(
     user_id: Uuid,
-    tenant_id: Uuid,
-    org_id: Uuid,
     client_id: &str,
     nonce: Option<&str>,
-    email: Option<&str>,
     username: Option<&str>,
     scopes: &[String],
     config: &AuthConfig,
@@ -1322,13 +1452,13 @@ pub fn issue_id_token(
         iat: now,
         nonce: nonce.map(str::to_owned),
         sid: session_id.map(|s| s.to_string()),
-        tenant_id: tenant_id.to_string(),
-        org_id: org_id.to_string(),
-        email: if has_scope("email") {
-            email.map(str::to_owned)
-        } else {
-            None
-        },
+        // Never emitted — see the three fields' own documentation. Left as
+        // explicit `None`s rather than dropped from the initialiser so that the
+        // decision is visible where the token is built, and so that adding a
+        // field to the struct still fails to compile here.
+        tenant_id: None,
+        org_id: None,
+        email: None,
         preferred_username: if has_scope("profile") {
             username.map(str::to_owned)
         } else {
@@ -1393,12 +1523,35 @@ pub struct ValidatedClaims(pub AccessTokenClaims);
 /// When the audit middleware (or any other middleware) validates a JWT,
 /// it stores a `CachedUserIdentity` so downstream extractors can skip
 /// re-verification.
+///
+/// # What "re-verification" means here, and what it does not
+///
+/// Signature, expiry and issuer are properties of the **token**, so checking
+/// them twice on one request buys nothing and this cache exists to skip the
+/// second check. Sender-constraining is not a property of the token: RFC 8705
+/// §3 and RFC 9449 §7.1 are statements about the connection or the proof that
+/// carried it *on this request*, and no cached answer can stand in for them.
+///
+/// That distinction was not made, and the consequence was a real hole: every
+/// route reached through `AuthenticatedUser` accepted a certificate-bound
+/// access token presented over a connection with no client certificate at all,
+/// because the extractor took the cached claims and never reached the code that
+/// checks `cnf`. It surfaced in the OIDF FAPI 2.0 lane, where
+/// `EnsureHttpStatusCodeIs4xx` called UserInfo through the plain front door
+/// with a bound token and was answered `200` and a full claim set.
+///
+/// [`Self::token`] exists so the extractor can complete the check it must not
+/// skip — a DPoP proof binds to the token's own hash (`ath`), so the raw string
+/// is needed and not just its claims.
 #[derive(Debug, Clone)]
 pub struct CachedUserIdentity {
     pub user_id: uuid::Uuid,
     pub tenant_id: uuid::Uuid,
     pub org_id: uuid::Uuid,
     pub claims: ValidatedClaims,
+    /// The encoded token these claims came from, for the sender-constraint
+    /// check the cache deliberately does not perform.
+    pub token: String,
 }
 
 /// Validate a JWT access token (signature, expiry, issuer) and return
@@ -1678,6 +1831,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             auth_code_lifetime_secs: 600,
             oauth2_issuer_url: String::new(),
             oauth2_mtls_base_url: String::new(),
+            oauth2_default_tenant_id: String::new(),
             sso_spa_origins: Vec::new(),
             email_verification_grace_period_hours: 24,
             password_reset_token_expiry_hours: 1,
@@ -1896,8 +2050,6 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     fn id_token_roundtrip() {
         let config = test_config();
         let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-        let org_id = Uuid::new_v4();
         let scopes = vec![
             "openid".to_owned(),
             "email".to_owned(),
@@ -1906,11 +2058,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 
         let token = issue_id_token(
             user_id,
-            tenant_id,
-            org_id,
             "test-client",
             Some("abc123"),
-            Some("user@example.com"),
             Some("jdoe"),
             &scopes,
             &config,
@@ -1924,11 +2073,55 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         assert_eq!(claims.sub, user_id.to_string());
         assert_eq!(claims.aud, "test-client");
         assert_eq!(claims.iss, "axiam-test");
-        assert_eq!(claims.tenant_id, tenant_id.to_string());
-        assert_eq!(claims.org_id, org_id.to_string());
         assert_eq!(claims.nonce.as_deref(), Some("abc123"));
-        assert_eq!(claims.email.as_deref(), Some("user@example.com"),);
         assert_eq!(claims.preferred_username.as_deref(), Some("jdoe"),);
+    }
+
+    /// OIDC Core §5.4 — the three claims the ID token no longer carries.
+    ///
+    /// Asserted over the RAW payload rather than over `IdTokenClaims`, and that
+    /// is the whole point: the struct still HAS all three fields so that an
+    /// `id_token_hint` minted before this change can be decoded, so reading
+    /// them back through it would answer `None` whether the claim was omitted
+    /// or merely deserialised into an `Option` — which is the shape of test
+    /// that let two defects survive on this branch already.
+    ///
+    /// The scopes here are `openid email profile`, so every one of the three
+    /// would have been emitted under the old rule. What must remain is
+    /// `preferred_username`: §5.4 permits profile claims in the ID token and
+    /// the OIDF suite accepts it there, so this test also pins that the change
+    /// stopped where it was supposed to.
+    #[test]
+    fn the_id_token_carries_no_unrequested_claim() {
+        let config = test_config();
+        let token = issue_id_token(
+            Uuid::new_v4(),
+            "test-client",
+            Some("abc123"),
+            Some("jdoe"),
+            &[
+                "openid".to_owned(),
+                "email".to_owned(),
+                "profile".to_owned(),
+            ],
+            &config,
+            None,
+            &IdTokenEvidence::NONE,
+        )
+        .unwrap();
+
+        let payload = payload_of(&token);
+        for absent in ["tenant_id", "org_id", "email"] {
+            assert!(
+                payload.get(absent).is_none(),
+                "id_token must not carry {absent}: {payload}"
+            );
+        }
+        assert_eq!(
+            payload.get("preferred_username").and_then(|v| v.as_str()),
+            Some("jdoe"),
+            "scope=profile still places preferred_username in the id_token: {payload}"
+        );
     }
 
     /// Decode a JWT payload as raw JSON, so a test can compare the *claim
@@ -1944,22 +2137,25 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 
     /// **T2.6 (unit half) — the golden claim set.**
     ///
-    /// The ID token every client receives today, minted through the signature
-    /// that now takes evidence, must carry exactly the members it carried
-    /// before: no `auth_time`, no `acr`, no `amr`, and no `null`-valued
-    /// placeholder for any of them. A `"auth_time": null` would be as visible
-    /// to a relying party's parser as a value, which is why the three claims
-    /// are `skip_serializing_if` and not merely `Option`.
+    /// The whole claim set, as one list, so that a member can neither appear
+    /// nor disappear unnoticed.
+    ///
+    /// Two properties in one assertion. X7.2's: `auth_time`, `acr` and `amr`
+    /// stay absent when no evidence is supplied, and absent means ABSENT — a
+    /// `"auth_time": null` is as visible to a relying party's parser as a
+    /// value, which is why those three are `skip_serializing_if` and not merely
+    /// `Option`. And OIDC Core §5.4's: `tenant_id`, `org_id` and `email` are
+    /// gone, even though the scopes here ask for `email` and `profile`. See
+    /// [`IdTokenClaims::tenant_id`] for why removing them costs no relying
+    /// party anything and [`IdTokenClaims::email`] for why
+    /// `preferred_username` stays.
     #[test]
     fn an_id_token_with_no_evidence_has_exactly_todays_claim_set() {
         let config = test_config();
         let token = issue_id_token(
             Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
             "test-client",
             Some("abc123"),
-            Some("user@example.com"),
             Some("jdoe"),
             &[
                 "openid".to_owned(),
@@ -1983,18 +2179,15 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             members,
             [
                 "aud",
-                "email",
                 "exp",
                 "iat",
                 "iss",
                 "nonce",
-                "org_id",
                 "preferred_username",
                 "sid",
                 "sub",
-                "tenant_id",
             ],
-            "the ID token claim set must be byte-for-byte what it was before X7.2"
+            "the ID token claim set is the OIDC Core §5.4 one and nothing else"
         );
     }
 
@@ -2011,10 +2204,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         let authenticated_at = 1_764_500_000_i64;
         let token = issue_id_token(
             Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
             "test-client",
-            None,
             None,
             None,
             &["openid".to_owned()],
@@ -2036,10 +2226,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         // And a partial set stays partial: an empty `amr` is absent, not `[]`.
         let partial = issue_id_token(
             Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
             "test-client",
-            None,
             None,
             None,
             &["openid".to_owned()],
@@ -2077,10 +2264,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         let mint = || {
             issue_id_token(
                 Uuid::new_v4(),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
                 "test-client",
-                None,
                 None,
                 None,
                 &["openid".to_owned()],
@@ -2108,11 +2292,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 
         let with_nonce = issue_id_token(
             Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
             "test-client",
             Some("my-nonce"),
-            None,
             None,
             &scopes,
             &config,
@@ -2123,10 +2304,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 
         let without_nonce = issue_id_token(
             Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
             "test-client",
-            None,
             None,
             None,
             &scopes,
@@ -2143,21 +2321,23 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         assert!(c2.nonce.is_none());
     }
 
+    /// `scope=email` places the address at UserInfo, never in the ID token.
+    ///
+    /// Both halves assert absence now. Kept as two cases rather than collapsed
+    /// into one, because "omitted whatever the scopes say" is a stronger claim
+    /// than "omitted when nobody asked", and the second half is what would
+    /// catch a future `claims`-parameter implementation leaking it back in
+    /// through the scope path.
     #[test]
     fn id_token_email_scope() {
         let config = test_config();
         let uid = Uuid::new_v4();
-        let tid = Uuid::new_v4();
-        let oid = Uuid::new_v4();
 
         // With email scope
         let token_with = issue_id_token(
             uid,
-            tid,
-            oid,
             "test-client",
             None,
-            Some("user@example.com"),
             None,
             &["openid".to_owned(), "email".to_owned()],
             &config,
@@ -2165,17 +2345,13 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             &IdTokenEvidence::NONE,
         )
         .unwrap();
-        let c = decode_id_token(&token_with, &config);
-        assert_eq!(c.email.as_deref(), Some("user@example.com"),);
+        assert!(payload_of(&token_with).get("email").is_none());
 
         // Without email scope
         let token_without = issue_id_token(
             uid,
-            tid,
-            oid,
             "test-client",
             None,
-            Some("user@example.com"),
             None,
             &["openid".to_owned()],
             &config,
@@ -2183,24 +2359,18 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             &IdTokenEvidence::NONE,
         )
         .unwrap();
-        let c = decode_id_token(&token_without, &config);
-        assert!(c.email.is_none());
+        assert!(payload_of(&token_without).get("email").is_none());
     }
 
     #[test]
     fn id_token_profile_scope() {
         let config = test_config();
         let uid = Uuid::new_v4();
-        let tid = Uuid::new_v4();
-        let oid = Uuid::new_v4();
 
         // With profile scope
         let token_with = issue_id_token(
             uid,
-            tid,
-            oid,
             "test-client",
-            None,
             None,
             Some("jdoe"),
             &["openid".to_owned(), "profile".to_owned()],
@@ -2215,10 +2385,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         // Without profile scope
         let token_without = issue_id_token(
             uid,
-            tid,
-            oid,
             "test-client",
-            None,
             None,
             Some("jdoe"),
             &["openid".to_owned()],
@@ -2506,6 +2673,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 
     fn claims_with_cnf(cnf: Option<CnfClaim>) -> AccessTokenClaims {
         AccessTokenClaims {
+            axiam_requested_claims: None,
             sub: Uuid::new_v4().to_string(),
             tenant_id: Uuid::new_v4().to_string(),
             org_id: Uuid::new_v4().to_string(),
@@ -2513,6 +2681,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             iat: 0,
             exp: i64::MAX,
             jti: Uuid::new_v4().to_string(),
+            sid: None,
             aud: Some(AUD_M2M.into()),
             scope: None,
             sub_kind: SubjectKind::OAuth2Client,

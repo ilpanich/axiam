@@ -112,6 +112,37 @@ pub struct AuthConfig {
     /// conventional endpoints, which is the one outcome this setting exists to
     /// prevent.
     pub oauth2_mtls_base_url: String,
+    /// The tenant a discovery document describes when the caller named none
+    /// (`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`). Empty by default.
+    ///
+    /// # What it fixes
+    ///
+    /// Every OAuth2 endpoint that authenticates a *client* — token, PAR,
+    /// introspection, revocation, device authorization, end-session — takes a
+    /// **required** `tenant_id` query parameter, and `/oauth2/authorize` needs
+    /// one for any request without a principal, which is every browser. The
+    /// discovery document published none of them, so a relying party that did
+    /// exactly what OIDC Discovery tells it to do — read the document, use the
+    /// URLs — got `400 missing field tenant_id` at the token endpoint. The
+    /// first OpenID Foundation conformance run could not complete a single
+    /// authorization for this reason.
+    ///
+    /// Setting this makes the **bare** document publish endpoint URLs carrying
+    /// the tenant, which is the deployment shape an OP is certified as: one
+    /// issuer, one tenant. A document fetched with an explicit `?tenant_id=`
+    /// carries that tenant instead, and this value is not consulted.
+    ///
+    /// # What it does NOT do
+    ///
+    /// It changes no endpoint's behaviour. A request that arrives without
+    /// `tenant_id` is refused exactly as it is today — this is a statement in a
+    /// document, not a fallback in a handler. That distinction is deliberate:
+    /// a default applied at the endpoint would silently give an
+    /// unparameterised request a tenant, and on a multi-tenant authorization
+    /// server the tenant is the isolation boundary. Leaving it empty is
+    /// therefore safe and is the correct setting for a deployment that serves
+    /// many tenants from one issuer.
+    pub oauth2_default_tenant_id: String,
     /// Extra browser origins this deployment will hand a **federation SSO
     /// handoff code** to (`AXIAM__AUTH__SSO_SPA_ORIGINS`; a list, set the same
     /// way as `AXIAM__SERVER__CORS_ALLOWED_ORIGINS`).
@@ -362,6 +393,25 @@ impl AuthConfig {
     /// — an empty alias base would produce relative alias URLs, which RFC 8705
     /// §5 does not permit and no client would resolve the way the operator
     /// intended.
+    /// The configured default tenant, when one is set and parses as a UUID.
+    ///
+    /// An unparseable value is treated as unset rather than as an error: this
+    /// is consulted while building a *public, unauthenticated* document, and a
+    /// deployment whose operator fat-fingered the UUID should serve the
+    /// document it served before the setting existed rather than 500 for every
+    /// relying party. The mis-set value is visible in the document by its
+    /// absence, and `mtls_base_url` takes the opposite view for the opposite
+    /// reason — a bad alias actively misdirects a client, a missing tenant only
+    /// fails to help one.
+    #[must_use]
+    pub fn default_tenant_id(&self) -> Option<uuid::Uuid> {
+        let trimmed = self.oauth2_default_tenant_id.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        uuid::Uuid::parse_str(trimmed).ok()
+    }
+
     pub fn mtls_base_url(&self) -> Option<&str> {
         let trimmed = self.oauth2_mtls_base_url.trim().trim_end_matches('/');
         (!trimmed.is_empty()).then_some(trimmed)
@@ -419,6 +469,10 @@ impl Default for AuthConfig {
             // `mtls_endpoint_aliases` from discovery. The correct default:
             // most deployments run one listener.
             oauth2_mtls_base_url: String::new(),
+            // Empty means "the bare document names no tenant", which is
+            // today's behaviour and the right default for a multi-tenant
+            // deployment. A single-tenant issuer sets it.
+            oauth2_default_tenant_id: String::new(),
             sso_spa_origins: Vec::new(),
             pepper: None,
             pepper_previous: None,

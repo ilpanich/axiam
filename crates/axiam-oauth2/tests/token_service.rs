@@ -86,6 +86,7 @@ fn test_config() -> AuthConfig {
         auth_code_lifetime_secs: 600,
         oauth2_issuer_url: String::new(),
         oauth2_mtls_base_url: String::new(),
+        oauth2_default_tenant_id: String::new(),
         sso_spa_origins: Vec::new(),
         email_verification_grace_period_hours: 24,
         password_reset_token_expiry_hours: 1,
@@ -121,6 +122,10 @@ enum ClientOutcome {
 /// `(client_id, expected_hash, new_hash)`.
 type UpgradeCall = (String, String, String);
 type UpgradeLog = Arc<Mutex<Vec<UpgradeCall>>>;
+
+/// Every `(tenant_id, session_id)` a test's `SessionRepository` was asked to
+/// invalidate.
+type InvalidateLog = Arc<Mutex<Vec<(Uuid, Uuid)>>>;
 
 // --- Service-account double (client-credentials for `sa_…` client ids) -------
 
@@ -282,6 +287,21 @@ impl AuthorizationCodeRepository for MockCodeRepo {
             Err(not_found())
         }
     }
+    /// A code this mock refuses to consume but still knows about is exactly
+    /// the replay case: `consume_ok == false` with a row present.
+    async fn replayed_session(
+        &self,
+        _t: Uuid,
+        _h: &str,
+        _c: &str,
+        _r: &str,
+    ) -> AxiamResult<Option<Uuid>> {
+        if self.consume_ok {
+            Ok(None)
+        } else {
+            Ok(self.get.as_ref().and_then(|c| c.session_id))
+        }
+    }
     async fn delete_expired(&self) -> AxiamResult<u64> {
         Ok(0)
     }
@@ -415,6 +435,26 @@ impl RefreshTokenRepository for MockRefreshRepo {
             RevokeMode::Ok => Ok(()),
             RevokeMode::NotFound => Err(not_found()),
             RevokeMode::Db => Err(AxiamError::Database("revoke failed".into())),
+        }
+    }
+    /// Shares `RevokeMode` with [`Self::revoke`] deliberately.
+    ///
+    /// Rotation calls this instead of `revoke` now, and every existing test
+    /// that asserts what a failing retirement does — `NotFound` becoming
+    /// "already consumed", a database error becoming a server error — is
+    /// asserting about rotation. Pointing both at the same knob keeps those
+    /// tests testing the path they were written for rather than one that is no
+    /// longer taken.
+    async fn supersede(
+        &self,
+        _t: Uuid,
+        _h: &str,
+        _grace_until: chrono::DateTime<chrono::Utc>,
+    ) -> AxiamResult<()> {
+        match self.revoke {
+            RevokeMode::Ok => Ok(()),
+            RevokeMode::NotFound => Err(not_found()),
+            RevokeMode::Db => Err(AxiamError::Database("supersede failed".into())),
         }
     }
     async fn revoke_all_for_client(&self, _t: Uuid, _c: &str) -> AxiamResult<()> {
@@ -580,6 +620,8 @@ fn make_auth_code(scopes: &[&str], challenge: Option<&str>) -> AuthorizationCode
         auth_time: None,
         acr: None,
         amr: vec![],
+        dpop_jkt: None,
+        requested_userinfo_claims: Vec::new(),
         expires_at: Utc::now() + chrono::Duration::minutes(10),
         used: false,
         created_at: Utc::now(),
@@ -612,7 +654,13 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
 /// carries no authentication evidence, exactly as before W4. A test that wants
 /// the honour lane's behaviour supplies one.
 #[derive(Clone, Default)]
-struct MockSessionRepo(Option<axiam_core::models::session::Session>);
+struct MockSessionRepo(
+    Option<axiam_core::models::session::Session>,
+    /// Every `(tenant_id, session_id)` this repo was asked to invalidate.
+    /// RFC 6749 §10.5 revocation is a side effect with no visible response, so
+    /// the only way to assert it happened is to record the call.
+    InvalidateLog,
+);
 
 impl axiam_core::repository::SessionRepository for MockSessionRepo {
     async fn create(
@@ -648,7 +696,8 @@ impl axiam_core::repository::SessionRepository for MockSessionRepo {
     ) -> AxiamResult<Option<axiam_core::models::session::Session>> {
         Ok(None)
     }
-    async fn invalidate(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<()> {
+    async fn invalidate(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
+        self.1.lock().unwrap().push((tenant_id, id));
         Ok(())
     }
     async fn consume(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<bool> {
@@ -725,6 +774,30 @@ fn build_with_upgrade_log(
         2_592_000,
     );
     (svc, log)
+}
+
+/// Same as [`build`], but hands back the log of session invalidations so a
+/// test can assert RFC 6749 §10.5 revocation happened (or did not).
+fn build_with_session_log(
+    client: ClientOutcome,
+    code: MockCodeRepo,
+    tenant: TenantOutcome,
+    refresh: MockRefreshRepo,
+) -> (Svc, InvalidateLog) {
+    let upgrade: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    let sessions: InvalidateLog = Arc::new(Mutex::new(Vec::new()));
+    let svc = TokenService::new(
+        MockClientRepo(client, upgrade.clone()),
+        MockSaRepo(SaOutcome::NotFound, upgrade),
+        code,
+        MockTenantRepo(tenant),
+        refresh,
+        MockUserRepo,
+        MockSessionRepo(None, sessions.clone()),
+        test_config(),
+        2_592_000,
+    );
+    (svc, sessions)
 }
 
 fn base_req(grant: &str) -> TokenRequest {
@@ -1104,6 +1177,123 @@ async fn auth_code_refresh_create_failure_is_server_error() {
             .error_code(),
         "server_error"
     );
+}
+
+// ---------------------------------------------------------------------------
+// RFC 9449 §10 — the authorization code's binding to a DPoP key
+// ---------------------------------------------------------------------------
+//
+// §10: "When a token request is received, the authorization server computes
+// the JWK Thumbprint of the proof-of-possession public key in the DPoP proof
+// and verifies that it matches the dpop_jkt parameter value in the
+// authorization request. If they do not match, it MUST reject the request."
+//
+// The four tests below are the whole truth table of that sentence, and the
+// fourth — an unbound code — is the non-regression claim: every client that
+// has never sent `dpop_jkt` must be answered exactly as it was before §10 was
+// implemented.
+
+/// The thumbprints are 43-character base64url, as `jwk_thumbprint` produces;
+/// nothing here parses them, but a test that used `"a"`/`"b"` would pass just
+/// as well against an implementation comparing prefixes.
+const KEY_A: &str = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
+const KEY_B: &str = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs";
+
+/// A request that arrived carrying a verified DPoP proof for `jkt`.
+///
+/// Built directly rather than by verifying a real proof because
+/// `TokenRequestContext::dpop_proof` is documented to carry a *conclusion*:
+/// what this file is testing is what the token service does with a thumbprint,
+/// and `dpop::verify_dpop_proof`'s own tests are what establish that the
+/// thumbprint is right.
+fn proof_for(jkt: &str) -> TokenRequestContext {
+    TokenRequestContext {
+        dpop_proof: Some(axiam_oauth2::dpop::VerifiedDpopProof {
+            jkt: jkt.into(),
+            jti: "jti-for-this-request".into(),
+            iat: Utc::now().timestamp(),
+        }),
+        ..TokenRequestContext::default()
+    }
+}
+
+fn code_bound_to(jkt: Option<&str>) -> AuthorizationCode {
+    let mut code = make_auth_code(&["profile"], None);
+    code.dpop_jkt = jkt.map(str::to_owned);
+    code
+}
+
+#[tokio::test]
+async fn a_code_bound_to_a_dpop_key_refuses_a_proof_for_a_different_key() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(code_bound_to(Some(KEY_A))),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &proof_for(KEY_B))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.error_code(),
+        "invalid_grant",
+        "a code pinned to another key is an unredeemable grant, not a bad proof: \
+         the proof presented here is perfectly well-formed"
+    );
+}
+
+#[tokio::test]
+async fn a_code_bound_to_a_dpop_key_refuses_a_token_request_with_no_proof_at_all() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(code_bound_to(Some(KEY_A))),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.error_code(),
+        "invalid_grant",
+        "an absent proof must not read as a matching one — that is the case a \
+         stolen code actually presents"
+    );
+}
+
+#[tokio::test]
+async fn a_code_bound_to_a_dpop_key_redeems_against_a_proof_for_that_key() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(code_bound_to(Some(KEY_A))),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &proof_for(KEY_A))
+        .await
+        .expect("the bound key was proven; the code must redeem");
+    assert_eq!(resp.scope.as_deref(), Some("profile"));
+}
+
+/// The non-regression claim, stated as a test rather than left to inference:
+/// a code carrying no binding redeems with no proof, exactly as every code
+/// issued before schema v58 does.
+#[tokio::test]
+async fn an_unbound_code_still_redeems_with_no_dpop_proof() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(code_bound_to(None)),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+        .await
+        .expect("an unbound code must be unaffected by RFC 9449 §10");
+    assert_eq!(resp.token_type, "Bearer");
 }
 
 // ---------------------------------------------------------------------------
@@ -3025,4 +3215,100 @@ async fn sec093_private_key_jwt_client_is_refused_when_no_verifier_is_configured
         .await
         .expect_err("no verifier configured must refuse, not fall back to the secret");
     assert_eq!(err.error_code(), "invalid_client");
+}
+
+// ---------------------------------------------------------------------------
+// RFC 6749 §10.5 — a replayed authorization code revokes what it minted
+// ---------------------------------------------------------------------------
+
+/// The denial half was always there. This is the revocation half: "the
+/// authorization server ... SHOULD revoke (when possible) all tokens previously
+/// issued based on that authorization code".
+///
+/// AXIAM's access token is a stateless JWT, so the thing it can revoke is the
+/// session the token's `sid` names — which every resource request already
+/// checks. Found by the conformance suites: `oidcc-codereuse-30seconds` and
+/// FAPI's `attempt-reuse-authorization-code-after-one-second` both replay a
+/// code and then present the FIRST access token at the resource endpoint,
+/// expecting 4xx.
+#[tokio::test]
+async fn a_replayed_authorization_code_revokes_its_session() {
+    let session_id = Uuid::new_v4();
+    let mut code = make_auth_code(&["openid"], None);
+    code.session_id = Some(session_id);
+
+    // `consume_ok: false` with a row present is the replay shape: the code
+    // exists and has already been spent.
+    let (svc, invalidations) = build_with_session_log(
+        ClientOutcome::Found(make_client(&["authorization_code"], &[])),
+        MockCodeRepo {
+            get: Some(code),
+            consume_ok: false,
+        },
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+
+    let err = svc
+        .exchange(client_tenant(), auth_code_req(None), &no_cert())
+        .await
+        .expect_err("a replayed code must still be denied");
+    assert_eq!(
+        err.error_code(),
+        "invalid_grant",
+        "the denial is the guarantee; revocation is the clean-up"
+    );
+
+    let logged = invalidations.lock().unwrap().clone();
+    assert_eq!(
+        logged,
+        vec![(client_tenant(), session_id)],
+        "the session the replayed code was issued from must be invalidated"
+    );
+}
+
+/// A code hash that names nothing revokes nothing — an attacker guessing codes
+/// must not be able to sign anybody out, and the response is the same
+/// `invalid_grant` either way.
+#[tokio::test]
+async fn an_unknown_code_revokes_nothing() {
+    let (svc, invalidations) = build_with_session_log(
+        ClientOutcome::Found(make_client(&["authorization_code"], &[])),
+        MockCodeRepo::none(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+
+    let err = svc
+        .exchange(client_tenant(), auth_code_req(None), &no_cert())
+        .await
+        .expect_err("an unknown code is refused");
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert!(
+        invalidations.lock().unwrap().is_empty(),
+        "an unknown code must not invalidate a session"
+    );
+}
+
+/// A code with no session behind it — client-credentials-shaped, or issued
+/// before sessions were recorded — is still denied, and there is simply
+/// nothing to revoke. It must not error.
+#[tokio::test]
+async fn a_replayed_code_with_no_session_is_denied_without_revoking() {
+    let (svc, invalidations) = build_with_session_log(
+        ClientOutcome::Found(make_client(&["authorization_code"], &[])),
+        MockCodeRepo {
+            get: Some(make_auth_code(&["openid"], None)), // session_id: None
+            consume_ok: false,
+        },
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+
+    let err = svc
+        .exchange(client_tenant(), auth_code_req(None), &no_cert())
+        .await
+        .expect_err("a replayed code must still be denied");
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert!(invalidations.lock().unwrap().is_empty());
 }

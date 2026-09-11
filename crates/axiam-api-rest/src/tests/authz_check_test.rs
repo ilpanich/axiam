@@ -59,6 +59,7 @@ async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
 fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedPrincipal {
     let session_id = Uuid::new_v4();
     let claims = ValidatedClaims(AccessTokenClaims {
+        axiam_requested_claims: None,
         sub: user_id.to_string(),
         tenant_id: tenant_id.to_string(),
         org_id: Uuid::nil().to_string(),
@@ -66,6 +67,7 @@ fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedPrincipal {
         iat: 0,
         exp: i64::MAX,
         jti: session_id.to_string(),
+        sid: None,
         aud: Some("axiam:user".into()),
         scope: None,
         sub_kind: SubjectKind::User,
@@ -93,6 +95,7 @@ fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedPrincipal {
 /// device or a service account holding a client-credentials token.
 fn make_machine(tenant_id: Uuid, service_account_id: Uuid) -> AuthenticatedPrincipal {
     let claims = ValidatedClaims(AccessTokenClaims {
+        axiam_requested_claims: None,
         sub: service_account_id.to_string(),
         tenant_id: tenant_id.to_string(),
         org_id: Uuid::nil().to_string(),
@@ -100,6 +103,7 @@ fn make_machine(tenant_id: Uuid, service_account_id: Uuid) -> AuthenticatedPrinc
         iat: 0,
         exp: i64::MAX,
         jti: Uuid::new_v4().to_string(),
+        sid: None,
         aud: Some("axiam:m2m".into()),
         scope: None,
         sub_kind: axiam_auth::token::SubjectKind::ServiceAccount,

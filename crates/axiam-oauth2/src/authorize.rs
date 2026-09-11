@@ -88,9 +88,11 @@ pub struct AuthorizeRequest {
     /// W4 — whether the query string carried an authentication-request
     /// parameter alongside a `request_uri` (plan §4.1, test T1.3).
     ///
-    /// RFC 9126 §4 does not mix the two forms, and the existing refusal
-    /// ([`crate::par::has_inline_params`]) already covers the seven original
-    /// parameters. The nine OIDC ones are refused **only on the honour lane**,
+    /// The seven original parameters (`response_type`, `redirect_uri`,
+    /// `scope`, `code_challenge` and friends) are **ignored** when duplicated
+    /// beside a `request_uri`, which is what RFC 9101 §6.3 requires and what
+    /// RFC 9126 §4 adopts by reference. The nine OIDC authentication-request
+    /// parameters are refused **only on the honour lane**,
     /// which is where the refusal is worth anything: there a browser adding
     /// `prompt=none` to somebody's pushed request would be changing what the
     /// request means, and on the `ignore` lane it would be adding a parameter
@@ -139,6 +141,30 @@ pub struct AuthorizeRequest {
     /// survives one interaction is answered rather than retried. See
     /// [`crate::honour`].
     pub login_hop_return_leg: bool,
+    /// RFC 9449 §10 — the DPoP key this authorization is pinned to, if any.
+    ///
+    /// Resolved by the handler, which is the only layer holding both of
+    /// §10's carriers: the `dpop_jkt` request parameter and the thumbprint of
+    /// a `DPoP` proof presented at the PAR endpoint. Snapshotted onto the
+    /// authorization code below and compared at redemption — the comparison
+    /// is the whole of §10.1, and it can only happen at the token endpoint,
+    /// which is why the value has to survive the round trip through the
+    /// browser rather than be re-derived there.
+    ///
+    /// Read from the *pushed* copy when there is one, never from the query
+    /// string beside a `request_uri`, for the reason `state` and `nonce` are:
+    /// a key the client pinned under client authentication must not be
+    /// substitutable by the browser that merely carries the handle.
+    pub dpop_jkt: Option<String>,
+    /// OIDC Core §5.5 — the UserInfo claims this request asked for by name.
+    ///
+    /// Resolved by the handler through [`crate::claims_request::userinfo_claims`],
+    /// which is where the raw `claims` parameter is parsed and filtered to what
+    /// AXIAM will release on a request alone. Snapshotted onto the
+    /// authorization code for the same reason `dpop_jkt` is: UserInfo runs on
+    /// a later request that holds nothing but an access token, so anything it
+    /// must honour has to survive the round trip rather than be re-derived.
+    pub requested_userinfo_claims: Vec<String>,
 }
 
 /// What an authorization request earned (W4, plan §4.2).
@@ -467,8 +493,16 @@ where
         let code_hash = hash_code(&raw_code);
 
         // 8. Store authorization code
-        let lifetime =
-            i64::try_from(self.code_lifetime_secs).expect("code_lifetime_secs exceeds i64::MAX");
+        //
+        // The lifetime is the deployment's, capped by the client's profile:
+        // FAPI 2.0 §5.3.2.1 caps an authorization code at 60 seconds, and
+        // AXIAM's default is 600. See `crate::fapi::auth_code_lifetime_secs`
+        // for why this is a per-client cap rather than a lower global default.
+        let lifetime = i64::try_from(crate::fapi::auth_code_lifetime_secs(
+            &client,
+            self.code_lifetime_secs,
+        ))
+        .expect("code_lifetime_secs exceeds i64::MAX");
         let expires_at = Utc::now() + chrono::Duration::seconds(lifetime);
         let _stored = self
             .code_repo
@@ -494,6 +528,13 @@ where
                 // no session to speak for.
                 acr,
                 amr: req.session_evidence.amr,
+                // RFC 9449 §10.1 — snapshotted for the same reason
+                // `code_challenge` is: it is a commitment the client made
+                // under client authentication, and the token request that
+                // redeems this code has to be checked against the commitment
+                // as it stood then, not against anything it sends now.
+                dpop_jkt: req.dpop_jkt,
+                requested_userinfo_claims: req.requested_userinfo_claims,
                 expires_at,
             })
             .await
@@ -673,6 +714,8 @@ mod tests {
                 auth_time: input.auth_time,
                 acr: input.acr,
                 amr: input.amr,
+                dpop_jkt: input.dpop_jkt,
+                requested_userinfo_claims: input.requested_userinfo_claims,
                 expires_at: input.expires_at,
                 used: false,
                 created_at: Utc::now(),
@@ -694,6 +737,17 @@ mod tests {
             _client_id: &str,
             _redirect_uri: &str,
         ) -> AxiamResult<AuthorizationCode> {
+            unimplemented!()
+        }
+        async fn replayed_session(
+            &self,
+            _tid: Uuid,
+            _hash: &str,
+            _client_id: &str,
+            _redirect_uri: &str,
+        ) -> AxiamResult<Option<Uuid>> {
+            // These mocks exercise `authorize`, which never redeems a code and
+            // so never reaches the replay path.
             unimplemented!()
         }
         async fn delete_expired(&self) -> AxiamResult<u64> {
@@ -781,6 +835,17 @@ mod tests {
         ) -> AxiamResult<AuthorizationCode> {
             unimplemented!()
         }
+        async fn replayed_session(
+            &self,
+            _tid: Uuid,
+            _hash: &str,
+            _client_id: &str,
+            _redirect_uri: &str,
+        ) -> AxiamResult<Option<Uuid>> {
+            // These mocks exercise `authorize`, which never redeems a code and
+            // so never reaches the replay path.
+            unimplemented!()
+        }
         async fn delete_expired(&self) -> AxiamResult<u64> {
             Ok(0)
         }
@@ -850,6 +915,8 @@ mod tests {
             id_token_hint: None,
             inline_authn_params_beside_request_uri: false,
             login_hop_return_leg: false,
+            dpop_jkt: None,
+            requested_userinfo_claims: Vec::new(),
         }
     }
 

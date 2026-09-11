@@ -242,6 +242,54 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         Ok(())
     }
 
+    async fn supersede(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+        grace_until: chrono::DateTime<chrono::Utc>,
+    ) -> AxiamResult<()> {
+        let token_hash_owned = token_hash.to_string();
+        let tenant_id_str = tenant_id.to_string();
+
+        // `expires_at < $grace_until` in the SET, not just in the WHERE: the
+        // trait's one-way rule. The WHERE decides *whether* this token is still
+        // live; the conditional in the SET decides that the write can only ever
+        // bring the expiry forward, so a caller who passes a distant instant
+        // shortens nothing and lengthens nothing either.
+        //
+        // `revoked = false` in the WHERE keeps the single-use race closed
+        // exactly as `revoke` does: two concurrent rotations of the same token
+        // cannot both find a live row, and the loser still gets NotFound.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "UPDATE oauth2_refresh_token SET \
+                 expires_at = IF expires_at < $grace_until THEN expires_at ELSE $grace_until END \
+                 WHERE tenant_id = $tenant_id \
+                   AND token_hash = $token_hash \
+                   AND revoked = false \
+                   AND expires_at > time::now() \
+                 RETURN AFTER",
+            )
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("token_hash", token_hash_owned.clone()))
+            .bind(("grace_until", grace_until))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        if rows.is_empty() {
+            return Err(DbError::NotFound {
+                entity: "oauth2_refresh_token".into(),
+                id: format!("token_hash={token_hash_owned}"),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+
     async fn revoke_all_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
         // Revoke all non-revoked tokens for the user atomically. Skip already-revoked
         // tokens so the returned count reflects only newly-revoked tokens.

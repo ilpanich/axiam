@@ -58,7 +58,8 @@ use crate::helpers::{CountRow, is_transaction_conflict, take_first_or_not_found}
 /// relying on how the deserializer treats an unexpected key.
 const CONSUME_FIELDS: &str = "meta::id(id) AS record_id, tenant_id, client_id, user_id, \
      code_hash, redirect_uri, scopes, code_challenge, code_challenge_method, nonce, \
-     session_id, auth_time, acr, amr, expires_at, used, created_at";
+     session_id, auth_time, acr, amr, dpop_jkt, requested_userinfo_claims, expires_at, used, \
+     created_at";
 
 /// Parse an optional stored UUID.
 ///
@@ -97,6 +98,16 @@ struct AuthCodeRow {
     acr: Option<String>,
     #[surreal(default)]
     amr: Option<Vec<String>>,
+    /// RFC 9449 §10 — the DPoP key this code is bound to (schema v58).
+    /// `#[surreal(default)]` because v58 adds no backfill: a code written
+    /// before it pinned no key, and absent is the value that says so.
+    #[surreal(default)]
+    dpop_jkt: Option<String>,
+    /// OIDC Core §5.5 — claims asked for by name (schema v59).
+    /// `#[surreal(default)]` because v59 adds no backfill: a code written
+    /// before it asked for none, and absent is the value that says so.
+    #[surreal(default)]
+    requested_userinfo_claims: Option<Vec<String>>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -125,6 +136,16 @@ struct AuthCodeRowWithId {
     acr: Option<String>,
     #[surreal(default)]
     amr: Option<Vec<String>>,
+    /// RFC 9449 §10 — the DPoP key this code is bound to (schema v58).
+    /// `#[surreal(default)]` because v58 adds no backfill: a code written
+    /// before it pinned no key, and absent is the value that says so.
+    #[surreal(default)]
+    dpop_jkt: Option<String>,
+    /// OIDC Core §5.5 — claims asked for by name (schema v59).
+    /// `#[surreal(default)]` because v59 adds no backfill: a code written
+    /// before it asked for none, and absent is the value that says so.
+    #[surreal(default)]
+    requested_userinfo_claims: Option<Vec<String>>,
     expires_at: DateTime<Utc>,
     used: bool,
     created_at: DateTime<Utc>,
@@ -156,6 +177,8 @@ impl AuthCodeRowWithId {
                 .amr
                 .map(|raw| Amr::decode_list(&raw))
                 .unwrap_or_default(),
+            dpop_jkt: self.dpop_jkt,
+            requested_userinfo_claims: self.requested_userinfo_claims.unwrap_or_default(),
             expires_at: self.expires_at,
             used: self.used,
             created_at: self.created_at,
@@ -199,6 +222,8 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
                  auth_time = $auth_time, \
                  acr = $acr, \
                  amr = $amr, \
+                 dpop_jkt = $dpop_jkt, \
+                 requested_userinfo_claims = $requested_userinfo_claims, \
                  expires_at = $expires_at, \
                  used = false",
             )
@@ -216,6 +241,8 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
             .bind(("auth_time", input.auth_time))
             .bind(("acr", input.acr))
             .bind(("amr", Amr::encode_list(&input.amr)))
+            .bind(("dpop_jkt", input.dpop_jkt))
+            .bind(("requested_userinfo_claims", input.requested_userinfo_claims))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -250,6 +277,8 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
                 .amr
                 .map(|raw| Amr::decode_list(&raw))
                 .unwrap_or_default(),
+            dpop_jkt: row.dpop_jkt,
+            requested_userinfo_claims: row.requested_userinfo_claims.unwrap_or_default(),
             expires_at: row.expires_at,
             used: row.used,
             created_at: row.created_at,
@@ -405,6 +434,52 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
         }
 
         row.try_into_auth_code().map_err(Into::into)
+    }
+
+    async fn replayed_session(
+        &self,
+        tenant_id: Uuid,
+        code_hash: &str,
+        client_id: &str,
+        redirect_uri: &str,
+    ) -> AxiamResult<Option<Uuid>> {
+        // `used = true` is the whole predicate that makes this a replay rather
+        // than a lookup: an unspent code never reaches here, because `consume`
+        // would have succeeded. `client_id` and `redirect_uri` are matched for
+        // the same reason `consume` matches them — a caller presenting the
+        // wrong pair is not the party this code was issued to, and must not be
+        // able to revoke the session it belongs to.
+        //
+        // Expiry is deliberately absent: a replayed code that has since
+        // expired still minted tokens, and those may still be live.
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE session_id FROM oauth2_auth_code \
+                 WHERE tenant_id = $tenant_id \
+                   AND code_hash = $code_hash \
+                   AND client_id = $client_id \
+                   AND redirect_uri = $redirect_uri \
+                   AND used = true",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("code_hash", code_hash.to_string()))
+            .bind(("client_id", client_id.to_string()))
+            .bind(("redirect_uri", redirect_uri.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<Option<String>> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .flatten()
+            .next()
+            .and_then(|s| Uuid::parse_str(&s).ok()))
     }
 
     async fn delete_expired(&self) -> AxiamResult<u64> {

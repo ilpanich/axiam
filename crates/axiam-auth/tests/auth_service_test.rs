@@ -70,6 +70,7 @@ fn test_config() -> AuthConfig {
         auth_code_lifetime_secs: 600,
         oauth2_issuer_url: String::new(),
         oauth2_mtls_base_url: String::new(),
+        oauth2_default_tenant_id: String::new(),
         sso_spa_origins: Vec::new(),
         email_verification_grace_period_hours: 24,
         password_reset_token_expiry_hours: 1,

@@ -327,6 +327,16 @@ static MIGRATIONS: &[Migration] = &[
         name: "oidc_sensitive_scopes_and_tenant_locale",
         sql: SCHEMA_V57,
     },
+    Migration {
+        version: 58,
+        name: "dpop_authorization_code_key_binding",
+        sql: SCHEMA_V58,
+    },
+    Migration {
+        version: 59,
+        name: "oidc_requested_userinfo_claims",
+        sql: SCHEMA_V59,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3203,9 +3213,74 @@ DEFINE FIELD IF NOT EXISTS oidc_default_locale ON TABLE security_settings
     TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v58 — RFC 9449 §10: the DPoP key an authorization code is bound to
+// -----------------------------------------------------------------------
+//
+// One optional column, no backfill and no index.
+//
+// **Why `oauth2_auth_code` and not `pushed_auth_request`.** The pushed request
+// carries the binding too, but its `params` column is `TYPE object FLEXIBLE`,
+// so a new key inside it needs no migration at all. The authorization code is
+// `SCHEMAFULL`, and this is the row the token endpoint reads at redemption —
+// which is the only moment RFC 9449 §10.1 actually compares anything.
+//
+// **Why no backfill and why `option<string>`.** A code written before this
+// migration was issued by a client that could not have pinned a key, so the
+// honest value is absent, and absent is what makes the token endpoint skip
+// the comparison. Writing a placeholder would instead bind every in-flight
+// code to a key nobody holds, and every authorization mid-flight across the
+// deploy would fail to redeem.
+//
+// **Why no index.** The column is never a search key. It is read from a row
+// already located by `code_hash`, whose unique index does the work.
+const SCHEMA_V58: &str = "\
+DEFINE FIELD IF NOT EXISTS dpop_jkt ON TABLE oauth2_auth_code TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v59 — OIDC Core §5.5: claims this authorization asked for by name
+// -----------------------------------------------------------------------
+//
+// One optional array, no backfill, no index — v58's shape and v58's reasons.
+//
+// `option<array>` rather than `array DEFAULT []`: a code written before this
+// migration asked for no claims by name, and absent says that exactly. A
+// `DEFAULT []` would be the same statement in a form that requires every
+// existing row to be rewritten to make it.
+const SCHEMA_V59: &str = "\
+DEFINE FIELD IF NOT EXISTS requested_userinfo_claims ON TABLE oauth2_auth_code \
+    TYPE option<array>;
+DEFINE FIELD IF NOT EXISTS requested_userinfo_claims.* ON TABLE oauth2_auth_code TYPE string;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v58 is one additive, optional column. The three things that would make
+    /// it dangerous are the three things asserted absent: a backfill (which
+    /// would bind live codes to a key nobody holds), a `NOT NULL`-shaped
+    /// type (which would make every pre-migration code unreadable), and an
+    /// index (which this column has no query to serve).
+    #[test]
+    fn v58_binds_the_authorization_code_to_a_dpop_key_additively() {
+        assert!(
+            SCHEMA_V58.contains("dpop_jkt ON TABLE oauth2_auth_code TYPE option<string>"),
+            "v58 must define dpop_jkt as an optional column on oauth2_auth_code"
+        );
+        for forbidden in ["UPDATE", "DEFINE INDEX", "REMOVE", "ASSERT", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V58.contains(forbidden),
+                "v58 must stay additive; found {forbidden}"
+            );
+        }
+        assert_eq!(
+            SCHEMA_V58.matches("DEFINE FIELD").count(),
+            1,
+            "v58 defines exactly one column"
+        );
+    }
 
     /// W7 — v57's `user` columns are additive, optional, and carry no
     /// backfill. A migration that rewrote rows would be rewriting personal
@@ -3366,9 +3441,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&57),
-            "v57 is this wave's migration (v54 belongs to W1, v55 to W2, v56 to W3; \
-             W5 deliberately added none)"
+            Some(&59),
+            "v59 is the newest migration (OIDC Core §5.5 requested claims). This \
+             assertion is a tripwire, not bookkeeping: bumping it is how a new \
+             migration is declared deliberate rather than merged in by accident."
         );
     }
 

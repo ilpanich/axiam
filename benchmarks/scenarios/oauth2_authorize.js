@@ -67,28 +67,11 @@
 // `docs/admin/browser-login-hop.md` for what the hop adds.
 //
 // ============================================================================
-// STATUS: PENDING — statically checked against the handlers, never executed.
-//
-// Excluded from `scenario=all` auto-discovery by `runner/run-benchmark.sh`'s
-// `PENDING_SCENARIOS` list, for exactly the reason `scim_provisioning.js`'s
-// header gives: "matches on inspection" is not "runs green", and un-pending an
-// unrun scenario risks turning a skip into a red matrix cell — the failure the
-// list exists to prevent.
-//
-// Checked statically against `crates/axiam-api-rest/src/server.rs` (the route
-// is `GET /oauth2/authorize`, inside the `/oauth2` scope, with no rate-limit
-// governor — unlike `/token`, `/revoke` and `/introspect`), against
-// `AuthorizeQuery` (`handlers/oauth2.rs`: `response_type`, `client_id`,
-// `redirect_uri`, `scope`, `state` are the five this sends; every other member
-// is optional and omitted), against the success branch (`HttpResponse::Found()`
-// with a `Location` carrying `code`, `state` and `iss`), and against
-// `runner/seed.sh`'s client registration (`authorization_code` is in
-// `grant_types`, `http://localhost/cb` in `redirect_uris`, `openid` in
-// `scopes`).
-//
-// TO CLOSE THIS OUT: run it once, supervised, with
-// `BENCH_ENABLE_PENDING_SCENARIOS=1`. If it passes, remove it from
-// `PENDING_SCENARIOS` and delete this block. No code change is expected.
+// RUN HISTORY: first executed 2026-09-11 and PASSED on that first run
+// (ok=636, p95=21ms), which is what removed it from PENDING_SCENARIOS. The
+// three design choices argued below — no code redemption, no PKCE, bearer
+// authentication rather than the W3 browser hop — were all confirmed by that
+// run and are unchanged.
 // ============================================================================
 import { cfg, baseUrl, loadStages, thresholds, tlsOptions, requireSeed } from './lib/config.js';
 import { doOp } from './lib/metrics.js';

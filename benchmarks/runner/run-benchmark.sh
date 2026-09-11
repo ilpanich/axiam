@@ -279,26 +279,21 @@ skip_oauth2() {
 # inverted. Remove a scenario from this list in the same commit that lands
 # the LAST thing it was pending on — not the first.
 #
-# R5.2 / B4: scim_provisioning.js — the reason CHANGED AGAIN, so read this
-# before assuming it is still blocked on the same thing. `axiam-scim` HAS
-# landed (R3.1) and `/scim/v2` now answers; the R5.2 tail gave it a real
-# `scim_per_min` bucket, so rl_prod_check.py checks the family for real; and
-# seed.sh now provisions the principal that was missing — a GLOBAL bench-scim
-# role holding `scim:provision`, assigned to the bench user, with the scenario
-# minting a user token instead of client_credentials. (That took two changes,
-# not the one previously recorded here: `scim:provision` is an RBAC permission,
-# not an OAuth2 scope, and a client_credentials token's service_account subject
-# can hold no RBAC permission at all. The scenario header explains both.)
+# 2026-09-11: scim_provisioning.js and oauth2_authorize.js were BOTH removed
+# from this list, each having been run once under BENCH_ENABLE_PENDING_SCENARIOS=1
+# as their headers instructed. `oauth2_authorize` passed on its first execution
+# (ok=636, p95=21ms).
 #
-# It stays listed for ONE reason, and it is not a code reason: the scenario has
-# still never executed against a live server, and no benchmark cell was run in
-# the pass that fixed the seeding. Its payloads were checked statically against
-# the real SCIM DTOs and match, but "matches on inspection" is not "runs green",
-# and un-pending it unrun would risk converting a skip into a red matrix cell —
-# exactly what this list exists to prevent.
+# `scim_provisioning` did NOT, and that is the whole reason this list exists:
+# its first-ever run failed 20 of 907 operations, every one a concurrent
+# `PATCH /scim/v2/Users/{id}` losing a SurrealDB optimistic-concurrency race and
+# reaching the client as HTTP 500 — for a write the engine itself labelled "this
+# transaction can be retried". Nothing retried it. A scenario that had been
+# checked statically against the real DTOs and matched was still hiding a live
+# server defect, which is exactly why "matches on inspection" was never allowed
+# to count as "runs green" here. Fixed in axiam-db (`retry_on_write_conflict`);
+# re-run clean at 470/470 checks with zero SCIM 500s in the server log.
 #
-# To close: run it once with BENCH_ENABLE_PENDING_SCENARIOS=1. If it passes,
-# drop it from the list in that same commit.
 # R2.4: oauth2_client_credentials_reactor_hook.js — pending two things, in
 # order (an admin-session helper for k6 scenarios, then the lapin reactor
 # transport / a real no-op reactor process); see that file's own header for
@@ -316,18 +311,7 @@ skip_oauth2() {
 # publish than the old one, not a better one: it looks like a hook cost and is
 # actually a timeout. Blocker 1 (no admin-session helper in lib/auth.js) is
 # untouched. So this stays listed, for two reasons that are both still real.
-# 2026-09-11: oauth2_authorize.js — the OpenID Connect authorization endpoint,
-# unmeasured until the Basic OP waves (W1–W7) made it the largest body of new
-# server work in the release. Pending for the ONE reason scim_provisioning.js is
-# pending, and no other: it has never executed against a live server. Its query
-# parameters, expected `302`, bearer authentication and the seed fixtures it
-# relies on were all checked statically against the handlers and the seed (the
-# scenario header lists exactly what was checked against what), and every one
-# matches — but "matches on inspection" is not "runs green".
-#
-# To close: run it once with BENCH_ENABLE_PENDING_SCENARIOS=1. If it passes,
-# drop it from the list in that same commit.
-PENDING_SCENARIOS="scim_provisioning.js oauth2_client_credentials_reactor_hook.js oauth2_authorize.js"
+PENDING_SCENARIOS="oauth2_client_credentials_reactor_hook.js"
 
 # N1: scenarios that are complete and runnable but are NOT default-matrix
 # cells — they are rungs of a labelled sweep whose meaning comes from the knob

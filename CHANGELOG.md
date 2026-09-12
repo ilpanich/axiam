@@ -138,13 +138,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   published. This is the SDK half of a rule that has been normative since
   contract 1.40 and was implemented by nobody.
 
-  §21.3 rule 2 gains the clause that was implicit in it: an SDK MUST NOT
-  append, strip or reorder an alias's query component. AXIAM's aliases carry
-  the tenant that way, so an SDK that knows its own tenant and appends
-  `?tenant_id=` to endpoints it read from discovery produces
-  `…?tenant_id=A?tenant_id=A` — which parses as a path and points nowhere, and
-  only on a two-listener deployment, which is the deployment the rule exists
-  for.
+  §21.3 rule 2 gains the clause that was implicit in it: an SDK preserves an
+  alias's query component rather than appending to it. AXIAM's aliases carry
+  the tenant that way, so an SDK that appends its own `?tenant_id=` produces a
+  duplicate the server cannot resolve to one tenant, and one that rebuilds the
+  URL from host and path drops whatever else the deployment put there.
+  Displacing the tenant with the one the caller authenticated against is
+  correct and is explicitly not what the clause forbids — the multi-tenant
+  document names no tenant and the client supplies its own. Either way the
+  failure shows up only on a two-listener deployment, which is the deployment
+  the rule exists for.
 
   §21.3.1 publishes the three documents every SDK pins — the member present,
   absent, and malformed — inside `CONTRACT.md` itself rather than as a fourth

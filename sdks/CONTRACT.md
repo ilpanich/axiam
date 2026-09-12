@@ -3976,17 +3976,29 @@ wrongly:
    including for a token minted at an alias endpoint. An SDK that derives an
    expected issuer from the *host it called* will reject every token it obtains
    over mTLS.
-4. **An alias is used verbatim** (contract 1.43). AXIAM's aliases carry the
-   tenant as a query component — `https://mtls.example/oauth2/token?tenant_id=…`
-   — because every endpoint that authenticates a client requires one, and RFC
-   6749 §3.1 and §3.2 require a client to retain a query component when adding
-   parameters of its own. An SDK MUST NOT append, strip or reorder that
-   component. In particular an SDK that knows its own tenant and appends
-   `?tenant_id=` to endpoints it reads from discovery MUST stop doing so for an
-   alias, or it produces `…?tenant_id=A?tenant_id=A`, which parses as a path
-   and points nowhere. This clause states what AXIAM already publishes; it was
-   implicit in rule 2 and is written out because it is the one way to implement
-   the rule that fails only on a two-listener deployment, which is the
+4. **An alias's query component is preserved, not appended to** (contract
+   1.43). AXIAM's aliases carry the tenant as a query component —
+   `https://mtls.example/oauth2/token?tenant_id=…` — because every endpoint
+   that authenticates a client requires one, and RFC 6749 §3.1 and §3.2 require
+   a client to retain a query component when adding parameters of its own.
+
+   So an SDK that knows its own tenant and **appends** `?tenant_id=` to an
+   endpoint it read from discovery produces `…?tenant_id=A&tenant_id=B`, which
+   the server cannot deserialise into one tenant; and one that rebuilds the URL
+   from the host and path **strips** whatever else the deployment put there.
+   Neither is permitted.
+
+   **Replacing the `tenant_id` value with the one the caller actually
+   authenticated against is correct and expected**, and is not what this clause
+   forbids. The single-tenant document names a tenant and a client targeting it
+   agrees; the multi-tenant document names none, and the client supplies its
+   own. An SDK doing this MUST displace the existing pair rather than add a
+   second, and MUST leave every other parameter as the server wrote it —
+   including its encoding, which is not the SDK's to normalise.
+
+   This clause states what AXIAM already publishes and what a correct client
+   already does. It is written out because it is the one way to get rule 2
+   wrong that fails **only on a two-listener deployment**, which is the
    deployment the rule exists for.
 
 The discovery cache keying of §12 rule 6 is unaffected: aliases are part of the
@@ -4031,7 +4043,7 @@ certificate**:
 
 | Call | Host used |
 |---|---|
-| token, revocation, introspection, device authorization, PAR, UserInfo | `mtls.iam.example.test` — the alias, verbatim, query component intact |
+| token, revocation, introspection, device authorization, PAR, UserInfo | `mtls.iam.example.test` — the alias, with its query component intact (a `tenant_id` may be displaced by the caller's own, never duplicated or dropped) |
 | authorization, end session, JWKS | `iam.example.test` — never aliased, never synthesised |
 | `iss` validation | compared against `https://iam.example.test`, unchanged |
 

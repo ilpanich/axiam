@@ -1134,12 +1134,21 @@ and a deployment that leaves it off collects what it collects today. Open
 > `crates/axiam-oauth2/src/oidc.rs` — the table in §9.1 is the result, and the
 > fourth row is the finding: an alias carries the tenant as a query component
 > and rule 2 never said what an SDK owes that. So §21.3 rule 2 gains **clause
-> 4** — an alias is used verbatim, no appending, stripping or reordering — and
-> the contract bumps to **1.43**. The failure it prevents is specific and
-> nasty: an SDK that knows its own tenant and appends `?tenant_id=` to
-> discovery endpoints produces `…?tenant_id=A?tenant_id=A`, which parses as a
-> path, and it does so **only on a two-listener deployment**, which is the
-> deployment the rule exists for.
+> 4** and the contract bumps to **1.43**.
+>
+> **The first draft of that clause said "verbatim", and was wrong.** Reading
+> the Rust SDK — which has implemented rule 2 since contract 1.40 — is what
+> caught it: that SDK *displaces* the alias's `tenant_id` with the one the
+> caller actually authenticated against, and it has to, because the
+> multi-tenant document names no tenant and the client supplies its own. A
+> "verbatim" clause would have forbidden the one behaviour a multi-tenant
+> deployment requires, and eleven SDK PRs would have implemented it. The clause
+> now names the two real failures — **appending** (a duplicate the server
+> cannot resolve to one tenant) and **stripping** (rebuilding the URL from host
+> and path, dropping whatever else the deployment put there) — and says
+> outright that displacing the value is correct. This is exactly what the
+> plan's "confirm the rule's wording is implementable as written" step is for,
+> and it only works if the confirming is done against an implementation.
 >
 > **The vectors live in `CONTRACT.md` itself** (§21.3.1), not in a new
 > `sdks/*.json`. The plan left the location open; this is the reason for the

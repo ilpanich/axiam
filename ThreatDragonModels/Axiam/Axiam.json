@@ -1,5 +1,5 @@
 {
-  "version": "2.11.0",
+  "version": "2.12.0",
   "summary": {
     "title": "Axiam",
     "owner": "ilpanich",
@@ -20,7 +20,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.11.0",
+        "version": "2.12.0",
         "cells": [
           {
             "position": {
@@ -587,6 +587,17 @@
                   "mitigation": "Fixed in 1.0.0-beta01: deletion overwrites username, email and metadata with values derived from the row's own id and erases what lives outside the row \u2014 WebAuthn credentials, federation identity links, password history \u2014 the same residue the GDPR Art. 17 purge clears, so an administrator's Delete and a data subject's erasure request do not leave different residue. The freed identifiers make a later registration a genuinely new account (pinned by a delete-then-recreate test). The row survives holding only its id, because append-only audit entries name their actor by id; only the Art. 17 pipeline additionally pseudonymises audit references and produces an erasure proof \u2014 a distinction docs/compliance/gdpr-compliance.md now states.",
                   "modelType": "STRIDE",
                   "number": 187
+                },
+                {
+                  "id": "eb8d0b01-f4fd-4c2c-af79-f456bd9da9ce",
+                  "title": "A personal-data column added to `user` survives erasure and never reaches the Art. 15 export, and a SCIM patch that erases it is read as a no-op",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "Both erasure statements \u2014 the Art. 17 pipeline's `anonymize_user` and the administrator's tombstone behind `DELETE /api/v1/users/{id}` (T-187) \u2014 and the export job's `profile` section write **explicit column lists**. A column none of them names survives erasure and never appears in an export. Latent rather than live: the columns it would have stranded, `phone_number` and `address`, are added by the same release, and the plan assumed user-row fields were erased \"for free\"; an erased subject would have held a telephone number and a postal address indefinitely, with the account hidden from the UI \u2014 what the tombstone's own documentation calls retention with the UI hidden, not erasure. Beside it, `user_patch_is_noop` had never been taught the two columns, so a SCIM PATCH that set or *removed* only those answered `200` with the unchanged resource and wrote nothing \u2014 an erasure that silently does not happen.",
+                  "mitigation": "All three paths name the columns, and the tests erase a subject who has both and read the row back rather than inspecting the SQL, so a fourth erasure path cannot pass by sharing a statement. The no-op list is destructured from `UpdateUser`, so a field added to that struct fails to compile here instead of silently becoming unwritable, and each of its seven fields is asserted on its own rather than in one lump \u2014 a lump assertion still passes with a field missing, which is precisely how this was missed the first time. The three-way distinction is asserted too: `None` means the PATCH did not mention the attribute, `Some(None)` means write NULL \u2014 the erasure a data subject asked for \u2014 and confusing the two is an erasure that does not happen; `remove` and an empty array both erase, because RFC 7644 \u00a73.5.2.3 spells \"replace with nothing\" that way, and `phoneNumbers` and `addresses` are removable unlike `emails`, deliberately, since a provisioning client sending `remove` is a subject asking for a number or an address to stop being held. `docs/compliance/gdpr-compliance.md` \u00a71 and \u00a72 carry the warning to whoever adds the next such column; the residual is that the three lists are still hand-maintained, and the compile-time guard covers only the SCIM one.",
+                  "modelType": "STRIDE",
+                  "number": 261
                 }
               ]
             }
@@ -876,6 +887,17 @@
                   "mitigation": "Not addressed by AXIAM itself. Deployment guidance: encrypt backups at rest, restrict snapshot IAM, and treat backup media as in-scope for the same access review as the live cluster.",
                   "modelType": "STRIDE",
                   "number": 18
+                },
+                {
+                  "id": "2224a0ca-7d23-4594-9348-110184d37bf9",
+                  "title": "A contended write surfaces as a migration failure, and the single-use guard cannot recognise the engine's own conflict message",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "The first run of the `scim_provisioning` benchmark cell failed 20 of 907 operations, every one a concurrent `PATCH /scim/v2/Users/{id}` that lost a SurrealDB optimistic-concurrency race and reached the client as `500` carrying the engine's own words \u2014 \"Transaction write conflict. This transaction can be retried\". Nothing retried it: the `retry_on_write_conflict` helper the marker documentation linked to had never been written, so the one method that had surfaced the bug got a hand-rolled loop and every other contended write got nothing, and an IdP driving Okta- or Entra-shaped provisioning reads those as failed syncs and re-sends the whole record. Worse for T-163 and T-164: `is_transaction_conflict` \u2014 the single-use consume guard on `device_grant`, `permission_ticket`, `pushed_auth_request` and `oauth2_auth_code` \u2014 matched only the two pre-v3 phrasings, so on the deployed engine its \"someone else got there first\" branch could not fire and a correctly refused replay surfaced as a `500` rather than as \"no row consumed\". Fail-closed, so a robustness defect and not a hole: no token is minted either way.",
+                  "mitigation": "2d371ad. `retry_on_write_conflict` now exists; `update` \u2014 which every administrative and SCIM write goes through \u2014 and `increment_failed_logins` use it, and replay is safe because a conflicted transaction commits *nothing*, which is also why the non-idempotent `failed_login_attempts += 1` can be retried at all. `classify_write_error` gains a conflict branch feeding `DbError::Conflict`, ordered after the UNIQUE check so a constraint violation \u2014 a statement about the request, which retrying only reproduces \u2014 still wins, and a contended write is no longer reported as a schema-migration failure that sends operators hunting a broken migration; the HTTP status deliberately stays `5xx`, since narrowing it to `503` with `Retry-After` is a client-visible contract change and a separate decision. Both legacy literals now live in `WRITE_CONFLICT_MARKERS` beside the v3 phrasing and the helper delegates, so the two sets can never again disagree about what a conflict looks like \u2014 the drift D-09 and `scripts/check-conflict-markers.py` exist to prevent, and which survived because these were never one set. Seven tests, one pinning the verbatim message captured from the failing run.",
+                  "modelType": "STRIDE",
+                  "number": 262
                 }
               ]
             }
@@ -2018,7 +2040,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.11.0",
+        "version": "2.12.0",
         "cells": [
           {
             "position": {
@@ -2303,6 +2325,17 @@
                   "mitigation": "Under OPAQUE the expensive KSF runs on the client, so the server-side cost per attempt is a bounded elliptic-curve OPRF evaluation, not a ~19 MiB Argon2id arena. The endpoints sit under the strict internet-facing per-IP rate limits the tuning presets are prevented from widening; register/start has its own benchmark scenario and budget (opaque_register_start \u2014 new in kind, since SRP enrolment cost the server nothing); and in-flight exchange state is sealed for 120 seconds under the cheap-to-rotate opaque_session_key rather than accumulating unbounded server-side sessions. OPAQUE is additionally off by default (opaque_mode: disabled) until an organization or tenant enables it.",
                   "modelType": "STRIDE",
                   "number": 177
+                },
+                {
+                  "id": "b3097e27-c988-4c33-8b97-b06ec70a0f81",
+                  "title": "A bearer credential reaches stderr or the CI log through a derived `Debug` or a failing test's panic message",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "Three CodeQL high-severity alerts on this wave, one class. `LoginOutput` gained a browser session token, and its derived `Debug` would have printed three credentials; a test panic formatted a whole `LoginResult`, whose non-`Success` variants carry a live MFA challenge token and a setup token; two assertions printed a full `Set-Cookie` header, token included, to explain a failed attribute check, and an `assert_ne!` on two cookie values prints both credentials when it fires. A panic message reaches stderr and a CI log that outlives the run, so a test is not exempt \u2014 the values are fixtures, but the sink is real and the next author's would not be.",
+                  "mitigation": "SECHRD-09 applied to every new sink rather than to the one CodeQL named. `LoginOutput`, `BasicCredentials` (T-253) and `UserInfoPostForm` (T-243) hand-write redacting `Debug` impls; the tests name the variant or the cookie that was set, never the value \u2014 compare, then assert. The TRACE-capture tests grep for the secret, its encoding and the header value rather than trusting the absence of a `{:?}`. `axiam-core`'s three redacting certificate `Debug` impls, which reach `{:?}` in handler-level tracing spans where `#[serde(skip_serializing)]` cannot help, are now asserted \u2014 `Option`-aware on purpose, since a `vault_pki` CA has no key and printing `[REDACTED]` would claim one was withheld.",
+                  "modelType": "STRIDE",
+                  "number": 260
                 }
               ]
             }
@@ -2549,7 +2582,7 @@
                   "severity": "High",
                   "type": "Spoofing",
                   "description": "A stolen refresh token grants indefinite re-authentication if it can be redeemed repeatedly.",
-                  "mitigation": "Refresh tokens are opaque, server-stored and single-use with rotation; redeeming a token that has already been rotated is detectable and invalidates the family.",
+                  "mitigation": "Refresh tokens are opaque, server-stored and single-use with rotation; redeeming a token that has already been rotated is detectable and invalidates the family. **Amended at 1.0.0-beta13:** rotation now *supersedes* rather than revokes \u2014 the previous token stays redeemable for a 60-second grace (FAPI 2.0 \u00a75.3.2.1-9) before its brought-forward expiry retires it \u2014 so \"detectable\" holds only outside that window; T-254 records the residual, and records it open.",
                   "modelType": "STRIDE",
                   "number": 37
                 },
@@ -3856,11 +3889,11 @@
       {
         "id": 2,
         "title": "OAuth2 / OIDC authorization server",
-        "description": "Authorization Code with PKCE, client credentials and refresh grants; consent, introspection, revocation, userinfo, JWKS and discovery; client registration and the code and token stores.",
+        "description": "Authorization Code with PKCE, client credentials and refresh grants; consent, introspection, revocation, userinfo, JWKS and discovery; client registration and the code and token stores. Since 1.0.0-beta13 this also covers the OpenID Connect Basic OP surface the W1\u2013W9 waves added \u2014 the per-client browser login hop and its OP session cookie, the honour lane for the authentication-request parameters, the consent-gated address and phone scopes, client_secret_basic, POST /oauth2/userinfo and tenant-scoped discovery \u2014 and the resource-endpoint token validation the OpenID Foundation conformance runs found wanting (T-237\u2026T-259).",
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.11.0",
+        "version": "2.12.0",
         "cells": [
           {
             "position": {
@@ -4098,6 +4131,17 @@
                   "mitigation": "The security-headers middleware sets frame-ancestors in the CSP and X-Frame-Options, so the authorization endpoint cannot be framed by a third-party origin.",
                   "modelType": "STRIDE",
                   "number": 51
+                },
+                {
+                  "id": "23a02be2-30cf-4551-b524-671584b7bdbe",
+                  "title": "The end user cannot refuse an authorization request, so the relying party cannot tell a refusal from a crash",
+                  "status": "Mitigated",
+                  "severity": "Low",
+                  "type": "Repudiation",
+                  "description": "RFC 6749 \u00a74.1.2.1 and OIDC Core \u00a73.1.2.6 both require `access_denied` when the end user declines. The consent screen has a decline button, but it renders only for a sensitive scope; a request for `openid profile` reached a sign-in page whose only outcomes were \"authenticate\" and \"close the tab\". Closing the tab is not a protocol answer: the relying party waits on a response that never arrives, cannot tell a refusal from a crash, and the refusal is recorded nowhere.",
+                  "mitigation": "065f37c: the sign-in page gains a Cancel control, shown only when a pending authorization is being decided, which returns through `axiam_user_declined`. The refusal is delivered on the same terms as every other authorization error \u2014 only to a `redirect_uri` this client registered, compared exactly, with the request's own `state`, and for a pushed request both come from the pushed copy (T-256); consuming the `request_uri` there is correct, since it is single-use and the request has just been answered terminally. A sensitive-scope consent decision is recorded either way: the `consent` row is live state and `gdpr.oidc_scope_consent_*` in the append-only audit log is the history (Art. 7(1)).",
+                  "modelType": "STRIDE",
+                  "number": 259
                 }
               ]
             }
@@ -4159,6 +4203,72 @@
                   "mitigation": "state is required and echoed unchanged; the browser-facing flow additionally runs behind the double-submit CSRF cookie middleware with constant-time comparison.",
                   "modelType": "STRIDE",
                   "number": 53
+                },
+                {
+                  "id": "8cd5ec87-63ca-4acc-bddc-bed7e77209e6",
+                  "title": "The OP session cookie travels where a Strict cookie would not, so its attributes carry the whole risk",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "Wave W3 added `axiam_op_session`, the only `SameSite=Lax` cookie AXIAM sets. It has to be Lax: a relying party's redirect is a cross-site top-level navigation, and the `SameSite=Strict` API cookie never travels on one \u2014 which is why `/oauth2/authorize` could not answer an anonymous browser at all, and why `prompt`, `max_age` and `id_token_hint` were unreachable rather than merely unimplemented. A cookie that travels further is exposed to more: a plaintext hop on a request the user never typed, a hidden cross-site iframe probing whether a session exists, and a client that never opted into browser sign-on whose authorization request now arrives with a session attached.",
+                  "mitigation": "`HttpOnly; Secure; SameSite=Lax; Path=/oauth2/authorize`, `Max-Age` equal to the session's; minted at `create_session_and_tokens`, the choke point every browser sign-in funnels through, and only its SHA-256 is stored (256 CSPRNG bits; the schema-v56 index is deliberately not UNIQUE because the column is unset on almost every row, and the ambiguity a unique index would have caught is refused in `get_by_browser_token_hash`, which returns no principal rather than the first of two rows). `Secure` is **unconditional** \u2014 unlike the three Strict cookies this one does not follow `AuthConfig::cookie_secure` (D-18), because RFC 6749 \u00a73.1 requires TLS at the authorization endpoint regardless and browsers treat loopback origins as trustworthy, so the local-development case costs nothing; a plaintext login hop to a non-loopback host fails into `login_required`, whose description names the cause (CodeQL 557). `Lax` is load-bearing and not a candidate for fixing: it is sent on a top-level navigation and not inside a frame, so the relying-party redirect works and hidden-iframe probing fails closed \u2014 cross-site silent renew is the plan's \u00a79 recorded decision. The cookie is read only for a client registered `browser_sso: true`, and the client is loaded *before* the cookie is read, because the registration decides whether the cookie is consulted; with the default `false` the anonymous answer is the same `401` object it always was, pinned byte for byte with and without every new parameter and with a live cookie attached (`t0_1`, `t0_5`). Logout and `end_session` clear it, `clear_op_session_cookie` is built from the setter so the removal is `Secure` too, and refresh copies the digest rather than restamping it. `docs/admin/browser-login-hop.md`; conformance rows 47\u201359.",
+                  "modelType": "STRIDE",
+                  "number": 237
+                },
+                {
+                  "id": "0872a79f-47a0-4342-a740-457cac80ccbf",
+                  "title": "`/login?return_to=` becomes an open redirect, or the login hop a redirect loop",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "The login hop sends an anonymous browser to `/login?return_to=\u2026` and back to the authorization endpoint. A `return_to` that accepts a foreign origin is an open redirect on the sign-in page \u2014 the page on which a phishing target types a password, on AXIAM's own origin \u2014 and a hop that can be re-entered is a loop a misconfiguration or an attacker can drive indefinitely.",
+                  "mitigation": "`return_to` is exactly `/oauth2/authorize?` plus a query, and it is validated three times: by the builder, by the deployment-origin resolution (`require_deployment_spa_origin`, the same rule the SSO handoff uses rather than a second one), and by the SPA before it navigates. A foreign origin, a scheme-relative `//evil.example`, its backslash spellings, path traversal and any other same-origin path are each refused. Every login redirect carries `axiam_login_hop=1` inside its `return_to`, and a request that *arrives* with the marker is never redirected again \u2014 it is answered `login_required` \u2014 so a chain is at most two authorization requests and one sign-in page whatever goes wrong in between. A browser presenting an OP cookie that resolves to no live session gets `reauth` mode, with the stale cookie cleared on the way out. A PAR `request_uri` that expired during the hop answers `invalid_request_uri` with a description saying so, and only on a return leg, so an ordinary request with a dead handle keeps today's `invalid_request`. The consent screen (W7) carries its own `axiam_consent_hop` marker, because a request carrying both `prompt=consent` and `address` came back from the sign-in page with the login marker, which the consent rule read as \"asked and declined\" \u2014 `access_denied` for somebody never shown the question (row 129; a test walks all three legs).",
+                  "modelType": "STRIDE",
+                  "number": 238
+                },
+                {
+                  "id": "cd241e0c-4a93-4d33-af90-a60c3b230887",
+                  "title": "A relying party is told it received a freshness or assurance guarantee it did not get",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "description": "OpenID Connect Core \u00a73.1.2.1 lets a relying party ask for five things that change what a token *means*: `prompt=none`, `prompt=login`, `max_age`, `acr_values` / `claims.id_token.acr` and `id_token_hint`. Until W4 AXIAM accepted all five and acted on none. That is a conformant answer to nothing: a relying party that sent `max_age=60` and received a code minted from a week-old login had been told a freshness guarantee it did not get, and could not tell. On the assurance side the classic deception is to copy `acr_values[0]` into the `acr` claim, which no reviewer reliably notices.",
+                  "mitigation": "A per-client `authn_request_params: ignore | honour`, default `ignore` (schema v54; pre-v54 rows decode to `ignore`, an unknown stored value fails closed the way `decode_profile` does). On the honour lane a relying party gets the property it asked for or is told it cannot have it \u2014 never a token that quietly does not have it. The ACR echo is designed out at the type level: `acr::acr_for(amr: &[Amr]) -> Acr` takes the session's evidence and nothing else, so there is no parameter through which the request could reach it, and `report_acr` can only return a requested value the achieved class already satisfies \u2014 the strongest thing a relying party achieves by asking is to select among true statements; the vocabulary is the two AXIAM URNs and is not operator-configurable, because an operator who could configure the string could configure it to say `mfa` for a password login. `max_age` is `elapsed >= max_age` with no leeway in the relying party's disfavour, and `max_age=0` always demands a reauthentication whose return leg answers `login_required`. `prompt=none` from an anonymous browser is refused, and on a return leg it is refused however good the session is, so silent authentication over PAR sees `invalid_request_uri` or `login_required` and never a token minted behind an interaction it forbade. `prompt=consent` was treated as `login` until W7 gave it a consent screen \u2014 ignoring it is the silent downgrade the lane exists to prevent. A `fapi2` client is refused the five security-bearing parameters at registration and at request time (W1 rules 1\u20133), and a `fapi2` row edited to `honour` is refused with `tracing::error!`; `claims` left that list once \u00a75.5 was implemented, because the list is the parameters AXIAM *drops*, and dropping is what made it dangerous. Request objects are rejected rather than implemented \u2014 `request` answers `request_not_supported`, a `request_uri` that is not a PAR handle `request_uri_not_supported`, both redirected only to a registered `redirect_uri` (G12; plan \u00a79 says why nobody should \"helpfully\" implement them later). Invariant 4 \u2014 no client registered today changes behaviour \u2014 is proved by the `P1`/`P2` twins and by an I4 twin on every negative test. `docs/admin/oidc-authn-parameters.md`; conformance rows 23\u201339 and 60\u201380.",
+                  "modelType": "STRIDE",
+                  "number": 239
+                },
+                {
+                  "id": "58a5455d-4cf0-4248-b337-b8050ead63ef",
+                  "title": "An authorization error is delivered to the wrong place: redirected to an unregistered target, rendered as JSON to a person, or echoing attacker-chosen parameters on AXIAM's origin",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "RFC 6749 \u00a74.1.2.1 draws the line at whether the server can trust where it would be sending the browser. It MUST NOT redirect when the `redirect_uri` is missing or does not match a registered one \u2014 the open-redirect case, where a direct answer is right \u2014 and it MUST deliver the error by redirect, with `state`, when `client_id` names a real client and the `redirect_uri` is one it registered, or the relying party waits on a response that never comes (the suite stalled its whole plan at module 2 of 35 on `oidcc-response-type-missing`). AXIAM answered the second case with a JSON body in the browser window, and answered the first with JSON too \u2014 informing a developer, and not the resource owner \u00a74.1.2.1 says SHOULD be informed. An HTML page on AXIAM's own origin is then a reflected-content sink for `state`, `redirect_uri` and `request_uri`, and an `error_description` carrying `\u00a7` or an em dash violates \u00a75.2's `NQSCHAR` grammar.",
+                  "mitigation": "0853e20: a known client with a registered `redirect_uri` receives the error by redirect with `state` echoed. The lookup uses `user.tenant_id`, never the query's `tenant_id` \u2014 a lookup that decides where a browser is sent is the worst place to reintroduce a tenant-crossing primitive \u2014 and the description stops naming `redirect_uri`, which was misleading in exactly the case that matters. dfcef2d and 13050d9: the direct-answer arms \u2014 all seven, including the three inside `resolve_authorize_principal` that build their own responses and were found by probing the live endpoint as a browser after the integration test had passed by authenticating first \u2014 render a page only on an explicit `Accept: text/html`; a missing header, `*/*` and `application/json` keep the JSON byte for byte, asserted directly, because content negotiation is only safe if the un-negotiated answer is untouched. The page renders the same `error` and `error_description` the JSON carries, escaped, and nothing else: no `state`, no `redirect_uri`, no `request_uri`, the rule `logged_out_page` already states applied to the endpoint that actually receives attacker-chosen parameters. The `build_error_redirect` branches beside them are untouched. 52ded73: `OAuth2Error::error_description()` \u2014 the one renderer every OAuth2 error passes through, and `dpop_error_response` routed through it \u2014 transliterates to `NQSCHAR` rather than stripping (`\u00a7` to \"section \", an em dash to a hyphen, anything else to a visible `?`), because a silently deleted character is an invisible change of meaning; enforced in one place rather than at hundreds of call sites written in a house style that cites specifications with `\u00a7`. The character-set test walks U+0000..U+00FF in both directions. The token, PAR and introspection endpoints are API endpoints and keep one JSON renderer.",
+                  "modelType": "STRIDE",
+                  "number": 255
+                },
+                {
+                  "id": "61d0d484-7369-4d7a-8fd1-abf34508eafd",
+                  "title": "Inline parameters beside a PAR `request_uri` are read, or a pushed `request_uri` is accepted",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "RFC 9101 \u00a75 lets a client duplicate the pushed parameters in the query string \"for backward compatibility\", and \u00a76.3 says the server MUST only use the parameters in the request object even when the same parameter is provided in the query. AXIAM refused the combination \u2014 citing RFC 9126 \u00a74, which says nothing of the sort \u2014 and failed every FAPI 2.0 authorization module. The security argument the refusal rested on, that merging is exactly where parameter confusion lives, is sound; but confusion needs the inline value to be *read*, and ignoring it satisfies the argument as well as refusing does. Beside it, PAR accepted a pushed `request_uri` (RFC 9126 \u00a72.1-2) because the parameter was not modelled and serde dropped it, answering `201` to a request the specification says must be rejected.",
+                  "mitigation": "Every field comes from the pushed copy and nothing reads the inline value \u2014 `state` and `nonce` always did, and the nine OIDC authentication-request parameters, `dpop_jkt` (T-251) and the user's own refusal (T-259) follow the same rule, because a FAPI client sends `client_id` and `request_uri` and may send nothing else. `has_inline_params` is deleted rather than left unused, with a tombstone saying why the rule it encoded was not the one the specifications state, and the test that asserted the defect is inverted rather than supplemented, so the suite cannot claim both behaviours. A pushed `request_uri` is refused before client authentication: the refusal names a parameter the caller sent rather than anything about the client, so it is not an oracle. PAR errors are JSON at the route (RFC 9126 \u00a72.3 makes the PAR error response the token endpoint's), since actix's form-deserialisation error fired before the handler was reached and a client cannot act on prose. Conformance rows 141\u2013154.",
+                  "modelType": "STRIDE",
+                  "number": 256
+                },
+                {
+                  "id": "f7663190-3984-40d9-8a5c-80bb340af0a1",
+                  "title": "`login_hint` becomes an account-existence oracle, or `ui_locales` / `display` an injection into the sign-in page",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "Wave W5 lets four cosmetic parameters reach the sign-in page. A `login_hint` that is looked up answers differently for an existing and a non-existing account, on an unauthenticated endpoint; a locale or display value forwarded raw is attacker-chosen text rendered on AXIAM's own origin; and `claims_locales` sits one parameter name away from `ui_locales`, which is how two adjacent names get confused.",
+                  "mitigation": "`login_hint` is carried verbatim and **nothing looks it up, on any path** \u2014 uniformity with respect to whether the hinted account exists is a property of there being no branch, not of two branches kept equal (T5.1 asserts whole-response equality for an existing and a non-existing hint). `ui_locales` is matched on the server by RFC 4647 \u00a73.4 lookup, per requested tag in the relying party's order, against the five locales AXIAM ships, so the raw value never crosses into the SPA and T6.2 is true by construction rather than by escaping; `display` is allow-listed to the four OIDC Core values and anything else is dropped; `claims_locales` is accepted and ignored, and `Cosmetic::from_params` \u2014 the single call site of `select_ui_locale` \u2014 takes no `claims_locales` argument at all, which is the guard against the two being confused. The four decide no `Outcome` and never enter the honour evaluation; they are never *refused* on a `fapi2` row, since relying-party libraries send `login_hint` by reflex, but no `/login?login_hint=` is ever built for one. A CI gate fails when the server's allow-list and the SPA's locale bundles drift, and the SPA's typed catalogue makes a missing translation a compile error rather than a runtime fallback. `default_locale` at the settings API is refused for a tag this build does not ship. Conformance rows 81\u201389.",
+                  "modelType": "STRIDE",
+                  "number": 257
                 }
               ]
             }
@@ -4193,7 +4303,7 @@
               "isTrustBoundary": false,
               "outOfScope": false,
               "reasonOutOfScope": "",
-              "hasOpenThreats": false,
+              "hasOpenThreats": true,
               "handlesCardPayment": false,
               "handlesGoodsOrServices": false,
               "isWebApplication": false,
@@ -4228,7 +4338,7 @@
                   "severity": "High",
                   "type": "Spoofing",
                   "description": "A confidential client's client_secret leaks \u2014 through a log, a CI variable, a config repository or an operator's shell history \u2014 and an attacker presents it from an arbitrary host to mint tokens as that client. A shared secret carries no evidence of where it is being used from, so the authorization server cannot distinguish the legitimate client from the thief.",
-                  "mitigation": "X5.1 adds RFC 8705 mutual-TLS client authentication: a client registered tls_client_auth or self_signed_tls_client_auth authenticates by presenting a certificate rustls verifies during the TLS 1.3 handshake, matched against the registration's subject DN / SAN or its x5t#S256 thumbprint. The private key never leaves the client, so the credential cannot be copied out of a log. The REGISTRATION selects which credential authenticates, never the request, so the two methods can never become an OR an attacker may pick from; and the X-Client-Certificate proxy header the device-auth path accepts is deliberately not a source here, because a client credential must not be assertable by anything that can set a header. Every failure returns one uniform invalid_client description (SEC-086), so client existence stays undecidable to an unauthenticated caller.",
+                  "mitigation": "X5.1 adds RFC 8705 mutual-TLS client authentication: a client registered tls_client_auth or self_signed_tls_client_auth authenticates by presenting a certificate rustls verifies during the TLS 1.3 handshake, matched against the registration's subject DN / SAN or its x5t#S256 thumbprint. The private key never leaves the client, so the credential cannot be copied out of a log. The REGISTRATION selects which credential authenticates, never the request, so the two methods can never become an OR an attacker may pick from; and the X-Client-Certificate proxy header the device-auth path accepts is deliberately not a source here, because a client credential must not be assertable by anything that can set a header. Every failure returns one uniform invalid_client description (SEC-086), so client existence stays undecidable to an unauthenticated caller. Since 1.0.0-beta13 the listener can also admit RFC 8705 \u00a72.2 self-signed certificates under a fourth, opt-in policy, and `tls_client_auth` then *requires* the certificate to have chained (T-263); the registered subject DN is compared, still exactly, against both correct renderings derived from the certificate, because the documented `-nameopt rfc2253` form never matched before (T-252).",
                   "modelType": "STRIDE",
                   "number": 166
                 },
@@ -4272,9 +4382,64 @@
                   "severity": "High",
                   "type": "Spoofing",
                   "description": "A DPoP proof (RFC 9449) travels in a request header on every request, so it is observed by strictly more infrastructure than a client assertion is. A captured proof replayed within its freshness window would let the captor obtain or use a sender-constrained token without holding the private key -- which is the entire property DPoP exists to provide.",
-                  "mitigation": "Layered, because no single layer is sufficient. (1) `iat` must be within 60 s in both directions. (2) `htm`/`htu` bind the proof to one method and one URI, compared with query and fragment stripped and nothing else normalised. (3) `ath` binds it to one access token, so a proof cannot be re-aimed at another token held by the same key. (4) `jti` is recorded single-use at the token endpoint through the same UNIQUE-index guard the client assertion uses, with the row expiring exactly at the end of the freshness window. (5) `dpop_require_nonce` optionally makes a proof unusable before the server has spoken. KNOWN RESIDUAL: the resource-server path in `axiam-api-rest`'s extractor is synchronous and does NOT record `jti`, so within the 60 s window a proof for that exact method, URI and token could be presented twice there. Documented in the extractor and in contract \u00a721.7.2; closing it means moving the check into middleware that can await.",
+                  "mitigation": "Layered, because no single layer is sufficient. (1) `iat` must be within 60 s in both directions. (2) `htm`/`htu` bind the proof to one method and one URI, compared with query and fragment stripped and nothing else normalised. (3) `ath` binds it to one access token, so a proof cannot be re-aimed at another token held by the same key. (4) `jti` is recorded single-use at the token endpoint through the same UNIQUE-index guard the client assertion uses, with the row expiring exactly at the end of the freshness window. (5) `dpop_require_nonce` optionally makes a proof unusable before the server has spoken. KNOWN RESIDUAL: the resource-server path in `axiam-api-rest`'s extractor is synchronous and does NOT record `jti`, so within the 60 s window a proof for that exact method, URI and token could be presented twice there. Documented in the extractor and in contract \u00a721.7.2; closing it means moving the check into middleware that can await. **Residual closed at 1.0.0-beta13:** the resource-endpoint extractors now record `jti` in their async tail through the same replay repository the token endpoint writes (T-247, T-248), and `htu` is compared after RFC 3986 syntax- and scheme-based normalisation as \u00a74.3 asks \u2014 `:443`, host case and a `..` segment no longer produce false negatives, an unparseable `htu` is compared raw on both sides, and a URI naming a different resource is still refused.",
                   "modelType": "STRIDE",
                   "number": 172
+                },
+                {
+                  "id": "f893dfcf-7f9b-4bd1-ab87-aa80d819e8d0",
+                  "title": "A refresh or a replayed upstream SSO session is dated as a fresh authentication",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "`auth_time` says when the end user authenticated, and `amr` how. `session.created_at` cannot stand in for it because refresh rotation writes a new session row on every refresh, and a code's evidence cannot be looked up at redemption because by then the session it came from may be gone. A federated login dated by AXIAM's clock records a provider session established hours ago as having just happened; a refreshed ID token that restamps `auth_time` violates OIDC Core \u00a712.2; and an evidence record whose absence reads as *stronger* would upgrade every pre-migration session.",
+                  "mitigation": "Wave W2 (schema v55): `session.authenticated_at` and `session.amr` \u2014 a closed RFC 8176 enum rather than a free string, so a typo at one of the five login call sites is found by the compiler rather than by a relying party, and unknown stored values decode to nothing. The authentication event is recorded at the one choke point, `create_session_and_tokens`, whose callers pass what they actually verified: `pwd`, `pwd otp mfa`, `pwd hwk mfa`, `hwk user` (usernameless passkey, which requires user verification unconditionally) or `fed`. Federated logins are dated by the upstream provider \u2014 OIDC `auth_time`, SAML `AuthnInstant`, carried across the 60-second handoff hop on the handoff row \u2014 and fall back to the moment AXIAM verified the assertion only when the provider asserted no instant. Refresh rotation **copies** the evidence rather than restamping it; the authorization code snapshots it at issuance (a snapshot, not a join, because rotation replaces the row). Every column is optional with no backfill, and the decode path leans strict: an absent `authenticated_at` reads as `created_at`, an absent `amr` as the empty list, so a pre-migration row can be judged staler and weaker than it was, never fresher and stronger. The claims are emitted only for a client on the honour lane (`fapi::honours_authn_params`) and for nobody else \u2014 pinned for every `ignore` client and every `fapi2` row at either setting \u2014 and a refreshed ID token reports the class the session proves. `session_evidence_rotation_test` (two rotations, the event never moves); conformance rows 40\u201346.",
+                  "modelType": "STRIDE",
+                  "number": 240
+                },
+                {
+                  "id": "379aa9e3-3c5d-4dff-9c4d-e0027e1b4c8f",
+                  "title": "An authorization code is redeemed by a DPoP key other than the one it was pinned to",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "RFC 9449 \u00a710 lets the authorization request bind the grant to a key (`dpop_jkt`), so a code observed in transit cannot be redeemed by a thief presenting a proof from a key of their own. AXIAM never recorded which key an authorization was pinned to, so there was nothing for the token endpoint to compare a proof against: the happy-path FAPI modules passed by accident, and `ensure-mismatched-dpop-jkt-fails` received a `201` from a PAR endpoint dropping both carriers on the floor.",
+                  "mitigation": "246c163. \u00a710.1 requires an authorization server supporting both PAR and DPoP to accept two carriers \u2014 `dpop_jkt` in the PAR body or on a plain request, and a `DPoP` header on the PAR request, whose key thumbprint the server \"MUST further behave as if\" had been sent as `dpop_jkt` \u2014 and the PAR endpoint resolves them into one binding under client authentication, refusing a contradiction with `invalid_dpop_proof`. The value rides the pushed parameters to the authorization endpoint, read from the pushed copy and never a query-string copy for the same reason `state` and `nonce` are (T-256), and is snapshotted onto the code (schema v58, one optional column, no backfill). At redemption a code whose bound key the request has not proven possession of is refused `invalid_grant`, not `invalid_dpop_proof`: the proof is perfectly valid \u2014 signature, `htm`, `htu` and freshness all check out \u2014 and what fails is the grant, bound to a key this caller cannot demonstrate; the other code would send an honest client debugging its proof generation over a code it should simply push again. The check sits beside PKCE, *before* the code is consumed, on PKCE's own argument: a caller who cannot satisfy it must not be able to burn a valid code by failing it deliberately. `verify_dpop_header` is extracted so PAR runs the \u00a74.3 proof check from one copy. Four of the nine tests state the non-regression claim directly: a code that carries no binding, and a push that used neither carrier, are answered exactly as before \u2014 the property that matters for every client registered today, none of which sends the parameter.",
+                  "modelType": "STRIDE",
+                  "number": 251
+                },
+                {
+                  "id": "8a9057b5-9799-4d9f-bad7-6de456c8bd7b",
+                  "title": "The strong client-authentication methods were registrable and unusable, inviting a fall-back to a shared secret",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "Three defects, each a strong method that no conformant request could use. `tls_client_auth` compared the registered `tls_client_auth_subject_dn` only against `x509_parser`'s rendering of the subject, and the operator guide's `openssl x509 -nameopt rfc2253` form never equals it \u2014 RFC 2253 emits the RDNs in reverse of their encoded order, and the separators differ \u2014 so every client onboarded as documented authenticated nothing (89 FAPI module failures, all at PAR). `private_key_jwt` was implemented and wired to nothing: `JwksAssertionVerifier` was constructed nowhere, so no client in any deployment could use one of FAPI 2.0's two client-authentication families (all 56 modules of that lane). And a request carrying only a `client_assertion` was refused \"client_id is required\", though RFC 7521 \u00a74.2 makes it optional and OIDC Core \u00a79 makes the assertion's `sub` the identifier. A strong method that cannot work is pressure toward the shared secret that can \u2014 and a test that compared the server against its own rendering passed throughout.",
+                  "mitigation": "The DN exact match is kept \u2014 the comment that \"a normalising comparison is exactly where DN-matching CVEs live\" stands, so nothing normalises the registered value. Instead the server derives **both** correct renderings of the name from the certificate, and the registered string must equal one of them exactly: no case folding, no whitespace stripping, no structural comparison. The RFC 2253 form is built by rendering each RDN individually and joining the reversed list on `,` \u2014 reversing the formatted full string would have split a value containing an escaped comma, the very failure the comment warns about \u2014 and the new test uses a two-RDN certificate, because a single-RDN name renders identically both ways and cannot observe an ordering difference at all. The assertion verifier is wired with the **federation** JWKS cache, deliberately and not one of its own: a client's `jwks_uri` is the same SEC-054 SSRF surface whichever feature asked for it, and a second cache would be a second place for a guard to go missing (T-173). Wiring alone would have made three passing modules fail, because FAPI 2.0 \u00a75.3.2.1 narrows RFC 7523's audience rule to the issuer identifier, as a string, only; `verify_client_assertion` takes an `AudiencePolicy` \u2014 `IssuerStringOnly` for a `fapi2` client, refusing an array even when it *contains* the issuer, `AnyOf` (issuer or token-endpoint URL, string or array) for everyone else, since RFC 7523 \u00a73 and OIDC Core \u00a79 disagree and refusing either is an interop failure with no security content. `client_id` is optional beside an assertion, and `unverified_client_id` reads `sub` from a JWT nobody has checked for the one thing that is safe: the row it names is loaded and the assertion is then verified against *that* row's registered key, so naming somebody else only picks the key the forgery will be checked against \u2014 a routing hint, never a credential; the pre-lookup credential guard three grants copied now lives in one place, `TokenRequestContext::carries_no_client_credential`. A missing DPoP proof is `invalid_dpop_proof` with `400` (RFC 9449 \u00a75), not `invalid_client` with `401`: the client authenticated, what was missing was the proof; the certificate branch keeps `invalid_client`. Every test pins the operator-facing contract rather than the server's own rendering.",
+                  "modelType": "STRIDE",
+                  "number": 252
+                },
+                {
+                  "id": "fcab137a-f324-4c4a-abf3-87a376f4c0ac",
+                  "title": "`client_secret_basic`: the header reaches a log, the RFC 6749 \u00a72.3.1 decoding is wrong, or a client gets two ways in",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "Wave W8 (G9) adds HTTP Basic client authentication as a fifth registrable `token_endpoint_auth_method` \u2014 escalated as decision A of the Basic OP plan and decided yes by the maintainer on 2026-09-07, because 37 of the 38 modules of the OpenID Foundation's Basic OP plan use it and there is no badge without it. Three failure modes travel with it: the classic omission of the form-urlencode step in \u00a72.3.1's encoding, invisible against server-generated secrets; an `Authorization` header, which is the channel intermediaries routinely log; and a second channel carrying the same credential, which is an OR an attacker may pick from (SEC-093).",
+                  "mitigation": "The decoding is base64, split on the **first** `:`, then `application/x-www-form-urlencoded`-decode each half, with the fixture secret `p%a+s:s` so the last step cannot be skipped unnoticed; it is hand-written in `axiam-oauth2::client_secret_basic` rather than routed through `url::form_urlencoded::parse`, which also splits on `&` and `=`. `Authorization` reaches no log: asserted at TRACE over a successful request, a rejected one and one refused at the edge, grepping for the secret, its encoding, the base64 blob and the header value; `BasicCredentials` hand-writes a redacting `Debug`, and a second test pins that the request-logging layer is `TracingLogger::default()`, which has no header allow-list to add the header to. The registration decides which channel carries the credential, never the request: a body `client_secret` on a `client_secret_basic` client is `invalid_request`, ordered *after* the header credential verifies so that SEC-086's undecidability of client existence survives; an `Authorization: Basic` header on a `client_secret_post` client is ignored and logged at `warn`, never a second way in. `client_id` may arrive in the header alone, and a disagreeing pair is refused before the client lookup so no existence oracle is created; the RFC 6749 \u00a75.2 challenge is applied by wrapping the four handlers rather than at their ~35 error sites. The FAPI gate needed no new code \u2014 `validate_registration` and `enforce_token_request` ask `is_strong()` rather than enumerating variants \u2014 so a `fapi2` client is refused it exactly as it is refused `client_secret_post`. **No SDK sends it**: `sdks/CONTRACT.md` \u00a75 rule 3 keeps its MUST NOT verbatim (contract 1.41, T-266). Residual, and where it lands: the header is protected from AXIAM's own logs and nothing in front of AXIAM \u2014 `docs/admin/fapi2-profile.md` says to audit what the ingress logs before enabling it, and the broader class of a long-lived secret in the wrong place is T-146.",
+                  "modelType": "STRIDE",
+                  "number": 253
+                },
+                {
+                  "id": "936490a9-726a-49e5-a9e9-2eb26fff6ba5",
+                  "title": "A leaked refresh token replayed inside the rotation grace window forks the session undetected",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "FAPI 2.0 Security Profile \u00a75.3.2.1-9 requires an authorization server that rotates refresh tokens to keep accepting the previous one for a period after issuing its successor \u2014 the only recovery a client has from a rotation response lost in transit, since under immediate revocation it holds a token the server has destroyed and has not been given the replacement. AXIAM now **supersedes** rather than revokes: the old token's `expires_at` is brought forward to a 60-second grace instant (`REFRESH_ROTATION_GRACE_SECS`), for every client on every profile. Inside that window a second presentation is answered `200` and rotates again, so a refresh token leaked at the moment of a legitimate rotation yields a second live chain, and nothing distinguishes the thief's use from the honest retry. Before 065f37c the second use was refused outright, which is what T-37 records.",
+                  "mitigation": "Accepted design trade-off, bounded and stated rather than made silently. The window is 60 seconds and can only ever be brought forward \u2014 `expires_at < $grace_until` in the SET, so a caller passing a distant instant lengthens nothing \u2014 and after it the token is expired exactly as before, answered \"already consumed\". `revoked = false` in the WHERE keeps two genuinely concurrent rotations from both finding a live row, so the loser still gets `NotFound` and the single-use race T-37 closes stays closed. A password or MFA reset revokes the whole family through `revoke_all_for_user`, and T-249's `sid` extends that to the access tokens in flight. On the `fapi2` profile \u2014 the one that requires the grace \u2014 every token is sender-constrained, so replaying one inside the window needs the client's private key as well, which is why the profile that requires the window is also the one that can afford it. **Open because on the `standard` profile a bearer refresh token now has a 60-second replay window it did not have, and the server cannot tell the thief from the retry.** Closing it is a decision, not a fix: either reuse detection inside the window \u2014 revoke the family when a superseded token is presented *after* its successor has itself been used \u2014 or confining the grace to sender-constrained clients. `refresh_token_rotation_retires_old_on_the_grace_clock` pins the bound (thirty days becoming sixty seconds), which is the property that survives the change.",
+                  "modelType": "STRIDE",
+                  "number": 254
                 }
               ]
             }
@@ -4422,9 +4587,64 @@
                   "severity": "Medium",
                   "type": "Information disclosure",
                   "description": "Returning the full profile regardless of scope discloses email, groups or metadata the user never consented to share.",
-                  "mitigation": "Claims are filtered by the token's granted scopes; profile, email and groups claims each require their corresponding scope.",
+                  "mitigation": "Claims are filtered by the token's granted scopes; profile, email and groups claims each require their corresponding scope. Since 1.0.0-beta13 the `profile` scope releases the full OIDC Core \u00a75.1 claim set \u2014 SCIM attributes first, `metadata.oidc` as the fallback for every claim, `updated_at` from the row's own column as a NumericDate \u2014 and \u00a75.5's `claims` parameter is honoured for its `userinfo` member, parsed and filtered at the authorization endpoint, stored on the code and carried in the token as `axiam_requested_claims`. Neither can unlock `phone_number`, `phone_number_verified` or `address`, which sit behind the consent gates of T-241 (`claims_request::RELEASABLE`).",
                   "modelType": "STRIDE",
                   "number": 58
+                },
+                {
+                  "id": "c7f634a6-179e-4281-86cc-899db746e49f",
+                  "title": "A postal address or telephone number is released by naming the claim, from a token issued before consent was withdrawn, or inside an ID token",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "OIDC Core \u00a75.4's `address` and `phone` scopes release data AXIAM holds for no purpose of its own \u2014 nothing authenticates against them, nothing is sent to them \u2014 so they exist only to be released to a relying party the end user has agreed to. Three ways past a consent ceremony: \u00a75.5's `claims` parameter naming the claim directly; a release decision taken once at authorization that outlives a withdrawal for the access token's fifteen minutes and the refresh's thirty days; and the ID token, a long-lived artefact relying parties log and cache. A fourth is a client on a profile that collects no consent record at all.",
+                  "mitigation": "X7 G8 / wave W7: four gates, each closed by a different party \u2014 the **organization** enabled `sensitive_scopes_enabled` (off by default, and the settings model's only *disable*-only field: a tenant may refuse a release its organization allows and never authorise one it forbade); the **operator** registered the scope on the client, checked on create and on the merged update path because a gate that only runs on create is a gate with a PATCH around it; the **end user** consented, per client and per exact scope set; and the client is not on the `fapi2` profile, refused at registration, at the authorization endpoint (M8) and at UserInfo (M10) \u2014 even against a hand-written consent record the API would have refused to create. All four are re-asked **at every UserInfo call**, so withdrawal is effective on the relying party's next request with the token it already holds (T8.4 uses the byte-identical token before and after). Claims are returned from UserInfo only and never in the ID token (T8.3 decodes the ID token a relying party actually receives). `claims_request::RELEASABLE` cannot unlock `phone_number`, `phone_number_verified` or `address` for anybody, FAPI or not: the filter runs at the authorization endpoint and is asserted again at UserInfo against a token minted as though it had been bypassed, because that endpoint is the one that would leak. A release is audited by claim **name** and never by value, since the audit log is append-only and is itself exported under Art. 15 (T8.6). The Art. 7 self-service surface is new \u2014 `GET /api/v1/account/consents`, `POST`/`DELETE \u2026/oidc-scopes` \u2014 withdrawal is one call with no confirmation and no grace, and it is namespaced `oidc_scope_release:` so it can never reach a `terms_of_service` row. A token naming no relying party \u2014 every token issued before this wave \u2014 releases nothing, and nothing registered earlier changes behaviour, structurally: the scopes were unregistrable. Known limitation, stated rather than discovered: the requested claims ride the authorization code, not the refresh token, so a refreshing client must ask again. `docs/compliance/gdpr-compliance.md` \u00a73.1; conformance rows 104\u2013129.",
+                  "modelType": "STRIDE",
+                  "number": 241
+                },
+                {
+                  "id": "723d4623-6c5d-4a93-be64-2a573a458adc",
+                  "title": "The ID token carries identifiers nobody asked for, and travels further than the relying party",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "The ID token carried `tenant_id`, `org_id` and \u2014 under `scope=email` \u2014 `email`. The OpenID Foundation suite objects by name in both lanes and states the consequence rather than the rule (OIDC Core \u00a75.4): an ID token is often forwarded as proof of an authentication event, so anything in it travels further than the relying party that asked for it. The reverse defect sat beside it \u2014 UserInfo withheld `email_verified`, `name`, `given_name` and `family_name`, which AXIAM held all along.",
+                  "mitigation": "The three claims left the ID token (065f37c). `sdks/CONTRACT.md` binds both identifiers to two other places that do not move \u2014 an SDK resolves them from the access-token claims returned by login, and `UserInfo { sub, tenant_id, org_id, \u2026 }` still carries both \u2014 so the ID token was a third copy nothing was specified to read; `preferred_username` deliberately stays, which \u00a75.4 permits. The member list is pinned exactly (`an_id_token_with_no_evidence_has_exactly_todays_claim_set`, `t2_6_\u2026`), so `auth_time`, `acr` or `amr` appearing for an `ignore` client still fails. UserInfo now emits what the OP can assert and omits what it cannot rather than inventing it (\u00a75.3.2): `email_verified` from `email_verified_at`, the SCIM-provisioned names, and since c4bdefd the full \u00a75.1 `profile` set read SCIM-first with `metadata.oidc` as the fallback (T-58).",
+                  "modelType": "STRIDE",
+                  "number": 242
+                },
+                {
+                  "id": "15a4a0ba-b7a2-428c-8cdb-671ac203f44a",
+                  "title": "A UserInfo POST authenticated by a cookie answers a cross-site form, or logs the token it carried",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "OIDC Core \u00a75.3 requires UserInfo to accept POST, and RFC 6750 \u00a72.2 lets the access token travel in the form body. `/oauth2` carries no CSRF middleware and the cookie is read before the header, so a route that accepted a cookie-authenticated cross-site form POST would return personal data to any page that submitted one; a form field is a place a token gets logged; and a token accepted from the query string is a credential read out of a URL.",
+                  "mitigation": "Wave W6 (G10): `/oauth2/userinfo` is one resource with two routes, deliberately without the scope's rate-limit wraps \u2014 every wrapped endpoint there is unauthenticated and allocates or terminates state, UserInfo does neither, and a limiter would change what GET does under load. The token is accepted from the `Authorization` header or, on POST only, from an `access_token` form field; a request carrying more than one credential is refused `400 invalid_request` and the refusal reads neither of them; an `access_token` query parameter is never read on either method (RFC 6750 \u00a72.3 \u2014 refusing it would mean reading a credential out of a URL first). A cross-site cookie POST fails closed because `axiam_access` is `SameSite=Strict`, and since that is a property of the cookie the test pins the attribute and then asserts that a same-site cookie POST *does* authenticate, so the pin cannot pass against a route that stopped reading the cookie. `UserInfoPostForm` hand-writes a redacting `Debug`, and a TRACE capture over a successful and a failed POST asserts that neither the token nor its signature segment appears. GET is unchanged as a property of the routing table \u2014 the POST handler resolves the carrier and delegates to the body GET calls, `AuthenticatedUser`'s extractor is untouched, and whole-response equality between the two is asserted. DPoP needs no method-specific branch: `htm` is built from the request method, so a proof minted for GET is refused on POST; a certificate-bound token presented without a certificate is refused on POST identically to GET. `POST /oauth2/authorize` (G11) is declined and the reason recorded with a revisit condition. Conformance rows 90\u2013103.",
+                  "modelType": "STRIDE",
+                  "number": 243
+                },
+                {
+                  "id": "f1cc79bd-8813-4270-8b75-9b060d70db39",
+                  "title": "Tenant-scoped discovery becomes a tenant-enumeration oracle, or a default tenant becomes a handler fallback",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "The discovery document advertised endpoints that could not be used at the URLs it advertised: every endpoint that authenticates a client takes a required `?tenant_id=`, `/oauth2/authorize` needs one for any browser arriving from a relying party, and the document published all of them bare \u2014 so no third-party discovery-driven client could complete a flow against AXIAM, which is the problem discovery exists to solve. Each of the two fixes opens a door of its own: a document that varies by tenant can be probed for which tenants exist, and a \"default tenant\" applied at the endpoint would silently give an unparameterised request a tenant on a multi-tenant authorization server where the tenant *is* the isolation boundary.",
+                  "mitigation": "Discovery takes an optional `tenant_id`. A caller that omits it receives exactly the document it received before; an unknown tenant is answered identically to a known one except for the single caller-supplied value the document now echoes \u2014 asserted by normalising that one value away and requiring the two documents to match exactly, so a leak anywhere else still fails \u2014 and the sensitive scopes and their claims are advertised only for a tenant that has them enabled. The endpoint URLs carry the tenant they describe (RFC 6749 \u00a73.1 and \u00a73.2 allow a query component and require clients to retain it), from the caller's `tenant_id`, else from `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`. That default **states a fact in a document; it is not a fallback in a handler**: no endpoint's behaviour changed, a request arriving without `tenant_id` is refused exactly as before, and a deployment that sets nothing serves the document it served before, with no endpoint gaining a query string (`a_document_that_names_no_tenant_carries_no_query_string`). `userinfo_endpoint`, `jwks_uri` and `issuer` stay bare \u2014 UserInfo resolves its tenant from the token, the JWKS is deployment-wide, and an `issuer` carrying a query would stop matching every token's `iss`. An unparseable default is treated as unset, deliberately the opposite of the mTLS alias's fail-closed refusal (T-245): a missing tenant only fails to help a client, while a bad alias actively misdirects one. The same first conformance run found two RFC 8414 members missing that described behaviour AXIAM already had \u2014 `code_challenge_methods_supported` and `token_endpoint_auth_signing_alg_values_supported` \u2014 and RFC 8414 defines no default for either, so silence read as \"unsupported\"; the second is derived from `jose::permitted_algorithm_names()` through an exhaustive match, so widening the verifier's list stops compiling until the wire name is spelled (contract 1.42 \u00a721.5).",
+                  "modelType": "STRIDE",
+                  "number": 244
+                },
+                {
+                  "id": "629451a8-e367-4b9c-9aeb-21396b51927b",
+                  "title": "A misconfigured mTLS alias routes clients to the wrong host, or the front channel is aliased",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "RFC 8705 \u00a75 `mtls_endpoint_aliases` instructs a conforming client to switch hosts. AXIAM implemented both halves of RFC 8705 and published no \u00a75 metadata, so a deployment terminating mTLS on a separate host \u2014 the only shape one TLS listener allows, since it decides whether to request a certificate before it has seen a byte of HTTP \u2014 had to pass client configuration out of band. Publishing the member wrongly misdirects every mTLS client; dropping it silently on a bad value routes them to the conventional endpoints, the one outcome the setting exists to prevent, indistinguishably from a deployment that has no mTLS host; and aliasing the front channel makes a browser raise a certificate-chooser dialog most users cannot answer.",
+                  "mitigation": "`AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` adds aliases for the six back-channel endpoints \u2014 token, userinfo, revocation, introspection, device authorization and PAR \u2014 each the top-level endpoint of the same name re-based on the mTLS host through one macro, so the two cannot drift. `authorization_endpoint`, `end_session_endpoint` and `jwks_uri` are deliberately not aliased (the first two authenticate the user and never the client; the third is public key material), and the `issuer` does not move because OIDC Core \u00a72 requires it to equal every token's `iss`, including one minted at an alias. The member is absent by default and absence is correct \u2014 a present member instructs a client to switch hosts, so a single-listener deployment must emit none, including one running `client_auth = optional` \u2014 and it is omitted rather than serialised as `null`. A configured-but-unusable value, or one carrying a query or fragment, fails the discovery request with `500` rather than quietly dropping the aliases. Since b9232f3 the aliases carry the tenant (T-244): an alias tells an mTLS client it *must* use that URL, so one that omitted the tenant would be strictly worse than no alias. The conformance rig runs exactly this split \u2014 an nginx sidecar on the issuer for the front channel, the server's own rustls listener for the back channel \u2014 because `axiam_oauth2::mtls` refuses the `X-Client-Certificate` proxy header for OAuth2 client authentication by construction. Contract 1.40 \u00a721.3 rule 2 is the SDK half (T-266).",
+                  "modelType": "STRIDE",
+                  "number": 245
                 }
               ]
             }
@@ -4497,6 +4717,17 @@
                   "mitigation": "The shared JWKS cache serves keys for a 1-hour TTL without any HTTP, and serves STALE keys for a further 24 hours when the client's endpoint is unreachable rather than failing the authentication. An operator who wants no outbound dependency at all registers the key set inline as `jwks`; the operator guide says which to choose and why.",
                   "modelType": "STRIDE",
                   "number": 174
+                },
+                {
+                  "id": "c2851426-aaca-426a-a2e6-ef481b5a2628",
+                  "title": "A registration is edited into a weaker posture: a `fapi2` row set to honour, a sensitive scope on a `fapi2` client, or a scope-only patch that skips the merged validation",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "Three per-client switches now share one registration \u2014 `profile`, `authn_request_params`, `browser_sso` \u2014 plus the sensitive scopes, and a client's posture is what its row says. A `fapi2` row edited to `honour`, a `fapi2` client registered for `address` or `phone`, or a scope-only PATCH validated against the *stored* scope list rather than the one about to be written, would each move a client onto a lane a test proves refused, without any request having been made.",
+                  "mitigation": "Wave W1's gates, in `fapi.rs`'s existing two-layer pattern: `FapiRegistrationError::{AuthnParamsOnFapiClient, SensitiveScopesOnFapiClient}` enforced on create **and** on update, at both handler call sites; `touches_security_profile` now covers `scopes`, so a scope-only patch costs the merged read it previously skipped instead of validating against the wrong list; a `fapi2` row somehow on `honour` is refused again at request time with `tracing::error!`. `reject_sensitive_scopes_when_disabled` is the tenant-switch gate, found missing while writing W7's tests \u2014 `validate_registration` is a pure function four layers below the settings row \u2014 and it runs on create and on the merged update, because a gate that only runs on create is a gate with a PATCH around it. `browser_sso` is permitted on a `fapi2` client by decision (plan \u00a711 D2), and `m7_\u2026` asserts the flag changes nothing about what a request may contain on either profile. The admin API echoes both new fields so an operator can audit the posture from the endpoint; pre-v54 rows decode to today's behaviour; and the `WeakClientAuth` gate asks `is_strong()` rather than enumerating variants, so the fifth authentication method needed no new refusal code to be refused.",
+                  "modelType": "STRIDE",
+                  "number": 258
                 }
               ]
             }
@@ -4605,9 +4836,20 @@
                   "severity": "High",
                   "type": "Tampering",
                   "description": "A code observed in a redirect or a proxy log and replayed at the same moment as the legitimate exchange could, if the two are not serialised, let both callers mint a token pair from one authorization. T-54 covers the sequential replay; this is the concurrent one, which the single-use flag alone does not decide.",
-                  "mitigation": "Two independent layers, the same pair the three credentials in T-163 carry (schema v37). The guarded UPDATE \u2014 used = false, with client_id and redirect_uri matched in the same statement so a wrong-client attempt cannot burn the code \u2014 runs inside an explicit transaction, so two concurrent redemptions conflict on one key and the engine aborts the loser; and a per-attempt redemption nonce is read back in a separate query after that transaction commits, catching a conflict the engine silently missed. Before v37 this path had the first layer implicitly (a lone statement runs in the engine's own transaction) and the second not at all, which left it resting on T-165 with nothing behind it. Guarded by authorization_code_consume_serialises over 50 rounds of 8 racers, and by an_authorization_code_redemption_stamps_its_nonce, which asserts the second layer directly \u2014 a race test cannot distinguish a two-layer mechanism from a one-layer one when the engine arbitrates either way.",
+                  "mitigation": "Two independent layers, the same pair the three credentials in T-163 carry (schema v37). The guarded UPDATE \u2014 used = false, with client_id and redirect_uri matched in the same statement so a wrong-client attempt cannot burn the code \u2014 runs inside an explicit transaction, so two concurrent redemptions conflict on one key and the engine aborts the loser; and a per-attempt redemption nonce is read back in a separate query after that transaction commits, catching a conflict the engine silently missed. Before v37 this path had the first layer implicitly (a lone statement runs in the engine's own transaction) and the second not at all, which left it resting on T-165 with nothing behind it. Guarded by authorization_code_consume_serialises over 50 rounds of 8 racers, and by an_authorization_code_redemption_stamps_its_nonce, which asserts the second layer directly \u2014 a race test cannot distinguish a two-layer mechanism from a one-layer one when the engine arbitrates either way. At 1.0.0-beta13 the conflict recogniser behind this branch was found not to match SurrealDB v3's own phrasing \u2014 fail-closed, so a refused replay surfaced as a `500` rather than as \"no row consumed\" \u2014 and the three phrasings now live in one marker set (T-262).",
                   "modelType": "STRIDE",
                   "number": 164
+                },
+                {
+                  "id": "3d3af516-9338-4e06-ba4c-a48ac91ecb1f",
+                  "title": "A replayed authorization code is refused, but the tokens it already minted keep working",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "description": "RFC 6749 \u00a710.5 asks two things of a code used twice: deny it, and revoke, when possible, every token previously issued on it. The denial half was thorough \u2014 single-use across two layers with a redemption nonce (T-54, T-164). The revocation half was absent: `revoke_after_code_replay` ran only when `consume` failed, but `get_by_hash` requires `used = false`, so a replayed code was refused one step earlier and the revocation fired for a race and for nothing else. An access token minted from a replayed code kept working, and the server logged nothing at all across a whole conformance run; both `oidcc-codereuse-30seconds` and FAPI's `attempt-reuse-authorization-code-after-one-second` proved it by presenting the first access token afterwards. FAPI 2.0 \u00a75.3.2.1 additionally caps a code at 60 seconds, and AXIAM issued 600.",
+                  "mitigation": "a76161b and 065f37c: `AuthorizationCodeRepository::replayed_session` returns the session for a code that exists and is spent \u2014 `used = true` is what makes it a replay rather than a lookup, `client_id` and `redirect_uri` are matched so a caller presenting the wrong pair cannot revoke somebody else's session, and expiry is deliberately *not* filtered, because a replayed code that has since expired still minted tokens. Revocation reaches the session: an AXIAM access token is a stateless JWT, so what can be revoked is the session its `sid` names (T-249), which every resource request already checks. Two costs are stated in the code rather than glossed \u2014 the session is the browser session, so revoking it signs the user out of everything it reaches, admin UI included; and a legitimate client retrying after a lost `200` replays a code exactly as an attacker does. The server cannot tell them apart, which is precisely why \u00a710.5's answer is to revoke rather than to guess. Not an oracle: both paths return the same `invalid_grant`, and a hash naming nothing revokes nothing; a replay costs one extra read and one write, distinguishable by timing only to an attacker who already holds a real code. The FAPI lifetime is a per-client cap taken as the minimum of the profile's 60 seconds and the operator's own setting \u2014 never a lower global default, which would shorten the window for every existing client to satisfy a profile none of them is on, and never a longer one, because a security profile must not make a deployment less strict.",
+                  "modelType": "STRIDE",
+                  "number": 250
                 }
               ]
             }
@@ -5632,7 +5874,7 @@
                   "severity": "High",
                   "type": "Tampering",
                   "description": "Two redemptions of the same credential arriving together can both observe it unspent and both succeed, yielding two RPTs from one authorization decision, two token sets from one user approval, or a replayable authorization request. RFC 8628 makes this the normal shape of the device flow rather than an exotic case: the device polls on a short interval, so a poll is usually already in flight when the user approves.",
-                  "mitigation": "Two independent layers, so a double redemption needs both to fail (ilpanich/axiam#302). The guarded UPDATE runs inside an explicit transaction, making two concurrent redemptions a write-write conflict the storage engine aborts the loser of; and a per-attempt nonce is read back in a separate query after that transaction commits, so a conflict the engine silently missed is still caught. The read-back stays outside the transaction deliberately \u2014 inside one, snapshot isolation shows every racer its own write. Measured with tools/surreal-race-probe: zero double redemptions in 40 000 contended attempts on surrealkv and 9 600 on rocksdb. Layer one is a property of the storage engine, so the guarantee is conditional on running a persistent one \u2014 see T-165. authorization_code.consume carries the same two layers as of schema v37 (T-164).",
+                  "mitigation": "Two independent layers, so a double redemption needs both to fail (ilpanich/axiam#302). The guarded UPDATE runs inside an explicit transaction, making two concurrent redemptions a write-write conflict the storage engine aborts the loser of; and a per-attempt nonce is read back in a separate query after that transaction commits, so a conflict the engine silently missed is still caught. The read-back stays outside the transaction deliberately \u2014 inside one, snapshot isolation shows every racer its own write. Measured with tools/surreal-race-probe: zero double redemptions in 40 000 contended attempts on surrealkv and 9 600 on rocksdb. Layer one is a property of the storage engine, so the guarantee is conditional on running a persistent one \u2014 see T-165. authorization_code.consume carries the same two layers as of schema v37 (T-164). At 1.0.0-beta13 the conflict recogniser behind this branch was found not to match SurrealDB v3's own phrasing \u2014 fail-closed, so a refused replay surfaced as a `500` rather than as \"no row consumed\" \u2014 and the three phrasings now live in one marker set (T-262).",
                   "modelType": "STRIDE",
                   "number": 163
                 }
@@ -5744,6 +5986,195 @@
               "threats": [],
               "trustBoundaryIds": []
             }
+          },
+          {
+            "position": {
+              "x": 370,
+              "y": 640
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "Resource-endpoint\ntoken validation\n(cnf, DPoP jti, sid)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "7a5c9644-3db1-4d22-ad8d-fdd39b62946a",
+            "data": {
+              "type": "tm.Process",
+              "name": "Resource-endpoint\ntoken validation\n(cnf, DPoP jti, sid)",
+              "description": "The extractors every protected REST route runs before a handler: JWT signature and expiry, the session named by `sid`, and the sender constraint \u2014 certificate thumbprint or DPoP proof, now single-use \u2014 a bound token demands of this request.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "013ec309-cb26-410a-8619-cfa71b527257",
+                  "title": "A sender-constrained token is laundered into a bearer token through the identity cache",
+                  "status": "Mitigated",
+                  "severity": "Critical",
+                  "type": "Spoofing",
+                  "description": "The audit middleware validates a JWT's signature and expiry and caches the result as `CachedUserIdentity`. `extract_user` and `extract_principal` then took those claims and returned \u2014 never reaching `validate_presented_token`, the only place `enforce_sender_constraint` lives. So on every route behind `AuthenticatedUser`, a certificate-bound or DPoP-bound access token was accepted over a connection that presented no certificate and carried no proof: the binding T-167 and T-175 require every relying party to honour was decorative on AXIAM's own API. It survived because the test that asserts the property could not exhibit the defect \u2014 the test app installs no audit middleware, so the cache was always absent and the slow path always taken.",
+                  "mitigation": "Found by the OpenID Foundation suite and closed in 065f37c, \"one of them a hole\". Signature and expiry are facts about the **token** and are worth caching; RFC 8705 \u00a73 and RFC 9449 \u00a77.1 are facts about **this request** \u2014 which certificate the connection presented, which proof accompanied it \u2014 and no cached answer can stand in for them. Both extractors now go through one `cached_identity` helper that enforces the constraint every time the cache is used, and `CachedUserIdentity` carries the encoded token so the DPoP `ath` binding can still be checked. The new test installs the cache, uses the same token and the same assertion, and keeps an **unbound** token as a control so it cannot pass by having broken the cached path outright. `authenticate_presented_token` (W6) does not consult the cache at all. Recorded Critical rather than High because the whole value of sender constraint rests on the resource server, and here the resource server is AXIAM.",
+                  "modelType": "STRIDE",
+                  "number": 246
+                },
+                {
+                  "id": "9d5c99b4-b672-46b8-bcc4-a20797abee5f",
+                  "title": "A DPoP proof captured at a resource endpoint is replayed within its freshness window",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "T-172's known residual. The token endpoint has recorded proof `jti`s since X5.1; the resource endpoints did not, and `enforce_sender_constraint` documented the gap rather than hiding it \u2014 actix extractors are synchronous and the replay store is not \u2014 so within the 60-second freshness window a captured proof for that exact method, URI and token would be accepted a second time. The OIDF `dpop-negative-tests` module measured it: \"Second use of the same jti\" expected 400 or 401 and got 200 (RFC 9449 \u00a711.1).",
+                  "mitigation": "The remedy the comment proposed \u2014 middleware that can await \u2014 was more than needed: the three extractors that matter already return a boxed future, only the helpers were synchronous. So the check splits along the line that was already there: verification stays synchronous, where every caller already is, and leaves the verified proof on the request as a `PendingDpopProof`; recording \u2014 the part that is a write \u2014 happens in the extractor's async tail through a `DpopReplayGuard`, the same object-safe boxed-future seam `SessionValidator` uses. The guard is a clone of the token endpoint's own `proof_replay_repo` by construction rather than by convention: a proof is single-use, not single-use *per endpoint*, and two stores would let one proof be spent once at each; the `UNIQUE` index decides, with no read-then-write. `AuthenticatedServiceAccount` was wholly synchronous and is now async like the others, because a machine token carries `cnf` exactly as a user token can and leaving it alone would have left every m2m route as the replayable way in. Requests presenting no proof pay nothing. Two tests: one proof sent twice answers 200 then 401, with the good first request there so the test cannot pass against a server that refuses every proof; three fresh proofs from the same key are all served, because \"single-use\" means that proof, not that key. `htu` is now compared in canonical form as \u00a74.3 asks (T-172).",
+                  "modelType": "STRIDE",
+                  "number": 247
+                },
+                {
+                  "id": "7ae4e7dc-3991-4ae9-8a50-3e26555cbc9c",
+                  "title": "Replay protection recorded before verification becomes a denial-of-service primitive against the key it protects",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "Recording a proof's `(jkt, jti)` is a write keyed by the client's public key. Done *before* the signature is verified, anyone could burn arbitrary pairs against a victim's key by sending forged proofs carrying that victim's `jwk` \u2014 turning replay protection into a denial-of-service aimed at its beneficiary. And a guard that fails open when the store is unreachable turns a database blip into an unlimited replay window.",
+                  "mitigation": "The order is load-bearing and stated in the code: verify first, record after, and only a proof that verified is ever recorded. A proof that verified but whose `jti` cannot be recorded is **refused**, including when no `DpopReplayGuard` is registered at all \u2014 the token endpoint's rule (\"failing open would turn a database blip into an unlimited replay window\") applied at the other end of the same mechanism, at no cost to a deployment that wires the guard and with a `tracing::error!` for one that forgot. The replay row expires exactly at the end of the 60-second freshness window, so the table is bounded by the proof rate rather than growing without limit, and a client is never locked out by its own last request, since the tuple is per proof and not per key.",
+                  "modelType": "STRIDE",
+                  "number": 248
+                },
+                {
+                  "id": "53be4048-2394-4e5f-bd7a-62dd549299f6",
+                  "title": "An OAuth2 access token names no session, so a password or MFA reset cannot revoke it \u2014 or UserInfo refuses every token",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "description": "`check_user_aud_and_parse_jti` derived the session id from the token's `jti`. Every login path honours the contract that a user-flow token's `jti` equals the issuing `session.id`; the OAuth2 paths cannot, because a `jti` must be unique per token (RFC 7519 \u00a74.1.7) and one session issues many, so they minted a random one. `is_session_active` then looked up a session that had never existed and refused, seconds after issuance \u2014 UserInfo did not work for any OIDC client at all. The obvious repair, dropping the session check at UserInfo, would have given up the property the check exists for: a password or MFA reset revoking in-flight OAuth2 access tokens.",
+                  "mitigation": "49916b4: the session travels in its own `sid` claim \u2014 the name OIDC Core \u00a72 already uses on the ID token \u2014 on the authorization-code and refresh paths, and the reader prefers `sid`, falling back to `jti`. The fallback is what makes this need no migration and no flag day: every login-issued token resolves to exactly the session it always did, and not one login path changed. The refresh path carries it too, because a rotated token that dropped `sid` would stop working at UserInfo the moment it replaced the one that had it \u2014 a session ending mid-flow fifteen minutes after sign-in. `None` for a token with no session behind it (client credentials, an RPT, a token exchange), which are not weakened by the absence since there is no session to revoke. The access token's `sid` equals the ID token's, and RFC 6749 \u00a710.5's code-replay revocation (T-250) is built on the same claim.",
+                  "modelType": "STRIDE",
+                  "number": 249
+                }
+              ]
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "cfb25907-2444-4138-9d15-1ad1e919c642",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "validate presented token (cnf, DPoP, sid)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "f87eea4c-e8b9-54be-b890-88743fe08b84"
+            },
+            "target": {
+              "cell": "7a5c9644-3db1-4d22-ad8d-fdd39b62946a"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "validate presented token",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "in-process",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "13fde7ec-9950-4ffd-8d7e-0af440e9cb5f",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "check session / record proof jti"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "7a5c9644-3db1-4d22-ad8d-fdd39b62946a"
+            },
+            "target": {
+              "cell": "80616398-b151-54a9-8b63-8ddda79c7552"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "check session, record proof jti",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "in-process",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
           }
         ]
       },
@@ -5754,7 +6185,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.11.0",
+        "version": "2.12.0",
         "cells": [
           {
             "position": {
@@ -7588,7 +8019,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.11.0",
+        "version": "2.12.0",
         "cells": [
           {
             "position": {
@@ -9005,7 +9436,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.11.0",
+        "version": "2.12.0",
         "cells": [
           {
             "position": {
@@ -9480,6 +9911,17 @@
                   "mitigation": "Fixed in 1.0.0-beta05: require_trust_anchor runs on every device authentication, before the service-account binding. It walks up parent_ca_id until it reaches a CA flagged as an anchor \u2014 a walk, not a test of the immediate issuer, because a tenant signing CA is deliberately an unflagged intermediate \u2014 requires every CA on the way to be Active and inside its validity window (an anchor reached through a revoked intermediate is not reached), and bounds the walk at depth 8, because parent_ca_id is data and data can describe a cycle. Each refusal names its reason distinctly. The decisive test presents a bound, otherwise-valid certificate from an unflagged CA, so the refusal can only be about trust \u2014 the first draft presented an unbound one and passed for the wrong reason, which is recorded so the next assertion is written with one reason to succeed.",
                   "modelType": "STRIDE",
                   "number": 206
+                },
+                {
+                  "id": "3df05edd-d1f9-4795-a6d8-37b78deb8255",
+                  "title": "Accepting an unchained certificate for RFC 8705 \u00a72.2 lets a self-minted certificate authenticate as a device or as a `tls_client_auth` client",
+                  "status": "Mitigated",
+                  "severity": "Critical",
+                  "type": "Elevation of privilege",
+                  "description": "A `self_signed_tls_client_auth` client could never open a connection: `ReloadableClientCertVerifier` delegated to webpki, whose job is chain-building, and an RFC 8705 \u00a72.2 certificate is self-signed by design \u2014 it chains to nothing, because the method identifies a client by the `x5t#S256` an administrator registered rather than by an issuer \u2014 so rustls sent `bad_certificate` before AXIAM saw a request (34 of 37 FAPI modules `INTERRUPTED` with no HTTP status). RFC 8705 puts two trust models under one transport: \u00a72.1 is PKI, the identity a name a CA vouched for; \u00a72.2 has no PKI in it, the certificate *is* the credential, and adding an issuer to the bundle cannot answer it. The hazard is in the fix: once the listener admits an unchained certificate, device and IoT authentication \u2014 whose entire model is chaining to a CA an administrator flagged as a trust anchor, the native-listener twin of B-06 \u2014 must not accept one, and a `tls_client_auth` DN match without a chain requirement makes `openssl req -subj \"/CN=<whatever was registered>\"` the entire attack.",
+                  "mitigation": "2d4cb59, four layers, and the third and fourth are where the safety is. (1) `ClientAuth::OptionalSelfSigned`, spelled `optional_self_signed`, a fourth policy: `off`, `optional` and `required` are byte-for-byte unchanged, every new branch is gated on `accepts_self_asserted()`, which only this variant answers true to, and the new behaviour is reachable only through a value no deployment sets today \u2014 which is what makes it non-regressive rather than merely tested. (2) The verifier tries webpki and, under the new policy only, accepts on failure, with an explicit `not_before`/`not_after` check on that branch because webpki performs the validity check as part of chain building and the path that skips chain building would silently lose it, for exactly the clients nobody else vouches for; the self-signature is deliberately not verified, since under \u00a72.2 the identity is the SHA-256 of the DER and possession is proven by TLS 1.3's `CertificateVerify`, which rustls checks whether or not a chain was built. (3) `CertTrust::{ChainedToAnchor, SelfAsserted}` travels from the handshake to every consumer, on `VerifiedClientCert` and `PresentedCertificate` \u2014 an enum rather than a bool, **required** rather than defaulted, because a default would have handed the privileged value to any future call site that said nothing; it lives in `axiam-core` because the layering gate refuses the outward edge, and it is re-derived in the `on_connect` hook via `tls::peer_certificate_trust` because rustls's `ClientCertVerified` is an opaque token with no payload and the verifier is handed no connection handle to key a side channel on. (4) Only the one method specified to work this way may consume the weaker level: device/IoT certificate auth **refuses** `SelfAsserted` outright \u2014 rather than by falling through to the header branch, whose error text would advise setting `TRUST_FORWARDED_CLIENT_CERT`, advice that would widen a different trust boundary while chasing this one; `tls_client_auth` (\u00a72.1) now **requires** `ChainedToAnchor`, a no-op until this commit and a real guard now that the invariant is configurable; `self_signed_tls_client_auth` (\u00a72.2) accepts either, since the thumbprint comparison is the authentication and is no weaker for the certificate having also chained. Net effect: an unchained certificate can do exactly one thing \u2014 authenticate as a client whose exact SHA-256 an administrator registered \u2014 and every other path treats it as though the handshake had carried no certificate at all. A second listener for \u00a72.2 was rejected: the per-client decision happens at the application layer either way, so an extra port buys only another listener to operate. The tests pin the operator-facing contract: a DN that *matches* is refused unchained with the chained case as a control on the same certificate; the \u00a72.2 acceptance test computes the thumbprint the way an administrator does rather than reading it back off the value under test; the four documented policy strings are hard-coded; a real rustls TLS 1.3 handshake through `build_rustls_server_config` rejects the certificate under `optional` and accepts it under `optional_self_signed`; expired, not-yet-valid and non-certificate bytes are each refused.",
+                  "modelType": "STRIDE",
+                  "number": 263
                 }
               ]
             }
@@ -10636,7 +11078,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.11.0",
+        "version": "2.12.0",
         "cells": [
           {
             "position": {
@@ -12001,7 +12443,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.11.0",
+        "version": "2.12.0",
         "cells": [
           {
             "position": {
@@ -12401,7 +12843,7 @@
                   "severity": "High",
                   "type": "Spoofing",
                   "description": "The gRPC listener is loopback-bound in Compose and ClusterIP-only in Kubernetes, a rule filed as SEC-003 when `UserService` and `TokenService` had no authentication at all. That is no longer true \u2014 every service is built with `with_interceptor(AuthInterceptor)`, derives tenant and subject from verified claims rather than the request body, `ValidateCredentials` accrues lockout, and neither reflection nor the health service is registered \u2014 so publishing the surface became a defensible choice, and the obvious cheap way to do it is unsound for a reason that has nothing to do with TLS. `GrpcTrustedHopsKeyExtractor` reads `X-Forwarded-For` before the verified connection peer, exactly as the REST extractor does (T-212); with no proxy appending the real peer, a client that sends one entry is keyed on a value it chose, and a value it varies per call mints a fresh bucket per call, so every ceiling becomes decorative. No value of `TRUSTED_HOPS` repairs it \u2014 for `n`, `n+1` client-written entries select the leftmost and fewer fall back to the peer \u2014 and both protocols read the one `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, so they cannot be given different values. Publishing the whole `axiam.v1` package would also put `ValidateCredentials`, a real Argon2id password check, and `ReactorAdminService`, an administrative surface rate-limited like the hot path, on the internet by default.",
-                  "mitigation": "Recorded at 1.0.0-beta11. The bind stays loopback by default, and the blanket rule becomes a default rather than a prohibition: gRPC is published **through the edge on 443, path-matched, or not at all**. Caddy speaks HTTP/2 to the client, re-encrypts to the backend's own gRPC listener and appends the real peer, so the hop count is one on both protocols and the shared `TRUSTED_HOPS` stays correct for both. The documented route is an **allowlist** of services — `AuthorizationService`, `UserInfoService`, `TokenService` — so `UserService` and `ReactorAdminService` stay off the public edge unless an operator names them, with what each costs written beside the line that would add it; anything under `/axiam.v1.*` not listed falls through to the SPA handler and gets HTML back, a confusing refusal but a safe one. The site-wide stripping of `X-Client-Certificate` and `X-Real-IP` applies to the route. The listener's own TLS is enabled only when both `AXIAM__GRPC_TLS_CERT_PATH` and `_KEY_PATH` are set, and the server panics at startup if either names a file it cannot read — a typo is a failed boot, never a listener that quietly came up in cleartext. The runbook sets `AXIAM__GRPC__STRICT_REVOCATION=true` for a public listener so a revoked session does not keep passing for up to fifteen minutes, and states the per-IP-is-not-per-client sizing behind NAT. `claude_dev/public-backend-tls-design.md` §13 and the Pi runbook §14 carry the argument; `ReactorAdminService` left the authz rate-limit family in 1.0.0-beta12 (R-5): it fell through `GrpcMethodFamily::classify`'s catch-all, which puts an unrecognised path in the strictest *limited* family so a new service is throttled rather than unlimited — safe as a default, wrong as an outcome for an administrative surface, which was therefore sized like the hot path at 100/s per IP and raised by the `gateway` and `mesh` profiles. It now maps to `Admin`, whose ceiling is the absolute `ADMIN_PER_SEC_DEFAULT` (10/s) that no profile raises; the catch-all arm is unchanged. The listener's TLS was 1.3-capable but 1.2-negotiable when this was recorded, because tonic's `ServerTlsConfig` exposed no protocol-version knob; R-1 removed that limit and both listeners are TLS 1.3-only (T-234).",
+                  "mitigation": "Recorded at 1.0.0-beta11. The bind stays loopback by default, and the blanket rule becomes a default rather than a prohibition: gRPC is published **through the edge on 443, path-matched, or not at all**. Caddy speaks HTTP/2 to the client, re-encrypts to the backend's own gRPC listener and appends the real peer, so the hop count is one on both protocols and the shared `TRUSTED_HOPS` stays correct for both. The documented route is an **allowlist** of services \u2014 `AuthorizationService`, `UserInfoService`, `TokenService` \u2014 so `UserService` and `ReactorAdminService` stay off the public edge unless an operator names them, with what each costs written beside the line that would add it; anything under `/axiam.v1.*` not listed falls through to the SPA handler and gets HTML back, a confusing refusal but a safe one. The site-wide stripping of `X-Client-Certificate` and `X-Real-IP` applies to the route. The listener's own TLS is enabled only when both `AXIAM__GRPC_TLS_CERT_PATH` and `_KEY_PATH` are set, and the server panics at startup if either names a file it cannot read \u2014 a typo is a failed boot, never a listener that quietly came up in cleartext. The runbook sets `AXIAM__GRPC__STRICT_REVOCATION=true` for a public listener so a revoked session does not keep passing for up to fifteen minutes, and states the per-IP-is-not-per-client sizing behind NAT. `claude_dev/public-backend-tls-design.md` \u00a713 and the Pi runbook \u00a714 carry the argument; `ReactorAdminService` left the authz rate-limit family in 1.0.0-beta12 (R-5): it fell through `GrpcMethodFamily::classify`'s catch-all, which puts an unrecognised path in the strictest *limited* family so a new service is throttled rather than unlimited \u2014 safe as a default, wrong as an outcome for an administrative surface, which was therefore sized like the hot path at 100/s per IP and raised by the `gateway` and `mesh` profiles. It now maps to `Admin`, whose ceiling is the absolute `ADMIN_PER_SEC_DEFAULT` (10/s) that no profile raises; the catch-all arm is unchanged. The listener's TLS was 1.3-capable but 1.2-negotiable when this was recorded, because tonic's `ServerTlsConfig` exposed no protocol-version knob; R-1 removed that limit and both listeners are TLS 1.3-only (T-234).",
                   "modelType": "STRIDE",
                   "number": 233
                 },
@@ -12423,7 +12865,7 @@
                   "severity": "Medium",
                   "type": "Tampering",
                   "description": "The gate T-127 relies on failed in both directions at once. `npm audit` got `503` from the registry's audit endpoint, retried internally for seven minutes and exited `1` seconds after `npm ci` had reported zero vulnerabilities \u2014 a red job with no vulnerability anywhere in the tree, the kind of failure that teaches a team to re-run until green, and one that buried the line that explained it under four SARIF upload errors from producers that never ran. And four advisory suppressions had gone stale, emitting `advisory-not-detected` on every run: two for advisories already fixed upstream, two for crates no longer in the resolved feature graph at all. An ignore is keyed by advisory ID, not by version or crate, so one left behind after its crate leaves the graph silently re-suppresses that advisory if the crate ever comes back \u2014 a gate that has been quietly told what to ignore.",
-                  "mitigation": "Fixed in 1.0.0-beta11. The npm audit step retries with backoff and tells \"found advisories\" apart from \"could not reach the endpoint\" by the shape of the output rather than the exit code \u2014 npm exits `1` for both, but only a completed audit parses as JSON without an `error` key. A real HIGH/CRITICAL finding still fails the job; anything parseable that is not an error object counts as a real report, so an unfamiliar schema fails rather than being waved through; and a sustained outage ends in a `::warning::` that says explicitly it is not a clean bill of health. `cargo-deny` now runs with `-D advisory-not-detected`, so the next stale entry fails CI instead of scrolling past, and the two ignore-lists are allowed to differ legitimately \u2014 cargo-deny resolves the feature graph while cargo-audit reads `Cargo.lock` \u2014 under a containment check that demands an explicit `# audit-only: <ID> \u2014 <reason>` declaration and rejects one that is missing, unreasoned, contradictory or stale, with seven self-test cases. The yanked `chacha20 0.10.1` was bumped, and the four SARIF uploads are guarded on the file existing so a failed producer stops adding its own errors on top of the one that matters. `scripts/check-docker-context.py` closes the neighbouring class of the same shape \u2014 a gate that reads the worktree while the artifact is built from a filtered context, which is how the beta08 release lost both frontend image legs \u2014 by asking, for every `COPY`/`ADD` in every Dockerfile, whether at least one tracked file both exists and survives `.dockerignore`, cross-checked file by file against BuildKit's real context export.",
+                  "mitigation": "Fixed in 1.0.0-beta11. The npm audit step retries with backoff and tells \"found advisories\" apart from \"could not reach the endpoint\" by the shape of the output rather than the exit code \u2014 npm exits `1` for both, but only a completed audit parses as JSON without an `error` key. A real HIGH/CRITICAL finding still fails the job; anything parseable that is not an error object counts as a real report, so an unfamiliar schema fails rather than being waved through; and a sustained outage ends in a `::warning::` that says explicitly it is not a clean bill of health. `cargo-deny` now runs with `-D advisory-not-detected`, so the next stale entry fails CI instead of scrolling past, and the two ignore-lists are allowed to differ legitimately \u2014 cargo-deny resolves the feature graph while cargo-audit reads `Cargo.lock` \u2014 under a containment check that demands an explicit `# audit-only: <ID> \u2014 <reason>` declaration and rejects one that is missing, unreasoned, contradictory or stale, with seven self-test cases. The yanked `chacha20 0.10.1` was bumped, and the four SARIF uploads are guarded on the file existing so a failed producer stops adding its own errors on top of the one that matters. `scripts/check-docker-context.py` closes the neighbouring class of the same shape \u2014 a gate that reads the worktree while the artifact is built from a filtered context, which is how the beta08 release lost both frontend image legs \u2014 by asking, for every `COPY`/`ADD` in every Dockerfile, whether at least one tracked file both exists and survives `.dockerignore`, cross-checked file by file against BuildKit's real context export. Narrowed deliberately at 1.0.0-beta13, and stated rather than folded into another change: the Trivy filesystem scan is scoped to what AXIAM ships \u2014 `crates/`, `frontend/`, `website/`, `examples/` and the root lockfile \u2014 and excludes the `benchmarks/` and `conformance/` harnesses, whose transitive CVEs (a netty CRITICAL under the Java bench) nothing in this repository can remediate and which were turning the gate red on every unrelated PR, which is how a red security check stops being read. The same wave removed 209 files of unbuilt design-system tooling that had entered the scan and the lint by accident.",
                   "modelType": "STRIDE",
                   "number": 236
                 }
@@ -12749,6 +13191,17 @@
                   "mitigation": "Fixed in 1.0.0-beta10. The policy lives in one file, `docker/vault/axiam-policy.hcl`: `read` on the startup path \u2014 the server reads it once at boot and never writes it \u2014 plus `create`, `read` and `update` confined to the CA-key prefix, and `delete` on that prefix's metadata so a custody migration can release a key. `scripts/vault-policy.sh` applies it, the docs quote it, and the status reporter's tests assert against it. One glob covers both CA tiers, because `CaKeyStore::store` is keyed by `(organization_id, ca_id)` with no tenant segment, so tenant intermediates land beside the organization root; `vault_pki` custody is deliberately not covered and now says so. `just vault-policy` applies it to a running deployment \u2014 Vault evaluates policies per request, so nothing is restarted, re-initialised or re-seeded and nothing already stored is lost. `just vault-status` reports **missing** capabilities as well as excess ones, so the misconfiguration is visible before it becomes a `403`, and a `403` from CA key custody prints the missing stanza as HCL addressed to the mount and prefix that deployment configured. The token is therefore no longer read-only, and T-180 and T-216 say so rather than repeating the older claim.",
                   "modelType": "STRIDE",
                   "number": 232
+                },
+                {
+                  "id": "a5a16da4-5ec3-413a-9300-1fa1fbd286fd",
+                  "title": "A Vault CA bundle that parses to nothing silently replaces the operator's pin with the public trust store",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "`reqwest::Certificate::from_pem_bundle` errors on malformed PEM but answers `Ok` with an **empty** list for a file containing no PEM blocks at all \u2014 empty, truncated, DER rather than PEM, or a path that points at something else. The loop then added no roots and startup carried on, which is exactly the fallback the branch exists to prevent: continuing falls back to the default trust store, the check the operator asked for. Behind a publicly-trusted certificate the pinning is silently lost and everything appears to work; behind a private CA the connection fails with \"error sending request\", which reads as a network fault and sends the operator to the wrong place \u2014 and that is the likelier deployment, since `AXIAM__AUTH__VAULT_CA_CERT_PATH` exists precisely for it.",
+                  "mitigation": "c38879a: refused at the bundle, naming the file. Two tests under `tests/` so no fixture is instrumented \u2014 an unreadable path and a bundle that parses to nothing \u2014 and the empty-bundle case asserts the message is *not* a downstream \"error sending request\", because failing later, against Vault, was the original symptom. Found while writing tests for `SecretProviderKind::build`, the one place in that change where the code did not do what its comment said. The neighbouring invariant is now asserted too: `SettingsLockoutPolicy` falls back to the deployment default when a tenant is unresolvable or the settings store is unreachable, so brute force is still metered while the store is down \u2014 failure must not mean \"no lockout\" (T-178's rule).",
+                  "modelType": "STRIDE",
+                  "number": 264
                 }
               ]
             }
@@ -13372,7 +13825,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.11.0",
+        "version": "2.12.0",
         "cells": [
           {
             "position": {
@@ -13690,6 +14143,17 @@
                   "mitigation": "Fixed in 1.0.0-beta06: one shared AssignRoleDialog serves the user and group pages with the same ResourceScopePicker and TenantScopePicker as the role page, in the same order \u2014 shared rather than written twice, because drift between two phrasings of one question is exactly what produced the defect. The scope picker distinguishes a principal that could switch to the organization scope (and is pointed at the selector) from one for whom that door does not exist, using the same predicate as the sidebar and the server\u2019s own guard. Stated residual: has_role is created and deleted but never updated, so re-scoping an existing grant remains a revoke plus a fresh assignment \u2014 the transient under- or over-grant during the swap is the operator\u2019s to sequence (docs/admin/organization-scope.md).",
                   "modelType": "STRIDE",
                   "number": 211
+                },
+                {
+                  "id": "23d0798e-0a63-4f38-9e8e-037e44a0ee25",
+                  "title": "A gateway echoes a rejected request body and the UI renders a prefixed secret unredacted, or an Axios error path skips redaction",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "`redactSecrets` exists because the error body is not always written by AXIAM at all \u2014 a reverse proxy, a load balancer or a gateway can answer instead, and those echo requests routinely. Its key match used `\\b(password|api_key|\u2026)\\b`; underscore is a word character, so `\\bpassword\\b` does not match inside `smtp_password`, and `smtp_password=hunter2`, `smtpPassword=\u2026` and `provider_api_key=\u2026` passed straight through \u2014 the key shape a gateway actually emits. Separately, four `onError` handlers in the email-configuration panel \u2014 the one panel in the application that handles SMTP passwords and provider API keys \u2014 rendered `err.message`, so a real `400` showed as \"Request failed with status code 400\" and never reached `redactSecrets()` at all.",
+                  "mitigation": "2646add: the key is now word characters *ending* in a named secret, still followed by `\\s*[:=]`, so widening the key does not widen what counts as a match \u2014 \"password too short: minimum 12\" and the SCIM \"does not hold scim:provision\" message stay intact, both already pinned \u2014 and a secret word counts only when it ends the key, so `password_policy` is not mistaken for a credential and configuration errors are not mangled, the failure mode that makes people stop trusting the UI and read the network tab instead. Checked for catastrophic backtracking at 2000-character runs, near-miss prefixes and 300 keys in one message. 0ac3d46: all four handlers go through `getApiErrorMessage`, the existing test that asserted the broken generic fallback now asserts the server's sentence, and a new test pins that a server-echoed password is redacted rather than rendered. Frontend line coverage moved from 92.6% to 96.6% with the threshold ratcheted to the achieved number, which is what found both.",
+                  "modelType": "STRIDE",
+                  "number": 265
                 }
               ]
             }
@@ -13795,6 +14259,17 @@
                   "mitigation": "CONTRACT \u00a725.4 forbids all three, normatively: request_password_reset answers 200 whether or not the address exists and an SDK may not improve on it; 404 on the reset context means unknown, expired or already-consumed and the SDK's presentation may not distinguish them either; and the context response discloses no identity \u2014 contract 1.26 removed the username when OPAQUE made it unnecessary, and an SDK must not reintroduce one by inferring the account from elsewhere.",
                   "modelType": "STRIDE",
                   "number": 185
+                },
+                {
+                  "id": "4bafd576-ac13-4d3c-b26e-a9464a53cd62",
+                  "title": "An SDK on a two-listener deployment authenticates at the front-channel host, or sends the secret over the header channel that intermediaries log",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_endpoint_aliases` presents its certificate to a listener that never asked for one and authenticates nothing; one that reads an absent member as \"unsupported\" breaks against every single-listener deployment; one that synthesises an alias for the front channel raises a certificate-chooser dialog in the user's browser. And a server that accepts `client_secret_basic` (T-253) invites an SDK to send a long-lived credential in the one channel routinely logged by intermediaries.",
+                  "mitigation": "Contract 1.40 adds \u00a721.3 rule 2, normative for the \u00a721 client role only: an SDK making a call over mTLS must prefer an alias over the top-level entry, must read an absent member as \"no separate host\" rather than \"unsupported\", must not synthesise aliases for the three excluded endpoints, and must keep validating `iss` against the unchanged issuer; the guard role (\u00a710.1 rule 9) is untouched, and the change is additive and server-side \u2014 every existing SDK keeps working unchanged against every existing deployment, because none publishes the member until an operator configures it. Contract 1.41 keeps \u00a75 rule 3's MUST NOT on Basic authentication verbatim and changes only its rationale, from \"the server documents no alternative\" to the reason that was always the better one: the two methods carry the identical credential and only the header channel is routinely logged. Contract 1.42 records the two RFC 8414 discovery members as informative; SDK decoders ignore unknown members, as they did for `dpop_signing_alg_values_supported` and `mtls_endpoint_aliases`.",
+                  "modelType": "STRIDE",
+                  "number": 266
                 }
               ]
             }
@@ -14874,6 +15349,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 236
+    "threatTop": 266
   }
 }

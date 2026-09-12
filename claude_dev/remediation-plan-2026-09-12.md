@@ -1380,17 +1380,28 @@ Filled in as PRs are opened; `—` means not reached this session.
 
 | SDK | R-4 test | R-6 guard | R-8 alias | PR | CI at session end |
 |---|---|---|---|---|---|
-| rust | | | | — | — |
-| typescript | | | | — | — |
-| python | | | | — | — |
-| java | | | | — | — |
-| kotlin | | | | — | — |
-| csharp | | | | — | — |
-| php | | | | — | — |
-| go | | | | — | — |
-| swift | | | | — | — |
-| c | | | | — | — |
-| cplusplus | | | | — | — |
+| rust | yes | yes | yes | [#104](https://github.com/ilpanich/axiam-rust-sdk/pull/104) | opened |
+| typescript | yes | yes | yes | [#103](https://github.com/ilpanich/axiam-typescript-sdk/pull/103) | opened |
+| python | — | — | — | — | — |
+| java | — | — | — | — | — |
+| kotlin | — | — | — | — | — |
+| csharp | — | — | — | — | — |
+| php | — | — | — | — | — |
+| go | — | — | — | — | — |
+| swift | — | — | — | — | — |
+| c | — | — | — | — | — |
+| cplusplus | — | — | — | — | — |
+
+**One ordering consequence, recorded so it is not discovered as a surprise.**
+§10.4.1 and §21.10 are tables *inside* `CONTRACT.md`, which every SDK vendors
+byte-for-byte. Filling in a row for SDK *n* therefore makes SDK *n−1*'s
+vendored copy stale. That is the right trade — the alternative is guessing all
+eleven outcomes up front and writing them down before they are true — and the
+fix is mechanical: **once the fan-out is done, re-vendor the final
+`CONTRACT.md` into every SDK branch that was opened**, as its own commit. Until
+`axiam`'s own PR merges, `sdk-artifact-drift.yml` compares against `main` and
+sees the whole wave as drift regardless, so this is a merge-ordering matter
+rather than a per-PR one.
 
 ---
 

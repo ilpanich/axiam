@@ -1357,8 +1357,8 @@ As §21.9 and §21.10: an unrecorded row is not a supported answer, and
 
 | SDK | Polls the revocation feed |
 |---|---|
-| rust | — |
-| typescript | — |
+| rust | yes — `RevocationFeed`, attached with `JwksVerifier::with_revocation_feed` |
+| typescript | yes — `RevocationFeed`, set as `VerifiableSession.revocationFeed` |
 | python | — |
 | go | — |
 | java | — |
@@ -4069,18 +4069,21 @@ work. Both defects are refusals on their own:
 1. **Not an absolute URL.** A relative alias resolves against nothing a client
    holds, and the one base that might seem obvious — the issuer's host — is
    precisely the host the alias exists to name a different one from.
-2. **A scheme weaker than the issuer's.** An `http` alias published by a
-   deployment whose `issuer` is `https` is a downgrade, and mutual TLS over
-   cleartext is a contradiction rather than a weaker option.
+2. **A scheme weaker than the endpoint it replaces.** An alias is a substitute
+   for one top-level endpoint, and it must not be weaker than the thing it
+   substitutes for: an `http` alias for an `https` `token_endpoint` is a
+   downgrade, and mutual TLS over cleartext is a contradiction rather than a
+   weaker option.
 
-   The test is "weaker than the issuer", **not** "is not `https`", and the
-   difference is load-bearing in both directions. The server itself permits an
-   `http` alias for local development (`build_mtls_aliases` accepts both
-   schemes), so a flat `https` requirement would refuse the dev and test
-   topologies AXIAM ships — and refuse the mock-server harness every SDK's own
-   suite is built on, which is how this was found. An alias that is *stronger*
-   than the issuer (`https` under an `http` issuer) is not a downgrade and is
-   accepted.
+   The comparison is against **the top-level endpoint of the same name**, and
+   getting that wrong is easy in two different directions. "The alias must be
+   `https`" refuses the dev and test topologies AXIAM ships — the server's own
+   `build_mtls_aliases` accepts `http` for local development, and every SDK's
+   suite runs against a mock server that speaks plain HTTP. "Weaker than the
+   `issuer`" refuses them too, because an SDK test fixture routinely pairs a
+   realistic `issuer` string with loopback endpoints, and a production
+   deployment behind a TLS-terminating proxy can legitimately do the same.
+   Comparing like with like is the only test that is true in all three.
 
 The refusal is at the **point of use**, not at decode. An SDK with no
 certificate configured MUST NOT read the member at all, in any of the three
@@ -4268,8 +4271,8 @@ the §21 client role has a call to prefer with; check §21.9 before reading a
 
 | SDK | Decodes the member | Prefers the alias on an mTLS call |
 |---|---|---|
-| rust | — | — |
-| typescript | — | — |
+| rust | yes | yes |
+| typescript | yes | yes |
 | python | — | — |
 | go | — | — |
 | java | — | — |

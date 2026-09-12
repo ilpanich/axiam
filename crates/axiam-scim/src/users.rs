@@ -1057,4 +1057,221 @@ mod tests {
         assert_eq!(clamp_count(Some(0)), 0);
         assert_eq!(clamp_count(Some(1000)), 200);
     }
+
+    fn phone(value: &str, primary: Option<bool>) -> ScimPhoneInput {
+        ScimPhoneInput {
+            value: value.into(),
+            primary,
+            kind: None,
+        }
+    }
+
+    fn address_input(locality: Option<&str>, primary: Option<bool>) -> ScimAddressInput {
+        ScimAddressInput {
+            formatted: None,
+            street_address: None,
+            locality: locality.map(str::to_owned),
+            region: None,
+            postal_code: None,
+            country: None,
+            primary,
+            kind: None,
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // `primary_phone` / `primary_address`
+    //
+    // `primary_email` has three tests; its two siblings had none, though all
+    // three pick an entry the same way and all three feed the same create and
+    // replace paths.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn primary_phone_prefers_the_flagged_entry_and_falls_back_to_the_first() {
+        assert_eq!(
+            primary_phone(&[phone("+15550001", None), phone("+15550002", Some(true))]),
+            Some("+15550002".to_string())
+        );
+        assert_eq!(
+            primary_phone(&[phone("+15550001", None), phone("+15550002", None)]),
+            Some("+15550001".to_string())
+        );
+        assert_eq!(primary_phone(&[]), None);
+    }
+
+    #[test]
+    fn a_blank_phone_number_is_no_phone_number() {
+        // Storing it would leave the record looking populated while holding
+        // nothing, and `phone_number_verified_at` would then hang off a value
+        // nobody can verify.
+        assert_eq!(primary_phone(&[phone("   ", Some(true))]), None);
+        assert_eq!(primary_phone(&[phone("", None)]), None);
+    }
+
+    #[test]
+    fn primary_address_prefers_the_flagged_entry_and_trims_its_members() {
+        let chosen = primary_address(&[
+            address_input(Some("First"), None),
+            address_input(Some("  Primary  "), Some(true)),
+        ])
+        .expect("a populated entry is an address");
+        assert_eq!(chosen.locality.as_deref(), Some("Primary"));
+    }
+
+    #[test]
+    fn an_address_with_nothing_in_it_is_not_an_address() {
+        assert_eq!(primary_address(&[]), None);
+        assert_eq!(primary_address(&[address_input(Some("   "), None)]), None);
+        assert_eq!(primary_address(&[address_input(None, Some(true))]), None);
+    }
+
+    // -----------------------------------------------------------------
+    // `user_patch_is_noop`
+    //
+    // The guard that decides whether `update` is called at all. Its doc
+    // records what a gap here costs: `phone_number` and `address` were added
+    // to `UpdateUser` and to the PATCH parser but not to this list, so a PATCH
+    // setting only those answered 200, wrote nothing, and sent two OIDF
+    // conformance modules chasing a UserInfo bug that did not exist. Four
+    // release gates were examined before the missing line was found.
+    //
+    // A list is exactly the kind of thing that goes stale silently, so every
+    // field it tracks is asserted individually rather than in one lump.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn an_empty_update_is_a_noop() {
+        assert!(user_patch_is_noop(&UpdateUser::default()));
+    }
+
+    #[test]
+    fn every_field_the_guard_tracks_makes_a_patch_non_trivial() {
+        let cases: Vec<(&str, UpdateUser)> = vec![
+            (
+                "username",
+                UpdateUser {
+                    username: Some("alice".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "email",
+                UpdateUser {
+                    email: Some("alice@example.com".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "status",
+                UpdateUser {
+                    status: Some(axiam_core::models::user::UserStatus::Inactive),
+                    ..Default::default()
+                },
+            ),
+            (
+                "metadata",
+                UpdateUser {
+                    metadata: Some(serde_json::json!({"scim": {}})),
+                    ..Default::default()
+                },
+            ),
+            (
+                "password_hash",
+                UpdateUser {
+                    password_hash: Some("hash".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "phone_number",
+                UpdateUser {
+                    phone_number: Some(Some("+15550001".into())),
+                    ..Default::default()
+                },
+            ),
+            (
+                "address",
+                UpdateUser {
+                    address: Some(Some(Address {
+                        formatted: None,
+                        street_address: None,
+                        locality: Some("Townsville".into()),
+                        region: None,
+                        postal_code: None,
+                        country: None,
+                    })),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        for (field, update) in cases {
+            assert!(
+                !user_patch_is_noop(&update),
+                "a PATCH setting only {field} must reach `update`; treating it as a \
+                 no-op answers 200 and writes nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn erasing_a_field_is_not_a_noop_either() {
+        // `Some(None)` is "write NULL" — the erasure a data subject asked for.
+        // Reading it as "nothing to do" would answer 200 and keep the data.
+        assert!(!user_patch_is_noop(&UpdateUser {
+            phone_number: Some(None),
+            ..Default::default()
+        }));
+        assert!(!user_patch_is_noop(&UpdateUser {
+            address: Some(None),
+            ..Default::default()
+        }));
+    }
+
+    // -----------------------------------------------------------------
+    // `apply_user_delta_metadata`
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_delta_touching_no_scim_name_field_leaves_metadata_alone() {
+        // `None` means "do not write metadata at all", which is what keeps an
+        // `active`-only PATCH from rewriting the SCIM blob it never mentioned.
+        let delta = UserPatchDelta {
+            active: Some(false),
+            ..Default::default()
+        };
+        assert!(apply_user_delta_metadata(&serde_json::json!({}), &delta).is_none());
+    }
+
+    #[test]
+    fn each_scim_name_field_lands_in_the_metadata_blob() {
+        let delta = UserPatchDelta {
+            external_id: Some(Some("ext-1".into())),
+            given_name: Some(Some("Ada".into())),
+            family_name: Some(Some("Lovelace".into())),
+            formatted: Some(Some("Ada Lovelace".into())),
+            ..Default::default()
+        };
+
+        let metadata = apply_user_delta_metadata(&serde_json::json!({}), &delta)
+            .expect("a delta naming SCIM name fields must write metadata");
+
+        assert_eq!(
+            scim_metadata::get_str(&metadata, "externalId").as_deref(),
+            Some("ext-1")
+        );
+        assert_eq!(
+            scim_metadata::get_str(&metadata, "givenName").as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(
+            scim_metadata::get_str(&metadata, "familyName").as_deref(),
+            Some("Lovelace")
+        );
+        assert_eq!(
+            scim_metadata::get_str(&metadata, "formatted").as_deref(),
+            Some("Ada Lovelace")
+        );
+    }
 }

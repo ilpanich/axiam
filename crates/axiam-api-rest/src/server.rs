@@ -902,6 +902,13 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     )),
             )
             .service(
+                // T-254 — the sessions a user holds, each carrying the
+                // refresh-replay marker. Registered beside the other
+                // `/users/{user_id}/…` sub-resources and gated the same way.
+                web::resource("/users/{user_id}/sessions")
+                    .route(web::get().to(handlers::sessions::list_sessions::<C>)),
+            )
+            .service(
                 web::resource("/users/{user_id}/mfa-methods/{method_id}")
                     .route(web::delete().to(
                         handlers::mfa_methods::delete_mfa_method::<C>,

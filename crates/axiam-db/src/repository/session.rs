@@ -34,6 +34,15 @@ struct SessionRow {
     amr: Option<Vec<String>>,
     #[surreal(default)]
     browser_token_hash: Option<String>,
+    /// T-254 — `#[surreal(default)]` for all three: schema v60 is additive and
+    /// backfills nothing, so a row written before it carries none of them.
+    /// [`decode_replay`] says what absence means.
+    #[surreal(default)]
+    refresh_replay_at: Option<DateTime<Utc>>,
+    #[surreal(default)]
+    refresh_replay_grace_accepted: Option<i64>,
+    #[surreal(default)]
+    refresh_replay_refused: Option<i64>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -53,6 +62,13 @@ struct SessionRowWithId {
     amr: Option<Vec<String>>,
     #[surreal(default)]
     browser_token_hash: Option<String>,
+    /// T-254 — see [`SessionRow`].
+    #[surreal(default)]
+    refresh_replay_at: Option<DateTime<Utc>>,
+    #[surreal(default)]
+    refresh_replay_grace_accepted: Option<i64>,
+    #[surreal(default)]
+    refresh_replay_refused: Option<i64>,
 }
 
 /// The pre-v55 decode path, specified once (plan §4.3).
@@ -77,6 +93,18 @@ fn decode_evidence(
     )
 }
 
+/// The pre-v60 decode path for the T-254 replay counters.
+///
+/// Absent reads as zero, which is the same statement schema v60 declined to
+/// write into every existing row: a session that predates the migration saw no
+/// replay anybody recorded, so it is credited with none. A stored negative — a
+/// value nothing in this codebase can produce — is also read as zero rather
+/// than saturating to a large `u32`, because a marker that overstates the
+/// count is worse than one that says nothing.
+fn decode_replay(stored: Option<i64>) -> u32 {
+    u32::try_from(stored.unwrap_or(0)).unwrap_or(0)
+}
+
 fn row_to_session(row: SessionRow, id: Uuid) -> Result<Session, DbError> {
     let tenant_id = Uuid::parse_str(&row.tenant_id)
         .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -95,6 +123,9 @@ fn row_to_session(row: SessionRow, id: Uuid) -> Result<Session, DbError> {
         authenticated_at,
         amr,
         browser_token_hash: row.browser_token_hash,
+        refresh_replay_at: row.refresh_replay_at,
+        refresh_replay_grace_accepted: decode_replay(row.refresh_replay_grace_accepted),
+        refresh_replay_refused: decode_replay(row.refresh_replay_refused),
     })
 }
 
@@ -120,6 +151,9 @@ impl SessionRowWithId {
             authenticated_at,
             amr,
             browser_token_hash: self.browser_token_hash,
+            refresh_replay_at: self.refresh_replay_at,
+            refresh_replay_grace_accepted: decode_replay(self.refresh_replay_grace_accepted),
+            refresh_replay_refused: decode_replay(self.refresh_replay_refused),
         })
     }
 }
@@ -595,6 +629,61 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .collect()
     }
 
+    async fn mark_refresh_replay(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+        accepted_under_grace: bool,
+    ) -> AxiamResult<()> {
+        let (accepted_inc, refused_inc) = if accepted_under_grace { (1, 0) } else { (0, 1) };
+        let session_id = session_id.to_string();
+        let tenant_id = tenant_id.to_string();
+
+        // One statement, incrementing in place. A SELECT-then-UPDATE would
+        // lose increments under exactly the concurrency this exists to record
+        // — several clients replaying one rotated token is the shape of the
+        // event — and SEC-032 already settled that argument for the
+        // failed-attempt counter.
+        //
+        // `(field OR 0) + $inc` rather than `+= $inc`: the column is
+        // `option<int>` and absent on every row written before schema v60, and
+        // adding to NONE yields NONE.
+        //
+        // Wrapped in `retry_on_write_conflict` because this is a write to the
+        // busiest table in the deployment on a path several requests can reach
+        // at once, and T-262 is what happens when a contended write surfaces
+        // as something the caller does not recognise as a conflict.
+        crate::helpers::retry_on_write_conflict(|| async {
+            self.db
+                .current()
+                .query(
+                    "UPDATE session SET \
+                     refresh_replay_at = time::now(), \
+                     refresh_replay_grace_accepted = \
+                        (refresh_replay_grace_accepted OR 0) + $accepted_inc, \
+                     refresh_replay_refused = (refresh_replay_refused OR 0) + $refused_inc \
+                     WHERE tenant_id = $tenant_id \
+                       AND meta::id(id) = $session_id",
+                )
+                .bind(("tenant_id", tenant_id.clone()))
+                .bind(("session_id", session_id.clone()))
+                .bind(("accepted_inc", accepted_inc))
+                .bind(("refused_inc", refused_inc))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| DbError::Migration(e.to_string()))?;
+            Ok::<(), DbError>(())
+        })
+        .await?;
+
+        // A session that no longer exists is `Ok(())`, not `NotFound`: the row
+        // may have been reaped between the token being issued and the replay
+        // arriving, and a refresh that works today must not begin to fail
+        // because there was nothing left to mark.
+        Ok(())
+    }
+
     async fn cleanup_expired(&self, tenant_id: Uuid) -> AxiamResult<u64> {
         // Count expired sessions first, then delete.
         let mut count_result = self
@@ -644,7 +733,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiam_core::models::session::CreateSession;
+    use axiam_core::models::session::{CreateSession, RefreshReplayVerdict};
     use chrono::Duration;
     use surrealdb::Surreal;
     use surrealdb::engine::local::Mem;
@@ -821,6 +910,137 @@ mod tests {
             authenticated_at.timestamp()
         );
         assert_eq!(by_hash.amr, created.amr);
+    }
+
+    // -----------------------------------------------------------------
+    // T-254 — the refresh-replay marker
+    // -----------------------------------------------------------------
+
+    /// The two outcomes are counted separately and the last instant is
+    /// stamped, so an operator can tell "a FAPI client retried a lost
+    /// rotation" from "a rotated token was presented where no window would
+    /// accept it" without reading the code.
+    ///
+    /// Incrementing rather than setting is the property that matters: the
+    /// events this records arrive concurrently by nature, and a
+    /// read-then-write would lose them.
+    #[tokio::test]
+    async fn mark_refresh_replay_counts_each_outcome_separately() {
+        let db = setup_db().await;
+        let repo = SurrealSessionRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let created = repo
+            .create(CreateSession {
+                tenant_id,
+                user_id: Uuid::new_v4(),
+                token_hash: "t254-marker".into(),
+                ip_address: None,
+                user_agent: None,
+                expires_at: Utc::now() + Duration::hours(1),
+                authenticated_at: Utc::now(),
+                amr: vec![Amr::Pwd],
+                browser_token_hash: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(created.refresh_replay_grace_accepted, 0);
+        assert_eq!(created.refresh_replay_refused, 0);
+        assert!(created.refresh_replay_at.is_none());
+        assert_eq!(
+            created.refresh_replay_verdict(),
+            RefreshReplayVerdict::None,
+            "a fresh session has seen nothing"
+        );
+
+        repo.mark_refresh_replay(tenant_id, created.id, true)
+            .await
+            .unwrap();
+        repo.mark_refresh_replay(tenant_id, created.id, true)
+            .await
+            .unwrap();
+
+        let after_grace = repo.get_by_id(tenant_id, created.id).await.unwrap();
+        assert_eq!(after_grace.refresh_replay_grace_accepted, 2, "increments");
+        assert_eq!(after_grace.refresh_replay_refused, 0);
+        assert!(after_grace.refresh_replay_at.is_some());
+        assert_eq!(
+            after_grace.refresh_replay_verdict(),
+            RefreshReplayVerdict::FapiGraceRetry,
+            "accepted grace retries alone read as the informational badge"
+        );
+
+        repo.mark_refresh_replay(tenant_id, created.id, false)
+            .await
+            .unwrap();
+
+        let after_refusal = repo.get_by_id(tenant_id, created.id).await.unwrap();
+        assert_eq!(after_refusal.refresh_replay_grace_accepted, 2);
+        assert_eq!(after_refusal.refresh_replay_refused, 1);
+        assert_eq!(
+            after_refusal.refresh_replay_verdict(),
+            RefreshReplayVerdict::Refused,
+            "one refusal outranks any number of honest retries"
+        );
+    }
+
+    /// A session written before schema v60 carries none of the three columns,
+    /// and v60 deliberately does not backfill. It must still read — as zero,
+    /// which is the same statement the migration declined to write into every
+    /// row — and marking it must still work, adding to an absent counter
+    /// rather than yielding NONE.
+    #[tokio::test]
+    async fn a_pre_v60_row_reads_as_unmarked_and_can_still_be_marked() {
+        let db = setup_db().await;
+        let tenant_id = Uuid::new_v4();
+        let id = Uuid::new_v4();
+
+        db.query(
+            "CREATE type::record('session', $id) SET \
+             tenant_id = $tenant_id, \
+             user_id = $user_id, \
+             token_hash = $token_hash, \
+             ip_address = NONE, \
+             user_agent = NONE, \
+             expires_at = $expires_at, \
+             created_at = time::now()",
+        )
+        .bind(("id", id.to_string()))
+        .bind(("tenant_id", tenant_id.to_string()))
+        .bind(("user_id", Uuid::new_v4().to_string()))
+        .bind(("token_hash", "t254-pre-v60".to_owned()))
+        .bind(("expires_at", Utc::now() + Duration::hours(1)))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let repo = SurrealSessionRepository::new(db);
+        let before = repo.get_by_id(tenant_id, id).await.unwrap();
+        assert_eq!(before.refresh_replay_grace_accepted, 0);
+        assert_eq!(before.refresh_replay_refused, 0);
+        assert_eq!(before.refresh_replay_verdict(), RefreshReplayVerdict::None);
+
+        repo.mark_refresh_replay(tenant_id, id, false)
+            .await
+            .unwrap();
+        let after = repo.get_by_id(tenant_id, id).await.unwrap();
+        assert_eq!(
+            after.refresh_replay_refused, 1,
+            "`(field OR 0) + 1` must add to an absent column, not yield NONE"
+        );
+    }
+
+    /// A session that no longer exists is not an error. The row may have been
+    /// reaped between the token being issued and the replay arriving, and a
+    /// refresh must not begin to fail because there was nothing left to mark.
+    #[tokio::test]
+    async fn marking_a_session_that_is_gone_is_not_an_error() {
+        let db = setup_db().await;
+        let repo = SurrealSessionRepository::new(db);
+        repo.mark_refresh_replay(Uuid::new_v4(), Uuid::new_v4(), false)
+            .await
+            .expect("a missing session is Ok(()), not NotFound");
     }
 
     /// The pre-v55 decode path (plan §4.3), exercised against a row that

@@ -127,6 +127,20 @@ type UpgradeLog = Arc<Mutex<Vec<UpgradeCall>>>;
 /// invalidate.
 type InvalidateLog = Arc<Mutex<Vec<(Uuid, Uuid)>>>;
 
+/// T-254 — every refresh-replay marker written, as
+/// `(session_id, accepted_under_grace)`.
+type ReplayLog = Arc<Mutex<Vec<(Uuid, bool)>>>;
+
+/// T-254 — how rotation retired each predecessor: `Supersede(grace_until)` on
+/// the FAPI lane, `RevokeRotated` everywhere else.
+type RetireLog = Arc<Mutex<Vec<Retirement>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Retirement {
+    Supersede(chrono::DateTime<Utc>),
+    RevokeRotated,
+}
+
 // --- Service-account double (client-credentials for `sa_…` client ids) -------
 
 #[derive(Clone)]
@@ -389,6 +403,14 @@ struct MockRefreshRepo {
     get: Get,
     create_ok: bool,
     revoke: RevokeMode,
+    /// T-254 — what `find_rotated` answers: the already-rotated row behind a
+    /// hash the read path refused, if the test is staging a refused replay.
+    rotated: Option<RefreshToken>,
+    /// T-254 — which retirement lane rotation took, and with what grace
+    /// instant. The choice between `supersede` and `revoke_rotated` is the
+    /// whole decision, and it has no visible effect on the response, so the
+    /// only way to assert it is to record the call.
+    retired: RetireLog,
 }
 
 impl MockRefreshRepo {
@@ -397,11 +419,24 @@ impl MockRefreshRepo {
             get: Get::NotFound,
             create_ok: true,
             revoke: RevokeMode::Ok,
+            rotated: None,
+            retired: Arc::new(Mutex::new(Vec::new())),
         }
     }
     fn with_get(mut self, rt: RefreshToken) -> Self {
         self.get = Get::Found(rt);
         self
+    }
+    /// T-254 — stage a refused replay: the read path finds nothing live, and
+    /// `find_rotated` hands back the row that says the token had a successor.
+    fn with_rotated(mut self, rt: RefreshToken) -> Self {
+        self.rotated = Some(rt);
+        self
+    }
+    /// T-254 — a handle on [`Self::retired`], taken before the repo is moved
+    /// into the service.
+    fn retire_log(&self) -> RetireLog {
+        Arc::clone(&self.retired)
     }
 }
 
@@ -415,10 +450,11 @@ impl RefreshTokenRepository for MockRefreshRepo {
                 client_id: i.client_id,
                 user_id: i.user_id,
                 scopes: i.scopes,
-                session_id: None,
+                session_id: i.session_id,
                 expires_at: i.expires_at,
                 revoked: false,
                 created_at: Utc::now(),
+                rotated_at: None,
             })
         } else {
             Err(AxiamError::Database("create failed".into()))
@@ -449,13 +485,32 @@ impl RefreshTokenRepository for MockRefreshRepo {
         &self,
         _t: Uuid,
         _h: &str,
-        _grace_until: chrono::DateTime<chrono::Utc>,
+        grace_until: chrono::DateTime<chrono::Utc>,
     ) -> AxiamResult<()> {
+        self.retired
+            .lock()
+            .unwrap()
+            .push(Retirement::Supersede(grace_until));
         match self.revoke {
             RevokeMode::Ok => Ok(()),
             RevokeMode::NotFound => Err(not_found()),
             RevokeMode::Db => Err(AxiamError::Database("supersede failed".into())),
         }
+    }
+    /// T-254 — the non-FAPI rotation lane. Shares `RevokeMode` with the two
+    /// above for the same reason `supersede` does: every existing test that
+    /// asserts what a failing retirement does is asserting about rotation, and
+    /// rotation now picks one of two methods by profile.
+    async fn revoke_rotated(&self, _t: Uuid, _h: &str) -> AxiamResult<()> {
+        self.retired.lock().unwrap().push(Retirement::RevokeRotated);
+        match self.revoke {
+            RevokeMode::Ok => Ok(()),
+            RevokeMode::NotFound => Err(not_found()),
+            RevokeMode::Db => Err(AxiamError::Database("revoke_rotated failed".into())),
+        }
+    }
+    async fn find_rotated(&self, _t: Uuid, _h: &str) -> AxiamResult<Option<RefreshToken>> {
+        Ok(self.rotated.clone())
     }
     async fn revoke_all_for_client(&self, _t: Uuid, _c: &str) -> AxiamResult<()> {
         unimplemented!()
@@ -640,6 +695,7 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
         expires_at: Utc::now() + chrono::Duration::days(30),
         revoked: false,
         created_at: Utc::now(),
+        rotated_at: None,
     }
 }
 
@@ -660,6 +716,10 @@ struct MockSessionRepo(
     /// RFC 6749 §10.5 revocation is a side effect with no visible response, so
     /// the only way to assert it happened is to record the call.
     InvalidateLog,
+    /// T-254 — every `(session_id, accepted_under_grace)` this repo was asked
+    /// to mark. A replay marker is a side effect with no visible response
+    /// either, so the same trick: record the call and assert on the log.
+    ReplayLog,
 );
 
 impl axiam_core::repository::SessionRepository for MockSessionRepo {
@@ -731,6 +791,93 @@ impl axiam_core::repository::SessionRepository for MockSessionRepo {
     ) -> AxiamResult<Vec<axiam_core::models::session::Session>> {
         Ok(vec![])
     }
+    async fn mark_refresh_replay(
+        &self,
+        _tenant_id: Uuid,
+        session_id: Uuid,
+        accepted_under_grace: bool,
+    ) -> AxiamResult<()> {
+        self.2
+            .lock()
+            .unwrap()
+            .push((session_id, accepted_under_grace));
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T-254 — the audit sink a refresh-token replay is recorded through
+// ---------------------------------------------------------------------------
+
+/// Every audit entry the service appended.
+type AuditLog = Arc<Mutex<Vec<axiam_core::models::audit::CreateAuditLogEntry>>>;
+
+/// An append-only audit repository that keeps what it was given.
+///
+/// Only `append` is ever reached from the token endpoint; the five read and
+/// maintenance methods exist to satisfy the trait and say so by refusing to be
+/// called, so a future path that starts reading the audit log from here fails
+/// loudly rather than silently answering nothing.
+#[derive(Clone, Default)]
+struct MockAuditRepo(AuditLog);
+
+impl axiam_core::repository::AuditLogRepository for MockAuditRepo {
+    async fn append(
+        &self,
+        input: axiam_core::models::audit::CreateAuditLogEntry,
+    ) -> AxiamResult<axiam_core::models::audit::AuditLogEntry> {
+        let entry = axiam_core::models::audit::AuditLogEntry {
+            id: Uuid::new_v4(),
+            tenant_id: input.tenant_id,
+            actor_id: input.actor_id,
+            actor_type: input.actor_type.clone(),
+            action: input.action.clone(),
+            resource_id: input.resource_id,
+            outcome: input.outcome.clone(),
+            ip_address: input.ip_address.clone(),
+            metadata: input.metadata.clone().unwrap_or(serde_json::Value::Null),
+            timestamp: Utc::now(),
+        };
+        self.0.lock().unwrap().push(input);
+        Ok(entry)
+    }
+    async fn list(
+        &self,
+        _tenant_id: Uuid,
+        _filter: axiam_core::repository::AuditLogFilter,
+        _pagination: axiam_core::repository::Pagination,
+    ) -> AxiamResult<
+        axiam_core::repository::PaginatedResult<axiam_core::models::audit::AuditLogEntry>,
+    > {
+        unimplemented!("the token endpoint never reads the audit log")
+    }
+    async fn list_system(
+        &self,
+        _filter: axiam_core::repository::AuditLogFilter,
+        _pagination: axiam_core::repository::Pagination,
+    ) -> AxiamResult<
+        axiam_core::repository::PaginatedResult<axiam_core::models::audit::AuditLogEntry>,
+    > {
+        unimplemented!("the token endpoint never reads the audit log")
+    }
+    async fn get_by_ids(
+        &self,
+        _tenant_id: Uuid,
+        _ids: &[Uuid],
+    ) -> AxiamResult<Vec<axiam_core::models::audit::AuditLogEntry>> {
+        unimplemented!("the token endpoint never reads the audit log")
+    }
+    async fn pseudonymize_actor(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _pseudonym: &str,
+    ) -> AxiamResult<u64> {
+        unimplemented!("GDPR erasure does not run through the token endpoint")
+    }
+    async fn prune_older_than(&self, _cutoff: chrono::DateTime<Utc>) -> AxiamResult<u64> {
+        unimplemented!("retention does not run through the token endpoint")
+    }
 }
 
 type Svc = TokenService<
@@ -741,6 +888,7 @@ type Svc = TokenService<
     MockUserRepo,
     MockSaRepo,
     MockSessionRepo,
+    MockAuditRepo,
 >;
 
 fn build(
@@ -770,6 +918,7 @@ fn build_with_upgrade_log(
         refresh,
         MockUserRepo,
         MockSessionRepo::default(),
+        MockAuditRepo::default(),
         test_config(),
         2_592_000,
     );
@@ -793,7 +942,8 @@ fn build_with_session_log(
         MockTenantRepo(tenant),
         refresh,
         MockUserRepo,
-        MockSessionRepo(None, sessions.clone()),
+        MockSessionRepo(None, sessions.clone(), Arc::new(Mutex::new(Vec::new()))),
+        MockAuditRepo::default(),
         test_config(),
         2_592_000,
     );
@@ -2363,6 +2513,28 @@ fn make_service_account(
     }
 }
 
+/// T-254 — the whole observable surface of a refresh-token replay: the marker
+/// written on the session, and the audit entries appended.
+fn build_t254(client: ClientOutcome, refresh: MockRefreshRepo) -> (Svc, ReplayLog, AuditLog) {
+    let upgrade: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    let replays: ReplayLog = Arc::new(Mutex::new(Vec::new()));
+    let audit = MockAuditRepo::default();
+    let audit_log = Arc::clone(&audit.0);
+    let svc = TokenService::new(
+        MockClientRepo(client, upgrade.clone()),
+        MockSaRepo(SaOutcome::NotFound, upgrade),
+        dummy_code_repo(),
+        MockTenantRepo(TenantOutcome::Found),
+        refresh,
+        MockUserRepo,
+        MockSessionRepo(None, Arc::new(Mutex::new(Vec::new())), replays.clone()),
+        audit,
+        test_config(),
+        2_592_000,
+    );
+    (svc, replays, audit_log)
+}
+
 fn build_sa(sa: SaOutcome) -> (Svc, UpgradeLog) {
     let log: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
     let svc = TokenService::new(
@@ -2373,6 +2545,7 @@ fn build_sa(sa: SaOutcome) -> (Svc, UpgradeLog) {
         MockRefreshRepo::new(),
         MockUserRepo,
         MockSessionRepo::default(),
+        MockAuditRepo::default(),
         test_config(),
         2_592_000,
     );
@@ -3311,4 +3484,354 @@ async fn a_replayed_code_with_no_session_is_denied_without_revoking() {
         .expect_err("a replayed code must still be denied");
     assert_eq!(err.error_code(), "invalid_grant");
     assert!(invalidations.lock().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// T-254 — the refresh-rotation grace window is a `fapi2` behaviour, and every
+// replay is marked
+// ---------------------------------------------------------------------------
+//
+// Commit 065f37c made rotation SUPERSEDE rather than revoke, giving the
+// previous refresh token a sixty-second life after its successor was issued.
+// FAPI 2.0 §5.3.2.1-9 requires that, and the profile that requires it
+// sender-constrains every token — so a replay inside the window needs the
+// client's private key as well. AXIAM applied it to every profile, which on
+// `standard` handed a bearer refresh token a sixty-second replay window the
+// server could not tell from an honest retry (T-254).
+//
+// The maintainer's decision, 2026-09-12, is two things and both are asserted
+// here:
+//
+//  1. **The window is `fapi2`-only.** Every other client is back to the
+//     pre-065f37c behaviour — the predecessor is revoked at rotation and a
+//     second presentation is refused. That is invariant 4 of the Basic OP
+//     plan, and every test below that names a FAPI behaviour has a `standard`
+//     twin immediately after it.
+//  2. **A replay is always marked**, accepted or refused: a counter on the
+//     session and an `oauth2.refresh_token_replayed` audit row naming the
+//     client, the session and which of the two happened.
+//
+// The registration decides, never the request. There is no header, parameter
+// or grant shape below that buys a `standard` client a window.
+
+/// A registration that satisfies the FAPI 2.0 bundle, and the request context
+/// that authenticates it.
+///
+/// `self_signed_tls_client_auth` (RFC 8705 §2.2) plus certificate-bound tokens
+/// (§3): the credential is a thumbprint comparison, so this needs no TLS
+/// listener and no assertion verifier, and the pairing is one of the four
+/// `fapi::validate_registration` accepts. The fixture asserts that itself
+/// below rather than asking the reader to take it on trust.
+fn fapi2_refresh_client() -> (Box<OAuth2Client>, TokenRequestContext) {
+    use axiam_core::models::certificate::CertTrust;
+    use axiam_core::models::oauth2_client::{ClientAuthMethod, ClientProfile};
+    use axiam_oauth2::mtls::PresentedCertificate;
+
+    let cert = PresentedCertificate::from_der(b"t254-fapi2-client-leaf", CertTrust::SelfAsserted);
+    let mut client = make_client(&["refresh_token"], &["api"]);
+    client.profile = ClientProfile::Fapi2;
+    client.require_par = true;
+    client.token_endpoint_auth_method = ClientAuthMethod::SelfSignedTlsClientAuth;
+    client.self_signed_tls_client_auth_thumbprints = vec![cert.thumbprint_s256.clone()];
+    client.tls_client_certificate_bound_access_tokens = true;
+
+    let ctx = TokenRequestContext {
+        client_certificate: Some(cert),
+        ..TokenRequestContext::default()
+    };
+    (client, ctx)
+}
+
+/// A stored refresh token that names a session, optionally already rotated.
+fn t254_stored(raw: &str, session_id: Uuid, rotated: bool) -> RefreshToken {
+    let mut stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["api"]);
+    stored.token_hash = hash_refresh_token(raw);
+    stored.session_id = Some(session_id);
+    stored.rotated_at = rotated.then(|| Utc::now() - chrono::Duration::seconds(5));
+    stored
+}
+
+/// The single audit entry the service appended, or a panic naming what it
+/// found instead.
+fn only_replay_audit(audit: &AuditLog) -> axiam_core::models::audit::CreateAuditLogEntry {
+    let entries = audit.lock().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one audit entry is expected; found {:?}",
+        entries.iter().map(|e| e.action.clone()).collect::<Vec<_>>()
+    );
+    let entry = entries[0].clone();
+    assert_eq!(
+        entry.action,
+        axiam_oauth2::token::REFRESH_REPLAY_AUDIT_ACTION,
+        "the replay must have its own action in the oauth2.* family"
+    );
+    entry
+}
+
+/// The fixture is a registration `fapi::validate_registration` would accept —
+/// otherwise the tests below would be exercising a row an operator could never
+/// create.
+#[test]
+fn t254_the_fapi2_fixture_is_a_registration_the_gate_accepts() {
+    let (client, _) = fapi2_refresh_client();
+    assert_eq!(axiam_oauth2::fapi::validate_registration(&*client), Ok(()));
+    assert_eq!(
+        axiam_oauth2::fapi::refresh_rotation_grace_secs(&client),
+        Some(axiam_oauth2::fapi::FAPI2_REFRESH_ROTATION_GRACE_SECS),
+        "a fapi2 client is the one that gets a grace window"
+    );
+}
+
+/// **Invariant 4.** A client registered today on `standard` gets the
+/// behaviour it had before beta13: rotation revokes.
+#[test]
+fn t254_a_standard_client_gets_no_grace_window_at_all() {
+    let client = make_client(&["refresh_token"], &["api"]);
+    assert_eq!(
+        axiam_oauth2::fapi::refresh_rotation_grace_secs(&client),
+        None,
+        "the window is a fapi2 behaviour; every other profile revokes at rotation"
+    );
+}
+
+/// A `fapi2` rotation supersedes, on the grace clock FAPI 2.0 §5.3.2.1-9 asks
+/// for.
+#[tokio::test]
+async fn t254_a_fapi2_rotation_supersedes_on_the_grace_clock() {
+    let raw = generate_refresh_token();
+    let (client, ctx) = fapi2_refresh_client();
+    let refresh_repo = MockRefreshRepo::new().with_get(t254_stored(&raw, Uuid::new_v4(), false));
+    let retired = refresh_repo.retire_log();
+
+    let (svc, replays, audit) = build_t254(ClientOutcome::Found(client), refresh_repo);
+    let mut req = refresh_req(&raw);
+    // The credential is the certificate, not the secret (SEC-093).
+    req.client_secret = None;
+    svc.exchange(Uuid::new_v4(), req, &ctx)
+        .await
+        .expect("an honest first rotation must succeed");
+
+    let retired = retired.lock().unwrap().clone();
+    match retired.as_slice() {
+        [Retirement::Supersede(grace_until)] => {
+            let remaining = (*grace_until - Utc::now()).num_seconds();
+            assert!(
+                remaining > 0 && remaining <= axiam_oauth2::fapi::FAPI2_REFRESH_ROTATION_GRACE_SECS,
+                "the predecessor must be retired on the grace clock, not its \
+                 original thirty days; {remaining}s were asked for"
+            );
+        }
+        other => panic!("a fapi2 rotation must supersede; got {other:?}"),
+    }
+    assert!(
+        replays.lock().unwrap().is_empty() && audit.lock().unwrap().is_empty(),
+        "a first, honest rotation is not a replay and must record nothing"
+    );
+}
+
+/// **Invariant 4's twin.** The same rotation on a `standard` client revokes
+/// the predecessor outright — no window, nothing to replay into.
+#[tokio::test]
+async fn t254_a_standard_rotation_revokes_the_predecessor() {
+    let raw = generate_refresh_token();
+    let refresh_repo = MockRefreshRepo::new().with_get(t254_stored(&raw, Uuid::new_v4(), false));
+    let retired = refresh_repo.retire_log();
+
+    let (svc, replays, audit) = build_t254(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+    );
+    svc.exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect("an honest first rotation must succeed");
+
+    assert_eq!(
+        retired.lock().unwrap().clone(),
+        vec![Retirement::RevokeRotated],
+        "a standard client's predecessor is revoked at rotation, as it was \
+         before 065f37c — not superseded onto a grace clock"
+    );
+    assert!(
+        replays.lock().unwrap().is_empty() && audit.lock().unwrap().is_empty(),
+        "a first, honest rotation is not a replay and must record nothing"
+    );
+}
+
+/// Inside the FAPI grace the replay is **accepted** — the OIDF module
+/// `fapi2-security-profile-final-refresh-token` sleeps thirty seconds and
+/// expects a 200 — and it is marked all the same.
+#[tokio::test]
+async fn t254_a_replay_inside_the_fapi_grace_is_accepted_and_marked() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let (client, ctx) = fapi2_refresh_client();
+    let client_id = client.client_id.clone();
+    // Already superseded: still live, and carrying `rotated_at`.
+    let refresh_repo = MockRefreshRepo::new().with_get(t254_stored(&raw, session_id, true));
+
+    let (svc, replays, audit) = build_t254(ClientOutcome::Found(client), refresh_repo);
+    let mut req = refresh_req(&raw);
+    req.client_secret = None;
+    svc.exchange(Uuid::new_v4(), req, &ctx)
+        .await
+        .expect("inside the grace window the previous token is still redeemable");
+
+    assert_eq!(
+        replays.lock().unwrap().clone(),
+        vec![(session_id, true)],
+        "the session must record the retry as accepted under the grace"
+    );
+    let entry = only_replay_audit(&audit);
+    assert_eq!(
+        entry.outcome,
+        axiam_core::models::audit::AuditOutcome::Success
+    );
+    assert_eq!(entry.resource_id, Some(session_id));
+    let metadata = entry.metadata.expect("the audit row carries metadata");
+    assert_eq!(metadata["disposition"], "accepted_under_fapi_grace");
+    assert_eq!(metadata["client_id"], client_id);
+    assert_eq!(metadata["client_profile"], "fapi2");
+}
+
+/// **The twin.** On a `standard` client the predecessor is gone, so the same
+/// second presentation is refused — and marked as a refusal, which is the
+/// half T-254 says was missing.
+#[tokio::test]
+async fn t254_a_replay_on_a_standard_client_is_refused_and_marked() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    // The read path finds nothing live, because rotation revoked it; the row
+    // is still there and still says it was rotated.
+    let refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+
+    let (svc, replays, audit) = build_t254(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("a rotated token must not redeem twice on a standard client");
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert!(
+        err.error_description().contains("already consumed"),
+        "the refusal must say the token was consumed, not merely that it is \
+         invalid: got {:?}",
+        err.error_description()
+    );
+
+    assert_eq!(
+        replays.lock().unwrap().clone(),
+        vec![(session_id, false)],
+        "a refused replay is marked on the session too — the window it was \
+         refused for is exactly what makes it worth recording"
+    );
+    let entry = only_replay_audit(&audit);
+    assert_eq!(
+        entry.outcome,
+        axiam_core::models::audit::AuditOutcome::Failure
+    );
+    let metadata = entry.metadata.expect("the audit row carries metadata");
+    assert_eq!(metadata["disposition"], "refused");
+    assert_eq!(metadata["client_profile"], "standard");
+}
+
+/// The registration decides, and it decides *now*. A row superseded while its
+/// client was on `fapi2` is refused the moment the registration is moved off
+/// it — the window is not a property the token keeps.
+#[tokio::test]
+async fn t254_the_registration_decides_a_superseded_row_is_refused_off_fapi() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let refresh_repo = MockRefreshRepo::new().with_get(t254_stored(&raw, session_id, true));
+    let retired = refresh_repo.retire_log();
+
+    let (svc, replays, audit) = build_t254(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("a standard client may not redeem a superseded token");
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert!(
+        retired.lock().unwrap().is_empty(),
+        "the request was refused before any rotation, so nothing was retired"
+    );
+    assert_eq!(replays.lock().unwrap().clone(), vec![(session_id, false)]);
+    let entry = only_replay_audit(&audit);
+    assert_eq!(entry.metadata.expect("metadata")["disposition"], "refused");
+}
+
+/// The non-regression claim: an ordinary stale refresh token — expired, or
+/// revoked at logout — is refused exactly as it always was, and is **not**
+/// filed as a security event. Nothing rotated it, so nothing replayed it.
+#[tokio::test]
+async fn t254_an_ordinary_stale_refresh_token_is_not_a_replay() {
+    let raw = generate_refresh_token();
+    // Neither found live nor found rotated: the shape a revoked-at-logout or
+    // long-expired token presents.
+    let refresh_repo = MockRefreshRepo::new();
+
+    let (svc, replays, audit) = build_t254(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("a stale refresh token is still refused");
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert!(
+        err.error_description()
+            .contains("invalid, expired, or revoked"),
+        "the wording for a stale credential is unchanged: got {:?}",
+        err.error_description()
+    );
+    assert!(
+        replays.lock().unwrap().is_empty(),
+        "nothing was replayed, so nothing may be marked"
+    );
+    assert!(
+        audit.lock().unwrap().is_empty(),
+        "an ordinary stale credential must not appear in the audit log as a replay"
+    );
+}
+
+/// The audit row names the client and the session and **never the token**.
+/// An audit log that recorded the credential would be a place to steal one
+/// from, and this is the assertion that keeps a future metadata key from
+/// becoming that.
+#[tokio::test]
+async fn t254_the_replay_audit_record_never_carries_the_token() {
+    let raw = generate_refresh_token();
+    let hashed = hash_refresh_token(&raw);
+    let session_id = Uuid::new_v4();
+    let refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+
+    let (svc, _replays, audit) = build_t254(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+    );
+    let _ = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await;
+
+    let entry = only_replay_audit(&audit);
+    let rendered = serde_json::to_string(&entry.metadata).expect("metadata serializes");
+    assert!(
+        !rendered.contains(&raw),
+        "the raw refresh token must never reach the audit log"
+    );
+    assert!(
+        !rendered.contains(&hashed),
+        "nor its hash — it is a lookup key for a live credential"
+    );
+    assert!(
+        rendered.contains(&session_id.to_string()),
+        "the session is what an investigation follows, and must be there"
+    );
 }

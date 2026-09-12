@@ -337,6 +337,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "oidc_requested_userinfo_claims",
         sql: SCHEMA_V59,
     },
+    Migration {
+        version: 60,
+        name: "refresh_rotation_replay_marker",
+        sql: SCHEMA_V60,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3254,9 +3259,86 @@ DEFINE FIELD IF NOT EXISTS requested_userinfo_claims ON TABLE oauth2_auth_code \
 DEFINE FIELD IF NOT EXISTS requested_userinfo_claims.* ON TABLE oauth2_auth_code TYPE string;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v60 — T-254: a refresh token that was rotated, and a session that
+// saw one replayed
+// -----------------------------------------------------------------------
+//
+// Four optional columns across two tables, no backfill, no index — v58's shape
+// and v58's reasons.
+//
+// **`oauth2_refresh_token.rotated_at`.** The one bit that distinguishes a
+// token which has a successor from one that was merely revoked. It is written
+// by the two rotation paths (`supersede` on the FAPI grace lane,
+// `revoke_rotated` everywhere else) and by nothing else, so a presentation of
+// a row that carries it is a replay while a presentation of one that does not
+// is an ordinary stale credential. Absent on every row written before this
+// migration, which is the honest value: nothing recorded whether those tokens
+// were rotated, so nothing may claim they were. A backfill would have to guess,
+// and guessing "rotated" would file every stale token of the deploy window as
+// a security event.
+//
+// **The three `session` columns.** `refresh_replay_at` plus one counter per
+// outcome. Two counters rather than one plus a flag because the two events are
+// read differently — an accepted FAPI grace retry is the mechanism working, a
+// refusal is nothing a conformant client does — and a single total cannot be
+// read back into them.
+//
+// `option<int>` rather than `int DEFAULT 0`: a session that predates this
+// migration saw no replay, and absent says that exactly, where `DEFAULT 0`
+// would be the same statement in a form that requires every existing session
+// row to be rewritten to make it. The decode path substitutes zero, which is
+// the same value and costs nothing.
+//
+// **No index.** Neither column is a search key: the refresh-token row is
+// already located by `token_hash` and its unique index, and the session
+// counters are read from rows fetched by id or by `user_id`. An operator
+// hunting replays across a tenant reads the `oauth2.refresh_token_replayed`
+// audit rows, which the audit log already indexes by action.
+const SCHEMA_V60: &str = "\
+DEFINE FIELD IF NOT EXISTS rotated_at ON TABLE oauth2_refresh_token TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS refresh_replay_at ON TABLE session TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS refresh_replay_grace_accepted ON TABLE session TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS refresh_replay_refused ON TABLE session TYPE option<int>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-254 — v60 is four additive, optional columns and nothing else. The
+    /// three things that would make it dangerous are the three asserted
+    /// absent: a backfill (which would claim rotations that were never
+    /// recorded), a non-optional column (which would make an unmigrated row
+    /// unreadable) and an index (which this needs none of).
+    #[test]
+    fn v60_marks_rotation_and_replay_additively_and_backfills_nothing() {
+        for column in [
+            "rotated_at ON TABLE oauth2_refresh_token TYPE option<datetime>",
+            "refresh_replay_at ON TABLE session TYPE option<datetime>",
+            "refresh_replay_grace_accepted ON TABLE session TYPE option<int>",
+            "refresh_replay_refused ON TABLE session TYPE option<int>",
+        ] {
+            assert!(SCHEMA_V60.contains(column), "v60 must define {column}");
+        }
+        for forbidden in ["UPDATE", "DELETE", "DEFAULT", "OVERWRITE", "DEFINE INDEX"] {
+            assert!(
+                !SCHEMA_V60.contains(forbidden),
+                "v60 must stay additive; found {forbidden}"
+            );
+        }
+        assert_eq!(
+            SCHEMA_V60.matches("DEFINE FIELD").count(),
+            4,
+            "v60 defines exactly four columns"
+        );
+        assert_eq!(
+            SCHEMA_V60.matches("TYPE option<").count(),
+            4,
+            "every v60 column must be option<…> — a non-optional column would \
+             make every pre-v60 row unreadable"
+        );
+    }
 
     /// v58 is one additive, optional column. The three things that would make
     /// it dangerous are the three things asserted absent: a backfill (which
@@ -3441,9 +3523,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&59),
-            "v59 is the newest migration (OIDC Core §5.5 requested claims). This \
-             assertion is a tripwire, not bookkeeping: bumping it is how a new \
+            Some(&60),
+            "v60 is the newest migration (T-254 refresh-rotation replay marker). \
+             This assertion is a tripwire, not bookkeeping: bumping it is how a new \
              migration is declared deliberate rather than merged in by accident."
         );
     }

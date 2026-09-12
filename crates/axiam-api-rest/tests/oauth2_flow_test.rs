@@ -921,30 +921,33 @@ async fn refresh_token_grant() {
     );
 }
 
-/// After rotation the old refresh token is *retired on a short clock*, not
-/// destroyed.
+/// **T-254, invariant 4.** After rotation, a `standard` client's old refresh
+/// token is gone: a second presentation is refused, and the refusal says the
+/// token was consumed.
 ///
-/// This test used to assert that the second use was refused outright. FAPI 2.0
-/// Security Profile §5.3.2.1-9 requires the opposite: an authorization server
-/// that rotates refresh tokens has to keep accepting the previous one for a
-/// period afterwards, so that a client whose rotation response was lost in
-/// transit can retry rather than restart the whole authorization. AXIAM now
-/// supersedes instead of revoking (`axiam_oauth2::token::
-/// REFRESH_ROTATION_GRACE_SECS`), and the OIDF module that measures it
-/// (`fapi2-security-profile-final-refresh-token`) sleeps thirty seconds before
-/// replaying the old token and expects a 200.
+/// This test asserted exactly that before 065f37c. Between 065f37c and the
+/// T-254 decision it asserted the opposite — rotation *superseded*, leaving
+/// the predecessor redeemable for sixty seconds — because FAPI 2.0 Security
+/// Profile §5.3.2.1-9 requires that window and AXIAM applied it to every
+/// profile. The maintainer's decision of 2026-09-12 confines the window to the
+/// profile that requires it, and that sender-constrains every token so a
+/// replay inside it needs the client's private key as well. On `standard` a
+/// refresh token is a bearer credential, and it is back to being single-use.
 ///
-/// So the behaviour under test changed, and asserting a 200 alone would leave
-/// nothing behind: a server that simply never retired the old token would pass
-/// it. The property that still has to hold is that the old token's life was
-/// brought *forward* to the grace instant — thirty days became sixty seconds —
-/// and that is what the second half asserts, by reading the row back.
+/// The FAPI half of the decision — the window still exists for a `fapi2`
+/// client, still on the grace clock, and a replay inside it is accepted — is
+/// asserted in `axiam-oauth2`'s `tests/token_service.rs`
+/// (`t254_a_fapi2_rotation_supersedes_on_the_grace_clock`,
+/// `t254_a_replay_inside_the_fapi_grace_is_accepted_and_marked`), because a
+/// `fapi2` client authenticates by certificate and this in-process harness has
+/// no TLS listener — the same reason
+/// `p2_a_fapi_client_sending_none_of_them_is_unaffected` below is exercised at
+/// the gates rather than over HTTP.
 #[actix_rt::test]
-async fn refresh_token_rotation_retires_old_on_the_grace_clock() {
+async fn refresh_token_rotation_retires_old_on_a_standard_client() {
     use axiam_auth::token::hash_refresh_token;
     use axiam_core::repository::RefreshTokenRepository;
     use axiam_db::repository::SurrealRefreshTokenRepository;
-    use axiam_oauth2::token::REFRESH_ROTATION_GRACE_SECS;
 
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
@@ -982,8 +985,8 @@ async fn refresh_token_rotation_retires_old_on_the_grace_clock() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
 
-    // Try the old refresh token again — inside the grace window it is still
-    // accepted, which is what §5.3.2.1-9 asks for.
+    // Try the old refresh token again — on `standard` there is no window to
+    // accept it in.
     let form = format!(
         "grant_type=refresh_token&refresh_token={old_refresh}\
          &client_id={client_id}&client_secret={client_secret}"
@@ -997,24 +1000,138 @@ async fn refresh_token_rotation_retires_old_on_the_grace_clock() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(
         resp.status().as_u16(),
-        200,
-        "a superseded refresh token stays usable for the grace period"
+        400,
+        "a rotated refresh token must not redeem twice on the standard profile"
+    );
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_grant");
+    assert!(
+        body["error_description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already consumed"),
+        "the refusal must name the reason — a rotated token was presented \
+         again — rather than the generic stale-credential wording; got {:?}",
+        body["error_description"]
     );
 
-    // …but only on the grace clock. The row must have been brought forward to
-    // roughly now + REFRESH_ROTATION_GRACE_SECS, rather than keeping the
-    // thirty-day life it was issued with. Read it back rather than waiting.
+    // And the row itself: revoked, and stamped as *rotated* rather than
+    // merely revoked. That stamp is what lets the refusal above be recognised
+    // as a replay instead of an ordinary expired credential.
     let repo = SurrealRefreshTokenRepository::new(db.clone());
-    let stored = repo
-        .get_by_token_hash(tenant_id, &hash_refresh_token(&old_refresh))
-        .await
-        .expect("the superseded row is still readable inside the window");
-    let remaining = (stored.expires_at - chrono::Utc::now()).num_seconds();
+    let hash = hash_refresh_token(&old_refresh);
     assert!(
-        remaining <= REFRESH_ROTATION_GRACE_SECS,
-        "a superseded refresh token must expire within the grace window, \
-         but {remaining}s remain (grace is {REFRESH_ROTATION_GRACE_SECS}s) — \
-         rotation left it with its original life"
+        repo.get_by_token_hash(tenant_id, &hash).await.is_err(),
+        "the predecessor must not be readable on the live path any more"
+    );
+    let rotated = repo
+        .find_rotated(tenant_id, &hash)
+        .await
+        .expect("the lookup succeeds")
+        .expect("the row is still there and says it was rotated");
+    assert!(
+        rotated.revoked,
+        "a standard client's predecessor is revoked"
+    );
+    assert!(
+        rotated.rotated_at.is_some(),
+        "rotation stamps rotated_at on both lanes — it is what tells a replay \
+         from a credential revoked at logout"
+    );
+}
+
+/// **T-254.** The refused replay above is not silent: it reaches the audit log
+/// under its own action in the `oauth2.*` family, naming the client, the
+/// profile that decided the refusal, and never the token.
+///
+/// The other half of the record — the counter on the session the token
+/// belonged to — needs a session, and the grant this harness drives has none:
+/// `mint_token` issues an access token directly rather than signing in, so the
+/// authorization code carries no `sid` to propagate. That half is asserted
+/// where each of its links lives: that the token endpoint asks for the right
+/// marker with the right arguments in `axiam-oauth2`'s
+/// `tests/token_service.rs` (`t254_a_replay_…_is_…_and_marked`), and that the
+/// write itself is atomic, additive and outcome-separated in
+/// `axiam-db`'s `session.rs` tests
+/// (`mark_refresh_replay_counts_each_outcome_separately`).
+#[actix_rt::test]
+async fn a_refused_refresh_replay_is_audited() {
+    use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
+    use axiam_db::repository::SurrealAuditLogRepository;
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
+    let code = do_authorize(&app, &user_jwt, &client_id, &redirect_uri, None, None).await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let old_refresh = body["refresh_token"].as_str().unwrap().to_string();
+
+    let refresh_once = || {
+        let form = format!(
+            "grant_type=refresh_token&refresh_token={old_refresh}\
+             &client_id={client_id}&client_secret={client_secret}"
+        );
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+            .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+            .set_payload(form)
+            .to_request()
+    };
+    assert_eq!(
+        test::call_service(&app, refresh_once())
+            .await
+            .status()
+            .as_u16(),
+        200
+    );
+    assert_eq!(
+        test::call_service(&app, refresh_once())
+            .await
+            .status()
+            .as_u16(),
+        400
+    );
+
+    let entries = SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some(axiam_oauth2::token::REFRESH_REPLAY_AUDIT_ACTION.into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .expect("audit log read back");
+    assert_eq!(entries.items.len(), 1, "one replay, one audit row");
+    let entry = &entries.items[0];
+    assert_eq!(
+        entry.outcome,
+        axiam_core::models::audit::AuditOutcome::Failure
+    );
+    assert_eq!(entry.metadata["disposition"], "refused");
+    assert_eq!(entry.metadata["client_id"], client_id);
+    assert_eq!(entry.metadata["client_profile"], "standard");
+    assert!(
+        !serde_json::to_string(&entry.metadata)
+            .unwrap()
+            .contains(&old_refresh),
+        "the token value must never reach the audit log"
     );
 }
 

@@ -26,6 +26,7 @@
 //! | Authorization code single-use | already global, and since #318/schema v37 guaranteed by a transaction plus a post-commit nonce read-back | 5.3.1.2 |
 //! | No token in any URL | already global — `response_type=token` does not exist in this server | 5.3.1.1 |
 //! | EdDSA/PS256/ES256, never `none` | already global — `Algorithm::EdDSA` is hard-coded at both encode and decode | 5.3.1.1 |
+//! | A rotated refresh token stays redeemable briefly | [`refresh_rotation_grace_secs`] — **and only here**: every other profile revokes the predecessor at rotation (T-254) | 5.3.2.1-9 |
 //!
 //! Four of those nine rows say "already global". That is the honest reading of
 //! the tree and the reason X5.1's gap table listed them as *audit* items
@@ -819,6 +820,61 @@ pub const fn wants_certificate_binding(client: &OAuth2Client) -> bool {
 /// the resource server (`axiam_auth::token::verify_token_binding`).
 pub const fn wants_dpop_binding(client: &OAuth2Client) -> bool {
     client.dpop_bound_access_tokens
+}
+
+/// How long a rotated refresh token stays usable after its successor is
+/// issued, **for a `fapi2` client**.
+///
+/// FAPI 2.0 Security Profile §5.3.2.1-9 requires the previous token to be
+/// accepted for a period after rotation; the OIDF module that checks it
+/// (`fapi2-security-profile-final-refresh-token`) sleeps thirty seconds and
+/// then replays the old token expecting a 200.
+///
+/// Sixty seconds, not thirty. The tested number is the suite's, not the
+/// profile's, and a grace period exactly as long as the test that measures it
+/// passes conformance by arriving first — a client on a slow link retrying the
+/// request whose response it lost has no such guarantee. Sixty is the smallest
+/// value that is comfortably longer than the observation and still far shorter
+/// than the thirty-day life of the token being retired.
+///
+/// Not configurable: a deployment that shortened it below the profile's floor
+/// would silently stop conforming, and one that lengthened it would widen the
+/// replay window for every tenant at once.
+pub const FAPI2_REFRESH_ROTATION_GRACE_SECS: i64 = 60;
+
+/// How long `client`'s rotated refresh token stays redeemable — `None` when it
+/// does not stay redeemable at all (T-254).
+///
+/// # The decision this encodes
+///
+/// Between 065f37c and the T-254 decision AXIAM applied the grace to *every*
+/// client on every profile, which is how the window came to exist somewhere it
+/// cannot be afforded. FAPI 2.0 requires the grace, and the profile that
+/// requires it sender-constrains every token: replaying a `fapi2` refresh
+/// token inside the window needs the client's private key as well, so the
+/// window costs an attacker's possession of a leaked bearer string nothing.
+/// On `standard` there is no such second factor — the token *is* the
+/// credential — so the same sixty seconds is a replay window the server cannot
+/// tell from an honest retry.
+///
+/// So the window is confined to the profile that both requires it and can
+/// afford it. Every other client returns to the pre-065f37c behaviour: the
+/// predecessor is revoked at rotation and a second presentation is refused.
+/// That is invariant 4 of `claude_dev/basic-op-gap-plan.md` — a client
+/// registered today on `standard` gets the behaviour it had before beta13 —
+/// and it is asserted by tests rather than hoped for.
+///
+/// **The registration decides, never the request.** Like every other function
+/// in this module this reads `client.profile` and nothing else: there is no
+/// header, parameter or grant shape that buys a client a grace window its
+/// registration did not.
+#[must_use]
+pub const fn refresh_rotation_grace_secs(client: &OAuth2Client) -> Option<i64> {
+    if client.profile.is_fapi2() {
+        Some(FAPI2_REFRESH_ROTATION_GRACE_SECS)
+    } else {
+        None
+    }
 }
 
 /// FAPI 2.0's ceiling on how long an authorization code may live.
@@ -2121,5 +2177,65 @@ mod tests {
     fn the_cap_is_sixty_not_sixty_one() {
         assert_eq!(FAPI2_MAX_AUTH_CODE_LIFETIME_SECS, 60);
         assert_eq!(auth_code_lifetime_secs(&fapi_client(), 61), 60);
+    }
+    // -----------------------------------------------------------------
+    // T-254 — the refresh-rotation grace window is a `fapi2` behaviour
+    // -----------------------------------------------------------------
+
+    /// Invariant 4, stated directly: the client every deployment has gets no
+    /// window, which is the behaviour it had before beta13.
+    #[test]
+    fn a_standard_client_gets_no_refresh_rotation_grace() {
+        assert_eq!(refresh_rotation_grace_secs(&base_client()), None);
+    }
+
+    /// And the profile that requires the window — and sender-constrains every
+    /// token, so it can afford one — gets exactly it.
+    #[test]
+    fn a_fapi2_client_gets_the_profiles_grace_window() {
+        assert_eq!(
+            refresh_rotation_grace_secs(&fapi_client()),
+            Some(FAPI2_REFRESH_ROTATION_GRACE_SECS)
+        );
+    }
+
+    /// The window is decided by the registration and by nothing else. Turning
+    /// on the *other* per-client switches this module knows about must not buy
+    /// a `standard` client one.
+    #[test]
+    fn nothing_but_the_profile_buys_a_grace_window() {
+        let mut client = base_client();
+        client.require_par = true;
+        client.dpop_bound_access_tokens = true;
+        client.tls_client_certificate_bound_access_tokens = true;
+        client.token_endpoint_auth_method = ClientAuthMethod::PrivateKeyJwt;
+        client.authn_request_params = AuthnRequestParamsMode::Honour;
+        client.browser_sso = true;
+        assert_eq!(
+            refresh_rotation_grace_secs(&client),
+            None,
+            "sender-constraining a standard client does not put it on the FAPI \
+             lane; only `profile: fapi2` does"
+        );
+    }
+
+    /// Sixty, not thirty: the OIDF module sleeps thirty seconds before
+    /// replaying, and a window exactly as long as the observation passes
+    /// conformance by arriving first.
+    #[test]
+    fn the_grace_window_is_comfortably_longer_than_the_module_that_measures_it() {
+        const {
+            assert!(
+                FAPI2_REFRESH_ROTATION_GRACE_SECS > 30,
+                "fapi2-security-profile-final-refresh-token sleeps thirty seconds \
+                 before replaying, and a window exactly as long as the observation \
+                 passes conformance by arriving first"
+            );
+            assert!(
+                FAPI2_REFRESH_ROTATION_GRACE_SECS < 300,
+                "the window is a replay window; it stays far shorter than the \
+                 thirty-day life of the token being retired"
+            );
+        }
     }
 }

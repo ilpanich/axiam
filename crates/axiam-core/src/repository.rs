@@ -966,6 +966,35 @@ pub trait SessionRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Session>>> + Send;
+
+    /// Record that a refresh token of this session was presented after it had
+    /// already been rotated (T-254).
+    ///
+    /// `accepted_under_grace` is the whole discriminator an operator reads: a
+    /// `true` is the retry the FAPI 2.0 §5.3.2.1-9 window exists for, a
+    /// `false` is a rotated token presented where no window would accept it.
+    /// They are counted separately
+    /// ([`Session::refresh_replay_grace_accepted`],
+    /// [`Session::refresh_replay_refused`]) rather than summed, because the
+    /// sum cannot be read.
+    ///
+    /// # Contract on the implementation
+    ///
+    /// One statement, incrementing in place. A read-then-write would lose
+    /// increments under exactly the concurrency this records — and the T-262
+    /// class is a contended write surfacing as something other than a
+    /// conflict, so an implementation that can contend must route through
+    /// `retry_on_write_conflict`.
+    ///
+    /// Never fails a request. The caller is the token endpoint, and a refresh
+    /// that works today must not begin to fail because a marker could not be
+    /// written; a missing session row is `Ok(())`, not `NotFound`.
+    fn mark_refresh_replay(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+        accepted_under_grace: bool,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,12 +1579,77 @@ pub trait RefreshTokenRepository: Send + Sync {
     ///
     /// Returns `NotFound` when no live token matched, exactly as
     /// [`Self::revoke`] does, so that concurrent use is still detectable.
+    ///
+    /// # T-254: this also stamps `rotated_at`
+    ///
+    /// A superseded token stays redeemable, so the only thing that
+    /// distinguishes the honest retry the grace exists for from a leaked token
+    /// being replayed is that the row *has a successor*. Implementations MUST
+    /// therefore set [`RefreshToken::rotated_at`] in the same statement that
+    /// brings the expiry forward — in the same statement, because a second
+    /// write could be lost and leave a rotated token that does not say so.
+    ///
+    /// Only ever called for a client whose registration is `profile: fapi2`.
+    /// Every other client is rotated with [`Self::revoke_rotated`]; see the
+    /// T-254 decision record.
     fn supersede(
         &self,
         tenant_id: Uuid,
         token_hash: &str,
         grace_until: chrono::DateTime<chrono::Utc>,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Retire a refresh token because its successor has just been issued
+    /// (T-254).
+    ///
+    /// The rotation path for every client that is **not** on the `fapi2`
+    /// profile — which is every client registered today. The token is revoked
+    /// outright, exactly as it was before 065f37c: a second presentation finds
+    /// no live row and is refused.
+    ///
+    /// # Why not just [`Self::revoke`]
+    ///
+    /// Because the two mean different things and T-254 needs to tell them
+    /// apart. `revoke` is "this grant is over" — logout, a password reset, an
+    /// RFC 7009 request — and a later presentation of such a token is an
+    /// ordinary stale credential. This is "this token has been succeeded", and
+    /// a later presentation of *this* is a replay. The difference is recorded
+    /// by stamping [`RefreshToken::rotated_at`], which `revoke` deliberately
+    /// does not touch.
+    ///
+    /// The guard is [`Self::supersede`]'s, not [`Self::revoke`]'s: `revoked =
+    /// false AND expires_at > time::now()`. Two concurrent rotations of one
+    /// token cannot both find a live row, so the loser still gets `NotFound`
+    /// and the single-use race stays closed.
+    fn revoke_rotated(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// The row behind a refresh token that has **already been rotated**, if
+    /// this hash names one (T-254).
+    ///
+    /// The refresh counterpart of
+    /// [`AuthorizationCodeRepository::replayed_session`], and it exists for
+    /// the same reason: when a presented credential is refused, the server
+    /// still has to be able to say *which session* was replayed against, and
+    /// the read path that refuses it has already filtered the row away.
+    ///
+    /// Neither `revoked` nor `expires_at` is filtered — a replay of a token
+    /// that has since expired is still a replay — but `rotated_at` must be
+    /// set. A token that was revoked at logout and later presented is a stale
+    /// credential, not a replay, and answering `Some` for it would file an
+    /// ordinary event under a security one.
+    ///
+    /// `Ok(None)` for an unknown hash, deliberately not an error: the token
+    /// endpoint answers `invalid_grant` either way, so this cannot become an
+    /// oracle for which refresh tokens exist.
+    fn find_rotated(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<RefreshToken>>> + Send;
 
     /// Revoke all refresh tokens for a given client within a tenant.
     fn revoke_all_for_client(

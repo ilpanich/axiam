@@ -156,6 +156,18 @@ impl SessionRepository for CountingSessionRepo {
         self.hit();
         self.inner.list_by_user(tenant_id, user_id).await
     }
+
+    async fn mark_refresh_replay(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+        accepted_under_grace: bool,
+    ) -> AxiamResult<()> {
+        self.hit();
+        self.inner
+            .mark_refresh_replay(tenant_id, session_id, accepted_under_grace)
+            .await
+    }
 }
 
 fn test_config() -> AuthConfig {

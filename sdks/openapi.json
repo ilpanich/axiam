@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta13",
-    "x-axiam-spec-digest": "sha256:a588caf033c1ff20ec29f75545daab832d4ab85ba0edf3a8fdfe6a3b229b1d22"
+    "x-axiam-spec-digest": "sha256:3ac97d8afd891f6d4ccfc392e99703cef25e7661da46d7e8abb765ab5a66abb2"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -10068,6 +10068,57 @@
         ]
       }
     },
+    "/api/v1/users/{user_id}/sessions": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "`GET /api/v1/users/{user_id}/sessions`",
+        "description": "List the sessions a user currently holds, with the T-254 refresh-replay\nmarker on each.",
+        "operationId": "list_sessions",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "Target user ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Cannot view another user's sessions"
+          },
+          "404": {
+            "description": "User not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/users/{user_id}/unlock": {
       "post": {
         "tags": [
@@ -17904,6 +17955,78 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "description": "One of a user's sessions, as an administrator sees it.",
+        "required": [
+          "id",
+          "created_at",
+          "expires_at",
+          "authenticated_at",
+          "amr",
+          "refresh_replay_verdict",
+          "refresh_replay_grace_accepted",
+          "refresh_replay_refused"
+        ],
+        "properties": {
+          "amr": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 8176 method references for that authentication."
+          },
+          "authenticated_at": {
+            "type": "string",
+            "description": "X7.2 — when the end user actually authenticated, which is not\n`created_at` on a session produced by refresh rotation."
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ip_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "refresh_replay_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "T-254 — when a refresh token of this session was last presented after\nit had already been rotated. `None` if that has never happened."
+          },
+          "refresh_replay_grace_accepted": {
+            "type": "integer",
+            "format": "int32",
+            "description": "T-254 — replays accepted under the FAPI 2.0 §5.3.2.1-9 grace window.\nOnly ever non-zero for a client registered `profile: fapi2`.",
+            "minimum": 0
+          },
+          "refresh_replay_refused": {
+            "type": "integer",
+            "format": "int32",
+            "description": "T-254 — replays refused because there was no window to accept them in.\nNothing a conformant client does.",
+            "minimum": 0
+          },
+          "refresh_replay_verdict": {
+            "type": "string",
+            "description": "T-254 — the badge: `none`, `fapi_grace_retry` or `refused`.\n\nDerived from the two counters below rather than stored, so it cannot\ndisagree with them. A refusal outranks an accepted grace retry however\nthe counts compare."
+          },
+          "user_agent": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

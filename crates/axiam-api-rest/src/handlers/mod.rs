@@ -29,6 +29,7 @@ pub mod roles;
 pub mod scim_tokens;
 pub mod scopes;
 pub mod service_accounts;
+pub mod sessions;
 pub mod settings;
 pub mod tenants;
 pub mod uma;

@@ -1082,6 +1082,9 @@ async fn main() -> std::io::Result<()> {
         // `auth_time` equals the original's (OIDC Core §12.2). Read only for a
         // client on the honour lane.
         session_repo.clone(),
+        // T-254 — where a refresh token presented after rotation is recorded,
+        // whether it was accepted under the FAPI grace or refused.
+        audit_repo.clone(),
         config.auth.clone(),
         i64::try_from(config.auth.refresh_token_lifetime_secs)
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),

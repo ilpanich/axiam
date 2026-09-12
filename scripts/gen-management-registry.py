@@ -160,6 +160,10 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("reset_mfa", "POST", "/api/v1/users/{user_id}/reset-mfa"),
             ("unlock", "POST", "/api/v1/users/{user_id}/unlock"),
             ("list_roles", "GET", "/api/v1/users/{user_id}/roles"),
+            # T-254 -- the sessions a user holds, each carrying the
+            # refresh-replay marker. Read-only: ending a session is the
+            # account-lifecycle surface, not this one.
+            ("list_sessions", "GET", "/api/v1/users/{user_id}/sessions"),
         ],
     },
     "groups": {

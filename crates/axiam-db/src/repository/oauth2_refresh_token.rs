@@ -40,6 +40,11 @@ struct RefreshTokenRow {
     expires_at: DateTime<Utc>,
     revoked: bool,
     created_at: DateTime<Utc>,
+    /// T-254 — see [`RefreshToken::rotated_at`]. Absent on every row written
+    /// before schema v60, and `#[surreal(default)]` is what lets such a row
+    /// still decode.
+    #[surreal(default)]
+    rotated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -55,6 +60,9 @@ struct RefreshTokenRowWithId {
     expires_at: DateTime<Utc>,
     revoked: bool,
     created_at: DateTime<Utc>,
+    /// T-254 — see [`RefreshToken::rotated_at`].
+    #[surreal(default)]
+    rotated_at: Option<DateTime<Utc>>,
 }
 
 impl RefreshTokenRowWithId {
@@ -82,6 +90,7 @@ impl RefreshTokenRowWithId {
             expires_at: self.expires_at,
             revoked: self.revoked,
             created_at: self.created_at,
+            rotated_at: self.rotated_at,
         })
     }
 }
@@ -168,6 +177,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             expires_at: row.expires_at,
             revoked: row.revoked,
             created_at: row.created_at,
+            rotated_at: row.rotated_at,
         })
     }
 
@@ -260,12 +270,24 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         // `revoked = false` in the WHERE keeps the single-use race closed
         // exactly as `revoke` does: two concurrent rotations of the same token
         // cannot both find a live row, and the loser still gets NotFound.
+        //
+        // T-254: `rotated_at` is stamped in the SAME statement. The grace
+        // window is the one case where a retired token stays redeemable, so
+        // the only thing that tells the honest retry from a replay is that the
+        // row records having a successor. A second write to set it could be
+        // lost — and what it would leave behind is a rotated token that does
+        // not say so, which is precisely the blind spot T-254 is about.
+        //
+        // Unconditional, unlike the expiry: a token rotated twice inside one
+        // window was rotated most recently now, and that is the instant an
+        // operator correlating an audit row wants.
         let mut result = self
             .db
             .current()
             .query(
                 "UPDATE oauth2_refresh_token SET \
-                 expires_at = IF expires_at < $grace_until THEN expires_at ELSE $grace_until END \
+                 expires_at = IF expires_at < $grace_until THEN expires_at ELSE $grace_until END, \
+                 rotated_at = time::now() \
                  WHERE tenant_id = $tenant_id \
                    AND token_hash = $token_hash \
                    AND revoked = false \
@@ -288,6 +310,85 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         }
 
         Ok(())
+    }
+
+    async fn revoke_rotated(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<()> {
+        let token_hash_owned = token_hash.to_string();
+        let tenant_id_str = tenant_id.to_string();
+
+        // The rotation path for every client that is not `fapi2` (T-254), and
+        // the behaviour every client had before 065f37c: the predecessor is
+        // revoked outright and a second presentation finds no live row.
+        //
+        // Two differences from `revoke`, both deliberate. `rotated_at` is
+        // stamped, so `find_rotated` can later say that a refused presentation
+        // was a *replay* rather than an ordinary stale credential. And the
+        // WHERE carries `expires_at > time::now()` as `supersede`'s does: the
+        // guard that keeps two concurrent rotations from both finding a live
+        // row is the same guard on both lanes, so the loser gets NotFound and
+        // the single-use race stays closed whichever profile the client is on.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "UPDATE oauth2_refresh_token SET \
+                 revoked = true, \
+                 rotated_at = time::now() \
+                 WHERE tenant_id = $tenant_id \
+                   AND token_hash = $token_hash \
+                   AND revoked = false \
+                   AND expires_at > time::now() \
+                 RETURN AFTER",
+            )
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("token_hash", token_hash_owned.clone()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        if rows.is_empty() {
+            return Err(DbError::NotFound {
+                entity: "oauth2_refresh_token".into(),
+                id: format!("token_hash={token_hash_owned}"),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+
+    async fn find_rotated(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<RefreshToken>> {
+        let token_hash_owned = token_hash.to_string();
+
+        // Neither `revoked` nor `expires_at` is filtered — a replay of a token
+        // that has since run out is still a replay — but `rotated_at` must be
+        // set, which is what keeps a credential revoked at logout from being
+        // filed as one.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT *, meta::id(id) AS record_id \
+                 FROM oauth2_refresh_token \
+                 WHERE tenant_id = $tenant_id \
+                   AND token_hash = $token_hash \
+                   AND rotated_at != NONE \
+                 LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("token_hash", token_hash_owned))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RefreshTokenRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .next()
+            .map(|row| row.try_into_refresh_token().map_err(Into::into))
+            .transpose()
     }
 
     async fn revoke_all_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
@@ -362,5 +463,252 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             .map_err(DbError::from)?;
 
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use surrealdb::Surreal;
+    use surrealdb::engine::local::Mem;
+
+    async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        crate::schema::run_migrations(&db).await.unwrap();
+        db
+    }
+
+    async fn issue(
+        repo: &SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> RefreshToken {
+        repo.create(CreateRefreshToken {
+            tenant_id,
+            token_hash: token_hash.to_owned(),
+            client_id: "oa_test".into(),
+            user_id: Some(Uuid::new_v4()),
+            scopes: vec!["openid".into()],
+            session_id: Some(Uuid::new_v4()),
+            expires_at: Utc::now() + chrono::Duration::days(30),
+        })
+        .await
+        .unwrap()
+    }
+
+    // -----------------------------------------------------------------
+    // T-254 — the two rotation lanes, and what each leaves behind
+    // -----------------------------------------------------------------
+
+    /// The FAPI lane. The predecessor stays redeemable on the grace clock —
+    /// thirty days brought forward to sixty seconds — and it records having a
+    /// successor, which is the only thing that distinguishes the honest retry
+    /// the window exists for from a replay.
+    #[tokio::test]
+    async fn supersede_keeps_the_row_live_on_the_grace_clock_and_stamps_it() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let issued = issue(&repo, tenant_id, "t254-supersede").await;
+        assert!(
+            issued.rotated_at.is_none(),
+            "a fresh token has no successor"
+        );
+
+        repo.supersede(
+            tenant_id,
+            "t254-supersede",
+            Utc::now() + chrono::Duration::seconds(60),
+        )
+        .await
+        .unwrap();
+
+        let live = repo
+            .get_by_token_hash(tenant_id, "t254-supersede")
+            .await
+            .expect("inside the window the predecessor is still redeemable");
+        let remaining = (live.expires_at - Utc::now()).num_seconds();
+        assert!(
+            (0..=60).contains(&remaining),
+            "thirty days must have become sixty seconds; {remaining}s remain"
+        );
+        assert!(
+            live.rotated_at.is_some(),
+            "the same statement must record that a successor was issued"
+        );
+    }
+
+    /// The one-way rule the trait states: a caller passing a distant instant
+    /// lengthens nothing.
+    #[tokio::test]
+    async fn supersede_can_only_ever_bring_the_expiry_forward() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        issue(&repo, tenant_id, "t254-one-way").await;
+
+        repo.supersede(
+            tenant_id,
+            "t254-one-way",
+            Utc::now() + chrono::Duration::days(3650),
+        )
+        .await
+        .unwrap();
+
+        let live = repo
+            .get_by_token_hash(tenant_id, "t254-one-way")
+            .await
+            .unwrap();
+        assert!(
+            live.expires_at < Utc::now() + chrono::Duration::days(31),
+            "a distant grace instant must not extend the token's life"
+        );
+    }
+
+    /// Every other profile's lane. The predecessor is revoked outright — no
+    /// window — and it too records having a successor, so the refusal that
+    /// follows can be recognised as a replay.
+    #[tokio::test]
+    async fn revoke_rotated_kills_the_row_and_still_stamps_it() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        issue(&repo, tenant_id, "t254-revoke-rotated").await;
+
+        repo.revoke_rotated(tenant_id, "t254-revoke-rotated")
+            .await
+            .unwrap();
+
+        assert!(
+            repo.get_by_token_hash(tenant_id, "t254-revoke-rotated")
+                .await
+                .is_err(),
+            "there is no window on this lane"
+        );
+        let rotated = repo
+            .find_rotated(tenant_id, "t254-revoke-rotated")
+            .await
+            .unwrap()
+            .expect("the row is still there and says it was rotated");
+        assert!(rotated.revoked);
+        assert!(rotated.rotated_at.is_some());
+    }
+
+    /// The single-use race, on both lanes. The loser of two concurrent
+    /// rotations gets `NotFound`, which is what the token endpoint turns into
+    /// "already consumed".
+    #[tokio::test]
+    async fn both_rotation_lanes_report_not_found_to_the_loser() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+
+        issue(&repo, tenant_id, "t254-race-fapi").await;
+        repo.supersede(
+            tenant_id,
+            "t254-race-fapi",
+            Utc::now() + chrono::Duration::seconds(60),
+        )
+        .await
+        .unwrap();
+        // A second supersede inside the window still finds a live row — that
+        // is the window working — so the race this asserts is the one that
+        // matters: once revoked, nothing wins.
+        repo.revoke(tenant_id, "t254-race-fapi").await.unwrap();
+        assert!(
+            matches!(
+                repo.supersede(
+                    tenant_id,
+                    "t254-race-fapi",
+                    Utc::now() + chrono::Duration::seconds(60)
+                )
+                .await,
+                Err(axiam_core::error::AxiamError::NotFound { .. })
+            ),
+            "a revoked row is not live, and supersede must say so"
+        );
+
+        issue(&repo, tenant_id, "t254-race-standard").await;
+        repo.revoke_rotated(tenant_id, "t254-race-standard")
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                repo.revoke_rotated(tenant_id, "t254-race-standard").await,
+                Err(axiam_core::error::AxiamError::NotFound { .. })
+            ),
+            "two concurrent rotations cannot both find a live row"
+        );
+    }
+
+    /// A credential revoked at logout is a stale credential, not a replay.
+    /// `find_rotated` must not blur the two, or every signed-out client that
+    /// retries would be filed as a security event.
+    #[tokio::test]
+    async fn find_rotated_ignores_a_token_that_was_merely_revoked() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        issue(&repo, tenant_id, "t254-logout").await;
+
+        repo.revoke(tenant_id, "t254-logout").await.unwrap();
+
+        assert!(
+            repo.find_rotated(tenant_id, "t254-logout")
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing rotated it, so nothing replayed it"
+        );
+        assert!(
+            repo.find_rotated(tenant_id, "t254-never-existed")
+                .await
+                .unwrap()
+                .is_none(),
+            "an unknown hash is Ok(None), never an error: the token endpoint \
+             answers invalid_grant either way, so this cannot become an oracle"
+        );
+    }
+
+    /// A row written before schema v60 carries no `rotated_at`, and v60
+    /// deliberately does not backfill. It must decode, and it must not be
+    /// mistaken for a rotated token.
+    #[tokio::test]
+    async fn a_pre_v60_refresh_token_row_is_readable_and_is_not_a_replay() {
+        let db = setup_db().await;
+        let tenant_id = Uuid::new_v4();
+        db.query(
+            "CREATE type::record('oauth2_refresh_token', $id) SET \
+             tenant_id = $tenant_id, \
+             token_hash = $token_hash, \
+             client_id = 'oa_legacy', \
+             user_id = NONE, \
+             scopes = ['openid'], \
+             expires_at = $expires_at, \
+             revoked = false",
+        )
+        .bind(("id", Uuid::new_v4().to_string()))
+        .bind(("tenant_id", tenant_id.to_string()))
+        .bind(("token_hash", "t254-pre-v60".to_owned()))
+        .bind(("expires_at", Utc::now() + chrono::Duration::days(30)))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let repo = SurrealRefreshTokenRepository::new(db);
+        let live = repo
+            .get_by_token_hash(tenant_id, "t254-pre-v60")
+            .await
+            .expect("a pre-v60 row must still be redeemable");
+        assert!(live.rotated_at.is_none());
+        assert!(
+            repo.find_rotated(tenant_id, "t254-pre-v60")
+                .await
+                .unwrap()
+                .is_none(),
+            "absent must not be read as 'rotated'; nothing recorded that it was"
+        );
     }
 }

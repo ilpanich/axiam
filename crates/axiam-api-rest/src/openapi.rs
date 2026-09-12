@@ -62,6 +62,7 @@ use crate::handlers;
         // MFA Methods
         handlers::mfa_methods::list_mfa_methods,
         handlers::mfa_methods::delete_mfa_method,
+        handlers::sessions::list_sessions,
         // WebAuthn
         handlers::webauthn::start_registration,
         handlers::webauthn::finish_registration,
@@ -348,6 +349,7 @@ use crate::handlers;
         axiam_core::models::webauthn_credential::WebauthnCredentialType,
         // MFA Methods
         handlers::mfa_methods::MfaMethodResponse,
+        handlers::sessions::SessionResponse,
         axiam_core::models::mfa_method::MfaMethodType,
         // Organizations
         axiam_core::models::organization::Organization,

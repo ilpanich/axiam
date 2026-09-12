@@ -696,6 +696,85 @@ moves.
 
 ## 7. R-6 — revocation reach: a revocation feed (decision C)
 
+> **EXECUTED (server and contract) — R-6, 2026-09-12. Contract 1.44.**
+> **T-39 and T-143 stay Open**, per §11: the feed exists and nothing polls it,
+> and a feed nobody reads narrows nothing. They flip when an SDK guard
+> implements §10.4; §13.1 tracks that.
+>
+> Schema **v62** — one new table, `revoked_session`, holding a `sid_hash` and
+> an `expires_at` and asserted by its own test to hold *nothing else*: a user
+> id or a tenant id there would turn a public, unauthenticated document into a
+> disclosure, and that is a decision to be argued rather than a column to be
+> added. The entry format is `axiam_core::revocation_feed` (layer 0, because
+> the server computes an entry and eleven SDKs compute the same entry from a
+> `sid` claim), pinned to a literal vector — eleven independent
+> implementations of a wire format need one.
+>
+> **The write side is on the session repository**, not a second one, because a
+> revocation is published by the same call that performs it. Three delete paths
+> publish and two deliberately do not: `consume` and `consume_by_token_hash`
+> are single-use redemptions of a handoff, where the session is being exchanged
+> rather than withdrawn, and publishing one would make a guard reject a caller
+> whose grant is proceeding normally. **A feed that can produce a false
+> rejection is worse than the fifteen-minute window it narrows**, and that
+> sentence is the design.
+>
+> Two things the plan did not anticipate. `DELETE ... RETURN BEFORE` yields the
+> record id in SurrealDB's own form rather than the `meta::id(id) AS record_id`
+> alias every row struct in that file expects, so the two bulk paths read the
+> ids in a separate `SELECT` **before** the delete — which also means a
+> deployment with the feed off issues exactly the queries it issued before. The
+> race that opens (a session created between the read and the delete) is the
+> right way round: it is missed by the feed and revoked by the delete, costing
+> one token lifetime — what the deployment had anyway — where the reverse would
+> cost a false rejection. And `ORDER BY` requires its idiom in the projection,
+> so `expires_at` is selected and then used by nothing: the document carries a
+> single deployment-wide `ttl` rather than a per-entry expiry, because a
+> per-entry expiry would say *when* each session was revoked.
+>
+> **"Rate-limited like `jwks`" turned out to mean "not rate-limited".**
+> `/oauth2/jwks` carries no limiter, and the feed is served exactly as it is —
+> a plain route with `Cache-Control: public, max-age=15` and an `ETag` over the
+> **entry list only**, since `issued_at` changes every call and covering it
+> would make every poll a full transfer. Every wrapped endpoint in that scope
+> is unauthenticated *and* allocates or terminates state; the feed does
+> neither. Recorded here because the plan asserted a limiter and the check is
+> the deliverable.
+>
+> **Mounted, not stubbed.** `RouteOptions` (new, `Default` = everything off) is
+> how the composition root turns the route on; `register_api_v1_routes` keeps
+> its signature and passes the default, so the forty-odd test files that call
+> it are untouched. A route that exists and answers 404 is one an operator
+> finds in a log and a scanner reports on — an off-by-default feature that
+> leaves traces is not off.
+>
+> Eight datastore tests and three route tests, the I4 twins among them the two
+> that matter: with the feed off **no row is ever written** by any of the five
+> delete paths (and the revocations still happen), and the route **does not
+> exist**. One test greps the raw row for the session, tenant and user ids
+> rather than trusting the projection, because the repository selects one
+> column and would hide a second.
+>
+> Contract **§10.4** (SHOULD, default off, bounded interval and cache, never on
+> the request path, **never fail closed** — including not reading an
+> unreachable or malformed feed as an empty list, which would be a guard
+> silently honouring no revocations while appearing to honour them), plus
+> **§10.4.1**'s per-SDK table and the scoping of §10.2's MUST NOT to
+> *per-request* polling, which is what its own words ("before each call",
+> "unbounded per-request cost") always said. Conformance rows **165–169**.
+> `sdks/openapi.json` and `management-registry.json` regenerated from a real
+> `--dump-openapi` (153 paths, 159 operations); the `oidc` exclusion reason in
+> `gen-management-registry.py` now names the feed as §10.4 guard machinery
+> rather than letting it ride on "§12 discovery/JWKS".
+>
+> Docs: `docs/deployment/README.md` (a new section, including what the document
+> does **not** disclose and why that is a non-enumerability argument rather
+> than a guarantee), the configuration reference, `CHANGELOG.md` under
+> **Added**. Threat model: T-39 and T-143 amended in `Axiam.json` and
+> `threat-model-stride.md` — mitigation, §6 register rows and the "Access
+> tokens survive revocation" grouping bullet — with **status unchanged** and no
+> count moved.
+
 **Closes** T-39 (Open, Medium, *Authentication & session management*) and
 T-143 (Open, Medium, *Client SDKs & admin UI integration surface*) — the two
 faces of one trade. Both become **Mitigated** only if the feed lands

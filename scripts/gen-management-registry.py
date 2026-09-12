@@ -64,7 +64,7 @@ EXCLUDED_TAGS: dict[str, str] = {
     "auth": "§1 login/MFA/refresh/logout, §23 OPAQUE, §25 account lifecycle",
     "authz": "§1 check_access / batch_check",
     "oauth2": "§12 RP helpers, §14 device grant, §15 token exchange, §26 PAR",
-    "oidc": "§12 discovery/JWKS; /oauth2/userinfo is §1.1 gRPC-only by design",
+    "oidc": "§12 discovery/JWKS; /oauth2/userinfo is §1.1 gRPC-only by design; /oauth2/revocations is §10.4 route-guard machinery, polled by a guard rather than called by an administrator",
     "uma": "§20 UMA 2.0 protection API and ticket grant",
     "webauthn": "§24 WebAuthn ceremonies -- credential I/O, not administration",
     "federation-sso": "§12 public SSO entry points, driven by the RP helpers",

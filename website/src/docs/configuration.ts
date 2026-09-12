@@ -267,6 +267,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "0b5f4d2e-6c31-4a8e-9f77-2d1c8a4b6e90",
           ],
           [
+            "AXIAM__AUTH__REVOCATION_FEED_ENABLED",
+            "Publish `GET /oauth2/revocations` — the hashed ids of sessions revoked within the last access-token lifetime, so an SDK route guard that polls it rejects a revoked session within one poll interval instead of within one token lifetime. Default `false`, and with it off the route is not mounted and no row is written. The document carries base64url SHA-256 hashes and nothing else: never a session id, a subject or a tenant. It is a narrowing of a residual window and never a control — a guard that cannot fetch it behaves exactly as it does without it, and the token itself still decides. Turn it on where sign-out has to take effect faster than fifteen minutes and routing every authorization decision through gRPC introspection is too expensive.",
+            "true",
+          ],
+          [
             "AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS",
             "Cache-Control max-age on the JWKS endpoint, in seconds.",
             "300",

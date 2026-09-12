@@ -8,4 +8,5 @@ pub mod models;
 pub mod permission_scope;
 pub mod personal_data;
 pub mod repository;
+pub mod revocation_feed;
 pub mod secrets;

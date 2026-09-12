@@ -479,6 +479,22 @@ documents.
 | 163 | An unusable mTLS base is refused at the source rather than published: a relative URL, a non-`https` scheme, a query or a fragment each fail discovery. So no conformant deployment can serve contract §21.3.1 vector C, and an SDK's refusal of one is defence in depth rather than the only line | contract 1.43 §21.3.1 | Pass | `oidc.rs::an_unusable_mtls_base_is_refused_rather_than_published` |
 | 164 | **Invariant 4.** A deployment that configures no mTLS host omits the member entirely — absent, never `null` — and an SDK reads absence as "no separate host", not "unsupported". That is the most common AXIAM topology, so an SDK that refuses on absence refuses the default | contract 1.43 §21.3.1 vector B | Pass (I4) | `oidc.rs::no_mtls_host_omits_the_member_entirely` |
 
+### The session-revocation feed (T-39, T-143, R-6)
+
+Both threats were **Open**: an access token is valid for fifteen minutes and an
+SDK guard verifies it locally, so a logout, a role removal or an account
+disable does not reach a token already in a caller's hands. The recorded remedy
+on both — call gRPC introspection instead of verifying locally — is real and
+costs a round trip per request, which is why integrators do not adopt it.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 165 | `GET /oauth2/revocations` publishes the base64url-unpadded SHA-256 of each session id revoked within the last access-token lifetime — never an id, a subject or a tenant. A guard that polls it rejects a revoked session within one poll interval rather than one token lifetime | contract 1.44 §10.4 | Pass | `revocation_feed_test.rs::a_logout_publishes_the_session_hash_and_nothing_else`; `revocation_feed.rs::the_entry_never_contains_the_session_id` |
+| 166 | The feed is **bounded**: an entry is published for exactly one access-token lifetime, after which every token naming the session has expired on its own `exp`. Filtered on read as well as swept, so a late sweep makes the table large and never the document untruthful | contract 1.44 §10.4 | Pass | `revocation_feed_test.rs::an_entry_stops_being_published_when_its_tokens_have_expired`, `::the_sweep_keeps_a_live_entry` |
+| 167 | The three deliberate revocation paths publish — a logout, a password or MFA reset, and "sign out everywhere else" (which does **not** publish the session it keeps). The two single-use redemption paths deliberately do not: a handoff being exchanged is not a session being withdrawn, and publishing it would make a guard reject a caller whose grant is proceeding normally | — | Pass | `revocation_feed_test.rs::a_reset_publishes_every_session_it_revoked`, `::the_session_a_reset_deliberately_keeps_is_not_published`, `::a_consumed_session_is_not_published_as_a_revocation` |
+| 168 | **Invariant 4.** With `AXIAM__AUTH__REVOCATION_FEED_ENABLED` unset the route is **not mounted** and no `revoked_session` row is written — a deployment that did not opt in is byte-identical to one built before the feed existed, 404 included, and the revocations themselves still happen | — (invariant 4) | Pass (I4) | `revocation_feed_route_test.rs::the_feed_does_not_exist_unless_the_deployment_asked_for_it`; `revocation_feed_test.rs::with_the_feed_off_no_row_is_ever_written` |
+| 169 | A conditional poll is answered `304` with the same `ETag`, and the `ETag` covers the entry list rather than the document — `issued_at` changes on every call, so covering it would make every poll a full transfer | RFC 7232 | Pass | `revocation_feed_route_test.rs::a_conditional_poll_is_answered_not_modified` |
+
 ---
 
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
@@ -618,3 +634,4 @@ documents.
 *Row 148 closed and rows 149–154 added: the first execution in which modules reached assertions — 2026-09-08*
 *Rows 158–160 added: R-2 of the 2026-09-12 residual pass (the claims request across a refresh) — 2026-09-12*
 *Rows 161–164 added: R-8 of the same pass (the SDK half of contract 1.40–1.42) — 2026-09-12*
+*Rows 165–169 added: R-6 of the same pass (the session-revocation feed) — 2026-09-12*

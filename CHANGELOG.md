@@ -155,6 +155,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An optional session-revocation feed** (T-39, T-143)
+
+  `AXIAM__AUTH__REVOCATION_FEED_ENABLED`, default `false`. With it off nothing
+  changes at all: the route is not mounted, no row is written, and the
+  deployment is byte-identical to one built before the feed existed.
+
+  With it on, `GET /oauth2/revocations` publishes the base64url SHA-256 of each
+  session id revoked within the last access-token lifetime. An SDK route guard
+  that polls it (contract §10.4, opt-in on that side too) rejects a revoked
+  session within one poll interval instead of within one token lifetime — for
+  one cacheable fetch per interval, rather than the per-request round trip
+  gRPC introspection costs.
+
+  The document carries hashes and nothing else: never a session id, a subject,
+  a tenant or a timestamp. It is bounded by your revocation rate over fifteen
+  minutes rather than by history, and filtered on read as well as swept, so a
+  sweep that falls behind makes the table large and never the document wrong.
+
+  It is not a control. A guard that cannot fetch the feed behaves exactly as it
+  does without it; the feed can only turn an accept into a reject, and local
+  verification still decides.
+
 - **`AXIAM__AUDIT__MINIMISE` — bound what the audit log collects, not just
   how long it keeps it** (T-110)
 

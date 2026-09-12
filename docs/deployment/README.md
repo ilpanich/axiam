@@ -1077,6 +1077,57 @@ allowlisted host. Every use is logged.
 The full reasoning, and the five properties that keep this from being a bypass,
 are in [`../security-profiles.md`](../security-profiles.md#outbound-ssrf-guard--the-operator-override-sec-107).
 
+## Session revocation feed (optional, T-39 / T-143)
+
+`AXIAM__AUTH__REVOCATION_FEED_ENABLED` — default `false`.
+
+An AXIAM access token is self-contained and valid for up to fifteen minutes,
+and an SDK route guard verifies it locally. A logout, a role removal or an
+account disable therefore does not reach a token already in a caller's hands
+until it expires. The documented answer has been "route the decision through
+gRPC introspection instead" — correct, and a network round trip **per
+request**, which is why integrations rarely take it.
+
+With this set, the server publishes `GET /oauth2/revocations`:
+
+```json
+{ "alg": "SHA-256", "issued_at": 1757664000, "ttl": 900,
+  "revoked": ["i9N2lYMTV4FhA0husWjGYCqJXXTb7_fMBuomhWjSsgQ"] }
+```
+
+An SDK guard that polls it (contract §10.4, opt-in on that side too) rejects a
+revoked session within **one poll interval** instead of one token lifetime.
+
+**What the document does and does not disclose.** An entry is the base64url
+SHA-256 of a session id — never an id, a subject, a tenant or a timestamp. A
+session id is not a subject, so the feed says neither who was revoked nor how
+many people are behind the entries; and a reader who does not already hold a
+`sid` learns nothing they can use, because a UUIDv4 preimage space is not
+walkable. That is a non-enumerability argument, not a guarantee, and it is
+stated that way on purpose.
+
+**What bounds it.** An entry is published for exactly one access-token
+lifetime, after which every token naming that session has expired on its own
+`exp` and the entry proves nothing. So the document's size tracks your
+revocation rate over fifteen minutes and never your history. It is filtered on
+read as well as swept: a sweep that falls behind makes the table large, never
+the document wrong.
+
+**What it is not.** It is not a control. A guard that cannot fetch the feed
+behaves exactly as it does without it — the contract requires that, and it is
+what stops a network blip from becoming an outage. The feed can only ever turn
+an accept into a reject, never the reverse, and every local verification rule
+still runs first and still decides.
+
+**With it off** — the default — the route is not mounted, no `revoked_session`
+row is written, and the deployment is byte-identical to one built before the
+feed existed.
+
+Turn it on where sign-out has to take effect faster than fifteen minutes and
+routing every authorization decision through gRPC is too expensive. Leave it
+off if neither is true: it is one more public endpoint, and an endpoint nobody
+polls narrows nothing.
+
 ## Audit collection minimisation (optional, T-110)
 
 `AXIAM__AUDIT__MINIMISE` — default `false`.

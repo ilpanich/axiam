@@ -347,6 +347,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "oidc_requested_claims_on_refresh",
         sql: SCHEMA_V61,
     },
+    Migration {
+        version: 62,
+        name: "session_revocation_feed",
+        sql: SCHEMA_V62,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3340,9 +3345,97 @@ DEFINE FIELD IF NOT EXISTS requested_userinfo_claims ON TABLE oauth2_refresh_tok
 DEFINE FIELD IF NOT EXISTS requested_userinfo_claims.* ON TABLE oauth2_refresh_token TYPE string;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v62 — T-39 / T-143: the revocation feed's backing table
+// -----------------------------------------------------------------------
+//
+// A new table rather than a column, and additive in the strongest sense: no
+// existing table is touched, so an unmigrated reader is unaffected and a
+// deployment that never enables the feed never writes a row.
+//
+// # Why a table at all
+//
+// A session is **deleted** on invalidation (`SessionRepository::invalidate`),
+// so there is no row left to derive a feed from. Something has to remember
+// that a session existed and stopped existing, for exactly as long as a token
+// naming it could still verify.
+//
+// # Why the hash and nothing else
+//
+// `sid_hash` is the base64url-unpadded SHA-256 of the session id — the same
+// encoding `cnf.x5t#S256` and `jkt` already use, so no SDK needs a new
+// primitive. The row holds no user id, no tenant id, no subject: the feed is
+// public and unauthenticated, and a reader who does not already hold the `sid`
+// learns nothing from it. That is a property of what is stored, not of who is
+// allowed to read, which is the only form of it worth relying on.
+//
+// # Why `expires_at`, and why it is short
+//
+// One access-token lifetime after the revocation. After that every token
+// naming the session has expired on its own `exp` and the entry proves
+// nothing, so keeping it would be pure disclosure with no benefit. It is what
+// bounds the table by the *revocation rate over fifteen minutes* rather than
+// by the deployment's history — which is what makes the feed small enough to
+// serve to anyone and cacheable enough to poll.
+//
+// # The index
+//
+// Unique on `sid_hash`, because a session revoked twice (a logout racing a
+// password reset) must not produce two entries — and because the feed is read
+// by scanning live rows, an ordinary index on `expires_at` serves that scan.
+const SCHEMA_V62: &str = "\
+DEFINE TABLE IF NOT EXISTS revoked_session SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS sid_hash ON TABLE revoked_session TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE revoked_session TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_revoked_session_hash ON TABLE revoked_session \
+    FIELDS sid_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_revoked_session_expiry ON TABLE revoked_session \
+    FIELDS expires_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-39/T-143 — v62 is one new table and nothing else. The things that
+    /// would make it dangerous are asserted absent: any write to an existing
+    /// table (a backfill would invent revocations), and any column beyond the
+    /// two the feed needs — a user id or a tenant id here would turn a public,
+    /// unauthenticated document into a disclosure.
+    #[test]
+    fn v62_adds_the_revocation_table_and_touches_nothing_else() {
+        for definition in [
+            "DEFINE TABLE IF NOT EXISTS revoked_session SCHEMAFULL",
+            "sid_hash ON TABLE revoked_session TYPE string",
+            "expires_at ON TABLE revoked_session TYPE datetime",
+            "idx_revoked_session_hash ON TABLE revoked_session",
+        ] {
+            assert!(
+                SCHEMA_V62.contains(definition),
+                "v62 must define {definition}"
+            );
+        }
+        for forbidden in ["UPDATE", "DELETE", "OVERWRITE", "REMOVE"] {
+            assert!(
+                !SCHEMA_V62.contains(forbidden),
+                "v62 must touch no existing data; found {forbidden}"
+            );
+        }
+        assert_eq!(
+            SCHEMA_V62.matches("DEFINE FIELD").count(),
+            2,
+            "the feed stores a hash and an expiry. A third column is a \
+             disclosure decision and must be argued, not added"
+        );
+        for never in ["user_id", "tenant_id", "subject", "sid ", "session_id"] {
+            assert!(
+                !SCHEMA_V62.contains(never),
+                "{never} must not be stored: the feed is public and \
+                 unauthenticated, and unlinkability is a property of what is \
+                 stored rather than of who may read it"
+            );
+        }
+    }
 
     /// T-241 — v61 is one additive, optional column and nothing else, on the
     /// table v59's column already lives on the other side of. The three things
@@ -3602,9 +3695,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&61),
-            "v61 is the newest migration (T-241 — the claims request on the \
-             refresh token). \
+            Some(&62),
+            "v62 is the newest migration (T-39/T-143 — the revocation feed's \
+             backing table). \
              This assertion is a tripwire, not bookkeeping: bumping it is how a new \
              migration is declared deliberate rather than merged in by accident."
         );

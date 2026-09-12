@@ -117,14 +117,45 @@ pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
     register_api_v1_routes::<DbClient>(cfg, &RateLimitConfig::default());
 }
 
+/// Per-deployment choices that change which routes exist at all.
+///
+/// A struct rather than a parameter list so that adding the next one does not
+/// touch the forty-odd test files that call [`register_api_v1_routes`]. Its
+/// `Default` is "every optional route off", which is what that function passes
+/// — so an existing caller gets exactly the route table it got before this
+/// type existed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RouteOptions {
+    /// T-39/T-143: mount `GET /oauth2/revocations`.
+    ///
+    /// `false` — the default — means the route does not exist. Not "exists and
+    /// answers 404": a route that exists is one an operator finds in a log, a
+    /// proxy is configured for and a scanner reports on, and an off-by-default
+    /// feature that leaves traces is not off.
+    pub revocation_feed_enabled: bool,
+}
+
 /// Register the API v1 scope, generic over the SurrealDB connection type.
 ///
 /// This allows tests to use an in-memory DB while production uses WebSocket.
 /// The `rate_limit_cfg` parameter controls per-endpoint rate limits.
+///
+/// Every optional route is **off**; the composition root calls
+/// [`register_api_v1_routes_with`] to turn one on.
 pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
     cfg: &mut web::ServiceConfig,
     rate_limit_cfg: &RateLimitConfig,
 ) {
+    register_api_v1_routes_with::<C>(cfg, rate_limit_cfg, RouteOptions::default());
+}
+
+/// [`register_api_v1_routes`], with the deployment's optional routes.
+pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
+    cfg: &mut web::ServiceConfig,
+    rate_limit_cfg: &RateLimitConfig,
+    options: RouteOptions,
+) {
+    let revocation_feed_enabled = options.revocation_feed_enabled;
     let auth_scope = web::scope("/api/v1/auth")
             .wrap(AuthzMiddleware)
             .wrap(CsrfMiddleware)
@@ -547,8 +578,13 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                     .route(web::delete().to(handlers::uma::delete_resource_set::<C>)),
             ),
     );
-    cfg.service(
-        web::scope("/oauth2")
+    // T-39/T-143: the revocation feed is mounted only where a deployment has
+    // asked for it. Not "mounted and answering 404": a route that exists is a
+    // route an operator can find in a log, a proxy can be configured for and a
+    // scanner can report on, and an off-by-default feature that leaves traces
+    // is not off. With the setting unset this scope is byte-identical to the
+    // one built before the feed existed, 404 included.
+    let mut oauth2_scope = web::scope("/oauth2")
             .wrap(AuthzMiddleware)
             .route(
                 "/authorize",
@@ -682,8 +718,28 @@ pub fn register_api_v1_routes<C: surrealdb::Connection + Clone>(
                 web::resource("/userinfo")
                     .route(web::get().to(handlers::oauth2::userinfo::<C>))
                     .route(web::post().to(handlers::oauth2::userinfo_post::<C>)),
-            ),
-    );
+            );
+    if revocation_feed_enabled {
+        // Beside the JWKS, and served exactly as the JWKS is: a plain route
+        // with `Cache-Control` and an `ETag`, and **no** rate-limit wrap.
+        //
+        // The plan for this item said "rate-limited like `jwks`", and checking
+        // what that meant is the reason this comment exists: `/oauth2/jwks`
+        // carries no limiter. Nor should this. Every wrapped endpoint in this
+        // scope is unauthenticated AND allocates or terminates state; the feed
+        // does neither, it answers one indexed read of a set bounded by the
+        // revocation rate over one access-token lifetime, and the caching
+        // headers are what a conformant poller actually costs. Adding a
+        // limiter would also make the feed fail *differently* under load, and
+        // a guard that gets a 429 must behave as though the feed were
+        // unreachable — which it does, but that is a subtlety worth not
+        // introducing for an endpoint shaped like the JWKS.
+        oauth2_scope = oauth2_scope.route(
+            "/revocations",
+            web::get().to(handlers::oauth2::revocations::<C>),
+        );
+    }
+    cfg.service(oauth2_scope);
     let api_scope = web::scope("/api/v1")
             .wrap(AuthzMiddleware)
             .wrap(CsrfMiddleware) // SEC-046: CSRF protection on all /api/v1 CRUD routes

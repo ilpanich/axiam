@@ -92,6 +92,15 @@ pub struct CleanupTask<C: Connection> {
     interval: Duration,
     /// Audit retention (T-119). `None` = never prune.
     audit_retention: Option<chrono::Duration>,
+    /// T-39/T-143: the revocation feed's table, when the deployment runs one.
+    ///
+    /// `None` — the default — means the feed is off, no row is ever written,
+    /// and this sweep is a no-op. A `Some` here is not optional in the way
+    /// `audit_retention`'s is: the entries have their own `expires_at` and the
+    /// read path filters on it, so a sweep that never ran would publish a
+    /// truthful document over a table that grows forever. It is a size bound,
+    /// not a correctness one.
+    revoked_session_repo: Option<Arc<axiam_db::SurrealRevokedSessionRepository<C>>>,
     /// T-129: records each sweep's outcome for `GET /health/jobs`.
     job_health: crate::job_health::JobHealth,
     shutdown: watch::Receiver<bool>,
@@ -235,6 +244,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         // would ever complain. Being unable to construct the task without
         // stating a retention policy is the point.
         audit_retention: Option<chrono::Duration>,
+        // T-39/T-143. `None` when the deployment does not run the feed.
+        revoked_session_repo: Option<Arc<axiam_db::SurrealRevokedSessionRepository<C>>>,
         // T-129: passed in rather than constructed here so `main` can hand
         // the same handle to `AppState`, which is what lets the HTTP layer
         // read what this loop writes.
@@ -265,6 +276,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             export_encryption_key,
             interval,
             audit_retention,
+            revoked_session_repo,
             job_health,
             shutdown,
         }
@@ -339,6 +351,18 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         self.sweep_audit_retention().await,
                         tracing::Level::INFO,
                     );
+
+                    // T-39/T-143: drop revocation entries whose access tokens
+                    // have all expired. DEBUG, not INFO: unlike the audit
+                    // sweep this destroys nothing anyone could want back —
+                    // an expired entry describes only tokens that have
+                    // expired on their own `exp`.
+                    Self::record(
+                        &self.job_health,
+                        "revocation_feed",
+                        self.sweep_revocation_feed().await,
+                        tracing::Level::DEBUG,
+                    );
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && *self.shutdown.borrow() {
@@ -412,6 +436,17 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         };
         let cutoff = Utc::now() - retention;
         self.audit_repo.prune_older_than(cutoff).await
+    }
+
+    /// Drop revocation-feed entries that have expired (T-39/T-143).
+    ///
+    /// A no-op returning `Ok(0)` when the deployment does not run the feed —
+    /// in which case there are no rows to drop, because nothing wrote any.
+    async fn sweep_revocation_feed(&self) -> Result<u64, AxiamError> {
+        let Some(repo) = &self.revoked_session_repo else {
+            return Ok(0);
+        };
+        repo.prune_expired(Utc::now()).await
     }
 
     // -----------------------------------------------------------------------

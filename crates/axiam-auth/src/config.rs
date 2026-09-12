@@ -165,6 +165,20 @@ pub struct AuthConfig {
     /// therefore safe and is the correct setting for a deployment that serves
     /// many tenants from one issuer.
     pub oauth2_default_tenant_id: String,
+    /// T-39/T-143 — whether this deployment publishes
+    /// `GET /oauth2/revocations`.
+    ///
+    /// `AXIAM__AUTH__REVOCATION_FEED_ENABLED`, default `false`. With it off the
+    /// route is not mounted and no `revoked_session` row is written, so the
+    /// deployment is byte-identical to one built before the feed existed.
+    ///
+    /// The feed narrows the window in which a revoked session's access token
+    /// still verifies — from one token lifetime to one poll interval — for an
+    /// SDK guard that opts into polling it. It is never a control: a guard
+    /// that cannot fetch it behaves exactly as it does today, and the token
+    /// itself still decides.
+    #[serde(default)]
+    pub revocation_feed_enabled: bool,
     /// Extra browser origins this deployment will hand a **federation SSO
     /// handoff code** to (`AXIAM__AUTH__SSO_SPA_ORIGINS`; a list, set the same
     /// way as `AXIAM__SERVER__CORS_ALLOWED_ORIGINS`).
@@ -535,6 +549,7 @@ impl Default for AuthConfig {
             // today's behaviour and the right default for a multi-tenant
             // deployment. A single-tenant issuer sets it.
             oauth2_default_tenant_id: String::new(),
+            revocation_feed_enabled: false,
             sso_spa_origins: Vec::new(),
             pepper: None,
             pepper_previous: None,

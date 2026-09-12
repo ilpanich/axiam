@@ -164,6 +164,14 @@ pub struct SurrealSessionRepository<C: Connection> {
     /// I6: optional short-TTL validity cache. `None` (the default) makes every
     /// method below byte-identical to the pre-I6 behaviour.
     validation_cache: Option<Arc<SessionValidationCache>>,
+    /// T-39/T-143: how long a revoked session's hash is published for, or
+    /// `None` — the default — for a deployment that does not run the feed.
+    ///
+    /// `None` means **no row is ever written**: a deployment that has not
+    /// opted in pays nothing and is byte-identical to one built before the
+    /// feed existed, which is the property that makes an off-by-default
+    /// feature honest rather than merely unused.
+    revocation_feed_ttl: Option<chrono::Duration>,
 }
 
 // Manual Clone impl (not derive): `#[derive(Clone)]` would add a `C: Clone`
@@ -177,6 +185,7 @@ impl<C: Connection> Clone for SurrealSessionRepository<C> {
             // into several services, and they must agree on what has been
             // revoked.
             validation_cache: self.validation_cache.clone(),
+            revocation_feed_ttl: self.revocation_feed_ttl,
         }
     }
 }
@@ -187,6 +196,7 @@ impl<C: Connection> SurrealSessionRepository<C> {
         Self {
             db,
             validation_cache: None,
+            revocation_feed_ttl: None,
         }
     }
 
@@ -204,6 +214,154 @@ impl<C: Connection> SurrealSessionRepository<C> {
     /// The attached validity cache, if any.
     pub fn validation_cache(&self) -> Option<&Arc<SessionValidationCache>> {
         self.validation_cache.as_ref()
+    }
+
+    /// Publish revoked sessions to the feed for `ttl` (T-39/T-143).
+    ///
+    /// `ttl` is one access-token lifetime: after that, every token naming the
+    /// session has expired on its own `exp` and the entry proves nothing, so
+    /// keeping it would be disclosure with no benefit.
+    ///
+    /// Without this the repository writes no `revoked_session` row at all.
+    #[must_use]
+    pub fn with_revocation_feed(mut self, ttl: chrono::Duration) -> Self {
+        self.revocation_feed_ttl = Some(ttl);
+        self
+    }
+
+    /// Record that these sessions were revoked, if the feed is enabled.
+    ///
+    /// # Which delete paths call this, and which deliberately do not
+    ///
+    /// The three **revocation** paths do: `invalidate` (a logout, an
+    /// administrator ending a session), `invalidate_user_sessions` and
+    /// `invalidate_user_sessions_except` (a password or MFA reset). Those are
+    /// the events T-39 and T-143 are about — a role removal, an account
+    /// disable, a sign-out that an access token in flight does not hear about.
+    ///
+    /// `consume` and `consume_by_token_hash` do **not**. Those are single-use
+    /// redemptions of a handoff, where the session is being exchanged rather
+    /// than withdrawn, and publishing them would have a guard reject a token
+    /// whose own grant is proceeding normally. A feed that can produce a false
+    /// rejection is worse than the fifteen-minute window it narrows.
+    ///
+    /// # Why a failure here is not a failure of the revocation
+    ///
+    /// The revocation has already committed by the time this runs, and it is
+    /// effective on every REST request regardless — the session row is gone.
+    /// The feed is a **narrowing** of a residual window, not the control. So a
+    /// failed publish is logged at `warn` and swallowed: turning it into an
+    /// error would make a logout fail because an optional optimisation did,
+    /// which is exactly the wrong trade.
+    /// The ids of this user's live sessions, read **before** a bulk revocation
+    /// so the feed can name them (T-39/T-143).
+    ///
+    /// A separate read rather than decoding the `DELETE ... RETURN BEFORE`
+    /// images, for two reasons. The BEFORE image carries the record id in
+    /// SurrealDB's own record form rather than the `meta::id(id) AS record_id`
+    /// alias every row struct in this file expects, so decoding it would mean a
+    /// second row type whose only job is to be decoded differently. And this
+    /// runs **only when the feed is on**: a deployment that has not opted in
+    /// issues exactly the queries it issued before, which is the property that
+    /// makes the feature genuinely off.
+    ///
+    /// A session created between this read and the DELETE is missed by the
+    /// feed and revoked by the DELETE. That is the right way round: the
+    /// revocation is the control and the feed narrows a residual window, so a
+    /// missed entry costs one token lifetime — exactly what the deployment had
+    /// before the feed — while a spurious entry would cost a false rejection.
+    async fn live_session_ids_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        except: Option<Uuid>,
+    ) -> AxiamResult<Vec<Uuid>> {
+        if self.revocation_feed_ttl.is_none() {
+            return Ok(Vec::new());
+        }
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id FROM session \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        #[derive(Debug, SurrealValue)]
+        struct IdRow {
+            record_id: String,
+        }
+        let rows: Vec<IdRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| Uuid::parse_str(&r.record_id).ok())
+            .filter(|id| Some(*id) != except)
+            .collect())
+    }
+
+    /// Record that these sessions were revoked, if the feed is enabled.
+    ///
+    /// # Which delete paths call this, and which deliberately do not
+    ///
+    /// The three **revocation** paths do: `invalidate` (a logout, an
+    /// administrator ending a session), `invalidate_user_sessions` and
+    /// `invalidate_user_sessions_except` (a password or MFA reset). Those are
+    /// the events T-39 and T-143 are about — a role removal, an account
+    /// disable, a sign-out that an access token in flight does not hear about.
+    ///
+    /// `consume` and `consume_by_token_hash` do **not**. Those are single-use
+    /// redemptions of a handoff, where the session is being exchanged rather
+    /// than withdrawn, and publishing them would have a guard reject a token
+    /// whose own grant is proceeding normally. A feed that can produce a false
+    /// rejection is worse than the fifteen-minute window it narrows.
+    ///
+    /// # Why a failure here is not a failure of the revocation
+    ///
+    /// The revocation has already committed by the time this runs, and it is
+    /// effective on every REST request regardless — the session row is gone.
+    /// The feed is a **narrowing** of a residual window, not the control. So a
+    /// failed publish is logged at `warn` and swallowed: turning it into an
+    /// error would make a logout fail because an optional optimisation did,
+    /// which is exactly the wrong trade.
+    async fn publish_revocations(&self, session_ids: &[Uuid]) {
+        let Some(ttl) = self.revocation_feed_ttl else {
+            return;
+        };
+        if session_ids.is_empty() {
+            return;
+        }
+        let expires_at = Utc::now() + ttl;
+        for id in session_ids {
+            let hash = axiam_core::revocation_feed::revocation_hash(*id);
+            // `UPSERT ... WHERE` keyed on the hash: a session revoked twice —
+            // a logout racing a password reset — must be one entry, and the
+            // unique index would otherwise turn the second write into an
+            // error on a path that has nothing useful to do with one.
+            let written = self
+                .db
+                .current()
+                .query(
+                    "UPSERT revoked_session SET sid_hash = $hash, \
+                     expires_at = $expires_at WHERE sid_hash = $hash",
+                )
+                .bind(("hash", hash))
+                .bind(("expires_at", expires_at))
+                .await;
+            if let Err(e) = written {
+                tracing::warn!(
+                    error = %e,
+                    "failed to publish a revocation to the feed; the session is \
+                     revoked regardless — the feed narrows a residual window and \
+                     is not the control"
+                );
+            }
+        }
     }
 
     /// Is the session behind an access token's `jti` still usable? (D-15 /
@@ -428,6 +586,10 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
+        // T-39/T-143, after the check: a revocation that did not happen must
+        // not be published as one.
+        self.publish_revocations(&[id]).await;
+
         Ok(())
     }
 
@@ -538,6 +700,11 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
     }
 
     async fn invalidate_user_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        // T-39/T-143, read before the DELETE — see `live_session_ids_for_user`.
+        // Empty, and free, when the feed is off.
+        let to_publish = self
+            .live_session_ids_for_user(tenant_id, user_id, None)
+            .await?;
         let result = self
             .db
             .current()
@@ -561,6 +728,8 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
+        self.publish_revocations(&to_publish).await;
+
         Ok(())
     }
 
@@ -570,6 +739,12 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
         user_id: Uuid,
         current_session_id: Uuid,
     ) -> AxiamResult<u64> {
+        // T-39/T-143: which sessions this is about to revoke, minus the one
+        // it deliberately keeps. Empty, and free, when the feed is off.
+        let to_publish = self
+            .live_session_ids_for_user(tenant_id, user_id, Some(current_session_id))
+            .await?;
+
         // DELETE all sessions for this user in this tenant EXCEPT the
         // current one (identified by its record ID). RETURN BEFORE gives us
         // the deleted rows so we can count them.
@@ -607,6 +782,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
+        self.publish_revocations(&to_publish).await;
         Ok(deleted.len() as u64)
     }
 

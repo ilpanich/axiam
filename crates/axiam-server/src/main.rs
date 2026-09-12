@@ -39,8 +39,8 @@ use axiam_api_rest::state::AppState;
 use axiam_api_rest::state::bundles;
 use axiam_api_rest::webhook_consumer::{WebhookRetryConfig, start_webhook_consumer};
 use axiam_api_rest::{
-    HealthChecker, RateLimitConfig, ServerConfig, build_cors, health_routes, openapi_routes,
-    register_api_v1_routes,
+    HealthChecker, RateLimitConfig, RouteOptions, ServerConfig, build_cors, health_routes,
+    openapi_routes, register_api_v1_routes_with,
 };
 use axiam_audit::AuditMiddleware;
 use axiam_auth::config::AuthConfig;
@@ -703,7 +703,46 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    // T-39/T-143: the revocation feed. Resolved once, and the same value both
+    // mounts the route and turns on the write side — two switches for one
+    // feature is how a deployment ends up publishing an empty feed forever, or
+    // writing rows nothing serves.
+    let revocation_feed_ttl = config
+        .auth
+        .revocation_feed_enabled
+        .then(|| chrono::Duration::seconds(config.auth.access_token_lifetime_secs as i64));
+    let route_options = RouteOptions {
+        revocation_feed_enabled: config.auth.revocation_feed_enabled,
+    };
+    if let Some(ttl) = revocation_feed_ttl {
+        tracing::info!(
+            ttl_secs = ttl.num_seconds(),
+            "session revocation feed is ON (AXIAM__AUTH__REVOCATION_FEED_ENABLED=true) — \
+             GET /oauth2/revocations publishes hashed session ids for one access-token \
+             lifetime; an SDK guard that polls it rejects a revoked session within one \
+             poll interval rather than one token lifetime"
+        );
+    } else {
+        tracing::info!(
+            "session revocation feed is OFF (AXIAM__AUTH__REVOCATION_FEED_ENABLED) — \
+             GET /oauth2/revocations is not served and no revocation row is written; a \
+             revoked session's access token stays verifiable locally until it expires"
+        );
+    }
+
     let session_repo = SurrealSessionRepository::new(pool.handle_for_repo());
+    let session_repo = match revocation_feed_ttl {
+        Some(ttl) => session_repo.with_revocation_feed(ttl),
+        None => session_repo,
+    };
+    // Built here, beside the writer, and only when the feed is on: the sweep
+    // that prunes the table and the path that fills it are two halves of one
+    // decision and must not be able to disagree about whether it was taken.
+    let revoked_session_repo = revocation_feed_ttl.map(|_| {
+        Arc::new(axiam_db::SurrealRevokedSessionRepository::new(
+            pool.handle_for_repo(),
+        ))
+    });
     // I6: optional short-TTL session-validation cache. Opt-in via
     // `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` (0 = off, the default);
     // every session-deleting path in the repository invalidates it, so on a
@@ -2317,6 +2356,7 @@ async fn main() -> std::io::Result<()> {
         config.email_encryption_key,
         Duration::from_secs(config.cleanup_interval_secs),
         audit_retention,
+        revoked_session_repo,
         job_health.clone(),
         cleanup_shutdown_rx,
     );
@@ -2535,7 +2575,9 @@ async fn main() -> std::io::Result<()> {
             // lives on this one AppState<C> value (see above).
             .app_data(web::Data::new(app_state.clone()))
             .configure(health_routes::<axiam_db::DbClient>)
-            .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
+            .configure(|cfg| {
+                register_api_v1_routes_with::<axiam_db::DbClient>(cfg, &rl, route_options)
+            })
             // R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.
             // R5.2: hand it the SAME resolved RateLimitConfig the /api/v1
             // wiring gets, so `AXIAM__RATE_LIMIT__SCIM_PER_MIN` (and the

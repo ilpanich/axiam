@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta13] - 2026-09-12
+
 ### Added
+
+- Hold the full profile claim set, and honour the claims parameter (§5.1, §5.5)
+
+- Answer a person at the authorization endpoint in prose, not JSON
+
+- Bind the authorization code to a DPoP key (RFC 9449 §10)
+
+- Complete the sign-in hops in a real browser, not HtmlUnit
+
+- Serve the SPA on the issuer origin so an authorization can finish
+
+- Basic OP harness, and the first run the harness has ever had (W9)
+
+- Accept client_secret_basic client authentication (W8, G9)
+
+- W7 — the address and phone sensitive scopes (X7 G8)
+
+- W6 — POST /oauth2/userinfo, and the G11 decision
+
+- W5 — the cosmetic parameters, and a real i18n layer
+
+- W4 — the honour lane for the security-bearing parameters
+
+- W3 — the browser login hop and the OP session cookie
+
+- W2 — session authentication evidence, emitted for nobody
+
+- W1 — OIDC authn-request parameter gates, honouring nothing
+
+- Publish RFC 8705 §5 mtls_endpoint_aliases in discovery
+
+- Mirror the beta11 security model and prose
 
 - **The OpenID Connect `address` and `phone` scopes, behind four gates** (X7 G8)
 
@@ -56,7 +90,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than carefully: the two scopes were unregistrable, so no existing
   client carries them and no authorization request could name them.
 
-
 - Publish RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document
 
   AXIAM implemented both halves of RFC 8705 — §2 mutual-TLS client
@@ -98,7 +131,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged against every existing deployment, because no deployment publishes
   the member until an operator configures it.
 
+### Changed
+
+- Stop an_unreachable_vault_is_an_error racing the ports it frees
+
+- Fix four gates this branch broke, and drop two directories it added by accident
+
+- Guard the PATCH no-op list, and test primary_email's two siblings
+
+- Assert what the strict-revocation layer does, not just what it reads
+
+- Cover the reactor health the detail view reports
+
+- Cover the two PATCH paths the op matrix never reached
+
+- Walk the mTLS trust chain, including the cases only data can create
+
+- Assert the invariants the doc comments already claimed
+
+- The 2026-09-11 re-run — zero FAILED across all four plans
+
+- Lift coverage to 96.6%, and fix what writing the tests found
+
+- Un-pend the two scenarios their first runs closed
+
+- Report the SDK actually measured, and measure /oauth2/authorize
+
+- Move four assertions onto the behaviour this branch chose
+
+- Document AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID
+
+- Scope the Trivy filesystem scan to what AXIAM ships
+
+- Re-export the OpenAPI spec for the §5.1 profile claim set
+
+- The run in which every plan reached zero failures
+
+- Where both lanes stand, and the one feature the DPoP lane still needs
+
+- Bump google.golang.org/grpc
+
+- Brief for accepting RFC 8705 §2.2 self-signed client certificates
+
+- The first run in which every module reached an assertion
+
+- Widen the I1 rate-limit band to ±25% to stop CI flakes
+
+- Register /consent in the nav-reach matrix
+
+- Bump @vitest/coverage-v8 to 5.0.0 alongside vitest
+
+- Bump vitest to 5.0.0 alongside @vitest/coverage-v8
+
+- W7 — conformance rows 104–129, GDPR §3.1, and the plan amendment
+
+- W7 — T8.1–T8.6, M8, M10, and the tenant switch at registration
+
+- Bump @vitest/coverage-v8 in /frontend
+
+- Bump vitest from 4.1.11 to 5.0.0 in /frontend
+
+- Bump the minor-patch group with 3 updates
+
+- Bump orhun/git-cliff-action from 4.8.0 to 4.9.0
+
+- Bump @simplewebauthn/browser in /frontend
+
+- Bump the minor-patch group in /frontend with 7 updates
+
+- Record maintainer decisions on the two Basic OP escalations
+
+- OpenID Connect Basic OP gap-closure plan coexisting with FAPI 2.0
+
+- Carry the three remediation details the plan's revision names
+
+- Lock every test that moves the XFF discard counter
+
+- Re-mirror against the post-remediation sources
+
+- Record the beta11 website pass as executed
+
+- Re-read the stamped pages against beta11 and stamp them
+
+- Date the beta post's addendum and extend phase 20
+
+- Carry the beta08…beta11 changes into the Docs pages
+
 ### Fixed
+
+- Refuse a Vault CA bundle that parses to no certificates
+
+- Redact a secret whose key carries a prefix
+
+- Retry contended writes instead of reporting them as migration failures
+
+- The DN-mismatch example is prose, not a doctest
+
+- Carry the §5.5 claims request in the batch-authz fixture
+
+- The other three authorization refusals a browser can reach
+
+- A fapi2 client may send `claims`, now that AXIAM honours it
+
+- Make a DPoP proof single-use at the resource endpoints (RFC 9449 §11.1)
+
+- Error_description is NQSCHAR, not prose (RFC 6749 §5.2)
+
+- Compare a DPoP proof's htu in canonical form (RFC 9449 §4.3)
+
+- Five harness gaps, and the evidence the suite was waiting for
+
+- Eight defects the OIDF conformance suite found, one of them a hole
+
+- A self_signed_tls_client_auth client could never open a connection
+
+- Six harness gaps, none of them AXIAM
+
+- Four conformance defects, each one gating a lane
+
+- Private_key_jwt was implemented and never wired to anything
+
+- A subject DN registered as documented could never authenticate
+
+- The FAPI plans asked for the openid scope on a plain-OAuth variant
+
+- Single-quote values written into suite.local.env
+
+- One browser context per test, not per authorization
+
+- Register the Basic OP clients on the honour lane
+
+- Carry the session in `sid` so an OAuth2 access token works at UserInfo
+
+- The driver was polling a long-dead plan
+
+- Drive only a test that is still WAITING
+
+- The driver matches the suite by host, not by base URL
+
+- Deliver an authorization error by redirect when the redirect_uri is registered
+
+- Publish the tenant in the endpoint URLs discovery advertises
+
+- Correct the browser block's match, and discover the tenant instead of trusting a constant
+
+- Advertise the two RFC 8414 members the first conformance run found missing
+
+- The three causes behind W7's five red checks
+
+- The OP session cookie is Secure unconditionally
+
+- Never format a Set-Cookie header carrying a credential
+
+- Box the authorize refusal so the Result's Err stays small
+
+- Don't debug-format a LoginResult into a panic message
+
+- Drop the STRICT_REVOCATION exemption now that it is documented
 
 - **A new personal-data column on `user` was covered by neither erasure path nor
   the Art. 15 export**

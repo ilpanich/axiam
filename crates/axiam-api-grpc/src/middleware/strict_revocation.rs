@@ -313,4 +313,158 @@ mod tests {
             None
         );
     }
+
+    // -----------------------------------------------------------------
+    // The layer itself
+    //
+    // The tests above cover `session_ref_from_request` — deciding WHICH
+    // session a request names. They stop short of what the middleware then
+    // DOES with that answer, which is the part that either denies a request or
+    // does not. Both outcomes matter and neither was exercised: a layer that
+    // never denied would leave revoked sessions working on this transport,
+    // and one that denied too eagerly would break health and reflection,
+    // which carry no credentials at all.
+    // -----------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::{Layer, Service};
+
+    /// Answers one fixed verdict and records nothing else.
+    struct Sessions(bool);
+
+    impl SessionRevocationCheck for Sessions {
+        fn is_session_active(
+            &self,
+            _tenant_id: Uuid,
+            _session_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+            let active = self.0;
+            Box::pin(async move { active })
+        }
+    }
+
+    /// Counts the calls that actually reached the service behind the layer.
+    #[derive(Clone)]
+    struct Downstream(Arc<AtomicUsize>);
+
+    impl Service<Request<tonic::body::Body>> for Downstream {
+        type Response = Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: Request<tonic::body::Body>) -> Self::Future {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(Response::builder()
+                    .status(200)
+                    .body(tonic::body::Body::empty())
+                    .expect("a 200 with an empty body always builds"))
+            })
+        }
+    }
+
+    fn bearer_request(
+        config: &AuthConfig,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> Request<tonic::body::Body> {
+        let token = issue_access_token(
+            Uuid::new_v4(),
+            tenant_id,
+            Uuid::new_v4(),
+            &[],
+            config,
+            session_id.to_string(),
+            AUD_USER,
+        )
+        .expect("issue token");
+        Request::builder()
+            .header("authorization", format!("Bearer {token}"))
+            .body(tonic::body::Body::empty())
+            .expect("request builds")
+    }
+
+    /// Drive one request through the layer, returning the response status and
+    /// how many times the service behind it was reached.
+    async fn through_the_layer(
+        session_is_active: bool,
+        req: Request<tonic::body::Body>,
+        config: AuthConfig,
+    ) -> (http::StatusCode, usize) {
+        let reached = Arc::new(AtomicUsize::new(0));
+        let layer = GrpcStrictRevocationLayer::new(Arc::new(Sessions(session_is_active)), config);
+        let mut service = layer.layer(Downstream(Arc::clone(&reached)));
+        let response = service
+            .call(req)
+            .await
+            .expect("the downstream is infallible");
+        (response.status(), reached.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn a_request_whose_session_is_gone_is_denied_and_never_reaches_the_service() {
+        // The point of the layer. Returning the refusal is not enough on its
+        // own — the handler behind it must not run, or a revoked session still
+        // has its side effects.
+        let config = test_config();
+
+        let (status, reached) = through_the_layer(
+            false,
+            bearer_request(&config, Uuid::new_v4(), Uuid::new_v4()),
+            config.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            tonic::Status::unauthenticated("session revoked")
+                .into_http::<tonic::body::Body>()
+                .status(),
+            "a revoked session is refused as unauthenticated"
+        );
+        assert_eq!(reached, 0, "the handler behind the layer must not run");
+    }
+
+    #[tokio::test]
+    async fn a_request_whose_session_is_live_passes_straight_through() {
+        let config = test_config();
+
+        let (status, reached) = through_the_layer(
+            true,
+            bearer_request(&config, Uuid::new_v4(), Uuid::new_v4()),
+            config.clone(),
+        )
+        .await;
+
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(reached, 1);
+    }
+
+    #[tokio::test]
+    async fn a_request_naming_no_session_is_passed_on_rather_than_denied() {
+        // Health and reflection carry no credentials, and the verifying
+        // interceptor — not this layer — is what refuses a call that needs
+        // them. Denying here would take those endpoints down, which is the
+        // failure mode the "fall through" rule exists to prevent.
+        let config = test_config();
+
+        let (status, reached) = through_the_layer(
+            false, // even with every session revoked
+            Request::builder()
+                .body(tonic::body::Body::empty())
+                .expect("request builds"),
+            config,
+        )
+        .await;
+
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(
+            reached, 1,
+            "an unauthenticated call is not this layer's to refuse"
+        );
+    }
 }

@@ -685,6 +685,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "How long audit entries are kept. A background sweep prunes anything older, through the audit table's only deletion path — deployment-wide, reachable from no HTTP handler. `0` disables pruning and restores unbounded growth, which is an explicit opt-out for deployments that archive out of band rather than something you fall into. Default `730`, chosen longer than most regimes ask because discarding evidence early is irreversible where keeping it is a storage cost.",
             "365",
           ],
+          [
+            "AXIAM__AUDIT__MINIMISE",
+            "Whether to reduce what is collected into the audit log before the append. With it on, a client address is truncated to its /24 (IPv4) or /48 (IPv6) prefix and a user-agent string is reduced to a coarse family; an address that does not parse is dropped rather than written through, because a value that cannot be parsed cannot be shown to have been minimised. Structured metadata that producers write for accountability — the client and disposition on a refresh-token replay, the names of released claims, a federated subject — is never touched: dropping it would weaken the controls that depend on it. Default `false`. Deployment-wide and deliberately not per tenant, because audit is an accountability control the deployment relies on including against a tenant administrator. Both states are logged at startup.",
+            "true",
+          ],
         ],
       },
       { type: "h", id: "tls", text: "Direct TLS termination (opt-in)" },

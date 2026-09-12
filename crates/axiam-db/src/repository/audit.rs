@@ -15,6 +15,7 @@
 //!
 //! Adding a third is a security decision, not a refactor.
 
+use axiam_core::audit_minimisation::AuditMinimisation;
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
@@ -233,12 +234,38 @@ fn apply_filter_binds<'a, C: Connection>(
 #[derive(Clone)]
 pub struct SurrealAuditLogRepository<C: Connection> {
     db: DbHandle<C>,
+    /// T-110 — whether this deployment minimises what it collects.
+    ///
+    /// Held **here**, on the repository, and not on the audit middleware,
+    /// because the middleware is one producer among eighteen: the OAuth2
+    /// replay record, the GDPR erasure proof, the webhook consumer, the
+    /// federation secret backfill and the rest all call
+    /// [`AuditLogRepository::append`] directly. This is the only code every
+    /// audit row passes through, and "before the append-only write" has to
+    /// mean *every* write or it means nothing.
+    minimisation: AuditMinimisation,
 }
 
 impl<C: Connection> SurrealAuditLogRepository<C> {
+    /// Without minimisation — today's behaviour, and what every test and every
+    /// caller that has no opinion gets.
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
-        Self { db }
+        Self {
+            db,
+            minimisation: AuditMinimisation::default(),
+        }
+    }
+
+    /// With the deployment's minimisation policy (T-110).
+    ///
+    /// A builder rather than a second constructor parameter, so the several
+    /// dozen existing `new` call sites stay unchanged and the composition root
+    /// is the one place that opts in.
+    #[must_use]
+    pub fn with_minimisation(mut self, minimisation: AuditMinimisation) -> Self {
+        self.minimisation = minimisation;
+        self
     }
 }
 
@@ -246,6 +273,11 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         let id = new_id();
         let id_str = id.to_string();
+
+        // T-110: the last thing before the write, because the table is
+        // append-only and there is no second chance by construction.
+        let mut input = input;
+        self.minimisation.apply(&mut input);
 
         let metadata = input
             .metadata
@@ -658,6 +690,146 @@ mod tests {
             .unwrap();
         assert_eq!(remaining.items.len(), 1, "the recent entry must survive");
         assert_eq!(remaining.items[0].action, "recent.event");
+    }
+
+    // -----------------------------------------------------------------
+    // T-110 — collection minimisation, at the only funnel every producer
+    // passes through
+    // -----------------------------------------------------------------
+
+    fn an_entry(tenant_id: Uuid, ip: Option<&str>) -> CreateAuditLogEntry {
+        CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::new_v4(),
+            actor_type: ActorType::User,
+            action: "POST /api/v1/users".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: ip.map(str::to_owned),
+            metadata: Some(serde_json::json!({
+                "http_status": 200,
+                "user_agent": "Mozilla/5.0 (X11; Linux) Firefox/128.0",
+                "client_id": "oa_reporting",
+            })),
+        }
+    }
+
+    /// The row that reaches the append-only table carries the truncated
+    /// address and the user-agent family, and still carries the producer's own
+    /// structured metadata — which other threats' mitigations depend on
+    /// (T-254's replay record, T-241's released claim names).
+    #[tokio::test]
+    async fn a_minimised_append_writes_the_truncated_values() {
+        let db = setup_db().await;
+        let tenant_id = Uuid::new_v4();
+        let repo = SurrealAuditLogRepository::new(db.clone())
+            .with_minimisation(AuditMinimisation::new(true));
+
+        let written = repo
+            .append(an_entry(tenant_id, Some("203.0.113.42")))
+            .await
+            .unwrap();
+
+        assert_eq!(written.ip_address.as_deref(), Some("203.0.113.0/24"));
+        assert_eq!(written.metadata["user_agent"], "Firefox");
+        assert_eq!(written.metadata["client_id"], "oa_reporting");
+        assert_eq!(written.metadata["http_status"], 200);
+    }
+
+    /// **I4 twin.** Minimisation is off by default, and off must be
+    /// indistinguishable from the repository as it was before T-110.
+    #[tokio::test]
+    async fn an_unminimised_append_is_unchanged() {
+        let db = setup_db().await;
+        let tenant_id = Uuid::new_v4();
+        let repo = SurrealAuditLogRepository::new(db.clone());
+
+        let written = repo
+            .append(an_entry(tenant_id, Some("203.0.113.42")))
+            .await
+            .unwrap();
+
+        assert_eq!(written.ip_address.as_deref(), Some("203.0.113.42"));
+        assert_eq!(
+            written.metadata["user_agent"],
+            "Mozilla/5.0 (X11; Linux) Firefox/128.0"
+        );
+    }
+
+    /// Erasure has to keep working on a minimised row. It does, and for a
+    /// reason worth pinning rather than assuming: `pseudonymize_actor` clears
+    /// `ip_address` outright, so a truncated value is erased by exactly the
+    /// same statement as a whole one — minimisation narrows what is collected
+    /// and changes nothing about what erasure reaches.
+    #[tokio::test]
+    async fn erasure_still_works_on_a_minimised_row() {
+        let db = setup_db().await;
+        let tenant_id = Uuid::new_v4();
+        let actor_id = Uuid::new_v4();
+        let repo = SurrealAuditLogRepository::new(db.clone())
+            .with_minimisation(AuditMinimisation::new(true));
+
+        let mut entry = an_entry(tenant_id, Some("203.0.113.42"));
+        entry.actor_id = actor_id;
+        repo.append(entry).await.unwrap();
+
+        repo.pseudonymize_actor(tenant_id, actor_id, "pseudo-1")
+            .await
+            .unwrap();
+
+        let rows = repo
+            .list(
+                tenant_id,
+                AuditLogFilter::default(),
+                axiam_core::repository::Pagination::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.items.len(), 1);
+        assert_eq!(rows.items[0].ip_address, None, "erasure clears the address");
+        assert_eq!(rows.items[0].actor_id, Uuid::nil());
+    }
+
+    /// The Art. 15 export keeps working on minimised rows, and this is the
+    /// precise form of that claim.
+    ///
+    /// The export's `audit_entries` section reads exactly four fields —
+    /// `action`, `outcome`, `timestamp`, `resource_id`
+    /// (`axiam_server::cleanup::aggregate_export_data`) — and **not**
+    /// `ip_address`. So minimisation is invisible to Art. 15: a data subject's
+    /// inventory is structurally and materially identical whether or not the
+    /// deployment minimises.
+    ///
+    /// Asserting it here rather than in the export job is deliberate. The
+    /// property is about what the repository hands the export, the export
+    /// reads those four fields from this row, and a test at this level fails
+    /// the moment a minimisation is added that touches one of them — which is
+    /// the change that would break Art. 15 without anyone noticing.
+    #[tokio::test]
+    async fn minimisation_leaves_every_field_the_art_15_export_reads() {
+        let db = setup_db().await;
+        let tenant_id = Uuid::new_v4();
+        let resource = Uuid::new_v4();
+
+        let mut entry = an_entry(tenant_id, Some("203.0.113.42"));
+        entry.resource_id = Some(resource);
+
+        let minimised = SurrealAuditLogRepository::new(db.clone())
+            .with_minimisation(AuditMinimisation::new(true))
+            .append(entry.clone())
+            .await
+            .unwrap();
+        let whole = SurrealAuditLogRepository::new(db.clone())
+            .append(entry)
+            .await
+            .unwrap();
+
+        assert_eq!(minimised.action, whole.action);
+        assert_eq!(minimised.outcome, whole.outcome);
+        assert_eq!(minimised.resource_id, whole.resource_id);
+        assert_eq!(minimised.actor_id, whole.actor_id);
+        // The one field that differs is the one the export never reads.
+        assert_ne!(minimised.ip_address, whole.ip_address);
     }
 
     /// The count is taken before the DELETE, so this guards the easy mistake

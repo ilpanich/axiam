@@ -9,7 +9,7 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
 | **Threats identified** | 266 |
-| **Mitigated / Open** | 250 / 16 |
+| **Mitigated / Open** | 251 / 15 |
 | **Owner** | ilpanich |
 
 ---
@@ -1794,7 +1794,7 @@ A `self_signed_tls_client_auth` client could never open a connection: `Reloadabl
 
 The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules.
 
-*18 threats — 2 high, 14 medium, 2 low; 2 open.*
+*18 threats — 2 high, 14 medium, 2 low; 1 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1802,7 +1802,7 @@ The append-only audit trail and its OpenPGP batch signing, webhook delivery with
 | T-107 | Email provider <br/>*Actor* | S | Provider API key reused to send mail as the tenant | Medium | Mitigated |
 | T-108 | Audit middleware & service <br/>*Process* | R | Action succeeds while its audit write fails | High | Mitigated |
 | T-109 | Audit middleware & service <br/>*Process* | T | Log injection through attacker-controlled fields | Medium | Mitigated |
-| T-110 | Audit middleware & service <br/>*Process* | I | Personal data over-collected into an immutable log | Medium | Open |
+| T-110 | Audit middleware & service <br/>*Process* | I | Personal data over-collected into an immutable log | Medium | Mitigated |
 | T-111 | Audit batch PGP signing <br/>*Process* | T | Signing gap leaves a batch unattested | Medium | Mitigated |
 | T-112 | Webhook delivery (HMAC + guarded_fetch + retry) <br/>*Process* | I | Webhook URL used to reach internal services | High | Mitigated |
 | T-113 | Webhook delivery (HMAC + guarded_fetch + retry) <br/>*Process* | T | Delivery replay by a party who captured one request | Medium | Mitigated |
@@ -1849,11 +1849,11 @@ Newlines or control characters in a username or resource name let an attacker fo
 > Audit records are structured values persisted as fields, not formatted strings, so injected control characters cannot create a synthetic record.
 
 **T-110 — Personal data over-collected into an immutable log**  
-`Audit middleware & service` (Process) · Information disclosure · Medium · Open
+`Audit middleware & service` (Process) · Information disclosure · Medium · Mitigated
 
 The audit log is append-only by design, so any personal data written into it cannot later be erased — which is in direct tension with the GDPR Art. 17 erasure path AXIAM also offers.
 
-> Partially addressed: audit metadata is deliberately minimised, erasure anonymises the subject rather than deleting audit records, and a default retention sweep bounds the log at 730 days — the table's only deletion path, configurable and disableable with 0 (T-119). What remains open is the collection side: nothing prevents a deployment from writing personal data into fields the sweep will hold for the full window, so the retention period must still be set consistent with the deployment's lawful basis.
+> Both halves are now bounded. **Retention** (T-119): a default 730-day sweep through the table's only deletion path — deployment-wide, reachable from no HTTP handler, `0` to disable, both states logged at startup. **Collection** (R-7, 2026-09-12): `AXIAM__AUDIT__MINIMISE`, default `false`, applied in `SurrealAuditLogRepository::append` — the only code every audit row passes through, since the request middleware is one producer among eighteen and the rest call `append` directly. With it on, `ip_address` is truncated to its `/24` or `/48` prefix and a `user_agent` in `metadata` is reduced to a coarse family, immediately before the write because the table is append-only and there is no second chance by construction; an address that does not parse is **dropped** rather than written through, since a value that cannot be parsed cannot be shown to have been minimised. Three limits, each deliberate: the structured metadata producers write is never touched — the client and disposition on a refresh-token replay (T-254), the names of released claims (T-241), a federated subject (T-161) are accountability evidence other mitigations depend on, and dropping them would weaken three controls to narrow one; the switch is **deployment-wide and not per tenant**, because audit is a control the deployment relies on *including against a tenant administrator* and a tenant-level switch would let a tenant weaken the evidence used to investigate that tenant; and it is off by default, because reducing forensic precision is a lawful-basis judgement to make deliberately. Both states are logged at startup exactly as retention is. Erasure and export are unaffected and are asserted so rather than assumed: `pseudonymize_actor` clears `ip_address` outright so a truncated value is erased by the same statement as a whole one, and the Art. 15 export's `audit_entries` section reads `action`, `outcome`, `timestamp` and `resource_id` and never the address (`minimisation_leaves_every_field_the_art_15_export_reads`). The request-audit middleware's own metadata key set is pinned exactly — `http_status` and `authenticated`, nothing else — so “no request metadata” cannot regress into an append-only table with a 730-day window. Residual, accepted: the deployment still chooses, and one that leaves the switch off collects what it collects today. `docs/compliance/gdpr-compliance.md` §2a; `docs/deployment/README.md`.
 
 **T-111 — Signing gap leaves a batch unattested**  
 `Audit batch PGP signing` (Process) · Tampering · Medium · Mitigated
@@ -2516,7 +2516,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-16 of 266 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. The one entry that did sit on the request path, T-254's refresh-rotation grace window, was closed by the maintainer's decision of 2026-09-12 and is no longer listed here. They are listed most severe first.
+15 of 266 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. The one entry that did sit on the request path, T-254's refresh-rotation grace window, was closed by the maintainer's decision of 2026-09-12 and is no longer listed here. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -2531,7 +2531,6 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | T-180 | High | Vault concentrates every long-lived secret behind one credential | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility — a token AXIAM is handed is a token AXIAM must use. Narrowed by H-4: `just vault-status` now reports the token's actual capabilities and flags anything beyond `read`, so the documented read-only policy is checkable rather than merely stated… |
 | T-9 | Medium | Connection flood exhausts ingress capacity | Ingress / TLS 1.3 termination <br/>*System diagram* | Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is… |
 | T-39 | Medium | Access token still valid after entitlement revocation | Token service EdDSA JWT + refresh rotation <br/>*Authentication & session management* | Accepted trade-off for stateless verification. The 15-minute lifetime bounds the window; sessions are invalidated on password change; deployments needing immediate revocation… |
-| T-110 | Medium | Personal data over-collected into an immutable log | Audit middleware & service <br/>*Audit, webhooks, email & notifications* | Partially addressed: audit metadata is deliberately minimised, erasure anonymises the subject, and a default 730-day retention sweep bounds the log (T-119). What remains open is the collection side… |
 | T-123 | Medium | Final mail hop is not confidential | deliver mail <br/>*Audit, webhooks, email & notifications* | Inherent to email. Bounded by making the tokens carried in mail single-use and short-lived, so interception has a narrow window. Deploy MTA-STS and DANE on the sending domain to… |
 | T-134 | Medium | Backup stream unencrypted in transit | scheduled backup <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility: use an encrypted transport and server-side encryption on the backup target. |
 | T-143 | Medium | Local JWT verification misses a revoked entitlement | SDK token verification (JWKS cache, iss/aud) <br/>*Client SDKs & admin UI integration surface* | Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should… |
@@ -2543,7 +2542,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 - **~~No deny-override in the RBAC cascade~~ (SEC-040, T-16/T-87) — closed.** The engine now supports explicit deny: a grant carries `effect: "allow" | "deny"`, and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity. Recorded here as closed rather than deleted so the history stays legible; see `claude_dev/deny-override-design.md`.
 - **Access tokens survive revocation for up to 15 minutes.** The price of stateless verification. Use gRPC introspection where immediate revocation matters.
-- **Audit records cannot be erased, only aged out.** Append-only by design, which is in tension with GDPR Art. 17; erasure anonymises the subject instead. Retention now defaults to a 730-day pruning window (T-119) applied by the background sweep — tune it (or disable with `0`) to match your lawful basis; there is still no on-demand deletion path.
+- **Audit records cannot be erased, only aged out.** Append-only by design, which is in tension with GDPR Art. 17; erasure anonymises the subject instead. Both sides are now bounded: retention defaults to a 730-day pruning window (T-119) applied by the background sweep, and collection can be minimised deployment-wide with `AXIAM__AUDIT__MINIMISE` (T-110, off by default) — a client address truncated to `/24` or `/48` and a user-agent reduced to its family, before the append, with the structured accountability metadata other mitigations depend on left alone. Tune both to match your lawful basis; there is still no on-demand deletion path, and the deployment still chooses — one that leaves minimisation off collects what it collected before.
 - **A stale FIDO MDS3 BLOB is never a hard failure at ingestion (X3),** though `AXIAM__PKI__MDS_MAX_STALE_DAYS` now lets an operator bound how stale metadata may get before attested *registration* is refused (T-153).
 - **~~A rotated refresh token stays redeemable for 60 seconds~~ (T-254) — closed.** Recorded here as closed rather than deleted so the history stays legible. Between 065f37c and 2026-09-12 the FAPI 2.0 §5.3.2.1-9 grace window applied to every profile, which on `standard` handed a bearer refresh token a replay window the server could not tell from an honest retry. The maintainer's decision confines the window to `fapi2`, where every token is sender-constrained and a replay inside it needs the client's private key — every other client is back to the predecessor being revoked at rotation — and makes a rotated token presented again visible whatever the window: a per-outcome counter on the session and an `oauth2.refresh_token_replayed` audit row. See [`t254-refresh-grace-decision.md`](t254-refresh-grace-decision.md).
 
@@ -2598,7 +2597,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 |---|---|---|
 | Critical | 30 | 1 |
 | High | 122 | 8 |
-| Medium | 106 | 6 |
+| Medium | 106 | 5 |
 | Low | 8 | 1 |
 
 **By diagram**
@@ -2611,7 +2610,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Federation — SAML SP & OIDC relying party | 31 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 26 | 0 |
 | PKI, certificates & IoT device identity | 25 | 1 |
-| Audit, webhooks, email & notifications | 18 | 2 |
+| Audit, webhooks, email & notifications | 18 | 1 |
 | Deployment & platform (Kubernetes) | 27 | 5 |
 | Client SDKs & admin UI integration surface | 28 | 4 |
 

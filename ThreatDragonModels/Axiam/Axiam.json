@@ -11373,7 +11373,7 @@
               "isTrustBoundary": false,
               "outOfScope": false,
               "reasonOutOfScope": "",
-              "hasOpenThreats": true,
+              "hasOpenThreats": false,
               "handlesCardPayment": false,
               "handlesGoodsOrServices": false,
               "isWebApplication": false,
@@ -11404,11 +11404,11 @@
                 {
                   "id": "d3419e13-e779-59c6-886c-f72310114448",
                   "title": "Personal data over-collected into an immutable log",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "Medium",
                   "type": "Information disclosure",
                   "description": "The audit log is append-only by design, so any personal data written into it cannot later be erased \u2014 which is in direct tension with the GDPR Art. 17 erasure path AXIAM also offers.",
-                  "mitigation": "Partially addressed: audit metadata is deliberately minimised, erasure anonymises the subject rather than deleting audit records, and a default retention sweep bounds the log at 730 days \u2014 the table's only deletion path, configurable and disableable with 0 (T-119). What remains open is the collection side: nothing prevents a deployment from writing personal data into fields the sweep will hold for the full window, so the retention period must still be set consistent with the deployment's lawful basis.",
+                  "mitigation": "Both halves are now bounded. **Retention** (T-119): a default 730-day sweep through the table's only deletion path \u2014 deployment-wide, reachable from no HTTP handler, `0` to disable, both states logged at startup. **Collection** (R-7, 2026-09-12): `AXIAM__AUDIT__MINIMISE`, default `false`, applied in `SurrealAuditLogRepository::append` \u2014 the only code every audit row passes through, since the request middleware is one producer among eighteen and the rest call `append` directly. With it on, `ip_address` is truncated to its `/24` or `/48` prefix and a `user_agent` in `metadata` is reduced to a coarse family, immediately before the write because the table is append-only and there is no second chance by construction; an address that does not parse is **dropped** rather than written through, since a value that cannot be parsed cannot be shown to have been minimised. Three limits, each deliberate: the structured metadata producers write is never touched \u2014 the client and disposition on a refresh-token replay (T-254), the names of released claims (T-241), a federated subject (T-161) are accountability evidence other mitigations depend on, and dropping them would weaken three controls to narrow one; the switch is **deployment-wide and not per tenant**, because audit is a control the deployment relies on *including against a tenant administrator* and a tenant-level switch would let a tenant weaken the evidence used to investigate that tenant; and it is off by default, because reducing forensic precision is a lawful-basis judgement to make deliberately. Both states are logged at startup exactly as retention is. Erasure and export are unaffected and are asserted so rather than assumed: `pseudonymize_actor` clears `ip_address` outright so a truncated value is erased by the same statement as a whole one, and the Art. 15 export's `audit_entries` section reads `action`, `outcome`, `timestamp` and `resource_id` and never the address (`minimisation_leaves_every_field_the_art_15_export_reads`). The request-audit middleware's own metadata key set is pinned exactly \u2014 `http_status` and `authenticated`, nothing else \u2014 so \"no request metadata\" cannot regress into an append-only table with a 730-day window. Residual, accepted: the deployment still chooses, and one that leaves the switch off collects what it collects today. `docs/compliance/gdpr-compliance.md` \u00a72a; `docs/deployment/README.md`.",
                   "modelType": "STRIDE",
                   "number": 110
                 }

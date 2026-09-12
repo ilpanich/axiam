@@ -14,11 +14,26 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-09-12 (`1.0.0-beta13`, model 2.12.1 —
-> the T-254 decision). The website section is at `1.0.0-beta11` and is brought
-> up by
+> **Status: source current as of 2026-09-12 (`1.0.0-beta13`, model 2.13.0 —
+> the T-254 decision, then the residual pass of
+> [`remediation-plan-2026-09-12.md`](remediation-plan-2026-09-12.md)). The
+> website section is at `1.0.0-beta11` and is brought up by
 > [`website-security-beta13-update-plan.md`](website-security-beta13-update-plan.md),
 > which is the entry point for that pass.**
+>
+> **The 2026-09-12 residual pass (model 2.13.0).** No new threats. Eight items
+> from [`remediation-plan-2026-09-12.md`](remediation-plan-2026-09-12.md), six of
+> them *residuals recorded inside entries the model already called Mitigated* —
+> the sentence at the end of a mitigation beginning "the residual is" — and two
+> open entries whose recorded remedy had never been built. Residuals of that
+> kind are the most expensive thing in a model to leave alone: they are
+> invisible to every count and every page, and the next reader sees a control
+> that sounds whole. The personal-data column lists became one declared
+> inventory with a gate on the live schema (T-261); the §5.5 claims request
+> survives a refresh (T-241); an unparseable default tenant says so at boot
+> (T-244); a contended write answers `503` with `Retry-After` rather than `500`
+> (T-262); and audit **collection** became configurable, closing T-110 and
+> taking the model to **266 threats, 251 mitigated / 15 open**.
 >
 > **Beta12…beta13 wave (model 2.12.0).** Thirty threats enter the model,
 > bringing it to **266 threats, 250 mitigated / 16 open**, and the OAuth2 diagram
@@ -419,7 +434,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
 | Threats identified | 266 |
-| Mitigated / Open | 250 / 16 |
+| Mitigated / Open | 251 / 15 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**

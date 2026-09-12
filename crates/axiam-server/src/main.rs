@@ -106,6 +106,20 @@ fn default_audit_retention_days() -> u64 {
 }
 
 /// Top-level configuration aggregating all sub-configs.
+/// `AXIAM__AUDIT__*` — what reaches the append-only log (T-110).
+///
+/// Its own struct rather than a flat `audit_minimise` field because the
+/// config layer maps `AXIAM__AUDIT__MINIMISE` onto `audit.minimise`, and
+/// `AXIAM__AUDIT_RETENTION_DAYS` (single underscore, T-119) is deliberately
+/// left where it is — renaming a shipped variable to tidy a namespace is a
+/// breaking change for every deployment that sets it.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct AuditCollectionConfig {
+    /// See [`AppConfig::audit`].
+    minimise: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct AppConfig {
     #[serde(default)]
@@ -140,6 +154,20 @@ struct AppConfig {
     /// into, since the default is [`default_audit_retention_days`].
     #[serde(default = "default_audit_retention_days")]
     audit_retention_days: u64,
+    /// Whether this deployment minimises what it collects into the audit log
+    /// (T-110).
+    ///
+    /// `AXIAM__AUDIT__MINIMISE`. `false` — today's behaviour — by default,
+    /// because turning it on reduces forensic precision and that is a
+    /// lawful-basis judgement a deployment must make deliberately rather than
+    /// inherit. Deployment-wide and deliberately not per tenant: audit is an
+    /// accountability control the deployment relies on *including against a
+    /// tenant administrator*, and a tenant-level switch would let a tenant
+    /// weaken the evidence used to investigate that tenant.
+    ///
+    /// Both states are logged at startup, exactly as retention is.
+    #[serde(default)]
+    audit: AuditCollectionConfig,
     /// AES-256-GCM key (32 bytes) for encrypting email provider secrets at rest
     /// (D-17). Loaded from `AXIAM__EMAIL_ENCRYPTION_KEY` (hex-encoded, 64 chars).
     /// Skipped by serde — populated manually from env at startup.
@@ -409,6 +437,27 @@ async fn main() -> std::io::Result<()> {
     // handles (default `pool_size = 1` ⇒ byte-for-byte today's single handle).
     // Held as `Arc` because it is both the source of every repository's bound
     // handle (`handle_for_repo`) and the process health checker.
+    // Audit collection minimisation (T-110). Logged either way, for the same
+    // reason retention is logged either way further down: the posture in force
+    // has to be readable from the startup log rather than inferable only from
+    // a manifest. An operator investigating an incident needs to know, before
+    // they start reading rows, whether the addresses in them are whole.
+    let audit_minimisation =
+        axiam_core::audit_minimisation::AuditMinimisation::new(config.audit.minimise);
+    if audit_minimisation.is_enabled() {
+        tracing::info!(
+            "audit collection minimisation is ON (AXIAM__AUDIT__MINIMISE=true) — client \
+             addresses are truncated to /24 or /48 and a user-agent is reduced to its family \
+             before the append; structured accountability metadata is unaffected"
+        );
+    } else {
+        tracing::info!(
+            "audit collection minimisation is OFF (AXIAM__AUDIT__MINIMISE) — full client \
+             addresses are recorded; set it when your lawful basis does not support holding \
+             them for the retention window"
+        );
+    }
+
     let pool = Arc::new(
         axiam_db::DbPool::connect(&config.db)
             .await
@@ -471,7 +520,8 @@ async fn main() -> std::io::Result<()> {
     {
         let boot_fed_repo =
             axiam_db::SurrealFederationConfigRepository::new(pool.handle_for_repo());
-        let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(pool.handle_for_repo());
+        let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(pool.handle_for_repo())
+            .with_minimisation(audit_minimisation);
         if let Some(fed_key) = config.auth.federation_encryption_key {
             match axiam_federation::secrets::migrate_plaintext_federation_secrets(
                 &boot_fed_repo,
@@ -716,7 +766,8 @@ async fn main() -> std::io::Result<()> {
             scim_token_repo.clone(),
             axiam_db::SurrealUserRepository::new(pool.handle_for_repo()),
         ));
-    let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo());
+    let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo())
+        .with_minimisation(audit_minimisation);
     let ca_cert_repo = SurrealCaCertificateRepository::new(pool.handle_for_repo());
     let federation_link_repo_for_auth =
         SurrealFederationLinkRepository::new(pool.handle_for_repo());
@@ -780,7 +831,10 @@ async fn main() -> std::io::Result<()> {
             // registration's `failure_policy` decides, which is the same
             // closed set §22.8 puts a timeout in.
             axiam_amqp::LapinReactorTransport::start(Arc::clone(&amqp), amqp_signing_key.clone()),
-            axiam_amqp::RepositoryAuditSink(SurrealAuditLogRepository::new(pool.handle_for_repo())),
+            axiam_amqp::RepositoryAuditSink(
+                SurrealAuditLogRepository::new(pool.handle_for_repo())
+                    .with_minimisation(audit_minimisation),
+            ),
             amqp_signing_key.clone(),
             axiam_amqp::ReactorGateConfig::default(),
         ));

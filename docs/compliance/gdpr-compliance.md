@@ -241,6 +241,69 @@ it. A data subject's erasure request must therefore go through
 
 ---
 
+## 2a. Audit collection minimisation (Art. 5(1)(c) — data minimisation)
+
+**Evidence:** `axiam_core::audit_minimisation` and
+[`SurrealAuditLogRepository::append`](../../crates/axiam-db/src/repository/audit.rs),
+behind `AXIAM__AUDIT__MINIMISE` (default `false`). Documented for operators in
+[`docs/deployment/README.md`](../deployment/README.md#audit-collection-minimisation-optional-t-110).
+
+The audit log is append-only, so what is written into it cannot be erased, only
+aged out. Retention has been bounded since T-119 (default 730 days, the table's
+only deletion path). Collection was not configurable at all, which is the
+remaining half of Art. 5(1)(c): a deployment whose lawful basis does not support
+holding a full client address for two years had nothing to turn off.
+
+With minimisation on, two fields are reduced **before** the append:
+
+| Field | Minimised to | Why this granularity |
+|---|---|---|
+| `ip_address` | `/24` (IPv4) or `/48` (IPv6) prefix | Keeps the network an action came from and drops the part that identifies a subscriber line or a device |
+| `metadata.user_agent` | a coarse family (`Firefox`, `curl`, `other`) | A full user-agent string is a fingerprint; the family is what an investigation reads |
+
+An address that does not parse is dropped rather than written through: a value
+that cannot be parsed cannot be shown to have been minimised.
+
+**Three limits, each deliberate and each stated rather than discovered.**
+
+1. **Structured producer metadata is never touched.** The client, profile and
+   disposition on a refresh-token replay (T-254), the names of released claims
+   (T-241), the provider and external subject on a JIT provision (T-161) are
+   accountability evidence other controls depend on. Dropping them would weaken
+   three controls to narrow one, and none of them is request metadata. The
+   request-audit middleware itself collects `http_status` and `authenticated`
+   and nothing else, pinned exactly by
+   `the_request_audit_middleware_collects_only_the_outcome`.
+2. **Deployment-wide, not per tenant.** Audit is an accountability control the
+   deployment relies on *including against a tenant administrator*. A per-tenant
+   switch would let a tenant weaken the evidence used to investigate that
+   tenant — the same argument that makes `sensitive_scopes_enabled` disable-only
+   for a tenant in §3.1, applied where the tenant is a possible subject rather
+   than a possible victim.
+3. **Off by default.** Turning it on reduces forensic precision, which is a
+   lawful-basis judgement to make deliberately. Both states are logged at
+   startup, exactly as retention is.
+
+**Erasure and export keep working, and the reason is worth stating.** The Art.
+17 scrub (`pseudonymize_actor`, §2) clears `ip_address` outright, so a truncated
+value is erased by the same statement as a whole one. The Art. 15 export's
+`audit_entries` section (§1) reads `action`, `outcome`, `timestamp` and
+`resource_id` — never the address — so a data subject's inventory is identical
+whether or not the deployment minimises.
+
+**Executable proof:**
+- `a_minimised_append_writes_the_truncated_values` and
+  `an_unminimised_append_is_unchanged` — the two postures at the funnel every
+  producer passes through.
+- `erasure_still_works_on_a_minimised_row` — Art. 17 over a minimised row.
+- `minimisation_leaves_every_field_the_art_15_export_reads` — the four fields
+  the export actually reads are identical in both postures, and the one that
+  differs is the one it never reads.
+- `structured_accountability_metadata_survives_minimisation` and the truncation
+  unit tests, including the fail-closed case for an unparseable address.
+
+---
+
 ## 3. Consent (Art. 7 — Conditions for Consent)
 
 **Evidence:** a `terms_of_service` consent row is created at registration

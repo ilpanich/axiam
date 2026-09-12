@@ -822,6 +822,83 @@ the style the closed entries there already use.
 
 ## 8. R-7 — audit collection minimisation (decision D)
 
+> **EXECUTED — R-7, 2026-09-12. T-110 → Mitigated; open 16 → 15.**
+>
+> **The plan named the wrong crate, and the right one is worth recording.**
+> `AXIAM__AUDIT__MINIMISE` is applied in
+> `axiam_db::SurrealAuditLogRepository::append`, not in `axiam-audit`. The
+> policy itself is `axiam_core::audit_minimisation` (layer 0 — `axiam-audit`
+> and `axiam-db` are layer-2 siblings and neither may depend on the other).
+> The reason is the one the plan's own wording asked for and its crate choice
+> would have missed: `axiam_audit::AuditService::log` is called by nothing but
+> its own tests, and `AuditMiddleware` is **one producer among eighteen** — the
+> OAuth2 replay record, the GDPR erasure proof, the webhook consumer, the
+> federation secret backfill and the rest all call `append` directly. "Before
+> the append-only write" has to mean every write or it means nothing, and only
+> the repository is common to all of them.
+>
+> What minimisation does: `ip_address` → `/24` or `/48`; a `user_agent` member
+> of `metadata` → a coarse family, by a total, dependency-free function (a
+> UA-parsing library exists to recover precision, which is the thing being
+> removed). An address that does not parse is **dropped** rather than written
+> through — a value that cannot be parsed cannot be shown to have been
+> minimised — and a `host:port` string and a v4-mapped v6 address are both
+> handled, so the common shapes do not lose a field for no reason.
+>
+> What it does **not** do, which is the part the plan's "no request metadata"
+> phrasing could have been read into wrongly: it does not strip the structured
+> metadata producers write. Two findings here. First, that data — T-254's
+> client and disposition, T-241's released claim names, T-161's federated
+> subject — is accountability evidence three other mitigations depend on.
+> Second, the third minimisation was **already true**: `AuditMiddleware` writes
+> `{http_status, authenticated}` and nothing else. So what landed is not a
+> change but a pin —
+> `the_request_audit_middleware_collects_only_the_outcome` asserts the key set
+> **exactly**, against a request carrying a query parameter, a user-agent and a
+> custom header, because absence checks only catch the fields whoever wrote
+> them thought of.
+>
+> Erasure and export: asserted, not assumed. `pseudonymize_actor` clears
+> `ip_address` outright, so a truncated value is erased by the same statement
+> as a whole one. And the Art. 15 export — the plan said to extend its test,
+> and what the code says is better than that:
+> `aggregate_export_data`'s `audit_entries` section reads `action`, `outcome`,
+> `timestamp` and `resource_id` and **never the address**, so minimisation is
+> invisible to Art. 15 altogether.
+> `minimisation_leaves_every_field_the_art_15_export_reads` pins exactly that —
+> those four identical across both postures, and the one field that differs
+> being the one the export never reads. Asserting it at the repository is where
+> it belongs: it fails the moment somebody adds a minimisation that touches one
+> of the four, which is the change that would break Art. 15 unnoticed.
+>
+> Twelve tests in three places: nine on the policy (the truncation cases
+> including the fail-closed one, the user-agent families with their
+> most-specific-claim ordering, both postures, and the
+> structured-metadata survival); three at the repository (minimised,
+> **unminimised — the I4 twin**, and the Art. 15 invariance) plus the erasure
+> one; and the middleware key-set pin.
+>
+> Config: `AuditCollectionConfig` as a nested struct so `AXIAM__AUDIT__MINIMISE`
+> maps cleanly, with `AXIAM__AUDIT_RETENTION_DAYS` (single underscore)
+> deliberately left where it is — renaming a shipped variable to tidy a
+> namespace is a breaking change for every deployment that sets it. Resolved
+> above the datastore pool, because the boot backfill writes audit rows before
+> the server binds a port. Both states logged at startup;
+> `scripts/check-config-key-coverage.py` passes.
+>
+> Docs: `docs/deployment/README.md` (a new section),
+> `docs/compliance/gdpr-compliance.md` **§2a** (Art. 5(1)(c), with the three
+> deliberate limits and the executable proof), `website/src/docs/configuration.ts`
+> (the coverage gate's required home for a new key — content only, no generated
+> file), `CHANGELOG.md` under **Added**. Threat model: T-110 → **Mitigated**
+> with the residual stated, `hasOpenThreats` cleared on the audit cell, header
+> 250/16 → 251/15, §5.7 "2 open" → "1 open", the §6 row removed and the
+> grouping bullet rewritten, §7 Medium open 6 → 5 and the audit diagram 2 → 1;
+> mirrored into `threat-modeling-and-security.md` (including its own current-state
+> table) and `website-security-beta13-update-plan.md` §1.
+> `gen-threat-model.mjs` prints `9 diagrams, 266 threats (251 mitigated, 15
+> open)`; generated files reverted.
+
 **Closes** T-110 (Open, Medium, *Audit, webhooks, email & notifications*):
 *"What remains open is the collection side: nothing prevents a deployment from
 writing personal data into fields the sweep will hold for the full window."*

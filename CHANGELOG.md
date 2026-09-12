@@ -129,6 +129,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`AXIAM__AUDIT__MINIMISE` — bound what the audit log collects, not just
+  how long it keeps it** (T-110)
+
+  The audit log is append-only, so what reaches it cannot be erased, only aged
+  out. `AXIAM__AUDIT_RETENTION_DAYS` has bounded the retention side since
+  1.0.0-beta12. Collection was not configurable at all, so a deployment whose
+  lawful basis does not support holding a full client address for two years had
+  nothing to turn off.
+
+  With this on, a client address is truncated to its `/24` (IPv4) or `/48`
+  (IPv6) prefix and a user-agent string is reduced to a coarse family, both
+  immediately before the append. An address that does not parse is dropped
+  rather than written through: a value that cannot be parsed cannot be shown to
+  have been minimised.
+
+  It does not touch the structured metadata AXIAM's own producers write — the
+  client and disposition on a refresh-token replay, the names of released
+  claims, a federated subject. Those are accountability evidence other controls
+  depend on, and none of it is request metadata.
+
+  Deployment-wide and deliberately not per tenant: audit is a control the
+  deployment relies on including against a tenant administrator, and a
+  per-tenant switch would let a tenant weaken the evidence used to investigate
+  it. Default `false`, and **both states are logged at startup** — an operator
+  opening an incident needs to know, before reading rows, whether the addresses
+  in them are whole.
+
+  Erasure and the Art. 15 export are unaffected: the erasure scrub clears the
+  address outright either way, and the export's audit section never carried it.
+
 - **A default tenant that is not a UUID is reported at startup** (T-244)
 
   `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` is ignored when it does not parse,

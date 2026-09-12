@@ -11,6 +11,8 @@
 //! Vault actually returns.
 
 use std::collections::HashMap;
+use std::net::TcpListener;
+use std::time::Duration;
 
 use axiam_auth::secrets::{VaultConfig, VaultSecretProvider};
 use axiam_core::secrets::{
@@ -156,22 +158,44 @@ async fn a_rejected_token_is_an_error_not_an_absence() {
 
 #[tokio::test]
 async fn an_unreachable_vault_is_an_error() {
-    let server = MockServer::start().await;
-    let uri = server.uri();
-    drop(server); // nothing is listening now
+    // This used to start a `MockServer`, take its address and drop it, on the
+    // reasoning that nothing was then listening. That races, and lost roughly
+    // one run in five: dropping the server returns its port to the ephemeral
+    // range, and the eight sibling tests in this binary run concurrently and
+    // each call `MockServer::start()`, which binds a port from exactly that
+    // range. When one of them drew the port this test had just released, the
+    // fetch reached a live server, returned `Ok`, and the assertion failed —
+    // a red build with nothing wrong in the code under test.
+    //
+    // So reserve the port instead of releasing it. `reservation` is held for
+    // the whole test, which makes the address un-bindable by anything else in
+    // the process; it never accepts, so the request is answered by nobody and
+    // the client's timeout is what ends it. Unreachable either way, and the
+    // outcome no longer depends on which test happens to run alongside.
+    let reservation = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let addr = reservation.local_addr().expect("the bound address");
 
     let config = VaultConfig {
-        address: uri,
+        address: format!("http://{addr}"),
         token: "test-token".into(),
         mount: "secret".into(),
         path: "axiam".into(),
         ca_cert_path: None,
     };
+    // Nothing will ever answer, so any timeout is correct and the shortest one
+    // that is unambiguously a timeout keeps the suite fast.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(250))
+        .build()
+        .expect("a client");
+
     assert!(
-        VaultSecretProvider::fetch(&reqwest::Client::new(), &config, KEYS, SECRETS)
+        VaultSecretProvider::fetch(&client, &config, KEYS, SECRETS)
             .await
             .is_err()
     );
+
+    drop(reservation);
 }
 
 #[tokio::test]

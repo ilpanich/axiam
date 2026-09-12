@@ -41,10 +41,62 @@ else here.
 `just vault-status` prints which of these your Vault holds — presence only,
 never values.
 
+#### The datastore and broker credentials (T-132's follow-up)
+
+Three more, and they behave differently enough to be worth their own table:
+
+| Field | Shape | Environment fallback |
+|---|---|---|
+| `db_username` | text | `AXIAM__DB__USERNAME` |
+| `db_password` | text | `AXIAM__DB__PASSWORD` |
+| `amqp_url` | `amqps://user:pass@host:5671/vhost` | `AXIAM__AMQP__URL` |
+
+Until 1.0.0-beta13 these were the one class of secret that **had** to be in the
+container spec, whatever provider you configured. They were read by the
+configuration loader before any provider existed, so a deployment that put
+every key in Vault still had its datastore password in the pod spec — which is
+the exact sentence T-132 was closed on. They are now fetched from the provider,
+in the same round trip as everything above, and the Vault token becomes the
+only credential your manifest has to carry.
+
+Three things about them:
+
+- **The environment variables stay, permanently.** `env` is a supported
+  provider kind — a single-node deployment, the dev Compose file and the E2E
+  stack all use it deliberately — so deprecating the variables would deprecate
+  the provider that reads them.
+- **A WARN, in one case only.** If you configure a *non-`env`* provider and a
+  value still arrives from the environment, the server logs one `WARN` at boot
+  naming the variable. That is the case where you believe something untrue.
+  Under `env` there is nothing to warn about.
+- **They are never minted.** See below.
+
+`just vault-status` reports their presence too, and an absence is not the
+failure an absent `jwt_private_key_pem` is — the server falls back and says so.
+
 ### Seeding them
 
-`just vault-seed` mints every one of the above that is missing and leaves every
-one that is present alone. It targets whatever Vault you point it at:
+`just vault-seed` mints every **key** above that is missing and leaves every one
+that is present alone.
+
+**The three credentials are never minted**, and the difference is the point. A
+256-bit key is meaningful only to AXIAM, so inventing one for an empty slot is
+exactly what seeding is for. A datastore password has to match what SurrealDB
+was configured with, and a broker URL has to name a broker that exists;
+inventing either gives you a Vault that looks configured and a server that
+cannot connect — strictly worse than an empty slot you were told about. So they
+are seeded only from the environment, when you supply them, and an existing
+value in Vault always wins over one in your shell: rotating the datastore
+password in Vault and then re-running the seeder with a stale variable must not
+silently undo the rotation (T-231).
+
+#### The policy needs no change
+
+`docker/vault/axiam-policy.hcl` already grants `read` on `secret/data/axiam`,
+and the three new fields live in that same KV entry. The policy is path-based,
+not field-based, so nothing was added — worth stating, because "add the new
+secrets to the policy" is the reasonable first assumption and following it
+would mean editing a file that did not need editing. It targets whatever Vault you point it at:
 
 ```sh
 export VAULT_ADDR=https://vault.internal:8200

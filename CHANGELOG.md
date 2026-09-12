@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Datastore and broker credentials come from the secret provider** (T-132)
+
+  `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` were read
+  before any secret provider existed, so a deployment that kept every key in
+  Vault still had its datastore password in the pod spec — which is the exact
+  thing T-132 was closed on, one secret class short.
+
+  They are now three more entries on the provider — `db_username`,
+  `db_password`, `amqp_url` — fetched in the same round trip as the other
+  eleven. **The Vault token, or the `file` provider's mount, is now the only
+  credential a container spec has to carry.**
+
+  The environment variables stay, permanently. `env` is a supported provider
+  kind, not a legacy path. What changed is that a deployment configuring a
+  *different* provider, and still supplying a value through the environment,
+  now gets one `WARN` at boot naming the variable — the one case where an
+  operator believes something untrue.
+
+  `just vault-seed` carries the three forward and never invents them: a
+  datastore password has to match what SurrealDB was configured with, and an
+  invented one gives a Vault that looks configured and a server that cannot
+  connect. A value already in Vault always wins over one in your shell, so
+  re-running the seeder after a rotation cannot undo it. The Vault policy needs
+  no change — it grants read on the path, and the new fields are in it.
+
+  `DbConfig` and `AmqpConfig` no longer derive `Debug`. The broker URL carries
+  its password inline by the AMQP URI's own design; it now renders as scheme,
+  host and path with the userinfo removed, and a value that does not parse as a
+  URL is not echoed at all.
+
 - **A refreshing client keeps the claims it asked for** (T-241)
 
   A client that names claims with the OIDC Core §5.5 `claims` parameter used to

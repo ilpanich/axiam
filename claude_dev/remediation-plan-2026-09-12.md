@@ -593,6 +593,74 @@ landed, with the decision and its §10 reference. Status unchanged.
 
 ## 6. R-5 — datastore and broker credentials through the secret provider (decision B)
 
+> **EXECUTED — R-5, 2026-09-12.** On the same branch as the rest, not its own
+> PR: the branch name is fixed for this session, so "its own PR" was not
+> available without a second one. It is a self-contained commit and reverts
+> cleanly on its own.
+>
+> Three text secrets on the port — `db_username`, `db_password`, `amqp_url` —
+> in `ALL_SECRETS`, so every preloading provider fetches them in the round trip
+> it already makes. **The Vault token (or the `file` mount) is now the only
+> credential a container spec has to carry.**
+>
+> `axiam_core::secrets::env_var_override` is the one table mapping those three
+> to their **existing shipped** variable names. Two places read it — the `env`
+> provider, resolving a logical name, and the composition root, naming a
+> variable in the WARN — and two copies is how the warning ends up naming a
+> variable nobody reads. Renaming them to `AXIAM__AUTH__DB_PASSWORD` for
+> namespace tidiness would have been a breaking change dressed as housekeeping.
+>
+> **The ordering fix was not the one the plan predicted.** No `_FILE`
+> convention was needed, which is what T-132's own text expected. What was
+> needed was moving `load_config`'s two assertions on the JWT keys to run
+> **after** the provider has been consulted — they are not wrong, they ran at
+> the one point where they could see only one of the two sources, and that is
+> precisely why a `vault` deployment had to keep setting the variable the
+> provider exists to replace. That defect was one release older than the one
+> this item is about.
+>
+> **The Vault policy needed no change**, and that is a finding rather than an
+> omission: `docker/vault/axiam-policy.hcl` grants `read` on
+> `secret/data/axiam` and the three fields live in that KV entry. The policy is
+> path-based, not field-based. Recorded in `vault.md` because "add the new
+> secrets to the policy" is the reasonable first assumption.
+>
+> The seeder carries them and **never mints** them. A 256-bit key is meaningful
+> only to AXIAM, so minting into an empty slot is what seeding is for; a
+> datastore password has to match what SurrealDB was configured with, and
+> inventing one gives a Vault that looks configured and a server that cannot
+> connect — strictly worse than an empty slot the operator is told about. An
+> existing value always wins over a supplied one (T-231), so re-running the
+> seeder with a stale variable in the shell cannot undo a rotation. Five tests
+> in `test_vault_seed_payload.py`, including the one asserting the environment
+> table matches the Rust side — if they disagree, an operator's variable seeds
+> a field the server never reads.
+>
+> `DbConfig` and `AmqpConfig` lost their derived `Debug`. The broker URL embeds
+> its credential inline by the AMQP URI's own design, so a derived `Debug`
+> there is a password in every log line, panic message or error chain that
+> renders a configuration. The redaction shows scheme, host and path and drops
+> the userinfo — a connection failure asks "which broker", never "which
+> password" — splits on the **last** `@` of the authority so a password
+> containing one cannot walk the boundary backwards, and refuses to echo a
+> value that does not parse as a URL at all, since that is the value most
+> likely to be a credential pasted into the wrong variable.
+>
+> `just vault-status` reports the three; an absence there is not the failure an
+> absent `jwt_private_key_pem` is, and the report says so.
+> `scripts/check-config-key-coverage.py` needed three exemptions — it derives
+> `AXIAM__AUTH__<NAME>` from each port constant, and for these three that
+> spelling is a variable the server does not read.
+>
+> Docs: `docs/deployment/vault.md` (a second table, why they are never minted,
+> and the policy note), `k8s/server/secret.yml`, the configuration reference
+> for all three variables, `CHANGELOG.md` under **Security**. Threat model:
+> T-132's residual paragraph replaced in `Axiam.json` and
+> `threat-model-stride.md`, with §6's grouping bullet and the closed-items entry
+> rewritten; T-180 gains the honest clause — three more secrets now sit behind
+> the one Vault credential, which **widens** the concentration that entry
+> records rather than narrowing it — and stays **Open**. No count moves.
+
 **Closes** the follow-up T-132's own entry names and §6's *Deployment
 responsibilities* grouping repeats: *"`AXIAM__DB__USERNAME`,
 `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` are the remaining environment

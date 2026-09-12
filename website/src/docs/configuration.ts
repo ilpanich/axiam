@@ -54,7 +54,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ["AXIAM__DB__DATABASE", "SurrealDB database.", "axiam"],
           [
             "AXIAM__AMQP__URL",
-            "RabbitMQ connection string, assembled from the broker credentials at the deployment layer. Must be amqps:// — AMQP is TLS-only and every other scheme is refused at startup.",
+            "RabbitMQ connection string, assembled from the broker credentials at the deployment layer. Must be amqps:// — AMQP is TLS-only and every other scheme is refused at startup. It embeds the broker password inline, which is why `AmqpConfig`'s `Debug` prints the host and never the userinfo. Also resolvable through the secret provider as `amqp_url`; this variable stays as a permanent fallback, and a non-`env` deployment that still supplies it here gets one `WARN` at boot.",
             "amqps://user:pass@rabbitmq:5671",
           ],
           [
@@ -135,8 +135,16 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         type: "table",
         headers: ["Variable", "Meaning", "Example"],
         rows: [
-          ["AXIAM__DB__USERNAME", "SurrealDB username.", "axiam"],
-          ["AXIAM__DB__PASSWORD", "SurrealDB password.", "<set-in-secret-manager>"],
+          [
+            "AXIAM__DB__USERNAME",
+            "SurrealDB username. Also resolvable through the secret provider as `db_username` — on a Vault or `file` deployment put it there and leave this unset, and the Vault token becomes the only credential the container spec carries. This variable stays as a permanent fallback (`env` is a supported provider kind); what a non-`env` deployment gets, if the value arrives here anyway, is one `WARN` at boot naming it.",
+            "axiam",
+          ],
+          [
+            "AXIAM__DB__PASSWORD",
+            "SurrealDB password — read-write access to every tenant's data. Also resolvable through the secret provider as `db_password`; see the note on the username above. Never rendered by `DbConfig`'s `Debug`, so it cannot reach a log line or a panic message that prints a configuration.",
+            "<set-in-secret-manager>",
+          ],
           [
             "AXIAM__AUTH__JWT_PRIVATE_KEY_PEM",
             "Ed25519 JWT signing private key (PEM).",

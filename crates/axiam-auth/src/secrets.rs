@@ -71,8 +71,18 @@ pub struct EnvSecretProvider;
 
 impl EnvSecretProvider {
     /// The environment variable a logical key name maps to.
+    ///
+    /// `AXIAM__AUTH__<NAME>` for everything the port defined first, and the
+    /// **existing shipped spelling** for the three datastore and broker
+    /// credentials T-132's follow-up brought in — `AXIAM__DB__PASSWORD`, not
+    /// `AXIAM__AUTH__DB_PASSWORD`. Renaming a variable every deployment
+    /// already sets, to make a namespace tidy, is a breaking change dressed as
+    /// housekeeping; the table lives in `axiam_core::secrets::env_var_override`
+    /// so the composition root's warning names the same variable this reads.
     pub fn var_name(name: &str) -> String {
-        format!("AXIAM__AUTH__{}", name.to_uppercase())
+        axiam_core::secrets::env_var_override(name)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("AXIAM__AUTH__{}", name.to_uppercase()))
     }
 }
 

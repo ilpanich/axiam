@@ -2138,13 +2138,60 @@ ConfigMaps are not secret and environment variables appear in pod specs, crash d
 > those features could not be configured through the shipped manifests at
 > all.
 >
-> **One residual, worth stating plainly:** `AXIAM__DB__USERNAME`,
-> `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` remain environment variables.
-> They are read by the layered configuration before any secret provider
-> exists, so moving them needs the config layer to learn a `_FILE`
-> convention — a real follow-up, not done here. The Vault token stays too,
-> and unavoidably: something must bootstrap the trust chain. Enable etcd
-> encryption at rest either way; see docs/deployment/vault.md.
+> **The residual is closed (R-5, 2026-09-12).** `AXIAM__DB__USERNAME`,
+> `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` were read by the layered
+> configuration before any secret provider existed, so a deployment that put
+> every key in Vault still had its datastore password in the pod spec — the
+> exact sentence this entry was closed on, one secret class short. They are now
+> three more text secrets on the port (`db_username`, `db_password`,
+> `amqp_url`), fetched in the same round trip as the other eleven, so **the
+> Vault token — or the `file` provider's mount — is the only credential the
+> container spec has to carry**. It stays, unavoidably: something must
+> bootstrap the trust chain.
+>
+> The fix needed no `_FILE` convention, which is what the old text predicted.
+> What it needed was for the two checks that forced the old shape —
+> `load_config`'s assertions on the JWT keys — to run **after** the provider has
+> been consulted. They did not move because they were wrong; they moved because
+> they ran at the one point where they could see only one of the two sources,
+> and that is why a `vault` deployment had to keep setting the very variable the
+> provider exists to replace.
+>
+> The environment variables **stay permanently** (decision B of
+> `remediation-plan-2026-09-12.md`): `env` is a supported provider kind, not a
+> legacy path — the dev compose file, the E2E stack and any single-node
+> deployment use it deliberately — so deprecating the variables would deprecate
+> the provider that reads them. The `WARN` is scoped to the one case where the
+> operator believes something untrue: a *non-`env`* provider configured, and the
+> value arriving from the environment anyway.
+>
+> The seeder carries them and never **mints** them, and that difference is the
+> design. A 256-bit key is meaningful only to AXIAM, so inventing one for an
+> empty slot is what seeding is for; a datastore password has to match what
+> SurrealDB was configured with, and inventing one gives a Vault that looks
+> configured and a server that cannot connect. An existing value always wins
+> over a supplied one, so re-running the seeder with a stale variable in the
+> shell cannot silently undo a rotation (T-231).
+>
+> `docker/vault/axiam-policy.hcl` needed **no change** — it grants `read` on
+> `secret/data/axiam` and the three fields live in that KV entry; the policy is
+> path-based, not field-based. Worth recording, because "add the new secrets to
+> the policy" is the reasonable first assumption and following it would mean
+> editing a file that did not need editing.
+>
+> `DbConfig` and `AmqpConfig` gained hand-written redacting `Debug` impls. The
+> broker URL embeds its credential inline by the AMQP URI's own design, so a
+> derived `Debug` there is a password in every log line, panic message or error
+> chain that renders a configuration — the shape of the three CodeQL findings
+> T-260 closed, in the struct that most invites it. The redaction shows scheme,
+> host and path and drops the userinfo, because a connection failure asks
+> "which broker" and never "which password"; a value that does not parse as a
+> URL is not echoed at all, since that is the value most likely to be a
+> credential pasted into the wrong variable.
+>
+> All three secrets now sit behind the one Vault credential, which is T-180 and
+> stays open. Enable etcd encryption at rest either way; see
+> docs/deployment/vault.md.
 
 **T-133 — Backup media accessible outside the cluster**  
 `Backups / volume snapshots` (Store) · Information disclosure · High · Open
@@ -2172,7 +2219,7 @@ SurrealDB's in-memory datastore does not reliably arbitrate the write-write conf
 
 With `AXIAM__AUTH__SECRET_PROVIDER=vault` the production default, all ten long-lived secrets — the JWT signing key, `opaque_setup_key`, the PKI, MFA, federation and email encryption keys, the password pepper, the GDPR pseudonym pepper and the AMQP signing key — sit behind one KV path. A Vault token with read on that path, or the unseal or root material, is equivalent to every one of them at once; a dev-mode Vault left in production holds them unsealed in memory.
 
-> Deployment responsibility, stated in `docs/deployment/vault.md` rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since **H-4 it checks rather than merely advises**: `just vault-status` queries `sys/capabilities-self` and reports the capabilities the token in hand actually holds on AXIAM's KV path, marking anything beyond `read` as `OVER-SCOPED` and naming a root token as what it is; `--strict` turns that into a non-zero exit for a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists. Since 1.0.0-beta10 the token is no longer strictly read-only: it holds `read` on the startup path and `create`/`update` on `secret/data/axiam/ca-keys/*`, from the one policy file `docker/vault/axiam-policy.hcl`, and `just vault-status` reports missing capabilities as well as excess ones (T-232).
+> Deployment responsibility, stated in `docs/deployment/vault.md` rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since **H-4 it checks rather than merely advises**: `just vault-status` queries `sys/capabilities-self` and reports the capabilities the token in hand actually holds on AXIAM's KV path, marking anything beyond `read` as `OVER-SCOPED` and naming a root token as what it is; `--strict` turns that into a non-zero exit for a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists. Since 1.0.0-beta10 the token is no longer strictly read-only: it holds `read` on the startup path and `create`/`update` on `secret/data/axiam/ca-keys/*`, from the one policy file `docker/vault/axiam-policy.hcl`, and `just vault-status` reports missing capabilities as well as excess ones (T-232). Since 2026-09-12 (R-5) three more secrets sit behind that one credential — the datastore username and password and the broker URL, moved off the container spec to close T-132's follow-up — which widens exactly the concentration this entry records rather than narrowing it, and is the honest trade: a credential in a pod spec is readable by anyone with `get pod`, while a credential behind Vault is readable by whoever holds the token and revocable after the fact. The policy needed no change, because it grants `read` on the path rather than on fields.
 
 **T-207 — A rolling deployment logs every not-yet-replaced replica out of the datastore**  
 `AXIAM deployment (N replicas, HPA)` (Process) · Denial of service · High · Mitigated
@@ -2551,7 +2598,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 - Network policy so pods are not reachable around the ingress
 - **Per-service** RabbitMQ credentials. Vhost separation is no longer on this list — the manifests now ship `RABBITMQ_DEFAULT_VHOST: axiam` (T-131) — but splitting one credential per service still belongs to whoever deploys. The transport itself is always TLS: the server refuses any non-`amqps://` broker URL
 - Running Vault itself in production mode — TLS, a read-only token scoped to AXIAM's KV path, unseal and root material kept offline, audit device on (T-180). Every long-lived secret sits behind one credential, so the Vault posture is the secret posture
-- etcd encryption at rest. Which secrets reach the container is no longer an operator choice (T-132): the manifests default to the Vault provider, and the `file` provider mounts key material for deployments without Vault. `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` are the remaining environment variables, read before any provider exists
+- etcd encryption at rest. Which secrets reach the container is no longer an operator choice (T-132): the manifests default to the Vault provider, and the `file` provider mounts key material for deployments without Vault. Since 2026-09-12 that covers the datastore and broker credentials too, so the Vault token (or the `file` mount) is the only credential the container spec has to carry; `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` remain as a permanent fallback, and a deployment on a non-`env` provider that still uses them is told so at boot
 - Backup encryption, restricted snapshot IAM, and backups included in access review
 - Edge protection (WAF, connection limits) in front of the ingress
 - **Auto-unseal on Vault** (T-216). The one production step AXIAM cannot take for you, and the one most often deferred: without it every restart leaves Vault sealed and the server crash-looping until a human with three shares arrives. A cloud KMS seal is the cheap answer (GCP Cloud KMS is roughly $0.06 per key per month); a transit seal against a Vault you already run elsewhere is the other. A script that unseals from shares kept on the machine is not auto-unseal
@@ -2569,7 +2616,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 **Closed at the 2026-08-21 review** — recorded rather than deleted, as with T-145.
 
-- **~~Secret material in a ConfigMap or plain env var~~ (T-132) — closed.** The `file` secret provider already existed and the manifests were not using it; eleven cryptographic secrets are now mounted as files. Datastore and broker credentials remain env-supplied — see the entry for why, and treat it as the open follow-up.
+- **~~Secret material in a ConfigMap or plain env var~~ (T-132) — closed.** The `file` secret provider already existed and the manifests were not using it; eleven cryptographic secrets are now mounted as files. The follow-up this entry named — datastore and broker credentials still env-supplied — was itself closed on 2026-09-12 (R-5): three more text secrets on the same port, fetched in the same round trip, with the environment kept as a permanent fallback that warns when a non-`env` provider is configured. The bootstrap credential is now the only one a container spec must carry.
 - **~~Default or shared broker credentials~~ (T-131) — closed.** A dedicated `axiam` vhost. The larger find was that the shipped manifests carried a credential-free AMQP URL in the ConfigMap and could never have authenticated at all.
 - **~~Erasure or expiry job silently stops running~~ (T-129) — closed.** `GET /health/jobs` reports every sweep's last success, failure and a computed `stalled` flag, measured from the last *success* rather than the last error.
 - **~~Stale MDS metadata~~ (T-153) — closed, opt-in.** `AXIAM__PKI__MDS_MAX_STALE_DAYS` bounds how far past `nextUpdate` metadata may drift before attested registration is refused. Default `0` keeps fail-open, deliberately.

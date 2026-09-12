@@ -83,6 +83,23 @@ EXEMPT: dict[str, str] = {
         "in the production image, so documenting it invites production use"
     ),
     "AXIAM__AUTH__AMQP_SIGNING_KEY": "same debug-build fallback, under its older name",
+    # -- Not variables at all: a name this scanner infers, and the server does
+    #    not read. `axiam_core::secrets` names its entries in the provider's
+    #    vocabulary (`db_username`), and this scanner derives the default
+    #    `AXIAM__AUTH__<NAME>` spelling from each. The three datastore and
+    #    broker credentials carry an explicit override
+    #    (`axiam_core::secrets::env_var_override`) precisely so they keep the
+    #    variable names every deployment already sets, and it is those that are
+    #    documented. Reading `AXIAM__AUTH__DB_PASSWORD` would set nothing.
+    #    (`AXIAM__AUTH__AMQP_URL` needs no entry: the scanner does not infer it,
+    #    and an exemption for a key nobody reads is a note about a setting that
+    #    is gone — which this script also refuses, correctly.)
+    "AXIAM__AUTH__DB_USERNAME": (
+        "not a variable: `db_username` resolves to AXIAM__DB__USERNAME, which is documented"
+    ),
+    "AXIAM__AUTH__DB_PASSWORD": (
+        "not a variable: `db_password` resolves to AXIAM__DB__PASSWORD, which is documented"
+    ),
     # -- No observable effect ---------------------------------------------
     "AXIAM__GRPC__KEY": (
         "gRPC rate limiting is per-IP by construction; setting this to anything "

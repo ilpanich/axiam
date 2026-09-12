@@ -387,6 +387,80 @@ async fn main() -> std::io::Result<()> {
         config.auth.jwt_public_key_pem = (*pem).clone();
     }
 
+    // ---------------------------------------------------------------------
+    // Datastore and broker credentials (T-132's follow-up, R-5)
+    // ---------------------------------------------------------------------
+    //
+    // The three credentials T-132 left behind. They were read by
+    // `load_config` from `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and
+    // `AXIAM__AMQP__URL` before any provider existed, so a deployment that put
+    // every key in Vault still had its datastore password in the pod spec —
+    // which is the exact sentence T-132 was closed on.
+    //
+    // Now: the Vault token (or the `file` provider's mount) is the only
+    // credential the container spec has to carry, and these three are fetched
+    // in the same round trip as the other eleven secrets.
+    //
+    // The environment variables **stay, permanently** (decision B of the
+    // 2026-09-12 plan). `env` is a supported provider kind, not a legacy path:
+    // a single-node deployment, the dev compose file and the E2E stack all use
+    // it deliberately, and deprecating the variables would deprecate the
+    // provider that reads them.
+    //
+    // The WARN is scoped to the one case where the operator believes something
+    // untrue — a *non-`env`* provider configured, and the value arriving from
+    // the environment anyway. Under `env` there is nothing to warn about:
+    // reading an environment variable is what that provider is for.
+    {
+        let provider_is_env = secret_provider.describe() == "env";
+        let overlay = |name: &'static str, target: &mut String, what: &str| match read_secret(name)
+        {
+            Some(value) => {
+                *target = (*value).clone();
+                tracing::info!(
+                    provider = secret_provider.describe(),
+                    credential = what,
+                    "datastore/broker credential loaded from the secret provider"
+                );
+            }
+            None if provider_is_env || target.is_empty() => {}
+            None => tracing::warn!(
+                provider = secret_provider.describe(),
+                variable = axiam_core::secrets::env_var_override(name).unwrap_or("(none)"),
+                credential = what,
+                "this credential was read from the environment; the configured secret \
+                     provider has no entry for it. Environment variables appear in pod specs, \
+                     crash dumps and orchestrator APIs — see docs/deployment/vault.md"
+            ),
+        };
+        overlay(
+            keys::DB_USERNAME,
+            &mut config.db.username,
+            "datastore username",
+        );
+        overlay(
+            keys::DB_PASSWORD,
+            &mut config.db.password,
+            "datastore password",
+        );
+        overlay(keys::AMQP_URL, &mut config.amqp.url, "broker URL");
+    }
+
+    // R-5: the credential checks that `load_config` used to make, moved here so
+    // they run once **every** source has been consulted. Doing it there meant a
+    // `vault` deployment had to keep setting the very variables the provider
+    // exists to replace.
+    assert!(
+        !config.auth.jwt_private_key_pem.is_empty(),
+        "the token signing key is not configured: set AXIAM__AUTH__JWT_PRIVATE_KEY_PEM, \
+         or provide `jwt_private_key_pem` through the configured secret provider"
+    );
+    assert!(
+        !config.auth.jwt_public_key_pem.is_empty(),
+        "the token verification key is not configured: set AXIAM__AUTH__JWT_PUBLIC_KEY_PEM, \
+         or provide `jwt_public_key_pem` through the configured secret provider"
+    );
+
     // CQ-B14: Parse Ed25519 JWT keys once at startup and cache them in the
     // AuthConfig so per-request token issuance/verification skips PEM parsing.
     config
@@ -2707,15 +2781,14 @@ fn load_config() -> AppConfig {
         .and_then(|c| c.try_deserialize())
         .expect("Failed to load configuration — check config/default.toml or AXIAM__* env vars");
 
-    // Validate critical fields to fail fast instead of booting an insecure/broken server.
-    assert!(
-        !config.auth.jwt_private_key_pem.is_empty(),
-        "AXIAM__AUTH__JWT_PRIVATE_KEY_PEM must be set (Ed25519 PEM)"
-    );
-    assert!(
-        !config.auth.jwt_public_key_pem.is_empty(),
-        "AXIAM__AUTH__JWT_PUBLIC_KEY_PEM must be set (Ed25519 PEM)"
-    );
+    // The signing keys are NOT asserted here (T-132 follow-up, R-5). They are
+    // asserted in `validate_credentials_after_secrets`, which runs after the
+    // secret provider has been consulted — because on a `vault` or `file`
+    // deployment they legitimately are not in the environment at all, and
+    // asserting here forced every such deployment to keep the very variable
+    // the provider exists to replace. The check did not move because it was
+    // wrong; it moved because it ran at the one point where it could only see
+    // one of the two sources.
 
     // Validate oauth2_issuer_url when explicitly configured.
     // jwt_issuer is intentionally unconstrained — it is used as the

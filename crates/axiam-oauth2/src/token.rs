@@ -10,6 +10,7 @@ use axiam_auth::token::{
     issue_service_account_client_credentials_token_enriched, validate_access_token,
 };
 use axiam_core::error::AxiamError;
+use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::oauth2_client::{ClientAuthMethod, CreateRefreshToken, OAuth2Client};
 use axiam_core::models::reactor::{
     ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events,
@@ -18,8 +19,8 @@ use axiam_core::models::service_account::{SERVICE_ACCOUNT_CLIENT_ID_PREFIX, Serv
 use axiam_core::models::uma::RptPermission;
 use axiam_core::models::user::UserStatus;
 use axiam_core::repository::{
-    AuthorizationCodeRepository, OAuth2ClientRepository, RefreshTokenRepository,
-    ServiceAccountRepository, TenantRepository, UserRepository,
+    AuditLogRepository, AuthorizationCodeRepository, OAuth2ClientRepository,
+    RefreshTokenRepository, ServiceAccountRepository, TenantRepository, UserRepository,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -58,26 +59,31 @@ use crate::pkce;
 /// indistinguishable.
 pub const CLIENT_AUTH_FAILED: &str = "invalid client credentials";
 
-/// How long a rotated refresh token stays usable after its successor is issued.
+/// How long a rotated refresh token stays usable after its successor is
+/// issued — for the clients that get a grace window at all.
 ///
-/// FAPI 2.0 Security Profile §5.3.2.1-9 requires the previous token to be
-/// accepted for a period after rotation; the OIDF module that checks it
-/// (`fapi2-security-profile-final-refresh-token`) sleeps thirty seconds and
-/// then replays the old token expecting a 200.
+/// Re-exported rather than defined here since the T-254 decision: the window
+/// is a **`fapi2`-profile behaviour**, and profile-dependent behaviour is
+/// decided in one place ([`crate::fapi`]) so that a second mechanism cannot
+/// grow up beside it. Ask [`crate::fapi::refresh_rotation_grace_secs`] whether
+/// a given client gets one; this constant is only how long it lasts when it
+/// does.
+pub use crate::fapi::FAPI2_REFRESH_ROTATION_GRACE_SECS as REFRESH_ROTATION_GRACE_SECS;
+
+/// The audit action a refresh-token replay is recorded under (T-254).
 ///
-/// Sixty seconds, not thirty. The tested number is the suite's, not the
-/// profile's, and a grace period exactly as long as the test that measures it
-/// passes conformance by arriving first — a client on a slow link retrying the
-/// request whose response it lost has no such guarantee. Sixty is the smallest
-/// value that is comfortably longer than the observation and still far shorter
-/// than the thirty-day life of the token being retired.
+/// Its own name in the `oauth2.*` family rather than a metadata key on
+/// `oauth2.token_endpoint`, for the same reason `oauth2.client_auth_failed`
+/// has one: an operator alerts on an action, and an event that can only be
+/// found by filtering the metadata of a name that fires on every token request
+/// is an event nobody alerts on.
 ///
-/// Not configurable: a deployment that shortened it below the profile's floor
-/// would silently stop conforming, and one that lengthened it would widen the
-/// replay window for every tenant at once. If a deployment ever needs to differ
-/// this belongs in the client's own registration, where the FAPI profile switch
-/// already lives, rather than in a global.
-pub const REFRESH_ROTATION_GRACE_SECS: i64 = 60;
+/// One name for both dispositions, not two. A refusal and a grace-accepted
+/// retry are the same event — a rotated refresh token was presented again —
+/// and separating them into two actions would mean an operator who wants "all
+/// replays" has to know both. The `disposition` metadata key tells them apart,
+/// and `outcome` follows the request.
+pub const REFRESH_REPLAY_AUDIT_ACTION: &str = "oauth2.refresh_token_replayed";
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -532,7 +538,7 @@ fn session_evidence_of(
 /// OAuth2 token service — handles token exchange, revocation, and
 /// introspection.
 #[derive(Clone)]
-pub struct TokenService<OC, AC, TR, RT, UR, SA, SR> {
+pub struct TokenService<OC, AC, TR, RT, UR, SA, SR, AR> {
     client_repo: OC,
     /// X5.1 — resolves a `private_key_jwt` client's keys, verifies its
     /// assertion, and records the `jti`.
@@ -561,6 +567,18 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA, SR> {
     /// honour lane — and a failed read yields no evidence rather than an
     /// error, so no grant that works today can start failing because of it.
     session_repo: SR,
+    /// T-254 — where a refresh-token replay is recorded.
+    ///
+    /// A repository rather than a callback handed down from the REST layer,
+    /// because the replay is detected *here*: the token endpoint is the only
+    /// place that knows a presented token had already been rotated, and
+    /// reporting the fact outward so somebody else could write the row would
+    /// put the marker and the audit entry in two crates for one event.
+    ///
+    /// Every write through it is fire-and-forget. A token request must not
+    /// fail because the audit sink is unavailable (T-15-04), which is the same
+    /// rule `oauth2.client_auth_failed` follows in `axiam-api-rest`.
+    audit_repo: AR,
     auth_config: AuthConfig,
     refresh_token_lifetime_secs: i64,
     /// X1 — the `token.pre_issue` interceptor chain.
@@ -572,7 +590,7 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA, SR> {
     reactor_gate: SharedReactorGate,
 }
 
-impl<OC, AC, TR, RT, UR, SA, SR> TokenService<OC, AC, TR, RT, UR, SA, SR>
+impl<OC, AC, TR, RT, UR, SA, SR, AR> TokenService<OC, AC, TR, RT, UR, SA, SR, AR>
 where
     OC: OAuth2ClientRepository,
     SA: ServiceAccountRepository,
@@ -581,6 +599,7 @@ where
     RT: RefreshTokenRepository,
     UR: UserRepository,
     SR: axiam_core::repository::SessionRepository,
+    AR: AuditLogRepository,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -591,6 +610,7 @@ where
         refresh_token_repo: RT,
         user_repo: UR,
         session_repo: SR,
+        audit_repo: AR,
         auth_config: AuthConfig,
         refresh_token_lifetime_secs: i64,
     ) -> Self {
@@ -603,6 +623,7 @@ where
             refresh_token_repo,
             user_repo,
             session_repo,
+            audit_repo,
             auth_config,
             refresh_token_lifetime_secs,
             reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
@@ -653,6 +674,138 @@ where
                 );
                 IdTokenEvidence::NONE
             }
+        }
+    }
+
+    /// The already-rotated row behind a refresh token the read path refused,
+    /// if there is one (T-254).
+    ///
+    /// Never an error and never a reason to answer differently: a lookup that
+    /// fails yields `None`, so a database fault costs the marker and the audit
+    /// row rather than turning an `invalid_grant` into a `500`. The refusal
+    /// itself has already been decided by the time this is asked.
+    async fn rotated_predecessor(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> Option<axiam_core::models::oauth2_client::RefreshToken> {
+        match self
+            .refresh_token_repo
+            .find_rotated(tenant_id, token_hash)
+            .await
+        {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "oauth2: could not determine whether a refused refresh token had been \
+                     rotated; the replay marker and audit record for this request are lost"
+                );
+                None
+            }
+        }
+    }
+
+    /// Make a refresh-token replay visible (T-254).
+    ///
+    /// Two records, because they answer different questions and are read by
+    /// different people:
+    ///
+    /// - **A marker on the session** the token names, which is what an
+    ///   administrator looking at an account sees. Counted per outcome so that
+    ///   "a FAPI client retried a lost rotation" and "a rotated token was
+    ///   presented where no window would accept it" are not one number.
+    /// - **An `oauth2.refresh_token_replayed` audit row**, which is what an
+    ///   operator queries across a tenant, and what survives the session being
+    ///   reaped.
+    ///
+    /// Both are fire-and-forget. A refresh that works today must not begin to
+    /// fail because a marker could not be written, and a refusal must not
+    /// become a `500` for the same reason (T-15-04) — so every error here is
+    /// logged and swallowed.
+    ///
+    /// **The token value is never recorded, in any form** — not the raw token,
+    /// not its hash. The row names the client, the session and the outcome,
+    /// which is everything an investigation needs and nothing that would make
+    /// the audit log a place to steal a credential from.
+    async fn record_refresh_replay(
+        &self,
+        tenant_id: Uuid,
+        client: &OAuth2Client,
+        replayed: &axiam_core::models::oauth2_client::RefreshToken,
+        accepted_under_grace: bool,
+    ) {
+        // The `warn` rather than `info`: on `standard` nothing legitimate
+        // produces one, and on `fapi2` it is at least worth knowing how often
+        // the grace is being leaned on.
+        tracing::warn!(
+            client_id = %client.client_id,
+            profile = client.profile.as_str(),
+            session_id = ?replayed.session_id,
+            accepted_under_grace,
+            "oauth2: a refresh token was presented after it had already been rotated (T-254)"
+        );
+
+        if let Some(session_id) = replayed.session_id
+            && let Err(e) = self
+                .session_repo
+                .mark_refresh_replay(tenant_id, session_id, accepted_under_grace)
+                .await
+        {
+            tracing::error!(
+                error = %e,
+                %session_id,
+                "oauth2: failed to mark a refresh-token replay on its session"
+            );
+        }
+
+        let outcome = if accepted_under_grace {
+            // The request succeeded, and saying otherwise would make every
+            // conformant FAPI retry look like a failure in the audit log.
+            AuditOutcome::Success
+        } else {
+            AuditOutcome::Failure
+        };
+        if let Err(e) = self
+            .audit_repo
+            .append(CreateAuditLogEntry {
+                tenant_id,
+                // The client authenticated, but it is not a user; the same
+                // reasoning `oauth2.client_auth_failed` applies, and the
+                // identity goes to the metadata where it is evidence.
+                actor_id: replayed.user_id.unwrap_or_else(Uuid::nil),
+                actor_type: if replayed.user_id.is_some() {
+                    ActorType::User
+                } else {
+                    ActorType::System
+                },
+                action: REFRESH_REPLAY_AUDIT_ACTION.into(),
+                resource_id: replayed.session_id,
+                outcome,
+                ip_address: None,
+                metadata: Some(serde_json::json!({
+                    "client_id": client.client_id,
+                    "client_profile": client.profile.as_str(),
+                    "session_id": replayed.session_id.map(|id| id.to_string()),
+                    // The discriminator, spelled out rather than left to be
+                    // inferred from `outcome`: an operator filtering the audit
+                    // log must be able to separate the retry the FAPI window
+                    // exists for from a refusal without reading the code.
+                    "disposition": if accepted_under_grace {
+                        "accepted_under_fapi_grace"
+                    } else {
+                        "refused"
+                    },
+                    "rotated_at": replayed.rotated_at.map(|t| t.to_rfc3339()),
+                })),
+            })
+            .await
+        {
+            tracing::error!(
+                error = %e,
+                %tenant_id,
+                "oauth2: failed to write the {REFRESH_REPLAY_AUDIT_ACTION} audit log"
+            );
         }
     }
 
@@ -1995,19 +2148,63 @@ where
 
         // Look up the refresh token by hash (after client auth)
         let token_hash = hash_refresh_token(raw_token);
-        let stored = self
+        let stored = match self
             .refresh_token_repo
             .get_by_token_hash(tenant_id, &token_hash)
             .await
-            .map_err(|_| {
-                OAuth2Error::InvalidGrant("refresh token is invalid, expired, or revoked".into())
-            })?;
+        {
+            Ok(stored) => stored,
+            Err(_) => {
+                // T-254 — before answering, find out *why* there was no live
+                // row. A token that had already been rotated is a replay, and
+                // a replay is marked and audited whatever the window; a token
+                // that was revoked at logout or simply ran out is an ordinary
+                // stale credential and stays the one-line refusal it has
+                // always been.
+                //
+                // The second read runs only on this branch, so the grant that
+                // succeeds pays nothing for it.
+                if let Some(rotated) = self.rotated_predecessor(tenant_id, &token_hash).await {
+                    self.record_refresh_replay(tenant_id, &client, &rotated, false)
+                        .await;
+                    return Err(OAuth2Error::InvalidGrant(
+                        "refresh token already consumed".into(),
+                    ));
+                }
+                return Err(OAuth2Error::InvalidGrant(
+                    "refresh token is invalid, expired, or revoked".into(),
+                ));
+            }
+        };
 
         // Verify client ownership
         if stored.client_id != client_id {
             return Err(OAuth2Error::InvalidGrant(
                 "refresh token was not issued to this client".into(),
             ));
+        }
+
+        // T-254 — a live row that already carries `rotated_at` is a
+        // presentation of a token whose successor has been issued. Only the
+        // FAPI grace lane can produce one (`supersede` leaves the row
+        // redeemable; `revoke_rotated` does not), and only a `fapi2`
+        // registration may be answered from one.
+        //
+        // The second half of that sentence is why the profile is asked again
+        // here rather than inferred from the row's existence: a registration
+        // moved off `fapi2` between the rotation and the replay leaves a
+        // superseded row behind it, and the client's registration *now* is
+        // what decides — never the request, and never a window it used to
+        // have.
+        if stored.rotated_at.is_some() {
+            let accepted = crate::fapi::refresh_rotation_grace_secs(&client).is_some();
+            self.record_refresh_replay(tenant_id, &client, &stored, accepted)
+                .await;
+            if !accepted {
+                return Err(OAuth2Error::InvalidGrant(
+                    "refresh token already consumed".into(),
+                ));
+            }
         }
 
         // Resolve org_id from tenant
@@ -2118,37 +2315,51 @@ where
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
-        // Now retire the old refresh token.
+        // Now retire the old refresh token — on one of two lanes, chosen by
+        // the client's registration and by nothing else (T-254).
         //
-        // FAPI 2.0 Security Profile §5.3.2.1-9: an authorization server that
-        // rotates refresh tokens shall keep accepting the previous one for a
-        // short period after issuing its successor. So this SUPERSEDES rather
-        // than revokes — the old token stays usable for
-        // `REFRESH_ROTATION_GRACE_SECS` and then expires on the read path's
-        // existing expiry check.
+        // **`fapi2`: supersede.** FAPI 2.0 Security Profile §5.3.2.1-9 says an
+        // authorization server that rotates refresh tokens shall keep
+        // accepting the previous one for a short period after issuing its
+        // successor. That is the only recovery a client has from a rotation
+        // whose response it never received: under immediate revocation it
+        // holds a token the server has destroyed, has not been given the
+        // replacement, and can do nothing but start a whole new authorization.
+        // The old token therefore stays usable for the grace period and then
+        // expires on the read path's existing expiry check.
         //
-        // What that buys is the only recovery a client has from a rotation
-        // whose response it never received: under immediate revocation it holds
-        // a token the server has destroyed, has not been given the replacement,
-        // and can do nothing but start a whole new authorization. What it costs
-        // is a window in which a leaked refresh token is still usable — which
-        // is why the profile that requires it is also the profile that
-        // sender-constrains every token, so replaying one inside the window
-        // needs the client's private key as well.
+        // **Everything else: revoke.** The window costs a replay window, and
+        // it is only affordable where every token is sender-constrained —
+        // replaying a `fapi2` refresh token inside the window needs the
+        // client's private key as well. On `standard` the token *is* the
+        // credential, so the predecessor is revoked at rotation and a second
+        // presentation is refused, exactly as it was before 065f37c.
         //
-        // The failure handling below is unchanged, including its NotFound case:
-        // `supersede` reports NotFound on exactly the same condition `revoke`
+        // Both lanes stamp `rotated_at`, so a later presentation of either is
+        // recognisable as a replay rather than as an ordinary stale
+        // credential.
+        //
+        // The failure handling below is unchanged, including its NotFound
+        // case: both methods report NotFound on exactly the condition `revoke`
         // did — no live row matched — so a genuinely concurrent second use is
         // still caught and still answered "already consumed".
-        if let Err(revoke_err) = self
-            .refresh_token_repo
-            .supersede(
-                tenant_id,
-                &token_hash,
-                Utc::now() + chrono::Duration::seconds(REFRESH_ROTATION_GRACE_SECS),
-            )
-            .await
-        {
+        let retirement = match crate::fapi::refresh_rotation_grace_secs(&client) {
+            Some(grace_secs) => {
+                self.refresh_token_repo
+                    .supersede(
+                        tenant_id,
+                        &token_hash,
+                        Utc::now() + chrono::Duration::seconds(grace_secs),
+                    )
+                    .await
+            }
+            None => {
+                self.refresh_token_repo
+                    .revoke_rotated(tenant_id, &token_hash)
+                    .await
+            }
+        };
+        if let Err(revoke_err) = retirement {
             // Best-effort: delete the newly-created token so it
             // doesn't linger as an orphan.
             if let Err(cleanup_err) = self

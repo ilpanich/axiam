@@ -47,6 +47,39 @@ export interface MfaMethod {
   created_at: string;
 }
 
+/**
+ * T-254 — the badge an operator reads on a session, derived server-side from
+ * the two counters below so the UI cannot disagree with the API about what a
+ * session saw.
+ *
+ * - `none` — no refresh token of this session was ever presented after
+ *   rotation.
+ * - `fapi_grace_retry` — every replay was accepted under the FAPI 2.0
+ *   §5.3.2.1-9 grace window. Informational: this is the retry the window
+ *   exists for, and only a `fapi2` client has one.
+ * - `refused` — at least one replay was refused. A rotated token was presented
+ *   with no window to accept it in, which is nothing a conformant client does.
+ */
+export type RefreshReplayVerdict = "none" | "fapi_grace_retry" | "refused";
+
+/** Backend `SessionResponse` — one of a user's sessions. Carries no token. */
+export interface UserSession {
+  id: string;
+  created_at: string;
+  expires_at: string;
+  /** When the end user actually authenticated, which is not `created_at` on a
+   *  session produced by refresh rotation. */
+  authenticated_at: string;
+  /** RFC 8176 method references for that authentication. */
+  amr: string[];
+  ip_address: string | null;
+  user_agent: string | null;
+  refresh_replay_verdict: RefreshReplayVerdict;
+  refresh_replay_at: string | null;
+  refresh_replay_grace_accepted: number;
+  refresh_replay_refused: number;
+}
+
 export interface PaginatedUsers {
   items: User[];
   total: number;
@@ -178,6 +211,15 @@ export const userService = {
 
   resetMfa: (userId: string): Promise<void> =>
     api.post(`/api/v1/users/${userId}/reset-mfa`).then(() => undefined),
+
+  /**
+   * T-254 — the sessions a user holds, newest first, each carrying the
+   * refresh-replay marker. Read-only; ending a session is a different surface.
+   */
+  listSessions: (userId: string): Promise<UserSession[]> =>
+    api
+      .get<UserSession[] | { items: UserSession[] }>(`/api/v1/users/${userId}/sessions`)
+      .then((r) => unwrapList(r.data)),
 
   unlock: (userId: string): Promise<User> =>
     api

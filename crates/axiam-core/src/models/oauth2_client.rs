@@ -811,6 +811,25 @@ pub struct RefreshToken {
     pub expires_at: DateTime<Utc>,
     pub revoked: bool,
     pub created_at: DateTime<Utc>,
+    /// T-254 — when this token's successor was issued, if it has one.
+    ///
+    /// Written by [`RefreshTokenRepository::supersede`] and
+    /// [`RefreshTokenRepository::revoke_rotated`], which are the only two ways
+    /// a token is retired *because a replacement exists*. Every other
+    /// retirement — logout, a password reset, `revoke_all_for_user` — leaves
+    /// this `None`, and that difference is the whole point: a presentation of
+    /// a token whose `rotated_at` is set is a **replay of a rotated token**,
+    /// while a presentation of one that was merely revoked is an ordinary
+    /// stale credential.
+    ///
+    /// `None` for every row written before schema v60, which is the honest
+    /// value: nothing recorded whether those tokens were rotated, so nothing
+    /// may claim they were.
+    ///
+    /// [`RefreshTokenRepository::supersede`]: crate::repository::RefreshTokenRepository::supersede
+    /// [`RefreshTokenRepository::revoke_rotated`]: crate::repository::RefreshTokenRepository::revoke_rotated
+    #[serde(default)]
+    pub rotated_at: Option<DateTime<Utc>>,
 }
 
 /// Input for creating a new refresh token.

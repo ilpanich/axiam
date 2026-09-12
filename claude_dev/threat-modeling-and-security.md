@@ -14,13 +14,14 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-09-12 (`1.0.0-beta13`, model 2.12.0). The
-> website section is at `1.0.0-beta11` and is brought up by
+> **Status: source current as of 2026-09-12 (`1.0.0-beta13`, model 2.12.1 —
+> the T-254 decision). The website section is at `1.0.0-beta11` and is brought
+> up by
 > [`website-security-beta13-update-plan.md`](website-security-beta13-update-plan.md),
 > which is the entry point for that pass.**
 >
 > **Beta12…beta13 wave (model 2.12.0).** Thirty threats enter the model,
-> bringing it to **266 threats, 249 mitigated / 17 open**, and the OAuth2 diagram
+> bringing it to **266 threats, 250 mitigated / 16 open**, and the OAuth2 diagram
 > gains a tenth element. Almost all of it is one programme: the OpenID Connect
 > **Basic OP** gap closure ([`basic-op-gap-plan.md`](basic-op-gap-plan.md),
 > waves W1–W9) and what the OpenID Foundation's conformance suite found when it
@@ -58,9 +59,15 @@
 > `client_secret_basic`, accepted because 37 of the plan's 38 modules use it,
 > with its three failure modes each tested and the residual — what an ingress
 > logs — named (T-253); and the refresh-rotation grace window FAPI 2.0
-> §5.3.2.1-9 requires, applied to every profile, which on `standard` gives a
-> bearer refresh token a 60-second replay window the server cannot distinguish
-> from an honest retry — recorded **open** (T-254), and T-37 amended to say so.
+> §5.3.2.1-9 requires, applied at beta13 to every profile, which on `standard`
+> gave a bearer refresh token a 60-second replay window the server could not
+> distinguish from an honest retry — recorded **open** (T-254), and T-37 amended
+> to say so. **T-254 was then closed by a second decision** (2026-09-12): the
+> window is confined to the `fapi2` profile, which both requires it and
+> sender-constrains every token, every other client is back to the predecessor
+> being revoked at rotation, and a rotated token presented again is now marked
+> on its session and audited as `oauth2.refresh_token_replayed` whatever the
+> window. T-37 says both halves.
 > **The rest** (T-260…T-266): three CodeQL alerts of one class, a credential in
 > a panic message (T-260); the explicit column lists that would have left an
 > erased subject holding a telephone number and a postal address, and a SCIM
@@ -73,10 +80,10 @@
 > the public trust store (T-264); the admin UI's redaction missing a prefixed
 > key and an Axios error path (T-265); and contract 1.40–1.42's alias and
 > Basic-authentication rules (T-266). Seven existing entries gained clauses:
-> T-37, T-58, T-163, T-164, T-166, T-172 and T-236. The open register gains
-> T-254 and loses nothing; AXIAM's own request path still carries no open
-> Critical or High finding — its one open item is a Medium recorded as an
-> accepted trade-off, and the sentence below says so. The OAuth2/OIDC compliance
+> T-37, T-58, T-163, T-164, T-166, T-172 and T-236. The open register neither
+> gains nor loses: T-254 entered it and left it in the same release, closed by
+> the decision above, so AXIAM's own request path carries **no open finding at
+> all** and the sentence below says so. The OAuth2/OIDC compliance
 > row changes substance for the first time: the suite has now been run, four
 > plans, 165 modules, zero `FAILED` on 2026-09-11, with the receipts published
 > green and red alike — a self-run against a working-tree build, not a
@@ -407,7 +414,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
 | Threats identified | 266 |
-| Mitigated / Open | 249 / 17 |
+| Mitigated / Open | 250 / 16 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -422,7 +429,7 @@ optimistic closed one.
 |---|---|---|
 | System context | 31 | 2 |
 | Authentication & session management | 33 | 1 |
-| OAuth2 / OIDC authorization server | 47 | 1 |
+| OAuth2 / OIDC authorization server | 47 | 0 |
 | Federation (SAML SP & OIDC RP) | 31 | 1 |
 | Authorization engine (RBAC, hierarchy, scopes) | 26 | 0 |
 | PKI, certificates & IoT device identity | 25 | 1 |
@@ -434,10 +441,11 @@ The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. AXIAM's own request path —
 authentication, authorization, tokens, PKI, federation — carries **no open
-Critical or High finding**. Its one open item is a Medium recorded as an accepted
-trade-off rather than absorbed: the 60-second grace a rotated refresh token keeps,
-which FAPI 2.0 requires and which is written down for the profile it is not
-required on (T-254).
+finding at all**. The one it briefly carried, the 60-second grace a rotated
+refresh token keeps, was recorded open at 1.0.0-beta13 rather than absorbed and
+then closed by a decision: the grace now applies only to the FAPI 2.0 profile
+that requires it and sender-constrains every token, and a rotated token presented
+again is marked and audited whichever way it is answered (T-254).
 
 ### Coverage by STRIDE category
 
@@ -497,7 +505,7 @@ have to be re-established — nothing is assumed across a boundary.
 | Password hashes | Argon2id, per-user salt, pepper | Offline cracking of credentials |
 | OPAQUE setup key & per-tenant OPRF seeds | Secret provider; seeds AES-256-GCM encrypted at rest | Stolen OPAQUE records become dictionary-attackable |
 | MFA secrets | AES-256-GCM encrypted at rest | Second factor defeated |
-| Refresh tokens & sessions | Stored hashed, single-use rotation with a 60-second grace after rotation | Sustained impersonation |
+| Refresh tokens & sessions | Stored hashed, single-use rotation; a 60-second grace after rotation for FAPI 2.0 clients only, and any presentation after rotation is marked and audited | Sustained impersonation |
 | Client & webhook secrets | Hashed / encrypted, redacted from logs | Service-account impersonation; forged events |
 | Authorization graph | Private data tier, API-only mutation, audited | Silent privilege escalation |
 | Audit log | Append-only, OpenPGP-signed | Loss of accountability |
@@ -560,13 +568,18 @@ have to be re-established — nothing is assumed across a boundary.
 - **Tokens**: access tokens are **EdDSA (Ed25519) JWTs**, 15 minutes long. The
   verifier pins the algorithm and never reads it from the token header, so
   `alg:none` and HMAC-key-confusion attacks are rejected outright. Refresh tokens
-  are opaque, server-stored and **single-use with rotation**: a rotated token is
-  retired on a 60-second grace clock rather than destroyed — FAPI 2.0
-  §5.3.2.1-9's recovery for a client whose rotation response was lost — and two
-  genuinely concurrent rotations still cannot both find a live row. That window
-  is recorded as an open item rather than glossed: inside it a leaked bearer
-  refresh token replays undetected, and the ways to close it are decisions the
-  register names. In the browser, tokens live only in `Secure` / `HttpOnly` /
+  are opaque, server-stored and **single-use with rotation**: the rotated token
+  is revoked and a second presentation is refused. A client registered on the
+  FAPI 2.0 profile is the exception — there the rotated token is retired on a
+  60-second grace clock rather than destroyed, which is §5.3.2.1-9's recovery
+  for a client whose rotation response was lost, and is affordable there
+  because that profile binds every token to a key the client must also hold.
+  Two genuinely concurrent rotations still cannot both find a live row. And a
+  refresh token presented **after** it was rotated is never silent, inside the
+  window or outside it: it is counted on the session it belongs to and written
+  to the audit log as `oauth2.refresh_token_replayed`, saying whether it was
+  served under the grace or refused, and never carrying the token itself. In the
+  browser, tokens live only in `Secure` / `HttpOnly` /
   `SameSite=Strict` cookies — never in `localStorage`, never in a URL — and
   logout's removal cookies are built from the same setters they clear, so the
   protective attributes are mirrored by construction rather than restated.
@@ -708,8 +721,11 @@ rather than counted as passes.
 - **Exact `redirect_uri` matching** — no wildcards, no prefix matching, no
   normalisation that could widen the match, closing the open-redirect class.
 - **Single-use authorization codes** bound to client and redirect URI; **refresh
-  rotation** that can only narrow scope, never widen it; `state` and `nonce`
-  required and verified.
+  rotation** that can only narrow scope, never widen it, and that revokes the
+  predecessor — except on the FAPI 2.0 profile, where §5.3.2.1-9's 60-second
+  grace applies and every token is sender-constrained. A rotated refresh token
+  presented again is audited either way; `state` and `nonce` required and
+  verified.
 - **Introspection and revocation require client authentication** and are scoped
   to the caller's own tenant; unknown tokens return the uniform inactive response.
 - **userinfo is scope-filtered**; JWKS publishes the active key plus a bounded
@@ -1171,7 +1187,6 @@ each.
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-143 — Local JWT verification misses a revoked entitlement | Medium | SDK token verification (JWKS cache, iss/aud) · *Client SDKs & admin UI integration surface* |
-| T-254 — A leaked refresh token replayed inside the rotation grace window forks the session undetected | Medium | /oauth2/token (code, refresh, client credentials) · *OAuth2 / OIDC authorization server* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are
@@ -1296,15 +1311,19 @@ list read as a checklist — what to do about each, grouped by who does it.
   design, which is in tension with GDPR Art. 17; erasure anonymises the subject
   instead. Retention defaults to a 730-day pruning window applied by the
   background sweep; tune it (or disable with `0`) to match your lawful basis.
-- **A rotated refresh token stays redeemable for 60 seconds.** FAPI 2.0 requires
-  it — the only recovery for a client whose rotation response was lost — and
-  the profile that requires it sender-constrains every token, so a replay
-  inside the window needs the client's private key. AXIAM applies the same
-  grace on the standard profile, where a bearer refresh token gains a
-  60-second replay window the server cannot tell from an honest retry. The
-  item is open in the register (T-254) until one of two decisions is taken:
-  detect reuse inside the window, or confine the grace to sender-constrained
-  clients. A password or MFA reset revokes the whole family either way.
+- **A rotated refresh token stays redeemable for 60 seconds — but only for a
+  FAPI 2.0 client.** FAPI 2.0 §5.3.2.1-9 requires it: it is the only recovery
+  for a client whose rotation response was lost in transit. The profile that
+  requires it also sender-constrains every token, so a replay inside the window
+  needs the client's private key as well. Between 1.0.0-beta13 and the T-254
+  decision of 2026-09-12 AXIAM applied the same grace on the standard profile,
+  where a bearer refresh token has no such second factor; it no longer does.
+  Every client that is not registered `profile: fapi2` has its previous refresh
+  token revoked at rotation, and a second presentation is refused. Either way,
+  a refresh token presented after it was rotated is recorded on its session and
+  written to the audit log as `oauth2.refresh_token_replayed`, saying whether it
+  was served under the grace or refused — and a password or MFA reset still
+  revokes the whole family.
 
 > **Caution — this is beta software.** AXIAM is in active development and has not
 > reached a stable release. It has not undergone an independent third-party

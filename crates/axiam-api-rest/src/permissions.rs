@@ -551,6 +551,11 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     ("POST", "/api/v1/users/{user_id}/unlock", "users:admin"),
     ("POST", "/api/v1/users/{user_id}/reset-mfa", "users:admin"),
     ("GET", "/api/v1/users/{user_id}/mfa-methods", "users:get"),
+    // T-254 — a session list carries the refresh-replay marker. `users:get`
+    // rather than `users:admin`, matching its sibling above: the handler
+    // additionally lets a principal read its OWN sessions with no named
+    // permission at all, and requires `users:admin` for anybody else's.
+    ("GET", "/api/v1/users/{user_id}/sessions", "users:get"),
     (
         "DELETE",
         "/api/v1/users/{user_id}/mfa-methods/{method_id}",

@@ -11,13 +11,14 @@ import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { UserSessionsDialog } from "@/components/UserSessionsDialog";
 import { StatusBadge } from "@/components/StatusBadge";
 import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordPolicyChecker, checkPasswordPolicy } from "@/components/PasswordPolicyChecker";
-import { Eye, Lock, LockOpen, Pencil, Plus, Trash2 } from "lucide-react";
+import { Eye, Lock, LockOpen, MonitorSmartphone, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
@@ -375,6 +376,8 @@ export function UsersPage() {
 
   // ─── Unlock state ─────────────────────────────────────────────────────────────
   const [userToUnlock, setUserToUnlock] = useState<User | null>(null);
+  /** T-254 — whose sessions the read-only dialog is showing, if any. */
+  const [sessionsFor, setSessionsFor] = useState<User | null>(null);
 
   const unlockMutation = useMutation({
     mutationFn: (userId: string) => userService.unlock(userId),
@@ -458,7 +461,7 @@ export function UsersPage() {
     {
       key: "actions",
       header: "Actions",
-      width: "w-36",
+      width: "w-44",
       render: (row) => (
         <div className="flex items-center gap-1">
           {row.is_locked && (
@@ -476,6 +479,14 @@ export function UsersPage() {
             className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
           >
             <Pencil size={14} />
+          </button>
+          <button
+            aria-label={`Sessions for ${row.username}`}
+            title="Sessions, and any refresh-token replay they saw (T-254)"
+            onClick={() => setSessionsFor(row)}
+            className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <MonitorSmartphone size={14} />
           </button>
           <button
             aria-label={`View ${row.username}`}
@@ -618,6 +629,14 @@ export function UsersPage() {
           onIsActiveChange={setEditIsActive}
         />
       </FormDialog>
+
+      {/* T-254 — sessions, and the refresh-replay marker on each */}
+      <UserSessionsDialog
+        open={sessionsFor !== null}
+        onClose={() => setSessionsFor(null)}
+        userId={sessionsFor?.id ?? null}
+        username={sessionsFor?.display_name ?? sessionsFor?.username ?? ""}
+      />
 
       {/* Delete confirm */}
       <ConfirmDialog

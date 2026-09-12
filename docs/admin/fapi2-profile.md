@@ -61,9 +61,10 @@ is a well-formed patch and a completely broken client; it is refused.
 | Strict `redirect_uri` equality | already global — exact match, no prefixes, no wildcards |
 | Authorization code single-use | already global, and guaranteed rather than intended: a guarded update inside a transaction plus a post-commit nonce read-back |
 | EdDSA only, never `none` | already global — hard-coded at encode and decode |
+| A rotated refresh token stays redeemable for 60 seconds | **`fapi2` only** — see [The refresh-rotation grace window](#the-refresh-rotation-grace-window) below |
 
 Seven of those were already true for every AXIAM client. The profile adds the
-first four and refuses to let the others be relaxed.
+first four, adds the refresh grace, and refuses to let the others be relaxed.
 
 ### Two onboarding paths, and how to choose
 
@@ -543,6 +544,96 @@ copies of the same credential, which is strictly weaker than either alone.
 
 ---
 
+## The refresh-rotation grace window
+
+**This is the one behaviour on this page that makes AXIAM *more* permissive on
+`fapi2` than off it, and it is the reason it is confined to `fapi2`.**
+
+FAPI 2.0 Security Profile §5.3.2.1-9 requires an authorization server that
+rotates refresh tokens to keep accepting the previous one for a short period
+after issuing its successor. It exists for one case: a client that never
+received the rotation response. A dropped connection after the server committed
+the write leaves that client holding a token the server has destroyed, with no
+replacement and nothing to do but start a whole new authorization.
+
+So for a client registered `profile: fapi2`, rotation **supersedes** rather than
+revokes. The previous refresh token's expiry is brought forward to **60 seconds**
+from the rotation, and inside that window presenting it again is answered `200`
+and rotates again.
+
+### What every other client does
+
+The predecessor is **revoked** at rotation. A second presentation is answered:
+
+```json
+HTTP/1.1 400 Bad Request
+
+{ "error": "invalid_grant",
+  "error_description": "refresh token already consumed" }
+```
+
+That is what AXIAM has always done, and what it does again. Between 1.0.0-beta13
+and 2026-09-12 the grace applied to every profile, which was a defect: the
+profile that *requires* the window also sender-constrains every token, so
+replaying a `fapi2` refresh token inside it needs the client's private key as
+well as the token. On `standard` the refresh token *is* the credential, and the
+same sixty seconds was a replay window the server could not tell from an honest
+retry. See [`claude_dev/t254-refresh-grace-decision.md`](../../claude_dev/t254-refresh-grace-decision.md).
+
+**The registration decides, never the request.** There is no header, parameter
+or grant shape that buys a client a grace window, and turning on DPoP or
+certificate binding without the profile does not buy one either. Sixty seconds
+is not configurable: shortening it below the profile's floor would silently stop
+conforming, and lengthening it would widen the window for every tenant at once.
+
+### The replay marker
+
+Whichever way it is answered, a refresh token presented **after** it has been
+rotated is recorded. Nothing is silent, on either profile.
+
+**In the audit log**, under its own action:
+
+```
+GET /api/v1/audit-logs?action=oauth2.refresh_token_replayed
+```
+
+Each row names the client, its profile, the session, and a `disposition` of
+either `accepted_under_fapi_grace` or `refused`. It never carries the refresh
+token or its digest.
+
+**On the session**, as two counters an administrator can read directly:
+
+```
+GET /api/v1/users/{user_id}/sessions
+```
+
+| Field | Means |
+|---|---|
+| `refresh_replay_verdict` | `none`, `fapi_grace_retry`, or `refused` — derived, and a refusal outranks any number of accepted retries |
+| `refresh_replay_grace_accepted` | replays served under the FAPI window. Only ever non-zero for a `fapi2` client |
+| `refresh_replay_refused` | replays refused. Nothing a conformant client does |
+| `refresh_replay_at` | when the last one arrived |
+
+The admin UI shows the same thing on the **Sessions** action of any row in
+*Users*: an amber "FAPI grace retry" badge or a red "Replay refused" one.
+
+### How to read them
+
+- **`fapi_grace_retry` on a `fapi2` client, occasionally.** The mechanism
+  working. A client on a lossy link retried a rotation whose response it never
+  saw. Worth watching if the rate climbs — that is a network problem, or a
+  client that is not storing the new token before using it.
+- **`refused`, on any profile.** A rotated refresh token was presented with no
+  window to accept it in. Nothing a conformant client does. Either a client is
+  reusing a token it should have replaced (a bug, and it will be failing every
+  refresh), or a token has leaked and something else is using it. Check the
+  audit rows for the client id, then revoke the family — a password reset or
+  `POST /api/v1/auth/logout-all` does that.
+
+Alert on `refused`. `fapi_grace_retry` is a rate to watch, not a page.
+
+---
+
 ## RFC 9207 `iss` — on by default, for everybody
 
 Every authorization response now carries an `iss` parameter naming the issuer,
@@ -570,7 +661,14 @@ have their own sections above. What remains out of scope:
   responses). A separate optional OIDF certification; `response_mode=jwt` is not
   accepted.
 - **Certificate-bound or DPoP-bound *refresh* tokens.** Only access tokens carry
-  `cnf`.
+  `cnf`. The refresh token is protected instead by being opaque, server-stored
+  and single-use with rotation — and, inside the grace window above, by the
+  client authentication the token request itself has to pass, which on this
+  profile is mTLS or `private_key_jwt`.
+- **Reuse detection inside the grace window** — revoking the whole family when a
+  superseded token is presented after its successor has itself been used. The
+  window is already gated behind the client's private key; a replay in it is
+  marked and audited, not acted on automatically.
 - **Sender-constrained token exchange.** An RFC 8693 exchange deliberately does
   not inherit or mint a `cnf`: the exchanging client is a different party from
   the subject, so copying the constraint would bind the new token to a key its

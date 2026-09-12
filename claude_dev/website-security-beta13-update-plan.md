@@ -11,13 +11,17 @@
 > **The headline.** Two releases — beta12 and beta13 — carried the OpenID Connect
 > **Basic OP** programme (waves W1–W9 of [`basic-op-gap-plan.md`](basic-op-gap-plan.md))
 > and the first runs of the OpenID Foundation's conformance suite against a live
-> AXIAM. The Threat Dragon model is at **2.12.0 — 266 threats, 249 mitigated /
-> 17 open**, with a tenth element on the OAuth2 diagram; the generated files under
+> AXIAM. The Threat Dragon model is at **2.12.1 — 266 threats, 250 mitigated /
+> 16 open**, with a tenth element on the OAuth2 diagram; the generated files under
 > `website/src/` still render **236 / 220 / 16**, the Security prose is at
 > `1.0.0-beta11`, and `SECURITY_VERIFIED_RELEASE` says so. The OAuth2 Docs pages
 > describe an authorization server that could not answer an anonymous browser,
 > a UserInfo endpoint that answered only GET, and a refresh token that was
-> refused on second use. This pass closes that gap.
+> refused on second use. This pass closes that gap. Note that the refresh
+> behaviour has moved twice: beta13 made rotation supersede for every profile,
+> and the T-254 decision of 2026-09-12 confined that to `fapi2` — so the Docs
+> pages are right again for a `standard` client, and wrong only in not saying
+> that a `fapi2` client is different and that a replay is now audited.
 
 **Sources of truth, in order.** [`threat-modeling-and-security.md`](threat-modeling-and-security.md)
 (the website section's source, current as of 2026-09-12 — its handoff block
@@ -44,7 +48,7 @@ documents do not**.
 | beta13 | **W6** `POST /oauth2/userinfo` (RFC 6750 §2.2 body carrier; two carriers refused; query never read); `POST /oauth2/authorize` declined with a revisit condition | T-243 |
 | beta13 | **W7** `address` and `phone` scopes behind four gates re-asked at every UserInfo call; userinfo-only release; `sensitive_scopes_enabled` (org, disable-only); consent screen at `/consent` in five languages; Art. 7 self-service `GET /api/v1/account/consents`, `POST`/`DELETE …/oidc-scopes`; SCIM `phoneNumbers`/`addresses`; discovery `?tenant_id`; erasure and export name the new columns; schema v57; `gdpr-compliance.md` §3.1 | T-241, T-261 |
 | beta13 | **W8** `client_secret_basic` accepted server-side, decoded per RFC 6749 §2.3.1, header kept out of logs, registration decides the channel; contract 1.41 (§5 rule 3 rationale only); `docs/admin/fapi2-profile.md` "accepted, and not recommended" | T-253, T-266 |
-| beta13 | **W9 and the conformance runs** (2026-09-08, 09-10, 09-11): the identity cache laundering a bound token into a bearer one (**the hole**); ID token stripped of `tenant_id`/`org_id`/`email`; UserInfo emitting `email_verified`, the names, then the full §5.1 `profile` set; RFC 6749 §10.5 code-replay revocation reachable; FAPI 60-second code cap per client; PAR inline parameters ignored not refused; pushed `request_uri` refused; PAR errors as JSON; `private_key_jwt` wired (FAPI `aud` = issuer string only); `client_id` optional beside an assertion; DN compared against both correct renderings; `sid` on OAuth2 access tokens; discovery endpoint URLs carry the tenant (`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`); two RFC 8414 members; DPoP `dpop_jkt` binding (schema v58); DPoP `jti` single-use at resource endpoints; `htu` canonical comparison; `error_description` NQSCHAR; authorization errors by redirect when registered, HTML on explicit `Accept: text/html`; `claims` parameter honoured (`userinfo` member; schema v59); a Cancel that yields `access_denied`; refresh rotation **supersedes** with a 60-second grace | T-242, T-244, T-246…T-252, T-255, T-256, T-259; T-254 **open**; T-37, T-58, T-172 amended |
+| beta13 | **W9 and the conformance runs** (2026-09-08, 09-10, 09-11): the identity cache laundering a bound token into a bearer one (**the hole**); ID token stripped of `tenant_id`/`org_id`/`email`; UserInfo emitting `email_verified`, the names, then the full §5.1 `profile` set; RFC 6749 §10.5 code-replay revocation reachable; FAPI 60-second code cap per client; PAR inline parameters ignored not refused; pushed `request_uri` refused; PAR errors as JSON; `private_key_jwt` wired (FAPI `aud` = issuer string only); `client_id` optional beside an assertion; DN compared against both correct renderings; `sid` on OAuth2 access tokens; discovery endpoint URLs carry the tenant (`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`); two RFC 8414 members; DPoP `dpop_jkt` binding (schema v58); DPoP `jti` single-use at resource endpoints; `htu` canonical comparison; `error_description` NQSCHAR; authorization errors by redirect when registered, HTML on explicit `Accept: text/html`; `claims` parameter honoured (`userinfo` member; schema v59); a Cancel that yields `access_denied`; refresh rotation **supersedes** with a 60-second grace | T-242, T-244, T-246…T-252, T-255, T-256, T-259; T-254 opened then **closed** by the 2026-09-12 decision (grace confined to `fapi2`, every replay marked and audited); T-37, T-58, T-172 amended |
 | beta13 | `self_signed_tls_client_auth` can complete a handshake: `AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed`, `CertTrust` carried to every consumer, device auth refuses a self-asserted certificate, `tls_client_auth` requires a chain | T-263; T-166 amended |
 | beta13 | A Vault CA bundle that parses to no certificates is refused at startup, naming the file | T-264 |
 | beta13 | Contended SurrealDB writes retried through `retry_on_write_conflict`; the v3 conflict phrasing recognised by the single-use consume guard; `DbError::Conflict` | T-262; T-163, T-164 amended |
@@ -54,10 +58,13 @@ documents do not**.
 | beta13 | Conformance receipts: `docs/conformance/` — four plans, 165 modules, zero `FAILED` on 2026-09-11; `REVIEW`/`WARNING` published, not counted as passes; not a submission | Compliance row |
 
 Seven existing entries gained clauses: T-37, T-58, T-163, T-164, T-166, T-172,
-T-236. The open register gains **T-254** (Medium, accepted trade-off) and loses
-nothing, so it is 17. AXIAM's own request path still carries **no open Critical
-or High** finding — keep that sentence, and keep the new sentence after it that
-names T-254 as the one Medium.
+T-236. The open register **neither gains nor loses**, so it is 16: T-254 entered
+it at beta13 and left it on 2026-09-12, closed by the maintainer's decision that
+confines the FAPI 2.0 grace window to the `fapi2` profile and makes every
+presentation of a rotated refresh token marked on its session and audited as
+`oauth2.refresh_token_replayed`. AXIAM's own request path therefore carries
+**no open finding at all** — the sentence after "no open Critical or High" now
+says that, and no longer names a Medium.
 
 ## 2. Ground rules (unchanged; they are why the pass has value)
 
@@ -73,11 +80,13 @@ names T-254 as the one Medium.
   backed by code, a commit or a conformance receipt this pass verified. Copy its
   prose; do not improve it.
 - **Keep the shared-responsibility section**, and keep the open register
-  generated. T-254 is new there and is *AXIAM's* trade-off, not a deployment
-  responsibility — it belongs under **Accepted, documented trade-offs**, where
-  the source document put it, not under Platform & operations. The one new
-  Integration bullet (audit ingress logs before `client_secret_basic`) *is* an
-  integrator responsibility.
+  generated. T-254 does **not** appear in it: it was closed before this pass
+  ran. Its **Accepted, documented trade-offs** bullet stays, rewritten to the
+  post-decision shape the source document now carries — the grace applies to
+  `fapi2` only, every other client has its predecessor revoked at rotation, and
+  a replay is marked and audited either way. The one new Integration bullet
+  (audit ingress logs before `client_secret_basic`) *is* an integrator
+  responsibility.
 - **Mirror, do not paraphrase.** `src/security.ts` mirrors the Markdown section
   for section; the three bullets whose bold markers deliberately differ stay as
   they are, for the reason recorded in the handoff block.
@@ -96,7 +105,7 @@ names T-254 as the one Medium.
 |---|---|---|
 | Security stamp | `website/src/version.ts` | `SECURITY_VERIFIED_RELEASE = "1.0.0-beta11"`, `SECURITY_VERIFIED_DATE = "2026-09-04"` |
 | Docs stamp | `website/src/version.ts` | `DOCS_VERIFIED_RELEASE = "1.0.0-beta11"` |
-| Generated model | `website/src/threatModel.ts`, `threatModelSummary.ts` | 236 threats / 220 / 16, model 2.11.0 — `node scripts/gen-threat-model.mjs` was run against 2.12.0 in this pass and printed `threatModel.ts: 9 diagrams, 266 threats (249 mitigated, 17 open)`, then **reverted** so the generated files and the prose move together |
+| Generated model | `website/src/threatModel.ts`, `threatModelSummary.ts` | 236 threats / 220 / 16, model 2.11.0 — `node scripts/gen-threat-model.mjs` was run against 2.12.1 (the T-254 decision) and printed `threatModel.ts: 9 diagrams, 266 threats (250 mitigated, 16 open)`, then **reverted** so the generated files and the prose move together |
 | Security prose | `website/src/security.ts` | At beta11: nothing on the login hop, the honour lane, the sensitive scopes, `POST /oauth2/userinfo`, the conformance runs, the identity-cache hole, the resource-endpoint DPoP replay, the code-replay revocation, `client_secret_basic`, the self-signed listener policy, the grace window, or the Vault CA bundle |
 | Contract anchors | `website/src/contractAnchors.ts` | `CONTRACT_VERSION = "1.39"` — behind `sdks/CONTRACT.md`, which moved to **1.42** (1.40 §21.3 rule 2; 1.41 §5 rule 3 rationale; 1.42 §21.5 discovery members); `gen:contract-anchors` will produce a diff |
 | API index | `website/src/apiIndex.ts` | 213 operations / 148 paths — behind `sdks/openapi.json`, now **217 / 151**: `POST /oauth2/userinfo`, and the three consent paths `GET /api/v1/account/consents`, `POST`/`DELETE /api/v1/account/consents/oidc-scopes`, `DELETE …/oidc-scopes/{client_id}` |
@@ -106,9 +115,10 @@ names T-254 as the one Medium.
 
 The explorer (`src/components/ThreatModelExplorer.tsx`) needs no functional
 change. The OAuth2 diagram is the one to open first in the built site: it has a
-new node and two new flows, and it now carries 47 threats and one open item, so
-the open-only filter on diagram 2 (`#/security/diagram/2`) must show exactly
-T-254.
+new node and two new flows, and it now carries 47 threats and **no** open item,
+so the open-only filter on diagram 2 (`#/security/diagram/2`) must show an empty
+list. T-254 is on that diagram and is Mitigated; the filter finding it would mean
+the model was regenerated from a stale JSON.
 
 ## 4. Wave 0 — regenerate
 
@@ -116,7 +126,7 @@ Run from `website/`, in this order, and commit the generated files together with
 the prose that describes them (Wave 1), never alone:
 
 ```sh
-npm run gen:threat-model     # expect: threatModel.ts: 9 diagrams, 266 threats (249 mitigated, 17 open)
+npm run gen:threat-model     # expect: threatModel.ts: 9 diagrams, 266 threats (250 mitigated, 16 open)
 npm run gen:api-index        # expect: POST /oauth2/userinfo, and the three consent paths — 217 operations / 151 paths
 npm run gen:contract-anchors # expect: CONTRACT_VERSION 1.39 → 1.42, and the §21.3 / §21.5 anchors if the generator emits them
 ```
@@ -136,9 +146,9 @@ section. The table below is the checklist; the Markdown is the text.
 | `security.ts` section | Change |
 |---|---|
 | Security at a glance | "STRIDE threat model of **266** threats"; the closing sentence gains "and run against the OpenID Foundation's conformance suite, with the receipts published green and red alike" |
-| The threat model | Table: 266 threats, 249 / 17. Coverage by area, STRIDE category and severity are generated — confirm the page renders 266 / 17, OAuth2 47 / 1, and that the area rows match §Appendix A. The paragraph after the area table gains the T-254 sentence ("Its one open item is a Medium recorded as an accepted trade-off…") |
-| Trust boundaries | The **Public Internet ↔ AXIAM** row's third column gains the OP-session-cookie clause. The assets table's **Refresh tokens & sessions** row reads "single-use rotation with a 60-second grace after rotation" |
-| Authentication & sessions | The **Tokens** bullet's rotation sentence is replaced by the grace-clock sentence (three sentences, ending "…the ways to close it are decisions the register names") |
+| The threat model | Table: 266 threats, 250 / 16. Coverage by area, STRIDE category and severity are generated — confirm the page renders 266 / 16, OAuth2 47 / 0, and that the area rows match §Appendix A. The paragraph after the area table now ends "carries **no open finding at all**", followed by the T-254 sentence in its closed form ("The one it briefly carried … was recorded open at 1.0.0-beta13 rather than absorbed and then closed by a decision…") |
+| Trust boundaries | The **Public Internet ↔ AXIAM** row's third column gains the OP-session-cookie clause. The assets table's **Refresh tokens & sessions** row reads "single-use rotation; a 60-second grace after rotation for FAPI 2.0 clients only, and any presentation after rotation is marked and audited" |
+| Authentication & sessions | The **Tokens** bullet's rotation sentence is replaced by the post-T-254 version: the rotated token is revoked and a second presentation refused; a FAPI 2.0 client is the exception and gets the 60-second grace clock, affordable there because every token is bound to a key the client must also hold; and a refresh token presented after rotation is counted on its session and audited as `oauth2.refresh_token_replayed`, never carrying the token itself |
 | OAuth2 & OpenID Connect | The intro paragraph gains the conformance-suite sentences (zero `FAILED`, self-run, `REVIEW`/`WARNING` not passes). The **Clients can authenticate without a copyable secret** bullet gains the `dpop_jkt`, self-signed-certificate and `mtls_endpoint_aliases` sentences. **Six new bullets** in this order: *A bound token is checked against this request, every time*; *Relying parties reach a sign-in page, and only the ones that opted in*; *A parameter AXIAM will not honour is refused, never silently dropped*; *Sensitive claims sit behind four gates, re-asked on every call*; *Discovery describes a tenant without enumerating tenants*; *Basic client authentication is accepted, and not recommended* |
 | Federation (SAML & OIDC) | The **OIDC federation** bullet gains the upstream-`auth_time` sentence |
 | PKI, certificates & device identity | The **mTLS device authentication** bullet gains the "certificate the listener admitted *without* a chain … is refused here outright" sentence |
@@ -162,8 +172,8 @@ first: `docs/admin/browser-login-hop.md` and `docs/admin/oidc-authn-parameters.m
 
 | Page (slug) | What to add or correct | Source |
 |---|---|---|
-| `oauth2` | **The endpoint table**: `/oauth2/userinfo` is `GET` *and* `POST` (header or, on POST only, form-body token; two carriers refused; query never read). **Token lifetimes table**: refresh token "single-use, rotating on every refresh" becomes "rotating on every refresh; the previous token stays redeemable for 60 seconds after rotation (FAPI 2.0 §5.3.2.1-9), then expires" — and link the open item T-254; authorization code "10 minutes" gains "60 seconds on a `fapi2` client". **The flow walkthrough**: a code used twice now revokes the session it minted (RFC 6749 §10.5), and the retry-after-lost-response cost is stated. **Tokens paragraph**: access tokens issued by the code and refresh grants carry `sid`, the same session the ID token names — a reset revokes them. **A new section, *Signing in from a relying party***: `browser_sso` per client (default off), what the three anonymous answers are, the `axiam_op_session` cookie's attributes and why `Lax`, `return_to` validation, the loop bound, `tenant_id` on the anonymous request; link `docs/admin/browser-login-hop.md`. **A new section, *Authentication-request parameters***: `authn_request_params` `ignore`/`honour`, what each of the five security-bearing parameters does on the honour lane, that `fapi2` refuses them, that request objects are rejected (`request_not_supported`, `request_uri_not_supported`), the four cosmetic parameters and that `login_hint` is never looked up; link `docs/admin/oidc-authn-parameters.md`. **A new section, *The `address` and `phone` scopes***: the four gates, userinfo-only, re-asked per call, the consent screen at `/consent`, the self-service consent endpoints, `sensitive_scopes_enabled`; link `docs/compliance/gdpr-compliance.md` §3.1. **Discovery**: optional `?tenant_id=`, endpoint URLs carry the tenant, `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` states a fact and changes no endpoint; `mtls_endpoint_aliases` when `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` is set; `claims_parameter_supported: true` and the `userinfo` member honoured. **Errors**: delivered by redirect with `state` when the client and `redirect_uri` are registered; a page only on `Accept: text/html`; `error_description` is ASCII (`§` becomes "section") | `docs/admin/browser-login-hop.md`; `docs/admin/oidc-authn-parameters.md`; `docs/compliance/oidc-conformance.md` rows 23–154; `docs/compliance/gdpr-compliance.md` §3.1; commits `cdfe000`, `318db2a`, `02b41cd`, `5de8df7`, `16d646a`, `065f37c`, `a76161b`, `b9232f3`, `49916b4`; T-237…T-244, T-249, T-250, T-254, T-255 |
-| `fapi2` | **Client authentication**: `client_secret_basic` is a fifth method, accepted and not recommended, refused on `fapi2` exactly as `client_secret_post`; the registration decides the channel (body secret on a Basic client → `invalid_request`; Basic header on a post client ignored with a `warn`); AXIAM's SDKs never send it. **`private_key_jwt`**: now works (it was never wired), `aud` must be the issuer identifier as a string on a `fapi2` client — an array is refused even when it contains the issuer; `client_id` may be omitted beside the assertion. **`tls_client_auth`**: the registered DN may be either the `openssl -nameopt rfc2253` rendering or the encoded-order one — exact match against both. **`self_signed_tls_client_auth`**: needs `AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed` on the listener; what that policy admits and what it never admits (device auth, `tls_client_auth`). **DPoP**: `dpop_jkt` on PAR or the plain request, or a `DPoP` header on the PAR request; mismatch → `invalid_dpop_proof`; a code bound to a key the caller cannot prove → `invalid_grant`; proofs are single-use at the resource endpoints too; `htu` compared in canonical form. **Authorization code lifetime** capped at 60 s on `fapi2`. **Refresh rotation grace** of 60 s, required by §5.3.2.1-9, and why the profile can afford it. **Conformance**: link `docs/conformance/README.md` and state the 2026-09-11 result exactly as §2 words it | `docs/admin/fapi2-profile.md`; `docs/conformance/README.md`; commits `57016c9`, `fb7956f`, `62284e2`, `2d4cb59`, `246c163`, `4b737e7`, `28ffdcf`; T-247, T-251…T-254, T-263 |
+| `oauth2` | **The endpoint table**: `/oauth2/userinfo` is `GET` *and* `POST` (header or, on POST only, form-body token; two carriers refused; query never read). **Token lifetimes table**: refresh token "single-use, rotating on every refresh" becomes "single-use, rotating on every refresh — the predecessor is revoked and a second presentation refused; on a `fapi2` client it instead stays redeemable for 60 seconds after rotation (FAPI 2.0 §5.3.2.1-9), then expires. A refresh token presented after rotation is audited as `oauth2.refresh_token_replayed` either way" — link the closed item T-254, not an open one; authorization code "10 minutes" gains "60 seconds on a `fapi2` client". **The flow walkthrough**: a code used twice now revokes the session it minted (RFC 6749 §10.5), and the retry-after-lost-response cost is stated. **Tokens paragraph**: access tokens issued by the code and refresh grants carry `sid`, the same session the ID token names — a reset revokes them. **A new section, *Signing in from a relying party***: `browser_sso` per client (default off), what the three anonymous answers are, the `axiam_op_session` cookie's attributes and why `Lax`, `return_to` validation, the loop bound, `tenant_id` on the anonymous request; link `docs/admin/browser-login-hop.md`. **A new section, *Authentication-request parameters***: `authn_request_params` `ignore`/`honour`, what each of the five security-bearing parameters does on the honour lane, that `fapi2` refuses them, that request objects are rejected (`request_not_supported`, `request_uri_not_supported`), the four cosmetic parameters and that `login_hint` is never looked up; link `docs/admin/oidc-authn-parameters.md`. **A new section, *The `address` and `phone` scopes***: the four gates, userinfo-only, re-asked per call, the consent screen at `/consent`, the self-service consent endpoints, `sensitive_scopes_enabled`; link `docs/compliance/gdpr-compliance.md` §3.1. **Discovery**: optional `?tenant_id=`, endpoint URLs carry the tenant, `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` states a fact and changes no endpoint; `mtls_endpoint_aliases` when `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` is set; `claims_parameter_supported: true` and the `userinfo` member honoured. **Errors**: delivered by redirect with `state` when the client and `redirect_uri` are registered; a page only on `Accept: text/html`; `error_description` is ASCII (`§` becomes "section") | `docs/admin/browser-login-hop.md`; `docs/admin/oidc-authn-parameters.md`; `docs/compliance/oidc-conformance.md` rows 23–154; `docs/compliance/gdpr-compliance.md` §3.1; commits `cdfe000`, `318db2a`, `02b41cd`, `5de8df7`, `16d646a`, `065f37c`, `a76161b`, `b9232f3`, `49916b4`; T-237…T-244, T-249, T-250, T-254, T-255 |
+| `fapi2` | **Client authentication**: `client_secret_basic` is a fifth method, accepted and not recommended, refused on `fapi2` exactly as `client_secret_post`; the registration decides the channel (body secret on a Basic client → `invalid_request`; Basic header on a post client ignored with a `warn`); AXIAM's SDKs never send it. **`private_key_jwt`**: now works (it was never wired), `aud` must be the issuer identifier as a string on a `fapi2` client — an array is refused even when it contains the issuer; `client_id` may be omitted beside the assertion. **`tls_client_auth`**: the registered DN may be either the `openssl -nameopt rfc2253` rendering or the encoded-order one — exact match against both. **`self_signed_tls_client_auth`**: needs `AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed` on the listener; what that policy admits and what it never admits (device auth, `tls_client_auth`). **DPoP**: `dpop_jkt` on PAR or the plain request, or a `DPoP` header on the PAR request; mismatch → `invalid_dpop_proof`; a code bound to a key the caller cannot prove → `invalid_grant`; proofs are single-use at the resource endpoints too; `htu` compared in canonical form. **Authorization code lifetime** capped at 60 s on `fapi2`. **Refresh rotation grace** of 60 s, required by §5.3.2.1-9, why the profile can afford it (every token is sender-constrained), and that it is a `fapi2` behaviour only — every other client has its predecessor revoked at rotation (T-254). Say that a rotated refresh token presented again is marked on its session and audited as `oauth2.refresh_token_replayed` whichever way it is answered. **Conformance**: link `docs/conformance/README.md` and state the 2026-09-11 result exactly as §2 words it | `docs/admin/fapi2-profile.md`; `docs/conformance/README.md`; commits `57016c9`, `fb7956f`, `62284e2`, `2d4cb59`, `246c163`, `4b737e7`, `28ffdcf`; T-247, T-251…T-254, T-263 |
 | `par` | **The page is wrong on one point and says it three times**: "the server **refuses** a request that mixes inline parameters with `request_uri`" (the two-parameters callout and the `fapi2` paragraph, and the `require_par` sentence on the `fapi2` page). Since `a76161b` inline parameters beside a `request_uri` are **ignored**, not refused — RFC 9101 §6.3 says the server MUST only use the request object's parameters, and RFC 9126 §4 never said to refuse. Rewrite all three: "the server reads only the pushed copy; anything sent inline beside `request_uri` is ignored, so it cannot be confused with the pushed value" — and keep the security argument, which is unchanged. A `require_par` client that sends *no* `request_uri` is still refused. Then: a pushed `request_uri` is refused; PAR errors are JSON; `dpop_jkt` rides the pushed copy; a `request_uri` that expires during a login hop answers `invalid_request_uri` on the return leg | `a76161b`, `065f37c`, `246c163`, `cdfe000`; T-238, T-251, T-256 |
 | `logout` | `end_session` also clears the OP session cookie; the `sid` sentence gains "and the access tokens the code and refresh grants issue carry the same `sid`" | `cdfe000`, `49916b4` |
 | `auth` | The session-cookie paragraph: a fourth cookie, `axiam_op_session`, exists for the authorization endpoint only, `SameSite=Lax` by necessity, `Secure` unconditionally — the three API cookies stay `Strict`. Authentication evidence (`authenticated_at`, `amr`) is recorded at sign-in and copied across refresh | `cdfe000`, `b9f5cbf`, `97acce9`; T-237, T-240 |
@@ -199,9 +209,11 @@ Pages **not** to touch for this pass: `opaque`, `mfa`, `passkeys`,
   ([T-246](#/security/diagram/2/T-246)) and the resource-endpoint replay
   ([T-247](#/security/diagram/2/T-247)) plainly — the point of publishing
   receipts is that the reader learns it from us. One paragraph on the model:
-  266 threats, 249 / 17, and that the one new open item is AXIAM's own
-  trade-off ([T-254](#/security/diagram/2/T-254)), recorded rather than
-  absorbed. Every anchor checked against the generated model. Keep the beta
+  266 threats, 250 / 16, and that the one item the wave opened on AXIAM's own
+  request path ([T-254](#/security/diagram/2/T-254)) was recorded rather than
+  absorbed and then closed by a decision in the same release — the FAPI 2.0
+  refresh grace confined to the profile that requires it, and every replay
+  marked and audited. Every anchor checked against the generated model. Keep the beta
   caution in the post's own words.
 - **Roadmap.** Phase 20 stays `ongoing`. Extend its `focus` with "the OpenID
   Connect Basic OP surface and the first OpenID Foundation conformance runs".
@@ -240,14 +252,16 @@ cd .. && scripts/check-doc-links.sh
 
 `docSectionsAreComplete()` in `website/src/docs/index.ts` asserts navigation and
 content agree; the build runs it. Open `#/security/diagram/2` in the built site
-with the open-only filter and confirm exactly T-254; open
-`#/security/diagram/2/T-246` and confirm it selects the new node.
+with the open-only filter and confirm it is **empty** — T-254 closed, and no
+other OAuth2 threat is open; open `#/security/diagram/2/T-246` and confirm it
+selects the new node.
 
 ## 10. Out of scope
 
-- Server work: the decision T-254 waits on (in-window reuse detection, or
-  grace confined to sender-constrained clients) is the maintainer's, not this
-  pass's. The website says the item is open and why.
+- Server work: the T-254 decision (grace confined to the `fapi2` profile, and
+  every replay marked and audited) was taken and implemented on 2026-09-12,
+  before this pass. Nothing here re-opens it; the website says the item is
+  closed and how.
 - A conformance *submission*. The receipts are self-run; the website must not
   say or imply otherwise.
 - The eleven SDK repositories' own documentation of contract 1.40–1.42.
@@ -255,15 +269,15 @@ with the open-only filter and confirm exactly T-254; open
 
 ---
 
-## Appendix A — the numbers (model 2.12.0, 2026-09-12)
+## Appendix A — the numbers (model 2.12.1, 2026-09-12)
 
-Headline: **266 threats, 249 mitigated / 17 open**, 9 diagrams, `threatTop` 266.
+Headline: **266 threats, 250 mitigated / 16 open**, 9 diagrams, `threatTop` 266.
 
 | Area | Threats | Open |
 |---|---|---|
 | System context | 31 | 2 |
 | Authentication & session management | 33 | 1 |
-| OAuth2 / OIDC authorization server | 47 | 1 |
+| OAuth2 / OIDC authorization server | 47 | 0 |
 | Federation (SAML SP & OIDC RP) | 31 | 1 |
 | Authorization engine (RBAC, hierarchy, scopes) | 26 | 0 |
 | PKI, certificates & IoT device identity | 25 | 1 |
@@ -271,11 +285,11 @@ Headline: **266 threats, 249 mitigated / 17 open**, 9 diagrams, `threatTop` 266.
 | Deployment & platform (Kubernetes) | 27 | 5 |
 | Client SDKs & admin-UI integration surface | 28 | 4 |
 
-By STRIDE category: Spoofing 66 (4 open), Tampering 57 (1), Repudiation 6 (0),
+By STRIDE category: Spoofing 66 (3 open), Tampering 57 (1), Repudiation 6 (0),
 Information disclosure 65 (7), Denial of service 24 (2), Elevation of
 privilege 48 (3). By severity: Critical 30 (1 open), High 122 (8), Medium 106
-(7), Low 8 (1). The open items are T-148, T-18, T-94, T-124, T-133, T-135,
-T-146, T-180, T-216, T-9, T-39, T-110, T-123, T-134, T-143, T-254, T-161. Every
+(6), Low 8 (1). The open items are T-148, T-18, T-94, T-124, T-133, T-135,
+T-146, T-180, T-216, T-9, T-39, T-110, T-123, T-134, T-143, T-161. Every
 one of these numbers is emitted by the generator; they are here so a wrong
 regeneration is noticed, not so they can be typed in.
 

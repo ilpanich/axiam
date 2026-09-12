@@ -182,6 +182,7 @@ pub type TokenServiceT<C> = TokenService<
     SurrealUserRepository<C>,
     SurrealServiceAccountRepository<C>,
     SurrealSessionRepository<C>,
+    SurrealAuditLogRepository<C>,
 >;
 
 /// B2 — the device-authorization grant's own service. Separate from
@@ -610,6 +611,10 @@ impl<C: Connection + Clone> AppState<C> {
             // on the honour lane, where OIDC Core §12.2 requires `auth_time`
             // to equal the original's.
             session_repo.clone(),
+            // T-254: where a refresh-token replay is recorded. The detection
+            // is at the token endpoint, so the audit row is written there too
+            // rather than reported outward for the REST layer to write.
+            SurrealAuditLogRepository::new(db.clone()),
             auth_config.clone(),
             2_592_000,
         );

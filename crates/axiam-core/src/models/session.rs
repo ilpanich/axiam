@@ -216,6 +216,83 @@ pub struct Session {
     /// alone.
     #[serde(default)]
     pub browser_token_hash: Option<String>,
+    /// T-254 — when a refresh token belonging to this session was last
+    /// presented *after* it had already been rotated.
+    ///
+    /// `None` on every session that has never seen one, which is every session
+    /// in an untroubled deployment and every row written before schema v60.
+    #[serde(default)]
+    pub refresh_replay_at: Option<DateTime<Utc>>,
+    /// T-254 — how many such presentations were **accepted** under the FAPI
+    /// 2.0 §5.3.2.1-9 grace window.
+    ///
+    /// Only ever non-zero for a client registered `profile: fapi2`: no other
+    /// client has a grace window to be accepted under. Expected to be small
+    /// and benign — it is what a client retrying a rotation whose response it
+    /// lost produces — which is exactly why it is counted separately from the
+    /// refusals rather than folded in with them.
+    #[serde(default)]
+    pub refresh_replay_grace_accepted: u32,
+    /// T-254 — how many such presentations were **refused**.
+    ///
+    /// A refusal means the token had already been rotated and there was no
+    /// window to accept it in: the client is on the `standard` profile, or the
+    /// FAPI grace had run out. Nothing legitimate produces one, so any
+    /// non-zero value here is worth an operator's attention.
+    #[serde(default)]
+    pub refresh_replay_refused: u32,
+}
+
+/// What an operator should read into a session's refresh-replay counters
+/// (T-254).
+///
+/// Derived rather than stored, so it cannot drift from the counters it
+/// summarises. Its whole job is the "at a glance" distinction the T-254
+/// decision asks for: a FAPI client retrying a lost rotation looks nothing
+/// like a rotated token being presented where no window exists to accept it,
+/// and an operator scanning a session list must not have to compare two
+/// numbers to tell them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefreshReplayVerdict {
+    /// No refresh token of this session has ever been presented after
+    /// rotation.
+    None,
+    /// Every replay this session saw was accepted under the FAPI 2.0 grace
+    /// window. Informational: this is the retry the window exists for.
+    FapiGraceRetry,
+    /// At least one replay was refused. A rotated token was presented with no
+    /// window to accept it in — nothing a conformant client does.
+    Refused,
+}
+
+impl RefreshReplayVerdict {
+    /// The wire spelling, which is what the admin API emits and the admin UI
+    /// switches on.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::FapiGraceRetry => "fapi_grace_retry",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+impl Session {
+    /// The T-254 badge for this session — see [`RefreshReplayVerdict`].
+    ///
+    /// A refusal outranks an accepted grace retry however the two counts
+    /// compare: one refused replay is a security event, and a hundred honest
+    /// retries alongside it do not make it less of one.
+    pub const fn refresh_replay_verdict(&self) -> RefreshReplayVerdict {
+        if self.refresh_replay_refused > 0 {
+            RefreshReplayVerdict::Refused
+        } else if self.refresh_replay_grace_accepted > 0 {
+            RefreshReplayVerdict::FapiGraceRetry
+        } else {
+            RefreshReplayVerdict::None
+        }
+    }
 }
 
 /// Serde fallback for [`Session::authenticated_at`] on a payload that predates

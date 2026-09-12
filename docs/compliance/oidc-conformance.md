@@ -431,6 +431,25 @@ defects that had to be fixed before a single module executed, is in
 | 153 | `userinfo_endpoint`, `jwks_uri` and `issuer` stay **bare**: UserInfo resolves its tenant from the bearer token, a JWKS is deployment-wide, and an `issuer` carrying a query would stop matching the `iss` of every token AXIAM mints | OIDC Discovery §4.3 | Pass | `oidc.rs::userinfo_jwks_and_the_issuer_stay_bare` |
 | 154 | A deployment that names no default tenant serves the document it served before row 152 — no endpoint gains a query string. The setting states a fact in a document and changes no endpoint's behaviour: an unparameterised request is still refused, because the tenant is the isolation boundary | — | Pass | `oidc.rs::a_document_that_names_no_tenant_carries_no_query_string`; `AuthConfig::default_tenant_id` |
 
+## FAPI 2.0 §5.3.2.1-9 and BCP §4.14 — the refresh-rotation grace window (T-254)
+
+Between 1.0.0-beta13 and the maintainer's decision of 2026-09-12 the grace
+window FAPI 2.0 requires was applied to every client profile, which handed a
+bearer refresh token on the `standard` profile a replay window the server could
+not distinguish from an honest retry. The decision confines the window to the
+profile that both requires it and sender-constrains every token, and makes a
+replay visible whichever way it is answered. See
+[`claude_dev/t254-refresh-grace-decision.md`](../../claude_dev/t254-refresh-grace-decision.md)
+and [`docs/admin/fapi2-profile.md`](../admin/fapi2-profile.md#the-refresh-rotation-grace-window).
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 155 | A `fapi2` client's rotated refresh token stays redeemable for 60 seconds and is then retired on that clock, not on its original thirty days — which is what `fapi2-security-profile-final-refresh-token` measures after sleeping thirty | FAPI 2.0 §5.3.2.1-9 | Pass | `token_service.rs::t254_a_fapi2_rotation_supersedes_on_the_grace_clock`, `::t254_a_replay_inside_the_fapi_grace_is_accepted_and_marked`; `oauth2_refresh_token.rs::supersede_keeps_the_row_live_on_the_grace_clock_and_stamps_it` |
+| 156 | **Invariant 4.** Every client that is not registered `profile: fapi2` has its predecessor revoked at rotation, and a second presentation is `invalid_grant`, "already consumed" — the behaviour it had before beta13. The registration decides, never the request, and no other per-client switch buys a window | — (invariant 4) | Pass | `fapi.rs::a_standard_client_gets_no_refresh_rotation_grace`, `::nothing_but_the_profile_buys_a_grace_window`; `token_service.rs::t254_a_standard_rotation_revokes_the_predecessor`, `::t254_the_registration_decides_a_superseded_row_is_refused_off_fapi`; `oauth2_flow_test.rs::refresh_token_rotation_retires_old_on_a_standard_client` |
+| 157 | A refresh token presented **after** rotation is recorded whichever way it is answered: a per-outcome counter on its session and an `oauth2.refresh_token_replayed` audit row naming the client, the profile, the session and the disposition — never the token or its digest. A credential merely revoked at logout is not filed as a replay | BCP §4.14.2 | Pass | `token_service.rs::t254_the_replay_audit_record_never_carries_the_token`, `::t254_an_ordinary_stale_refresh_token_is_not_a_replay`; `oauth2_flow_test.rs::a_refused_refresh_replay_is_audited`; `session.rs::mark_refresh_replay_counts_each_outcome_separately`; `user_sessions_test.rs` |
+
+---
+
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
 
 | # | Behaviour | Spec Ref | Status | Evidence |

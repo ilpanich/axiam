@@ -254,6 +254,30 @@ just conformance-run-basic         # the OIDC Core Basic plan
 CONFORMANCE_DATE=$(date +%F) just conformance-report
 ```
 
+### The FAPI clients must carry `profile: "fapi2"` — and they do
+
+`fapi2-security-profile-final-refresh-token` sleeps thirty seconds, replays the
+refresh token it already used, and expects a `200`. Since the T-254 decision of
+2026-09-12 that window is a **`fapi2`-profile behaviour**: for every other
+client AXIAM revokes the predecessor at rotation and answers the replay
+`invalid_grant`, "refresh token already consumed". See
+[`docs/admin/fapi2-profile.md`](../admin/fapi2-profile.md#the-refresh-rotation-grace-window).
+
+So a FAPI plan run against clients registered `standard` would fail that module,
+and it would fail it *correctly*. All five clients `register-clients.sh` creates
+for the FAPI plans carry `profile: "fapi2"` — the two mTLS ones, the self-signed
+one and the two `private_key_jwt` ones — and the registration would be refused
+outright if they did not also carry PAR, a strong authentication method and
+sender-constrained tokens, so they are FAPI-shaped by construction rather than
+by the script remembering four fields.
+
+The Basic OP clients are registered `standard`, deliberately (the Basic profile
+requires neither PAR nor bound tokens). `oidcc-refresh-token` obtains and uses a
+refresh token; it does not replay a rotated one, so it is unaffected. A refresh
+token presented after rotation on either plan is recorded on its session and
+written to the audit log as `oauth2.refresh_token_replayed` — a useful thing to
+grep after a run that behaved oddly.
+
 Three things the recipes do not do for you:
 
 - **`sensitive_scopes_enabled` must be on at the ORGANIZATION level.** It is off

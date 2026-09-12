@@ -2304,4 +2304,184 @@ mod tests {
         assert_eq!(diff.sensitive_scopes_enabled, Some(false));
         assert_eq!(diff.default_locale.as_deref(), Some("fr"));
     }
+
+    // -----------------------------------------------------------------------
+    // The clamp, field by field
+    //
+    // `clamp_overrides_to_org` is the control that stops a tenant keeping a
+    // weaker policy after the organization tightens its baseline. Three tests
+    // covered three fields; the other twenty arms were asserted nowhere, and an
+    // arm that silently stops clearing looks exactly like an arm that had
+    // nothing to clear. These walk every one in a single pass, in both
+    // directions.
+    // -----------------------------------------------------------------------
+
+    /// An org baseline with every boolean requirement switched ON, so that a
+    /// tenant saying `false` is unambiguously the weaker position.
+    fn a_demanding_org() -> SecuritySettings {
+        let mut org = org_settings();
+        org.password.require_uppercase = true;
+        org.password.require_lowercase = true;
+        org.password.require_digits = true;
+        org.password.require_symbols = true;
+        org.password.hibp_check_enabled = true;
+        org.mfa.mfa_enforced = true;
+        org.email.email_verification_required = true;
+        org.notification.admin_notifications_enabled = true;
+        org
+    }
+
+    /// Every clamped field set one step *weaker* than `org`.
+    fn every_field_weaker_than(org: &SecuritySettings) -> TenantSettingsOverride {
+        TenantSettingsOverride {
+            // `tenant >= org` — a lower minimum is the weaker one.
+            min_length: Some(org.password.min_length - 1),
+            password_history_count: Some(org.password.password_history_count - 1),
+            lockout_duration_secs: Some(org.lockout.lockout_duration_secs - 1),
+            max_lockout_duration_secs: Some(org.lockout.max_lockout_duration_secs - 1),
+            lockout_backoff_multiplier: Some(org.lockout.lockout_backoff_multiplier - 0.5),
+            // `tenant <= org` — a larger cap or longer lifetime is the weaker one.
+            max_failed_login_attempts: Some(org.lockout.max_failed_login_attempts + 1),
+            access_token_lifetime_secs: Some(org.token.access_token_lifetime_secs + 1),
+            refresh_token_lifetime_secs: Some(org.token.refresh_token_lifetime_secs + 1),
+            mfa_challenge_lifetime_secs: Some(org.mfa.mfa_challenge_lifetime_secs + 1),
+            default_cert_validity_days: Some(org.certificate.default_cert_validity_days + 1),
+            max_cert_validity_days: Some(org.certificate.max_cert_validity_days + 1),
+            email_verification_grace_period_hours: Some(
+                org.email.email_verification_grace_period_hours + 1,
+            ),
+            deletion_grace_period_days: Some(org.privacy.deletion_grace_period_days + 1),
+            // Opt-in only — the org requires it, the tenant tries to switch off.
+            require_uppercase: Some(false),
+            require_lowercase: Some(false),
+            require_digits: Some(false),
+            require_symbols: Some(false),
+            hibp_check_enabled: Some(false),
+            mfa_enforced: Some(false),
+            email_verification_required: Some(false),
+            admin_notifications_enabled: Some(false),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_clamped_field_is_cleared_when_the_tenant_is_the_weaker_of_the_two() {
+        let org = a_demanding_org();
+        let mut overrides = every_field_weaker_than(&org);
+
+        let cleared = clamp_overrides_to_org(&org, &mut overrides);
+
+        for field in [
+            "min_length",
+            "password_history_count",
+            "lockout_duration_secs",
+            "max_lockout_duration_secs",
+            "lockout_backoff_multiplier",
+            "max_failed_login_attempts",
+            "access_token_lifetime_secs",
+            "refresh_token_lifetime_secs",
+            "mfa_challenge_lifetime_secs",
+            "default_cert_validity_days",
+            "max_cert_validity_days",
+            "email_verification_grace_period_hours",
+            "deletion_grace_period_days",
+            "require_uppercase",
+            "require_lowercase",
+            "require_digits",
+            "require_symbols",
+            "hibp_check_enabled",
+            "mfa_enforced",
+            "email_verification_required",
+            "admin_notifications_enabled",
+        ] {
+            assert!(
+                cleared.contains(&field),
+                "{field} was left in place though the tenant value is weaker; cleared: {cleared:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cleared_field_is_removed_rather_than_rewritten_to_the_org_value() {
+        // The distinction the doc calls out: an absent override *tracks* the
+        // baseline, so the tenant also picks up the next tightening. Writing
+        // the org's current value in would freeze it again and reproduce the
+        // original defect one baseline later.
+        let org = a_demanding_org();
+        let mut overrides = every_field_weaker_than(&org);
+
+        clamp_overrides_to_org(&org, &mut overrides);
+
+        assert_eq!(overrides.min_length, None);
+        assert_eq!(overrides.access_token_lifetime_secs, None);
+        assert_eq!(overrides.mfa_enforced, None);
+        assert_eq!(overrides.lockout_backoff_multiplier, None);
+    }
+
+    #[test]
+    fn a_tenant_stricter_than_the_org_keeps_every_field_it_chose() {
+        // The other half of the contract, and the one a too-eager clamp would
+        // break: a tenant that picked a 24-character minimum does not lose it
+        // because the organization moved from 12 to 16.
+        let org = a_demanding_org();
+        let mut overrides = TenantSettingsOverride {
+            min_length: Some(org.password.min_length + 1),
+            password_history_count: Some(org.password.password_history_count + 1),
+            lockout_duration_secs: Some(org.lockout.lockout_duration_secs + 1),
+            max_lockout_duration_secs: Some(org.lockout.max_lockout_duration_secs + 1),
+            lockout_backoff_multiplier: Some(org.lockout.lockout_backoff_multiplier + 0.5),
+            max_failed_login_attempts: Some(org.lockout.max_failed_login_attempts - 1),
+            access_token_lifetime_secs: Some(org.token.access_token_lifetime_secs - 1),
+            refresh_token_lifetime_secs: Some(org.token.refresh_token_lifetime_secs - 1),
+            mfa_challenge_lifetime_secs: Some(org.mfa.mfa_challenge_lifetime_secs - 1),
+            default_cert_validity_days: Some(org.certificate.default_cert_validity_days - 1),
+            max_cert_validity_days: Some(org.certificate.max_cert_validity_days - 1),
+            email_verification_grace_period_hours: Some(
+                org.email.email_verification_grace_period_hours - 1,
+            ),
+            deletion_grace_period_days: Some(org.privacy.deletion_grace_period_days - 1),
+            require_uppercase: Some(true),
+            require_lowercase: Some(true),
+            require_digits: Some(true),
+            require_symbols: Some(true),
+            hibp_check_enabled: Some(true),
+            mfa_enforced: Some(true),
+            email_verification_required: Some(true),
+            admin_notifications_enabled: Some(true),
+            ..Default::default()
+        };
+
+        let cleared = clamp_overrides_to_org(&org, &mut overrides);
+
+        assert!(cleared.is_empty(), "wrongly cleared: {cleared:?}");
+        assert_eq!(overrides.min_length, Some(org.password.min_length + 1));
+    }
+
+    #[test]
+    fn an_override_that_matches_the_org_exactly_is_left_alone() {
+        // Equality is compliance on both sides of the comparison. Clearing here
+        // would be harmless for the effective value but would report a field as
+        // "cleared" that the tenant never weakened, and that list is what an
+        // operator is shown.
+        let org = a_demanding_org();
+        let mut overrides = TenantSettingsOverride {
+            min_length: Some(org.password.min_length),
+            max_failed_login_attempts: Some(org.lockout.max_failed_login_attempts),
+            access_token_lifetime_secs: Some(org.token.access_token_lifetime_secs),
+            mfa_enforced: Some(true),
+            ..Default::default()
+        };
+
+        let cleared = clamp_overrides_to_org(&org, &mut overrides);
+
+        assert!(cleared.is_empty(), "wrongly cleared: {cleared:?}");
+    }
+
+    #[test]
+    fn an_override_that_sets_nothing_clears_nothing() {
+        let org = a_demanding_org();
+        let mut overrides = TenantSettingsOverride::default();
+
+        assert!(clamp_overrides_to_org(&org, &mut overrides).is_empty());
+    }
 }

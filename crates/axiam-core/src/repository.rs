@@ -3260,4 +3260,124 @@ mod tests {
         };
         assert!(got.is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // Provided defaults on the scope and OPAQUE repositories
+    // -----------------------------------------------------------------------
+
+    /// Drive a future that never yields, without pulling a runtime into
+    /// layer 0 — the same reasoning as
+    /// [`list_by_tenant_defaults_to_empty_so_test_doubles_keep_compiling`].
+    fn now<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(output) => output,
+            std::task::Poll::Pending => panic!("a provided default must not yield"),
+        }
+    }
+
+    fn a_scope(tenant_id: Uuid, resource_id: Uuid, name: &str) -> Scope {
+        let now = chrono::Utc::now();
+        Scope {
+            id: Uuid::new_v4(),
+            tenant_id,
+            resource_id,
+            name: name.to_string(),
+            description: String::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// One scope per resource, named after it, so the order the default
+    /// assembles them in is visible in the result.
+    struct ScopePerResource;
+
+    impl ScopeRepository for ScopePerResource {
+        async fn create(&self, _input: CreateScope) -> AxiamResult<Scope> {
+            unreachable!("not exercised by this test")
+        }
+        async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<Scope> {
+            unreachable!("not exercised by this test")
+        }
+        async fn update(&self, _t: Uuid, _i: Uuid, _input: UpdateScope) -> AxiamResult<Scope> {
+            unreachable!("not exercised by this test")
+        }
+        async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> {
+            unreachable!("not exercised by this test")
+        }
+        async fn list_by_resource(
+            &self,
+            tenant_id: Uuid,
+            resource_id: Uuid,
+        ) -> AxiamResult<Vec<Scope>> {
+            Ok(vec![a_scope(tenant_id, resource_id, "read")])
+        }
+        // list_by_resources deliberately NOT overridden.
+    }
+
+    #[test]
+    fn the_batched_scope_lookup_preserves_the_order_it_was_given() {
+        // The default concatenates per-resource results in argument order, and
+        // its doc tells callers that "nearest ancestor wins" is *their* job,
+        // imposed from the resource order they already hold. That instruction
+        // is only followable if this order is the one they passed in — a
+        // default that sorted or deduplicated would silently invert precedence
+        // in a hierarchy.
+        let tenant_id = Uuid::new_v4();
+        let resources: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+
+        let scopes = now(ScopePerResource.list_by_resources(tenant_id, &resources))
+            .expect("the default propagates the per-resource results");
+
+        assert_eq!(
+            scopes.iter().map(|s| s.resource_id).collect::<Vec<_>>(),
+            resources
+        );
+    }
+
+    #[test]
+    fn the_batched_scope_lookup_asks_nothing_for_an_empty_resource_list() {
+        // An empty hierarchy is the common case for a root resource, and the
+        // caller should get an empty page rather than an error.
+        let scopes = now(ScopePerResource.list_by_resources(Uuid::new_v4(), &[]))
+            .expect("no resources is not a failure");
+
+        assert!(scopes.is_empty());
+    }
+
+    /// A repository that never grew the coverage-gate query.
+    struct WithoutTheCoverageGate;
+
+    impl OpaqueCredentialRepository for WithoutTheCoverageGate {
+        async fn upsert(&self, _input: CreateOpaqueCredential) -> AxiamResult<OpaqueCredential> {
+            unreachable!("not exercised by this test")
+        }
+        async fn get_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<OpaqueCredential> {
+            unreachable!("not exercised by this test")
+        }
+        async fn delete_for_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<bool> {
+            unreachable!("not exercised by this test")
+        }
+        async fn count_for_tenant(&self, _t: Uuid) -> AxiamResult<u64> {
+            unreachable!("not exercised by this test")
+        }
+        // count_active_users_without_credential deliberately NOT overridden.
+    }
+
+    #[test]
+    fn the_stranded_user_count_defaults_to_nobody_rather_than_to_everybody() {
+        // The gate reads "how many active users would lose their way in if
+        // OPAQUE became mandatory". Zero means nobody is stranded, so the
+        // default is permissive by construction — which is right for a double
+        // that never models credentials, and would be wrong in the other
+        // direction: a default of "all of them" would block the switch for a
+        // caller whose repository simply predates the query.
+        let stranded =
+            now(WithoutTheCoverageGate.count_active_users_without_credential(Uuid::new_v4()))
+                .expect("the default never fails");
+
+        assert_eq!(stranded, 0);
+    }
 }

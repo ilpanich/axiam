@@ -166,3 +166,107 @@ pub struct UpdateTenant {
     pub status: Option<TenantStatus>,
     pub metadata: Option<serde_json::Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn a_tenant(kind: TenantKind) -> Tenant {
+        let now = Utc::now();
+        Tenant {
+            id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
+            name: "Production".to_string(),
+            slug: "production".to_string(),
+            status: TenantStatus::Active,
+            kind,
+            metadata: serde_json::Value::Null,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn a_row_written_before_organization_scope_existed_reads_back_as_standard() {
+        // The `#[serde(default)]` on `Tenant::kind` is what lets an old row
+        // deserialise at all; that it defaults to `Standard` rather than to
+        // `Organization` is the part that matters, because the wrong default
+        // would silently promote every pre-existing tenant to the scope the
+        // super-admin lives in.
+        let without_kind = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "organization_id": Uuid::new_v4(),
+            "name": "Legacy",
+            "slug": "legacy",
+            "status": "Active",
+            "metadata": null,
+            "created_at": Utc::now(),
+            "updated_at": Utc::now(),
+        });
+
+        let tenant: Tenant = serde_json::from_value(without_kind).expect("row deserialises");
+
+        assert_eq!(tenant.kind, TenantKind::Standard);
+        assert!(!tenant.is_organization_scope());
+    }
+
+    #[test]
+    fn only_the_organization_kind_is_the_organization_scope() {
+        assert!(TenantKind::Organization.is_organization());
+        assert!(!TenantKind::Standard.is_organization());
+
+        assert!(a_tenant(TenantKind::Organization).is_organization_scope());
+        assert!(!a_tenant(TenantKind::Standard).is_organization_scope());
+    }
+
+    #[test]
+    fn the_displayed_kind_is_the_same_string_serde_writes() {
+        // Display is used in log lines and operator-facing messages while serde
+        // writes the stored value. They are separate impls, so nothing but a
+        // test keeps them from drifting into two spellings of one concept.
+        for kind in [TenantKind::Standard, TenantKind::Organization] {
+            let displayed = kind.to_string();
+            let serialised = serde_json::to_value(kind).expect("kind serialises");
+
+            assert_eq!(serde_json::Value::String(displayed), serialised);
+        }
+
+        assert_eq!(TenantKind::Standard.to_string(), "standard");
+        assert_eq!(TenantKind::Organization.to_string(), "organization");
+    }
+
+    #[test]
+    fn the_organization_scope_constructor_produces_the_row_the_unique_index_expects() {
+        // Bootstrap, the back-fill migration and organization creation all go
+        // through this constructor precisely so they cannot disagree. A tenant
+        // that is *nearly* the organization scope — right kind, wrong slug — is
+        // the failure the constructor exists to prevent.
+        let organization_id = Uuid::new_v4();
+
+        let create = CreateTenant::organization_scope(organization_id);
+
+        assert_eq!(create.organization_id, organization_id);
+        assert_eq!(create.kind, TenantKind::Organization);
+        assert_eq!(create.slug, ORGANIZATION_TENANT_SLUG);
+    }
+
+    #[test]
+    fn a_caller_cannot_ask_the_api_for_a_second_organization_scope() {
+        // `kind` is `skip_deserializing`, so a create request that names it is
+        // not an error — it is ignored. That distinction is the whole defence:
+        // the field exists for internal constructors and is unreachable from
+        // the wire, and a future `#[serde(default)]`-only spelling would open
+        // it without failing anything else.
+        let hostile = serde_json::json!({
+            "organization_id": Uuid::new_v4(),
+            "name": "Not actually the organization",
+            "slug": "sneaky",
+            "kind": "organization",
+            "metadata": null,
+        });
+
+        let create: CreateTenant = serde_json::from_value(hostile).expect("request deserialises");
+
+        assert_eq!(create.kind, TenantKind::Standard);
+    }
+}

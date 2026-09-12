@@ -366,6 +366,38 @@ happens. Status unchanged; no count moves.
 
 ## 4. R-3 — an unparseable default tenant is visible at boot
 
+> **EXECUTED — R-3, 2026-09-12.** `AuthConfig::default_tenant_id_diagnostic()`
+> answers `Some(DefaultTenantProblem { length, shape })` exactly when a
+> non-empty value failed to parse; `default_tenant_id()` is untouched, so the
+> builder still sees `None` and nothing about discovery moved. The composition
+> root logs one `WARN` beside `warn_on_mintable_key`, naming the variable and
+> saying what will happen rather than merely that something is wrong.
+>
+> `shape` is one of two phrases — "hexadecimal, but not a 36-character UUID",
+> and "contains characters a UUID cannot" — which is the distinction that
+> matters to whoever has to fix it: the first is a truncated paste, the second
+> is a different identifier entirely (a tenant *slug*, most often). Neither
+> echoes the value.
+>
+> Five tests on the diagnostic: the three quiet cases; the two shapes; and
+> `the_rendered_diagnostic_never_echoes_the_value`, which checks **every
+> three-character window** of the value against the rendered line — crude on
+> purpose, because the way this regresses is somebody appending the value "to
+> make it easier to debug". Plus the two identity assertions: the accessor
+> answers `None` for a bad value exactly as for no value, and — in
+> `oidc.rs` — `an_unparseable_default_tenant_serves_the_unconfigured_document`
+> compares the **whole serialized document** byte for byte against the unset
+> case, resolving the value through `AuthConfig` the way the handler does. The
+> plan asked for the endpoints; asserting the whole serialisation is strictly
+> stronger and catches the way this would actually go wrong, which is something
+> other than an endpoint URL starting to vary with the setting.
+>
+> Docs: `docs/conformance/README.md`, where the variable is actually described
+> — it is not in `docs/deployment/README.md`, which the plan assumed — and
+> `CHANGELOG.md` under **Added**. Threat model: T-244's mitigation gains the
+> clause in `Axiam.json` and `threat-model-stride.md`; status unchanged, no
+> count moves.
+
 **Closes** the residual in T-244: the deliberate silence of
 `AuthConfig::default_tenant_id()` (`crates/axiam-auth/src/config.rs` ~line 407)
 when `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` holds something that is not a

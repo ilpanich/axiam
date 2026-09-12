@@ -237,6 +237,21 @@ resolves its tenant from the bearer token that authenticates the call, a JWKS is
 deployment-wide, and an `issuer` carrying a query would stop matching the `iss`
 of every token AXIAM mints.
 
+**A value that is not a UUID is ignored — and now says so.** An unparseable
+`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` is treated as unset rather than as a
+startup error, deliberately: this is consulted while building a public,
+unauthenticated document, and a fat-fingered UUID should serve the document the
+deployment served before the setting existed rather than `500` for every
+relying party. (The mTLS alias takes the opposite view for the opposite reason
+— a bad alias actively misdirects a client, a missing tenant only fails to help
+one.) What changed with T-244's follow-up is that the operator is told: one
+`WARN` at startup, beside the other posture lines, naming the variable and
+describing the value's **shape** — its length, and whether its characters could
+belong to a UUID at all — and never the value, because a variable this code
+cannot prove holds a tenant id is a variable it cannot prove is safe to print.
+Never logged on the request path: the accessor runs per discovery request, and
+a warning there is a log flood any anonymous caller can drive.
+
 ## Reproducing a run
 
 ```bash

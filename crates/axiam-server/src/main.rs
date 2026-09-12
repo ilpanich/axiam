@@ -1308,6 +1308,25 @@ async fn main() -> std::io::Result<()> {
     // that carries the caveat, say nothing when the safe default is active.
     config.rate_limit.warn_on_mintable_key();
 
+    // T-244: a default tenant that does not parse is treated as unset, which
+    // is the right behaviour — discovery is a public, unauthenticated document
+    // and a fat-fingered UUID must not `500` for every relying party — and was
+    // also completely silent, so a deployment that set it concluded the
+    // setting does not work. Said once here, never on the request path (the
+    // accessor is called per discovery request, and a warning there is a log
+    // flood any anonymous caller can drive), and describing the value's shape
+    // rather than the value: this variable is not proven to hold a tenant id,
+    // so it is not proven to hold something safe to print.
+    if let Some(problem) = config.auth.default_tenant_id_diagnostic() {
+        tracing::warn!(
+            variable = "AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID",
+            value_shape = %problem,
+            "the configured default tenant is not a UUID and is being ignored; \
+             discovery will serve the document it serves when the variable is \
+             unset, and no endpoint URL will carry a tenant"
+        );
+    }
+
     // I3: should the machine-traffic throttling advisory be armed on the
     // shared rate-limit counter built further down? Only when the shipped
     // `internet` defaults are what this process is actually enforcing —

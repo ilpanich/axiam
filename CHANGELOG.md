@@ -101,6 +101,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A default tenant that is not a UUID is reported at startup** (T-244)
+
+  `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` is ignored when it does not parse,
+  which stays: the value is read while building a public, unauthenticated
+  document, and a fat-fingered UUID must not `500` for every relying party. But
+  the deployment was never told, so an operator who set it concluded the
+  setting does not work.
+
+  There is now one `WARN` at boot naming the variable and saying what will
+  happen — the document served is the one served with the variable unset, and
+  no endpoint URL will carry a tenant. It describes the value's shape (its
+  length, and whether its characters could belong to a UUID) and never the
+  value. Nothing is logged on the request path, and the discovery document is
+  unchanged in every configuration.
+
 - Hold the full profile claim set, and honour the claims parameter (§5.1, §5.5)
 
 - Answer a person at the authorization endpoint in prose, not JSON

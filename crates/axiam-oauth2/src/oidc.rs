@@ -857,6 +857,44 @@ mod tests {
         }
     }
 
+    /// T-244's follow-up: an operator who set the variable to something that
+    /// is not a UUID gets a `WARN` at boot — and the document is still exactly
+    /// the one an unconfigured deployment serves. The warning changed what the
+    /// operator is told and nothing about what a relying party receives.
+    ///
+    /// Asserted over the **whole serialized document**, byte for byte, rather
+    /// than over the endpoints it was expected to affect: the value reaches
+    /// the builder through one resolution step, and the way this could go
+    /// wrong is for something other than the endpoint URLs to start varying
+    /// with it.
+    #[test]
+    fn an_unparseable_default_tenant_serves_the_unconfigured_document() {
+        use axiam_auth::config::AuthConfig;
+
+        let resolve = |value: &str| {
+            // Exactly what `handlers::oauth2::discovery` does: the caller's
+            // `tenant_id` if there is one, else the configured default.
+            AuthConfig {
+                oauth2_default_tenant_id: value.to_owned(),
+                ..AuthConfig::default()
+            }
+            .default_tenant_id()
+        };
+
+        let misconfigured =
+            build_discovery_document_for(ISSUER, Some(MTLS), false, resolve("not-a-uuid"))
+                .expect("an ignored default still builds a document");
+        let unset = build_discovery_document_for(ISSUER, Some(MTLS), false, resolve(""))
+            .expect("an unset default builds a document");
+
+        assert_eq!(
+            serde_json::to_string(&misconfigured).unwrap(),
+            serde_json::to_string(&unset).unwrap(),
+            "a deployment whose default tenant does not parse must serve the \
+             document it served before the setting existed"
+        );
+    }
+
     /// Naming no tenant must reproduce the document exactly as it was before
     /// this change — that is what every multi-tenant deployment keeps getting,
     /// and it is the property that makes the new setting safe to leave unset.

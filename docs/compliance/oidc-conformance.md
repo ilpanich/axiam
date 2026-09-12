@@ -463,6 +463,22 @@ recovery short of a whole new authorization.
 | 159 | The refresh path **copies** the request and never widens it: `claims_request::RELEASABLE` still runs only at the authorization endpoint, a hand-built row naming `phone_number` or `address` is carried verbatim and releases neither at UserInfo, and no scope is granted on the strength of a named claim | Core §5.5; GDPR Art. 6 | Pass | `token_service.rs::the_refresh_path_copies_a_claims_request_and_never_widens_it`; `oauth2_userinfo_post_test.rs::a_consent_gated_claim_is_not_released_by_requesting_it` |
 | 160 | **Invariant 4.** A refresh token issued before v61 decodes to no claims and mints exactly the token it minted before — the column is `option<array>` with no backfill, so every token in flight across the migration keeps working and gains nothing | — (invariant 4) | Pass (I4) | `token_service.rs::a_pre_migration_refresh_token_still_mints_todays_token`; `oauth2_refresh_token.rs::a_row_written_before_v61_decodes_to_no_claims`; `schema.rs::v61_carries_the_claims_request_onto_the_refresh_token_additively` |
 
+### `mtls_endpoint_aliases`, and what an SDK owes it (T-266, R-8)
+
+Contract 1.40 made preferring an alias normative for the §21 client role. The
+server has published the member since 1.0.0-beta12 and, until 2026-09-12, no
+SDK read it. Contract **1.43** adds the clause that was implicit — an alias is
+used **verbatim** — and publishes the three test vectors every SDK pins, so
+eleven repositories assert the same bytes rather than eleven hand-written
+documents.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 161 | The alias object carries **exactly** the six endpoints where reaching the mTLS host is meaningful, and never `authorization_endpoint`, `end_session_endpoint`, `jwks_uri` or `issuer`. The member set is what SDKs pin, so a seventh would break every one of them | RFC 8705 §5 | Pass | `oidc.rs::the_alias_object_has_exactly_the_six_members_the_contract_names` |
+| 162 | An alias carries the tenant as a query component and is used verbatim; an SDK MUST NOT append, strip or reorder it. An SDK that appends its own `?tenant_id=` produces a URL that parses as a path and points nowhere — and does so only on a two-listener deployment, which is the deployment the rule exists for | RFC 6749 §3.1, §3.2; contract 1.43 §21.3 rule 2 clause 4 | Pass | `oidc.rs::the_mtls_aliases_carry_the_tenant_too`; `::every_tenant_scoped_endpoint_has_exactly_one_query_string` |
+| 163 | An unusable mTLS base is refused at the source rather than published: a relative URL, a non-`https` scheme, a query or a fragment each fail discovery. So no conformant deployment can serve contract §21.3.1 vector C, and an SDK's refusal of one is defence in depth rather than the only line | contract 1.43 §21.3.1 | Pass | `oidc.rs::an_unusable_mtls_base_is_refused_rather_than_published` |
+| 164 | **Invariant 4.** A deployment that configures no mTLS host omits the member entirely — absent, never `null` — and an SDK reads absence as "no separate host", not "unsupported". That is the most common AXIAM topology, so an SDK that refuses on absence refuses the default | contract 1.43 §21.3.1 vector B | Pass (I4) | `oidc.rs::no_mtls_host_omits_the_member_entirely` |
+
 ---
 
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
@@ -601,3 +617,4 @@ recovery short of a whole new authorization.
 *Rows 141–148 added: wave W9 (the first conformance-suite execution) — 2026-09-08*
 *Row 148 closed and rows 149–154 added: the first execution in which modules reached assertions — 2026-09-08*
 *Rows 158–160 added: R-2 of the 2026-09-12 residual pass (the claims request across a refresh) — 2026-09-12*
+*Rows 161–164 added: R-8 of the same pass (the SDK half of contract 1.40–1.42) — 2026-09-12*

@@ -980,6 +980,56 @@ and a deployment that leaves it off collects what it collects today. Open
 
 ## 9. R-8 — the SDK half of contract 1.40–1.42
 
+> **EXECUTED (this repository) — R-8, 2026-09-12. Contract 1.43.** The SDK
+> fan-out is §13.1's table.
+>
+> **Rule 2 is implementable as written**, checked clause by clause against
+> `crates/axiam-oauth2/src/oidc.rs` — the table in §9.1 is the result, and the
+> fourth row is the finding: an alias carries the tenant as a query component
+> and rule 2 never said what an SDK owes that. So §21.3 rule 2 gains **clause
+> 4** — an alias is used verbatim, no appending, stripping or reordering — and
+> the contract bumps to **1.43**. The failure it prevents is specific and
+> nasty: an SDK that knows its own tenant and appends `?tenant_id=` to
+> discovery endpoints produces `…?tenant_id=A?tenant_id=A`, which parses as a
+> path, and it does so **only on a two-listener deployment**, which is the
+> deployment the rule exists for.
+>
+> **The vectors live in `CONTRACT.md` itself** (§21.3.1), not in a new
+> `sdks/*.json`. The plan left the location open; this is the reason for the
+> choice. `sdk-artifact-drift.yml` vendors four artifacts into eleven
+> repositories, and a fifth would be a fifth thing to go stale — the exact
+> failure that workflow's own header records (eight SDKs found at contract 1.17
+> while this repo was at 1.19, and the plan driving that pass believing they
+> were at 1.15). The contract is already vendored byte-for-byte and already
+> drift-gated, so vectors inside it are distributed and guarded by machinery
+> that exists.
+>
+> Vector C is a **refusal**, and the plan's wording is worth keeping: falling
+> back is the dangerous answer, not the safe one. The caller asked to
+> authenticate with a certificate; the operator published something unusable;
+> presenting the certificate to the front-channel host authenticates nothing
+> while appearing to work.
+>
+> **§21.10** is the per-SDK table, in §21.9's style, with two columns because
+> they separate: *decodes the member* (every SDK has a discovery decoder) and
+> *prefers the alias* (only an SDK implementing the §21 client role has a call
+> to prefer with — §21.9 says which). Every row is `—` until an SDK's PR fills
+> it, and `—` is explicitly **not** a claim either way.
+>
+> Server-side tests, both pinning what an SDK pins:
+> `the_alias_object_has_exactly_the_six_members_the_contract_names` asserts the
+> **serialised** member set exactly, plus the four names that must never appear
+> — a seventh alias would break every SDK that pinned vector A; and
+> `an_unusable_mtls_base_is_refused_rather_than_published` covers all five
+> unusable shapes, which is what makes an SDK's vector-C refusal defence in
+> depth rather than the only line.
+>
+> Conformance rows **161–164**, the last of them the invariant-4 twin (absence
+> means "no separate host", and that is the common topology).
+> `CHANGELOG.md` under **Changed**. T-266's mitigation gains the R-8 paragraph
+> in `Axiam.json` and `threat-model-stride.md`; status unchanged (Mitigated),
+> no count moves.
+
 **Closes** the residual T-266 records: contract §21.3 rule 2 is normative for
 the §21 client role and **no SDK implements it**. The server publishes
 `mtls_endpoint_aliases`; every SDK ignores it.

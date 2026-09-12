@@ -101,6 +101,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Contract 1.43 — an mTLS alias is used verbatim, and the vectors SDKs pin
+  are published** (T-266)
+
+  Nothing an operator observes changes; the server publishes exactly what it
+  published. This is the SDK half of a rule that has been normative since
+  contract 1.40 and was implemented by nobody.
+
+  §21.3 rule 2 gains the clause that was implicit in it: an SDK MUST NOT
+  append, strip or reorder an alias's query component. AXIAM's aliases carry
+  the tenant that way, so an SDK that knows its own tenant and appends
+  `?tenant_id=` to endpoints it read from discovery produces
+  `…?tenant_id=A?tenant_id=A` — which parses as a path and points nowhere, and
+  only on a two-listener deployment, which is the deployment the rule exists
+  for.
+
+  §21.3.1 publishes the three documents every SDK pins — the member present,
+  absent, and malformed — inside `CONTRACT.md` itself rather than as a fourth
+  vendored artifact, so eleven repositories assert the same bytes. A malformed
+  alias must be **refused**, not fallen back from: quietly presenting a
+  certificate to the front-channel host authenticates nothing while appearing
+  to work.
+
+  §21.10 records, per SDK, whether it decodes the member and whether it prefers
+  the alias — in the style §21.9 already uses for DPoP, where an unrecorded row
+  is not a supported answer.
+
 - **A contended write answers `503` with `Retry-After: 1`, not `500`** (T-262)
 
   A write that loses an optimistic-concurrency race in the datastore, and

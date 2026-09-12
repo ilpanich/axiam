@@ -829,6 +829,77 @@ mod tests {
         }
     }
 
+    /// Contract §21.3.1 vector A pins a member set, and an SDK that pins it
+    /// fails against a server that grows a seventh. The six here are the
+    /// endpoints where reaching the mTLS host is meaningful — the server
+    /// authenticates the client there (§2), or a certificate-bound token is
+    /// presented there (§3.2) — and the three absent ones are absent by
+    /// design, not by omission.
+    ///
+    /// This asserts the **serialised** object rather than the struct, because
+    /// what an SDK pins is the JSON.
+    #[test]
+    fn the_alias_object_has_exactly_the_six_members_the_contract_names() {
+        let doc = doc_for_tenant(Some(MTLS));
+        let json = serde_json::to_value(&doc).expect("document serialises");
+        let mut members: Vec<&str> = json["mtls_endpoint_aliases"]
+            .as_object()
+            .expect("the aliases are an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        members.sort_unstable();
+        assert_eq!(
+            members,
+            vec![
+                "device_authorization_endpoint",
+                "introspection_endpoint",
+                "pushed_authorization_request_endpoint",
+                "revocation_endpoint",
+                "token_endpoint",
+                "userinfo_endpoint",
+            ],
+            "contract §21.3.1 vector A pins this set; a seventh member breaks \
+             every SDK that pinned it, and the three front-channel endpoints \
+             must never appear"
+        );
+        for never in [
+            "authorization_endpoint",
+            "end_session_endpoint",
+            "jwks_uri",
+            "issuer",
+        ] {
+            assert!(
+                json["mtls_endpoint_aliases"].get(never).is_none(),
+                "{never} must never be aliased — sending a browser to an mTLS \
+                 host raises a certificate chooser, and an aliased issuer would \
+                 stop matching every token's `iss`"
+            );
+        }
+    }
+
+    /// Contract §21.3.1 vector C, from the server's side: an unusable alias is
+    /// refused at the source rather than published for a client to refuse.
+    /// Both defects the vector names are refusals here — a relative URL, and a
+    /// scheme that is not `https` — so no conformant deployment can serve
+    /// vector C, and an SDK's refusal is defence in depth rather than the only
+    /// line.
+    #[test]
+    fn an_unusable_mtls_base_is_refused_rather_than_published() {
+        for bad in [
+            "/oauth2",
+            "mtls.example.test",
+            "ftp://mtls.example.test",
+            "https://mtls.example.test?x=1",
+            "https://mtls.example.test#frag",
+        ] {
+            assert!(
+                build_discovery_document_for(ISSUER, Some(bad), false, Some(TENANT)).is_err(),
+                "{bad:?} must fail the document rather than be published"
+            );
+        }
+    }
+
     /// RFC 8705 §5 tells an mTLS client it MUST use these, so an alias that
     /// omitted the tenant would be strictly worse than no alias at all: the
     /// client would follow a URL that cannot work, with no conventional

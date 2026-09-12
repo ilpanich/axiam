@@ -574,3 +574,143 @@ pub struct GeneratedCertificate {
     /// PEM-encoded private key — returned only on generation.
     pub private_key_pem: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stands in for key material. Deliberately not PEM-shaped: a realistic
+    /// header would trip every secret scanner in CI for a string that is not a
+    /// secret, and the assertions only need a token distinctive enough that its
+    /// absence from the output means something.
+    const SECRET: &str = "key-material-sentinel-9f3a2b";
+
+    fn a_ca_certificate() -> CaCertificate {
+        let now = Utc::now();
+        CaCertificate {
+            id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
+            tenant_id: None,
+            parent_ca_id: None,
+            subject: "CN=Test CA".to_string(),
+            public_cert_pem: "-----BEGIN CERTIFICATE-----".to_string(),
+            chain_pem: None,
+            fingerprint: "ab:cd".to_string(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: now,
+            not_after: now,
+            status: CertificateStatus::Active,
+            encrypted_private_key: None,
+            key_custody: CaKeyCustody::Database,
+            key_locator: None,
+            mtls_trust_anchor: false,
+            created_at: now,
+        }
+    }
+
+    #[test]
+    fn importing_a_ca_never_prints_the_key_it_was_handed() {
+        // These structs reach a `{:?}` in handler-level tracing spans
+        // (SECHRD-09 / D-06). `#[serde(skip_serializing)]` covers the response
+        // body and nothing else, so the manual `Debug` is the only thing
+        // standing between a BYOK import and a private key in the log file.
+        let import = ImportCaCertificate {
+            organization_id: Uuid::new_v4(),
+            public_cert_pem: "-----BEGIN CERTIFICATE-----".to_string(),
+            private_key_pem: Some(SECRET.to_string()),
+        };
+
+        let printed = format!("{import:?}");
+
+        assert!(
+            !printed.contains(SECRET),
+            "the key reached the log: {printed}"
+        );
+        assert!(printed.contains("REDACTED"));
+    }
+
+    #[test]
+    fn a_generated_ca_redacts_a_key_it_has_and_stays_silent_about_one_it_does_not() {
+        // The `Option`-aware redaction is deliberate: a `vault_pki` CA has no
+        // key at all, and printing `[REDACTED]` for it would claim a key was
+        // withheld when none exists — which is the wrong thing to tell whoever
+        // is reading the span to find out where the key lives.
+        let with_key = GeneratedCaCertificate {
+            certificate: a_ca_certificate(),
+            private_key_pem: Some(SECRET.to_string()),
+        };
+        let printed = format!("{with_key:?}");
+        assert!(
+            !printed.contains(SECRET),
+            "the key reached the log: {printed}"
+        );
+        assert!(printed.contains("REDACTED"));
+
+        let without_key = GeneratedCaCertificate {
+            certificate: a_ca_certificate(),
+            private_key_pem: None,
+        };
+        let printed = format!("{without_key:?}");
+        assert!(
+            !printed.contains("REDACTED"),
+            "a CA with no key must not claim one was withheld: {printed}"
+        );
+        assert!(printed.contains("None"));
+    }
+
+    #[test]
+    fn a_csr_is_elided_by_length_rather_than_redacted() {
+        // A CSR is public by construction, so hiding it would be theatre; it is
+        // elided only because it is bulky. The byte count is the part worth
+        // keeping — it is what tells a reader whether the request arrived
+        // whole.
+        let csr = "-----BEGIN CERTIFICATE REQUEST-----".repeat(40);
+        let request = SignIntermediateCsr {
+            organization_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            parent_ca_id: Uuid::new_v4(),
+            csr_pem: csr.clone(),
+            validity_days: 365,
+        };
+
+        let printed = format!("{request:?}");
+
+        assert!(!printed.contains(&csr));
+        assert!(printed.contains(&format!("[{} bytes]", csr.len())));
+    }
+
+    #[test]
+    fn a_row_written_before_custody_existed_reads_back_as_database_custody() {
+        // Every such row holds its key sealed into itself, so `Database` is the
+        // only reading that finds those keys. Defaulting to `External` instead
+        // would make the key unfindable on a row that has one.
+        let without_custody = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "organization_id": Uuid::new_v4(),
+            "tenant_id": null,
+            "parent_ca_id": null,
+            "subject": "CN=Legacy CA",
+            "public_cert_pem": "-----BEGIN CERTIFICATE-----",
+            "chain_pem": null,
+            "fingerprint": "ab:cd",
+            "key_algorithm": "Ed25519",
+            "not_before": Utc::now(),
+            "not_after": Utc::now(),
+            "status": "Active",
+            "encrypted_private_key": null,
+            "key_locator": null,
+            "mtls_trust_anchor": false,
+            "created_at": Utc::now(),
+        });
+
+        let ca: CaCertificate = serde_json::from_value(without_custody).expect("row deserialises");
+
+        assert_eq!(ca.key_custody, CaKeyCustody::Database);
+    }
+
+    #[test]
+    fn only_a_chained_certificate_is_chained_to_an_anchor() {
+        assert!(CertTrust::ChainedToAnchor.is_chained_to_anchor());
+        assert!(!CertTrust::SelfAsserted.is_chained_to_anchor());
+    }
+}

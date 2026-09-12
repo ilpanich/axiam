@@ -368,3 +368,253 @@ describe("AttestationPolicyPage — MDS status panel", () => {
     ).toBeInTheDocument();
   });
 });
+
+// ─── Allow/block lists, the remaining toggles, and the failure paths ──────────
+//
+// The AAGUID lists are the part of this policy that can lock a tenant out, and
+// the page has a lot of state that only exists once a non-none mode is chosen.
+// None of it was exercised: not the lists, not the certification controls, not
+// what happens when a save or an MDS refresh is refused.
+
+const YUBIKEY_AAGUID = "ee882879-721c-4913-9775-3dfcce97072a";
+const OTHER_AAGUID = "11111111-1111-1111-1111-111111111111";
+
+async function openEditor() {
+  renderWithProviders(<AttestationPolicyPage />);
+  await userEvent.click(await screen.findByRole("button", { name: /Edit Policy/ }));
+}
+
+/** Choose a mode and tick the passkey caveat, which every non-none save needs. */
+async function chooseMode(mode: string) {
+  await userEvent.selectOptions(screen.getByLabelText("Mode"), mode);
+  await userEvent.click(
+    screen.getByRole("checkbox", {
+      name: /I understand this excludes iCloud Keychain/,
+    }),
+  );
+}
+
+describe("AttestationPolicyPage — allow and block lists", () => {
+  it("warns that an empty explicit allow list is a deliberate lockout", async () => {
+    // Restricting to an allow list with nothing in it denies every
+    // registration. That is a legitimate thing to want and an easy thing to
+    // do by accident, so the form says which it is looking at.
+    mockGets();
+    await openEditor();
+
+    expect(
+      screen.queryByText(/deliberate lockout/),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("radio", { name: /Restrict registration to an explicit allow list/ }),
+    );
+    expect(screen.getByText(/deliberate lockout/)).toBeInTheDocument();
+
+    await userEvent.type(
+      screen.getByPlaceholderText(/one AAGUID per line, e.g./),
+      YUBIKEY_AAGUID,
+    );
+    expect(screen.queryByText(/deliberate lockout/)).not.toBeInTheDocument();
+  });
+
+  it("sends the parsed allow and block lists", async () => {
+    mockGets();
+    apiMock.put.mockResolvedValue(res(DEFAULT_ATTESTATION_POLICY));
+    await openEditor();
+
+    await userEvent.click(
+      screen.getByRole("radio", { name: /Restrict registration to an explicit allow list/ }),
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText(/one AAGUID per line, e.g./),
+      YUBIKEY_AAGUID,
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText("one AAGUID per line"),
+      OTHER_AAGUID,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Save Policy/ }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const [, body] = apiMock.put.mock.calls[0];
+    expect(body.allowed_aaguids).toEqual([YUBIKEY_AAGUID]);
+    expect(body.blocked_aaguids).toEqual([OTHER_AAGUID]);
+  });
+
+  it("sends a null allow list when every authenticator is allowed", async () => {
+    // `null` and `[]` are opposite policies on the wire: no restriction versus
+    // nothing may register.
+    mockGets();
+    apiMock.put.mockResolvedValue(res(DEFAULT_ATTESTATION_POLICY));
+    await openEditor();
+
+    await userEvent.click(
+      screen.getByRole("radio", { name: /Restrict registration to an explicit allow list/ }),
+    );
+    await userEvent.click(
+      screen.getByRole("radio", { name: /Allow every authenticator except the block list/ }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Save Policy/ }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1].allowed_aaguids).toBeNull();
+  });
+
+  it("names what is not a valid AAGUID instead of sending it", async () => {
+    mockGets();
+    await openEditor();
+
+    await userEvent.type(
+      screen.getByPlaceholderText("one AAGUID per line"),
+      "not-a-uuid",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Save Policy/ }));
+
+    expect(
+      await screen.findByText(/Not a valid AAGUID \(expected a UUID\): not-a-uuid/),
+    ).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("sends the certification requirements once a mode enforces anything", async () => {
+    mockGets();
+    apiMock.put.mockResolvedValue(res(DEFAULT_ATTESTATION_POLICY));
+    await openEditor();
+
+    await chooseMode("direct_required");
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: /Require FIDO certification/ }),
+    );
+    await userEvent.selectOptions(
+      screen.getByLabelText("Minimum certification level"),
+      "L2",
+    );
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: /Block revoked \/ compromised/ }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Save Policy/ }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const [, body] = apiMock.put.mock.calls[0];
+    expect(body.require_fido_certified).toBe(true);
+    expect(body.min_certification).toBe("L2");
+    expect(body.block_revoked_status).toBe(false);
+  });
+
+  it("discards every edit when the editor is cancelled", async () => {
+    mockGets();
+    await openEditor();
+
+    await userEvent.selectOptions(screen.getByLabelText("Mode"), "indirect");
+    await userEvent.click(screen.getByRole("button", { name: /Cancel/ }));
+
+    // Back in view mode, showing the stored policy rather than the edit.
+    expect(
+      await screen.findByRole("button", { name: /Edit Policy/ }),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Edit Policy/ }));
+    expect(screen.getByLabelText("Mode")).toHaveValue("none");
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the server's refusal of a policy rather than reporting it saved", async () => {
+    mockGets();
+    apiMock.put.mockRejectedValue({
+      response: {
+        status: 422,
+        data: { message: "min_certification cannot exceed the organization baseline" },
+      },
+    });
+    await openEditor();
+
+    await chooseMode("indirect");
+    await userEvent.click(screen.getByRole("button", { name: /Save Policy/ }));
+
+    expect(
+      await screen.findByText(
+        "min_certification cannot exceed the organization baseline",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Attestation policy saved.")).not.toBeInTheDocument();
+  });
+});
+
+describe("AttestationPolicyPage — MDS refresh outcomes", () => {
+  it("reports a first ingestion by serial and entry count", async () => {
+    mockGets({ mds: { no: null, next_update: null, entry_count: 0, last_refreshed_at: null, stale: true } });
+    apiMock.post.mockResolvedValue(
+      res({ outcome: "initial", no: 1, entry_count: 900 }),
+    );
+    renderWithProviders(<AttestationPolicyPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Refresh now/ }));
+    expect(
+      await screen.findByText(/First ingestion complete — serial 1, 900 entries/),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing changed when the BLOB is already current", async () => {
+    mockGets();
+    apiMock.post.mockResolvedValue(
+      res({ outcome: "no_op_refresh", no: 42, entry_count: 1200 }),
+    );
+    renderWithProviders(<AttestationPolicyPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Refresh now/ }));
+    expect(
+      await screen.findByText(/Already current at serial 42 — no changes/),
+    ).toBeInTheDocument();
+  });
+
+  it("says a rollback was rejected and that nothing was written", async () => {
+    // An older BLOB reaching the endpoint is the shape of an MDS rollback
+    // attack, so the refusal names both serials rather than failing quietly.
+    mockGets();
+    apiMock.post.mockResolvedValue(
+      res({ outcome: "rollback_rejected", attempted_no: 41, stored_no: 42 }),
+    );
+    renderWithProviders(<AttestationPolicyPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Refresh now/ }));
+    expect(
+      await screen.findByText(
+        /fetched serial 41 is older than the stored serial 42\. Nothing was written\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a failed refresh rather than leaving the panel unchanged", async () => {
+    mockGets();
+    apiMock.post.mockRejectedValue({
+      response: { status: 502, data: { message: "Could not reach the FIDO MDS endpoint" } },
+    });
+    renderWithProviders(<AttestationPolicyPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Refresh now/ }));
+    expect(
+      await screen.findByText("Could not reach the FIDO MDS endpoint"),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("AttestationPolicyPage — compliance report failure", () => {
+  it("offers a retry when the report cannot be loaded", async () => {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/tenants/t1/webauthn/attestation-policy") {
+        return Promise.resolve(res(DEFAULT_ATTESTATION_POLICY));
+      }
+      if (url === "/api/v1/mds/status") return Promise.resolve(res(mdsStatus));
+      return Promise.reject(new Error("report unavailable"));
+    });
+    renderWithProviders(<AttestationPolicyPage />);
+
+    expect(
+      await screen.findByText("Failed to load the compliance report."),
+    ).toBeInTheDocument();
+    const before = apiMock.get.mock.calls.length;
+    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+    await waitFor(() =>
+      expect(apiMock.get.mock.calls.length).toBeGreaterThan(before),
+    );
+  });
+});

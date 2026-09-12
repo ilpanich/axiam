@@ -205,3 +205,59 @@ expects it:
 ```bash
 just target=axiam profile=p2-tls13 sdk-dry-run
 ```
+
+---
+
+## 5. The operator's run — outcome (2026-09-11, same day)
+
+§4 was executed. Both closable cells are closed, and one of them was not a
+formality.
+
+| Cell | Result |
+|---|---|
+| `oauth2_authorize` | **PASS** on its first-ever execution — `ok=636, p95=21ms`. Un-pended. |
+| `scim_provisioning` | **FAILED** its first-ever execution: 20 of 907 operations. Un-pended only after the server defect it found was fixed; re-run clean at 470/470 with zero SCIM 500s. |
+
+### 5.1 What `scim_provisioning` found
+
+Every one of the 20 failures was the same thing. A concurrent
+`PATCH /scim/v2/Users/{id}` lost a SurrealDB optimistic-concurrency race and
+reached the client as HTTP 500, carrying the engine's own words — *"Transaction
+write conflict. This transaction can be retried"*. Nothing retried it. An IdP
+driving Okta/Entra-shaped provisioning reads those as failed syncs and re-sends
+the whole record.
+
+The machinery to handle it already existed and was already unit-tested —
+`is_write_conflict`, `MAX_WRITE_ATTEMPTS`, `write_conflict_backoff` all shipped
+with the August `increment_failed_logins` fix — but the helper their own
+documentation linked to, `retry_on_write_conflict`, had never been written. One
+method got a hand-rolled loop; every other contended write got nothing.
+
+Fixed in `axiam-db`: the helper now exists, `UserRepository::update` uses it (so
+every administrative and SCIM write is covered), `classify_write_error` stops
+reporting a contended write as `Migration failed`, and `is_transaction_conflict`
+— whose two literals did not match the message SurrealDB v3 actually emits, and
+which guards the single-use consume on `device_grant`, `permission_ticket`,
+`pushed_auth_request` and `oauth2_auth_code` — was folded into the one marker set.
+
+### 5.2 Why this is the argument for `PENDING_SCENARIOS`
+
+`scim_provisioning`'s header recorded that its payloads had been checked
+statically against the real SCIM DTOs and matched. They did. It still hid a live
+server defect, because what it exercises is *concurrency*, and no amount of
+reading finds that. "Matches on inspection" was never allowed to count as "runs
+green" here, and this is why.
+
+### 5.3 The rest of §4
+
+The base matrix is **22 PASS / 0 WARN / 6 SKIP / 0 FAIL** (3m36s), and the SDK
+dry-run is **11 PASS / 0 WARN / 0 SKIP / 0 FAIL** (4m43s) with every language
+reporting `1.0.0-beta12` (`1.0.0b12` for Python) — so §1.1's `_sdkversion.sh` fix
+is confirmed working end to end. Nothing in §3's named follow-ups changed.
+
+One harness note for the next operator: `bench-up`'s port pre-flight checks the
+TLS port but not the gRPC one, so with a conformance `serve-axiam.sh` running
+(it holds `127.0.0.1:50051`) the stack dies with a raw daemon error and the next
+stage reports `auth.mintUserToken: could not obtain a token for setup (status 0)`
+— a connection failure wearing a credentials failure's clothes. `BENCH_GRPC_PORT`
+is the knob, as `BENCH_TLS_PORT` is for 8443.

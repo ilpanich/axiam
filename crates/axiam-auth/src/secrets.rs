@@ -433,6 +433,22 @@ impl SecretProviderKind {
                                 path.display()
                             ))
                         })?;
+                        // `from_pem_bundle` answers `Ok` with an EMPTY list for
+                        // a file that contains no PEM blocks at all — a
+                        // truncated, empty, or wrong-format bundle parses to
+                        // nothing rather than to an error. Adding no roots and
+                        // carrying on would leave a client trusting only the
+                        // platform defaults, which is precisely the fallback
+                        // this branch exists to prevent, and it would be
+                        // invisible: the operator asked for pinning and would
+                        // get none, with nothing in the log to say so.
+                        if anchors.is_empty() {
+                            return Err(AxiamError::Internal(format!(
+                                "vault: {} contains no certificates — refusing to \
+                                 continue with the default trust store",
+                                path.display()
+                            )));
+                        }
                         let mut builder = reqwest::Client::builder();
                         for anchor in anchors {
                             builder = builder.add_root_certificate(anchor);

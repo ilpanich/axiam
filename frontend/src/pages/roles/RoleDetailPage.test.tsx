@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter } from "react-router";
@@ -10,6 +10,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import { RoleDetailPage } from "./RoleDetailPage";
 import { makeClient } from "@/test/renderWithProviders";
+import { setToastDispatch } from "@/hooks/useToast";
 
 const role = {
   id: "r1",
@@ -800,6 +801,250 @@ describe("RoleDetailPage", () => {
         "/api/v1/roles/r1/service-accounts/sa1",
         {}
       )
+    );
+  });
+});
+
+// ─── Dismissal, and what a refused unassignment looks like ────────────────────
+//
+// Every dialog on this page can be walked away from, and each of them resets
+// its own state on the way out — a scope picker or a half-typed search left
+// behind is a grant the next operator did not mean to make. The unassign
+// mutations, meanwhile, are the only writes here whose failure is reported by
+// toast rather than inline, so a swallowed rejection reads as a click that did
+// nothing.
+
+describe("RoleDetailPage — dismissal and refused writes", () => {
+  afterEach(() => {
+    setToastDispatch(null);
+  });
+
+  it("forgets the permission search when the grant dialog is dismissed", async () => {
+    routeGet(defaultData());
+    renderPage();
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Grant Permission/ })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(
+      within(dialog).getByLabelText("Filter permissions"),
+      "write"
+    );
+    // This dialog grants on click and has no submit button, so the only way
+    // out is the close control in its header.
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Close dialog" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /Grant Permission/ }));
+    expect(
+      within(screen.getByRole("dialog")).getByLabelText("Filter permissions")
+    ).toHaveValue("");
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("forgets the chosen group when the assign-group dialog is dismissed", async () => {
+    routeGet(defaultData());
+    renderPage();
+    await screen.findByText("Editor");
+    await userEvent.click(screen.getByRole("button", { name: "groups" }));
+    await userEvent.click(screen.getByRole("button", { name: /Assign Group/ }));
+    let dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Group"), "g1");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /Assign Group/ }));
+    dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText("Group")).toHaveValue("");
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("forgets the chosen service account when that dialog is dismissed", async () => {
+    routeGet(defaultData());
+    renderPage();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "service accounts" })
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Assign Service Account/ })
+    );
+    let dialog = await screen.findByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Service account"),
+      "sa1"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /Assign Service Account/ })
+    );
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByLabelText("Service account")).toHaveValue("");
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("closes the assign-user dialog without assigning", async () => {
+    routeGet(defaultData());
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Assign User/ }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Done" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("cancels each confirmation without writing anything", async () => {
+    routeGet(defaultData());
+    renderPage();
+
+    for (const open of ["Revoke read", "Unassign alice"]) {
+      await userEvent.click(await screen.findByRole("button", { name: open }));
+      await userEvent.click(
+        within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })
+      );
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+      );
+    }
+
+    await userEvent.click(screen.getByRole("button", { name: "groups" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Unassign group Admins" })
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "service accounts" }));
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Unassign service account ingest-worker",
+      })
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+
+    expect(apiMock.delete).not.toHaveBeenCalled();
+  });
+
+  it("toasts the server's reason when unassigning a user is refused", async () => {
+    routeGet(defaultData());
+    apiMock.delete.mockRejectedValue({
+      response: {
+        status: 409,
+        data: { message: "Role is required by an active session policy" },
+      },
+    });
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    renderPage();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Unassign alice" }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" })
+    );
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith({
+        description: "Role is required by an active session policy",
+        variant: "destructive",
+      })
+    );
+  });
+
+  it("toasts the server's reason when unassigning a group is refused", async () => {
+    routeGet(defaultData());
+    apiMock.delete.mockRejectedValue({
+      response: { status: 403, data: { message: "Not permitted on this role" } },
+    });
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    renderPage();
+
+    await screen.findByText("Editor");
+    await userEvent.click(screen.getByRole("button", { name: "groups" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Unassign group Admins" })
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" })
+    );
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith({
+        description: "Not permitted on this role",
+        variant: "destructive",
+      })
+    );
+  });
+
+  it("toasts the server's reason when unassigning a service account is refused", async () => {
+    routeGet(defaultData());
+    apiMock.delete.mockRejectedValue({
+      response: { status: 403, data: { message: "Machine grant is managed elsewhere" } },
+    });
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    renderPage();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "service accounts" })
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Unassign service account ingest-worker",
+      })
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" })
+    );
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith({
+        description: "Machine grant is managed elsewhere",
+        variant: "destructive",
+      })
+    );
+  });
+
+  it("toasts the 409 an already-assigned user produces, which the dialog swallows", async () => {
+    routeGet(defaultData());
+    apiMock.post.mockRejectedValue({
+      response: { status: 409, data: { message: "User already holds this role" } },
+    });
+    const toastSpy = vi.fn();
+    setToastDispatch(toastSpy);
+    renderPage();
+
+    await userEvent.click(await screen.findByRole("button", { name: /Assign User/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Search users"), "al");
+    await userEvent.click(await within(dialog).findByRole("button", { name: "Assign" }));
+
+    await waitFor(() =>
+      expect(toastSpy).toHaveBeenCalledWith({
+        description: "User already holds this role",
+        variant: "destructive",
+      })
     );
   });
 });

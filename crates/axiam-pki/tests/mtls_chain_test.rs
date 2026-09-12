@@ -603,3 +603,326 @@ async fn mtls_rejects_expired_issuing_ca() {
         "error must indicate the issuing CA is expired, got: {err_msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cases 7-9: the chain WALK — a leaf issued by an intermediate
+// ---------------------------------------------------------------------------
+//
+// Every case above ends at the leaf's immediate issuer, so `require_trust_anchor`
+// never took a second lap: no test had a CA with a parent at all. That left the
+// whole walk — the parent lookup, the per-hop usability check, and the depth
+// bound that stops a cycle in `parent_ca_id` hanging a request handler —
+// asserted nowhere, in the function that decides whether a client certificate
+// is trusted.
+
+/// Root (flagged as the anchor) -> intermediate (not flagged) -> leaf.
+///
+/// Returns the pieces a test needs to drive `authenticate`.
+struct Hierarchy {
+    org_id: uuid::Uuid,
+    root_id: uuid::Uuid,
+    leaf_id: uuid::Uuid,
+    service_account_id: uuid::Uuid,
+    leaf_pem: String,
+    cert_repo: SurrealCaCertificateRepository<TestDb>,
+}
+
+async fn a_leaf_beneath_an_intermediate(
+    db: &Surreal<TestDb>,
+    flag_root_as_anchor: bool,
+) -> (Hierarchy, SurrealCertificateRepository<TestDb>) {
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let ca_svc = CaService::new(
+        ca_repo.clone(),
+        test_pki_config(),
+        sem.clone(),
+        test_ca_custodians(),
+    );
+
+    let root = ca_svc
+        .generate(CreateCaCertificate {
+            organization_id: org_id,
+            subject: "Root CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 3650,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: true,
+        })
+        .await
+        .expect("root CA generation must succeed");
+
+    if flag_root_as_anchor {
+        ca_repo
+            .set_mtls_trust_anchor(org_id, root.certificate.id, true)
+            .await
+            .expect("flagging the root as an mTLS trust anchor must succeed");
+    }
+
+    let intermediate = ca_svc
+        .generate_intermediate(axiam_core::models::certificate::CreateIntermediateCa {
+            organization_id: org_id,
+            tenant_id,
+            parent_ca_id: root.certificate.id,
+            subject: "Tenant Signing CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+        })
+        .await
+        .expect("intermediate CA generation must succeed");
+    // Deliberately NOT flagged: the anchor is its parent, which is the whole
+    // point of walking.
+
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let cert_svc = CertService::new(
+        ca_repo.clone(),
+        cert_repo.clone(),
+        test_pki_config(),
+        sem.clone(),
+        test_ca_custodians(),
+    );
+    let leaf = cert_svc
+        .generate(
+            org_id,
+            CreateCertificate {
+                tenant_id,
+                issuer_ca_id: intermediate.certificate.id,
+                subject: "CN=intermediate-issued-device".into(),
+                cert_type: CertificateType::Device,
+                key_algorithm: KeyAlgorithm::Ed25519,
+                validity_days: 30,
+                metadata: None,
+            },
+            None,
+        )
+        .await
+        .expect("leaf cert generation must succeed");
+
+    // Bound, so a refusal can never be attributed to a missing binding.
+    let sa_repo = SurrealServiceAccountRepository::new(db.clone());
+    let (sa, _secret) = sa_repo
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "Chain walk SA".into(),
+            description: None,
+        })
+        .await
+        .expect("service account creation must succeed");
+    cert_repo
+        .bind_to_service_account(tenant_id, leaf.certificate.id, sa.id)
+        .await
+        .expect("cert bind must succeed");
+
+    (
+        Hierarchy {
+            org_id,
+            root_id: root.certificate.id,
+            leaf_id: leaf.certificate.id,
+            service_account_id: sa.id,
+            leaf_pem: leaf.certificate.public_cert_pem.clone(),
+            cert_repo: ca_repo,
+        },
+        cert_repo,
+    )
+}
+
+#[tokio::test]
+async fn mtls_accepts_a_leaf_whose_anchor_is_its_grandparent() {
+    // The intermediate is not itself an anchor, so accepting this leaf requires
+    // the walk to take a second lap and find the root. If the walk stopped at
+    // the immediate issuer, every intermediate-issued device in the fleet would
+    // be refused.
+    let db = setup_db().await;
+    let (h, leaf_repo) = a_leaf_beneath_an_intermediate(&db, true).await;
+
+    let identity = DeviceAuthService::new(leaf_repo, h.cert_repo)
+        .authenticate(&h.leaf_pem)
+        .await
+        .expect("a leaf chaining to a flagged root must authenticate");
+
+    // Resolving to the *right* principal is the point — an accept that
+    // returned some other service account would be worse than a refusal.
+    assert_eq!(identity.certificate_id, h.leaf_id);
+    assert_eq!(identity.service_account_id, h.service_account_id);
+}
+
+#[tokio::test]
+async fn mtls_refuses_a_chain_whose_only_anchor_has_been_revoked() {
+    // An anchor reached through — or as — a revoked CA is not reached at all.
+    // The check runs per hop, so revoking the root must refuse a leaf two
+    // levels below it, and the message must say which condition failed.
+    let db = setup_db().await;
+    let (h, leaf_repo) = a_leaf_beneath_an_intermediate(&db, true).await;
+
+    h.cert_repo
+        .revoke(h.org_id, h.root_id)
+        .await
+        .expect("revoking the root CA must succeed");
+
+    let err = DeviceAuthService::new(leaf_repo, h.cert_repo)
+        .authenticate(&h.leaf_pem)
+        .await
+        .expect_err("a chain whose anchor is revoked must fail closed");
+
+    assert!(
+        err.to_string().contains("revoked")
+            || err.to_string().contains("validity window")
+            || err.to_string().contains("trust anchor"),
+        "the refusal must name the reason; got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn mtls_refuses_an_intermediate_chain_that_reaches_no_anchor() {
+    // Same hierarchy, root left unflagged. The walk runs out of parents rather
+    // than out of depth, and that is a different refusal from "not signed by
+    // the CA" — an operator who sees this one needs to flag a CA, not reissue
+    // a certificate.
+    let db = setup_db().await;
+    let (h, leaf_repo) = a_leaf_beneath_an_intermediate(&db, false).await;
+
+    let err = DeviceAuthService::new(leaf_repo, h.cert_repo)
+        .authenticate(&h.leaf_pem)
+        .await
+        .expect_err("a chain that reaches no anchor must fail closed");
+
+    assert!(
+        err.to_string().contains("trust anchor"),
+        "the refusal must name the reason; got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn mtls_refuses_a_client_certificate_that_is_not_parseable_pem() {
+    // The first thing `authenticate` does with attacker-controlled input. It
+    // reaches the same code on the proxy-header path, where the bytes are
+    // whatever a header contained, so failing closed here is what keeps a
+    // malformed header from becoming a panic or an unchecked DER parse.
+    let db = setup_db().await;
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+
+    let err = DeviceAuthService::new(cert_repo, ca_repo)
+        .authenticate("not a certificate at all")
+        .await
+        .expect_err("unparseable input must be refused, not parsed further");
+
+    assert!(
+        err.to_string().contains("invalid client certificate PEM"),
+        "the refusal must name the stage that failed; got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn mtls_refuses_a_ca_row_whose_parent_chain_is_a_cycle() {
+    // The walk's depth bound exists because `parent_ca_id` is data, and data
+    // can describe a cycle. It cannot be reached by building certificates:
+    // `CaService` constrains a tenant signing CA to `pathlen: 0`, so a real
+    // hierarchy is at most root -> intermediate -> leaf, two hops against a
+    // budget of eight. The case the bound actually defends against is a
+    // corrupt row, so that is what this writes — straight through the
+    // repository, bypassing the service that would refuse it.
+    //
+    // Without the bound this test does not fail; it hangs, which on a request
+    // handler is a worker that never comes back.
+    let db = setup_db().await;
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+    let now = Utc::now();
+
+    // A CA that really did sign the leaf, so the run reaches the chain walk
+    // rather than stopping at the signature check.
+    let ca_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("CA keygen must succeed");
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params must build");
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "Self-parented CA");
+    ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_cert = ca_params
+        .self_signed(&ca_key)
+        .expect("self-sign must succeed");
+    let ca_pem = ca_cert.pem();
+    let ca_issuer = rcgen::Issuer::from_params(&ca_params, ca_key);
+
+    let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("leaf keygen must succeed");
+    let mut leaf_params =
+        CertificateParams::new(Vec::<String>::new()).expect("leaf params must build");
+    leaf_params
+        .distinguished_name
+        .push(DnType::CommonName, "cycle-device");
+    leaf_params.is_ca = IsCa::NoCa;
+    let leaf_cert = leaf_params
+        .signed_by(&leaf_key, &ca_issuer)
+        .expect("signing the leaf must succeed");
+    let leaf_pem = leaf_cert.pem();
+    let fingerprint = hex::encode(Sha256::digest(leaf_cert.der()));
+
+    // The corruption: the CA names itself as its own parent.
+    let ca_id = uuid::Uuid::new_v4();
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    ca_repo
+        .create(axiam_core::models::certificate::StoreCaCertificate {
+            id: ca_id,
+            organization_id: org_id,
+            tenant_id: Some(tenant_id),
+            parent_ca_id: Some(ca_id),
+            subject: "CN=Self-parented CA".into(),
+            public_cert_pem: ca_pem,
+            chain_pem: None,
+            fingerprint: "ca-fingerprint".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: now - Duration::days(1),
+            not_after: now + Duration::days(365),
+            encrypted_private_key: None,
+            key_custody: axiam_core::ca_keys::CaKeyCustody::External,
+            key_locator: None,
+        })
+        .await
+        .expect("writing the malformed CA row must succeed — the point is that it can");
+
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let leaf = cert_repo
+        .create(StoreCertificate {
+            tenant_id,
+            issuer_ca_id: ca_id,
+            subject: "CN=cycle-device".into(),
+            public_cert_pem: leaf_pem.clone(),
+            fingerprint,
+            cert_type: CertificateType::Device,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: now,
+            not_after: now + Duration::days(30),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .expect("storing the leaf must succeed");
+
+    let sa_repo = SurrealServiceAccountRepository::new(db.clone());
+    let (sa, _secret) = sa_repo
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "Cycle SA".into(),
+            description: None,
+        })
+        .await
+        .expect("service account creation must succeed");
+    cert_repo
+        .bind_to_service_account(tenant_id, leaf.id, sa.id)
+        .await
+        .expect("cert bind must succeed");
+
+    let err = DeviceAuthService::new(cert_repo, ca_repo)
+        .authenticate(&leaf_pem)
+        .await
+        .expect_err("a cyclic parent chain must be refused, and must terminate");
+
+    assert!(
+        err.to_string().contains("longer than the supported depth"),
+        "the refusal must name the depth bound, so the row is recognisable as \
+         corrupt rather than merely unanchored; got: {err}"
+    );
+}

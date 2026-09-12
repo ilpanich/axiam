@@ -759,4 +759,197 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.scim_type, Some("invalidPath"));
     }
+
+    // -----------------------------------------------------------------
+    // phoneNumbers and addresses
+    //
+    // The two paths the op matrix above never reached. Both were added late
+    // (X7 G8 / W7) and both are *removable*, unlike `emails` — a provisioning
+    // client sending `remove` is a data subject asking for a telephone number
+    // or a postal address to stop being held, and refusing it would leave them
+    // no way to do that short of deleting the account. That makes the
+    // difference between `Some(None)` (erase it) and `None` (leave it alone)
+    // the whole contract here, and nothing asserted it.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn user_phonenumbers_add_and_replace_take_the_primary_entry() {
+        for verb in ["add", "replace"] {
+            let d = parse_user_patch(&req(vec![op(
+                verb,
+                Some("phoneNumbers"),
+                Some(json!([
+                    {"value": "+15550001", "type": "home"},
+                    {"value": "+15550002", "type": "work", "primary": true},
+                ])),
+            )]))
+            .unwrap();
+            assert_eq!(
+                d.phone_number,
+                Some(Some("+15550002".to_string())),
+                "the entry marked primary wins over document order; verb={verb}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_phonenumbers_falls_back_to_the_first_entry_when_none_is_primary() {
+        let d = parse_user_patch(&req(vec![op(
+            "replace",
+            Some("phoneNumbers"),
+            Some(json!([{"value": "+15550001"}, {"value": "+15550002"}])),
+        )]))
+        .unwrap();
+        assert_eq!(d.phone_number, Some(Some("+15550001".to_string())));
+    }
+
+    #[test]
+    fn user_phonenumbers_remove_erases_rather_than_being_refused() {
+        // The erasure path. `Some(None)` means "write NULL"; a bare `None`
+        // would mean "this PATCH did not mention the attribute" and would
+        // silently keep the number the subject asked to have deleted.
+        let d = parse_user_patch(&req(vec![op("remove", Some("phoneNumbers"), None)])).unwrap();
+        assert_eq!(d.phone_number, Some(None));
+    }
+
+    #[test]
+    fn user_phonenumbers_replaced_with_an_empty_array_also_erases() {
+        // RFC 7644 §3.5.2.3 spells "replace this attribute with nothing" as an
+        // empty array, and clients that only ever send `replace` say it this
+        // way. It has to mean the same as `remove`.
+        let d = parse_user_patch(&req(vec![op(
+            "replace",
+            Some("phoneNumbers"),
+            Some(json!([])),
+        )]))
+        .unwrap();
+        assert_eq!(d.phone_number, Some(None));
+    }
+
+    #[test]
+    fn user_phonenumbers_ignores_a_blank_value() {
+        // A blank string is not a phone number. Storing it would leave the
+        // record looking populated while holding nothing.
+        let d = parse_user_patch(&req(vec![op(
+            "replace",
+            Some("phoneNumbers"),
+            Some(json!([{"value": "   "}])),
+        )]))
+        .unwrap();
+        assert_eq!(d.phone_number, Some(None));
+    }
+
+    #[test]
+    fn user_phonenumbers_that_is_not_an_array_is_invalid_value() {
+        let err = parse_user_patch(&req(vec![op(
+            "replace",
+            Some("phoneNumbers"),
+            Some(json!("+15550001")),
+        )]))
+        .expect_err("a bare string is not a SCIM multi-valued attribute");
+        assert!(
+            format!("{err:?}").contains("phoneNumbers"),
+            "the error must name the attribute; got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn user_addresses_are_renamed_from_scim_casing_to_the_oidc_shape() {
+        // SCIM and OIDC use the same words in different casings, so this is a
+        // rename and every member has to land in the right field — a swap
+        // between `region` and `locality` would be invisible without this.
+        let d = parse_user_patch(&req(vec![op(
+            "replace",
+            Some("addresses"),
+            Some(json!([{
+                "formatted": "1 Example Way\nTownsville",
+                "streetAddress": "1 Example Way",
+                "locality": "Townsville",
+                "region": "Exampleshire",
+                "postalCode": "EX1 2MP",
+                "country": "GB",
+                "primary": true,
+            }])),
+        )]))
+        .unwrap();
+
+        let address = d
+            .address
+            .expect("the PATCH mentioned addresses")
+            .expect("a populated entry is an address");
+        assert_eq!(address.street_address.as_deref(), Some("1 Example Way"));
+        assert_eq!(address.locality.as_deref(), Some("Townsville"));
+        assert_eq!(address.region.as_deref(), Some("Exampleshire"));
+        assert_eq!(address.postal_code.as_deref(), Some("EX1 2MP"));
+        assert_eq!(address.country.as_deref(), Some("GB"));
+        assert!(address.formatted.is_some());
+    }
+
+    #[test]
+    fn user_addresses_prefer_the_primary_entry() {
+        let d = parse_user_patch(&req(vec![op(
+            "replace",
+            Some("addresses"),
+            Some(json!([
+                {"locality": "First"},
+                {"locality": "Primary", "primary": true},
+            ])),
+        )]))
+        .unwrap();
+        assert_eq!(
+            d.address.unwrap().unwrap().locality.as_deref(),
+            Some("Primary")
+        );
+    }
+
+    #[test]
+    fn user_addresses_remove_erases_rather_than_being_refused() {
+        let d = parse_user_patch(&req(vec![op("remove", Some("addresses"), None)])).unwrap();
+        assert_eq!(d.address, Some(None));
+    }
+
+    #[test]
+    fn an_address_whose_every_member_is_blank_is_not_an_address() {
+        // Otherwise a client that sends a fully-blank entry writes an address
+        // record that reads as present and holds nothing, which is worse than
+        // either storing one or storing none.
+        let d = parse_user_patch(&req(vec![op(
+            "replace",
+            Some("addresses"),
+            Some(json!([{"locality": "  ", "country": ""}])),
+        )]))
+        .unwrap();
+        assert_eq!(d.address, Some(None));
+    }
+
+    #[test]
+    fn user_addresses_that_is_not_an_array_is_invalid_value() {
+        let err = parse_user_patch(&req(vec![op(
+            "replace",
+            Some("addresses"),
+            Some(json!({"locality": "Townsville"})),
+        )]))
+        .expect_err("a bare object is not a SCIM multi-valued attribute");
+        assert!(
+            format!("{err:?}").contains("addresses"),
+            "the error must name the attribute; got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_emails_entry_without_a_value_member_is_refused() {
+        // `emails` is the one attribute AXIAM requires, so a malformed entry
+        // must be an error rather than a silently skipped write.
+        let err = parse_user_patch(&req(vec![op(
+            "replace",
+            Some("emails"),
+            Some(json!([{"type": "work", "primary": true}])),
+        )]))
+        .expect_err("an entry with no value is not an email address");
+        assert!(format!("{err:?}").contains("emails"));
+
+        let err = parse_user_patch(&req(vec![op("replace", Some("emails"), Some(json!([])))]))
+            .expect_err("an empty array is not an email address");
+        assert!(format!("{err:?}").contains("emails"));
+    }
 }

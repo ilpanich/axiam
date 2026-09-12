@@ -1661,4 +1661,180 @@ mod tests {
         assert_eq!(SubjectMapping::from_wire("jit_provsion"), None);
         assert_eq!(SubjectMapping::from_wire(""), None);
     }
+
+    // -----------------------------------------------------------------------
+    // Token-exchange trust validation, and the messages it produces
+    //
+    // Every rejection an operator can hit is a message they have to act on, and
+    // the `Display` arms were rendered by no test at all — so a message could
+    // name the wrong field, or interpolate the wrong bound, and everything
+    // would still pass. These assert the variant AND the text.
+    // -----------------------------------------------------------------------
+
+    fn a_valid_trust() -> TokenExchangeTrust {
+        TokenExchangeTrust {
+            enabled: true,
+            accepted_audiences: vec!["https://rp.example".to_string()],
+            subject_mapping: SubjectMapping::LinkedOnly,
+            scope_map: BTreeMap::new(),
+            max_token_age_secs: 300,
+            max_lifetime_secs: None,
+        }
+    }
+
+    #[test]
+    fn a_well_formed_trust_block_validates() {
+        a_valid_trust()
+            .validate()
+            .expect("the baseline the other cases mutate must itself be valid");
+    }
+
+    #[test]
+    fn every_rejection_names_the_field_the_operator_has_to_fix() {
+        let too_many_audiences = (0..=MAX_ACCEPTED_AUDIENCES)
+            .map(|i| format!("https://rp{i}.example"))
+            .collect::<Vec<_>>();
+        let too_many_entries = (0..=MAX_SCOPE_MAP_ENTRIES)
+            .map(|i| (format!("scope{i}"), vec!["read".to_string()]))
+            .collect::<BTreeMap<_, _>>();
+
+        let cases: Vec<(TrustConfigError, TokenExchangeTrust)> = vec![
+            (
+                TrustConfigError::NoAcceptedAudiences,
+                TokenExchangeTrust {
+                    accepted_audiences: Vec::new(),
+                    ..a_valid_trust()
+                },
+            ),
+            (
+                TrustConfigError::TooManyAudiences(too_many_audiences.len()),
+                TokenExchangeTrust {
+                    accepted_audiences: too_many_audiences,
+                    ..a_valid_trust()
+                },
+            ),
+            (
+                TrustConfigError::BlankAudience,
+                TokenExchangeTrust {
+                    accepted_audiences: vec!["   ".to_string()],
+                    ..a_valid_trust()
+                },
+            ),
+            (
+                TrustConfigError::TokenAgeOutOfRange(0),
+                TokenExchangeTrust {
+                    max_token_age_secs: 0,
+                    ..a_valid_trust()
+                },
+            ),
+            (
+                TrustConfigError::TokenAgeOutOfRange(MAX_TOKEN_AGE_CEILING_SECS + 1),
+                TokenExchangeTrust {
+                    max_token_age_secs: MAX_TOKEN_AGE_CEILING_SECS + 1,
+                    ..a_valid_trust()
+                },
+            ),
+            (
+                TrustConfigError::NonPositiveLifetime(0),
+                TokenExchangeTrust {
+                    max_lifetime_secs: Some(0),
+                    ..a_valid_trust()
+                },
+            ),
+            (
+                TrustConfigError::TooManyScopeMapEntries(too_many_entries.len()),
+                TokenExchangeTrust {
+                    scope_map: too_many_entries,
+                    ..a_valid_trust()
+                },
+            ),
+            (
+                TrustConfigError::BlankScopeMapKey,
+                TokenExchangeTrust {
+                    scope_map: BTreeMap::from([("  ".to_string(), vec!["read".to_string()])]),
+                    ..a_valid_trust()
+                },
+            ),
+            (
+                TrustConfigError::EmptyScopeMapValue("upstream".to_string()),
+                TokenExchangeTrust {
+                    scope_map: BTreeMap::from([("upstream".to_string(), Vec::new())]),
+                    ..a_valid_trust()
+                },
+            ),
+            (
+                TrustConfigError::BlankScopeName("upstream".to_string()),
+                TokenExchangeTrust {
+                    scope_map: BTreeMap::from([("upstream".to_string(), vec![" ".to_string()])]),
+                    ..a_valid_trust()
+                },
+            ),
+        ];
+
+        for (expected, trust) in cases {
+            let got = trust
+                .validate()
+                .expect_err("this configuration cannot be enforced safely");
+
+            assert_eq!(got, expected);
+
+            let message = got.to_string();
+            assert!(
+                message.starts_with("token_exchange."),
+                "a rejection must name its config path; got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bound_a_rejection_quotes_is_the_bound_that_was_applied() {
+        // Interpolating the wrong constant here sends an operator to change a
+        // value that was already within range.
+        let over = MAX_ACCEPTED_AUDIENCES + 1;
+        let message = TrustConfigError::TooManyAudiences(over).to_string();
+        assert!(message.contains(&over.to_string()));
+        assert!(message.contains(&MAX_ACCEPTED_AUDIENCES.to_string()));
+
+        let message = TrustConfigError::TokenAgeOutOfRange(99_999).to_string();
+        assert!(message.contains("99999"));
+        assert!(message.contains(&MAX_TOKEN_AGE_CEILING_SECS.to_string()));
+
+        let message = TrustConfigError::TooManyScopeMapEntries(999).to_string();
+        assert!(message.contains("999"));
+        assert!(message.contains(&MAX_SCOPE_MAP_ENTRIES.to_string()));
+    }
+
+    #[test]
+    fn a_disabled_block_is_still_validated_except_for_the_audience_rule() {
+        // The documented asymmetry: nonsense in a disabled block becomes
+        // nonsense in an enabled block the moment someone flips the checkbox,
+        // and that flip is not where an operator expects to learn their
+        // scope_map was malformed. An empty audience list, though, is exactly
+        // what a disabled block looks like.
+        let disabled_and_empty = TokenExchangeTrust {
+            enabled: false,
+            accepted_audiences: Vec::new(),
+            ..a_valid_trust()
+        };
+        disabled_and_empty
+            .validate()
+            .expect("an unused block need not name an audience");
+
+        let disabled_but_malformed = TokenExchangeTrust {
+            enabled: false,
+            accepted_audiences: Vec::new(),
+            scope_map: BTreeMap::from([("upstream".to_string(), Vec::new())]),
+            ..a_valid_trust()
+        };
+        assert_eq!(
+            disabled_but_malformed.validate(),
+            Err(TrustConfigError::EmptyScopeMapValue("upstream".to_string()))
+        );
+    }
+
+    #[test]
+    fn subject_mapping_wire_names_are_stable() {
+        assert_eq!(SubjectMapping::LinkedOnly.as_str(), "linked_only");
+        assert_eq!(SubjectMapping::JitProvision.as_str(), "jit_provision");
+    }
 }

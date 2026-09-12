@@ -9,6 +9,7 @@ import { FederationPage } from "./FederationPage";
 import { DEFAULT_TOKEN_EXCHANGE_TRUST } from "@/services/federation";
 import { renderWithProviders } from "@/test/renderWithProviders";
 import { setToastDispatch } from "@/hooks/useToast";
+import { useAuthStore } from "@/stores/auth";
 
 const configs = [
   {
@@ -505,5 +506,446 @@ describe("FederationPage", () => {
         variant: "destructive",
       }),
     );
+  });
+});
+
+// ─── Provider kinds, inheritance, and the paths that refuse a save ────────────
+//
+// The suite above walks the generic OIDC and SAML kinds. The rest of the form
+// only appears for other kinds — Apple's team/key IDs, an OAuth2 provider's
+// three endpoints, a generic kind's slug, Entra's accepted-tenant list — and
+// the inherited-providers section only appears for a tenant that inherits one,
+// which needs the effective-providers endpoint to answer.
+
+/** A config list plus an effective-providers response, routed by URL. */
+function mockFederationGets(options: {
+  configs?: unknown[];
+  providers?: unknown[];
+}) {
+  apiMock.get.mockImplementation((url: string) => {
+    if (url === "/api/v1/auth/federation/providers") {
+      return Promise.resolve(res({ providers: options.providers ?? [] }));
+    }
+    return Promise.resolve(res(options.configs ?? []));
+  });
+}
+
+const inheritedGoogle = {
+  id: "p1",
+  provider_kind: "google",
+  display_name: "Google",
+  protocol: "OidcConnect",
+  has_bundled_mark: true,
+  button_icon: null,
+  inherited: true,
+};
+
+describe("FederationPage — provider kinds", () => {
+  it("sends Apple's team and key IDs, which no other kind has", async () => {
+    mockFederationGets({ configs });
+    apiMock.post.mockResolvedValue(res({ ...configs[0], id: "f5" }));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
+    const dialog = screen.getByRole("dialog");
+
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Provider *"),
+      "apple",
+    );
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Apple");
+    await userEvent.type(
+      within(dialog).getByLabelText("Services ID *"),
+      "com.example.service",
+    );
+    // Apple's "client secret" is the .p8 private key, and the field says so.
+    await userEvent.type(
+      within(dialog).getByLabelText(/Signing key/),
+      "-----BEGIN PRIVATE KEY-----p8",
+    );
+    await userEvent.type(within(dialog).getByLabelText("Team ID"), "ABCDE12345");
+    await userEvent.type(within(dialog).getByLabelText("Key ID"), "KEYID67890");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/federation-configs",
+        expect.objectContaining({
+          provider_kind: "apple",
+          apple_team_id: "ABCDE12345",
+          apple_key_id: "KEYID67890",
+        }),
+      ),
+    );
+  });
+
+  it("sends the three endpoints an OAuth2 provider authenticates through", async () => {
+    // There is no ID token on this protocol, so the userinfo endpoint *is* the
+    // authentication — a wrong one is not a broken button, it is a wrong answer
+    // to "who is this". All three go out explicitly.
+    mockFederationGets({ configs });
+    apiMock.post.mockResolvedValue(res({ ...configs[0], id: "f6" }));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
+    const dialog = screen.getByRole("dialog");
+
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Provider *"),
+      "generic_oauth2",
+    );
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Partner");
+    await userEvent.type(within(dialog).getByLabelText("Client ID *"), "partner-id");
+    await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "partner-secret");
+    // `fireEvent.change` rather than `type`: these are long URLs, and a
+    // per-keystroke type of three of them is slow enough to matter under
+    // coverage instrumentation. One change event is what a paste looks like.
+    fireEvent.change(within(dialog).getByLabelText("Authorization endpoint *"), {
+      target: { value: "https://partner.example/authorize" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Token endpoint *"), {
+      target: { value: "https://partner.example/token" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Userinfo endpoint *"), {
+      target: { value: "https://partner.example/userinfo" },
+    });
+    await userEvent.type(within(dialog).getByLabelText("Scopes"), "profile email");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/federation-configs",
+        expect.objectContaining({
+          protocol: "OAuth2",
+          authorization_endpoint: "https://partner.example/authorize",
+          token_endpoint: "https://partner.example/token",
+          userinfo_endpoint: "https://partner.example/userinfo",
+          scopes: ["profile", "email"],
+        }),
+      ),
+    );
+  });
+
+  it("lets Facebook change protocol, which is the only kind that offers two", async () => {
+    mockFederationGets({ configs });
+    apiMock.post.mockResolvedValue(res({ ...configs[0], id: "f7" }));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
+    const dialog = screen.getByRole("dialog");
+
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Provider *"),
+      "generic_oidc",
+    );
+    expect(within(dialog).getByLabelText("Federation protocol")).toBeDisabled();
+
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Provider *"),
+      "facebook",
+    );
+    const protocol = within(dialog).getByLabelText("Federation protocol");
+    expect(protocol).toBeEnabled();
+    await userEvent.selectOptions(protocol, "OidcConnect");
+
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Facebook");
+    await userEvent.type(within(dialog).getByLabelText("Client ID *"), "fb-app-id");
+    await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "fb-secret");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/federation-configs",
+        expect.objectContaining({ provider_kind: "facebook", protocol: "OidcConnect" }),
+      ),
+    );
+  });
+
+  it("sends the slug a generic provider is overridden by", async () => {
+    // The slug is what a tenant override matches on, so it is the one field a
+    // generic kind cannot be identified without when there are two of them.
+    mockFederationGets({ configs });
+    apiMock.post.mockResolvedValue(res({ ...configs[0], id: "f8" }));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
+    const dialog = screen.getByRole("dialog");
+
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Okta EU");
+    await userEvent.type(within(dialog).getByLabelText("Identifier"), "okta-eu");
+    await userEvent.type(within(dialog).getByLabelText("Client ID *"), "okta-eu-client");
+    await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "eu-secret");
+    fireEvent.change(within(dialog).getByLabelText(/Discovery URL/), {
+      target: {
+        value: "https://eu.okta.example/.well-known/openid-configuration",
+      },
+    });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/federation-configs",
+        expect.objectContaining({
+          provider_slug: "okta-eu",
+          metadata_url:
+            "https://eu.okta.example/.well-known/openid-configuration",
+        }),
+      ),
+    );
+  });
+
+  it("asks for accepted tenants only once the discovery URL is a templated authority", async () => {
+    // Entra's `common` authority publishes a templated issuer, so *any*
+    // Microsoft tenant could otherwise sign in. The field appears in response
+    // to the URL rather than always, so it is never filled in for no reason.
+    mockFederationGets({ configs });
+    apiMock.post.mockResolvedValue(res({ ...configs[0], id: "f9" }));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
+    const dialog = screen.getByRole("dialog");
+
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Provider *"),
+      "microsoft",
+    );
+    expect(
+      within(dialog).queryByLabelText("Accepted provider tenants *"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(within(dialog).getByLabelText(/Discovery URL/), {
+      target: {
+        value:
+          "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration",
+      },
+    });
+    await userEvent.type(
+      await within(dialog).findByLabelText("Accepted provider tenants *"),
+      "72f988bf-86f1-41af-91ab-2d7cd011db47",
+    );
+
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Entra");
+    await userEvent.type(within(dialog).getByLabelText("Client ID *"), "entra-client");
+    await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "entra-secret");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/federation-configs",
+        expect.objectContaining({
+          allowed_issuer_tenants: ["72f988bf-86f1-41af-91ab-2d7cd011db47"],
+        }),
+      ),
+    );
+  });
+});
+
+describe("FederationPage — inherited providers", () => {
+  beforeEach(() => {
+    useAuthStore.setState({
+      user: {
+        id: "u1",
+        username: "admin",
+        email: "admin@example.com",
+        permissions: [],
+        tenant_id: "t1",
+        orgSlug: "acme",
+        tenantSlug: "eng",
+      },
+      isAuthenticated: true,
+      isInitializing: false,
+    });
+  });
+
+  afterEach(() => {
+    useAuthStore.setState({ user: null, isAuthenticated: false });
+  });
+
+  it("lists what the tenant inherits separately from what it owns", async () => {
+    // A tenant admin whose login page shows a Google button but whose table is
+    // empty has no way to tell whether that is a bug. This section is the
+    // explanation.
+    mockFederationGets({ configs: [], providers: [inheritedGoogle] });
+    renderWithProviders(<FederationPage />);
+
+    expect(
+      await screen.findByRole("heading", { name: /Inherited from the organization/ }),
+    ).toBeInTheDocument();
+    const inherited = screen.getByRole("listitem");
+    expect(within(inherited).getByText("Google")).toBeInTheDocument();
+    expect(within(inherited).getByText("Inherited")).toBeInTheDocument();
+    // The table's empty message changes to say the distinction out loud.
+    expect(
+      screen.getByText("No federation configs of this tenant's own."),
+    ).toBeInTheDocument();
+  });
+
+  it("omits the section when every effective provider is the tenant's own", async () => {
+    mockFederationGets({
+      configs: [],
+      providers: [{ ...inheritedGoogle, inherited: false }],
+    });
+    renderWithProviders(<FederationPage />);
+
+    expect(
+      await screen.findByText("No federation configs defined."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /Inherited from the organization/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("seeds the create form from the provider being overridden", async () => {
+    mockFederationGets({ configs: [], providers: [inheritedGoogle] });
+    renderWithProviders(<FederationPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Override in this tenant" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText("Display name *")).toHaveValue("Google");
+    expect(within(dialog).getByLabelText("Provider *")).toHaveValue("google");
+    // Google's discovery URL is prefilled from the kind's defaults, so the
+    // override does not have to be looked up.
+    expect(within(dialog).getByLabelText(/Discovery URL/)).toHaveValue(
+      "https://accounts.google.com/.well-known/openid-configuration",
+    );
+  });
+
+  it("carries the slug across when overriding a generic inherited provider", async () => {
+    // The override matches on the slug, so a generic kind's must be the same
+    // one — derived from the display name exactly as the organization's was.
+    mockFederationGets({
+      configs: [],
+      providers: [
+        {
+          ...inheritedGoogle,
+          id: "p2",
+          provider_kind: "generic_oidc",
+          display_name: "Partner IdP",
+          has_bundled_mark: false,
+        },
+      ],
+    });
+    renderWithProviders(<FederationPage />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Override in this tenant" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText("Identifier")).toHaveValue("partner-idp");
+  });
+
+  it("keeps the table when the effective-providers endpoint fails", async () => {
+    // Deliberately quiet: this list is supplementary, and a fault in it must
+    // not take the CRUD table with it.
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/auth/federation/providers") {
+        return Promise.reject(new Error("Service unavailable"));
+      }
+      return res(configs);
+    });
+    renderWithProviders(<FederationPage />);
+
+    expect(await screen.findByText("Okta")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /Inherited from the organization/ }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("FederationPage — edit refusals and dialog dismissal", () => {
+  it("requires a client id when editing", async () => {
+    mockFederationGets({ configs });
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.clear(within(dialog).getByLabelText("Client ID *"));
+    fireEvent.submit(
+      within(dialog).getByRole("button", { name: "Save Changes" }).closest("form")!,
+    );
+
+    expect(await screen.findByText("Client ID is required.")).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unparseable scope map rather than sending a partial one", async () => {
+    // X4: the trust block is replaced wholesale by the server, so a half-parsed
+    // scope map submitted by accident silently changes what a partner is
+    // granted. Nothing goes out until every line parses.
+    mockFederationGets({ configs });
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(
+      within(dialog).getByLabelText("Scope map"),
+      "this is not a mapping",
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+
+    expect(await screen.findByText(/Line 1/)).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("refuses to enable token exchange with no accepted audience", async () => {
+    // There is deliberately no accept-all audience: a token that was not
+    // addressed to you is one you captured, not one you were given.
+    mockFederationGets({ configs });
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(
+      within(dialog).getByLabelText("Accept this provider's tokens for exchange"),
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+
+    expect(
+      await screen.findByText(/At least one accepted audience is required/),
+    ).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("discards a half-filled create form when the dialog is dismissed", async () => {
+    mockFederationGets({ configs });
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
+    await userEvent.type(
+      within(screen.getByRole("dialog")).getByLabelText("Display name *"),
+      "Half typed",
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /New Config/ }));
+    expect(
+      within(screen.getByRole("dialog")).getByLabelText("Display name *"),
+    ).toHaveValue("");
+  });
+
+  it("closes the edit dialog without saving when dismissed", async () => {
+    mockFederationGets({ configs });
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("closes the delete confirmation without deleting when dismissed", async () => {
+    mockFederationGets({ configs });
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Delete ADFS" }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(apiMock.delete).not.toHaveBeenCalled();
   });
 });

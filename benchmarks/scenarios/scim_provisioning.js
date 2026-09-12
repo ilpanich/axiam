@@ -3,45 +3,17 @@
 // the configured `scim_per_min`.
 //
 // ============================================================================
-// STATUS: SEEDING AND AUTH ARE FIXED. STILL PENDING ON ONE SUPERVISED RUN.
+// RUN HISTORY: its first-ever execution (2026-09-11) FAILED 20 of 907
+// operations, and the failure was a real server defect rather than a harness
+// one: concurrent `PATCH /scim/v2/Users/{id}` lost a SurrealDB
+// optimistic-concurrency race and answered HTTP 500 for a write the engine
+// labelled retryable. Nothing retried it. Fixed in axiam-db
+// (`helpers::retry_on_write_conflict`, applied to `UserRepository::update`);
+// this cell then ran clean at 470/470 checks with zero SCIM 500s in the
+// server log, and was removed from PENDING_SCENARIOS in that same commit.
 //
-// `crates/axiam-scim` HAS landed (R3.1) and `/scim/v2` answers; the R5.2 tail
-// gave it a real rate-limit bucket (`AXIAM__RATE_LIMIT__SCIM_PER_MIN`,
-// shipped 600/min per IP) and folded the family into rl_prod_check.py's
-// ENDPOINTS. `runner/seed.sh` now provisions the missing principal: a GLOBAL
-// `bench-scim` role holding a `scim:provision` permission, assigned to the
-// bench user. `mintScimToken()` below mints a USER token accordingly.
-//
-// The earlier note here — "that is a seed.sh change" — was only half right,
-// and the half it got wrong is worth keeping written down. Two things had to
-// change, because `scim:provision` is an RBAC permission, not an OAuth2
-// scope:
-//
-//   1. Adding "scim:provision" to the bench client's `scopes` would have
-//      done nothing. `require_scim_provision` calls
-//      `RequirePermission::new("scim:provision", Uuid::nil()).check(...)`,
-//      an RBAC check against the token's SUBJECT. The scope would have ridden
-//      along on the token and the check would still have denied.
-//   2. A `client_credentials` token cannot work at all, whatever it is
-//      scoped for. That grant mints a `sub_kind: ServiceAccount` subject, and
-//      AXIAM's role-assignment edge is hard-scoped to the `user` table today,
-//      so a service_account subject can hold NO RBAC permission —
-//      `scim:provision` included (`crates/axiam-scim/src/auth.rs` says so
-//      explicitly). Hence the switch to a user token below.
-//
-// It stays in `runner/run-benchmark.sh`'s `PENDING_SCENARIOS` for ONE
-// remaining reason, and it is not a code reason: this scenario has still
-// never executed against a live server. Its field names and paths were
-// checked statically against the real DTOs (`users.rs`'s `userName` /
-// `externalId` / `emails[].primary` / `active`, and `patch.rs`'s `replace` on
-// path `active` with a boolean) and they match — but "matches on inspection"
-// is not "runs green", and un-pending it unrun would risk turning a skip into
-// a red matrix cell, which is the exact failure this list exists to prevent.
-//
-// TO CLOSE THIS OUT: run it once, supervised, with
-// `BENCH_ENABLE_PENDING_SCENARIOS=1`. If it passes, remove it from
-// `PENDING_SCENARIOS` and delete this block. No further code change is
-// expected to be needed.
+// Keep the flood shape below as it is. A single-user PATCH storm is precisely
+// what found that defect, and it is also what Okta/Entra actually send.
 // ============================================================================
 //
 // Written against `improvement-after-run5-benchmark.md` B4's verbatim scope

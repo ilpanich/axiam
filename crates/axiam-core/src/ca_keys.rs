@@ -478,4 +478,169 @@ mod tests {
             "\"vault_pki\""
         );
     }
+
+    /// A custodian that implements only what [`CaKeyStore`] requires, so every
+    /// other method under test is the trait's own default body.
+    ///
+    /// This is the shape of a real safe-style custodian — the database one is
+    /// exactly this — so the defaults it inherits are production behaviour, not
+    /// a fallback nobody reaches.
+    #[derive(Default)]
+    struct MinimalCustodian {
+        stored: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CaKeyStore for MinimalCustodian {
+        fn store<'a>(
+            &'a self,
+            _organization_id: Uuid,
+            _ca_id: Uuid,
+            private_key_pem: &'a str,
+        ) -> Pin<Box<dyn Future<Output = AxiamResult<StoredCaKey>> + Send + 'a>> {
+            self.stored
+                .lock()
+                .expect("no test holds this lock across a panic")
+                .push(private_key_pem.to_string());
+            Box::pin(async { Ok(StoredCaKey::Referenced("ref".to_string())) })
+        }
+
+        fn load<'a>(
+            &'a self,
+            _key_ref: &'a CaKeyRef,
+            _inline: Option<&'a [u8]>,
+        ) -> Pin<Box<dyn Future<Output = AxiamResult<Zeroizing<String>>> + Send + 'a>> {
+            Box::pin(async { Ok(Zeroizing::new("KEY".to_string())) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _key_ref: &'a CaKeyRef,
+        ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn custody(&self) -> CaKeyCustody {
+            CaKeyCustody::Database
+        }
+
+        fn describe(&self) -> &'static str {
+            "minimal"
+        }
+    }
+
+    fn a_key_ref() -> CaKeyRef {
+        CaKeyRef {
+            organization_id: Uuid::new_v4(),
+            ca_id: Uuid::new_v4(),
+            custody: CaKeyCustody::Database,
+            locator: "locator".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_custodian_that_did_not_opt_in_advertises_neither_capability() {
+        // Both flags gate a call the caller would otherwise never make. They
+        // default to false so that adding a method to this trait cannot turn an
+        // existing custodian into one that claims to generate or sign.
+        let custodian = MinimalCustodian::default();
+
+        assert!(!custodian.generates_cas());
+        assert!(!custodian.signs_remotely());
+    }
+
+    #[tokio::test]
+    async fn the_default_refuses_to_generate_a_ca_rather_than_minting_one_in_process() {
+        // The whole reason a caller reaches for `generate_ca` is to get a key
+        // that never existed in this process. A default that quietly generated
+        // one here would hand back exactly the property being avoided, and it
+        // would look like success.
+        let custodian = MinimalCustodian::default();
+        let request = CaGenerationRequest {
+            organization_id: Uuid::new_v4(),
+            ca_id: Uuid::new_v4(),
+            subject: "CN=Test".to_string(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+            intermediate: None,
+        };
+
+        let err = custodian
+            .generate_ca(&request)
+            .await
+            .expect_err("a custodian that does not generate must refuse");
+
+        assert!(matches!(err, AxiamError::Internal(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn every_remote_signing_default_refuses_while_signs_remotely_is_false() {
+        // These three are only ever called when `signs_remotely()` is true, so
+        // reaching a default body means the caller asked a custodian to do
+        // something it never claimed it could. Refusing keeps that a visible
+        // error instead of a silently unsigned or wrongly-signed certificate.
+        let custodian = MinimalCustodian::default();
+        let parent = a_key_ref();
+
+        let leaf = LeafSigningRequest {
+            csr_pem: "CSR".to_string(),
+            ttl_seconds: 3600,
+        };
+        assert!(custodian.sign_csr(&parent, &leaf).await.is_err());
+
+        let intermediate = IntermediateCaRequest {
+            organization_id: parent.organization_id,
+            ca_id: Uuid::new_v4(),
+            subject: "CN=Intermediate".to_string(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+        };
+        assert!(
+            custodian
+                .generate_intermediate_ca(&parent, &intermediate)
+                .await
+                .is_err()
+        );
+
+        let intermediate_csr = IntermediateSigningRequest {
+            csr_pem: "CSR".to_string(),
+            subject: "CN=Intermediate".to_string(),
+            ttl_seconds: 3600,
+        };
+        assert!(
+            custodian
+                .sign_intermediate_csr(&parent, &intermediate_csr)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn importing_a_ca_takes_custody_of_the_key_and_not_of_the_certificate() {
+        // `import_ca` defaults to delegating to `store`, dropping the
+        // certificate — right for a safe, and wrong in one specific way worth
+        // pinning: storing the certificate in the key's place would leave a CA
+        // whose "key" is public, and every later `load` would succeed while
+        // returning something that cannot sign.
+        let custodian = MinimalCustodian::default();
+
+        let stored = custodian
+            .import_ca(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "-----BEGIN CERTIFICATE-----",
+                "key-material-sentinel",
+            )
+            .await
+            .expect("the default import delegates to store");
+
+        assert!(matches!(stored, StoredCaKey::Referenced(_)));
+        assert_eq!(
+            custodian
+                .stored
+                .lock()
+                .expect("no test holds this lock across a panic")
+                .as_slice(),
+            ["key-material-sentinel"]
+        );
+    }
 }

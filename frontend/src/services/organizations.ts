@@ -476,10 +476,14 @@ export const caCertService = {
   /**
    * Offer this CA — or stop offering it — as an mTLS client trust anchor.
    *
-   * The response's `restart_required` is always true and is the point of it:
-   * there is no supported way to add a root to a rustls listener that is
-   * already serving, so the change applies at the next server start. Surface
-   * that to the operator rather than letting the toggle imply it took effect.
+   * Read `restart_required` from the response rather than assuming it. This
+   * comment used to say it was "always true", which stopped being so once the
+   * listener learned to reload its anchor set: `ca_certificates.rs` returns
+   * `false` when the live listener accepted the new set — the ordinary case on
+   * a TLS deployment — and `true` only when there was no listener to reload
+   * into (plaintext, or `client_auth = off`), where the flag is merely stored
+   * and applies at the next start. Surface whichever the server actually said,
+   * rather than letting the toggle imply it took effect when it did not.
    */
   setMtlsTrustAnchor: (
     orgId: string,

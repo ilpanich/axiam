@@ -70,8 +70,69 @@ pub fn classify_write_error<E: std::fmt::Display>(err: E, entity: &str) -> DbErr
         DbError::AlreadyExists {
             entity: entity.to_string(),
         }
+    } else if is_write_conflict(&msg) {
+        // Ordered AFTER the unique check on purpose. A UNIQUE violation is a
+        // statement about the caller's request and must win: it is a 409 the
+        // client can act on, and retrying it would only fail again identically.
+        // A write conflict says nothing about the request — only that it lost a
+        // race — so it is the weaker, more retryable classification of the two.
+        DbError::Conflict(msg)
     } else {
         DbError::Migration(msg)
+    }
+}
+
+/// Run `op`, retrying while it fails with a retryable write conflict.
+///
+/// This is the helper the [`WRITE_CONFLICT_MARKERS`] documentation has linked
+/// to since the markers were introduced, and which was never actually defined:
+/// [`MAX_WRITE_ATTEMPTS`], [`write_conflict_backoff`] and [`is_write_conflict`]
+/// all shipped, tested, with exactly one hand-rolled loop assembling them (in
+/// `UserRepository::increment_failed_logins`) and no way to reuse it. Every
+/// other contended write therefore had no retry at all — which is how a
+/// concurrent SCIM `PATCH /scim/v2/Users/{id}` came to answer HTTP 500 on 2.2%
+/// of a benchmark flood, for a write the engine labelled retryable.
+///
+/// `op` is a closure rather than a future because a future is consumed by the
+/// first `.await`: a retry needs a *new* one per attempt, and SurrealDB's
+/// `bind` takes owned values, so each attempt must rebuild its own statement.
+///
+/// Generic over the error type rather than fixed to [`DbError`] because the two
+/// kinds of call site disagree about it: a repository method that returns
+/// `AxiamResult<T>` has already widened to `AxiamError` by the time it can fail,
+/// while one working inside the db layer still holds a `DbError`. Both render
+/// the engine's text, which is all the retry predicate reads, so neither has to
+/// convert at the boundary just to be retried.
+///
+/// # Safety of replaying `op`
+///
+/// Only [`is_write_conflict`] is retried, and a conflicted transaction commits
+/// NOTHING — that is what the abort means. So re-running `op` cannot
+/// double-apply, even when the statement is not idempotent (`x += 1`). Every
+/// other error returns on the first attempt, so an outage or a malformed
+/// statement fails fast instead of slowly.
+pub async fn retry_on_write_conflict<T, E, F, Fut>(mut op: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let mut attempt = 1;
+    loop {
+        match op().await {
+            // Matched on the rendered message rather than on `DbError::Conflict`
+            // because a conflict can arrive as any of three variants depending
+            // on where in the write path it surfaced: `Conflict` from
+            // `classify_write_error`, `Surreal` from a bare `DbError::from`, or
+            // `Migration` from a call site that has not been routed through the
+            // classifier. Every one of them renders the engine's own text, so
+            // the message is the reliable discriminator; the variant is not.
+            Err(e) if attempt < MAX_WRITE_ATTEMPTS && is_write_conflict(&e.to_string()) => {
+                tokio::time::sleep(write_conflict_backoff(attempt)).await;
+                attempt += 1;
+            }
+            outcome => return outcome,
+        }
     }
 }
 
@@ -142,7 +203,31 @@ pub fn is_unique_violation(msg: &str) -> bool {
 /// committed. Because it commits nothing, replaying it cannot double-apply —
 /// which is what makes [`retry_on_write_conflict`] safe even for a
 /// non-idempotent statement like `failed_login_attempts += 1`.
-const WRITE_CONFLICT_MARKERS: [&str; 2] = ["Transaction conflict", "read or write conflict"];
+///
+/// # The last two markers, and why they were a hole
+///
+/// `"failed transaction"` and `"Failed to commit transaction"` were the ONLY
+/// two literals [`is_transaction_conflict`] matched, in a set of its own. That
+/// helper guards the single-use consume on four replay-sensitive paths —
+/// `device_grant`, `permission_ticket`, `pushed_auth_request` and
+/// `oauth2_auth_code` — and the message SurrealDB v3 actually emits for a
+/// contended write (`Transaction conflict: Transaction write conflict. This
+/// transaction can be retried`) contains neither of them. So the branch those
+/// four paths rely on to answer "someone else got there first" could not fire
+/// on the phrasing the deployed engine produces, and a correctly-refused
+/// replay surfaced as a 500 instead of as "no row consumed".
+///
+/// That direction is fail-CLOSED — a 500 mints no token — so it was a
+/// robustness defect rather than a security hole. But it is exactly the
+/// drift-between-copies failure D-09 and `scripts/check-conflict-markers.py`
+/// exist to prevent, and it survived because the two sets were never one set.
+/// They are one set now, and [`is_transaction_conflict`] delegates here.
+const WRITE_CONFLICT_MARKERS: [&str; 4] = [
+    "Transaction conflict",
+    "read or write conflict",
+    "failed transaction",
+    "Failed to commit transaction",
+];
 
 /// Whether a datastore error message reports a retryable write conflict.
 ///
@@ -291,9 +376,19 @@ pub async fn cleanup_expired_rows<C: Connection>(
 /// Matched on the message because the driver surfaces it as an opaque error
 /// rather than a typed variant. Deliberately narrow: only a conflict is
 /// swallowed, and only into "lost the race" — every other failure propagates.
+///
+/// # Why this delegates instead of holding its own markers
+///
+/// It used to match two literals of its own — `"failed transaction"` and
+/// `"Failed to commit transaction"` — neither of which appears in the message
+/// SurrealDB v3 emits for a contended write. The four callers listed above
+/// therefore could not recognise the live phrasing, and answered a refused
+/// replay with a 500 rather than with "no row consumed". Both literals are now
+/// in [`WRITE_CONFLICT_MARKERS`] alongside the v3 phrasing, and this is a thin
+/// `&E`-taking adapter over [`is_write_conflict`] so the two can never again
+/// disagree about what a conflict looks like — the exact drift D-09 forbids.
 pub fn is_transaction_conflict<E: std::fmt::Display>(err: &E) -> bool {
-    let msg = err.to_string();
-    msg.contains("failed transaction") || msg.contains("Failed to commit transaction")
+    is_write_conflict(&err.to_string())
 }
 
 pub fn take_first_or_not_found<T>(items: Vec<T>, entity: &str, id: &str) -> Result<T, DbError> {
@@ -686,6 +781,152 @@ mod tests {
         assert_eq!(write_conflict_backoff(3).as_millis(), 8);
         // Never a runaway shift, even if a caller passes a large attempt.
         assert_eq!(write_conflict_backoff(99).as_millis(), 64);
+    }
+
+    /// The exact message the deployed engine produced when a concurrent SCIM
+    /// `PATCH /scim/v2/Users/{id}` lost its race — captured from
+    /// `bench-axiam-server` during the first run of the `scim_provisioning`
+    /// benchmark cell, which failed 20 of 907 operations on it.
+    const LIVE_V3_CONFLICT: &str = "There was a problem with the key-value store: \
+         Transaction conflict: Transaction write conflict. This transaction can be retried";
+
+    #[test]
+    fn classify_write_error_maps_a_write_conflict_to_conflict_not_migration() {
+        // The regression this guards: the conflict fell through to
+        // `DbError::Migration`, so a contended user write reached the operator
+        // as "Migration failed: ..." — sending them after a broken schema
+        // migration for a write the datastore had said to retry.
+        match classify_write_error(LIVE_V3_CONFLICT, "user") {
+            DbError::Conflict(msg) => assert!(msg.contains("Transaction write conflict")),
+            other => panic!("expected DbError::Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_write_error_still_prefers_a_unique_violation_over_a_conflict() {
+        // Ordering matters: a UNIQUE violation is a statement about the
+        // caller's request (409, and retrying reproduces it identically),
+        // so it must win over the weaker, retryable conflict classification.
+        let msg = "Database index `idx_users_username_unique` already contains ['alice']";
+        match classify_write_error(msg, "user") {
+            DbError::AlreadyExists { entity } => assert_eq!(entity, "user"),
+            other => panic!("expected DbError::AlreadyExists, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_converts_to_a_database_error_not_a_conflict_status() {
+        // Deliberate: the variant exists to stop MISLABELING, not to change the
+        // client-visible contract. A 503 with Retry-After would be defensible
+        // and is a separate decision.
+        use axiam_core::error::AxiamError;
+        let axiam_err: AxiamError = DbError::Conflict(LIVE_V3_CONFLICT.to_string()).into();
+        match axiam_err {
+            AxiamError::Database(msg) => assert!(msg.contains("Write conflict")),
+            other => panic!("expected AxiamError::Database, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_transaction_conflict_matches_the_live_v3_message() {
+        // THE BUG THIS PINS. `is_transaction_conflict` matched only
+        // "failed transaction" / "Failed to commit transaction", and the
+        // message SurrealDB v3 actually emits contains NEITHER. It guards the
+        // single-use consume on device_grant, permission_ticket,
+        // pushed_auth_request and oauth2_auth_code — so on the deployed engine
+        // their "someone else got there first" branch could not fire, and a
+        // correctly-refused replay surfaced as a 500 instead of "no row
+        // consumed". Fail-closed, so a robustness defect rather than a hole.
+        assert!(is_transaction_conflict(&LIVE_V3_CONFLICT));
+    }
+
+    #[test]
+    fn is_transaction_conflict_still_matches_the_legacy_phrasings() {
+        // Unifying the marker sets must not drop what the old set caught.
+        assert!(is_transaction_conflict(
+            &"the failed transaction was rolled back"
+        ));
+        assert!(is_transaction_conflict(
+            &"Failed to commit transaction due to a read or write conflict"
+        ));
+        // And still refuses everything that is not a conflict.
+        assert!(!is_transaction_conflict(&"Connection refused"));
+        assert!(!is_transaction_conflict(
+            &"Database index `idx_x` already contains ['a']"
+        ));
+    }
+
+    #[tokio::test]
+    async fn retry_on_write_conflict_retries_a_conflict_then_succeeds() {
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let out: Result<&str, DbError> = retry_on_write_conflict(|| async {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 {
+                Err(DbError::Conflict(LIVE_V3_CONFLICT.to_string()))
+            } else {
+                Ok("committed")
+            }
+        })
+        .await;
+        assert_eq!(out.unwrap(), "committed");
+        assert_eq!(calls.get(), 3, "should have retried twice then succeeded");
+    }
+
+    #[tokio::test]
+    async fn retry_on_write_conflict_does_not_retry_anything_else() {
+        // A hard failure must fail FAST — an outage turned into four slow
+        // attempts is strictly worse than one quick one.
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let out: Result<(), DbError> = retry_on_write_conflict(|| async {
+            calls.set(calls.get() + 1);
+            Err(DbError::Migration("Connection refused".to_string()))
+        })
+        .await;
+        assert!(matches!(out, Err(DbError::Migration(_))));
+        assert_eq!(calls.get(), 1, "a non-conflict must not be retried");
+    }
+
+    #[tokio::test]
+    async fn retry_on_write_conflict_is_bounded_and_surfaces_the_last_error() {
+        // Sustained contention must eventually surface rather than be retried
+        // forever — past a few attempts this is no longer masking a race.
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let out: Result<(), DbError> = retry_on_write_conflict(|| async {
+            calls.set(calls.get() + 1);
+            Err(DbError::Conflict(LIVE_V3_CONFLICT.to_string()))
+        })
+        .await;
+        assert!(matches!(out, Err(DbError::Conflict(_))));
+        assert_eq!(calls.get(), MAX_WRITE_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn retry_on_write_conflict_recognises_a_conflict_in_any_variant() {
+        // A conflict can arrive as Conflict, Surreal or Migration depending on
+        // where in the write path it surfaced; the predicate reads the rendered
+        // message, so every one of them must retry.
+        use std::cell::Cell;
+        for seed in [
+            DbError::Conflict(LIVE_V3_CONFLICT.to_string()),
+            DbError::Migration(LIVE_V3_CONFLICT.to_string()),
+        ] {
+            let rendered = seed.to_string();
+            let calls = Cell::new(0u32);
+            let out: Result<(), DbError> = retry_on_write_conflict(|| async {
+                calls.set(calls.get() + 1);
+                Err(DbError::Migration(rendered.clone()))
+            })
+            .await;
+            assert!(out.is_err());
+            assert_eq!(
+                calls.get(),
+                MAX_WRITE_ATTEMPTS,
+                "a conflict rendered as {rendered} should have been retried"
+            );
+        }
     }
 
     #[test]

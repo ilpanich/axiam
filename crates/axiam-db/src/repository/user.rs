@@ -471,139 +471,160 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     }
 
     async fn update(&self, tenant_id: Uuid, id: Uuid, input: UpdateUser) -> AxiamResult<User> {
-        let id_str = id.to_string();
-        let tenant_id_str = tenant_id.to_string();
+        // Retried on an optimistic-concurrency loss, for the same reason
+        // `increment_failed_logins` below is: this statement targets ONE row, so
+        // two concurrent writers to the same user race by construction and the
+        // loser is aborted with a write the datastore itself labels retryable.
+        //
+        // Unlike that method, this one is reached by every administrative and
+        // provisioning write — including SCIM `PATCH /scim/v2/Users/{id}`, whose
+        // benchmark cell is a deliberate flood of `replace active` against a
+        // single user and which returned HTTP 500 on 2.2% of its operations
+        // before this loop existed. An IdP driving Okta/Entra-shaped
+        // provisioning sees those as failed syncs and retries the whole record.
+        //
+        // `input` is cloned per attempt because SurrealDB's `bind` takes owned
+        // values: the binding block below moves each field out of `input`, so a
+        // second attempt needs its own copy. The clone is paid only on the
+        // attempt itself, which the uncontended path never reaches past the
+        // first.
+        crate::helpers::retry_on_write_conflict(|| async {
+            let input = input.clone();
+            let id_str = id.to_string();
+            let tenant_id_str = tenant_id.to_string();
 
-        let mut sets = Vec::new();
-        if input.username.is_some() {
-            sets.push("username = $username");
-        }
-        if input.email.is_some() {
-            sets.push("email = $email");
-        }
-        if input.password_hash.is_some() {
-            sets.push("password_hash = $password_hash");
-        }
-        if input.status.is_some() {
-            sets.push("status = $status");
-        }
-        if input.metadata.is_some() {
-            sets.push("metadata = $metadata");
-        }
-        if input.mfa_enabled.is_some() {
-            sets.push("mfa_enabled = $mfa_enabled");
-        }
-        if input.mfa_secret.is_some() {
-            sets.push("mfa_secret = $mfa_secret");
-        }
-        if input.totp_last_used_step.is_some() {
-            sets.push("totp_last_used_step = $totp_last_used_step");
-        }
-        if input.failed_login_attempts.is_some() {
-            sets.push("failed_login_attempts = $failed_login_attempts");
-        }
-        if input.last_failed_login_at.is_some() {
-            sets.push("last_failed_login_at = $last_failed_login_at");
-        }
-        if input.locked_until.is_some() {
-            sets.push("locked_until = $locked_until");
-        }
-        if input.email_verified_at.is_some() {
-            sets.push("email_verified_at = $email_verified_at");
-        }
-        // W7 / X7 G8. Same `Option<Option<T>>` convention as the fields above:
-        // `Some(Some(v))` sets, `Some(None)` clears, `None` leaves alone. The
-        // clear direction is not decoration — it is how a data subject
-        // withdrawing a telephone number gets it removed rather than hidden.
-        if input.phone_number.is_some() {
-            sets.push("phone_number = $phone_number");
-        }
-        if input.phone_number_verified_at.is_some() {
-            sets.push("phone_number_verified_at = $phone_number_verified_at");
-        }
-        if input.address.is_some() {
-            sets.push("address = $address");
-        }
-        sets.push("updated_at = time::now()");
+            let mut sets = Vec::new();
+            if input.username.is_some() {
+                sets.push("username = $username");
+            }
+            if input.email.is_some() {
+                sets.push("email = $email");
+            }
+            if input.password_hash.is_some() {
+                sets.push("password_hash = $password_hash");
+            }
+            if input.status.is_some() {
+                sets.push("status = $status");
+            }
+            if input.metadata.is_some() {
+                sets.push("metadata = $metadata");
+            }
+            if input.mfa_enabled.is_some() {
+                sets.push("mfa_enabled = $mfa_enabled");
+            }
+            if input.mfa_secret.is_some() {
+                sets.push("mfa_secret = $mfa_secret");
+            }
+            if input.totp_last_used_step.is_some() {
+                sets.push("totp_last_used_step = $totp_last_used_step");
+            }
+            if input.failed_login_attempts.is_some() {
+                sets.push("failed_login_attempts = $failed_login_attempts");
+            }
+            if input.last_failed_login_at.is_some() {
+                sets.push("last_failed_login_at = $last_failed_login_at");
+            }
+            if input.locked_until.is_some() {
+                sets.push("locked_until = $locked_until");
+            }
+            if input.email_verified_at.is_some() {
+                sets.push("email_verified_at = $email_verified_at");
+            }
+            // W7 / X7 G8. Same `Option<Option<T>>` convention as the fields above:
+            // `Some(Some(v))` sets, `Some(None)` clears, `None` leaves alone. The
+            // clear direction is not decoration — it is how a data subject
+            // withdrawing a telephone number gets it removed rather than hidden.
+            if input.phone_number.is_some() {
+                sets.push("phone_number = $phone_number");
+            }
+            if input.phone_number_verified_at.is_some() {
+                sets.push("phone_number_verified_at = $phone_number_verified_at");
+            }
+            if input.address.is_some() {
+                sets.push("address = $address");
+            }
+            sets.push("updated_at = time::now()");
 
-        let query = format!(
-            "UPDATE type::record('user', $id) SET {} \
+            let query = format!(
+                "UPDATE type::record('user', $id) SET {} \
              WHERE tenant_id = $tenant_id",
-            sets.join(", ")
-        );
+                sets.join(", ")
+            );
 
-        let db = self.db.current();
-        let mut builder = db
-            .query(&query)
-            .bind(("id", id_str.clone()))
-            .bind(("tenant_id", tenant_id_str));
+            let db = self.db.current();
+            let mut builder = db
+                .query(&query)
+                .bind(("id", id_str.clone()))
+                .bind(("tenant_id", tenant_id_str));
 
-        if let Some(username) = input.username {
-            builder = builder.bind(("username", username));
-        }
-        if let Some(email) = input.email {
-            builder = builder.bind(("email", email));
-        }
-        if let Some(password_hash) = input.password_hash {
-            builder = builder.bind(("password_hash", password_hash));
-        }
-        if let Some(ref status) = input.status {
-            builder = builder.bind(("status", status_to_string(status).to_string()));
-        }
-        if let Some(metadata) = input.metadata {
-            builder = builder.bind(("metadata", metadata));
-        }
-        if let Some(mfa_enabled) = input.mfa_enabled {
-            builder = builder.bind(("mfa_enabled", mfa_enabled));
-        }
-        if let Some(mfa_secret) = input.mfa_secret {
-            // mfa_secret is Option<Option<String>>: Some(Some(v)) = set, Some(None) = clear
-            builder = builder.bind(("mfa_secret", mfa_secret));
-        }
-        if let Some(totp_last_used_step) = input.totp_last_used_step {
-            // totp_last_used_step is Option<Option<u64>>: Some(Some(v)) = set, Some(None) = clear
-            builder = builder.bind(("totp_last_used_step", totp_last_used_step));
-        }
-        if let Some(failed_login_attempts) = input.failed_login_attempts {
-            builder = builder.bind(("failed_login_attempts", failed_login_attempts));
-        }
-        if let Some(last_failed_login_at) = input.last_failed_login_at {
-            builder = builder.bind(("last_failed_login_at", last_failed_login_at));
-        }
-        if let Some(locked_until) = input.locked_until {
-            builder = builder.bind(("locked_until", locked_until));
-        }
-        if let Some(email_verified_at) = input.email_verified_at {
-            builder = builder.bind(("email_verified_at", email_verified_at));
-        }
-        if let Some(phone_number) = input.phone_number {
-            builder = builder.bind(("phone_number", phone_number));
-        }
-        if let Some(phone_number_verified_at) = input.phone_number_verified_at {
-            builder = builder.bind(("phone_number_verified_at", phone_number_verified_at));
-        }
-        if let Some(address) = input.address {
-            // An address with no members is stored as absent, so that "has an
-            // address" and "the address says something" cannot disagree.
-            let row = address
-                .as_ref()
-                .filter(|a| !a.is_empty())
-                .map(AddressRow::from);
-            builder = builder.bind(("address", row));
-        }
+            if let Some(username) = input.username {
+                builder = builder.bind(("username", username));
+            }
+            if let Some(email) = input.email {
+                builder = builder.bind(("email", email));
+            }
+            if let Some(password_hash) = input.password_hash {
+                builder = builder.bind(("password_hash", password_hash));
+            }
+            if let Some(ref status) = input.status {
+                builder = builder.bind(("status", status_to_string(status).to_string()));
+            }
+            if let Some(metadata) = input.metadata {
+                builder = builder.bind(("metadata", metadata));
+            }
+            if let Some(mfa_enabled) = input.mfa_enabled {
+                builder = builder.bind(("mfa_enabled", mfa_enabled));
+            }
+            if let Some(mfa_secret) = input.mfa_secret {
+                // mfa_secret is Option<Option<String>>: Some(Some(v)) = set, Some(None) = clear
+                builder = builder.bind(("mfa_secret", mfa_secret));
+            }
+            if let Some(totp_last_used_step) = input.totp_last_used_step {
+                // totp_last_used_step is Option<Option<u64>>: Some(Some(v)) = set, Some(None) = clear
+                builder = builder.bind(("totp_last_used_step", totp_last_used_step));
+            }
+            if let Some(failed_login_attempts) = input.failed_login_attempts {
+                builder = builder.bind(("failed_login_attempts", failed_login_attempts));
+            }
+            if let Some(last_failed_login_at) = input.last_failed_login_at {
+                builder = builder.bind(("last_failed_login_at", last_failed_login_at));
+            }
+            if let Some(locked_until) = input.locked_until {
+                builder = builder.bind(("locked_until", locked_until));
+            }
+            if let Some(email_verified_at) = input.email_verified_at {
+                builder = builder.bind(("email_verified_at", email_verified_at));
+            }
+            if let Some(phone_number) = input.phone_number {
+                builder = builder.bind(("phone_number", phone_number));
+            }
+            if let Some(phone_number_verified_at) = input.phone_number_verified_at {
+                builder = builder.bind(("phone_number_verified_at", phone_number_verified_at));
+            }
+            if let Some(address) = input.address {
+                // An address with no members is stored as absent, so that "has an
+                // address" and "the address says something" cannot disagree.
+                let row = address
+                    .as_ref()
+                    .filter(|a| !a.is_empty())
+                    .map(AddressRow::from);
+                builder = builder.bind(("address", row));
+            }
 
-        let result = builder.await.map_err(DbError::from)?;
-        let mut result = result
-            .check()
-            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+            let result = builder.await.map_err(DbError::from)?;
+            let mut result = result
+                .check()
+                .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
-        let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "user".into(),
-            id: id_str,
-        })?;
+            let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
+            let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+                entity: "user".into(),
+                id: id_str,
+            })?;
 
-        Ok(row.into_user(id)?)
+            Ok(row.into_user(id)?)
+        })
+        .await
     }
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
@@ -828,22 +849,23 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     ) -> AxiamResult<()> {
         let user_id_str = user_id.to_string();
         let tenant_id_str = tenant_id.to_string();
-        // Retried on an optimistic-concurrency loss (`is_write_conflict`).
+        // Retried on an optimistic-concurrency loss — see
+        // `helpers::retry_on_write_conflict`, which this method's own
+        // hand-rolled loop became once a second caller (`update`, above) needed
+        // the same thing.
         //
         // SurrealDB is optimistic, and this statement targets ONE row: every
         // failed credential check for a given user updates the SAME record, so
-        // two concurrent failures race by construction. Before this loop the
-        // loser was reported to the caller as a 5xx — `grpc_admin_validate`
+        // two concurrent failures race by construction. Before the retry existed
+        // the loser was reported to the caller as a 5xx — `grpc_admin_validate`
         // reproduces it as gRPC INTERNAL on ~0.3-0.7 % of calls — for a write
         // the datastore itself labels "can be retried".
         //
         // Replaying is safe precisely because the loser commits NOTHING, so the
         // non-idempotent `failed_login_attempts += 1` cannot double-count. Only
         // the conflict class is retried; any other error returns immediately.
-        let mut attempt = 1;
-        loop {
-            let outcome = self
-                .db
+        crate::helpers::retry_on_write_conflict(|| async {
+            self.db
                 .current()
                 .query(
                     // SurrealDB evaluates each RHS in this SET against the
@@ -886,19 +908,11 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                 .and_then(|r| {
                     r.check()
                         .map_err(|e| classify_write_error(e.to_string(), "user"))
-                });
-            match outcome {
-                Err(e)
-                    if attempt < crate::helpers::MAX_WRITE_ATTEMPTS
-                        && crate::helpers::is_write_conflict(&e.to_string()) =>
-                {
-                    tokio::time::sleep(crate::helpers::write_conflict_backoff(attempt)).await;
-                    attempt += 1;
-                }
-                Err(e) => return Err(e.into()),
-                Ok(_) => return Ok(()),
-            }
-        }
+                })
+                .map(|_| ())
+        })
+        .await
+        .map_err(Into::into)
     }
 
     /// Anonymize a user row in-place (D-05).

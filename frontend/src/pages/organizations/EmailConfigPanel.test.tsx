@@ -382,3 +382,458 @@ describe("TenantEmailConfigPanel", () => {
     );
   });
 });
+
+// ─── Provider editing, failures, and the tenant provider override ─────────────
+//
+// The panels above are covered for the paths an operator walks when everything
+// works. These cover the rest: editing each provider field, the API-provider
+// shape (a different branch of `providerFromForm` than SMTP), the four mutation
+// failure handlers, and the tenant's provider-override group — which has its
+// own validation and is the only way `payload.provider` is ever populated.
+
+/** The same org config, but on an API provider rather than SMTP. */
+const apiOrgConfig = {
+  ...orgConfig,
+  provider: { kind: "send_grid", api_url: "https://api.sendgrid.example" },
+};
+
+describe("OrgEmailConfigPanel — provider fields and failures", () => {
+  it("sends every edited SMTP field, including a replacement password", async () => {
+    apiMock.get.mockResolvedValue(res(orgConfig));
+    apiMock.put.mockResolvedValue(res(orgConfig));
+    renderWithProviders(<OrgEmailConfigPanel orgId="o1" />);
+
+    const host = await screen.findByLabelText("SMTP Host *");
+    await userEvent.clear(host);
+    await userEvent.type(host, "smtp.relay.example");
+    const port = screen.getByLabelText("Port *");
+    await userEvent.clear(port);
+    await userEvent.type(port, "465");
+    const username = screen.getByLabelText("Username");
+    await userEvent.clear(username);
+    await userEvent.type(username, "relay-user");
+    await userEvent.type(screen.getByLabelText("Password"), "s3cret");
+    // Unchecking STARTTLS is how implicit TLS on 465 is expressed.
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: /Use STARTTLS/ })
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Save Configuration" })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/organizations/o1/email-config",
+        expect.objectContaining({
+          provider: {
+            kind: "smtp",
+            host: "smtp.relay.example",
+            port: 465,
+            username: "relay-user",
+            password: "s3cret",
+            starttls: false,
+          },
+        })
+      )
+    );
+  });
+
+  it("sends the API-provider shape, not the SMTP one, for a non-SMTP provider", async () => {
+    // `providerFromForm` has two branches and the payloads share no fields:
+    // sending `{host, port, username}` to a SendGrid-shaped endpoint would be
+    // refused by the backend's `#[serde(tag = "kind")]` enum.
+    apiMock.get.mockResolvedValue(res(orgConfig));
+    apiMock.put.mockResolvedValue(res(orgConfig));
+    renderWithProviders(<OrgEmailConfigPanel orgId="o1" />);
+
+    await userEvent.selectOptions(
+      await screen.findByLabelText("Provider"),
+      "resend"
+    );
+    await userEvent.type(screen.getByLabelText("API Key"), "re_live_key");
+    await userEvent.type(
+      screen.getByLabelText("API URL"),
+      "https://api.resend.example"
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Save Configuration" })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/organizations/o1/email-config",
+        expect.objectContaining({
+          provider: {
+            kind: "resend",
+            api_key: "re_live_key",
+            api_url: "https://api.resend.example",
+          },
+        })
+      )
+    );
+  });
+
+  it("seeds the API URL from a stored API provider and sends a null for a blank one", async () => {
+    // A blank API URL means "use the provider's default", which the backend
+    // models as `Option<String>` — so it must go out as null, not "".
+    apiMock.get.mockResolvedValue(res(apiOrgConfig));
+    apiMock.put.mockResolvedValue(res(apiOrgConfig));
+    renderWithProviders(<OrgEmailConfigPanel orgId="o1" />);
+
+    const apiUrl = await screen.findByLabelText("API URL");
+    expect(apiUrl).toHaveValue("https://api.sendgrid.example");
+    await userEvent.clear(apiUrl);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Save Configuration" })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/organizations/o1/email-config",
+        expect.objectContaining({
+          provider: { kind: "send_grid", api_key: "", api_url: null },
+        })
+      )
+    );
+  });
+
+  it("sends the delivery switch the operator turned off", async () => {
+    apiMock.get.mockResolvedValue(res(orgConfig));
+    apiMock.put.mockResolvedValue(res(orgConfig));
+    renderWithProviders(<OrgEmailConfigPanel orgId="o1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Email delivery enabled/ })
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Save Configuration" })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/organizations/o1/email-config",
+        expect.objectContaining({ enabled: false })
+      )
+    );
+  });
+
+  it("reports a rejected save rather than showing it as saved", async () => {
+    apiMock.get.mockResolvedValue(res(orgConfig));
+    apiMock.put.mockRejectedValue({
+      response: { status: 400, data: { message: "SMTP host is unreachable" } },
+    });
+    renderWithProviders(<OrgEmailConfigPanel orgId="o1" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Save Configuration" })
+    );
+
+    // The SERVER's sentence, not the generic fallback. These four handlers used
+    // `err instanceof Error ? err.message : fallback`, and an AxiosError IS an
+    // Error, so the operator was shown "Request failed with status code 400" —
+    // or, when the shape did not match, a fallback that told them nothing about
+    // what the provider actually rejected.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "SMTP host is unreachable"
+    );
+    expect(screen.queryByText("Saved.")).not.toBeInTheDocument();
+  });
+
+  it("redacts a secret the server echoed back into its error message", async () => {
+    // The reason the four handlers had to go through getApiErrorMessage rather
+    // than merely being made to read `data.message`: that helper runs
+    // redactSecrets(), and this is the one panel in the application that handles
+    // SMTP passwords and provider API keys. A server error that quotes the
+    // offending request — which is an ordinary thing for a validation error to
+    // do — must not put the credential on screen.
+    // `password` is the real wire field (services/emailConfig.ts: SmtpProvider),
+    // so this is the shape a gateway echoing the rejected body would actually
+    // produce — not an invented one.
+    apiMock.get.mockResolvedValue(res(orgConfig));
+    apiMock.put.mockRejectedValue({
+      response: {
+        status: 400,
+        data: {
+          message: 'rejected: {"password":"hunter2-not-on-screen"}',
+        },
+      },
+    });
+    renderWithProviders(<OrgEmailConfigPanel orgId="o1" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Save Configuration" })
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/rejected/);
+    expect(alert).not.toHaveTextContent("hunter2-not-on-screen");
+  });
+
+  it("reports a rejected removal and closes the dialog", async () => {
+    apiMock.get.mockResolvedValue(res(orgConfig));
+    apiMock.delete.mockRejectedValue({ response: { status: 403 } });
+    renderWithProviders(<OrgEmailConfigPanel orgId="o1" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Remove/ }));
+    const confirm = await screen.findByRole("dialog");
+    await userEvent.click(within(confirm).getByRole("button", { name: "Remove" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Failed to delete email configuration."
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+  });
+
+  it("cancelling the removal dialog leaves the configuration alone", async () => {
+    apiMock.get.mockResolvedValue(res(orgConfig));
+    renderWithProviders(<OrgEmailConfigPanel orgId="o1" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Remove/ }));
+    const confirm = await screen.findByRole("dialog");
+    await userEvent.click(within(confirm).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+    expect(apiMock.delete).not.toHaveBeenCalled();
+  });
+});
+
+describe("TenantEmailConfigPanel — provider override and failures", () => {
+  it("sends the whole provider block when the provider group is overridden", async () => {
+    // There is no partial merge within a provider: an override replaces the
+    // organization's provider outright, so every field goes out together.
+    apiMock.get.mockRejectedValue({ response: { status: 404 } });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Override provider/ })
+    );
+    await userEvent.type(screen.getByLabelText("SMTP Host *"), "smtp.tenant.example");
+    const port = screen.getByLabelText("Port *");
+    await userEvent.clear(port);
+    await userEvent.type(port, "2525");
+    await userEvent.type(screen.getByLabelText("Username"), "tenant-mailer");
+    await userEvent.type(screen.getByLabelText("Password"), "tenant-secret");
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/tenants/t1/email-config",
+        {
+          provider: {
+            kind: "smtp",
+            host: "smtp.tenant.example",
+            port: 2525,
+            username: "tenant-mailer",
+            password: "tenant-secret",
+            starttls: true,
+          },
+        }
+      )
+    );
+  });
+
+  it("refuses an SMTP provider override with no host", async () => {
+    apiMock.get.mockRejectedValue({ response: { status: 404 } });
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Override provider/ })
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "SMTP host must not be empty."
+    );
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("refuses an SMTP provider override with a cleared port", async () => {
+    // An empty port parses to NaN, which would serialize as null and fail the
+    // backend's u16 parse with a message about JSON rather than about the port.
+    apiMock.get.mockRejectedValue({ response: { status: 404 } });
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Override provider/ })
+    );
+    await userEvent.type(screen.getByLabelText("SMTP Host *"), "smtp.tenant.example");
+    await userEvent.clear(screen.getByLabelText("Port *"));
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "SMTP port must be greater than 0."
+    );
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("sends an API provider override without any SMTP fields", async () => {
+    apiMock.get.mockRejectedValue({ response: { status: 404 } });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Override provider/ })
+    );
+    await userEvent.selectOptions(screen.getByLabelText("Provider"), "postmark");
+    await userEvent.type(screen.getByLabelText("API Key"), "pm_token");
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/tenants/t1/email-config",
+        { provider: { kind: "postmark", api_key: "pm_token", api_url: null } }
+      )
+    );
+  });
+
+  it("refuses an overridden sender whose from address has no @", async () => {
+    apiMock.get.mockRejectedValue({ response: { status: 404 } });
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Override sender identity/ })
+    );
+    await userEvent.type(screen.getByLabelText("From Name *"), "Tenant Co");
+    await userEvent.type(screen.getByLabelText("From Address *"), "nobody");
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "From address must be a valid email address."
+    );
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("refuses an overridden reply-to that is not an address", async () => {
+    // A non-empty reply-to is validated; an empty one is the deliberate
+    // "clear the organization's reply-to" case and must stay allowed.
+    apiMock.get.mockRejectedValue({ response: { status: 404 } });
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Override sender identity/ })
+    );
+    await userEvent.type(screen.getByLabelText("From Name *"), "Tenant Co");
+    await userEvent.type(
+      screen.getByLabelText("From Address *"),
+      "hello@tenant.example"
+    );
+    await userEvent.type(screen.getByLabelText("Reply-To"), "support");
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Reply-to must be a valid email address."
+    );
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("sends the delivery switch only once the operator overrides it", async () => {
+    // Turning delivery *off* for one tenant is the reason this group exists;
+    // the inner switch starts at the inherited-looking "on".
+    apiMock.get.mockRejectedValue({ response: { status: 404 } });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Override delivery on\/off/ })
+    );
+    const inner = screen.getByRole("checkbox", {
+      name: /Email delivery enabled for this tenant/,
+    });
+    expect(inner).toBeChecked();
+    await userEvent.click(inner);
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/tenants/t1/email-config",
+        { enabled: false }
+      )
+    );
+  });
+
+  it("clears every override back to the organization baseline", async () => {
+    apiMock.get.mockResolvedValue(res({ enabled: false }));
+    apiMock.delete.mockResolvedValue(res(undefined));
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Clear All/ })
+    );
+    const confirm = await screen.findByRole("dialog");
+    await userEvent.click(
+      within(confirm).getByRole("button", { name: "Clear overrides" })
+    );
+
+    await waitFor(() =>
+      expect(apiMock.delete).toHaveBeenCalledWith(
+        "/api/v1/tenants/t1/email-config"
+      )
+    );
+    // The toggles re-arm: nothing is overridden any more.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", { name: /Override delivery on\/off/ })
+      ).not.toBeChecked()
+    );
+  });
+
+  it("reports a rejected clear and closes the dialog", async () => {
+    apiMock.get.mockResolvedValue(res({ enabled: false }));
+    apiMock.delete.mockRejectedValue({ response: { status: 403 } });
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Clear All/ })
+    );
+    const confirm = await screen.findByRole("dialog");
+    await userEvent.click(
+      within(confirm).getByRole("button", { name: "Clear overrides" })
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Failed to remove email override."
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+  });
+
+  it("cancelling the clear dialog leaves the tenant's overrides in place", async () => {
+    apiMock.get.mockResolvedValue(res({ enabled: false }));
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Clear All/ })
+    );
+    const confirm = await screen.findByRole("dialog");
+    await userEvent.click(within(confirm).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+    expect(apiMock.delete).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("checkbox", { name: /Override delivery on\/off/ })
+    ).toBeChecked();
+  });
+
+  it("reports a rejected override save", async () => {
+    apiMock.get.mockRejectedValue({ response: { status: 404 } });
+    apiMock.put.mockRejectedValue({ response: { status: 400 } });
+    renderWithProviders(<TenantEmailConfigPanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Override delivery on\/off/ })
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Failed to save email override."
+    );
+  });
+});

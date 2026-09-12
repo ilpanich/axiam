@@ -30,3 +30,12 @@ e2e/.auth/
 
 # vitest coverage output
 coverage/
+
+# Design-system sync tooling and its generated bundle.
+# `.ds-sync/` is a local authoring helper with its own npm tree, and
+# `ds-bundle/` is the artefact it emits. Neither is imported by the app, built
+# by vite, or shipped. Both were committed by accident in 0ac3d46 and cost two
+# CI gates: oxlint reported 1640 errors in the generated `_ds_bundle.js`, and
+# Trivy picked up `.ds-sync/package-lock.json` as a dependency tree AXIAM ships.
+.ds-sync/
+ds-bundle/

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BASIC_CHALLENGE"],"enum":["BasicAuthError"],"fn":["decode_credentials","names_basic_scheme","parse_authorization_header"],"struct":["BasicCredentials"]};

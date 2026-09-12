@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ALL_LOCALES","DEPLOYMENT_DEFAULT"],"enum":["Display","Locale"],"fn":["select_ui_locale"]};

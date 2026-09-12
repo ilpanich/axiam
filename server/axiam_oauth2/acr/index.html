@@ -1,0 +1,47 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Authentication context class references (W4, plan §4.4 — G3/G4)."><title>axiam_oauth2::acr - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module acr</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-beta13</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module acr</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-echo-bug-and-why-it-cannot-be-written-here" title="The echo bug, and why it cannot be written here">The echo bug, and why it cannot be written here</a></li><li><a href="#the-vocabulary-is-closed-plan-11-d6" title="The vocabulary is closed (plan §11, D6)">The vocabulary is closed (plan §11, D6)</a></li><li><a href="#federated-sessions" title="Federated sessions">Federated sessions</a></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>acr</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/acr.rs.html#1-324">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Authentication context class references (W4, plan §4.4 — G3/G4).</p>
+<p>An <code>acr</code> claim is a statement about <strong>how</strong> the end user authenticated. A
+relying party that requires a second factor reads it and decides whether to
+release money, or medical records, or the ability to change a password. It
+is therefore one of the few claims whose falsehood is directly exploitable,
+and it has one famous way of becoming false.</p>
+<h2 id="the-echo-bug-and-why-it-cannot-be-written-here"><a class="doc-anchor" href="#the-echo-bug-and-why-it-cannot-be-written-here">§</a>The echo bug, and why it cannot be written here</h2>
+<p>The classic implementation of <code>acr</code> is: read <code>acr_values</code> from the
+authorization request, copy the first entry into the ID token, ship it.
+Every conformance suite passes, every relying party is satisfied, and the
+claim means nothing at all — the RP asked for MFA and was told “MFA”
+because it asked, not because anything happened.</p>
+<p><a href="fn.acr_for.html" title="fn axiam_oauth2::acr::acr_for"><code>acr_for</code></a> is the whole defence, and it is a defence of shape rather than
+of discipline: <strong>it takes the session’s evidence and nothing else.</strong> There
+is no parameter it could be handed the request through, so there is no
+review that has to notice the request being handed to it. A future edit
+that reintroduced the bug would have to widen the signature first, which is
+a change a reader can see without knowing this story.</p>
+<p>The request is not ignored — it decides two things — but neither of them is
+what the claim <em>says</em>:</p>
+<div><table><thead><tr><th>The request’s <code>acr_values</code> decide</th><th>The session’s <code>amr</code> decides</th></tr></thead><tbody>
+<tr><td>whether a step-up is offered (<a href="enum.Acr.html#method.satisfies" title="method axiam_oauth2::acr::Acr::satisfies"><code>Acr::satisfies</code></a>)</td><td>which class was achieved (<a href="fn.acr_for.html" title="fn axiam_oauth2::acr::acr_for"><code>acr_for</code></a>)</td></tr>
+<tr><td>which <em>satisfied</em> value is reported (<a href="fn.report_acr.html" title="fn axiam_oauth2::acr::report_acr"><code>report_acr</code></a>)</td><td>which values are satisfiable at all</td></tr>
+</tbody></table>
+</div>
+<p><a href="fn.report_acr.html" title="fn axiam_oauth2::acr::report_acr"><code>report_acr</code></a> is the second half of the same argument. It can only return
+a requested value that the achieved class already satisfies; anything else
+falls back to the achieved class itself. So the strongest thing an RP can
+do by asking is change <em>which true statement</em> it is told.</p>
+<h2 id="the-vocabulary-is-closed-plan-11-d6"><a class="doc-anchor" href="#the-vocabulary-is-closed-plan-11-d6">§</a>The vocabulary is closed (plan §11, D6)</h2>
+<p>Two values, defined by AXIAM, published in <code>acr_values_supported</code>
+(<a href="../oidc/constant.ACR_SINGLE_FACTOR.html" title="constant axiam_oauth2::oidc::ACR_SINGLE_FACTOR"><code>crate::oidc::ACR_SINGLE_FACTOR</code></a>, <a href="../oidc/constant.ACR_MULTI_FACTOR.html" title="constant axiam_oauth2::oidc::ACR_MULTI_FACTOR"><code>crate::oidc::ACR_MULTI_FACTOR</code></a>).
+Not operator-configurable strings: an operator who can configure the string
+can configure it to say <code>mfa</code> for a password login, which is the echo bug
+arriving through the configuration file instead of through the code.</p>
+<h2 id="federated-sessions"><a class="doc-anchor" href="#federated-sessions">§</a>Federated sessions</h2>
+<p>A federated login records <code>amr = ["fed"]</code> and nothing else
+(<code>handlers/federation.rs</code>), because what the upstream provider did to
+produce its assertion is the provider’s claim and not AXIAM’s evidence.
+<code>fed</code> alone maps to <a href="enum.Acr.html#variant.SingleFactor" title="variant axiam_oauth2::acr::Acr::SingleFactor"><code>Acr::SingleFactor</code></a> here — the plan’s “unmapped
+upstream evidence yields <code>1fa</code>, strict by default”. Mapping an upstream
+<code>acr</code>/<code>amr</code> into the local vocabulary would need an operator-configured
+attribute mapping, which does not exist (<code>federation_claims.rs</code> has no such
+field) and which W4 deliberately does not add: it is exactly the
+configuration surface D6 refuses.</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.Acr.html" title="enum axiam_oauth2::acr::Acr">Acr</a></dt><dd>An authentication context class AXIAM can assert.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.acr_for.html" title="fn axiam_oauth2::acr::acr_for">acr_for</a></dt><dd>The class an authentication achieved, from its evidence and nothing else.</dd><dt><a class="fn" href="fn.report_acr.html" title="fn axiam_oauth2::acr::report_acr">report_<wbr>acr</a></dt><dd>Which value to put in the <code>acr</code> claim, given what was achieved and what the
+relying party asked for.</dd></dl></section></div></main></body></html>

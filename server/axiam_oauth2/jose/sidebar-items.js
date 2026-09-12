@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["PERMITTED_ALGORITHMS"],"enum":["JoseKeyError"],"fn":["access_token_hash","algorithm_for_key","candidate_keys","decoding_key_for","is_permitted","jwk_thumbprint","verify_permitted_header"]};
+window.SIDEBAR_ITEMS = {"constant":["PERMITTED_ALGORITHMS"],"enum":["JoseKeyError"],"fn":["access_token_hash","algorithm_for_key","candidate_keys","decoding_key_for","is_permitted","jwk_thumbprint","permitted_algorithm_names","verify_permitted_header"]};

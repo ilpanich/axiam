@@ -19,90 +19,421 @@
 <a href=#19 id=19 data-nosnippet>19</a>    </span>InvalidGrant(String),
 <a href=#20 id=20 data-nosnippet>20</a>    <span class="attr">#[error(<span class="string">"invalid_client: {0}"</span>)]
 <a href=#21 id=21 data-nosnippet>21</a>    </span>InvalidClient(String),
-<a href=#22 id=22 data-nosnippet>22</a>    <span class="attr">#[error(<span class="string">"invalid_request: {0}"</span>)]
-<a href=#23 id=23 data-nosnippet>23</a>    </span>InvalidRedirectUri(String),
-<a href=#24 id=24 data-nosnippet>24</a>    <span class="doccomment">/// B5 — the client is registered `require_par` and sent its parameters
-<a href=#25 id=25 data-nosnippet>25</a>    /// through the browser anyway.
-<a href=#26 id=26 data-nosnippet>26</a>    ///
-<a href=#27 id=27 data-nosnippet>27</a>    /// A distinct variant rather than a plain `InvalidRequest` because of how
-<a href=#28 id=28 data-nosnippet>28</a>    /// the authorize handler decides whether to redirect: `InvalidRequest`
-<a href=#29 id=29 data-nosnippet>29</a>    /// means "we got past client and redirect_uri validation", and is
-<a href=#30 id=30 data-nosnippet>30</a>    /// therefore safe to report by redirecting. This refusal happens
-<a href=#31 id=31 data-nosnippet>31</a>    /// *before* the redirect_uri is validated — deliberately, since the whole
-<a href=#32 id=32 data-nosnippet>32</a>    /// point is that this client's parameters must not travel through the
-<a href=#33 id=33 data-nosnippet>33</a>    /// browser — so redirecting would bounce the user agent to an unvalidated
-<a href=#34 id=34 data-nosnippet>34</a>    /// URI supplied by the very channel the setting forbids. On the wire it
-<a href=#35 id=35 data-nosnippet>35</a>    /// is still `invalid_request` per RFC 9126 §5; the variant exists to keep
-<a href=#36 id=36 data-nosnippet>36</a>    /// the response non-redirecting.
-<a href=#37 id=37 data-nosnippet>37</a>    </span><span class="attr">#[error(<span class="string">"invalid_request: {0}"</span>)]
-<a href=#38 id=38 data-nosnippet>38</a>    </span>ParRequired(String),
-<a href=#39 id=39 data-nosnippet>39</a>    <span class="attr">#[error(<span class="string">"unsupported_grant_type: grant type is not supported"</span>)]
-<a href=#40 id=40 data-nosnippet>40</a>    </span>UnsupportedGrantType,
-<a href=#41 id=41 data-nosnippet>41</a>    <span class="attr">#[error(<span class="string">"server_error: {0}"</span>)]
-<a href=#42 id=42 data-nosnippet>42</a>    </span>ServerError(String),
-<a href=#43 id=43 data-nosnippet>43</a>
-<a href=#44 id=44 data-nosnippet>44</a>    <span class="comment">// --- RFC 8628 device-flow polling errors (B2) --------------------------
-<a href=#45 id=45 data-nosnippet>45</a>    //
-<a href=#46 id=46 data-nosnippet>46</a>    // These are NOT failures in the usual sense: `authorization_pending` is
-<a href=#47 id=47 data-nosnippet>47</a>    // the *expected* answer to almost every poll, and `slow_down` is
-<a href=#48 id=48 data-nosnippet>48</a>    // corrective rather than terminal. They are modelled as errors because
-<a href=#49 id=49 data-nosnippet>49</a>    // that is what RFC 8628 §3.5 puts on the wire — a 400 with an `error`
-<a href=#50 id=50 data-nosnippet>50</a>    // field — and because keeping them in one type is what stops the token
-<a href=#51 id=51 data-nosnippet>51</a>    // endpoint growing a second, parallel response path.
-<a href=#52 id=52 data-nosnippet>52</a>    </span><span class="doccomment">/// The user has not yet approved or denied. The device keeps polling.
-<a href=#53 id=53 data-nosnippet>53</a>    </span><span class="attr">#[error(<span class="string">"authorization_pending: the user has not yet completed authorization"</span>)]
-<a href=#54 id=54 data-nosnippet>54</a>    </span>AuthorizationPending,
-<a href=#55 id=55 data-nosnippet>55</a>    <span class="doccomment">/// The device is polling faster than the interval it was given. The
-<a href=#56 id=56 data-nosnippet>56</a>    /// interval has been raised; the device must honour the new one.
-<a href=#57 id=57 data-nosnippet>57</a>    </span><span class="attr">#[error(<span class="string">"slow_down: polling faster than the permitted interval"</span>)]
-<a href=#58 id=58 data-nosnippet>58</a>    </span>SlowDown,
-<a href=#59 id=59 data-nosnippet>59</a>    <span class="doccomment">/// The device code expired before the user acted.
-<a href=#60 id=60 data-nosnippet>60</a>    </span><span class="attr">#[error(<span class="string">"expired_token: the device code has expired; restart the flow"</span>)]
-<a href=#61 id=61 data-nosnippet>61</a>    </span>ExpiredToken,
-<a href=#62 id=62 data-nosnippet>62</a>
-<a href=#63 id=63 data-nosnippet>63</a>    <span class="comment">// --- RFC 8693 token exchange (B3) --------------------------------------
-<a href=#64 id=64 data-nosnippet>64</a>    </span><span class="doccomment">/// RFC 8693 §2.2.2 — the requested `audience`/`resource` is not one the
-<a href=#65 id=65 data-nosnippet>65</a>    /// exchanging client may address. Its own error code rather than
-<a href=#66 id=66 data-nosnippet>66</a>    /// `invalid_request` because a caller can act on it: the target is
-<a href=#67 id=67 data-nosnippet>67</a>    /// well-formed, it is simply not theirs to address.
-<a href=#68 id=68 data-nosnippet>68</a>    </span><span class="attr">#[error(<span class="string">"invalid_target: {0}"</span>)]
-<a href=#69 id=69 data-nosnippet>69</a>    </span>InvalidTarget(String),
-<a href=#70 id=70 data-nosnippet>70</a>}
-<a href=#71 id=71 data-nosnippet>71</a>
-<a href=#72 id=72 data-nosnippet>72</a><span class="kw">impl </span>OAuth2Error {
-<a href=#73 id=73 data-nosnippet>73</a>    <span class="doccomment">/// RFC 6749 error code string.
-<a href=#74 id=74 data-nosnippet>74</a>    </span><span class="kw">pub fn </span>error_code(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
-<a href=#75 id=75 data-nosnippet>75</a>        <span class="kw">match </span><span class="self">self </span>{
-<a href=#76 id=76 data-nosnippet>76</a>            <span class="self">Self</span>::InvalidRequest(<span class="kw">_</span>) =&gt; <span class="string">"invalid_request"</span>,
-<a href=#77 id=77 data-nosnippet>77</a>            <span class="self">Self</span>::UnauthorizedClient(<span class="kw">_</span>) =&gt; <span class="string">"unauthorized_client"</span>,
-<a href=#78 id=78 data-nosnippet>78</a>            <span class="self">Self</span>::AccessDenied(<span class="kw">_</span>) =&gt; <span class="string">"access_denied"</span>,
-<a href=#79 id=79 data-nosnippet>79</a>            <span class="self">Self</span>::UnsupportedResponseType =&gt; <span class="string">"unsupported_response_type"</span>,
-<a href=#80 id=80 data-nosnippet>80</a>            <span class="self">Self</span>::InvalidScope(<span class="kw">_</span>) =&gt; <span class="string">"invalid_scope"</span>,
-<a href=#81 id=81 data-nosnippet>81</a>            <span class="self">Self</span>::InvalidGrant(<span class="kw">_</span>) =&gt; <span class="string">"invalid_grant"</span>,
-<a href=#82 id=82 data-nosnippet>82</a>            <span class="self">Self</span>::InvalidClient(<span class="kw">_</span>) =&gt; <span class="string">"invalid_client"</span>,
-<a href=#83 id=83 data-nosnippet>83</a>            <span class="self">Self</span>::InvalidRedirectUri(<span class="kw">_</span>) =&gt; <span class="string">"invalid_request"</span>,
-<a href=#84 id=84 data-nosnippet>84</a>            <span class="self">Self</span>::ParRequired(<span class="kw">_</span>) =&gt; <span class="string">"invalid_request"</span>,
-<a href=#85 id=85 data-nosnippet>85</a>            <span class="self">Self</span>::UnsupportedGrantType =&gt; <span class="string">"unsupported_grant_type"</span>,
-<a href=#86 id=86 data-nosnippet>86</a>            <span class="self">Self</span>::ServerError(<span class="kw">_</span>) =&gt; <span class="string">"server_error"</span>,
-<a href=#87 id=87 data-nosnippet>87</a>            <span class="self">Self</span>::AuthorizationPending =&gt; <span class="string">"authorization_pending"</span>,
-<a href=#88 id=88 data-nosnippet>88</a>            <span class="self">Self</span>::SlowDown =&gt; <span class="string">"slow_down"</span>,
-<a href=#89 id=89 data-nosnippet>89</a>            <span class="self">Self</span>::ExpiredToken =&gt; <span class="string">"expired_token"</span>,
-<a href=#90 id=90 data-nosnippet>90</a>            <span class="self">Self</span>::InvalidTarget(<span class="kw">_</span>) =&gt; <span class="string">"invalid_target"</span>,
-<a href=#91 id=91 data-nosnippet>91</a>        }
-<a href=#92 id=92 data-nosnippet>92</a>    }
-<a href=#93 id=93 data-nosnippet>93</a>
-<a href=#94 id=94 data-nosnippet>94</a>    <span class="doccomment">/// Human-readable error description for the `error_description` field.
-<a href=#95 id=95 data-nosnippet>95</a>    ///
-<a href=#96 id=96 data-nosnippet>96</a>    /// Strips the RFC error-code prefix from the Display output so that
-<a href=#97 id=97 data-nosnippet>97</a>    /// `error_description` contains only the message (the code goes in
-<a href=#98 id=98 data-nosnippet>98</a>    /// the separate `error` field per RFC 6749 §5.2).
-<a href=#99 id=99 data-nosnippet>99</a>    </span><span class="kw">pub fn </span>error_description(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; String {
-<a href=#100 id=100 data-nosnippet>100</a>        <span class="kw">let </span>full = <span class="self">self</span>.to_string();
-<a href=#101 id=101 data-nosnippet>101</a>        <span class="comment">// Display format is "error_code: message"; extract the message part.
-<a href=#102 id=102 data-nosnippet>102</a>        </span><span class="kw">match </span>full.split_once(<span class="string">": "</span>) {
-<a href=#103 id=103 data-nosnippet>103</a>            <span class="prelude-val">Some</span>((<span class="kw">_</span>, msg)) =&gt; msg.to_string(),
-<a href=#104 id=104 data-nosnippet>104</a>            <span class="prelude-val">None </span>=&gt; full,
-<a href=#105 id=105 data-nosnippet>105</a>        }
-<a href=#106 id=106 data-nosnippet>106</a>    }
-<a href=#107 id=107 data-nosnippet>107</a>}
+<a href=#22 id=22 data-nosnippet>22</a>    <span class="doccomment">/// RFC 9449 §5 — a DPoP proof was required and was missing or unusable.
+<a href=#23 id=23 data-nosnippet>23</a>    ///
+<a href=#24 id=24 data-nosnippet>24</a>    /// # Why this is not `invalid_client`
+<a href=#25 id=25 data-nosnippet>25</a>    ///
+<a href=#26 id=26 data-nosnippet>26</a>    /// It was, and it was wrong in both directions. A `private_key_jwt` client
+<a href=#27 id=27 data-nosnippet>27</a>    /// that presented a perfectly valid assertion and no proof was told
+<a href=#28 id=28 data-nosnippet>28</a>    /// `invalid_client: invalid client credentials`, which names the one thing
+<a href=#29 id=29 data-nosnippet>29</a>    /// that was not the problem — so the client cannot tell what to fix, and an
+<a href=#30 id=30 data-nosnippet>30</a>    /// operator reading logs sees an authentication failure that did not
+<a href=#31 id=31 data-nosnippet>31</a>    /// happen. RFC 9449 §5 gives the code for exactly this case, and §7.1 gives
+<a href=#32 id=32 data-nosnippet>32</a>    /// the same code for a proof that fails verification at a resource.
+<a href=#33 id=33 data-nosnippet>33</a>    ///
+<a href=#34 id=34 data-nosnippet>34</a>    /// The OIDF FAPI 2.0 DPoP lane checks it by name:
+<a href=#35 id=35 data-nosnippet>35</a>    /// `CheckTokenEndpointReturnedInvalidRequestGrantOrDPopProofError` accepts
+<a href=#36 id=36 data-nosnippet>36</a>    /// `invalid_request`, `invalid_grant` or `invalid_dpop_proof` and rejects
+<a href=#37 id=37 data-nosnippet>37</a>    /// anything else, `invalid_client` included.
+<a href=#38 id=38 data-nosnippet>38</a>    ///
+<a href=#39 id=39 data-nosnippet>39</a>    /// Carries HTTP **400**, not 401: 401 is for a failure to authenticate the
+<a href=#40 id=40 data-nosnippet>40</a>    /// client (RFC 6749 §5.2), and this is a client that authenticated.
+<a href=#41 id=41 data-nosnippet>41</a>    </span><span class="attr">#[error(<span class="string">"invalid_dpop_proof: {0}"</span>)]
+<a href=#42 id=42 data-nosnippet>42</a>    </span>InvalidDpopProof(String),
+<a href=#43 id=43 data-nosnippet>43</a>    <span class="attr">#[error(<span class="string">"invalid_request: {0}"</span>)]
+<a href=#44 id=44 data-nosnippet>44</a>    </span>InvalidRedirectUri(String),
+<a href=#45 id=45 data-nosnippet>45</a>    <span class="doccomment">/// B5 — the client is registered `require_par` and sent its parameters
+<a href=#46 id=46 data-nosnippet>46</a>    /// through the browser anyway.
+<a href=#47 id=47 data-nosnippet>47</a>    ///
+<a href=#48 id=48 data-nosnippet>48</a>    /// A distinct variant rather than a plain `InvalidRequest` because of how
+<a href=#49 id=49 data-nosnippet>49</a>    /// the authorize handler decides whether to redirect: `InvalidRequest`
+<a href=#50 id=50 data-nosnippet>50</a>    /// means "we got past client and redirect_uri validation", and is
+<a href=#51 id=51 data-nosnippet>51</a>    /// therefore safe to report by redirecting. This refusal happens
+<a href=#52 id=52 data-nosnippet>52</a>    /// *before* the redirect_uri is validated — deliberately, since the whole
+<a href=#53 id=53 data-nosnippet>53</a>    /// point is that this client's parameters must not travel through the
+<a href=#54 id=54 data-nosnippet>54</a>    /// browser — so redirecting would bounce the user agent to an unvalidated
+<a href=#55 id=55 data-nosnippet>55</a>    /// URI supplied by the very channel the setting forbids. On the wire it
+<a href=#56 id=56 data-nosnippet>56</a>    /// is still `invalid_request` per RFC 9126 §5; the variant exists to keep
+<a href=#57 id=57 data-nosnippet>57</a>    /// the response non-redirecting.
+<a href=#58 id=58 data-nosnippet>58</a>    </span><span class="attr">#[error(<span class="string">"invalid_request: {0}"</span>)]
+<a href=#59 id=59 data-nosnippet>59</a>    </span>ParRequired(String),
+<a href=#60 id=60 data-nosnippet>60</a>    <span class="attr">#[error(<span class="string">"unsupported_grant_type: grant type is not supported"</span>)]
+<a href=#61 id=61 data-nosnippet>61</a>    </span>UnsupportedGrantType,
+<a href=#62 id=62 data-nosnippet>62</a>    <span class="attr">#[error(<span class="string">"server_error: {0}"</span>)]
+<a href=#63 id=63 data-nosnippet>63</a>    </span>ServerError(String),
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a>    <span class="comment">// --- RFC 8628 device-flow polling errors (B2) --------------------------
+<a href=#66 id=66 data-nosnippet>66</a>    //
+<a href=#67 id=67 data-nosnippet>67</a>    // These are NOT failures in the usual sense: `authorization_pending` is
+<a href=#68 id=68 data-nosnippet>68</a>    // the *expected* answer to almost every poll, and `slow_down` is
+<a href=#69 id=69 data-nosnippet>69</a>    // corrective rather than terminal. They are modelled as errors because
+<a href=#70 id=70 data-nosnippet>70</a>    // that is what RFC 8628 §3.5 puts on the wire — a 400 with an `error`
+<a href=#71 id=71 data-nosnippet>71</a>    // field — and because keeping them in one type is what stops the token
+<a href=#72 id=72 data-nosnippet>72</a>    // endpoint growing a second, parallel response path.
+<a href=#73 id=73 data-nosnippet>73</a>    </span><span class="doccomment">/// The user has not yet approved or denied. The device keeps polling.
+<a href=#74 id=74 data-nosnippet>74</a>    </span><span class="attr">#[error(<span class="string">"authorization_pending: the user has not yet completed authorization"</span>)]
+<a href=#75 id=75 data-nosnippet>75</a>    </span>AuthorizationPending,
+<a href=#76 id=76 data-nosnippet>76</a>    <span class="doccomment">/// The device is polling faster than the interval it was given. The
+<a href=#77 id=77 data-nosnippet>77</a>    /// interval has been raised; the device must honour the new one.
+<a href=#78 id=78 data-nosnippet>78</a>    </span><span class="attr">#[error(<span class="string">"slow_down: polling faster than the permitted interval"</span>)]
+<a href=#79 id=79 data-nosnippet>79</a>    </span>SlowDown,
+<a href=#80 id=80 data-nosnippet>80</a>    <span class="doccomment">/// The device code expired before the user acted.
+<a href=#81 id=81 data-nosnippet>81</a>    </span><span class="attr">#[error(<span class="string">"expired_token: the device code has expired; restart the flow"</span>)]
+<a href=#82 id=82 data-nosnippet>82</a>    </span>ExpiredToken,
+<a href=#83 id=83 data-nosnippet>83</a>
+<a href=#84 id=84 data-nosnippet>84</a>    <span class="comment">// --- RFC 8693 token exchange (B3) --------------------------------------
+<a href=#85 id=85 data-nosnippet>85</a>    </span><span class="doccomment">/// RFC 8693 §2.2.2 — the requested `audience`/`resource` is not one the
+<a href=#86 id=86 data-nosnippet>86</a>    /// exchanging client may address. Its own error code rather than
+<a href=#87 id=87 data-nosnippet>87</a>    /// `invalid_request` because a caller can act on it: the target is
+<a href=#88 id=88 data-nosnippet>88</a>    /// well-formed, it is simply not theirs to address.
+<a href=#89 id=89 data-nosnippet>89</a>    </span><span class="attr">#[error(<span class="string">"invalid_target: {0}"</span>)]
+<a href=#90 id=90 data-nosnippet>90</a>    </span>InvalidTarget(String),
+<a href=#91 id=91 data-nosnippet>91</a>
+<a href=#92 id=92 data-nosnippet>92</a>    <span class="comment">// --- OIDC Core §3.1.2.6 request objects (X7 G12) -----------------------
+<a href=#93 id=93 data-nosnippet>93</a>    //
+<a href=#94 id=94 data-nosnippet>94</a>    // Their own variants rather than `InvalidRequest` because the codes are
+<a href=#95 id=95 data-nosnippet>95</a>    // the whole point: OIDC Core defines `request_not_supported` and
+<a href=#96 id=96 data-nosnippet>96</a>    // `request_uri_not_supported` precisely so a relying party can tell "I
+<a href=#97 id=97 data-nosnippet>97</a>    // sent a malformed request" from "this server does not do request
+<a href=#98 id=98 data-nosnippet>98</a>    // objects", and a conformance suite matches on the distinction. AXIAM
+<a href=#99 id=99 data-nosnippet>99</a>    // implements neither form — see `authorize::RequestObject` for why.
+<a href=#100 id=100 data-nosnippet>100</a>    </span><span class="doccomment">/// OIDC Core §3.1.2.6 — `login_required`: the authorization server needs
+<a href=#101 id=101 data-nosnippet>101</a>    /// the end user to authenticate and cannot ask again (W3, plan §4.0).
+<a href=#102 id=102 data-nosnippet>102</a>    ///
+<a href=#103 id=103 data-nosnippet>103</a>    /// The **terminal state of the login hop's loop guard**. A `browser_sso`
+<a href=#104 id=104 data-nosnippet>104</a>    /// client's anonymous authorization request is redirected to the login page
+<a href=#105 id=105 data-nosnippet>105</a>    /// once; if the request that redirect produces comes back still carrying no
+<a href=#106 id=106 data-nosnippet>106</a>    /// principal, this is the answer, and it is deliberately not another
+<a href=#107 id=107 data-nosnippet>107</a>    /// redirect. See `crate::login_hop` for the argument that this bounds the
+<a href=#108 id=108 data-nosnippet>108</a>    /// chain at two authorization requests.
+<a href=#109 id=109 data-nosnippet>109</a>    ///
+<a href=#110 id=110 data-nosnippet>110</a>    /// Answered **directly**, not by redirecting to the relying party. W3
+<a href=#111 id=111 data-nosnippet>111</a>    /// honours no authentication-request parameter, so it builds no
+<a href=#112 id=112 data-nosnippet>112</a>    /// parameter-driven redirect error; the loop guard is a server-side safety
+<a href=#113 id=113 data-nosnippet>113</a>    /// valve for a deployment that is misconfigured or a browser that is
+<a href=#114 id=114 data-nosnippet>114</a>    /// refusing cookies, and neither is something the relying party can act on
+<a href=#115 id=115 data-nosnippet>115</a>    /// by being told in a query string.
+<a href=#116 id=116 data-nosnippet>116</a>    </span><span class="attr">#[error(<span class="string">"login_required: {0}"</span>)]
+<a href=#117 id=117 data-nosnippet>117</a>    </span>LoginRequired(String),
+<a href=#118 id=118 data-nosnippet>118</a>
+<a href=#119 id=119 data-nosnippet>119</a>    <span class="doccomment">/// OIDC Core §3.1.2.6 — `consent_required`: the end user has not consented
+<a href=#120 id=120 data-nosnippet>120</a>    /// to something this request needs, and `prompt=none` forbids asking.
+<a href=#121 id=121 data-nosnippet>121</a>    ///
+<a href=#122 id=122 data-nosnippet>122</a>    /// **Unreachable in W4, deliberately and stated rather than hidden.** The
+<a href=#123 id=123 data-nosnippet>123</a>    /// only thing that could require consent is a consent-gated scope, and
+<a href=#124 id=124 data-nosnippet>124</a>    /// there are none until W7 defines `address` and `phone` (plan §4.8). The
+<a href=#125 id=125 data-nosnippet>125</a>    /// variant exists because the four OIDC interaction errors are one
+<a href=#126 id=126 data-nosnippet>126</a>    /// vocabulary and splitting it across two waves is how an error code comes
+<a href=#127 id=127 data-nosnippet>127</a>    /// to be spelled twice; the honour lane raises it nowhere, and
+<a href=#128 id=128 data-nosnippet>128</a>    /// `crate::honour` has no branch that could.
+<a href=#129 id=129 data-nosnippet>129</a>    </span><span class="attr">#[error(<span class="string">"consent_required: {0}"</span>)]
+<a href=#130 id=130 data-nosnippet>130</a>    </span>ConsentRequired(String),
+<a href=#131 id=131 data-nosnippet>131</a>
+<a href=#132 id=132 data-nosnippet>132</a>    <span class="doccomment">/// OIDC Core §3.1.2.6 — `interaction_required`: some interaction other
+<a href=#133 id=133 data-nosnippet>133</a>    /// than authentication or consent is needed, and `prompt=none` forbids it.
+<a href=#134 id=134 data-nosnippet>134</a>    ///
+<a href=#135 id=135 data-nosnippet>135</a>    /// **Also unreachable in W4.** Every `prompt=none` refusal the honour lane
+<a href=#136 id=136 data-nosnippet>136</a>    /// can produce has a more specific name — `login_required` for a missing,
+<a href=#137 id=137 data-nosnippet>137</a>    /// stale or mismatched authentication, `account_selection_required` when a
+<a href=#138 id=138 data-nosnippet>138</a>    /// hint mismatch is the cause, `unmet_authentication_requirements` for an
+<a href=#139 id=139 data-nosnippet>139</a>    /// essential `acr` — and OIDC Core asks for the most specific code that
+<a href=#140 id=140 data-nosnippet>140</a>    /// applies. It is declared with its siblings for the same reason
+<a href=#141 id=141 data-nosnippet>141</a>    /// [`Self::ConsentRequired`] is.
+<a href=#142 id=142 data-nosnippet>142</a>    </span><span class="attr">#[error(<span class="string">"interaction_required: {0}"</span>)]
+<a href=#143 id=143 data-nosnippet>143</a>    </span>InteractionRequired(String),
+<a href=#144 id=144 data-nosnippet>144</a>
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="doccomment">/// OIDC Core §3.1.2.6 — `account_selection_required`: the end user needs
+<a href=#146 id=146 data-nosnippet>146</a>    /// to choose a session, and this request could not choose for them.
+<a href=#147 id=147 data-nosnippet>147</a>    ///
+<a href=#148 id=148 data-nosnippet>148</a>    /// Raised on the return leg of a login hop when `prompt=select_account`
+<a href=#149 id=149 data-nosnippet>149</a>    /// was asked and the `id_token_hint` still names somebody other than
+<a href=#150 id=150 data-nosnippet>150</a>    /// whoever signed in (plan §4.2). Without `select_account` the same state
+<a href=#151 id=151 data-nosnippet>151</a>    /// is `login_required`: the relying party did not ask about accounts, so
+<a href=#152 id=152 data-nosnippet>152</a>    /// naming accounts in the answer would tell it something it did not ask.
+<a href=#153 id=153 data-nosnippet>153</a>    </span><span class="attr">#[error(<span class="string">"account_selection_required: {0}"</span>)]
+<a href=#154 id=154 data-nosnippet>154</a>    </span>AccountSelectionRequired(String),
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a>    <span class="doccomment">/// OpenID Connect Core Error Code `unmet_authentication_requirements` 1.0
+<a href=#157 id=157 data-nosnippet>157</a>    /// — an **essential** authentication context class the end user did not
+<a href=#158 id=158 data-nosnippet>158</a>    /// reach.
+<a href=#159 id=159 data-nosnippet>159</a>    ///
+<a href=#160 id=160 data-nosnippet>160</a>    /// Distinct from `login_required` because the two ask the relying party
+<a href=#161 id=161 data-nosnippet>161</a>    /// for different things: `login_required` says "send them back and they
+<a href=#162 id=162 data-nosnippet>162</a>    /// can sign in", and this says "they signed in, and this deployment cannot
+<a href=#163 id=163 data-nosnippet>163</a>    /// give you the assurance level you require of them" — commonly a user
+<a href=#164 id=164 data-nosnippet>164</a>    /// with no second factor enrolled against a request for
+<a href=#165 id=165 data-nosnippet>165</a>    /// [`crate::acr::Acr::MultiFactor`]. Answering `login_required` there
+<a href=#166 id=166 data-nosnippet>166</a>    /// invites a loop the relying party drives.
+<a href=#167 id=167 data-nosnippet>167</a>    ///
+<a href=#168 id=168 data-nosnippet>168</a>    /// Never accompanied by a token, at any point. That is the whole
+<a href=#169 id=169 data-nosnippet>169</a>    /// difference between an essential and a voluntary `acr` request.
+<a href=#170 id=170 data-nosnippet>170</a>    </span><span class="attr">#[error(<span class="string">"unmet_authentication_requirements: {0}"</span>)]
+<a href=#171 id=171 data-nosnippet>171</a>    </span>UnmetAuthenticationRequirements(String),
+<a href=#172 id=172 data-nosnippet>172</a>
+<a href=#173 id=173 data-nosnippet>173</a>    <span class="doccomment">/// OIDC Core §3.1.2.6 — `invalid_request_uri`, raised on the **return leg
+<a href=#174 id=174 data-nosnippet>174</a>    /// of a login hop** when the pushed request the browser left with is gone
+<a href=#175 id=175 data-nosnippet>175</a>    /// (W3, plan §4.0 and F10).
+<a href=#176 id=176 data-nosnippet>176</a>    ///
+<a href=#177 id=177 data-nosnippet>177</a>    /// A PAR `request_uri` lives 60 seconds (RFC 9126 §2.2, and `par.rs`'s own
+<a href=#178 id=178 data-nosnippet>178</a>    /// constant). A user who takes longer than that to type a password comes
+<a href=#179 id=179 data-nosnippet>179</a>    /// back to an authorization endpoint that has nothing to consume — and
+<a href=#180 id=180 data-nosnippet>180</a>    /// telling them `invalid_request: request_uri is unknown, expired, or used`
+<a href=#181 id=181 data-nosnippet>181</a>    /// describes a client bug that did not happen. This code says the recoverable
+<a href=#182 id=182 data-nosnippet>182</a>    /// thing instead, which is what OIDC Core defines it for: the relying party
+<a href=#183 id=183 data-nosnippet>183</a>    /// pushes again and restarts.
+<a href=#184 id=184 data-nosnippet>184</a>    ///
+<a href=#185 id=185 data-nosnippet>185</a>    /// Raised **only** on a request carrying `axiam_login_hop`; an ordinary
+<a href=#186 id=186 data-nosnippet>186</a>    /// authorization request with a dead `request_uri` gets the same
+<a href=#187 id=187 data-nosnippet>187</a>    /// `invalid_request` it has always got, because changing that would change
+<a href=#188 id=188 data-nosnippet>188</a>    /// behaviour for a client registered today.
+<a href=#189 id=189 data-nosnippet>189</a>    </span><span class="attr">#[error(<span class="string">"invalid_request_uri: {0}"</span>)]
+<a href=#190 id=190 data-nosnippet>190</a>    </span>InvalidRequestUri(String),
+<a href=#191 id=191 data-nosnippet>191</a>
+<a href=#192 id=192 data-nosnippet>192</a>    <span class="doccomment">/// OIDC Core §3.1.2.6 — a `request` parameter (a request object by value).
+<a href=#193 id=193 data-nosnippet>193</a>    </span><span class="attr">#[error(
+<a href=#194 id=194 data-nosnippet>194</a>        <span class="string">"request_not_supported: this server does not accept request objects; send the \
+<a href=#195 id=195 data-nosnippet>195</a>             authorization parameters directly, or push them to /oauth2/par"
+<a href=#196 id=196 data-nosnippet>196</a>    </span>)]
+<a href=#197 id=197 data-nosnippet>197</a>    </span>RequestNotSupported,
+<a href=#198 id=198 data-nosnippet>198</a>    <span class="doccomment">/// OIDC Core §3.1.2.6 — a `request_uri` that is not a PAR handle.
+<a href=#199 id=199 data-nosnippet>199</a>    </span><span class="attr">#[error(
+<a href=#200 id=200 data-nosnippet>200</a>        <span class="string">"request_uri_not_supported: request_uri accepts only a \
+<a href=#201 id=201 data-nosnippet>201</a>             urn:ietf:params:oauth:request_uri: value obtained from /oauth2/par (RFC 9126); \
+<a href=#202 id=202 data-nosnippet>202</a>             this server does not fetch request objects by reference"
+<a href=#203 id=203 data-nosnippet>203</a>    </span>)]
+<a href=#204 id=204 data-nosnippet>204</a>    </span>RequestUriNotSupported,
+<a href=#205 id=205 data-nosnippet>205</a>}
+<a href=#206 id=206 data-nosnippet>206</a>
+<a href=#207 id=207 data-nosnippet>207</a><span class="kw">impl </span>OAuth2Error {
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="doccomment">/// RFC 6749 error code string.
+<a href=#209 id=209 data-nosnippet>209</a>    </span><span class="kw">pub fn </span>error_code(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#210 id=210 data-nosnippet>210</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#211 id=211 data-nosnippet>211</a>            <span class="self">Self</span>::InvalidRequest(<span class="kw">_</span>) =&gt; <span class="string">"invalid_request"</span>,
+<a href=#212 id=212 data-nosnippet>212</a>            <span class="self">Self</span>::UnauthorizedClient(<span class="kw">_</span>) =&gt; <span class="string">"unauthorized_client"</span>,
+<a href=#213 id=213 data-nosnippet>213</a>            <span class="self">Self</span>::AccessDenied(<span class="kw">_</span>) =&gt; <span class="string">"access_denied"</span>,
+<a href=#214 id=214 data-nosnippet>214</a>            <span class="self">Self</span>::UnsupportedResponseType =&gt; <span class="string">"unsupported_response_type"</span>,
+<a href=#215 id=215 data-nosnippet>215</a>            <span class="self">Self</span>::InvalidScope(<span class="kw">_</span>) =&gt; <span class="string">"invalid_scope"</span>,
+<a href=#216 id=216 data-nosnippet>216</a>            <span class="self">Self</span>::InvalidGrant(<span class="kw">_</span>) =&gt; <span class="string">"invalid_grant"</span>,
+<a href=#217 id=217 data-nosnippet>217</a>            <span class="self">Self</span>::InvalidClient(<span class="kw">_</span>) =&gt; <span class="string">"invalid_client"</span>,
+<a href=#218 id=218 data-nosnippet>218</a>            <span class="self">Self</span>::InvalidDpopProof(<span class="kw">_</span>) =&gt; <span class="string">"invalid_dpop_proof"</span>,
+<a href=#219 id=219 data-nosnippet>219</a>            <span class="self">Self</span>::InvalidRedirectUri(<span class="kw">_</span>) =&gt; <span class="string">"invalid_request"</span>,
+<a href=#220 id=220 data-nosnippet>220</a>            <span class="self">Self</span>::ParRequired(<span class="kw">_</span>) =&gt; <span class="string">"invalid_request"</span>,
+<a href=#221 id=221 data-nosnippet>221</a>            <span class="self">Self</span>::UnsupportedGrantType =&gt; <span class="string">"unsupported_grant_type"</span>,
+<a href=#222 id=222 data-nosnippet>222</a>            <span class="self">Self</span>::ServerError(<span class="kw">_</span>) =&gt; <span class="string">"server_error"</span>,
+<a href=#223 id=223 data-nosnippet>223</a>            <span class="self">Self</span>::AuthorizationPending =&gt; <span class="string">"authorization_pending"</span>,
+<a href=#224 id=224 data-nosnippet>224</a>            <span class="self">Self</span>::SlowDown =&gt; <span class="string">"slow_down"</span>,
+<a href=#225 id=225 data-nosnippet>225</a>            <span class="self">Self</span>::ExpiredToken =&gt; <span class="string">"expired_token"</span>,
+<a href=#226 id=226 data-nosnippet>226</a>            <span class="self">Self</span>::InvalidTarget(<span class="kw">_</span>) =&gt; <span class="string">"invalid_target"</span>,
+<a href=#227 id=227 data-nosnippet>227</a>            <span class="self">Self</span>::LoginRequired(<span class="kw">_</span>) =&gt; <span class="string">"login_required"</span>,
+<a href=#228 id=228 data-nosnippet>228</a>            <span class="self">Self</span>::ConsentRequired(<span class="kw">_</span>) =&gt; <span class="string">"consent_required"</span>,
+<a href=#229 id=229 data-nosnippet>229</a>            <span class="self">Self</span>::InteractionRequired(<span class="kw">_</span>) =&gt; <span class="string">"interaction_required"</span>,
+<a href=#230 id=230 data-nosnippet>230</a>            <span class="self">Self</span>::AccountSelectionRequired(<span class="kw">_</span>) =&gt; <span class="string">"account_selection_required"</span>,
+<a href=#231 id=231 data-nosnippet>231</a>            <span class="self">Self</span>::UnmetAuthenticationRequirements(<span class="kw">_</span>) =&gt; <span class="string">"unmet_authentication_requirements"</span>,
+<a href=#232 id=232 data-nosnippet>232</a>            <span class="self">Self</span>::InvalidRequestUri(<span class="kw">_</span>) =&gt; <span class="string">"invalid_request_uri"</span>,
+<a href=#233 id=233 data-nosnippet>233</a>            <span class="self">Self</span>::RequestNotSupported =&gt; <span class="string">"request_not_supported"</span>,
+<a href=#234 id=234 data-nosnippet>234</a>            <span class="self">Self</span>::RequestUriNotSupported =&gt; <span class="string">"request_uri_not_supported"</span>,
+<a href=#235 id=235 data-nosnippet>235</a>        }
+<a href=#236 id=236 data-nosnippet>236</a>    }
+<a href=#237 id=237 data-nosnippet>237</a>
+<a href=#238 id=238 data-nosnippet>238</a>    <span class="doccomment">/// Human-readable error description for the `error_description` field.
+<a href=#239 id=239 data-nosnippet>239</a>    ///
+<a href=#240 id=240 data-nosnippet>240</a>    /// Strips the RFC error-code prefix from the Display output so that
+<a href=#241 id=241 data-nosnippet>241</a>    /// `error_description` contains only the message (the code goes in
+<a href=#242 id=242 data-nosnippet>242</a>    /// the separate `error` field per RFC 6749 §5.2).
+<a href=#243 id=243 data-nosnippet>243</a>    </span><span class="kw">pub fn </span>error_description(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; String {
+<a href=#244 id=244 data-nosnippet>244</a>        <span class="kw">let </span>full = <span class="self">self</span>.to_string();
+<a href=#245 id=245 data-nosnippet>245</a>        <span class="comment">// Display format is "error_code: message"; extract the message part.
+<a href=#246 id=246 data-nosnippet>246</a>        </span><span class="kw">let </span>msg = <span class="kw">match </span>full.split_once(<span class="string">": "</span>) {
+<a href=#247 id=247 data-nosnippet>247</a>            <span class="prelude-val">Some</span>((<span class="kw">_</span>, msg)) =&gt; msg,
+<a href=#248 id=248 data-nosnippet>248</a>            <span class="prelude-val">None </span>=&gt; <span class="kw-2">&amp;</span>full,
+<a href=#249 id=249 data-nosnippet>249</a>        };
+<a href=#250 id=250 data-nosnippet>250</a>        nqschar(msg)
+<a href=#251 id=251 data-nosnippet>251</a>    }
+<a href=#252 id=252 data-nosnippet>252</a>}
+<a href=#253 id=253 data-nosnippet>253</a>
+<a href=#254 id=254 data-nosnippet>254</a><span class="doccomment">/// Render text as RFC 6749 §5.2 `error_description`.
+<a href=#255 id=255 data-nosnippet>255</a>///
+<a href=#256 id=256 data-nosnippet>256</a>/// The grammar is not advisory and it is narrower than "text":
+<a href=#257 id=257 data-nosnippet>257</a>///
+<a href=#258 id=258 data-nosnippet>258</a>/// ```text
+<a href=#259 id=259 data-nosnippet>259</a>/// error_description = 1*NQSCHAR
+<a href=#260 id=260 data-nosnippet>260</a>/// NQSCHAR           = %x20-21 / %x23-5B / %x5D-7E
+<a href=#261 id=261 data-nosnippet>261</a>/// ```
+<a href=#262 id=262 data-nosnippet>262</a>///
+<a href=#263 id=263 data-nosnippet>263</a>/// Printable US-ASCII, minus `"` (%x22) and `\` (%x5C) — the two characters
+<a href=#264 id=264 data-nosnippet>264</a>/// that would need escaping inside the JSON string the field is delivered in.
+<a href=#265 id=265 data-nosnippet>265</a>/// Everything above %x7E is excluded, which rules out every character this
+<a href=#266 id=266 data-nosnippet>266</a>/// codebase reaches for when it writes prose: `§`, `—`, curly quotes, `…`.
+<a href=#267 id=267 data-nosnippet>267</a>///
+<a href=#268 id=268 data-nosnippet>268</a>/// # Why here and not at the call sites
+<a href=#269 id=269 data-nosnippet>269</a>///
+<a href=#270 id=270 data-nosnippet>270</a>/// Because there are hundreds of call sites and one of this function. A
+<a href=#271 id=271 data-nosnippet>271</a>/// message is written by whoever is fixing the bug it describes, in the house
+<a href=#272 id=272 data-nosnippet>272</a>/// style of the file around it, and that style cites specifications as `§`.
+<a href=#273 id=273 data-nosnippet>273</a>/// Asking every future author to remember a character-set rule from RFC 6749
+<a href=#274 id=274 data-nosnippet>274</a>/// is asking for the defect back; `error_description()` is the one place every
+<a href=#275 id=275 data-nosnippet>275</a>/// one of those strings passes through on its way to a client.
+<a href=#276 id=276 data-nosnippet>276</a>///
+<a href=#277 id=277 data-nosnippet>277</a>/// It is a real defect and not pedantry. The OIDF module
+<a href=#278 id=278 data-nosnippet>278</a>/// `fapi2-security-profile-final-ensure-holder-of-key-required` fails on
+<a href=#279 id=279 data-nosnippet>279</a>/// exactly this, and it failed on a description that had just been *corrected*
+<a href=#280 id=280 data-nosnippet>280</a>/// to say `RFC 9449 §5` — the section reference is what broke it.
+<a href=#281 id=281 data-nosnippet>281</a>///
+<a href=#282 id=282 data-nosnippet>282</a>/// # Transliterated, not stripped
+<a href=#283 id=283 data-nosnippet>283</a>///
+<a href=#284 id=284 data-nosnippet>284</a>/// The characters that actually occur are given ASCII spellings rather than
+<a href=#285 id=285 data-nosnippet>285</a>/// dropped, because the description exists to be read by an integrator: "RFC
+<a href=#286 id=286 data-nosnippet>286</a>/// 9449 5" and "RFC 9449 section 5" are not equally useful, and a message with
+<a href=#287 id=287 data-nosnippet>287</a>/// its punctuation silently deleted reads like a corrupted string. Anything
+<a href=#288 id=288 data-nosnippet>288</a>/// not spelled out here is replaced by a single `?`, which is visible — a
+<a href=#289 id=289 data-nosnippet>289</a>/// dropped character is not, and an invisible truncation is how a message
+<a href=#290 id=290 data-nosnippet>290</a>/// comes to mean something it did not say.
+<a href=#291 id=291 data-nosnippet>291</a></span><span class="kw">pub fn </span>nqschar(msg: <span class="kw-2">&amp;</span>str) -&gt; String {
+<a href=#292 id=292 data-nosnippet>292</a>    <span class="kw">let </span><span class="kw-2">mut </span>out = String::with_capacity(msg.len());
+<a href=#293 id=293 data-nosnippet>293</a>    <span class="kw">for </span>c <span class="kw">in </span>msg.chars() {
+<a href=#294 id=294 data-nosnippet>294</a>        <span class="kw">match </span>c {
+<a href=#295 id=295 data-nosnippet>295</a>            <span class="comment">// The permitted set, verbatim.
+<a href=#296 id=296 data-nosnippet>296</a>            </span><span class="string">'\x20'</span>..=<span class="string">'\x21' </span>| <span class="string">'\x23'</span>..=<span class="string">'\x5b' </span>| <span class="string">'\x5d'</span>..=<span class="string">'\x7e' </span>=&gt; out.push(c),
+<a href=#297 id=297 data-nosnippet>297</a>            <span class="comment">// Excluded by NQSCHAR even though they are ASCII.
+<a href=#298 id=298 data-nosnippet>298</a>            </span><span class="string">'"' </span>=&gt; out.push(<span class="string">'\''</span>),
+<a href=#299 id=299 data-nosnippet>299</a>            <span class="string">'\\' </span>=&gt; out.push(<span class="string">'/'</span>),
+<a href=#300 id=300 data-nosnippet>300</a>            <span class="comment">// Whitespace a multi-line Rust string literal picks up.
+<a href=#301 id=301 data-nosnippet>301</a>            </span><span class="string">'\n' </span>| <span class="string">'\r' </span>| <span class="string">'\t' </span>=&gt; out.push(<span class="string">' '</span>),
+<a href=#302 id=302 data-nosnippet>302</a>            <span class="comment">// The house style's punctuation, spelled out.
+<a href=#303 id=303 data-nosnippet>303</a>            </span><span class="string">'§' </span>=&gt; out.push_str(<span class="string">"section "</span>),
+<a href=#304 id=304 data-nosnippet>304</a>            <span class="string">'—' </span>| <span class="string">'–' </span>=&gt; out.push(<span class="string">'-'</span>),
+<a href=#305 id=305 data-nosnippet>305</a>            <span class="string">'‘' </span>| <span class="string">'’' </span>=&gt; out.push(<span class="string">'\''</span>),
+<a href=#306 id=306 data-nosnippet>306</a>            <span class="string">'“' </span>| <span class="string">'”' </span>=&gt; out.push(<span class="string">'\''</span>),
+<a href=#307 id=307 data-nosnippet>307</a>            <span class="string">'…' </span>=&gt; out.push_str(<span class="string">"..."</span>),
+<a href=#308 id=308 data-nosnippet>308</a>            <span class="string">'\u{a0}' </span>=&gt; out.push(<span class="string">' '</span>),
+<a href=#309 id=309 data-nosnippet>309</a>            <span class="kw">_ </span>=&gt; out.push(<span class="string">'?'</span>),
+<a href=#310 id=310 data-nosnippet>310</a>        }
+<a href=#311 id=311 data-nosnippet>311</a>    }
+<a href=#312 id=312 data-nosnippet>312</a>    out
+<a href=#313 id=313 data-nosnippet>313</a>}
+<a href=#314 id=314 data-nosnippet>314</a>
+<a href=#315 id=315 data-nosnippet>315</a><span class="attr">#[cfg(test)]
+<a href=#316 id=316 data-nosnippet>316</a></span><span class="kw">mod </span>tests {
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#318 id=318 data-nosnippet>318</a>
+<a href=#319 id=319 data-nosnippet>319</a>    <span class="doccomment">/// The character set is the whole of the rule, so it is asserted as the
+<a href=#320 id=320 data-nosnippet>320</a>    /// whole of the rule rather than by example.
+<a href=#321 id=321 data-nosnippet>321</a>    </span><span class="attr">#[test]
+<a href=#322 id=322 data-nosnippet>322</a>    </span><span class="kw">fn </span>nqschar_admits_exactly_the_rfc6749_set() {
+<a href=#323 id=323 data-nosnippet>323</a>        <span class="kw">for </span>c <span class="kw">in </span><span class="string">'\u{0}'</span>..=<span class="string">'\u{ff}' </span>{
+<a href=#324 id=324 data-nosnippet>324</a>            <span class="kw">let </span>permitted = <span class="macro">matches!</span>(c, <span class="string">'\x20'</span>..=<span class="string">'\x21' </span>| <span class="string">'\x23'</span>..=<span class="string">'\x5b' </span>| <span class="string">'\x5d'</span>..=<span class="string">'\x7e'</span>);
+<a href=#325 id=325 data-nosnippet>325</a>            <span class="kw">let </span>rendered = nqschar(<span class="kw-2">&amp;</span>c.to_string());
+<a href=#326 id=326 data-nosnippet>326</a>            <span class="kw">if </span>permitted {
+<a href=#327 id=327 data-nosnippet>327</a>                <span class="macro">assert_eq!</span>(rendered, c.to_string(), <span class="string">"{c:?} is NQSCHAR and must survive"</span>);
+<a href=#328 id=328 data-nosnippet>328</a>            } <span class="kw">else </span>{
+<a href=#329 id=329 data-nosnippet>329</a>                <span class="macro">assert!</span>(
+<a href=#330 id=330 data-nosnippet>330</a>                    rendered.chars().all(|r| <span class="macro">matches!</span>(
+<a href=#331 id=331 data-nosnippet>331</a>                        r,
+<a href=#332 id=332 data-nosnippet>332</a>                        <span class="string">'\x20'</span>..=<span class="string">'\x21' </span>| <span class="string">'\x23'</span>..=<span class="string">'\x5b' </span>| <span class="string">'\x5d'</span>..=<span class="string">'\x7e'
+<a href=#333 id=333 data-nosnippet>333</a>                    </span>)),
+<a href=#334 id=334 data-nosnippet>334</a>                    <span class="string">"{c:?} rendered as {rendered:?}, which is not NQSCHAR"
+<a href=#335 id=335 data-nosnippet>335</a>                </span>);
+<a href=#336 id=336 data-nosnippet>336</a>            }
+<a href=#337 id=337 data-nosnippet>337</a>        }
+<a href=#338 id=338 data-nosnippet>338</a>    }
+<a href=#339 id=339 data-nosnippet>339</a>
+<a href=#340 id=340 data-nosnippet>340</a>    <span class="doccomment">/// The description that actually failed
+<a href=#341 id=341 data-nosnippet>341</a>    /// `fapi2-security-profile-final-ensure-holder-of-key-required`, and what
+<a href=#342 id=342 data-nosnippet>342</a>    /// it has to become.
+<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="attr">#[test]
+<a href=#344 id=344 data-nosnippet>344</a>    </span><span class="kw">fn </span>a_section_sign_becomes_a_readable_word_not_a_hole() {
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="kw">let </span>described = OAuth2Error::InvalidDpopProof(
+<a href=#346 id=346 data-nosnippet>346</a>            <span class="string">"this client's access tokens are DPoP-bound, so the request must carry a \
+<a href=#347 id=347 data-nosnippet>347</a>             DPoP proof (RFC 9449 §5)"
+<a href=#348 id=348 data-nosnippet>348</a>                </span>.into(),
+<a href=#349 id=349 data-nosnippet>349</a>        )
+<a href=#350 id=350 data-nosnippet>350</a>        .error_description();
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="macro">assert!</span>(
+<a href=#352 id=352 data-nosnippet>352</a>            described.ends_with(<span class="string">"(RFC 9449 section 5)"</span>),
+<a href=#353 id=353 data-nosnippet>353</a>            <span class="string">"the reference must survive in a form an integrator can act on: {described}"
+<a href=#354 id=354 data-nosnippet>354</a>        </span>);
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="macro">assert!</span>(described.is_ascii());
+<a href=#356 id=356 data-nosnippet>356</a>    }
+<a href=#357 id=357 data-nosnippet>357</a>
+<a href=#358 id=358 data-nosnippet>358</a>    <span class="doccomment">/// Every variant that carries a message, rendered — because the rule binds
+<a href=#359 id=359 data-nosnippet>359</a>    /// the field and not one variant of it.
+<a href=#360 id=360 data-nosnippet>360</a>    </span><span class="attr">#[test]
+<a href=#361 id=361 data-nosnippet>361</a>    </span><span class="kw">fn </span>every_error_description_is_nqschar() {
+<a href=#362 id=362 data-nosnippet>362</a>        <span class="kw">let </span>prose = <span class="string">"an em dash — a section §7 — curly ‘quotes’ and an ellipsis…"</span>;
+<a href=#363 id=363 data-nosnippet>363</a>        <span class="kw">for </span>e <span class="kw">in </span>[
+<a href=#364 id=364 data-nosnippet>364</a>            OAuth2Error::InvalidRequest(prose.into()),
+<a href=#365 id=365 data-nosnippet>365</a>            OAuth2Error::UnauthorizedClient(prose.into()),
+<a href=#366 id=366 data-nosnippet>366</a>            OAuth2Error::AccessDenied(prose.into()),
+<a href=#367 id=367 data-nosnippet>367</a>            OAuth2Error::InvalidScope(prose.into()),
+<a href=#368 id=368 data-nosnippet>368</a>            OAuth2Error::InvalidGrant(prose.into()),
+<a href=#369 id=369 data-nosnippet>369</a>            OAuth2Error::InvalidClient(prose.into()),
+<a href=#370 id=370 data-nosnippet>370</a>            OAuth2Error::InvalidDpopProof(prose.into()),
+<a href=#371 id=371 data-nosnippet>371</a>            OAuth2Error::ServerError(prose.into()),
+<a href=#372 id=372 data-nosnippet>372</a>        ] {
+<a href=#373 id=373 data-nosnippet>373</a>            <span class="kw">let </span>d = e.error_description();
+<a href=#374 id=374 data-nosnippet>374</a>            <span class="macro">assert!</span>(
+<a href=#375 id=375 data-nosnippet>375</a>                d.chars()
+<a href=#376 id=376 data-nosnippet>376</a>                    .all(|c| <span class="macro">matches!</span>(c, <span class="string">'\x20'</span>..=<span class="string">'\x21' </span>| <span class="string">'\x23'</span>..=<span class="string">'\x5b' </span>| <span class="string">'\x5d'</span>..=<span class="string">'\x7e'</span>)),
+<a href=#377 id=377 data-nosnippet>377</a>                <span class="string">"{d:?} escaped the NQSCHAR rule"
+<a href=#378 id=378 data-nosnippet>378</a>            </span>);
+<a href=#379 id=379 data-nosnippet>379</a>        }
+<a href=#380 id=380 data-nosnippet>380</a>    }
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="doccomment">/// A quote and a backslash are ASCII and still excluded — the two the JSON
+<a href=#383 id=383 data-nosnippet>383</a>    /// string would have had to escape.
+<a href=#384 id=384 data-nosnippet>384</a>    </span><span class="attr">#[test]
+<a href=#385 id=385 data-nosnippet>385</a>    </span><span class="kw">fn </span>the_two_excluded_ascii_characters_are_replaced_not_kept() {
+<a href=#386 id=386 data-nosnippet>386</a>        <span class="kw">let </span>d = OAuth2Error::InvalidRequest(<span class="string">r#"missing field "redirect_uri" in a\path"#</span>.into())
+<a href=#387 id=387 data-nosnippet>387</a>            .error_description();
+<a href=#388 id=388 data-nosnippet>388</a>        <span class="macro">assert!</span>(!d.contains(<span class="string">'"'</span>), <span class="string">"{d}"</span>);
+<a href=#389 id=389 data-nosnippet>389</a>        <span class="macro">assert!</span>(!d.contains(<span class="string">'\\'</span>), <span class="string">"{d}"</span>);
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="macro">assert!</span>(
+<a href=#391 id=391 data-nosnippet>391</a>            d.contains(<span class="string">"redirect_uri"</span>),
+<a href=#392 id=392 data-nosnippet>392</a>            <span class="string">"the message must still say what it said: {d}"
+<a href=#393 id=393 data-nosnippet>393</a>        </span>);
+<a href=#394 id=394 data-nosnippet>394</a>    }
+<a href=#395 id=395 data-nosnippet>395</a>
+<a href=#396 id=396 data-nosnippet>396</a>    <span class="doccomment">/// The OIDC interaction vocabulary, pinned as strings.
+<a href=#397 id=397 data-nosnippet>397</a>    ///
+<a href=#398 id=398 data-nosnippet>398</a>    /// These five codes are what a relying party matches on and what the
+<a href=#399 id=399 data-nosnippet>399</a>    /// conformance suite's
+<a href=#400 id=400 data-nosnippet>400</a>    /// `CheckErrorFromAuthorizationEndpointIsOneThatRequiredAUserInterface`
+<a href=#401 id=401 data-nosnippet>401</a>    /// accepts; a typo in one of them is invisible to every type in the
+<a href=#402 id=402 data-nosnippet>402</a>    /// codebase and visible to every client. Two of the five are unreachable
+<a href=#403 id=403 data-nosnippet>403</a>    /// in W4 — see their doc comments — and are pinned anyway so the wave that
+<a href=#404 id=404 data-nosnippet>404</a>    /// reaches them inherits the spelling rather than choosing it again.
+<a href=#405 id=405 data-nosnippet>405</a>    </span><span class="attr">#[test]
+<a href=#406 id=406 data-nosnippet>406</a>    </span><span class="kw">fn </span>the_oidc_interaction_error_codes_are_spelled_as_the_specification_spells_them() {
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="kw">for </span>(error, code) <span class="kw">in </span>[
+<a href=#408 id=408 data-nosnippet>408</a>            (OAuth2Error::LoginRequired(String::new()), <span class="string">"login_required"</span>),
+<a href=#409 id=409 data-nosnippet>409</a>            (
+<a href=#410 id=410 data-nosnippet>410</a>                OAuth2Error::ConsentRequired(String::new()),
+<a href=#411 id=411 data-nosnippet>411</a>                <span class="string">"consent_required"</span>,
+<a href=#412 id=412 data-nosnippet>412</a>            ),
+<a href=#413 id=413 data-nosnippet>413</a>            (
+<a href=#414 id=414 data-nosnippet>414</a>                OAuth2Error::InteractionRequired(String::new()),
+<a href=#415 id=415 data-nosnippet>415</a>                <span class="string">"interaction_required"</span>,
+<a href=#416 id=416 data-nosnippet>416</a>            ),
+<a href=#417 id=417 data-nosnippet>417</a>            (
+<a href=#418 id=418 data-nosnippet>418</a>                OAuth2Error::AccountSelectionRequired(String::new()),
+<a href=#419 id=419 data-nosnippet>419</a>                <span class="string">"account_selection_required"</span>,
+<a href=#420 id=420 data-nosnippet>420</a>            ),
+<a href=#421 id=421 data-nosnippet>421</a>            (
+<a href=#422 id=422 data-nosnippet>422</a>                OAuth2Error::UnmetAuthenticationRequirements(String::new()),
+<a href=#423 id=423 data-nosnippet>423</a>                <span class="string">"unmet_authentication_requirements"</span>,
+<a href=#424 id=424 data-nosnippet>424</a>            ),
+<a href=#425 id=425 data-nosnippet>425</a>        ] {
+<a href=#426 id=426 data-nosnippet>426</a>            <span class="macro">assert_eq!</span>(error.error_code(), code);
+<a href=#427 id=427 data-nosnippet>427</a>        }
+<a href=#428 id=428 data-nosnippet>428</a>    }
+<a href=#429 id=429 data-nosnippet>429</a>
+<a href=#430 id=430 data-nosnippet>430</a>    <span class="doccomment">/// The description carries the message and not the code — the two travel
+<a href=#431 id=431 data-nosnippet>431</a>    /// in separate members of the RFC 6749 §5.2 body.
+<a href=#432 id=432 data-nosnippet>432</a>    </span><span class="attr">#[test]
+<a href=#433 id=433 data-nosnippet>433</a>    </span><span class="kw">fn </span>the_description_does_not_repeat_the_code() {
+<a href=#434 id=434 data-nosnippet>434</a>        <span class="kw">let </span>e = OAuth2Error::UnmetAuthenticationRequirements(<span class="string">"no second factor enrolled"</span>.into());
+<a href=#435 id=435 data-nosnippet>435</a>        <span class="macro">assert_eq!</span>(e.error_description(), <span class="string">"no second factor enrolled"</span>);
+<a href=#436 id=436 data-nosnippet>436</a>        <span class="macro">assert!</span>(!e.error_description().contains(<span class="string">"unmet_authentication"</span>));
+<a href=#437 id=437 data-nosnippet>437</a>    }
+<a href=#438 id=438 data-nosnippet>438</a>}
 </code></pre></div></section></main></body></html>

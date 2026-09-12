@@ -1,0 +1,51 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Build the `axiam_op_session` cookie — the OP browser session (W3, plan §4.0)."><title>op_session_cookie in axiam_api_rest::middleware::csrf - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">op_session_cookie</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.0.0-beta13</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">op_<wbr>session_<wbr>cookie</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-lax-and-why-it-must-stay-lax" title="Why `Lax`, and why it must stay `Lax`">Why <code>Lax</code>, and why it must stay <code>Lax</code></a></li><li><a href="#why-a-second-cookie-rather-than-relaxing-axiam_access" title="Why a second cookie rather than relaxing `axiam_access`">Why a second cookie rather than relaxing <code>axiam_access</code></a></li><li><a href="#why-secure-is-not-cookie_secure-here" title="Why `Secure` is not `cookie_secure` here">Why <code>Secure</code> is not <code>cookie_secure</code> here</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In axiam_<wbr>api_<wbr>rest::<wbr>middleware::<wbr>csrf</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_rest</a>::<wbr><a href="../index.html">middleware</a>::<wbr><a href="index.html">csrf</a></div><h1>Function <span class="fn">op_<wbr>session_<wbr>cookie</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_rest/middleware/csrf.rs.html#405-413">Source</a> </span></div><pre class="rust item-decl"><code>pub fn op_session_cookie(token: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.str.html">str</a>, max_age_secs: <a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.u64.html">u64</a>) -&gt; <a class="struct" href="https://docs.rs/cookie/0.16/cookie/struct.Cookie.html" title="struct cookie::Cookie">Cookie</a>&lt;'static&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Build the <code>axiam_op_session</code> cookie — the OP browser session (W3, plan §4.0).</p>
+<ul>
+<li><code>httpOnly(true)</code> — script must never read it; it buys authorization codes</li>
+<li><code>Secure</code> — <strong>unconditionally <code>true</code></strong>, unlike the other three; see below</li>
+<li><code>SameSite::Lax</code> — <strong>the load-bearing attribute</strong>, see below</li>
+<li><code>path("/oauth2/authorize")</code> — the only endpoint that consults it</li>
+<li><code>Max-Age</code> = the session’s, i.e. <code>AuthConfig::refresh_token_lifetime_secs</code></li>
+</ul>
+<h2 id="why-lax-and-why-it-must-stay-lax"><a class="doc-anchor" href="#why-lax-and-why-it-must-stay-lax">§</a>Why <code>Lax</code>, and why it must stay <code>Lax</code></h2>
+<p>A browser sends a <code>Lax</code> cookie on <strong>top-level GET navigations and nothing
+else</strong>. That is precisely an OpenID Connect redirect from a relying party,
+and precisely <em>not</em> an <code>&lt;iframe&gt;</code>, an <code>&lt;img&gt;</code>, or a cross-site <code>fetch</code> —
+so the one thing this cookie exists to enable works, and the probing
+technique it would otherwise enable does not. An attacker’s page cannot
+frame <code>/oauth2/authorize</code> and watch whether a session exists, because the
+cookie is not sent inside a frame at all.</p>
+<p>The cost is stated rather than hidden, and it is recorded in plan §9: the
+cross-site hidden-iframe silent-renew pattern (<code>prompt=none</code> in an invisible
+frame) <strong>is not supported and fails closed</strong>. Relying parties renew with a
+top-level <code>prompt=none</code> navigation or with a refresh token. Changing this to
+<code>SameSite=None</code> would make that pattern work and would hand every site on
+the internet the same probe; it is not a fix and must not be made as one.</p>
+<h2 id="why-a-second-cookie-rather-than-relaxing-axiam_access"><a class="doc-anchor" href="#why-a-second-cookie-rather-than-relaxing-axiam_access">§</a>Why a second cookie rather than relaxing <code>axiam_access</code></h2>
+<p><code>axiam_access</code> is <code>SameSite=Strict; Path=/</code> and opens the entire API. This
+one is scoped to a single endpoint, so a browser that sends it cross-site can
+obtain exactly one thing: an authorization code, for a client that is
+registered, at a <code>redirect_uri</code> that matched exactly, bound to the relying
+party’s own PKCE and <code>state</code>. The API surface keeps its Strict cookies and
+its double-submit CSRF token untouched, and SEC-046’s threat model for the
+API cookie is unchanged rather than re-argued.</p>
+<h2 id="why-secure-is-not-cookie_secure-here"><a class="doc-anchor" href="#why-secure-is-not-cookie_secure-here">§</a>Why <code>Secure</code> is not <code>cookie_secure</code> here</h2>
+<p>The other three cookies take <code>AuthConfig::cookie_secure</code> (D-18), whose
+documented purpose is local HTTP development <em>“e.g. http://localhost”</em>. This
+one does not, for two reasons that only apply to it:</p>
+<ol>
+<li>It is the only <code>SameSite=Lax</code> cookie in the codebase, i.e. the only one a
+browser sends on a <strong>cross-site</strong> top-level navigation. That is the whole
+point of it — and it means a plaintext hop exposes it on a request the
+user never typed, in a context the three <code>Strict</code> cookies never reach.</li>
+<li>The endpoint it is scoped to must be TLS-protected regardless: RFC 6749
+§3.1 requires TLS on the authorization endpoint, and this project’s own
+standard is TLS 1.3 minimum for external communication. A cookie that
+refuses to exist over plaintext is enforcing a rule the endpoint already
+has, not adding one.</li>
+</ol>
+<p>It costs nothing in the case D-18 exists for: browsers treat
+<code>http://localhost</code> and <code>http://127.0.0.1</code> as trustworthy origins and store
+<code>Secure</code> cookies set from them. What it does refuse is a browser login hop
+over plaintext to a <em>non-loopback</em> host — which is a deployment that should
+not be completing OpenID Connect authorization requests at all.</p>
+</div></details></section></div></main></body></html>

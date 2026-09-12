@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["UserStatus"],"struct":["CreateUser","UpdateUser","User"]};
+window.SIDEBAR_ITEMS = {"constant":["OIDC_METADATA_KEY","SCIM_METADATA_KEY"],"enum":["UserStatus"],"fn":["oidc_metadata_str","scim_metadata_str"],"struct":["Address","CreateUser","ProfileClaims","UpdateUser","User"]};

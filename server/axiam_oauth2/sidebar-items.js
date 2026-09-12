@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["authorize","device","device_service","dpop","error","fapi","jose","jwks_cache","logout","mtls","oidc","par","pkce","private_key_jwt","token","token_exchange","uma"]};
+window.SIDEBAR_ITEMS = {"mod":["acr","authn_params","authorize","claims_request","client_secret_basic","device","device_service","dpop","error","fapi","honour","jose","jwks_cache","locale","login_hop","logout","mtls","oidc","par","pkce","private_key_jwt","sensitive","token","token_exchange","uma"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Decision","Refusal","Requested"],"fn":["consent_type","consent_version","decide","requested"]};

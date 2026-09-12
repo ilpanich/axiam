@@ -1,0 +1,70 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The honour lane: what a security-bearing authentication-request parameter actually does (W4, plan §4.2/§4.3/§4.4)."><title>axiam_oauth2::honour - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module honour</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-beta13</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module honour</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-shape-of-the-answer" title="The shape of the answer">The shape of the answer</a></li><li><a href="#why-the-return-leg-matters-so-much" title="Why the return leg matters so much">Why the return leg matters so much</a></li><li><a href="#max_age--0" title="`max_age = 0`"><code>max_age = 0</code></a></li><li><a href="#w5s-cosmetic-four-are-not-here" title="W5’s cosmetic four are not here">W5’s cosmetic four are not here</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>honour</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/honour.rs.html#1-1052">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The honour lane: what a security-bearing authentication-request parameter
+actually does (W4, plan §4.2/§4.3/§4.4).</p>
+<p>W1 parsed <code>prompt</code>, <code>max_age</code>, <code>acr_values</code>, <code>claims.id_token.acr</code> and
+<code>id_token_hint</code> and honoured none of them. W2 recorded, on every session,
+the evidence that would be needed to answer them. W3 built the browser
+login hop, so that “the answer is: authenticate the user again” became a
+thing the authorization endpoint could actually <em>do</em>. This module is where
+those three become one decision, <strong>for a client registered
+<code>authn_request_params = honour</code> and for nobody else</strong>.</p>
+<p>It is a pure function over four things — what was asked, what the session
+proves, who the request is acting for, and whether this request has already
+been through the login hop once — so that every hard case in the plan is a
+unit test rather than an HTTP round trip.</p>
+<h2 id="the-shape-of-the-answer"><a class="doc-anchor" href="#the-shape-of-the-answer">§</a>The shape of the answer</h2>
+<p><a href="fn.evaluate.html" title="fn axiam_oauth2::honour::evaluate"><code>evaluate</code></a> returns one of three things, and the caller cannot confuse
+them:</p>
+<ul>
+<li><a href="enum.Outcome.html#variant.Proceed" title="variant axiam_oauth2::honour::Outcome::Proceed"><code>Outcome::Proceed</code></a> — issue a code, and record this <code>acr</code> on it.</li>
+<li><a href="enum.Outcome.html#variant.Interact" title="variant axiam_oauth2::honour::Outcome::Interact"><code>Outcome::Interact</code></a> — send the browser through the login hop, demanding
+at most the one factor named. This is the only arm that produces a login
+redirect, and it is unreachable when the request carries <code>prompt=none</code>.</li>
+<li><a href="enum.Outcome.html#variant.Refuse" title="variant axiam_oauth2::honour::Outcome::Refuse"><code>Outcome::Refuse</code></a> — a terminal OIDC error, redirected to the relying
+party’s registered <code>redirect_uri</code> by the caller.</li>
+</ul>
+<h2 id="why-the-return-leg-matters-so-much"><a class="doc-anchor" href="#why-the-return-leg-matters-so-much">§</a>Why the return leg matters so much</h2>
+<p><code>authorize → /login → authorize</code> terminates because the second leg carries
+<a href="../login_hop/constant.LOGIN_HOP_MARKER.html" title="constant axiam_oauth2::login_hop::LOGIN_HOP_MARKER"><code>crate::login_hop::LOGIN_HOP_MARKER</code></a> and this module never asks for a
+second interaction when it sees one. That turns every requirement into two
+questions rather than one: <em>can this session satisfy it?</em> and, if not,
+<em>have we already tried?</em> A requirement that survives one interaction is
+answered — with a token when what was asked was voluntary (an <code>acr_values</code>
+preference, a <code>prompt=login</code> whose ceremony has now happened), and with an
+error when it was not (<code>max_age</code>, an essential <code>acr</code>, an <code>id_token_hint</code>
+naming somebody else).</p>
+<p><code>prompt=none</code> reads the marker too, and reads it as a <em>refusal condition</em>:
+a request that has been through the login page has, by definition, had the
+interaction it asked not to have, so it is answered <code>login_required</code> rather
+than with a code. That is what closes the one gap the carrier split would
+otherwise leave — a pushed request whose <code>prompt=none</code> cannot be read until
+after the handle is consumed, i.e. after the hop has already happened.</p>
+<p>The marker travels in a URL and a relying party could send one itself. It
+never selects a principal and it never adds a claim: the strongest thing a
+forged marker does is make the server skip an interaction <em>the forger asked
+for</em>, and every claim the resulting token carries — <code>auth_time</code>, <code>acr</code>,
+<code>amr</code> — still describes the authentication that really happened.</p>
+<h2 id="max_age--0"><a class="doc-anchor" href="#max_age--0">§</a><code>max_age = 0</code></h2>
+<p><code>elapsed = floor(now − authenticated_at)</code>, reauthenticate iff
+<code>elapsed &gt;= max_age</code>, per plan §4.3 — no special case and no leeway in the
+relying party’s disfavour. One consequence is worth stating out loud
+because the plan’s prose does not: <strong><code>max_age=0</code> can never be satisfied by
+any code.</strong> It always demands a reauthentication, and the reauthentication
+it produces is itself zero seconds old, so <code>0 &gt;= 0</code> holds again on the
+return leg and the answer is <code>login_required</code>. An RP that sends <code>max_age=0</code>
+is asking for an authentication of age zero, which no clock can report; the
+honest answer is the refusal, not a code minted under a rounder comparison.</p>
+<h2 id="w5s-cosmetic-four-are-not-here"><a class="doc-anchor" href="#w5s-cosmetic-four-are-not-here">§</a>W5’s cosmetic four are not here</h2>
+<p><code>login_hint</code>, <code>display</code>, <code>ui_locales</code> and <code>claims_locales</code> are carried on
+the same <a href="../authn_params/struct.AuthnRequestParams.html" title="struct axiam_oauth2::authn_params::AuthnRequestParams"><code>AuthnRequestParams</code></a> bundle this module reads, and this module
+reads none of them. That is deliberate and it is the whole of their design:
+they change how a page <em>looks</em>, so there is no <a href="enum.Outcome.html" title="enum axiam_oauth2::honour::Outcome"><code>Outcome</code></a> they could
+select. Threading them through <a href="fn.evaluate.html" title="fn axiam_oauth2::honour::evaluate"><code>evaluate</code></a> to reach the login redirect
+would give the honour lane’s one security decision four inputs that cannot
+affect it, and would put a relying-party-controlled string inside the
+function whose job is to decide whether to mint a code.</p>
+<p>Instead they are assembled by <a href="../login_hop/struct.Cosmetic.html#method.from_params" title="associated function axiam_oauth2::login_hop::Cosmetic::from_params"><code>crate::login_hop::Cosmetic::from_params</code></a>,
+at the point the redirect is built, from the same bundle — so they reach
+the page without ever having been in scope where the decision was made. A
+test below pins the consequence: setting all four to anything at all leaves
+every <code>Outcome</code> in this module identical.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Interaction.html" title="struct axiam_oauth2::honour::Interaction">Interaction</a></dt><dd>A login hop this evaluation is asking the caller to perform.</dd><dt><a class="struct" href="struct.Request.html" title="struct axiam_oauth2::honour::Request">Request</a></dt><dd>Everything <a href="fn.evaluate.html" title="fn axiam_oauth2::honour::evaluate"><code>evaluate</code></a> is allowed to see.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.Outcome.html" title="enum axiam_oauth2::honour::Outcome">Outcome</a></dt><dd>What the honour lane decided.</dd><dt><a class="enum" href="enum.Reason.html" title="enum axiam_oauth2::honour::Reason">Reason</a></dt><dd>Why an interaction is being asked for. Logged, never sent to the RP.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.evaluate.html" title="fn axiam_oauth2::honour::evaluate">evaluate</a></dt><dd>Decide what an authorization request on the honour lane earns.</dd></dl></section></div></main></body></html>

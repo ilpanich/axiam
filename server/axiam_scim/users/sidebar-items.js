@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["create","delete","get","list","patch","replace"],"struct":["ScimEmail","ScimEmailInput","ScimListQuery","ScimMeta","ScimName","ScimNameInput","ScimUser","ScimUserWrite"]};
+window.SIDEBAR_ITEMS = {"fn":["create","delete","get","list","patch","replace"],"struct":["ScimAddress","ScimAddressInput","ScimEmail","ScimEmailInput","ScimListQuery","ScimMeta","ScimName","ScimNameInput","ScimPhone","ScimPhoneInput","ScimUser","ScimUserWrite"]};

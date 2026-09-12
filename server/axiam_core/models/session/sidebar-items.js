@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["CreateSession","Session"]};
+window.SIDEBAR_ITEMS = {"enum":["Amr"],"struct":["AuthenticationEvidence","CreateSession","Session"]};

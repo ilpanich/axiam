@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["build_discovery_document","build_jwks"],"struct":["Jwk","JwksDocument","OidcDiscoveryDocument","UserInfoResponse"]};
+window.SIDEBAR_ITEMS = {"constant":["ACR_MULTI_FACTOR","ACR_SINGLE_FACTOR"],"fn":["build_discovery_document","build_discovery_document_for","build_jwks"],"struct":["Jwk","JwksDocument","MtlsEndpointAliases","OidcDiscoveryDocument","UserInfoResponse"]};

@@ -1,9 +1,9 @@
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-db/src/repository/consent.rs`."><title>consent.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_db" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_db/repository/</div>consent.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SurrealDB implementation of [`ConsentRepository`].
 <a href=#2 id=2 data-nosnippet>2</a>
-<a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>axiam_core::error::AxiamResult;
+<a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>axiam_core::error::{AxiamError, AxiamResult};
 <a href=#4 id=4 data-nosnippet>4</a><span class="kw">use </span>axiam_core::id::new_id;
 <a href=#5 id=5 data-nosnippet>5</a><span class="kw">use </span>axiam_core::models::gdpr::{Consent, CreateConsent};
-<a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span>axiam_core::repository::ConsentRepository;
+<a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span>axiam_core::repository::{ConsentRepository, OIDC_SCOPE_RELEASE_CONSENT_PREFIX};
 <a href=#7 id=7 data-nosnippet>7</a><span class="kw">use </span>chrono::{DateTime, Utc};
 <a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span>surrealdb::Connection;
 <a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span>surrealdb_types::SurrealValue;
@@ -131,71 +131,112 @@
 <a href=#131 id=131 data-nosnippet>131</a>        })
 <a href=#132 id=132 data-nosnippet>132</a>    }
 <a href=#133 id=133 data-nosnippet>133</a>
-<a href=#134 id=134 data-nosnippet>134</a>    <span class="kw">async fn </span>list_by_user(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, user_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Consent&gt;&gt; {
-<a href=#135 id=135 data-nosnippet>135</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#136 id=136 data-nosnippet>136</a>            </span>.db
-<a href=#137 id=137 data-nosnippet>137</a>            .current()
-<a href=#138 id=138 data-nosnippet>138</a>            .query(
-<a href=#139 id=139 data-nosnippet>139</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM consent \
-<a href=#140 id=140 data-nosnippet>140</a>                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
-<a href=#141 id=141 data-nosnippet>141</a>                 ORDER BY accepted_at ASC"</span>,
-<a href=#142 id=142 data-nosnippet>142</a>            )
-<a href=#143 id=143 data-nosnippet>143</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#144 id=144 data-nosnippet>144</a>            .bind((<span class="string">"user_id"</span>, user_id.to_string()))
-<a href=#145 id=145 data-nosnippet>145</a>            .<span class="kw">await
-<a href=#146 id=146 data-nosnippet>146</a>            </span>.map_err(DbError::from)<span class="question-mark">?
-<a href=#147 id=147 data-nosnippet>147</a>            </span>.check()
-<a href=#148 id=148 data-nosnippet>148</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
-<a href=#149 id=149 data-nosnippet>149</a>
-<a href=#150 id=150 data-nosnippet>150</a>        <span class="kw">let </span>rows: Vec&lt;ConsentRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#151 id=151 data-nosnippet>151</a>        rows.into_iter()
-<a href=#152 id=152 data-nosnippet>152</a>            .map(|r| r.try_into_domain().map_err(Into::into))
-<a href=#153 id=153 data-nosnippet>153</a>            .collect()
-<a href=#154 id=154 data-nosnippet>154</a>    }
-<a href=#155 id=155 data-nosnippet>155</a>}
-<a href=#156 id=156 data-nosnippet>156</a>
-<a href=#157 id=157 data-nosnippet>157</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#158 id=158 data-nosnippet>158</a>// Tests
-<a href=#159 id=159 data-nosnippet>159</a>// ---------------------------------------------------------------------------
-<a href=#160 id=160 data-nosnippet>160</a>
-<a href=#161 id=161 data-nosnippet>161</a></span><span class="attr">#[cfg(test)]
-<a href=#162 id=162 data-nosnippet>162</a></span><span class="kw">mod </span>tests {
-<a href=#163 id=163 data-nosnippet>163</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#164 id=164 data-nosnippet>164</a>    <span class="kw">use </span>surrealdb::Surreal;
-<a href=#165 id=165 data-nosnippet>165</a>    <span class="kw">use </span>surrealdb::engine::local::Mem;
-<a href=#166 id=166 data-nosnippet>166</a>
-<a href=#167 id=167 data-nosnippet>167</a>    <span class="kw">async fn </span>setup_db() -&gt; Surreal&lt;surrealdb::engine::local::Db&gt; {
-<a href=#168 id=168 data-nosnippet>168</a>        <span class="kw">let </span>db = Surreal::new::&lt;Mem&gt;(()).<span class="kw">await</span>.unwrap();
-<a href=#169 id=169 data-nosnippet>169</a>        db.use_ns(<span class="string">"test"</span>).use_db(<span class="string">"test"</span>).<span class="kw">await</span>.unwrap();
-<a href=#170 id=170 data-nosnippet>170</a>        <span class="kw">crate</span>::schema::run_migrations(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>.unwrap();
-<a href=#171 id=171 data-nosnippet>171</a>        db
-<a href=#172 id=172 data-nosnippet>172</a>    }
-<a href=#173 id=173 data-nosnippet>173</a>
-<a href=#174 id=174 data-nosnippet>174</a>    <span class="attr">#[tokio::test]
-<a href=#175 id=175 data-nosnippet>175</a>    </span><span class="kw">async fn </span>consent_round_trip() {
-<a href=#176 id=176 data-nosnippet>176</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
-<a href=#177 id=177 data-nosnippet>177</a>        <span class="kw">let </span>repo = SurrealConsentRepository::new(db);
-<a href=#178 id=178 data-nosnippet>178</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
-<a href=#179 id=179 data-nosnippet>179</a>        <span class="kw">let </span>user_id = Uuid::new_v4();
-<a href=#180 id=180 data-nosnippet>180</a>
-<a href=#181 id=181 data-nosnippet>181</a>        <span class="kw">let </span>consent = repo
-<a href=#182 id=182 data-nosnippet>182</a>            .create(CreateConsent {
-<a href=#183 id=183 data-nosnippet>183</a>                tenant_id,
-<a href=#184 id=184 data-nosnippet>184</a>                user_id,
-<a href=#185 id=185 data-nosnippet>185</a>                consent_type: <span class="string">"terms_of_service"</span>.into(),
-<a href=#186 id=186 data-nosnippet>186</a>                version: <span class="string">"2026-01-01"</span>.into(),
-<a href=#187 id=187 data-nosnippet>187</a>                ip_address: <span class="prelude-val">Some</span>(<span class="string">"127.0.0.1"</span>.into()),
-<a href=#188 id=188 data-nosnippet>188</a>                user_agent: <span class="prelude-val">None</span>,
-<a href=#189 id=189 data-nosnippet>189</a>            })
-<a href=#190 id=190 data-nosnippet>190</a>            .<span class="kw">await
-<a href=#191 id=191 data-nosnippet>191</a>            </span>.unwrap();
-<a href=#192 id=192 data-nosnippet>192</a>
-<a href=#193 id=193 data-nosnippet>193</a>        <span class="macro">assert_eq!</span>(consent.consent_type, <span class="string">"terms_of_service"</span>);
-<a href=#194 id=194 data-nosnippet>194</a>        <span class="macro">assert_eq!</span>(consent.tenant_id, tenant_id);
-<a href=#195 id=195 data-nosnippet>195</a>
-<a href=#196 id=196 data-nosnippet>196</a>        <span class="kw">let </span>list = repo.list_by_user(tenant_id, user_id).<span class="kw">await</span>.unwrap();
-<a href=#197 id=197 data-nosnippet>197</a>        <span class="macro">assert_eq!</span>(list.len(), <span class="number">1</span>);
-<a href=#198 id=198 data-nosnippet>198</a>        <span class="macro">assert_eq!</span>(list[<span class="number">0</span>].version, <span class="string">"2026-01-01"</span>);
-<a href=#199 id=199 data-nosnippet>199</a>    }
-<a href=#200 id=200 data-nosnippet>200</a>}
+<a href=#134 id=134 data-nosnippet>134</a>    <span class="kw">async fn </span>withdraw(
+<a href=#135 id=135 data-nosnippet>135</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#136 id=136 data-nosnippet>136</a>        tenant_id: Uuid,
+<a href=#137 id=137 data-nosnippet>137</a>        user_id: Uuid,
+<a href=#138 id=138 data-nosnippet>138</a>        consent_type: <span class="kw-2">&amp;</span>str,
+<a href=#139 id=139 data-nosnippet>139</a>    ) -&gt; AxiamResult&lt;usize&gt; {
+<a href=#140 id=140 data-nosnippet>140</a>        <span class="comment">// The namespace guard the trait's contract promises. Refused rather
+<a href=#141 id=141 data-nosnippet>141</a>        // than silently matching nothing, because a caller that reached here
+<a href=#142 id=142 data-nosnippet>142</a>        // with `terms_of_service` has a bug the caller needs to hear about —
+<a href=#143 id=143 data-nosnippet>143</a>        // and because "deleted nothing" and "was not allowed to try" must not
+<a href=#144 id=144 data-nosnippet>144</a>        // be the same answer.
+<a href=#145 id=145 data-nosnippet>145</a>        </span><span class="kw">if </span>!consent_type.starts_with(OIDC_SCOPE_RELEASE_CONSENT_PREFIX) {
+<a href=#146 id=146 data-nosnippet>146</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::Validation {
+<a href=#147 id=147 data-nosnippet>147</a>                message: <span class="macro">format!</span>(
+<a href=#148 id=148 data-nosnippet>148</a>                    <span class="string">"consent withdrawal is limited to the \
+<a href=#149 id=149 data-nosnippet>149</a>                     {OIDC_SCOPE_RELEASE_CONSENT_PREFIX}… namespace; \
+<a href=#150 id=150 data-nosnippet>150</a>                     {consent_type:?} is outside it"
+<a href=#151 id=151 data-nosnippet>151</a>                </span>),
+<a href=#152 id=152 data-nosnippet>152</a>            });
+<a href=#153 id=153 data-nosnippet>153</a>        }
+<a href=#154 id=154 data-nosnippet>154</a>
+<a href=#155 id=155 data-nosnippet>155</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#156 id=156 data-nosnippet>156</a>            </span>.db
+<a href=#157 id=157 data-nosnippet>157</a>            .current()
+<a href=#158 id=158 data-nosnippet>158</a>            .query(
+<a href=#159 id=159 data-nosnippet>159</a>                <span class="string">"DELETE consent \
+<a href=#160 id=160 data-nosnippet>160</a>                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
+<a href=#161 id=161 data-nosnippet>161</a>                 AND consent_type = $consent_type RETURN BEFORE"</span>,
+<a href=#162 id=162 data-nosnippet>162</a>            )
+<a href=#163 id=163 data-nosnippet>163</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#164 id=164 data-nosnippet>164</a>            .bind((<span class="string">"user_id"</span>, user_id.to_string()))
+<a href=#165 id=165 data-nosnippet>165</a>            .bind((<span class="string">"consent_type"</span>, consent_type.to_owned()))
+<a href=#166 id=166 data-nosnippet>166</a>            .<span class="kw">await
+<a href=#167 id=167 data-nosnippet>167</a>            </span>.map_err(DbError::from)<span class="question-mark">?
+<a href=#168 id=168 data-nosnippet>168</a>            </span>.check()
+<a href=#169 id=169 data-nosnippet>169</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#170 id=170 data-nosnippet>170</a>
+<a href=#171 id=171 data-nosnippet>171</a>        <span class="kw">let </span>removed: Vec&lt;ConsentRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="prelude-val">Ok</span>(removed.len())
+<a href=#173 id=173 data-nosnippet>173</a>    }
+<a href=#174 id=174 data-nosnippet>174</a>
+<a href=#175 id=175 data-nosnippet>175</a>    <span class="kw">async fn </span>list_by_user(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, user_id: Uuid) -&gt; AxiamResult&lt;Vec&lt;Consent&gt;&gt; {
+<a href=#176 id=176 data-nosnippet>176</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#177 id=177 data-nosnippet>177</a>            </span>.db
+<a href=#178 id=178 data-nosnippet>178</a>            .current()
+<a href=#179 id=179 data-nosnippet>179</a>            .query(
+<a href=#180 id=180 data-nosnippet>180</a>                <span class="string">"SELECT meta::id(id) AS record_id, * FROM consent \
+<a href=#181 id=181 data-nosnippet>181</a>                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
+<a href=#182 id=182 data-nosnippet>182</a>                 ORDER BY accepted_at ASC"</span>,
+<a href=#183 id=183 data-nosnippet>183</a>            )
+<a href=#184 id=184 data-nosnippet>184</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#185 id=185 data-nosnippet>185</a>            .bind((<span class="string">"user_id"</span>, user_id.to_string()))
+<a href=#186 id=186 data-nosnippet>186</a>            .<span class="kw">await
+<a href=#187 id=187 data-nosnippet>187</a>            </span>.map_err(DbError::from)<span class="question-mark">?
+<a href=#188 id=188 data-nosnippet>188</a>            </span>.check()
+<a href=#189 id=189 data-nosnippet>189</a>            .map_err(|e| DbError::Migration(e.to_string()))<span class="question-mark">?</span>;
+<a href=#190 id=190 data-nosnippet>190</a>
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="kw">let </span>rows: Vec&lt;ConsentRowWithId&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#192 id=192 data-nosnippet>192</a>        rows.into_iter()
+<a href=#193 id=193 data-nosnippet>193</a>            .map(|r| r.try_into_domain().map_err(Into::into))
+<a href=#194 id=194 data-nosnippet>194</a>            .collect()
+<a href=#195 id=195 data-nosnippet>195</a>    }
+<a href=#196 id=196 data-nosnippet>196</a>}
+<a href=#197 id=197 data-nosnippet>197</a>
+<a href=#198 id=198 data-nosnippet>198</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#199 id=199 data-nosnippet>199</a>// Tests
+<a href=#200 id=200 data-nosnippet>200</a>// ---------------------------------------------------------------------------
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a></span><span class="attr">#[cfg(test)]
+<a href=#203 id=203 data-nosnippet>203</a></span><span class="kw">mod </span>tests {
+<a href=#204 id=204 data-nosnippet>204</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#205 id=205 data-nosnippet>205</a>    <span class="kw">use </span>surrealdb::Surreal;
+<a href=#206 id=206 data-nosnippet>206</a>    <span class="kw">use </span>surrealdb::engine::local::Mem;
+<a href=#207 id=207 data-nosnippet>207</a>
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="kw">async fn </span>setup_db() -&gt; Surreal&lt;surrealdb::engine::local::Db&gt; {
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">let </span>db = Surreal::new::&lt;Mem&gt;(()).<span class="kw">await</span>.unwrap();
+<a href=#210 id=210 data-nosnippet>210</a>        db.use_ns(<span class="string">"test"</span>).use_db(<span class="string">"test"</span>).<span class="kw">await</span>.unwrap();
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="kw">crate</span>::schema::run_migrations(<span class="kw-2">&amp;</span>db).<span class="kw">await</span>.unwrap();
+<a href=#212 id=212 data-nosnippet>212</a>        db
+<a href=#213 id=213 data-nosnippet>213</a>    }
+<a href=#214 id=214 data-nosnippet>214</a>
+<a href=#215 id=215 data-nosnippet>215</a>    <span class="attr">#[tokio::test]
+<a href=#216 id=216 data-nosnippet>216</a>    </span><span class="kw">async fn </span>consent_round_trip() {
+<a href=#217 id=217 data-nosnippet>217</a>        <span class="kw">let </span>db = setup_db().<span class="kw">await</span>;
+<a href=#218 id=218 data-nosnippet>218</a>        <span class="kw">let </span>repo = SurrealConsentRepository::new(db);
+<a href=#219 id=219 data-nosnippet>219</a>        <span class="kw">let </span>tenant_id = Uuid::new_v4();
+<a href=#220 id=220 data-nosnippet>220</a>        <span class="kw">let </span>user_id = Uuid::new_v4();
+<a href=#221 id=221 data-nosnippet>221</a>
+<a href=#222 id=222 data-nosnippet>222</a>        <span class="kw">let </span>consent = repo
+<a href=#223 id=223 data-nosnippet>223</a>            .create(CreateConsent {
+<a href=#224 id=224 data-nosnippet>224</a>                tenant_id,
+<a href=#225 id=225 data-nosnippet>225</a>                user_id,
+<a href=#226 id=226 data-nosnippet>226</a>                consent_type: <span class="string">"terms_of_service"</span>.into(),
+<a href=#227 id=227 data-nosnippet>227</a>                version: <span class="string">"2026-01-01"</span>.into(),
+<a href=#228 id=228 data-nosnippet>228</a>                ip_address: <span class="prelude-val">Some</span>(<span class="string">"127.0.0.1"</span>.into()),
+<a href=#229 id=229 data-nosnippet>229</a>                user_agent: <span class="prelude-val">None</span>,
+<a href=#230 id=230 data-nosnippet>230</a>            })
+<a href=#231 id=231 data-nosnippet>231</a>            .<span class="kw">await
+<a href=#232 id=232 data-nosnippet>232</a>            </span>.unwrap();
+<a href=#233 id=233 data-nosnippet>233</a>
+<a href=#234 id=234 data-nosnippet>234</a>        <span class="macro">assert_eq!</span>(consent.consent_type, <span class="string">"terms_of_service"</span>);
+<a href=#235 id=235 data-nosnippet>235</a>        <span class="macro">assert_eq!</span>(consent.tenant_id, tenant_id);
+<a href=#236 id=236 data-nosnippet>236</a>
+<a href=#237 id=237 data-nosnippet>237</a>        <span class="kw">let </span>list = repo.list_by_user(tenant_id, user_id).<span class="kw">await</span>.unwrap();
+<a href=#238 id=238 data-nosnippet>238</a>        <span class="macro">assert_eq!</span>(list.len(), <span class="number">1</span>);
+<a href=#239 id=239 data-nosnippet>239</a>        <span class="macro">assert_eq!</span>(list[<span class="number">0</span>].version, <span class="string">"2026-01-01"</span>);
+<a href=#240 id=240 data-nosnippet>240</a>    }
+<a href=#241 id=241 data-nosnippet>241</a>}
 </code></pre></div></section></main></body></html>

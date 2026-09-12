@@ -275,21 +275,24 @@
 <a href=#275 id=275 data-nosnippet>275</a>            email_verified_at: <span class="prelude-val">None</span>,
 <a href=#276 id=276 data-nosnippet>276</a>            deletion_pending: <span class="bool-val">false</span>,
 <a href=#277 id=277 data-nosnippet>277</a>            scheduled_purge_at: <span class="prelude-val">None</span>,
-<a href=#278 id=278 data-nosnippet>278</a>            metadata: serde_json::Value::Null,
-<a href=#279 id=279 data-nosnippet>279</a>            created_at: Utc::now(),
-<a href=#280 id=280 data-nosnippet>280</a>            updated_at: Utc::now(),
-<a href=#281 id=281 data-nosnippet>281</a>        };
-<a href=#282 id=282 data-nosnippet>282</a>
-<a href=#283 id=283 data-nosnippet>283</a>        <span class="macro">assert!</span>(!is_locked_out(<span class="kw-2">&amp;</span>user), <span class="string">"no deadline means not locked"</span>);
-<a href=#284 id=284 data-nosnippet>284</a>
-<a href=#285 id=285 data-nosnippet>285</a>        user.locked_until = <span class="prelude-val">Some</span>(Utc::now() - Duration::minutes(<span class="number">1</span>));
-<a href=#286 id=286 data-nosnippet>286</a>        <span class="macro">assert!</span>(!is_locked_out(<span class="kw-2">&amp;</span>user), <span class="string">"a past deadline has been served"</span>);
+<a href=#278 id=278 data-nosnippet>278</a>            phone_number: <span class="prelude-val">None</span>,
+<a href=#279 id=279 data-nosnippet>279</a>            phone_number_verified_at: <span class="prelude-val">None</span>,
+<a href=#280 id=280 data-nosnippet>280</a>            address: <span class="prelude-val">None</span>,
+<a href=#281 id=281 data-nosnippet>281</a>            metadata: serde_json::Value::Null,
+<a href=#282 id=282 data-nosnippet>282</a>            created_at: Utc::now(),
+<a href=#283 id=283 data-nosnippet>283</a>            updated_at: Utc::now(),
+<a href=#284 id=284 data-nosnippet>284</a>        };
+<a href=#285 id=285 data-nosnippet>285</a>
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="macro">assert!</span>(!is_locked_out(<span class="kw-2">&amp;</span>user), <span class="string">"no deadline means not locked"</span>);
 <a href=#287 id=287 data-nosnippet>287</a>
-<a href=#288 id=288 data-nosnippet>288</a>        user.locked_until = <span class="prelude-val">Some</span>(Utc::now() + Duration::minutes(<span class="number">1</span>));
-<a href=#289 id=289 data-nosnippet>289</a>        <span class="macro">assert!</span>(
-<a href=#290 id=290 data-nosnippet>290</a>            is_locked_out(<span class="kw-2">&amp;</span>user),
-<a href=#291 id=291 data-nosnippet>291</a>            <span class="string">"a future deadline is an active lockout"
-<a href=#292 id=292 data-nosnippet>292</a>        </span>);
-<a href=#293 id=293 data-nosnippet>293</a>    }
-<a href=#294 id=294 data-nosnippet>294</a>}
+<a href=#288 id=288 data-nosnippet>288</a>        user.locked_until = <span class="prelude-val">Some</span>(Utc::now() - Duration::minutes(<span class="number">1</span>));
+<a href=#289 id=289 data-nosnippet>289</a>        <span class="macro">assert!</span>(!is_locked_out(<span class="kw-2">&amp;</span>user), <span class="string">"a past deadline has been served"</span>);
+<a href=#290 id=290 data-nosnippet>290</a>
+<a href=#291 id=291 data-nosnippet>291</a>        user.locked_until = <span class="prelude-val">Some</span>(Utc::now() + Duration::minutes(<span class="number">1</span>));
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="macro">assert!</span>(
+<a href=#293 id=293 data-nosnippet>293</a>            is_locked_out(<span class="kw-2">&amp;</span>user),
+<a href=#294 id=294 data-nosnippet>294</a>            <span class="string">"a future deadline is an active lockout"
+<a href=#295 id=295 data-nosnippet>295</a>        </span>);
+<a href=#296 id=296 data-nosnippet>296</a>    }
+<a href=#297 id=297 data-nosnippet>297</a>}
 </code></pre></div></section></main></body></html>

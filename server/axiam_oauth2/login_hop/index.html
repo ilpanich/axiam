@@ -1,0 +1,93 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The browser login hop (W3, plan §4.0 “Gap 0”)."><title>axiam_oauth2::login_hop - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module login_hop</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-beta13</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module login_<wbr>hop</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-a-return_to-may-be" title="What a `return_to` may be">What a <code>return_to</code> may be</a></li><li><a href="#why-the-hop-terminates" title="Why the hop terminates">Why the hop terminates</a></li><li><a href="#what-w4-added-to-the-marker-and-why-it-is-still-not-a-security-decision" title="What W4 added to the marker, and why it is still not a security decision">What W4 added to the marker, and why it is still not a security decision</a></li><li><a href="#what-w5-adds-and-why-it-is-all-allow-listed-types" title="What W5 adds, and why it is all allow-listed types">What W5 adds, and why it is all allow-listed types</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>login_<wbr>hop</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/login_hop.rs.html#1-1033">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The browser login hop (W3, plan §4.0 “Gap 0”).</p>
+<p>Until this wave <code>/oauth2/authorize</code> had no way to answer an anonymous
+browser. It required an already-authenticated principal — the <code>axiam_access</code>
+cookie or a <code>Bearer</code>/<code>DPoP</code> header — and answered anything else with a 401
+JSON body. That is a dead end for a real relying party, because
+<code>axiam_access</code> is <code>SameSite=Strict</code> and a cross-site top-level navigation
+(which is precisely what an RP redirect is) never carries a Strict cookie.
+Even a signed-in user arrived anonymous.</p>
+<p>The hop closes that: an anonymous request from a client registered
+<code>browser_sso</code> is redirected to the admin SPA’s <code>/login</code>, carrying a
+<code>return_to</code> that names where to come back to. This module owns the two
+decisions in that sentence which must be right — <strong>what a <code>return_to</code> is
+allowed to be</strong>, and <strong>why the hop terminates</strong> — as pure functions, so they
+are tested without an HTTP server and cannot be re-derived slightly
+differently by a second caller.</p>
+<h2 id="what-a-return_to-may-be"><a class="doc-anchor" href="#what-a-return_to-may-be">§</a>What a <code>return_to</code> may be</h2>
+<p>Exactly one shape: <code>/oauth2/authorize?</code> followed by a query string. Not a
+URL, not a path the caller chose, not a prefix — the authorization endpoint,
+with parameters, and nothing else. <a href="fn.validate_return_to.html" title="fn axiam_oauth2::login_hop::validate_return_to"><code>validate_return_to</code></a> is where that is
+decided, and it is applied <strong>twice on the server</strong> (once when the value is
+built, once when the browser comes back with it) as well as in the SPA
+before it navigates. The plan calls for validation “on both sides”; the
+third check is free and closes the case where a <code>return_to</code> is stored,
+logged or replayed between the two.</p>
+<p>Anything else is an open redirect. The interesting members of that family
+are foreign origins (<code>https://evil.example/…</code>), scheme-relative values
+(<code>//evil.example/…</code>, which a browser resolves to a <em>different host</em> while
+looking like a path), backslash variants (<code>/\evil.example</code>, which several
+browsers normalise to <code>//</code>), and traversal (<code>/oauth2/authorize/../../admin</code>).
+All four are refused here, and the REST layer additionally resolves the
+result against the deployment’s own origin and re-checks it through
+<code>require_deployment_spa_origin</code> — the same rule that already guards the
+federation SSO handoff. That second check is redundant while this function
+demands an exact path, and it is kept precisely because a future edit to
+this function is the way that stops being true.</p>
+<h2 id="why-the-hop-terminates"><a class="doc-anchor" href="#why-the-hop-terminates">§</a>Why the hop terminates</h2>
+<p><code>authorize → /login → authorize</code> is a loop if the second <code>authorize</code> can
+produce a third. It cannot, because of one rule with two halves:</p>
+<ol>
+<li>every login redirect this server builds carries <a href="constant.LOGIN_HOP_MARKER.html" title="constant axiam_oauth2::login_hop::LOGIN_HOP_MARKER"><code>LOGIN_HOP_MARKER</code></a> in
+its <code>return_to</code>; and</li>
+<li>an authorization request that <strong>arrives</strong> carrying that marker is never
+answered with a login redirect — if it still has no principal, it is
+answered with a terminal error.</li>
+</ol>
+<p>So along any chain of authorization requests generated by this server’s own
+redirects, at most one redirect is emitted: the first request has no marker
+and may hop; the request that hop produces has one and may not. The chain is
+two authorization requests and one login page, whatever goes wrong in
+between — a cookie the browser refused to store, a login into the wrong
+tenant, a session that expired between the two legs.</p>
+<p>The marker is in a URL and the user agent could strip it. That costs the
+guard nothing: the loop it prevents is a loop in <em>that same browser</em>, so
+removing the guard only harms whoever removed it, and no security decision
+anywhere reads the marker. It selects an error message and the shape of a
+response; it never selects a principal.</p>
+<h2 id="what-w4-added-to-the-marker-and-why-it-is-still-not-a-security-decision"><a class="doc-anchor" href="#what-w4-added-to-the-marker-and-why-it-is-still-not-a-security-decision">§</a>What W4 added to the marker, and why it is still not a security decision</h2>
+<p>W3 read the marker in one place: an anonymous return leg is answered rather
+than redirected again. W4’s honour lane reads it in two more (see
+<a href="../honour/index.html" title="mod axiam_oauth2::honour"><code>crate::honour</code></a>) — a requirement that survives one interaction is
+answered rather than retried, and <code>prompt=none</code> on a request that has been
+through the sign-in page is refused because the interaction it forbade has
+happened.</p>
+<p>Both are still, exactly, “which of two truthful answers to give”. A relying
+party can forge the marker on its own authorization request, and the
+strongest thing forging it achieves is that the server skips an interaction
+<em>the forger asked for</em>: no principal changes, no claim is added, and
+<code>auth_time</code>, <code>acr</code> and <code>amr</code> still describe the authentication that really
+happened rather than the one the request wanted. A third party cannot forge
+it into somebody else’s request without already being able to write that
+request, at which point it is the relying party.</p>
+<h2 id="what-w5-adds-and-why-it-is-all-allow-listed-types"><a class="doc-anchor" href="#what-w5-adds-and-why-it-is-all-allow-listed-types">§</a>What W5 adds, and why it is all allow-listed types</h2>
+<p>W5 lets the sign-in page be <em>presented</em> the way the relying party asked:
+a pre-filled username (<code>login_hint</code>), a compact layout (<code>display</code>) and a
+language (<code>ui_locales</code>). All three arrive as relying-party-controlled
+strings and all three end up on a page a human types a password into, so
+the rule for this module is the one W4 set for <code>acr</code>: <strong>what crosses into
+the URL is a type, not a string</strong>, wherever a closed set exists.</p>
+<p>Two of the three have one — <a href="../locale/enum.Locale.html" title="enum axiam_oauth2::locale::Locale"><code>crate::locale::Locale</code></a> and
+<a href="../locale/enum.Display.html" title="enum axiam_oauth2::locale::Display"><code>crate::locale::Display</code></a> — and are matched on the server, so the raw
+<code>ui_locales</code> and <code>display</code> values never reach the SPA at all. The third,
+<code>login_hint</code>, has no closed set by definition: it is whatever identifier
+the relying party believes the user types. It is carried verbatim, and the
+two things that make that safe are stated where they are decided rather
+than here — the parser bounds it to
+<a href="../authn_params/constant.MAX_HINT_LEN.html" title="constant axiam_oauth2::authn_params::MAX_HINT_LEN"><code>crate::authn_params::MAX_HINT_LEN</code></a> bytes and drops it if it fails to
+parse as UTF-8, and <a href="struct.Cosmetic.html#structfield.login_hint" title="field axiam_oauth2::login_hop::Cosmetic::login_hint"><code>Cosmetic::login_hint</code></a> documents the property that
+actually matters: <strong>no server-side lookup is ever performed on it.</strong></p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Cosmetic.html" title="struct axiam_oauth2::login_hop::Cosmetic">Cosmetic</a></dt><dd>The presentation an authorization request asked the sign-in page for
+(W5, plan §4.5/§4.6).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ReturnToError.html" title="enum axiam_oauth2::login_hop::ReturnToError">Return<wbr>ToError</a></dt><dd>Why a candidate <code>return_to</code> was refused.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.AUTHORIZE_PATH.html" title="constant axiam_oauth2::login_hop::AUTHORIZE_PATH">AUTHORIZE_<wbr>PATH</a></dt><dd>The only path a <code>return_to</code> may name.</dd><dt><a class="constant" href="constant.CONSENT_HOP_MARKER.html" title="constant axiam_oauth2::login_hop::CONSENT_HOP_MARKER">CONSENT_<wbr>HOP_<wbr>MARKER</a></dt><dd>The marker a <strong>consent</strong> hop carries (W7).</dd><dt><a class="constant" href="constant.CONSENT_PATH.html" title="constant axiam_oauth2::login_hop::CONSENT_PATH">CONSENT_<wbr>PATH</a></dt><dd>The SPA route that asks the end user to consent to a scope release (W7).</dd><dt><a class="constant" href="constant.LOGIN_HOP_MARKER.html" title="constant axiam_oauth2::login_hop::LOGIN_HOP_MARKER">LOGIN_<wbr>HOP_<wbr>MARKER</a></dt><dd>The query parameter that marks an authorization request as the return leg
+of a login hop.</dd><dt><a class="constant" href="constant.LOGIN_PATH.html" title="constant axiam_oauth2::login_hop::LOGIN_PATH">LOGIN_<wbr>PATH</a></dt><dd>The SPA route the hop sends the browser to.</dd><dt><a class="constant" href="constant.MAX_RETURN_TO_LEN.html" title="constant axiam_oauth2::login_hop::MAX_RETURN_TO_LEN">MAX_<wbr>RETURN_<wbr>TO_<wbr>LEN</a></dt><dd>Largest <code>return_to</code> this server will build or accept, in bytes.</dd><dt><a class="constant" href="constant.USER_DECLINED_MARKER.html" title="constant axiam_oauth2::login_hop::USER_DECLINED_MARKER">USER_<wbr>DECLINED_<wbr>MARKER</a></dt><dd>The sign-in page’s <strong>Cancel</strong>, on its way back to the authorization request.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.build_consent_return_to.html" title="fn axiam_oauth2::login_hop::build_consent_return_to">build_<wbr>consent_<wbr>return_<wbr>to</a></dt><dd><a href="fn.build_return_to.html" title="fn axiam_oauth2::login_hop::build_return_to"><code>build_return_to</code></a>, marked as the return leg of a <strong>consent</strong> hop.</dd><dt><a class="fn" href="fn.build_interaction_redirect.html" title="fn axiam_oauth2::login_hop::build_interaction_redirect">build_<wbr>interaction_<wbr>redirect</a></dt><dd>Build the redirect for an interaction the authorization endpoint asked for.</dd><dt><a class="fn" href="fn.build_login_redirect.html" title="fn axiam_oauth2::login_hop::build_login_redirect">build_<wbr>login_<wbr>redirect</a></dt><dd>Build the <code>Location</code> that sends the browser to the SPA login page.</dd><dt><a class="fn" href="fn.build_login_redirect_for.html" title="fn axiam_oauth2::login_hop::build_login_redirect_for">build_<wbr>login_<wbr>redirect_<wbr>for</a></dt><dd><a href="fn.build_login_redirect.html" title="fn axiam_oauth2::login_hop::build_login_redirect"><code>build_login_redirect</code></a>, plus the one factor the sign-in page must demand
+(W4, plan §4.4) and the presentation it was asked for (W5, plan §4.5/§4.6).</dd><dt><a class="fn" href="fn.build_return_to.html" title="fn axiam_oauth2::login_hop::build_return_to">build_<wbr>return_<wbr>to</a></dt><dd>Build the <code>return_to</code> for an authorization request whose raw query string is
+<code>query</code>.</dd><dt><a class="fn" href="fn.is_return_leg.html" title="fn axiam_oauth2::login_hop::is_return_leg">is_<wbr>return_<wbr>leg</a></dt><dd>Is this authorization request the return leg of a hop this server started?</dd><dt><a class="fn" href="fn.user_declined.html" title="fn axiam_oauth2::login_hop::user_declined">user_<wbr>declined</a></dt><dd>Did the person at the sign-in page decline this authorization request?</dd><dt><a class="fn" href="fn.validate_return_to.html" title="fn axiam_oauth2::login_hop::validate_return_to">validate_<wbr>return_<wbr>to</a></dt><dd>Is this a <code>return_to</code> the server built and will honour?</dd></dl></section></div></main></body></html>

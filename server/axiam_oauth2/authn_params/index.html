@@ -1,0 +1,45 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="OpenID Connect authentication-request parameters (X7.1, plan §4.1)."><title>axiam_oauth2::authn_params - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module authn_params</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-beta13</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module authn_<wbr>params</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-the-parse-is-total" title="Why the parse is total">Why the parse is total</a></li><li><a href="#which-parameters-are-security-bearing" title="Which parameters are “security-bearing”">Which parameters are “security-bearing”</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>authn_<wbr>params</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/authn_params.rs.html#1-725">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>OpenID Connect authentication-request parameters (X7.1, plan §4.1).</p>
+<p>OIDC Core §3.1.2.1 adds nine parameters to the authorization request that
+plain OAuth 2.0 does not have. AXIAM has never read any of them: they are
+not fields on <code>AuthorizeQuery</code>, so serde drops them, and the request
+proceeds as though they were never sent. That is a <em>conformant</em> answer for
+the cosmetic four and a <strong>silent downgrade</strong> for the five that carry
+security — a relying party that sends <code>max_age=0</code> and receives a code
+minted from a week-old session has been told a freshness guarantee it did
+not get.</p>
+<p>This module is the first half of closing that: one typed, total parse of
+all nine, shared by both carriers. Acting on them is a later wave; nothing
+here decides anything.</p>
+<h2 id="why-the-parse-is-total"><a class="doc-anchor" href="#why-the-parse-is-total">§</a>Why the parse is total</h2>
+<p>Invariant 4 of the plan is that no client registered today changes
+behaviour. A client on the <code>ignore</code> lane that sends <code>max_age=tomorrow</code>
+gets a code today, and must keep getting one — so a malformed value
+cannot be an error the parse <em>returns</em>, or the caller would have to
+remember to swallow it, on every path, forever.</p>
+<p>Instead <a href="struct.AuthnRequestParams.html#method.parse" title="associated function axiam_oauth2::authn_params::AuthnRequestParams::parse"><code>AuthnRequestParams::parse</code></a> always succeeds and records the first
+malformed value in <a href="struct.AuthnRequestParams.html#method.parse_error" title="method axiam_oauth2::authn_params::AuthnRequestParams::parse_error"><code>AuthnRequestParams::parse_error</code></a>. The honour lane
+asks for it and refuses; the ignore lane never asks, and a parameter it
+could not understand is simply one more parameter it was going to drop.
+The presence of a parameter, which is what the FAPI gate reads, survives
+either way — <a href="struct.AuthnRequestParams.html#method.security_bearing_present" title="method axiam_oauth2::authn_params::AuthnRequestParams::security_bearing_present"><code>AuthnRequestParams::security_bearing_present</code></a> counts a
+malformed <code>max_age</code> as present, because a <code>fapi2</code> client that sent one
+must be refused whether or not it spelled it correctly.</p>
+<h2 id="which-parameters-are-security-bearing"><a class="doc-anchor" href="#which-parameters-are-security-bearing">§</a>Which parameters are “security-bearing”</h2><div><table><thead><tr><th>Parameter</th><th>Security-bearing</th><th>What it asserts</th></tr></thead><tbody>
+<tr><td><code>prompt</code></td><td>yes</td><td>that the OP did, or did not, interact with the user</td></tr>
+<tr><td><code>max_age</code></td><td>yes</td><td>an upper bound on the age of the authentication</td></tr>
+<tr><td><code>acr_values</code></td><td>yes</td><td>which authentication method was used</td></tr>
+<tr><td><code>claims</code></td><td>yes</td><td>(its <code>id_token.acr</code> member) the same</td></tr>
+<tr><td><code>id_token_hint</code></td><td>yes</td><td>which subject the RP believes is present</td></tr>
+<tr><td><code>login_hint</code></td><td>no</td><td>a prefill for a form</td></tr>
+<tr><td><code>display</code></td><td>no</td><td>a layout request</td></tr>
+<tr><td><code>ui_locales</code></td><td>no</td><td>a language preference</td></tr>
+<tr><td><code>claims_locales</code></td><td>no</td><td>a language preference</td></tr>
+</tbody></table>
+</div>
+<p>The split is not stylistic. The first five change what a token <em>means</em>, so
+ignoring one is a lie; a <code>fapi2</code> client is refused them outright (see
+<code>crate::fapi::enforce_authorization_request</code>). The last four change what a
+page <em>looks like</em>, so ignoring one costs a relying party nothing it can
+detect, and refusing <code>login_hint</code> — which client libraries send by reflex —
+would break working clients for no security gain.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AcrRequest.html" title="struct axiam_oauth2::authn_params::AcrRequest">AcrRequest</a></dt><dd>What an RP asked for in <code>claims.id_token.acr</code> (OIDC Core §5.5.1).</dd><dt><a class="struct" href="struct.AuthnRequestParams.html" title="struct axiam_oauth2::authn_params::AuthnRequestParams">Authn<wbr>Request<wbr>Params</a></dt><dd>The parsed bundle.</dd><dt><a class="struct" href="struct.RawAuthnParams.html" title="struct axiam_oauth2::authn_params::RawAuthnParams">RawAuthn<wbr>Params</a></dt><dd>The nine parameters as they arrived, before any interpretation.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.Prompt.html" title="enum axiam_oauth2::authn_params::Prompt">Prompt</a></dt><dd>The values <code>prompt</code> may take (OIDC Core §3.1.2.1).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_HINT_LEN.html" title="constant axiam_oauth2::authn_params::MAX_HINT_LEN">MAX_<wbr>HINT_<wbr>LEN</a></dt><dd>Longest accepted value for a free-text parameter, in bytes.</dd></dl></section></div></main></body></html>

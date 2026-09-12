@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["OAuth2Error"]};
+window.SIDEBAR_ITEMS = {"enum":["OAuth2Error"],"fn":["nqschar"]};

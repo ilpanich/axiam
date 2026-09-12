@@ -1,0 +1,46 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The presentation parameters of an authentication request (W5, plan §4.6 — G6/G7), as types rather than as strings."><title>axiam_oauth2::locale - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module locale</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-beta13</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module locale</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-the-raw-value-never-leaves-the-server" title="Why the raw value never leaves the server">Why the raw value never leaves the server</a></li><li><a href="#claims_locales-is-not-here-on-purpose" title="`claims_locales` is not here, on purpose"><code>claims_locales</code> is not here, on purpose</a></li><li><a href="#the-list-is-short-on-purpose" title="The list is short on purpose">The list is short on purpose</a></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>locale</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/locale.rs.html#1-495">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The presentation parameters of an authentication request (W5, plan §4.6 —
+G6/G7), as types rather than as strings.</p>
+<p><code>ui_locales</code> and <code>display</code> are the two cosmetic parameters that <em>do</em>
+something. Neither changes what a token means — a relying party cannot
+detect whether either was honoured by inspecting anything it receives —
+which is why they are refused on no honest <code>fapi2</code> row and why the plan
+files them away from the security-bearing five. What they do change is a
+page a human is about to type a password into, and that is the whole reason
+they are modelled here instead of being forwarded as the strings they
+arrived as.</p>
+<h2 id="why-the-raw-value-never-leaves-the-server"><a class="doc-anchor" href="#why-the-raw-value-never-leaves-the-server">§</a>Why the raw value never leaves the server</h2>
+<p><code>ui_locales</code> is a space-separated list chosen by the relying party. The
+obvious implementation forwards it to the sign-in page and lets the page
+decide; the page then holds an attacker-chosen string, and every later edit
+that renders it — a “language not available” notice, a <code>lang</code> attribute, a
+debug banner — is a reflected-XSS bug waiting for someone to write it.</p>
+<p>So the match happens here, and what crosses to the SPA is a
+<a href="enum.Locale.html" title="enum axiam_oauth2::locale::Locale"><code>Locale</code></a> — one of five values this binary knows the names of. Test T6.2
+(<code>ui_locales=&lt;img onerror=…&gt;</code> appears in no redirect the server builds) is
+then true <em>by construction</em>: there is no code path along which the raw
+value could be written into a URL, because the only thing the builder
+accepts is this enum. It is not true because someone remembered to escape
+it, and it does not become false when the next person forgets.</p>
+<p><a href="enum.Display.html" title="enum axiam_oauth2::locale::Display"><code>Display</code></a> is the same argument with four values instead of five.</p>
+<h2 id="claims_locales-is-not-here-on-purpose"><a class="doc-anchor" href="#claims_locales-is-not-here-on-purpose">§</a><code>claims_locales</code> is not here, on purpose</h2>
+<p>OIDC Core §3.1.2.1 defines <code>claims_locales</code> beside <code>ui_locales</code>, one letter
+of prefix apart, with the same BCP 47 syntax. It selects the language of
+<strong>claim values</strong> — a <code>name</code> in Japanese, an <code>address</code> in French — and AXIAM
+has no localised claims at all, so it is accepted and ignored
+(<code>OIDCCClaimsLocales</code> asks only that it not be an error).</p>
+<p>The thing to guard against is not that ignoring it is wrong; it is that the
+two names are adjacent and the values are interchangeable-looking, so a
+future edit reaching for “the locale the RP asked for” can reach for the
+wrong one and be visibly correct in review. Nothing in this module reads
+<code>claims_locales</code>, no caller passes it here, and
+<code>crate::login_hop::build_login_redirect_for</code> has no parameter it could
+arrive through. There is a test in <code>crate::honour</code>’s wave pinning that
+<code>claims_locales=it</code> alone leaves the page in the deployment default.</p>
+<h2 id="the-list-is-short-on-purpose"><a class="doc-anchor" href="#the-list-is-short-on-purpose">§</a>The list is short on purpose</h2>
+<p>Five languages, each translated completely in the SPA
+(<code>frontend/src/i18n/</code>). A sixth added here without its bundle would make
+<code>ui_locales=pt</code> <em>succeed</em> and then deliver English, which is worse than
+answering “no match” and delivering English for a stated reason:
+<code>scripts/check-locale-bundle-sync.py</code> fails the build when this enum and
+the SPA’s catalogue disagree, in either direction.</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.Display.html" title="enum axiam_oauth2::locale::Display">Display</a></dt><dd>The <code>display</code> values OIDC Core §3.1.2.1 defines.</dd><dt><a class="enum" href="enum.Locale.html" title="enum axiam_oauth2::locale::Locale">Locale</a></dt><dd>A language the sign-in page is fully translated into.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.ALL_LOCALES.html" title="constant axiam_oauth2::locale::ALL_LOCALES">ALL_<wbr>LOCALES</a></dt><dd>Every locale, in the order the documentation and the SPA list them.</dd><dt><a class="constant" href="constant.DEPLOYMENT_DEFAULT.html" title="constant axiam_oauth2::locale::DEPLOYMENT_DEFAULT">DEPLOYMENT_<wbr>DEFAULT</a></dt><dd>What AXIAM falls back to when nothing else selects a language.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.select_ui_locale.html" title="fn axiam_oauth2::locale::select_ui_locale">select_<wbr>ui_<wbr>locale</a></dt><dd>Select the sign-in page’s language for one authorization request.</dd></dl></section></div></main></body></html>

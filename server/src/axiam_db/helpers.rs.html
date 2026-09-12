@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-db/src/helpers.rs`."><title>helpers.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_db" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_db/</div>helpers.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Shared repository utilities: common row types and helper functions
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-db/src/helpers.rs`."><title>helpers.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_db" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_db/</div>helpers.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Shared repository utilities: common row types and helper functions
 <a href=#2 id=2 data-nosnippet>2</a>//! that were previously duplicated across every repo module.
 <a href=#3 id=3 data-nosnippet>3</a>
 <a href=#4 id=4 data-nosnippet>4</a></span><span class="kw">use </span>axiam_core::error::{AxiamError, AxiamResult};
@@ -70,761 +70,1002 @@
 <a href=#70 id=70 data-nosnippet>70</a>        DbError::AlreadyExists {
 <a href=#71 id=71 data-nosnippet>71</a>            entity: entity.to_string(),
 <a href=#72 id=72 data-nosnippet>72</a>        }
-<a href=#73 id=73 data-nosnippet>73</a>    } <span class="kw">else </span>{
-<a href=#74 id=74 data-nosnippet>74</a>        DbError::Migration(msg)
-<a href=#75 id=75 data-nosnippet>75</a>    }
-<a href=#76 id=76 data-nosnippet>76</a>}
-<a href=#77 id=77 data-nosnippet>77</a>
-<a href=#78 id=78 data-nosnippet>78</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#79 id=79 data-nosnippet>79</a>// The unique-violation marker set — one definition, three classifiers (F5)
-<a href=#80 id=80 data-nosnippet>80</a>// ---------------------------------------------------------------------------
-<a href=#81 id=81 data-nosnippet>81</a>
-<a href=#82 id=82 data-nosnippet>82</a></span><span class="doccomment">/// Substrings that identify a SurrealDB UNIQUE-index violation.
-<a href=#83 id=83 data-nosnippet>83</a>///
-<a href=#84 id=84 data-nosnippet>84</a>/// SurrealDB v3 reports one as ``Database index `idx_x_uniq` already contains
-<a href=#85 id=85 data-nosnippet>85</a>/// [...]``. `"already exists"` and `"unique"` are kept as fallbacks: they
-<a href=#86 id=86 data-nosnippet>86</a>/// covered earlier server versions and cost nothing to keep, and a conflict
-<a href=#87 id=87 data-nosnippet>87</a>/// this set fails to recognise is not a benign miss — it is a replayed
-<a href=#88 id=88 data-nosnippet>88</a>/// assertion accepted as fresh.
-<a href=#89 id=89 data-nosnippet>89</a>///
-<a href=#90 id=90 data-nosnippet>90</a>/// **The set is narrow on purpose.** Everything it does not match falls
-<a href=#91 id=91 data-nosnippet>91</a>/// through to a 5xx, and that is the safe direction: a datastore outage
-<a href=#92 id=92 data-nosnippet>92</a>/// contains none of these markers and must never be reported to a caller as
-<a href=#93 id=93 data-nosnippet>93</a>/// "that already exists" or "that was a replay". Widening this set trades a
-<a href=#94 id=94 data-nosnippet>94</a>/// clearer conflict message for the risk of answering an outage with a 409.
-<a href=#95 id=95 data-nosnippet>95</a></span><span class="kw">const </span>UNIQUE_VIOLATION_MARKERS: [<span class="kw-2">&amp;</span>str; <span class="number">3</span>] = [<span class="string">"already contains"</span>, <span class="string">"already exists"</span>, <span class="string">"unique"</span>];
-<a href=#96 id=96 data-nosnippet>96</a>
-<a href=#97 id=97 data-nosnippet>97</a><span class="doccomment">/// Whether a datastore error message reports a UNIQUE-index violation.
-<a href=#98 id=98 data-nosnippet>98</a>///
-<a href=#99 id=99 data-nosnippet>99</a>/// # Why this is a function and not three `contains` calls
-<a href=#100 id=100 data-nosnippet>100</a>///
-<a href=#101 id=101 data-nosnippet>101</a>/// [`classify_write_error`] has always documented itself as "the ONLY place
-<a href=#102 id=102 data-nosnippet>102</a>/// that inspects error text for these markers — call sites must not add their
-<a href=#103 id=103 data-nosnippet>103</a>/// own inline `contains(...)` checks" (D-09). Five call sites did anyway:
-<a href=#104 id=104 data-nosnippet>104</a>/// `saml_replay`, `amqp_nonce_replay`, `oauth2_proof_replay`,
-<a href=#105 id=105 data-nosnippet>105</a>/// `federation_login_state` and the REST bootstrap handler, each with the
-<a href=#106 id=106 data-nosnippet>106</a>/// three markers written out again and a comment pointing at one of the
-<a href=#107 id=107 data-nosnippet>107</a>/// others as its source of truth.
+<a href=#73 id=73 data-nosnippet>73</a>    } <span class="kw">else if </span>is_write_conflict(<span class="kw-2">&amp;</span>msg) {
+<a href=#74 id=74 data-nosnippet>74</a>        <span class="comment">// Ordered AFTER the unique check on purpose. A UNIQUE violation is a
+<a href=#75 id=75 data-nosnippet>75</a>        // statement about the caller's request and must win: it is a 409 the
+<a href=#76 id=76 data-nosnippet>76</a>        // client can act on, and retrying it would only fail again identically.
+<a href=#77 id=77 data-nosnippet>77</a>        // A write conflict says nothing about the request — only that it lost a
+<a href=#78 id=78 data-nosnippet>78</a>        // race — so it is the weaker, more retryable classification of the two.
+<a href=#79 id=79 data-nosnippet>79</a>        </span>DbError::Conflict(msg)
+<a href=#80 id=80 data-nosnippet>80</a>    } <span class="kw">else </span>{
+<a href=#81 id=81 data-nosnippet>81</a>        DbError::Migration(msg)
+<a href=#82 id=82 data-nosnippet>82</a>    }
+<a href=#83 id=83 data-nosnippet>83</a>}
+<a href=#84 id=84 data-nosnippet>84</a>
+<a href=#85 id=85 data-nosnippet>85</a><span class="doccomment">/// Run `op`, retrying while it fails with a retryable write conflict.
+<a href=#86 id=86 data-nosnippet>86</a>///
+<a href=#87 id=87 data-nosnippet>87</a>/// This is the helper the [`WRITE_CONFLICT_MARKERS`] documentation has linked
+<a href=#88 id=88 data-nosnippet>88</a>/// to since the markers were introduced, and which was never actually defined:
+<a href=#89 id=89 data-nosnippet>89</a>/// [`MAX_WRITE_ATTEMPTS`], [`write_conflict_backoff`] and [`is_write_conflict`]
+<a href=#90 id=90 data-nosnippet>90</a>/// all shipped, tested, with exactly one hand-rolled loop assembling them (in
+<a href=#91 id=91 data-nosnippet>91</a>/// `UserRepository::increment_failed_logins`) and no way to reuse it. Every
+<a href=#92 id=92 data-nosnippet>92</a>/// other contended write therefore had no retry at all — which is how a
+<a href=#93 id=93 data-nosnippet>93</a>/// concurrent SCIM `PATCH /scim/v2/Users/{id}` came to answer HTTP 500 on 2.2%
+<a href=#94 id=94 data-nosnippet>94</a>/// of a benchmark flood, for a write the engine labelled retryable.
+<a href=#95 id=95 data-nosnippet>95</a>///
+<a href=#96 id=96 data-nosnippet>96</a>/// `op` is a closure rather than a future because a future is consumed by the
+<a href=#97 id=97 data-nosnippet>97</a>/// first `.await`: a retry needs a *new* one per attempt, and SurrealDB's
+<a href=#98 id=98 data-nosnippet>98</a>/// `bind` takes owned values, so each attempt must rebuild its own statement.
+<a href=#99 id=99 data-nosnippet>99</a>///
+<a href=#100 id=100 data-nosnippet>100</a>/// Generic over the error type rather than fixed to [`DbError`] because the two
+<a href=#101 id=101 data-nosnippet>101</a>/// kinds of call site disagree about it: a repository method that returns
+<a href=#102 id=102 data-nosnippet>102</a>/// `AxiamResult&lt;T&gt;` has already widened to `AxiamError` by the time it can fail,
+<a href=#103 id=103 data-nosnippet>103</a>/// while one working inside the db layer still holds a `DbError`. Both render
+<a href=#104 id=104 data-nosnippet>104</a>/// the engine's text, which is all the retry predicate reads, so neither has to
+<a href=#105 id=105 data-nosnippet>105</a>/// convert at the boundary just to be retried.
+<a href=#106 id=106 data-nosnippet>106</a>///
+<a href=#107 id=107 data-nosnippet>107</a>/// # Safety of replaying `op`
 <a href=#108 id=108 data-nosnippet>108</a>///
-<a href=#109 id=109 data-nosnippet>109</a>/// Nobody did that carelessly — the copies were kept deliberately identical,
-<a href=#110 id=110 data-nosnippet>110</a>/// and `oauth2_proof_replay` says so in as many words: "kept identical so the
-<a href=#111 id=111 data-nosnippet>111</a>/// three replay guards cannot drift into disagreeing about what a conflict
-<a href=#112 id=112 data-nosnippet>112</a>/// looks like." That is the correct worry and the wrong mechanism. Every one
-<a href=#113 id=113 data-nosnippet>113</a>/// of those five sites decides whether a replayed credential is refused or
-<a href=#114 id=114 data-nosnippet>114</a>/// accepted; a marker added to four of them is a security fix with a hole in
-<a href=#115 id=115 data-nosnippet>115</a>/// it, and no test would notice.
-<a href=#116 id=116 data-nosnippet>116</a>///
-<a href=#117 id=117 data-nosnippet>117</a>/// So the markers live here, once, and the five sites call one of the three
-<a href=#118 id=118 data-nosnippet>118</a>/// classifiers below. See `claude_dev/conflict-classification.md`, and
-<a href=#119 id=119 data-nosnippet>119</a>/// `scripts/check-conflict-markers.py`, which fails CI if a sixth inline copy
-<a href=#120 id=120 data-nosnippet>120</a>/// appears.
-<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">pub fn </span>is_unique_violation(msg: <span class="kw-2">&amp;</span>str) -&gt; bool {
-<a href=#122 id=122 data-nosnippet>122</a>    UNIQUE_VIOLATION_MARKERS.iter().any(|m| msg.contains(m))
-<a href=#123 id=123 data-nosnippet>123</a>}
-<a href=#124 id=124 data-nosnippet>124</a>
-<a href=#125 id=125 data-nosnippet>125</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#126 id=126 data-nosnippet>126</a>// Optimistic-concurrency write conflicts — transient, and explicitly retryable
-<a href=#127 id=127 data-nosnippet>127</a>// ---------------------------------------------------------------------------
-<a href=#128 id=128 data-nosnippet>128</a>
-<a href=#129 id=129 data-nosnippet>129</a></span><span class="doccomment">/// Substrings that identify a SurrealDB optimistic-concurrency write conflict.
-<a href=#130 id=130 data-nosnippet>130</a>///
-<a href=#131 id=131 data-nosnippet>131</a>/// SurrealDB is optimistic: concurrent transactions touching the same record
-<a href=#132 id=132 data-nosnippet>132</a>/// both proceed, and the loser is aborted at commit with
-<a href=#133 id=133 data-nosnippet>133</a>/// ``There was a problem with the key-value store: Transaction conflict:
-<a href=#134 id=134 data-nosnippet>134</a>/// Transaction write conflict. This transaction can be retried`` (some
-<a href=#135 id=135 data-nosnippet>135</a>/// versions phrase it ``Failed to commit transaction due to a read or write
-<a href=#136 id=136 data-nosnippet>136</a>/// conflict``). Both phrasings are matched.
-<a href=#137 id=137 data-nosnippet>137</a>///
-<a href=#138 id=138 data-nosnippet>138</a>/// **This class of failure is not an error to report — it is an instruction to
-<a href=#139 id=139 data-nosnippet>139</a>/// retry**, and the datastore says so in the message itself. It is emphatically
-<a href=#140 id=140 data-nosnippet>140</a>/// NOT a [`is_unique_violation`]: no constraint was broken and nothing about
-<a href=#141 id=141 data-nosnippet>141</a>/// the caller's request was wrong; the write simply lost a race and never
-<a href=#142 id=142 data-nosnippet>142</a>/// committed. Because it commits nothing, replaying it cannot double-apply —
-<a href=#143 id=143 data-nosnippet>143</a>/// which is what makes [`retry_on_write_conflict`] safe even for a
-<a href=#144 id=144 data-nosnippet>144</a>/// non-idempotent statement like `failed_login_attempts += 1`.
-<a href=#145 id=145 data-nosnippet>145</a></span><span class="kw">const </span>WRITE_CONFLICT_MARKERS: [<span class="kw-2">&amp;</span>str; <span class="number">2</span>] = [<span class="string">"Transaction conflict"</span>, <span class="string">"read or write conflict"</span>];
-<a href=#146 id=146 data-nosnippet>146</a>
-<a href=#147 id=147 data-nosnippet>147</a><span class="doccomment">/// Whether a datastore error message reports a retryable write conflict.
-<a href=#148 id=148 data-nosnippet>148</a>///
-<a href=#149 id=149 data-nosnippet>149</a>/// Kept beside [`is_unique_violation`] and for the same reason (D-09): the
-<a href=#150 id=150 data-nosnippet>150</a>/// decision "was this transient?" is made from free error text, so it gets one
-<a href=#151 id=151 data-nosnippet>151</a>/// definition rather than a `contains(...)` at every hot-row write site.
-<a href=#152 id=152 data-nosnippet>152</a></span><span class="kw">pub fn </span>is_write_conflict(msg: <span class="kw-2">&amp;</span>str) -&gt; bool {
-<a href=#153 id=153 data-nosnippet>153</a>    WRITE_CONFLICT_MARKERS.iter().any(|m| msg.contains(m))
-<a href=#154 id=154 data-nosnippet>154</a>}
-<a href=#155 id=155 data-nosnippet>155</a>
-<a href=#156 id=156 data-nosnippet>156</a><span class="doccomment">/// How many attempts a contended write gets before its conflict surfaces.
-<a href=#157 id=157 data-nosnippet>157</a>///
-<a href=#158 id=158 data-nosnippet>158</a>/// Four is chosen against the shape of the failure rather than as a round
-<a href=#159 id=159 data-nosnippet>159</a>/// number: a conflict means some other writer *did* commit, so the contended
-<a href=#160 id=160 data-nosnippet>160</a>/// record is free almost immediately and the overwhelming majority of retries
-<a href=#161 id=161 data-nosnippet>161</a>/// succeed on the first one. The extra attempts cover a burst of writers
-<a href=#162 id=162 data-nosnippet>162</a>/// landing on the same record at once; past that, retrying is no longer
-<a href=#163 id=163 data-nosnippet>163</a>/// masking a race but hiding sustained contention that should surface.
-<a href=#164 id=164 data-nosnippet>164</a>///
-<a href=#165 id=165 data-nosnippet>165</a>/// Retrying only ever applies to [`is_write_conflict`]. Every other error — an
-<a href=#166 id=166 data-nosnippet>166</a>/// outage, a malformed statement, a constraint violation — must return on the
-<a href=#167 id=167 data-nosnippet>167</a>/// first attempt, so a hard failure is never turned into a slow one.
-<a href=#168 id=168 data-nosnippet>168</a></span><span class="kw">pub const </span>MAX_WRITE_ATTEMPTS: u32 = <span class="number">4</span>;
-<a href=#169 id=169 data-nosnippet>169</a>
-<a href=#170 id=170 data-nosnippet>170</a><span class="doccomment">/// How long to wait before write attempt `attempt + 1` (2 ms, 4 ms, 8 ms).
-<a href=#171 id=171 data-nosnippet>171</a>///
-<a href=#172 id=172 data-nosnippet>172</a>/// Not there to wait out the winner — it has already committed by the time the
-<a href=#173 id=173 data-nosnippet>173</a>/// loser learns it lost — but to stop a burst of contending writers from
-<a href=#174 id=174 data-nosnippet>174</a>/// re-colliding in lockstep on the retry.
-<a href=#175 id=175 data-nosnippet>175</a></span><span class="kw">pub fn </span>write_conflict_backoff(attempt: u32) -&gt; std::time::Duration {
-<a href=#176 id=176 data-nosnippet>176</a>    std::time::Duration::from_millis(<span class="number">1u64 </span>&lt;&lt; attempt.min(<span class="number">6</span>))
-<a href=#177 id=177 data-nosnippet>177</a>}
-<a href=#178 id=178 data-nosnippet>178</a>
-<a href=#179 id=179 data-nosnippet>179</a><span class="doccomment">/// Classify a failed single-use `CREATE` on a replay-guard table.
-<a href=#180 id=180 data-nosnippet>180</a>///
-<a href=#181 id=181 data-nosnippet>181</a>/// A UNIQUE violation here is not an error condition — it is the answer. The
-<a href=#182 id=182 data-nosnippet>182</a>/// row was already present, so the assertion / nonce / proof `jti` being
-<a href=#183 id=183 data-nosnippet>183</a>/// inserted has been seen before, and the caller must refuse it. Anything else
-<a href=#184 id=184 data-nosnippet>184</a>/// is a real datastore failure and propagates as [`AxiamError::Database`], so
-<a href=#185 id=185 data-nosnippet>185</a>/// an outage surfaces as a 5xx rather than as a silent "replay detected" that
-<a href=#186 id=186 data-nosnippet>186</a>/// would refuse legitimate traffic.
-<a href=#187 id=187 data-nosnippet>187</a>///
-<a href=#188 id=188 data-nosnippet>188</a>/// Used by all three replay repositories (`saml_replay`, `amqp_nonce_replay`,
-<a href=#189 id=189 data-nosnippet>189</a>/// `oauth2_proof_replay`), which is the point: there is one definition of what
-<a href=#190 id=190 data-nosnippet>190</a>/// a replay looks like.
-<a href=#191 id=191 data-nosnippet>191</a></span><span class="kw">pub fn </span>classify_replay_write_error&lt;E: std::fmt::Display&gt;(err: E) -&gt; AxiamError {
-<a href=#192 id=192 data-nosnippet>192</a>    <span class="kw">let </span>msg = err.to_string();
-<a href=#193 id=193 data-nosnippet>193</a>    <span class="kw">if </span>is_unique_violation(<span class="kw-2">&amp;</span>msg) {
-<a href=#194 id=194 data-nosnippet>194</a>        AxiamError::ReplayDetected
-<a href=#195 id=195 data-nosnippet>195</a>    } <span class="kw">else </span>{
-<a href=#196 id=196 data-nosnippet>196</a>        AxiamError::Database(msg)
-<a href=#197 id=197 data-nosnippet>197</a>    }
-<a href=#198 id=198 data-nosnippet>198</a>}
-<a href=#199 id=199 data-nosnippet>199</a>
-<a href=#200 id=200 data-nosnippet>200</a><span class="doccomment">/// Classify a failed `CREATE` where a UNIQUE violation means "already taken".
-<a href=#201 id=201 data-nosnippet>201</a>///
-<a href=#202 id=202 data-nosnippet>202</a>/// The [`AxiamError`]-returning counterpart to [`classify_write_error`], for
-<a href=#203 id=203 data-nosnippet>203</a>/// the write paths that build an `AxiamError` directly rather than a
-<a href=#204 id=204 data-nosnippet>204</a>/// [`DbError`]. `entity` names what collided and reaches the client in the
-<a href=#205 id=205 data-nosnippet>205</a>/// 409 body, so it should identify the constrained thing
-<a href=#206 id=206 data-nosnippet>206</a>/// (`"federation_login_state.state"`), not merely the table.
-<a href=#207 id=207 data-nosnippet>207</a></span><span class="kw">pub fn </span>classify_conflict_write_error&lt;E: std::fmt::Display&gt;(err: E, entity: <span class="kw-2">&amp;</span>str) -&gt; AxiamError {
-<a href=#208 id=208 data-nosnippet>208</a>    <span class="kw">let </span>msg = err.to_string();
-<a href=#209 id=209 data-nosnippet>209</a>    <span class="kw">if </span>is_unique_violation(<span class="kw-2">&amp;</span>msg) {
-<a href=#210 id=210 data-nosnippet>210</a>        AxiamError::AlreadyExists {
-<a href=#211 id=211 data-nosnippet>211</a>            entity: entity.to_string(),
-<a href=#212 id=212 data-nosnippet>212</a>        }
-<a href=#213 id=213 data-nosnippet>213</a>    } <span class="kw">else </span>{
-<a href=#214 id=214 data-nosnippet>214</a>        AxiamError::Database(msg)
-<a href=#215 id=215 data-nosnippet>215</a>    }
-<a href=#216 id=216 data-nosnippet>216</a>}
-<a href=#217 id=217 data-nosnippet>217</a>
-<a href=#218 id=218 data-nosnippet>218</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#219 id=219 data-nosnippet>219</a>// cleanup_expired_rows — one sweep for every replay-guard table (F5)
-<a href=#220 id=220 data-nosnippet>220</a>// ---------------------------------------------------------------------------
-<a href=#221 id=221 data-nosnippet>221</a>
-<a href=#222 id=222 data-nosnippet>222</a></span><span class="doccomment">/// Count and then delete every row of `table` whose `expires_at` has passed,
-<a href=#223 id=223 data-nosnippet>223</a>/// returning how many were removed.
-<a href=#224 id=224 data-nosnippet>224</a>///
-<a href=#225 id=225 data-nosnippet>225</a>/// The three replay tables carried a byte-identical copy of this, differing
-<a href=#226 id=226 data-nosnippet>226</a>/// only in the table name. It is not security-critical the way
-<a href=#227 id=227 data-nosnippet>227</a>/// [`classify_replay_write_error`] is — a sweep that under-deletes leaves rows
-<a href=#228 id=228 data-nosnippet>228</a>/// that only cost space, and the UNIQUE index keeps doing its job either way —
-<a href=#229 id=229 data-nosnippet>229</a>/// but three copies of one query is three places to fix when the count and the
-<a href=#230 id=230 data-nosnippet>230</a>/// delete need to become one statement.
-<a href=#231 id=231 data-nosnippet>231</a>///
-<a href=#232 id=232 data-nosnippet>232</a>/// `table` is interpolated into the query rather than bound, because SurrealDB
-<a href=#233 id=233 data-nosnippet>233</a>/// has no bind form for a table name. It is therefore **never** caller- or
-<a href=#234 id=234 data-nosnippet>234</a>/// request-derived: every call site passes a `&amp;'static str` literal naming one
-<a href=#235 id=235 data-nosnippet>235</a>/// of this crate's own tables.
-<a href=#236 id=236 data-nosnippet>236</a></span><span class="kw">pub async fn </span>cleanup_expired_rows&lt;C: Connection&gt;(
-<a href=#237 id=237 data-nosnippet>237</a>    db: <span class="kw-2">&amp;</span><span class="kw">crate</span>::handle::DbHandle&lt;C&gt;,
-<a href=#238 id=238 data-nosnippet>238</a>    table: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
-<a href=#239 id=239 data-nosnippet>239</a>) -&gt; AxiamResult&lt;u64&gt; {
-<a href=#240 id=240 data-nosnippet>240</a>    <span class="kw">let </span><span class="kw-2">mut </span>count_result = db
-<a href=#241 id=241 data-nosnippet>241</a>        .current()
-<a href=#242 id=242 data-nosnippet>242</a>        .query(<span class="macro">format!</span>(
-<a href=#243 id=243 data-nosnippet>243</a>            <span class="string">"SELECT count() AS total FROM {table} \
-<a href=#244 id=244 data-nosnippet>244</a>             WHERE expires_at &lt; time::now() GROUP ALL"
-<a href=#245 id=245 data-nosnippet>245</a>        </span>))
-<a href=#246 id=246 data-nosnippet>246</a>        .<span class="kw">await
-<a href=#247 id=247 data-nosnippet>247</a>        </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#248 id=248 data-nosnippet>248</a>
-<a href=#249 id=249 data-nosnippet>249</a>    <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#250 id=250 data-nosnippet>250</a>    <span class="kw">let </span>total = count_rows.first().map(|r| r.total).unwrap_or(<span class="number">0</span>);
-<a href=#251 id=251 data-nosnippet>251</a>
-<a href=#252 id=252 data-nosnippet>252</a>    db.current()
-<a href=#253 id=253 data-nosnippet>253</a>        .query(<span class="macro">format!</span>(<span class="string">"DELETE {table} WHERE expires_at &lt; time::now()"</span>))
-<a href=#254 id=254 data-nosnippet>254</a>        .<span class="kw">await
-<a href=#255 id=255 data-nosnippet>255</a>        </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#256 id=256 data-nosnippet>256</a>
-<a href=#257 id=257 data-nosnippet>257</a>    <span class="prelude-val">Ok</span>(total)
-<a href=#258 id=258 data-nosnippet>258</a>}
-<a href=#259 id=259 data-nosnippet>259</a>
-<a href=#260 id=260 data-nosnippet>260</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#261 id=261 data-nosnippet>261</a>// take_first_or_not_found — unified "0 rows → NotFound" helper
-<a href=#262 id=262 data-nosnippet>262</a>// ---------------------------------------------------------------------------
+<a href=#109 id=109 data-nosnippet>109</a>/// Only [`is_write_conflict`] is retried, and a conflicted transaction commits
+<a href=#110 id=110 data-nosnippet>110</a>/// NOTHING — that is what the abort means. So re-running `op` cannot
+<a href=#111 id=111 data-nosnippet>111</a>/// double-apply, even when the statement is not idempotent (`x += 1`). Every
+<a href=#112 id=112 data-nosnippet>112</a>/// other error returns on the first attempt, so an outage or a malformed
+<a href=#113 id=113 data-nosnippet>113</a>/// statement fails fast instead of slowly.
+<a href=#114 id=114 data-nosnippet>114</a></span><span class="kw">pub async fn </span>retry_on_write_conflict&lt;T, E, F, Fut&gt;(<span class="kw-2">mut </span>op: F) -&gt; <span class="prelude-ty">Result</span>&lt;T, E&gt;
+<a href=#115 id=115 data-nosnippet>115</a><span class="kw">where
+<a href=#116 id=116 data-nosnippet>116</a>    </span>F: FnMut() -&gt; Fut,
+<a href=#117 id=117 data-nosnippet>117</a>    Fut: std::future::Future&lt;Output = <span class="prelude-ty">Result</span>&lt;T, E&gt;&gt;,
+<a href=#118 id=118 data-nosnippet>118</a>    E: std::fmt::Display,
+<a href=#119 id=119 data-nosnippet>119</a>{
+<a href=#120 id=120 data-nosnippet>120</a>    <span class="kw">let </span><span class="kw-2">mut </span>attempt = <span class="number">1</span>;
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="kw">loop </span>{
+<a href=#122 id=122 data-nosnippet>122</a>        <span class="kw">match </span>op().<span class="kw">await </span>{
+<a href=#123 id=123 data-nosnippet>123</a>            <span class="comment">// Matched on the rendered message rather than on `DbError::Conflict`
+<a href=#124 id=124 data-nosnippet>124</a>            // because a conflict can arrive as any of three variants depending
+<a href=#125 id=125 data-nosnippet>125</a>            // on where in the write path it surfaced: `Conflict` from
+<a href=#126 id=126 data-nosnippet>126</a>            // `classify_write_error`, `Surreal` from a bare `DbError::from`, or
+<a href=#127 id=127 data-nosnippet>127</a>            // `Migration` from a call site that has not been routed through the
+<a href=#128 id=128 data-nosnippet>128</a>            // classifier. Every one of them renders the engine's own text, so
+<a href=#129 id=129 data-nosnippet>129</a>            // the message is the reliable discriminator; the variant is not.
+<a href=#130 id=130 data-nosnippet>130</a>            </span><span class="prelude-val">Err</span>(e) <span class="kw">if </span>attempt &lt; MAX_WRITE_ATTEMPTS &amp;&amp; is_write_conflict(<span class="kw-2">&amp;</span>e.to_string()) =&gt; {
+<a href=#131 id=131 data-nosnippet>131</a>                tokio::time::sleep(write_conflict_backoff(attempt)).<span class="kw">await</span>;
+<a href=#132 id=132 data-nosnippet>132</a>                attempt += <span class="number">1</span>;
+<a href=#133 id=133 data-nosnippet>133</a>            }
+<a href=#134 id=134 data-nosnippet>134</a>            outcome =&gt; <span class="kw">return </span>outcome,
+<a href=#135 id=135 data-nosnippet>135</a>        }
+<a href=#136 id=136 data-nosnippet>136</a>    }
+<a href=#137 id=137 data-nosnippet>137</a>}
+<a href=#138 id=138 data-nosnippet>138</a>
+<a href=#139 id=139 data-nosnippet>139</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#140 id=140 data-nosnippet>140</a>// The unique-violation marker set — one definition, three classifiers (F5)
+<a href=#141 id=141 data-nosnippet>141</a>// ---------------------------------------------------------------------------
+<a href=#142 id=142 data-nosnippet>142</a>
+<a href=#143 id=143 data-nosnippet>143</a></span><span class="doccomment">/// Substrings that identify a SurrealDB UNIQUE-index violation.
+<a href=#144 id=144 data-nosnippet>144</a>///
+<a href=#145 id=145 data-nosnippet>145</a>/// SurrealDB v3 reports one as ``Database index `idx_x_uniq` already contains
+<a href=#146 id=146 data-nosnippet>146</a>/// [...]``. `"already exists"` and `"unique"` are kept as fallbacks: they
+<a href=#147 id=147 data-nosnippet>147</a>/// covered earlier server versions and cost nothing to keep, and a conflict
+<a href=#148 id=148 data-nosnippet>148</a>/// this set fails to recognise is not a benign miss — it is a replayed
+<a href=#149 id=149 data-nosnippet>149</a>/// assertion accepted as fresh.
+<a href=#150 id=150 data-nosnippet>150</a>///
+<a href=#151 id=151 data-nosnippet>151</a>/// **The set is narrow on purpose.** Everything it does not match falls
+<a href=#152 id=152 data-nosnippet>152</a>/// through to a 5xx, and that is the safe direction: a datastore outage
+<a href=#153 id=153 data-nosnippet>153</a>/// contains none of these markers and must never be reported to a caller as
+<a href=#154 id=154 data-nosnippet>154</a>/// "that already exists" or "that was a replay". Widening this set trades a
+<a href=#155 id=155 data-nosnippet>155</a>/// clearer conflict message for the risk of answering an outage with a 409.
+<a href=#156 id=156 data-nosnippet>156</a></span><span class="kw">const </span>UNIQUE_VIOLATION_MARKERS: [<span class="kw-2">&amp;</span>str; <span class="number">3</span>] = [<span class="string">"already contains"</span>, <span class="string">"already exists"</span>, <span class="string">"unique"</span>];
+<a href=#157 id=157 data-nosnippet>157</a>
+<a href=#158 id=158 data-nosnippet>158</a><span class="doccomment">/// Whether a datastore error message reports a UNIQUE-index violation.
+<a href=#159 id=159 data-nosnippet>159</a>///
+<a href=#160 id=160 data-nosnippet>160</a>/// # Why this is a function and not three `contains` calls
+<a href=#161 id=161 data-nosnippet>161</a>///
+<a href=#162 id=162 data-nosnippet>162</a>/// [`classify_write_error`] has always documented itself as "the ONLY place
+<a href=#163 id=163 data-nosnippet>163</a>/// that inspects error text for these markers — call sites must not add their
+<a href=#164 id=164 data-nosnippet>164</a>/// own inline `contains(...)` checks" (D-09). Five call sites did anyway:
+<a href=#165 id=165 data-nosnippet>165</a>/// `saml_replay`, `amqp_nonce_replay`, `oauth2_proof_replay`,
+<a href=#166 id=166 data-nosnippet>166</a>/// `federation_login_state` and the REST bootstrap handler, each with the
+<a href=#167 id=167 data-nosnippet>167</a>/// three markers written out again and a comment pointing at one of the
+<a href=#168 id=168 data-nosnippet>168</a>/// others as its source of truth.
+<a href=#169 id=169 data-nosnippet>169</a>///
+<a href=#170 id=170 data-nosnippet>170</a>/// Nobody did that carelessly — the copies were kept deliberately identical,
+<a href=#171 id=171 data-nosnippet>171</a>/// and `oauth2_proof_replay` says so in as many words: "kept identical so the
+<a href=#172 id=172 data-nosnippet>172</a>/// three replay guards cannot drift into disagreeing about what a conflict
+<a href=#173 id=173 data-nosnippet>173</a>/// looks like." That is the correct worry and the wrong mechanism. Every one
+<a href=#174 id=174 data-nosnippet>174</a>/// of those five sites decides whether a replayed credential is refused or
+<a href=#175 id=175 data-nosnippet>175</a>/// accepted; a marker added to four of them is a security fix with a hole in
+<a href=#176 id=176 data-nosnippet>176</a>/// it, and no test would notice.
+<a href=#177 id=177 data-nosnippet>177</a>///
+<a href=#178 id=178 data-nosnippet>178</a>/// So the markers live here, once, and the five sites call one of the three
+<a href=#179 id=179 data-nosnippet>179</a>/// classifiers below. See `claude_dev/conflict-classification.md`, and
+<a href=#180 id=180 data-nosnippet>180</a>/// `scripts/check-conflict-markers.py`, which fails CI if a sixth inline copy
+<a href=#181 id=181 data-nosnippet>181</a>/// appears.
+<a href=#182 id=182 data-nosnippet>182</a></span><span class="kw">pub fn </span>is_unique_violation(msg: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#183 id=183 data-nosnippet>183</a>    UNIQUE_VIOLATION_MARKERS.iter().any(|m| msg.contains(m))
+<a href=#184 id=184 data-nosnippet>184</a>}
+<a href=#185 id=185 data-nosnippet>185</a>
+<a href=#186 id=186 data-nosnippet>186</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#187 id=187 data-nosnippet>187</a>// Optimistic-concurrency write conflicts — transient, and explicitly retryable
+<a href=#188 id=188 data-nosnippet>188</a>// ---------------------------------------------------------------------------
+<a href=#189 id=189 data-nosnippet>189</a>
+<a href=#190 id=190 data-nosnippet>190</a></span><span class="doccomment">/// Substrings that identify a SurrealDB optimistic-concurrency write conflict.
+<a href=#191 id=191 data-nosnippet>191</a>///
+<a href=#192 id=192 data-nosnippet>192</a>/// SurrealDB is optimistic: concurrent transactions touching the same record
+<a href=#193 id=193 data-nosnippet>193</a>/// both proceed, and the loser is aborted at commit with
+<a href=#194 id=194 data-nosnippet>194</a>/// ``There was a problem with the key-value store: Transaction conflict:
+<a href=#195 id=195 data-nosnippet>195</a>/// Transaction write conflict. This transaction can be retried`` (some
+<a href=#196 id=196 data-nosnippet>196</a>/// versions phrase it ``Failed to commit transaction due to a read or write
+<a href=#197 id=197 data-nosnippet>197</a>/// conflict``). Both phrasings are matched.
+<a href=#198 id=198 data-nosnippet>198</a>///
+<a href=#199 id=199 data-nosnippet>199</a>/// **This class of failure is not an error to report — it is an instruction to
+<a href=#200 id=200 data-nosnippet>200</a>/// retry**, and the datastore says so in the message itself. It is emphatically
+<a href=#201 id=201 data-nosnippet>201</a>/// NOT a [`is_unique_violation`]: no constraint was broken and nothing about
+<a href=#202 id=202 data-nosnippet>202</a>/// the caller's request was wrong; the write simply lost a race and never
+<a href=#203 id=203 data-nosnippet>203</a>/// committed. Because it commits nothing, replaying it cannot double-apply —
+<a href=#204 id=204 data-nosnippet>204</a>/// which is what makes [`retry_on_write_conflict`] safe even for a
+<a href=#205 id=205 data-nosnippet>205</a>/// non-idempotent statement like `failed_login_attempts += 1`.
+<a href=#206 id=206 data-nosnippet>206</a>///
+<a href=#207 id=207 data-nosnippet>207</a>/// # The last two markers, and why they were a hole
+<a href=#208 id=208 data-nosnippet>208</a>///
+<a href=#209 id=209 data-nosnippet>209</a>/// `"failed transaction"` and `"Failed to commit transaction"` were the ONLY
+<a href=#210 id=210 data-nosnippet>210</a>/// two literals [`is_transaction_conflict`] matched, in a set of its own. That
+<a href=#211 id=211 data-nosnippet>211</a>/// helper guards the single-use consume on four replay-sensitive paths —
+<a href=#212 id=212 data-nosnippet>212</a>/// `device_grant`, `permission_ticket`, `pushed_auth_request` and
+<a href=#213 id=213 data-nosnippet>213</a>/// `oauth2_auth_code` — and the message SurrealDB v3 actually emits for a
+<a href=#214 id=214 data-nosnippet>214</a>/// contended write (`Transaction conflict: Transaction write conflict. This
+<a href=#215 id=215 data-nosnippet>215</a>/// transaction can be retried`) contains neither of them. So the branch those
+<a href=#216 id=216 data-nosnippet>216</a>/// four paths rely on to answer "someone else got there first" could not fire
+<a href=#217 id=217 data-nosnippet>217</a>/// on the phrasing the deployed engine produces, and a correctly-refused
+<a href=#218 id=218 data-nosnippet>218</a>/// replay surfaced as a 500 instead of as "no row consumed".
+<a href=#219 id=219 data-nosnippet>219</a>///
+<a href=#220 id=220 data-nosnippet>220</a>/// That direction is fail-CLOSED — a 500 mints no token — so it was a
+<a href=#221 id=221 data-nosnippet>221</a>/// robustness defect rather than a security hole. But it is exactly the
+<a href=#222 id=222 data-nosnippet>222</a>/// drift-between-copies failure D-09 and `scripts/check-conflict-markers.py`
+<a href=#223 id=223 data-nosnippet>223</a>/// exist to prevent, and it survived because the two sets were never one set.
+<a href=#224 id=224 data-nosnippet>224</a>/// They are one set now, and [`is_transaction_conflict`] delegates here.
+<a href=#225 id=225 data-nosnippet>225</a></span><span class="kw">const </span>WRITE_CONFLICT_MARKERS: [<span class="kw-2">&amp;</span>str; <span class="number">4</span>] = [
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="string">"Transaction conflict"</span>,
+<a href=#227 id=227 data-nosnippet>227</a>    <span class="string">"read or write conflict"</span>,
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="string">"failed transaction"</span>,
+<a href=#229 id=229 data-nosnippet>229</a>    <span class="string">"Failed to commit transaction"</span>,
+<a href=#230 id=230 data-nosnippet>230</a>];
+<a href=#231 id=231 data-nosnippet>231</a>
+<a href=#232 id=232 data-nosnippet>232</a><span class="doccomment">/// Whether a datastore error message reports a retryable write conflict.
+<a href=#233 id=233 data-nosnippet>233</a>///
+<a href=#234 id=234 data-nosnippet>234</a>/// Kept beside [`is_unique_violation`] and for the same reason (D-09): the
+<a href=#235 id=235 data-nosnippet>235</a>/// decision "was this transient?" is made from free error text, so it gets one
+<a href=#236 id=236 data-nosnippet>236</a>/// definition rather than a `contains(...)` at every hot-row write site.
+<a href=#237 id=237 data-nosnippet>237</a></span><span class="kw">pub fn </span>is_write_conflict(msg: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#238 id=238 data-nosnippet>238</a>    WRITE_CONFLICT_MARKERS.iter().any(|m| msg.contains(m))
+<a href=#239 id=239 data-nosnippet>239</a>}
+<a href=#240 id=240 data-nosnippet>240</a>
+<a href=#241 id=241 data-nosnippet>241</a><span class="doccomment">/// How many attempts a contended write gets before its conflict surfaces.
+<a href=#242 id=242 data-nosnippet>242</a>///
+<a href=#243 id=243 data-nosnippet>243</a>/// Four is chosen against the shape of the failure rather than as a round
+<a href=#244 id=244 data-nosnippet>244</a>/// number: a conflict means some other writer *did* commit, so the contended
+<a href=#245 id=245 data-nosnippet>245</a>/// record is free almost immediately and the overwhelming majority of retries
+<a href=#246 id=246 data-nosnippet>246</a>/// succeed on the first one. The extra attempts cover a burst of writers
+<a href=#247 id=247 data-nosnippet>247</a>/// landing on the same record at once; past that, retrying is no longer
+<a href=#248 id=248 data-nosnippet>248</a>/// masking a race but hiding sustained contention that should surface.
+<a href=#249 id=249 data-nosnippet>249</a>///
+<a href=#250 id=250 data-nosnippet>250</a>/// Retrying only ever applies to [`is_write_conflict`]. Every other error — an
+<a href=#251 id=251 data-nosnippet>251</a>/// outage, a malformed statement, a constraint violation — must return on the
+<a href=#252 id=252 data-nosnippet>252</a>/// first attempt, so a hard failure is never turned into a slow one.
+<a href=#253 id=253 data-nosnippet>253</a></span><span class="kw">pub const </span>MAX_WRITE_ATTEMPTS: u32 = <span class="number">4</span>;
+<a href=#254 id=254 data-nosnippet>254</a>
+<a href=#255 id=255 data-nosnippet>255</a><span class="doccomment">/// How long to wait before write attempt `attempt + 1` (2 ms, 4 ms, 8 ms).
+<a href=#256 id=256 data-nosnippet>256</a>///
+<a href=#257 id=257 data-nosnippet>257</a>/// Not there to wait out the winner — it has already committed by the time the
+<a href=#258 id=258 data-nosnippet>258</a>/// loser learns it lost — but to stop a burst of contending writers from
+<a href=#259 id=259 data-nosnippet>259</a>/// re-colliding in lockstep on the retry.
+<a href=#260 id=260 data-nosnippet>260</a></span><span class="kw">pub fn </span>write_conflict_backoff(attempt: u32) -&gt; std::time::Duration {
+<a href=#261 id=261 data-nosnippet>261</a>    std::time::Duration::from_millis(<span class="number">1u64 </span>&lt;&lt; attempt.min(<span class="number">6</span>))
+<a href=#262 id=262 data-nosnippet>262</a>}
 <a href=#263 id=263 data-nosnippet>263</a>
-<a href=#264 id=264 data-nosnippet>264</a></span><span class="doccomment">/// Take the first element of `items` or return `DbError::NotFound`.
+<a href=#264 id=264 data-nosnippet>264</a><span class="doccomment">/// Classify a failed single-use `CREATE` on a replay-guard table.
 <a href=#265 id=265 data-nosnippet>265</a>///
-<a href=#266 id=266 data-nosnippet>266</a>/// Replaces the `into_iter().next().ok_or_else(|| DbError::NotFound{…})`
-<a href=#267 id=267 data-nosnippet>267</a>/// pattern repeated in every `get_by_id` / find method.
-<a href=#268 id=268 data-nosnippet>268</a>/// Whether a SurrealDB error is a write-write transaction conflict.
-<a href=#269 id=269 data-nosnippet>269</a>///
-<a href=#270 id=270 data-nosnippet>270</a>/// # Why this exists
-<a href=#271 id=271 data-nosnippet>271</a>///
-<a href=#272 id=272 data-nosnippet>272</a>/// A multi-statement query (`LET $x = (UPDATE ...); SELECT ... FROM $x`) is
-<a href=#273 id=273 data-nosnippet>273</a>/// **not** atomic in SurrealDB — each statement runs in its own transaction —
-<a href=#274 id=274 data-nosnippet>274</a>/// so a single-use `UPDATE ... WHERE consumed = false` guard does not
-<a href=#275 id=275 data-nosnippet>275</a>/// serialise concurrent callers on its own. Measured: eight concurrent
-<a href=#276 id=276 data-nosnippet>276</a>/// redemptions of one row, up to four of them "winning".
-<a href=#277 id=277 data-nosnippet>277</a>///
-<a href=#278 id=278 data-nosnippet>278</a>/// Wrapping the statements in `BEGIN`/`COMMIT` makes a persistent datastore
-<a href=#279 id=279 data-nosnippet>279</a>/// detect the conflict and abort every loser with this error — 54% of
-<a href=#280 id=280 data-nosnippet>280</a>/// contended attempts on `surrealkv`, with zero double winners in 40 000
-<a href=#281 id=281 data-nosnippet>281</a>/// (`tools/surreal-race-probe`). That abort is the first of the two layers the
-<a href=#282 id=282 data-nosnippet>282</a>/// three single-use consume paths run since X6 (#302); the second is a nonce
-<a href=#283 id=283 data-nosnippet>283</a>/// read back after the commit, which is why the read-back lives in a query of
-<a href=#284 id=284 data-nosnippet>284</a>/// its own and this error can also surface on that second query.
-<a href=#285 id=285 data-nosnippet>285</a>///
-<a href=#286 id=286 data-nosnippet>286</a>/// For a single-use consume the abort is not a fault — it is the datastore
-<a href=#287 id=287 data-nosnippet>287</a>/// reporting that someone else got there first, which is the answer the caller
-<a href=#288 id=288 data-nosnippet>288</a>/// wanted. Callers translate it to "no row consumed"; propagating it would turn
-<a href=#289 id=289 data-nosnippet>289</a>/// a correctly-refused replay into a 500.
-<a href=#290 id=290 data-nosnippet>290</a>///
-<a href=#291 id=291 data-nosnippet>291</a>/// Matched on the message because the driver surfaces it as an opaque error
-<a href=#292 id=292 data-nosnippet>292</a>/// rather than a typed variant. Deliberately narrow: only a conflict is
-<a href=#293 id=293 data-nosnippet>293</a>/// swallowed, and only into "lost the race" — every other failure propagates.
-<a href=#294 id=294 data-nosnippet>294</a></span><span class="kw">pub fn </span>is_transaction_conflict&lt;E: std::fmt::Display&gt;(err: <span class="kw-2">&amp;</span>E) -&gt; bool {
-<a href=#295 id=295 data-nosnippet>295</a>    <span class="kw">let </span>msg = err.to_string();
-<a href=#296 id=296 data-nosnippet>296</a>    msg.contains(<span class="string">"failed transaction"</span>) || msg.contains(<span class="string">"Failed to commit transaction"</span>)
-<a href=#297 id=297 data-nosnippet>297</a>}
-<a href=#298 id=298 data-nosnippet>298</a>
-<a href=#299 id=299 data-nosnippet>299</a><span class="kw">pub fn </span>take_first_or_not_found&lt;T&gt;(items: Vec&lt;T&gt;, entity: <span class="kw-2">&amp;</span>str, id: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;T, DbError&gt; {
-<a href=#300 id=300 data-nosnippet>300</a>    items.into_iter().next().ok_or_else(|| DbError::NotFound {
-<a href=#301 id=301 data-nosnippet>301</a>        entity: entity.to_string(),
-<a href=#302 id=302 data-nosnippet>302</a>        id: id.to_string(),
-<a href=#303 id=303 data-nosnippet>303</a>    })
-<a href=#304 id=304 data-nosnippet>304</a>}
-<a href=#305 id=305 data-nosnippet>305</a>
-<a href=#306 id=306 data-nosnippet>306</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#307 id=307 data-nosnippet>307</a>// paginate — shared PaginatedResult&lt;T&gt; construction (QUAL-02/CQ-B10)
-<a href=#308 id=308 data-nosnippet>308</a>// ---------------------------------------------------------------------------
-<a href=#309 id=309 data-nosnippet>309</a>
-<a href=#310 id=310 data-nosnippet>310</a></span><span class="doccomment">/// Assemble a [`PaginatedResult&lt;T&gt;`] from already-fetched `items`, the
-<a href=#311 id=311 data-nosnippet>311</a>/// `count_rows` from a `SELECT count() AS total ... GROUP ALL` query, and the
-<a href=#312 id=312 data-nosnippet>312</a>/// `pagination` window that was applied to the data query.
-<a href=#313 id=313 data-nosnippet>313</a>///
-<a href=#314 id=314 data-nosnippet>314</a>/// Replaces the `let total = count_rows.first().map(|r| r.total).unwrap_or(0);
-<a href=#315 id=315 data-nosnippet>315</a>/// Ok(PaginatedResult { items, total, offset, limit })` tail duplicated across
-<a href=#316 id=316 data-nosnippet>316</a>/// every repo's list method (CQ-B10).
-<a href=#317 id=317 data-nosnippet>317</a></span><span class="kw">pub fn </span>paginate&lt;T&gt;(
-<a href=#318 id=318 data-nosnippet>318</a>    items: Vec&lt;T&gt;,
-<a href=#319 id=319 data-nosnippet>319</a>    count_rows: Vec&lt;CountRow&gt;,
-<a href=#320 id=320 data-nosnippet>320</a>    pagination: <span class="kw-2">&amp;</span>Pagination,
-<a href=#321 id=321 data-nosnippet>321</a>) -&gt; PaginatedResult&lt;T&gt; {
-<a href=#322 id=322 data-nosnippet>322</a>    <span class="kw">let </span>total = count_rows.first().map(|r| r.total).unwrap_or(<span class="number">0</span>);
-<a href=#323 id=323 data-nosnippet>323</a>    PaginatedResult {
-<a href=#324 id=324 data-nosnippet>324</a>        items,
-<a href=#325 id=325 data-nosnippet>325</a>        total,
-<a href=#326 id=326 data-nosnippet>326</a>        offset: pagination.offset,
-<a href=#327 id=327 data-nosnippet>327</a>        limit: pagination.limit,
-<a href=#328 id=328 data-nosnippet>328</a>    }
-<a href=#329 id=329 data-nosnippet>329</a>}
-<a href=#330 id=330 data-nosnippet>330</a>
-<a href=#331 id=331 data-nosnippet>331</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#332 id=332 data-nosnippet>332</a>// Free-text search
-<a href=#333 id=333 data-nosnippet>333</a>// ---------------------------------------------------------------------------
-<a href=#334 id=334 data-nosnippet>334</a>
-<a href=#335 id=335 data-nosnippet>335</a></span><span class="doccomment">/// The SurrealQL fragment that narrows a list query to [`Pagination::search`].
-<a href=#336 id=336 data-nosnippet>336</a>///
-<a href=#337 id=337 data-nosnippet>337</a>/// Returns a clause to splice in after an existing `WHERE`, beginning with
-<a href=#338 id=338 data-nosnippet>338</a>/// ` AND ` and empty when no term was given — so a caller concatenates it
-<a href=#339 id=339 data-nosnippet>339</a>/// unconditionally and a list with no search runs exactly the query it ran
-<a href=#340 id=340 data-nosnippet>340</a>/// before this existed.
-<a href=#341 id=341 data-nosnippet>341</a>///
-<a href=#342 id=342 data-nosnippet>342</a>/// # The binding is unconditional
-<a href=#343 id=343 data-nosnippet>343</a>///
-<a href=#344 id=344 data-nosnippet>344</a>/// `$search` is always bound (to the empty string when there is no term), even
-<a href=#345 id=345 data-nosnippet>345</a>/// though the clause that reads it is then absent. The alternative — binding
-<a href=#346 id=346 data-nosnippet>346</a>/// only when the clause is present — makes every call site a branch, and a
-<a href=#347 id=347 data-nosnippet>347</a>/// caller that got the branch wrong would fail at runtime on a query variant
-<a href=#348 id=348 data-nosnippet>348</a>/// nobody runs locally. An unused binding costs nothing.
-<a href=#349 id=349 data-nosnippet>349</a>///
-<a href=#350 id=350 data-nosnippet>350</a>/// # Why `CONTAINS` and not an index
-<a href=#351 id=351 data-nosnippet>351</a>///
-<a href=#352 id=352 data-nosnippet>352</a>/// A substring match over a tenant's rows, which is what an operator typing
-<a href=#353 id=353 data-nosnippet>353</a>/// into a box means. It is not indexed, and the honest reason is that the
-<a href=#354 id=354 data-nosnippet>354</a>/// alternative — SurrealDB's full-text search — tokenises, so `01a03efd` would
-<a href=#355 id=355 data-nosnippet>355</a>/// not match `device-01_01a03efd-…` and pasting an id from a log line would
-<a href=#356 id=356 data-nosnippet>356</a>/// silently find nothing. That is the search operators actually perform. The
-<a href=#357 id=357 data-nosnippet>357</a>/// term is length-capped at deserialization (see `normalize_search`) so the
-<a href=#358 id=358 data-nosnippet>358</a>/// scan is bounded.
-<a href=#359 id=359 data-nosnippet>359</a>///
-<a href=#360 id=360 data-nosnippet>360</a>/// Both sides are lowercased: the caller's term by
-<a href=#361 id=361 data-nosnippet>361</a>/// [`Pagination::search_term`], the column by `string::lowercase` here.
+<a href=#266 id=266 data-nosnippet>266</a>/// A UNIQUE violation here is not an error condition — it is the answer. The
+<a href=#267 id=267 data-nosnippet>267</a>/// row was already present, so the assertion / nonce / proof `jti` being
+<a href=#268 id=268 data-nosnippet>268</a>/// inserted has been seen before, and the caller must refuse it. Anything else
+<a href=#269 id=269 data-nosnippet>269</a>/// is a real datastore failure and propagates as [`AxiamError::Database`], so
+<a href=#270 id=270 data-nosnippet>270</a>/// an outage surfaces as a 5xx rather than as a silent "replay detected" that
+<a href=#271 id=271 data-nosnippet>271</a>/// would refuse legitimate traffic.
+<a href=#272 id=272 data-nosnippet>272</a>///
+<a href=#273 id=273 data-nosnippet>273</a>/// Used by all three replay repositories (`saml_replay`, `amqp_nonce_replay`,
+<a href=#274 id=274 data-nosnippet>274</a>/// `oauth2_proof_replay`), which is the point: there is one definition of what
+<a href=#275 id=275 data-nosnippet>275</a>/// a replay looks like.
+<a href=#276 id=276 data-nosnippet>276</a></span><span class="kw">pub fn </span>classify_replay_write_error&lt;E: std::fmt::Display&gt;(err: E) -&gt; AxiamError {
+<a href=#277 id=277 data-nosnippet>277</a>    <span class="kw">let </span>msg = err.to_string();
+<a href=#278 id=278 data-nosnippet>278</a>    <span class="kw">if </span>is_unique_violation(<span class="kw-2">&amp;</span>msg) {
+<a href=#279 id=279 data-nosnippet>279</a>        AxiamError::ReplayDetected
+<a href=#280 id=280 data-nosnippet>280</a>    } <span class="kw">else </span>{
+<a href=#281 id=281 data-nosnippet>281</a>        AxiamError::Database(msg)
+<a href=#282 id=282 data-nosnippet>282</a>    }
+<a href=#283 id=283 data-nosnippet>283</a>}
+<a href=#284 id=284 data-nosnippet>284</a>
+<a href=#285 id=285 data-nosnippet>285</a><span class="doccomment">/// Classify a failed `CREATE` where a UNIQUE violation means "already taken".
+<a href=#286 id=286 data-nosnippet>286</a>///
+<a href=#287 id=287 data-nosnippet>287</a>/// The [`AxiamError`]-returning counterpart to [`classify_write_error`], for
+<a href=#288 id=288 data-nosnippet>288</a>/// the write paths that build an `AxiamError` directly rather than a
+<a href=#289 id=289 data-nosnippet>289</a>/// [`DbError`]. `entity` names what collided and reaches the client in the
+<a href=#290 id=290 data-nosnippet>290</a>/// 409 body, so it should identify the constrained thing
+<a href=#291 id=291 data-nosnippet>291</a>/// (`"federation_login_state.state"`), not merely the table.
+<a href=#292 id=292 data-nosnippet>292</a></span><span class="kw">pub fn </span>classify_conflict_write_error&lt;E: std::fmt::Display&gt;(err: E, entity: <span class="kw-2">&amp;</span>str) -&gt; AxiamError {
+<a href=#293 id=293 data-nosnippet>293</a>    <span class="kw">let </span>msg = err.to_string();
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="kw">if </span>is_unique_violation(<span class="kw-2">&amp;</span>msg) {
+<a href=#295 id=295 data-nosnippet>295</a>        AxiamError::AlreadyExists {
+<a href=#296 id=296 data-nosnippet>296</a>            entity: entity.to_string(),
+<a href=#297 id=297 data-nosnippet>297</a>        }
+<a href=#298 id=298 data-nosnippet>298</a>    } <span class="kw">else </span>{
+<a href=#299 id=299 data-nosnippet>299</a>        AxiamError::Database(msg)
+<a href=#300 id=300 data-nosnippet>300</a>    }
+<a href=#301 id=301 data-nosnippet>301</a>}
+<a href=#302 id=302 data-nosnippet>302</a>
+<a href=#303 id=303 data-nosnippet>303</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#304 id=304 data-nosnippet>304</a>// cleanup_expired_rows — one sweep for every replay-guard table (F5)
+<a href=#305 id=305 data-nosnippet>305</a>// ---------------------------------------------------------------------------
+<a href=#306 id=306 data-nosnippet>306</a>
+<a href=#307 id=307 data-nosnippet>307</a></span><span class="doccomment">/// Count and then delete every row of `table` whose `expires_at` has passed,
+<a href=#308 id=308 data-nosnippet>308</a>/// returning how many were removed.
+<a href=#309 id=309 data-nosnippet>309</a>///
+<a href=#310 id=310 data-nosnippet>310</a>/// The three replay tables carried a byte-identical copy of this, differing
+<a href=#311 id=311 data-nosnippet>311</a>/// only in the table name. It is not security-critical the way
+<a href=#312 id=312 data-nosnippet>312</a>/// [`classify_replay_write_error`] is — a sweep that under-deletes leaves rows
+<a href=#313 id=313 data-nosnippet>313</a>/// that only cost space, and the UNIQUE index keeps doing its job either way —
+<a href=#314 id=314 data-nosnippet>314</a>/// but three copies of one query is three places to fix when the count and the
+<a href=#315 id=315 data-nosnippet>315</a>/// delete need to become one statement.
+<a href=#316 id=316 data-nosnippet>316</a>///
+<a href=#317 id=317 data-nosnippet>317</a>/// `table` is interpolated into the query rather than bound, because SurrealDB
+<a href=#318 id=318 data-nosnippet>318</a>/// has no bind form for a table name. It is therefore **never** caller- or
+<a href=#319 id=319 data-nosnippet>319</a>/// request-derived: every call site passes a `&amp;'static str` literal naming one
+<a href=#320 id=320 data-nosnippet>320</a>/// of this crate's own tables.
+<a href=#321 id=321 data-nosnippet>321</a></span><span class="kw">pub async fn </span>cleanup_expired_rows&lt;C: Connection&gt;(
+<a href=#322 id=322 data-nosnippet>322</a>    db: <span class="kw-2">&amp;</span><span class="kw">crate</span>::handle::DbHandle&lt;C&gt;,
+<a href=#323 id=323 data-nosnippet>323</a>    table: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#324 id=324 data-nosnippet>324</a>) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#325 id=325 data-nosnippet>325</a>    <span class="kw">let </span><span class="kw-2">mut </span>count_result = db
+<a href=#326 id=326 data-nosnippet>326</a>        .current()
+<a href=#327 id=327 data-nosnippet>327</a>        .query(<span class="macro">format!</span>(
+<a href=#328 id=328 data-nosnippet>328</a>            <span class="string">"SELECT count() AS total FROM {table} \
+<a href=#329 id=329 data-nosnippet>329</a>             WHERE expires_at &lt; time::now() GROUP ALL"
+<a href=#330 id=330 data-nosnippet>330</a>        </span>))
+<a href=#331 id=331 data-nosnippet>331</a>        .<span class="kw">await
+<a href=#332 id=332 data-nosnippet>332</a>        </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#333 id=333 data-nosnippet>333</a>
+<a href=#334 id=334 data-nosnippet>334</a>    <span class="kw">let </span>count_rows: Vec&lt;CountRow&gt; = count_result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#335 id=335 data-nosnippet>335</a>    <span class="kw">let </span>total = count_rows.first().map(|r| r.total).unwrap_or(<span class="number">0</span>);
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a>    db.current()
+<a href=#338 id=338 data-nosnippet>338</a>        .query(<span class="macro">format!</span>(<span class="string">"DELETE {table} WHERE expires_at &lt; time::now()"</span>))
+<a href=#339 id=339 data-nosnippet>339</a>        .<span class="kw">await
+<a href=#340 id=340 data-nosnippet>340</a>        </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#341 id=341 data-nosnippet>341</a>
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="prelude-val">Ok</span>(total)
+<a href=#343 id=343 data-nosnippet>343</a>}
+<a href=#344 id=344 data-nosnippet>344</a>
+<a href=#345 id=345 data-nosnippet>345</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#346 id=346 data-nosnippet>346</a>// take_first_or_not_found — unified "0 rows → NotFound" helper
+<a href=#347 id=347 data-nosnippet>347</a>// ---------------------------------------------------------------------------
+<a href=#348 id=348 data-nosnippet>348</a>
+<a href=#349 id=349 data-nosnippet>349</a></span><span class="doccomment">/// Take the first element of `items` or return `DbError::NotFound`.
+<a href=#350 id=350 data-nosnippet>350</a>///
+<a href=#351 id=351 data-nosnippet>351</a>/// Replaces the `into_iter().next().ok_or_else(|| DbError::NotFound{…})`
+<a href=#352 id=352 data-nosnippet>352</a>/// pattern repeated in every `get_by_id` / find method.
+<a href=#353 id=353 data-nosnippet>353</a>/// Whether a SurrealDB error is a write-write transaction conflict.
+<a href=#354 id=354 data-nosnippet>354</a>///
+<a href=#355 id=355 data-nosnippet>355</a>/// # Why this exists
+<a href=#356 id=356 data-nosnippet>356</a>///
+<a href=#357 id=357 data-nosnippet>357</a>/// A multi-statement query (`LET $x = (UPDATE ...); SELECT ... FROM $x`) is
+<a href=#358 id=358 data-nosnippet>358</a>/// **not** atomic in SurrealDB — each statement runs in its own transaction —
+<a href=#359 id=359 data-nosnippet>359</a>/// so a single-use `UPDATE ... WHERE consumed = false` guard does not
+<a href=#360 id=360 data-nosnippet>360</a>/// serialise concurrent callers on its own. Measured: eight concurrent
+<a href=#361 id=361 data-nosnippet>361</a>/// redemptions of one row, up to four of them "winning".
 <a href=#362 id=362 data-nosnippet>362</a>///
-<a href=#363 id=363 data-nosnippet>363</a>/// # Matching the record id
-<a href=#364 id=364 data-nosnippet>364</a>///
-<a href=#365 id=365 data-nosnippet>365</a>/// `meta::id(id)` is always searched in addition to `fields`, so the id an
-<a href=#366 id=366 data-nosnippet>366</a>/// operator copied out of a log line, an audit entry or a URL finds its row
-<a href=#367 id=367 data-nosnippet>367</a>/// in the same box as a name. It is compared unlowercased — a UUID has no
-<a href=#368 id=368 data-nosnippet>368</a>/// case — via a separate disjunct.
-<a href=#369 id=369 data-nosnippet>369</a></span><span class="kw">pub fn </span>search_clause(fields: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str]) -&gt; String {
-<a href=#370 id=370 data-nosnippet>370</a>    <span class="kw">let </span><span class="kw-2">mut </span>disjuncts: Vec&lt;String&gt; = fields
-<a href=#371 id=371 data-nosnippet>371</a>        .iter()
-<a href=#372 id=372 data-nosnippet>372</a>        .map(|f| <span class="macro">format!</span>(<span class="string">"string::lowercase({f} ?? '') CONTAINS $search"</span>))
-<a href=#373 id=373 data-nosnippet>373</a>        .collect();
-<a href=#374 id=374 data-nosnippet>374</a>    disjuncts.push(<span class="string">"meta::id(id) CONTAINS $search"</span>.to_string());
-<a href=#375 id=375 data-nosnippet>375</a>    <span class="macro">format!</span>(<span class="string">" AND ({})"</span>, disjuncts.join(<span class="string">" OR "</span>))
-<a href=#376 id=376 data-nosnippet>376</a>}
-<a href=#377 id=377 data-nosnippet>377</a>
-<a href=#378 id=378 data-nosnippet>378</a><span class="doccomment">/// [`search_clause`] when `pagination` carries a term, otherwise empty.
-<a href=#379 id=379 data-nosnippet>379</a></span><span class="kw">pub fn </span>search_filter(pagination: <span class="kw-2">&amp;</span>Pagination, fields: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str]) -&gt; String {
-<a href=#380 id=380 data-nosnippet>380</a>    <span class="kw">if </span>pagination.search_term().is_some() {
-<a href=#381 id=381 data-nosnippet>381</a>        search_clause(fields)
-<a href=#382 id=382 data-nosnippet>382</a>    } <span class="kw">else </span>{
-<a href=#383 id=383 data-nosnippet>383</a>        String::new()
-<a href=#384 id=384 data-nosnippet>384</a>    }
-<a href=#385 id=385 data-nosnippet>385</a>}
-<a href=#386 id=386 data-nosnippet>386</a>
-<a href=#387 id=387 data-nosnippet>387</a><span class="doccomment">/// The value to bind to `$search` — lowercased, or empty when unsearched.
-<a href=#388 id=388 data-nosnippet>388</a></span><span class="kw">pub fn </span>search_bind(pagination: <span class="kw-2">&amp;</span>Pagination) -&gt; String {
-<a href=#389 id=389 data-nosnippet>389</a>    pagination.search_term().unwrap_or_default()
-<a href=#390 id=390 data-nosnippet>390</a>}
-<a href=#391 id=391 data-nosnippet>391</a>
-<a href=#392 id=392 data-nosnippet>392</a><span class="attr">#[cfg(test)]
-<a href=#393 id=393 data-nosnippet>393</a></span><span class="kw">mod </span>search_tests {
-<a href=#394 id=394 data-nosnippet>394</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#395 id=395 data-nosnippet>395</a>
-<a href=#396 id=396 data-nosnippet>396</a>    <span class="kw">fn </span>paged(search: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;) -&gt; Pagination {
-<a href=#397 id=397 data-nosnippet>397</a>        Pagination {
-<a href=#398 id=398 data-nosnippet>398</a>            offset: <span class="number">0</span>,
-<a href=#399 id=399 data-nosnippet>399</a>            limit: <span class="number">50</span>,
-<a href=#400 id=400 data-nosnippet>400</a>            search: search.map(str::to_string),
-<a href=#401 id=401 data-nosnippet>401</a>        }
-<a href=#402 id=402 data-nosnippet>402</a>    }
-<a href=#403 id=403 data-nosnippet>403</a>
-<a href=#404 id=404 data-nosnippet>404</a>    <span class="attr">#[test]
-<a href=#405 id=405 data-nosnippet>405</a>    </span><span class="kw">fn </span>a_whitespace_only_term_is_no_term() {
-<a href=#406 id=406 data-nosnippet>406</a>        <span class="comment">// `normalize_search` catches this on the serde path, but a `Pagination`
-<a href=#407 id=407 data-nosnippet>407</a>        // built in code bypasses it — and `Some("   ")` would otherwise ask for
-<a href=#408 id=408 data-nosnippet>408</a>        // rows containing three spaces, returning nothing while looking like a
-<a href=#409 id=409 data-nosnippet>409</a>        // working filter.
-<a href=#410 id=410 data-nosnippet>410</a>        </span><span class="macro">assert_eq!</span>(search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"   "</span>)), <span class="kw-2">&amp;</span>[<span class="string">"name"</span>]), <span class="string">""</span>);
-<a href=#411 id=411 data-nosnippet>411</a>        <span class="macro">assert_eq!</span>(search_bind(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"   "</span>))), <span class="string">""</span>);
-<a href=#412 id=412 data-nosnippet>412</a>    }
-<a href=#413 id=413 data-nosnippet>413</a>
-<a href=#414 id=414 data-nosnippet>414</a>    <span class="attr">#[test]
-<a href=#415 id=415 data-nosnippet>415</a>    </span><span class="kw">fn </span>a_term_is_trimmed_before_matching() {
-<a href=#416 id=416 data-nosnippet>416</a>        <span class="comment">// Pasting an id out of a log line brings whitespace with it.
-<a href=#417 id=417 data-nosnippet>417</a>        </span><span class="macro">assert_eq!</span>(search_bind(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"  Admin \n"</span>))), <span class="string">"admin"</span>);
-<a href=#418 id=418 data-nosnippet>418</a>    }
-<a href=#419 id=419 data-nosnippet>419</a>
-<a href=#420 id=420 data-nosnippet>420</a>    <span class="attr">#[test]
-<a href=#421 id=421 data-nosnippet>421</a>    </span><span class="kw">fn </span>no_term_produces_no_clause() {
-<a href=#422 id=422 data-nosnippet>422</a>        <span class="comment">// The property that keeps an unsearched list byte-identical to what it
-<a href=#423 id=423 data-nosnippet>423</a>        // was before search existed.
-<a href=#424 id=424 data-nosnippet>424</a>        </span><span class="macro">assert_eq!</span>(search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">None</span>), <span class="kw-2">&amp;</span>[<span class="string">"username"</span>]), <span class="string">""</span>);
-<a href=#425 id=425 data-nosnippet>425</a>        <span class="macro">assert_eq!</span>(search_bind(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">None</span>)), <span class="string">""</span>);
-<a href=#426 id=426 data-nosnippet>426</a>    }
-<a href=#427 id=427 data-nosnippet>427</a>
-<a href=#428 id=428 data-nosnippet>428</a>    <span class="attr">#[test]
-<a href=#429 id=429 data-nosnippet>429</a>    </span><span class="kw">fn </span>a_term_lowercases_both_sides() {
-<a href=#430 id=430 data-nosnippet>430</a>        <span class="kw">let </span>clause = search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"AdMiN"</span>)), <span class="kw-2">&amp;</span>[<span class="string">"username"</span>]);
-<a href=#431 id=431 data-nosnippet>431</a>        <span class="macro">assert!</span>(clause.contains(<span class="string">"string::lowercase(username ?? '')"</span>));
-<a href=#432 id=432 data-nosnippet>432</a>        <span class="macro">assert_eq!</span>(search_bind(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"AdMiN"</span>))), <span class="string">"admin"</span>);
-<a href=#433 id=433 data-nosnippet>433</a>    }
-<a href=#434 id=434 data-nosnippet>434</a>
-<a href=#435 id=435 data-nosnippet>435</a>    <span class="attr">#[test]
-<a href=#436 id=436 data-nosnippet>436</a>    </span><span class="kw">fn </span>the_record_id_is_always_searchable() {
-<a href=#437 id=437 data-nosnippet>437</a>        <span class="comment">// An operator with a UUID from a log line pastes it into the same box
-<a href=#438 id=438 data-nosnippet>438</a>        // as a name; a search that only matched names would find nothing and
-<a href=#439 id=439 data-nosnippet>439</a>        // give no hint why.
-<a href=#440 id=440 data-nosnippet>440</a>        </span><span class="kw">let </span>clause = search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"x"</span>)), <span class="kw-2">&amp;</span>[<span class="string">"name"</span>]);
-<a href=#441 id=441 data-nosnippet>441</a>        <span class="macro">assert!</span>(clause.contains(<span class="string">"meta::id(id) CONTAINS $search"</span>));
-<a href=#442 id=442 data-nosnippet>442</a>    }
-<a href=#443 id=443 data-nosnippet>443</a>
-<a href=#444 id=444 data-nosnippet>444</a>    <span class="attr">#[test]
-<a href=#445 id=445 data-nosnippet>445</a>    </span><span class="kw">fn </span>the_clause_composes_onto_an_existing_where() {
-<a href=#446 id=446 data-nosnippet>446</a>        <span class="comment">// Spliced after `WHERE tenant_id = $tenant_id`, so it has to start with
-<a href=#447 id=447 data-nosnippet>447</a>        // ` AND ` and bracket its own disjunction — without the brackets, one
-<a href=#448 id=448 data-nosnippet>448</a>        // `OR` would escape and match rows in every tenant.
-<a href=#449 id=449 data-nosnippet>449</a>        </span><span class="kw">let </span>clause = search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"x"</span>)), <span class="kw-2">&amp;</span>[<span class="string">"name"</span>, <span class="string">"slug"</span>]);
-<a href=#450 id=450 data-nosnippet>450</a>        <span class="macro">assert!</span>(clause.starts_with(<span class="string">" AND ("</span>));
-<a href=#451 id=451 data-nosnippet>451</a>        <span class="macro">assert!</span>(clause.ends_with(<span class="string">")"</span>));
-<a href=#452 id=452 data-nosnippet>452</a>    }
-<a href=#453 id=453 data-nosnippet>453</a>
-<a href=#454 id=454 data-nosnippet>454</a>    <span class="attr">#[test]
-<a href=#455 id=455 data-nosnippet>455</a>    </span><span class="kw">fn </span>every_named_field_is_searched() {
-<a href=#456 id=456 data-nosnippet>456</a>        <span class="kw">let </span>clause = search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"x"</span>)), <span class="kw-2">&amp;</span>[<span class="string">"username"</span>, <span class="string">"email"</span>]);
-<a href=#457 id=457 data-nosnippet>457</a>        <span class="macro">assert!</span>(clause.contains(<span class="string">"username"</span>));
-<a href=#458 id=458 data-nosnippet>458</a>        <span class="macro">assert!</span>(clause.contains(<span class="string">"email"</span>));
-<a href=#459 id=459 data-nosnippet>459</a>    }
-<a href=#460 id=460 data-nosnippet>460</a>}
-<a href=#461 id=461 data-nosnippet>461</a>
-<a href=#462 id=462 data-nosnippet>462</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#463 id=463 data-nosnippet>463</a>// Delete-target existence guard (SEC-104)
-<a href=#464 id=464 data-nosnippet>464</a>// ---------------------------------------------------------------------------
-<a href=#465 id=465 data-nosnippet>465</a>
-<a href=#466 id=466 data-nosnippet>466</a></span><span class="doccomment">/// The sentinel a delete transaction `THROW`s when its target row does not
-<a href=#467 id=467 data-nosnippet>467</a>/// exist in the caller's tenant (SEC-104).
-<a href=#468 id=468 data-nosnippet>468</a>///
-<a href=#469 id=469 data-nosnippet>469</a>/// Not a human sentence: it is matched, not read, and a message that reads
-<a href=#470 id=470 data-nosnippet>470</a>/// like prose invites someone to reword it.
-<a href=#471 id=471 data-nosnippet>471</a></span><span class="kw">pub const </span>DELETE_TARGET_MISSING: <span class="kw-2">&amp;</span>str = <span class="string">"axiam:delete_target_missing"</span>;
+<a href=#363 id=363 data-nosnippet>363</a>/// Wrapping the statements in `BEGIN`/`COMMIT` makes a persistent datastore
+<a href=#364 id=364 data-nosnippet>364</a>/// detect the conflict and abort every loser with this error — 54% of
+<a href=#365 id=365 data-nosnippet>365</a>/// contended attempts on `surrealkv`, with zero double winners in 40 000
+<a href=#366 id=366 data-nosnippet>366</a>/// (`tools/surreal-race-probe`). That abort is the first of the two layers the
+<a href=#367 id=367 data-nosnippet>367</a>/// three single-use consume paths run since X6 (#302); the second is a nonce
+<a href=#368 id=368 data-nosnippet>368</a>/// read back after the commit, which is why the read-back lives in a query of
+<a href=#369 id=369 data-nosnippet>369</a>/// its own and this error can also surface on that second query.
+<a href=#370 id=370 data-nosnippet>370</a>///
+<a href=#371 id=371 data-nosnippet>371</a>/// For a single-use consume the abort is not a fault — it is the datastore
+<a href=#372 id=372 data-nosnippet>372</a>/// reporting that someone else got there first, which is the answer the caller
+<a href=#373 id=373 data-nosnippet>373</a>/// wanted. Callers translate it to "no row consumed"; propagating it would turn
+<a href=#374 id=374 data-nosnippet>374</a>/// a correctly-refused replay into a 500.
+<a href=#375 id=375 data-nosnippet>375</a>///
+<a href=#376 id=376 data-nosnippet>376</a>/// Matched on the message because the driver surfaces it as an opaque error
+<a href=#377 id=377 data-nosnippet>377</a>/// rather than a typed variant. Deliberately narrow: only a conflict is
+<a href=#378 id=378 data-nosnippet>378</a>/// swallowed, and only into "lost the race" — every other failure propagates.
+<a href=#379 id=379 data-nosnippet>379</a>///
+<a href=#380 id=380 data-nosnippet>380</a>/// # Why this delegates instead of holding its own markers
+<a href=#381 id=381 data-nosnippet>381</a>///
+<a href=#382 id=382 data-nosnippet>382</a>/// It used to match two literals of its own — `"failed transaction"` and
+<a href=#383 id=383 data-nosnippet>383</a>/// `"Failed to commit transaction"` — neither of which appears in the message
+<a href=#384 id=384 data-nosnippet>384</a>/// SurrealDB v3 emits for a contended write. The four callers listed above
+<a href=#385 id=385 data-nosnippet>385</a>/// therefore could not recognise the live phrasing, and answered a refused
+<a href=#386 id=386 data-nosnippet>386</a>/// replay with a 500 rather than with "no row consumed". Both literals are now
+<a href=#387 id=387 data-nosnippet>387</a>/// in [`WRITE_CONFLICT_MARKERS`] alongside the v3 phrasing, and this is a thin
+<a href=#388 id=388 data-nosnippet>388</a>/// `&amp;E`-taking adapter over [`is_write_conflict`] so the two can never again
+<a href=#389 id=389 data-nosnippet>389</a>/// disagree about what a conflict looks like — the exact drift D-09 forbids.
+<a href=#390 id=390 data-nosnippet>390</a></span><span class="kw">pub fn </span>is_transaction_conflict&lt;E: std::fmt::Display&gt;(err: <span class="kw-2">&amp;</span>E) -&gt; bool {
+<a href=#391 id=391 data-nosnippet>391</a>    is_write_conflict(<span class="kw-2">&amp;</span>err.to_string())
+<a href=#392 id=392 data-nosnippet>392</a>}
+<a href=#393 id=393 data-nosnippet>393</a>
+<a href=#394 id=394 data-nosnippet>394</a><span class="kw">pub fn </span>take_first_or_not_found&lt;T&gt;(items: Vec&lt;T&gt;, entity: <span class="kw-2">&amp;</span>str, id: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;T, DbError&gt; {
+<a href=#395 id=395 data-nosnippet>395</a>    items.into_iter().next().ok_or_else(|| DbError::NotFound {
+<a href=#396 id=396 data-nosnippet>396</a>        entity: entity.to_string(),
+<a href=#397 id=397 data-nosnippet>397</a>        id: id.to_string(),
+<a href=#398 id=398 data-nosnippet>398</a>    })
+<a href=#399 id=399 data-nosnippet>399</a>}
+<a href=#400 id=400 data-nosnippet>400</a>
+<a href=#401 id=401 data-nosnippet>401</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#402 id=402 data-nosnippet>402</a>// paginate — shared PaginatedResult&lt;T&gt; construction (QUAL-02/CQ-B10)
+<a href=#403 id=403 data-nosnippet>403</a>// ---------------------------------------------------------------------------
+<a href=#404 id=404 data-nosnippet>404</a>
+<a href=#405 id=405 data-nosnippet>405</a></span><span class="doccomment">/// Assemble a [`PaginatedResult&lt;T&gt;`] from already-fetched `items`, the
+<a href=#406 id=406 data-nosnippet>406</a>/// `count_rows` from a `SELECT count() AS total ... GROUP ALL` query, and the
+<a href=#407 id=407 data-nosnippet>407</a>/// `pagination` window that was applied to the data query.
+<a href=#408 id=408 data-nosnippet>408</a>///
+<a href=#409 id=409 data-nosnippet>409</a>/// Replaces the `let total = count_rows.first().map(|r| r.total).unwrap_or(0);
+<a href=#410 id=410 data-nosnippet>410</a>/// Ok(PaginatedResult { items, total, offset, limit })` tail duplicated across
+<a href=#411 id=411 data-nosnippet>411</a>/// every repo's list method (CQ-B10).
+<a href=#412 id=412 data-nosnippet>412</a></span><span class="kw">pub fn </span>paginate&lt;T&gt;(
+<a href=#413 id=413 data-nosnippet>413</a>    items: Vec&lt;T&gt;,
+<a href=#414 id=414 data-nosnippet>414</a>    count_rows: Vec&lt;CountRow&gt;,
+<a href=#415 id=415 data-nosnippet>415</a>    pagination: <span class="kw-2">&amp;</span>Pagination,
+<a href=#416 id=416 data-nosnippet>416</a>) -&gt; PaginatedResult&lt;T&gt; {
+<a href=#417 id=417 data-nosnippet>417</a>    <span class="kw">let </span>total = count_rows.first().map(|r| r.total).unwrap_or(<span class="number">0</span>);
+<a href=#418 id=418 data-nosnippet>418</a>    PaginatedResult {
+<a href=#419 id=419 data-nosnippet>419</a>        items,
+<a href=#420 id=420 data-nosnippet>420</a>        total,
+<a href=#421 id=421 data-nosnippet>421</a>        offset: pagination.offset,
+<a href=#422 id=422 data-nosnippet>422</a>        limit: pagination.limit,
+<a href=#423 id=423 data-nosnippet>423</a>    }
+<a href=#424 id=424 data-nosnippet>424</a>}
+<a href=#425 id=425 data-nosnippet>425</a>
+<a href=#426 id=426 data-nosnippet>426</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#427 id=427 data-nosnippet>427</a>// Free-text search
+<a href=#428 id=428 data-nosnippet>428</a>// ---------------------------------------------------------------------------
+<a href=#429 id=429 data-nosnippet>429</a>
+<a href=#430 id=430 data-nosnippet>430</a></span><span class="doccomment">/// The SurrealQL fragment that narrows a list query to [`Pagination::search`].
+<a href=#431 id=431 data-nosnippet>431</a>///
+<a href=#432 id=432 data-nosnippet>432</a>/// Returns a clause to splice in after an existing `WHERE`, beginning with
+<a href=#433 id=433 data-nosnippet>433</a>/// ` AND ` and empty when no term was given — so a caller concatenates it
+<a href=#434 id=434 data-nosnippet>434</a>/// unconditionally and a list with no search runs exactly the query it ran
+<a href=#435 id=435 data-nosnippet>435</a>/// before this existed.
+<a href=#436 id=436 data-nosnippet>436</a>///
+<a href=#437 id=437 data-nosnippet>437</a>/// # The binding is unconditional
+<a href=#438 id=438 data-nosnippet>438</a>///
+<a href=#439 id=439 data-nosnippet>439</a>/// `$search` is always bound (to the empty string when there is no term), even
+<a href=#440 id=440 data-nosnippet>440</a>/// though the clause that reads it is then absent. The alternative — binding
+<a href=#441 id=441 data-nosnippet>441</a>/// only when the clause is present — makes every call site a branch, and a
+<a href=#442 id=442 data-nosnippet>442</a>/// caller that got the branch wrong would fail at runtime on a query variant
+<a href=#443 id=443 data-nosnippet>443</a>/// nobody runs locally. An unused binding costs nothing.
+<a href=#444 id=444 data-nosnippet>444</a>///
+<a href=#445 id=445 data-nosnippet>445</a>/// # Why `CONTAINS` and not an index
+<a href=#446 id=446 data-nosnippet>446</a>///
+<a href=#447 id=447 data-nosnippet>447</a>/// A substring match over a tenant's rows, which is what an operator typing
+<a href=#448 id=448 data-nosnippet>448</a>/// into a box means. It is not indexed, and the honest reason is that the
+<a href=#449 id=449 data-nosnippet>449</a>/// alternative — SurrealDB's full-text search — tokenises, so `01a03efd` would
+<a href=#450 id=450 data-nosnippet>450</a>/// not match `device-01_01a03efd-…` and pasting an id from a log line would
+<a href=#451 id=451 data-nosnippet>451</a>/// silently find nothing. That is the search operators actually perform. The
+<a href=#452 id=452 data-nosnippet>452</a>/// term is length-capped at deserialization (see `normalize_search`) so the
+<a href=#453 id=453 data-nosnippet>453</a>/// scan is bounded.
+<a href=#454 id=454 data-nosnippet>454</a>///
+<a href=#455 id=455 data-nosnippet>455</a>/// Both sides are lowercased: the caller's term by
+<a href=#456 id=456 data-nosnippet>456</a>/// [`Pagination::search_term`], the column by `string::lowercase` here.
+<a href=#457 id=457 data-nosnippet>457</a>///
+<a href=#458 id=458 data-nosnippet>458</a>/// # Matching the record id
+<a href=#459 id=459 data-nosnippet>459</a>///
+<a href=#460 id=460 data-nosnippet>460</a>/// `meta::id(id)` is always searched in addition to `fields`, so the id an
+<a href=#461 id=461 data-nosnippet>461</a>/// operator copied out of a log line, an audit entry or a URL finds its row
+<a href=#462 id=462 data-nosnippet>462</a>/// in the same box as a name. It is compared unlowercased — a UUID has no
+<a href=#463 id=463 data-nosnippet>463</a>/// case — via a separate disjunct.
+<a href=#464 id=464 data-nosnippet>464</a></span><span class="kw">pub fn </span>search_clause(fields: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str]) -&gt; String {
+<a href=#465 id=465 data-nosnippet>465</a>    <span class="kw">let </span><span class="kw-2">mut </span>disjuncts: Vec&lt;String&gt; = fields
+<a href=#466 id=466 data-nosnippet>466</a>        .iter()
+<a href=#467 id=467 data-nosnippet>467</a>        .map(|f| <span class="macro">format!</span>(<span class="string">"string::lowercase({f} ?? '') CONTAINS $search"</span>))
+<a href=#468 id=468 data-nosnippet>468</a>        .collect();
+<a href=#469 id=469 data-nosnippet>469</a>    disjuncts.push(<span class="string">"meta::id(id) CONTAINS $search"</span>.to_string());
+<a href=#470 id=470 data-nosnippet>470</a>    <span class="macro">format!</span>(<span class="string">" AND ({})"</span>, disjuncts.join(<span class="string">" OR "</span>))
+<a href=#471 id=471 data-nosnippet>471</a>}
 <a href=#472 id=472 data-nosnippet>472</a>
-<a href=#473 id=473 data-nosnippet>473</a><span class="doccomment">/// The first statement of a delete transaction: abort unless the target row
-<a href=#474 id=474 data-nosnippet>474</a>/// exists **in this tenant** (SEC-104).
-<a href=#475 id=475 data-nosnippet>475</a>///
-<a href=#476 id=476 data-nosnippet>476</a>/// # Why the guard rather than inspecting the DELETE's result
-<a href=#477 id=477 data-nosnippet>477</a>///
-<a href=#478 id=478 data-nosnippet>478</a>/// Five repositories (`group`, `role`, `resource`, `permission`,
-<a href=#479 id=479 data-nosnippet>479</a>/// `service_account`) delete a record plus its edges inside one transaction and
-<a href=#480 id=480 data-nosnippet>480</a>/// returned `Ok(())` without looking at whether anything matched. The
-<a href=#481 id=481 data-nosnippet>481</a>/// `WHERE tenant_id = $tenant_id` predicate was — and is — correct, so no other
-<a href=#482 id=482 data-nosnippet>482</a>/// tenant's data was ever touched, and because the answer was a uniform 204 for
-<a href=#483 id=483 data-nosnippet>483</a>/// a foreign id, an unknown id and a real one, it was not an existence oracle
-<a href=#484 id=484 data-nosnippet>484</a>/// either. What it cost is an administrator who deletes the wrong id, is told
-<a href=#485 id=485 data-nosnippet>485</a>/// it worked, and believes the group is gone. `user` and `webhook` already got
-<a href=#486 id=486 data-nosnippet>486</a>/// this right with `RETURN BEFORE` + an empty-row check; this makes the other
-<a href=#487 id=487 data-nosnippet>487</a>/// five agree, in the repository, so `axiam-scim`'s hand-written pre-check can
-<a href=#488 id=488 data-nosnippet>488</a>/// be deleted rather than recopied for every future resource type.
-<a href=#489 id=489 data-nosnippet>489</a>///
-<a href=#490 id=490 data-nosnippet>490</a>/// Placing the check **inside** the transaction, as its first statement, is
-<a href=#491 id=491 data-nosnippet>491</a>/// what makes it more than a pre-check: a `THROW` aborts, so a delete against
-<a href=#492 id=492 data-nosnippet>492</a>/// a missing record leaves the edge deletes unexecuted too, rather than
-<a href=#493 id=493 data-nosnippet>493</a>/// stripping edges belonging to nothing and then reporting failure.
-<a href=#494 id=494 data-nosnippet>494</a>///
-<a href=#495 id=495 data-nosnippet>495</a>/// `table` is a literal table name from the calling repository, never caller
-<a href=#496 id=496 data-nosnippet>496</a>/// input; `$id` and `$tenant_id` are bound parameters.
-<a href=#497 id=497 data-nosnippet>497</a></span><span class="kw">pub fn </span>delete_existence_guard(table: <span class="kw-2">&amp;</span>str) -&gt; String {
-<a href=#498 id=498 data-nosnippet>498</a>    <span class="macro">format!</span>(
-<a href=#499 id=499 data-nosnippet>499</a>        <span class="string">"LET $existing = (SELECT VALUE id FROM type::record('{table}', $id) \
-<a href=#500 id=500 data-nosnippet>500</a>           WHERE tenant_id = $tenant_id); \
-<a href=#501 id=501 data-nosnippet>501</a>         IF array::len($existing) == 0 {{ THROW '{DELETE_TARGET_MISSING}'; }};"
-<a href=#502 id=502 data-nosnippet>502</a>    </span>)
-<a href=#503 id=503 data-nosnippet>503</a>}
-<a href=#504 id=504 data-nosnippet>504</a>
-<a href=#505 id=505 data-nosnippet>505</a><span class="doccomment">/// Turn a delete transaction's statement errors into the right [`DbError`]
-<a href=#506 id=506 data-nosnippet>506</a>/// (SEC-104).
-<a href=#507 id=507 data-nosnippet>507</a>///
-<a href=#508 id=508 data-nosnippet>508</a>/// Scans **every** statement's error rather than trusting `Response::check()`,
-<a href=#509 id=509 data-nosnippet>509</a>/// for the reason `resource::delete` already documents: a `THROW` fires on its
-<a href=#510 id=510 data-nosnippet>510</a>/// own slot while the trailing statements report the generic "not executed due
-<a href=#511 id=511 data-nosnippet>511</a>/// to a failed transaction", and `check()` can surface one of those instead —
-<a href=#512 id=512 data-nosnippet>512</a>/// which would silently downgrade a precise `404` into an opaque `500`.
-<a href=#513 id=513 data-nosnippet>513</a>///
-<a href=#514 id=514 data-nosnippet>514</a>/// `extra` lets a repository claim a `THROW` of its own (`resource`'s
-<a href=#515 id=515 data-nosnippet>515</a>/// child-count guard) before the generic mapping runs.
-<a href=#516 id=516 data-nosnippet>516</a></span><span class="kw">pub fn </span>map_delete_errors(
-<a href=#517 id=517 data-nosnippet>517</a>    errors: std::collections::HashMap&lt;usize, surrealdb::Error&gt;,
-<a href=#518 id=518 data-nosnippet>518</a>    entity: <span class="kw-2">&amp;</span>str,
-<a href=#519 id=519 data-nosnippet>519</a>    id: <span class="kw-2">&amp;</span>str,
-<a href=#520 id=520 data-nosnippet>520</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), DbError&gt; {
-<a href=#521 id=521 data-nosnippet>521</a>    <span class="kw">if </span>errors.is_empty() {
-<a href=#522 id=522 data-nosnippet>522</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(());
-<a href=#523 id=523 data-nosnippet>523</a>    }
-<a href=#524 id=524 data-nosnippet>524</a>    <span class="kw">let </span>combined = errors
-<a href=#525 id=525 data-nosnippet>525</a>        .into_values()
-<a href=#526 id=526 data-nosnippet>526</a>        .map(|e| e.to_string())
-<a href=#527 id=527 data-nosnippet>527</a>        .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
-<a href=#528 id=528 data-nosnippet>528</a>        .join(<span class="string">"; "</span>);
-<a href=#529 id=529 data-nosnippet>529</a>    <span class="kw">if </span>combined.contains(DELETE_TARGET_MISSING) {
-<a href=#530 id=530 data-nosnippet>530</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::NotFound {
-<a href=#531 id=531 data-nosnippet>531</a>            entity: entity.to_string(),
-<a href=#532 id=532 data-nosnippet>532</a>            id: id.to_string(),
-<a href=#533 id=533 data-nosnippet>533</a>        });
-<a href=#534 id=534 data-nosnippet>534</a>    }
-<a href=#535 id=535 data-nosnippet>535</a>    <span class="prelude-val">Err</span>(DbError::Migration(combined))
-<a href=#536 id=536 data-nosnippet>536</a>}
-<a href=#537 id=537 data-nosnippet>537</a>
-<a href=#538 id=538 data-nosnippet>538</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#539 id=539 data-nosnippet>539</a>// Unit tests
-<a href=#540 id=540 data-nosnippet>540</a>// ---------------------------------------------------------------------------
-<a href=#541 id=541 data-nosnippet>541</a>
-<a href=#542 id=542 data-nosnippet>542</a></span><span class="attr">#[cfg(test)]
-<a href=#543 id=543 data-nosnippet>543</a></span><span class="kw">mod </span>tests {
-<a href=#544 id=544 data-nosnippet>544</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#545 id=545 data-nosnippet>545</a>
-<a href=#546 id=546 data-nosnippet>546</a>    <span class="comment">// --- parse_uuid ---
-<a href=#547 id=547 data-nosnippet>547</a>
-<a href=#548 id=548 data-nosnippet>548</a>    </span><span class="attr">#[test]
-<a href=#549 id=549 data-nosnippet>549</a>    </span><span class="kw">fn </span>parse_uuid_valid_returns_ok() {
-<a href=#550 id=550 data-nosnippet>550</a>        <span class="kw">let </span>raw = <span class="string">"550e8400-e29b-41d4-a716-446655440000"</span>;
-<a href=#551 id=551 data-nosnippet>551</a>        <span class="kw">let </span>result = parse_uuid(raw, <span class="string">"user_id"</span>);
-<a href=#552 id=552 data-nosnippet>552</a>        <span class="macro">assert!</span>(result.is_ok(), <span class="string">"expected Ok for a valid UUID string"</span>);
-<a href=#553 id=553 data-nosnippet>553</a>        <span class="macro">assert_eq!</span>(result.unwrap().to_string(), raw);
+<a href=#473 id=473 data-nosnippet>473</a><span class="doccomment">/// [`search_clause`] when `pagination` carries a term, otherwise empty.
+<a href=#474 id=474 data-nosnippet>474</a></span><span class="kw">pub fn </span>search_filter(pagination: <span class="kw-2">&amp;</span>Pagination, fields: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str]) -&gt; String {
+<a href=#475 id=475 data-nosnippet>475</a>    <span class="kw">if </span>pagination.search_term().is_some() {
+<a href=#476 id=476 data-nosnippet>476</a>        search_clause(fields)
+<a href=#477 id=477 data-nosnippet>477</a>    } <span class="kw">else </span>{
+<a href=#478 id=478 data-nosnippet>478</a>        String::new()
+<a href=#479 id=479 data-nosnippet>479</a>    }
+<a href=#480 id=480 data-nosnippet>480</a>}
+<a href=#481 id=481 data-nosnippet>481</a>
+<a href=#482 id=482 data-nosnippet>482</a><span class="doccomment">/// The value to bind to `$search` — lowercased, or empty when unsearched.
+<a href=#483 id=483 data-nosnippet>483</a></span><span class="kw">pub fn </span>search_bind(pagination: <span class="kw-2">&amp;</span>Pagination) -&gt; String {
+<a href=#484 id=484 data-nosnippet>484</a>    pagination.search_term().unwrap_or_default()
+<a href=#485 id=485 data-nosnippet>485</a>}
+<a href=#486 id=486 data-nosnippet>486</a>
+<a href=#487 id=487 data-nosnippet>487</a><span class="attr">#[cfg(test)]
+<a href=#488 id=488 data-nosnippet>488</a></span><span class="kw">mod </span>search_tests {
+<a href=#489 id=489 data-nosnippet>489</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#490 id=490 data-nosnippet>490</a>
+<a href=#491 id=491 data-nosnippet>491</a>    <span class="kw">fn </span>paged(search: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;) -&gt; Pagination {
+<a href=#492 id=492 data-nosnippet>492</a>        Pagination {
+<a href=#493 id=493 data-nosnippet>493</a>            offset: <span class="number">0</span>,
+<a href=#494 id=494 data-nosnippet>494</a>            limit: <span class="number">50</span>,
+<a href=#495 id=495 data-nosnippet>495</a>            search: search.map(str::to_string),
+<a href=#496 id=496 data-nosnippet>496</a>        }
+<a href=#497 id=497 data-nosnippet>497</a>    }
+<a href=#498 id=498 data-nosnippet>498</a>
+<a href=#499 id=499 data-nosnippet>499</a>    <span class="attr">#[test]
+<a href=#500 id=500 data-nosnippet>500</a>    </span><span class="kw">fn </span>a_whitespace_only_term_is_no_term() {
+<a href=#501 id=501 data-nosnippet>501</a>        <span class="comment">// `normalize_search` catches this on the serde path, but a `Pagination`
+<a href=#502 id=502 data-nosnippet>502</a>        // built in code bypasses it — and `Some("   ")` would otherwise ask for
+<a href=#503 id=503 data-nosnippet>503</a>        // rows containing three spaces, returning nothing while looking like a
+<a href=#504 id=504 data-nosnippet>504</a>        // working filter.
+<a href=#505 id=505 data-nosnippet>505</a>        </span><span class="macro">assert_eq!</span>(search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"   "</span>)), <span class="kw-2">&amp;</span>[<span class="string">"name"</span>]), <span class="string">""</span>);
+<a href=#506 id=506 data-nosnippet>506</a>        <span class="macro">assert_eq!</span>(search_bind(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"   "</span>))), <span class="string">""</span>);
+<a href=#507 id=507 data-nosnippet>507</a>    }
+<a href=#508 id=508 data-nosnippet>508</a>
+<a href=#509 id=509 data-nosnippet>509</a>    <span class="attr">#[test]
+<a href=#510 id=510 data-nosnippet>510</a>    </span><span class="kw">fn </span>a_term_is_trimmed_before_matching() {
+<a href=#511 id=511 data-nosnippet>511</a>        <span class="comment">// Pasting an id out of a log line brings whitespace with it.
+<a href=#512 id=512 data-nosnippet>512</a>        </span><span class="macro">assert_eq!</span>(search_bind(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"  Admin \n"</span>))), <span class="string">"admin"</span>);
+<a href=#513 id=513 data-nosnippet>513</a>    }
+<a href=#514 id=514 data-nosnippet>514</a>
+<a href=#515 id=515 data-nosnippet>515</a>    <span class="attr">#[test]
+<a href=#516 id=516 data-nosnippet>516</a>    </span><span class="kw">fn </span>no_term_produces_no_clause() {
+<a href=#517 id=517 data-nosnippet>517</a>        <span class="comment">// The property that keeps an unsearched list byte-identical to what it
+<a href=#518 id=518 data-nosnippet>518</a>        // was before search existed.
+<a href=#519 id=519 data-nosnippet>519</a>        </span><span class="macro">assert_eq!</span>(search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">None</span>), <span class="kw-2">&amp;</span>[<span class="string">"username"</span>]), <span class="string">""</span>);
+<a href=#520 id=520 data-nosnippet>520</a>        <span class="macro">assert_eq!</span>(search_bind(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">None</span>)), <span class="string">""</span>);
+<a href=#521 id=521 data-nosnippet>521</a>    }
+<a href=#522 id=522 data-nosnippet>522</a>
+<a href=#523 id=523 data-nosnippet>523</a>    <span class="attr">#[test]
+<a href=#524 id=524 data-nosnippet>524</a>    </span><span class="kw">fn </span>a_term_lowercases_both_sides() {
+<a href=#525 id=525 data-nosnippet>525</a>        <span class="kw">let </span>clause = search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"AdMiN"</span>)), <span class="kw-2">&amp;</span>[<span class="string">"username"</span>]);
+<a href=#526 id=526 data-nosnippet>526</a>        <span class="macro">assert!</span>(clause.contains(<span class="string">"string::lowercase(username ?? '')"</span>));
+<a href=#527 id=527 data-nosnippet>527</a>        <span class="macro">assert_eq!</span>(search_bind(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"AdMiN"</span>))), <span class="string">"admin"</span>);
+<a href=#528 id=528 data-nosnippet>528</a>    }
+<a href=#529 id=529 data-nosnippet>529</a>
+<a href=#530 id=530 data-nosnippet>530</a>    <span class="attr">#[test]
+<a href=#531 id=531 data-nosnippet>531</a>    </span><span class="kw">fn </span>the_record_id_is_always_searchable() {
+<a href=#532 id=532 data-nosnippet>532</a>        <span class="comment">// An operator with a UUID from a log line pastes it into the same box
+<a href=#533 id=533 data-nosnippet>533</a>        // as a name; a search that only matched names would find nothing and
+<a href=#534 id=534 data-nosnippet>534</a>        // give no hint why.
+<a href=#535 id=535 data-nosnippet>535</a>        </span><span class="kw">let </span>clause = search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"x"</span>)), <span class="kw-2">&amp;</span>[<span class="string">"name"</span>]);
+<a href=#536 id=536 data-nosnippet>536</a>        <span class="macro">assert!</span>(clause.contains(<span class="string">"meta::id(id) CONTAINS $search"</span>));
+<a href=#537 id=537 data-nosnippet>537</a>    }
+<a href=#538 id=538 data-nosnippet>538</a>
+<a href=#539 id=539 data-nosnippet>539</a>    <span class="attr">#[test]
+<a href=#540 id=540 data-nosnippet>540</a>    </span><span class="kw">fn </span>the_clause_composes_onto_an_existing_where() {
+<a href=#541 id=541 data-nosnippet>541</a>        <span class="comment">// Spliced after `WHERE tenant_id = $tenant_id`, so it has to start with
+<a href=#542 id=542 data-nosnippet>542</a>        // ` AND ` and bracket its own disjunction — without the brackets, one
+<a href=#543 id=543 data-nosnippet>543</a>        // `OR` would escape and match rows in every tenant.
+<a href=#544 id=544 data-nosnippet>544</a>        </span><span class="kw">let </span>clause = search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"x"</span>)), <span class="kw-2">&amp;</span>[<span class="string">"name"</span>, <span class="string">"slug"</span>]);
+<a href=#545 id=545 data-nosnippet>545</a>        <span class="macro">assert!</span>(clause.starts_with(<span class="string">" AND ("</span>));
+<a href=#546 id=546 data-nosnippet>546</a>        <span class="macro">assert!</span>(clause.ends_with(<span class="string">")"</span>));
+<a href=#547 id=547 data-nosnippet>547</a>    }
+<a href=#548 id=548 data-nosnippet>548</a>
+<a href=#549 id=549 data-nosnippet>549</a>    <span class="attr">#[test]
+<a href=#550 id=550 data-nosnippet>550</a>    </span><span class="kw">fn </span>every_named_field_is_searched() {
+<a href=#551 id=551 data-nosnippet>551</a>        <span class="kw">let </span>clause = search_filter(<span class="kw-2">&amp;</span>paged(<span class="prelude-val">Some</span>(<span class="string">"x"</span>)), <span class="kw-2">&amp;</span>[<span class="string">"username"</span>, <span class="string">"email"</span>]);
+<a href=#552 id=552 data-nosnippet>552</a>        <span class="macro">assert!</span>(clause.contains(<span class="string">"username"</span>));
+<a href=#553 id=553 data-nosnippet>553</a>        <span class="macro">assert!</span>(clause.contains(<span class="string">"email"</span>));
 <a href=#554 id=554 data-nosnippet>554</a>    }
-<a href=#555 id=555 data-nosnippet>555</a>
-<a href=#556 id=556 data-nosnippet>556</a>    <span class="attr">#[test]
-<a href=#557 id=557 data-nosnippet>557</a>    </span><span class="kw">fn </span>parse_uuid_invalid_contains_field_name() {
-<a href=#558 id=558 data-nosnippet>558</a>        <span class="kw">let </span>err = parse_uuid(<span class="string">"not-a-uuid"</span>, <span class="string">"user_id"</span>).unwrap_err();
-<a href=#559 id=559 data-nosnippet>559</a>        <span class="kw">let </span>msg = err.to_string();
-<a href=#560 id=560 data-nosnippet>560</a>        <span class="macro">assert!</span>(
-<a href=#561 id=561 data-nosnippet>561</a>            msg.contains(<span class="string">"user_id"</span>),
-<a href=#562 id=562 data-nosnippet>562</a>            <span class="string">"error message should contain the field name; got: {msg}"
-<a href=#563 id=563 data-nosnippet>563</a>        </span>);
-<a href=#564 id=564 data-nosnippet>564</a>    }
-<a href=#565 id=565 data-nosnippet>565</a>
-<a href=#566 id=566 data-nosnippet>566</a>    <span class="attr">#[test]
-<a href=#567 id=567 data-nosnippet>567</a>    </span><span class="kw">fn </span>parse_uuid_invalid_returns_serialization_not_migration() {
-<a href=#568 id=568 data-nosnippet>568</a>        <span class="comment">// QUAL-03/D-10: a corrupt-data read must not be mislabeled as a
-<a href=#569 id=569 data-nosnippet>569</a>        // "Migration failed" error.
-<a href=#570 id=570 data-nosnippet>570</a>        </span><span class="kw">let </span>err = parse_uuid(<span class="string">"not-a-uuid"</span>, <span class="string">"tenant_id"</span>).unwrap_err();
-<a href=#571 id=571 data-nosnippet>571</a>        <span class="kw">match </span>err {
-<a href=#572 id=572 data-nosnippet>572</a>            DbError::Serialization(msg) =&gt; {
-<a href=#573 id=573 data-nosnippet>573</a>                <span class="macro">assert!</span>(
-<a href=#574 id=574 data-nosnippet>574</a>                    msg.contains(<span class="string">"tenant_id"</span>),
-<a href=#575 id=575 data-nosnippet>575</a>                    <span class="string">"Serialization message should name the field; got: {msg}"
-<a href=#576 id=576 data-nosnippet>576</a>                </span>);
-<a href=#577 id=577 data-nosnippet>577</a>            }
-<a href=#578 id=578 data-nosnippet>578</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected DbError::Serialization, got {other:?}"</span>),
-<a href=#579 id=579 data-nosnippet>579</a>        }
-<a href=#580 id=580 data-nosnippet>580</a>    }
-<a href=#581 id=581 data-nosnippet>581</a>
-<a href=#582 id=582 data-nosnippet>582</a>    <span class="comment">// --- take_first_or_not_found ---
-<a href=#583 id=583 data-nosnippet>583</a>
-<a href=#584 id=584 data-nosnippet>584</a>    </span><span class="attr">#[test]
-<a href=#585 id=585 data-nosnippet>585</a>    </span><span class="kw">fn </span>take_first_or_not_found_empty_returns_not_found() {
-<a href=#586 id=586 data-nosnippet>586</a>        <span class="kw">let </span>result: <span class="prelude-ty">Result</span>&lt;i32, DbError&gt; = take_first_or_not_found(<span class="macro">vec!</span>[], <span class="string">"user"</span>, <span class="string">"abc"</span>);
-<a href=#587 id=587 data-nosnippet>587</a>        <span class="kw">let </span>err = result.unwrap_err();
-<a href=#588 id=588 data-nosnippet>588</a>        <span class="kw">match </span>err {
-<a href=#589 id=589 data-nosnippet>589</a>            DbError::NotFound { entity, id } =&gt; {
-<a href=#590 id=590 data-nosnippet>590</a>                <span class="macro">assert_eq!</span>(entity, <span class="string">"user"</span>);
-<a href=#591 id=591 data-nosnippet>591</a>                <span class="macro">assert_eq!</span>(id, <span class="string">"abc"</span>);
-<a href=#592 id=592 data-nosnippet>592</a>            }
-<a href=#593 id=593 data-nosnippet>593</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected NotFound, got {other:?}"</span>),
-<a href=#594 id=594 data-nosnippet>594</a>        }
-<a href=#595 id=595 data-nosnippet>595</a>    }
-<a href=#596 id=596 data-nosnippet>596</a>
-<a href=#597 id=597 data-nosnippet>597</a>    <span class="attr">#[test]
-<a href=#598 id=598 data-nosnippet>598</a>    </span><span class="kw">fn </span>take_first_or_not_found_non_empty_returns_first() {
-<a href=#599 id=599 data-nosnippet>599</a>        <span class="kw">let </span>result: <span class="prelude-ty">Result</span>&lt;i32, DbError&gt; = take_first_or_not_found(<span class="macro">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>], <span class="string">"x"</span>, <span class="string">"y"</span>);
-<a href=#600 id=600 data-nosnippet>600</a>        <span class="macro">assert_eq!</span>(result.unwrap(), <span class="number">1</span>);
-<a href=#601 id=601 data-nosnippet>601</a>    }
-<a href=#602 id=602 data-nosnippet>602</a>
-<a href=#603 id=603 data-nosnippet>603</a>    <span class="comment">// --- paginate ---
-<a href=#604 id=604 data-nosnippet>604</a>
-<a href=#605 id=605 data-nosnippet>605</a>    </span><span class="attr">#[test]
-<a href=#606 id=606 data-nosnippet>606</a>    </span><span class="kw">fn </span>paginate_empty_count_rows_defaults_to_zero() {
-<a href=#607 id=607 data-nosnippet>607</a>        <span class="kw">let </span>pagination = Pagination {
-<a href=#608 id=608 data-nosnippet>608</a>            offset: <span class="number">5</span>,
-<a href=#609 id=609 data-nosnippet>609</a>            limit: <span class="number">10</span>,
-<a href=#610 id=610 data-nosnippet>610</a>            search: <span class="prelude-val">None</span>,
-<a href=#611 id=611 data-nosnippet>611</a>        };
-<a href=#612 id=612 data-nosnippet>612</a>        <span class="kw">let </span>result = paginate(<span class="macro">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>], <span class="macro">vec!</span>[], <span class="kw-2">&amp;</span>pagination);
-<a href=#613 id=613 data-nosnippet>613</a>        <span class="macro">assert_eq!</span>(result.total, <span class="number">0</span>);
-<a href=#614 id=614 data-nosnippet>614</a>        <span class="macro">assert_eq!</span>(result.offset, <span class="number">5</span>);
-<a href=#615 id=615 data-nosnippet>615</a>        <span class="macro">assert_eq!</span>(result.limit, <span class="number">10</span>);
-<a href=#616 id=616 data-nosnippet>616</a>        <span class="macro">assert_eq!</span>(result.items, <span class="macro">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>]);
-<a href=#617 id=617 data-nosnippet>617</a>    }
-<a href=#618 id=618 data-nosnippet>618</a>
-<a href=#619 id=619 data-nosnippet>619</a>    <span class="attr">#[test]
-<a href=#620 id=620 data-nosnippet>620</a>    </span><span class="kw">fn </span>paginate_preserves_pagination_offset_and_limit() {
-<a href=#621 id=621 data-nosnippet>621</a>        <span class="kw">let </span>pagination = Pagination {
-<a href=#622 id=622 data-nosnippet>622</a>            offset: <span class="number">20</span>,
-<a href=#623 id=623 data-nosnippet>623</a>            limit: <span class="number">50</span>,
-<a href=#624 id=624 data-nosnippet>624</a>            search: <span class="prelude-val">None</span>,
-<a href=#625 id=625 data-nosnippet>625</a>        };
-<a href=#626 id=626 data-nosnippet>626</a>        <span class="kw">let </span>count_rows = <span class="macro">vec!</span>[CountRow { total: <span class="number">42 </span>}];
-<a href=#627 id=627 data-nosnippet>627</a>        <span class="kw">let </span>result: PaginatedResult&lt;i32&gt; = paginate(<span class="macro">vec!</span>[], count_rows, <span class="kw-2">&amp;</span>pagination);
-<a href=#628 id=628 data-nosnippet>628</a>        <span class="macro">assert_eq!</span>(result.total, <span class="number">42</span>);
-<a href=#629 id=629 data-nosnippet>629</a>        <span class="macro">assert_eq!</span>(result.offset, <span class="number">20</span>);
-<a href=#630 id=630 data-nosnippet>630</a>        <span class="macro">assert_eq!</span>(result.limit, <span class="number">50</span>);
-<a href=#631 id=631 data-nosnippet>631</a>    }
+<a href=#555 id=555 data-nosnippet>555</a>}
+<a href=#556 id=556 data-nosnippet>556</a>
+<a href=#557 id=557 data-nosnippet>557</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#558 id=558 data-nosnippet>558</a>// Delete-target existence guard (SEC-104)
+<a href=#559 id=559 data-nosnippet>559</a>// ---------------------------------------------------------------------------
+<a href=#560 id=560 data-nosnippet>560</a>
+<a href=#561 id=561 data-nosnippet>561</a></span><span class="doccomment">/// The sentinel a delete transaction `THROW`s when its target row does not
+<a href=#562 id=562 data-nosnippet>562</a>/// exist in the caller's tenant (SEC-104).
+<a href=#563 id=563 data-nosnippet>563</a>///
+<a href=#564 id=564 data-nosnippet>564</a>/// Not a human sentence: it is matched, not read, and a message that reads
+<a href=#565 id=565 data-nosnippet>565</a>/// like prose invites someone to reword it.
+<a href=#566 id=566 data-nosnippet>566</a></span><span class="kw">pub const </span>DELETE_TARGET_MISSING: <span class="kw-2">&amp;</span>str = <span class="string">"axiam:delete_target_missing"</span>;
+<a href=#567 id=567 data-nosnippet>567</a>
+<a href=#568 id=568 data-nosnippet>568</a><span class="doccomment">/// The first statement of a delete transaction: abort unless the target row
+<a href=#569 id=569 data-nosnippet>569</a>/// exists **in this tenant** (SEC-104).
+<a href=#570 id=570 data-nosnippet>570</a>///
+<a href=#571 id=571 data-nosnippet>571</a>/// # Why the guard rather than inspecting the DELETE's result
+<a href=#572 id=572 data-nosnippet>572</a>///
+<a href=#573 id=573 data-nosnippet>573</a>/// Five repositories (`group`, `role`, `resource`, `permission`,
+<a href=#574 id=574 data-nosnippet>574</a>/// `service_account`) delete a record plus its edges inside one transaction and
+<a href=#575 id=575 data-nosnippet>575</a>/// returned `Ok(())` without looking at whether anything matched. The
+<a href=#576 id=576 data-nosnippet>576</a>/// `WHERE tenant_id = $tenant_id` predicate was — and is — correct, so no other
+<a href=#577 id=577 data-nosnippet>577</a>/// tenant's data was ever touched, and because the answer was a uniform 204 for
+<a href=#578 id=578 data-nosnippet>578</a>/// a foreign id, an unknown id and a real one, it was not an existence oracle
+<a href=#579 id=579 data-nosnippet>579</a>/// either. What it cost is an administrator who deletes the wrong id, is told
+<a href=#580 id=580 data-nosnippet>580</a>/// it worked, and believes the group is gone. `user` and `webhook` already got
+<a href=#581 id=581 data-nosnippet>581</a>/// this right with `RETURN BEFORE` + an empty-row check; this makes the other
+<a href=#582 id=582 data-nosnippet>582</a>/// five agree, in the repository, so `axiam-scim`'s hand-written pre-check can
+<a href=#583 id=583 data-nosnippet>583</a>/// be deleted rather than recopied for every future resource type.
+<a href=#584 id=584 data-nosnippet>584</a>///
+<a href=#585 id=585 data-nosnippet>585</a>/// Placing the check **inside** the transaction, as its first statement, is
+<a href=#586 id=586 data-nosnippet>586</a>/// what makes it more than a pre-check: a `THROW` aborts, so a delete against
+<a href=#587 id=587 data-nosnippet>587</a>/// a missing record leaves the edge deletes unexecuted too, rather than
+<a href=#588 id=588 data-nosnippet>588</a>/// stripping edges belonging to nothing and then reporting failure.
+<a href=#589 id=589 data-nosnippet>589</a>///
+<a href=#590 id=590 data-nosnippet>590</a>/// `table` is a literal table name from the calling repository, never caller
+<a href=#591 id=591 data-nosnippet>591</a>/// input; `$id` and `$tenant_id` are bound parameters.
+<a href=#592 id=592 data-nosnippet>592</a></span><span class="kw">pub fn </span>delete_existence_guard(table: <span class="kw-2">&amp;</span>str) -&gt; String {
+<a href=#593 id=593 data-nosnippet>593</a>    <span class="macro">format!</span>(
+<a href=#594 id=594 data-nosnippet>594</a>        <span class="string">"LET $existing = (SELECT VALUE id FROM type::record('{table}', $id) \
+<a href=#595 id=595 data-nosnippet>595</a>           WHERE tenant_id = $tenant_id); \
+<a href=#596 id=596 data-nosnippet>596</a>         IF array::len($existing) == 0 {{ THROW '{DELETE_TARGET_MISSING}'; }};"
+<a href=#597 id=597 data-nosnippet>597</a>    </span>)
+<a href=#598 id=598 data-nosnippet>598</a>}
+<a href=#599 id=599 data-nosnippet>599</a>
+<a href=#600 id=600 data-nosnippet>600</a><span class="doccomment">/// Turn a delete transaction's statement errors into the right [`DbError`]
+<a href=#601 id=601 data-nosnippet>601</a>/// (SEC-104).
+<a href=#602 id=602 data-nosnippet>602</a>///
+<a href=#603 id=603 data-nosnippet>603</a>/// Scans **every** statement's error rather than trusting `Response::check()`,
+<a href=#604 id=604 data-nosnippet>604</a>/// for the reason `resource::delete` already documents: a `THROW` fires on its
+<a href=#605 id=605 data-nosnippet>605</a>/// own slot while the trailing statements report the generic "not executed due
+<a href=#606 id=606 data-nosnippet>606</a>/// to a failed transaction", and `check()` can surface one of those instead —
+<a href=#607 id=607 data-nosnippet>607</a>/// which would silently downgrade a precise `404` into an opaque `500`.
+<a href=#608 id=608 data-nosnippet>608</a>///
+<a href=#609 id=609 data-nosnippet>609</a>/// `extra` lets a repository claim a `THROW` of its own (`resource`'s
+<a href=#610 id=610 data-nosnippet>610</a>/// child-count guard) before the generic mapping runs.
+<a href=#611 id=611 data-nosnippet>611</a></span><span class="kw">pub fn </span>map_delete_errors(
+<a href=#612 id=612 data-nosnippet>612</a>    errors: std::collections::HashMap&lt;usize, surrealdb::Error&gt;,
+<a href=#613 id=613 data-nosnippet>613</a>    entity: <span class="kw-2">&amp;</span>str,
+<a href=#614 id=614 data-nosnippet>614</a>    id: <span class="kw-2">&amp;</span>str,
+<a href=#615 id=615 data-nosnippet>615</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), DbError&gt; {
+<a href=#616 id=616 data-nosnippet>616</a>    <span class="kw">if </span>errors.is_empty() {
+<a href=#617 id=617 data-nosnippet>617</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#618 id=618 data-nosnippet>618</a>    }
+<a href=#619 id=619 data-nosnippet>619</a>    <span class="kw">let </span>combined = errors
+<a href=#620 id=620 data-nosnippet>620</a>        .into_values()
+<a href=#621 id=621 data-nosnippet>621</a>        .map(|e| e.to_string())
+<a href=#622 id=622 data-nosnippet>622</a>        .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
+<a href=#623 id=623 data-nosnippet>623</a>        .join(<span class="string">"; "</span>);
+<a href=#624 id=624 data-nosnippet>624</a>    <span class="kw">if </span>combined.contains(DELETE_TARGET_MISSING) {
+<a href=#625 id=625 data-nosnippet>625</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::NotFound {
+<a href=#626 id=626 data-nosnippet>626</a>            entity: entity.to_string(),
+<a href=#627 id=627 data-nosnippet>627</a>            id: id.to_string(),
+<a href=#628 id=628 data-nosnippet>628</a>        });
+<a href=#629 id=629 data-nosnippet>629</a>    }
+<a href=#630 id=630 data-nosnippet>630</a>    <span class="prelude-val">Err</span>(DbError::Migration(combined))
+<a href=#631 id=631 data-nosnippet>631</a>}
 <a href=#632 id=632 data-nosnippet>632</a>
-<a href=#633 id=633 data-nosnippet>633</a>    <span class="comment">// --- DbError::AlreadyExists propagation (compile-time check via From) ---
-<a href=#634 id=634 data-nosnippet>634</a>
-<a href=#635 id=635 data-nosnippet>635</a>    </span><span class="attr">#[test]
-<a href=#636 id=636 data-nosnippet>636</a>    </span><span class="kw">fn </span>already_exists_converts_to_axiam_error() {
-<a href=#637 id=637 data-nosnippet>637</a>        <span class="kw">use </span>axiam_core::error::AxiamError;
-<a href=#638 id=638 data-nosnippet>638</a>        <span class="kw">let </span>db_err = DbError::AlreadyExists {
-<a href=#639 id=639 data-nosnippet>639</a>            entity: <span class="string">"user"</span>.to_string(),
-<a href=#640 id=640 data-nosnippet>640</a>        };
-<a href=#641 id=641 data-nosnippet>641</a>        <span class="kw">let </span>axiam_err: AxiamError = db_err.into();
-<a href=#642 id=642 data-nosnippet>642</a>        <span class="kw">match </span>axiam_err {
-<a href=#643 id=643 data-nosnippet>643</a>            AxiamError::AlreadyExists { entity } =&gt; {
-<a href=#644 id=644 data-nosnippet>644</a>                <span class="macro">assert_eq!</span>(entity, <span class="string">"user"</span>);
-<a href=#645 id=645 data-nosnippet>645</a>            }
-<a href=#646 id=646 data-nosnippet>646</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected AxiamError::AlreadyExists, got {other:?}"</span>),
-<a href=#647 id=647 data-nosnippet>647</a>        }
-<a href=#648 id=648 data-nosnippet>648</a>    }
-<a href=#649 id=649 data-nosnippet>649</a>
-<a href=#650 id=650 data-nosnippet>650</a>    <span class="comment">// --- classify_write_error ---
-<a href=#651 id=651 data-nosnippet>651</a>
-<a href=#652 id=652 data-nosnippet>652</a>    </span><span class="attr">#[test]
-<a href=#653 id=653 data-nosnippet>653</a>    </span><span class="kw">fn </span>is_write_conflict_matches_the_real_surrealdb_message() {
-<a href=#654 id=654 data-nosnippet>654</a>        <span class="comment">// Verbatim from a SurrealDB v3 write that lost an optimistic-concurrency
-<a href=#655 id=655 data-nosnippet>655</a>        // race, captured off the wire from the `grpc_admin_validate` benchmark
-<a href=#656 id=656 data-nosnippet>656</a>        // cell (it reaches the client as the gRPC INTERNAL message).
-<a href=#657 id=657 data-nosnippet>657</a>        </span><span class="kw">let </span>msg = <span class="string">"Database error: Migration failed: There was a problem with the \
-<a href=#658 id=658 data-nosnippet>658</a>                   key-value store: Transaction conflict: Transaction write \
-<a href=#659 id=659 data-nosnippet>659</a>                   conflict. This transaction can be retried"</span>;
-<a href=#660 id=660 data-nosnippet>660</a>        <span class="macro">assert!</span>(is_write_conflict(msg));
-<a href=#661 id=661 data-nosnippet>661</a>        <span class="comment">// A conflict is NOT a constraint violation — misfiling it as one would
-<a href=#662 id=662 data-nosnippet>662</a>        // answer a transient race with a 409.
-<a href=#663 id=663 data-nosnippet>663</a>        </span><span class="macro">assert!</span>(!is_unique_violation(msg));
-<a href=#664 id=664 data-nosnippet>664</a>    }
-<a href=#665 id=665 data-nosnippet>665</a>
-<a href=#666 id=666 data-nosnippet>666</a>    <span class="attr">#[test]
-<a href=#667 id=667 data-nosnippet>667</a>    </span><span class="kw">fn </span>is_write_conflict_matches_the_commit_time_phrasing() {
-<a href=#668 id=668 data-nosnippet>668</a>        <span class="macro">assert!</span>(is_write_conflict(
-<a href=#669 id=669 data-nosnippet>669</a>            <span class="string">"Failed to commit transaction due to a read or write conflict"
-<a href=#670 id=670 data-nosnippet>670</a>        </span>));
-<a href=#671 id=671 data-nosnippet>671</a>    }
-<a href=#672 id=672 data-nosnippet>672</a>
-<a href=#673 id=673 data-nosnippet>673</a>    <span class="attr">#[test]
-<a href=#674 id=674 data-nosnippet>674</a>    </span><span class="kw">fn </span>is_write_conflict_ignores_unrelated_failures() {
-<a href=#675 id=675 data-nosnippet>675</a>        <span class="comment">// An outage must never be treated as retryable-and-then-fine.
-<a href=#676 id=676 data-nosnippet>676</a>        </span><span class="macro">assert!</span>(!is_write_conflict(<span class="string">"There was a problem with the datastore"</span>));
-<a href=#677 id=677 data-nosnippet>677</a>        <span class="macro">assert!</span>(!is_write_conflict(
-<a href=#678 id=678 data-nosnippet>678</a>            <span class="string">"Database index `idx_users_username_unique` already contains ['alice']"
-<a href=#679 id=679 data-nosnippet>679</a>        </span>));
-<a href=#680 id=680 data-nosnippet>680</a>    }
-<a href=#681 id=681 data-nosnippet>681</a>
-<a href=#682 id=682 data-nosnippet>682</a>    <span class="attr">#[test]
-<a href=#683 id=683 data-nosnippet>683</a>    </span><span class="kw">fn </span>write_conflict_backoff_grows_and_stays_bounded() {
-<a href=#684 id=684 data-nosnippet>684</a>        <span class="macro">assert_eq!</span>(write_conflict_backoff(<span class="number">1</span>).as_millis(), <span class="number">2</span>);
-<a href=#685 id=685 data-nosnippet>685</a>        <span class="macro">assert_eq!</span>(write_conflict_backoff(<span class="number">2</span>).as_millis(), <span class="number">4</span>);
-<a href=#686 id=686 data-nosnippet>686</a>        <span class="macro">assert_eq!</span>(write_conflict_backoff(<span class="number">3</span>).as_millis(), <span class="number">8</span>);
-<a href=#687 id=687 data-nosnippet>687</a>        <span class="comment">// Never a runaway shift, even if a caller passes a large attempt.
-<a href=#688 id=688 data-nosnippet>688</a>        </span><span class="macro">assert_eq!</span>(write_conflict_backoff(<span class="number">99</span>).as_millis(), <span class="number">64</span>);
-<a href=#689 id=689 data-nosnippet>689</a>    }
-<a href=#690 id=690 data-nosnippet>690</a>
-<a href=#691 id=691 data-nosnippet>691</a>    <span class="attr">#[test]
-<a href=#692 id=692 data-nosnippet>692</a>    </span><span class="kw">fn </span>classify_write_error_maps_index_violation_to_already_exists() {
-<a href=#693 id=693 data-nosnippet>693</a>        <span class="comment">// Real SurrealDB v3 UNIQUE index violation message shape.
-<a href=#694 id=694 data-nosnippet>694</a>        </span><span class="kw">let </span>msg = <span class="string">"Database index `idx_users_username_unique` already contains \
-<a href=#695 id=695 data-nosnippet>695</a>                    the value ['alice'], with record `user:abc123`"</span>;
-<a href=#696 id=696 data-nosnippet>696</a>        <span class="kw">let </span>err = classify_write_error(msg, <span class="string">"user"</span>);
-<a href=#697 id=697 data-nosnippet>697</a>        <span class="kw">match </span>err {
-<a href=#698 id=698 data-nosnippet>698</a>            DbError::AlreadyExists { entity } =&gt; <span class="macro">assert_eq!</span>(entity, <span class="string">"user"</span>),
-<a href=#699 id=699 data-nosnippet>699</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected DbError::AlreadyExists, got {other:?}"</span>),
-<a href=#700 id=700 data-nosnippet>700</a>        }
-<a href=#701 id=701 data-nosnippet>701</a>    }
-<a href=#702 id=702 data-nosnippet>702</a>
-<a href=#703 id=703 data-nosnippet>703</a>    <span class="attr">#[test]
-<a href=#704 id=704 data-nosnippet>704</a>    </span><span class="kw">fn </span>classify_write_error_passes_non_marker_error_through_as_migration() {
-<a href=#705 id=705 data-nosnippet>705</a>        <span class="comment">// A DB outage/connection error carries none of the confirmed unique-
-<a href=#706 id=706 data-nosnippet>706</a>        // index markers and must NEVER be misclassified as a false 409.
-<a href=#707 id=707 data-nosnippet>707</a>        </span><span class="kw">let </span>msg = <span class="string">"There was a problem with the database: connection reset by peer"</span>;
-<a href=#708 id=708 data-nosnippet>708</a>        <span class="kw">let </span>err = classify_write_error(msg, <span class="string">"user"</span>);
-<a href=#709 id=709 data-nosnippet>709</a>        <span class="kw">match </span>err {
-<a href=#710 id=710 data-nosnippet>710</a>            DbError::Migration(m) =&gt; <span class="macro">assert_eq!</span>(m, msg),
-<a href=#711 id=711 data-nosnippet>711</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected DbError::Migration, got {other:?}"</span>),
-<a href=#712 id=712 data-nosnippet>712</a>        }
-<a href=#713 id=713 data-nosnippet>713</a>    }
-<a href=#714 id=714 data-nosnippet>714</a>
-<a href=#715 id=715 data-nosnippet>715</a>    <span class="comment">// --- is_unique_violation / classify_replay_write_error (F5, D-09) ---
-<a href=#716 id=716 data-nosnippet>716</a>
-<a href=#717 id=717 data-nosnippet>717</a>    </span><span class="doccomment">/// Real SurrealDB v3 UNIQUE-index violation messages, one per replay table.
-<a href=#718 id=718 data-nosnippet>718</a>    ///
-<a href=#719 id=719 data-nosnippet>719</a>    /// These are the exact shapes the three guards see. They are quoted here
-<a href=#720 id=720 data-nosnippet>720</a>    /// rather than paraphrased because the classifier is a substring match:
-<a href=#721 id=721 data-nosnippet>721</a>    /// a paraphrase that happens to contain "already contains" would pass this
-<a href=#722 id=722 data-nosnippet>722</a>    /// test while telling us nothing about the message the server sends.
-<a href=#723 id=723 data-nosnippet>723</a>    </span><span class="kw">const </span>REAL_VIOLATION_MESSAGES: [<span class="kw-2">&amp;</span>str; <span class="number">3</span>] = [
-<a href=#724 id=724 data-nosnippet>724</a>        <span class="string">"Database index `idx_replay_uniq` already contains ['t1', 'assertion-1'], \
-<a href=#725 id=725 data-nosnippet>725</a>         with record `saml_assertion_replay:abc`"</span>,
-<a href=#726 id=726 data-nosnippet>726</a>        <span class="string">"Database index `idx_amqp_nonce_uniq` already contains ['t1', 'n-1'], \
-<a href=#727 id=727 data-nosnippet>727</a>         with record `amqp_nonce_replay:def`"</span>,
-<a href=#728 id=728 data-nosnippet>728</a>        <span class="string">"Database index `idx_proof_replay_uniq` already contains ['t1', 'dpop', 'jti-1'], \
-<a href=#729 id=729 data-nosnippet>729</a>         with record `oauth2_proof_replay:ghi`"</span>,
-<a href=#730 id=730 data-nosnippet>730</a>    ];
-<a href=#731 id=731 data-nosnippet>731</a>
-<a href=#732 id=732 data-nosnippet>732</a>    <span class="attr">#[test]
-<a href=#733 id=733 data-nosnippet>733</a>    </span><span class="kw">fn </span>is_unique_violation_recognises_every_real_index_message() {
-<a href=#734 id=734 data-nosnippet>734</a>        <span class="kw">for </span>msg <span class="kw">in </span>REAL_VIOLATION_MESSAGES {
-<a href=#735 id=735 data-nosnippet>735</a>            <span class="macro">assert!</span>(is_unique_violation(msg), <span class="string">"should have matched: {msg}"</span>);
-<a href=#736 id=736 data-nosnippet>736</a>        }
-<a href=#737 id=737 data-nosnippet>737</a>    }
-<a href=#738 id=738 data-nosnippet>738</a>
-<a href=#739 id=739 data-nosnippet>739</a>    <span class="attr">#[test]
-<a href=#740 id=740 data-nosnippet>740</a>    </span><span class="kw">fn </span>is_unique_violation_recognises_the_fallback_markers() {
-<a href=#741 id=741 data-nosnippet>741</a>        <span class="macro">assert!</span>(is_unique_violation(<span class="string">"record already exists"</span>));
-<a href=#742 id=742 data-nosnippet>742</a>        <span class="macro">assert!</span>(is_unique_violation(<span class="string">"violates unique constraint"</span>));
+<a href=#633 id=633 data-nosnippet>633</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#634 id=634 data-nosnippet>634</a>// Unit tests
+<a href=#635 id=635 data-nosnippet>635</a>// ---------------------------------------------------------------------------
+<a href=#636 id=636 data-nosnippet>636</a>
+<a href=#637 id=637 data-nosnippet>637</a></span><span class="attr">#[cfg(test)]
+<a href=#638 id=638 data-nosnippet>638</a></span><span class="kw">mod </span>tests {
+<a href=#639 id=639 data-nosnippet>639</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#640 id=640 data-nosnippet>640</a>
+<a href=#641 id=641 data-nosnippet>641</a>    <span class="comment">// --- parse_uuid ---
+<a href=#642 id=642 data-nosnippet>642</a>
+<a href=#643 id=643 data-nosnippet>643</a>    </span><span class="attr">#[test]
+<a href=#644 id=644 data-nosnippet>644</a>    </span><span class="kw">fn </span>parse_uuid_valid_returns_ok() {
+<a href=#645 id=645 data-nosnippet>645</a>        <span class="kw">let </span>raw = <span class="string">"550e8400-e29b-41d4-a716-446655440000"</span>;
+<a href=#646 id=646 data-nosnippet>646</a>        <span class="kw">let </span>result = parse_uuid(raw, <span class="string">"user_id"</span>);
+<a href=#647 id=647 data-nosnippet>647</a>        <span class="macro">assert!</span>(result.is_ok(), <span class="string">"expected Ok for a valid UUID string"</span>);
+<a href=#648 id=648 data-nosnippet>648</a>        <span class="macro">assert_eq!</span>(result.unwrap().to_string(), raw);
+<a href=#649 id=649 data-nosnippet>649</a>    }
+<a href=#650 id=650 data-nosnippet>650</a>
+<a href=#651 id=651 data-nosnippet>651</a>    <span class="attr">#[test]
+<a href=#652 id=652 data-nosnippet>652</a>    </span><span class="kw">fn </span>parse_uuid_invalid_contains_field_name() {
+<a href=#653 id=653 data-nosnippet>653</a>        <span class="kw">let </span>err = parse_uuid(<span class="string">"not-a-uuid"</span>, <span class="string">"user_id"</span>).unwrap_err();
+<a href=#654 id=654 data-nosnippet>654</a>        <span class="kw">let </span>msg = err.to_string();
+<a href=#655 id=655 data-nosnippet>655</a>        <span class="macro">assert!</span>(
+<a href=#656 id=656 data-nosnippet>656</a>            msg.contains(<span class="string">"user_id"</span>),
+<a href=#657 id=657 data-nosnippet>657</a>            <span class="string">"error message should contain the field name; got: {msg}"
+<a href=#658 id=658 data-nosnippet>658</a>        </span>);
+<a href=#659 id=659 data-nosnippet>659</a>    }
+<a href=#660 id=660 data-nosnippet>660</a>
+<a href=#661 id=661 data-nosnippet>661</a>    <span class="attr">#[test]
+<a href=#662 id=662 data-nosnippet>662</a>    </span><span class="kw">fn </span>parse_uuid_invalid_returns_serialization_not_migration() {
+<a href=#663 id=663 data-nosnippet>663</a>        <span class="comment">// QUAL-03/D-10: a corrupt-data read must not be mislabeled as a
+<a href=#664 id=664 data-nosnippet>664</a>        // "Migration failed" error.
+<a href=#665 id=665 data-nosnippet>665</a>        </span><span class="kw">let </span>err = parse_uuid(<span class="string">"not-a-uuid"</span>, <span class="string">"tenant_id"</span>).unwrap_err();
+<a href=#666 id=666 data-nosnippet>666</a>        <span class="kw">match </span>err {
+<a href=#667 id=667 data-nosnippet>667</a>            DbError::Serialization(msg) =&gt; {
+<a href=#668 id=668 data-nosnippet>668</a>                <span class="macro">assert!</span>(
+<a href=#669 id=669 data-nosnippet>669</a>                    msg.contains(<span class="string">"tenant_id"</span>),
+<a href=#670 id=670 data-nosnippet>670</a>                    <span class="string">"Serialization message should name the field; got: {msg}"
+<a href=#671 id=671 data-nosnippet>671</a>                </span>);
+<a href=#672 id=672 data-nosnippet>672</a>            }
+<a href=#673 id=673 data-nosnippet>673</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected DbError::Serialization, got {other:?}"</span>),
+<a href=#674 id=674 data-nosnippet>674</a>        }
+<a href=#675 id=675 data-nosnippet>675</a>    }
+<a href=#676 id=676 data-nosnippet>676</a>
+<a href=#677 id=677 data-nosnippet>677</a>    <span class="comment">// --- take_first_or_not_found ---
+<a href=#678 id=678 data-nosnippet>678</a>
+<a href=#679 id=679 data-nosnippet>679</a>    </span><span class="attr">#[test]
+<a href=#680 id=680 data-nosnippet>680</a>    </span><span class="kw">fn </span>take_first_or_not_found_empty_returns_not_found() {
+<a href=#681 id=681 data-nosnippet>681</a>        <span class="kw">let </span>result: <span class="prelude-ty">Result</span>&lt;i32, DbError&gt; = take_first_or_not_found(<span class="macro">vec!</span>[], <span class="string">"user"</span>, <span class="string">"abc"</span>);
+<a href=#682 id=682 data-nosnippet>682</a>        <span class="kw">let </span>err = result.unwrap_err();
+<a href=#683 id=683 data-nosnippet>683</a>        <span class="kw">match </span>err {
+<a href=#684 id=684 data-nosnippet>684</a>            DbError::NotFound { entity, id } =&gt; {
+<a href=#685 id=685 data-nosnippet>685</a>                <span class="macro">assert_eq!</span>(entity, <span class="string">"user"</span>);
+<a href=#686 id=686 data-nosnippet>686</a>                <span class="macro">assert_eq!</span>(id, <span class="string">"abc"</span>);
+<a href=#687 id=687 data-nosnippet>687</a>            }
+<a href=#688 id=688 data-nosnippet>688</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected NotFound, got {other:?}"</span>),
+<a href=#689 id=689 data-nosnippet>689</a>        }
+<a href=#690 id=690 data-nosnippet>690</a>    }
+<a href=#691 id=691 data-nosnippet>691</a>
+<a href=#692 id=692 data-nosnippet>692</a>    <span class="attr">#[test]
+<a href=#693 id=693 data-nosnippet>693</a>    </span><span class="kw">fn </span>take_first_or_not_found_non_empty_returns_first() {
+<a href=#694 id=694 data-nosnippet>694</a>        <span class="kw">let </span>result: <span class="prelude-ty">Result</span>&lt;i32, DbError&gt; = take_first_or_not_found(<span class="macro">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>], <span class="string">"x"</span>, <span class="string">"y"</span>);
+<a href=#695 id=695 data-nosnippet>695</a>        <span class="macro">assert_eq!</span>(result.unwrap(), <span class="number">1</span>);
+<a href=#696 id=696 data-nosnippet>696</a>    }
+<a href=#697 id=697 data-nosnippet>697</a>
+<a href=#698 id=698 data-nosnippet>698</a>    <span class="comment">// --- paginate ---
+<a href=#699 id=699 data-nosnippet>699</a>
+<a href=#700 id=700 data-nosnippet>700</a>    </span><span class="attr">#[test]
+<a href=#701 id=701 data-nosnippet>701</a>    </span><span class="kw">fn </span>paginate_empty_count_rows_defaults_to_zero() {
+<a href=#702 id=702 data-nosnippet>702</a>        <span class="kw">let </span>pagination = Pagination {
+<a href=#703 id=703 data-nosnippet>703</a>            offset: <span class="number">5</span>,
+<a href=#704 id=704 data-nosnippet>704</a>            limit: <span class="number">10</span>,
+<a href=#705 id=705 data-nosnippet>705</a>            search: <span class="prelude-val">None</span>,
+<a href=#706 id=706 data-nosnippet>706</a>        };
+<a href=#707 id=707 data-nosnippet>707</a>        <span class="kw">let </span>result = paginate(<span class="macro">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>], <span class="macro">vec!</span>[], <span class="kw-2">&amp;</span>pagination);
+<a href=#708 id=708 data-nosnippet>708</a>        <span class="macro">assert_eq!</span>(result.total, <span class="number">0</span>);
+<a href=#709 id=709 data-nosnippet>709</a>        <span class="macro">assert_eq!</span>(result.offset, <span class="number">5</span>);
+<a href=#710 id=710 data-nosnippet>710</a>        <span class="macro">assert_eq!</span>(result.limit, <span class="number">10</span>);
+<a href=#711 id=711 data-nosnippet>711</a>        <span class="macro">assert_eq!</span>(result.items, <span class="macro">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>]);
+<a href=#712 id=712 data-nosnippet>712</a>    }
+<a href=#713 id=713 data-nosnippet>713</a>
+<a href=#714 id=714 data-nosnippet>714</a>    <span class="attr">#[test]
+<a href=#715 id=715 data-nosnippet>715</a>    </span><span class="kw">fn </span>paginate_preserves_pagination_offset_and_limit() {
+<a href=#716 id=716 data-nosnippet>716</a>        <span class="kw">let </span>pagination = Pagination {
+<a href=#717 id=717 data-nosnippet>717</a>            offset: <span class="number">20</span>,
+<a href=#718 id=718 data-nosnippet>718</a>            limit: <span class="number">50</span>,
+<a href=#719 id=719 data-nosnippet>719</a>            search: <span class="prelude-val">None</span>,
+<a href=#720 id=720 data-nosnippet>720</a>        };
+<a href=#721 id=721 data-nosnippet>721</a>        <span class="kw">let </span>count_rows = <span class="macro">vec!</span>[CountRow { total: <span class="number">42 </span>}];
+<a href=#722 id=722 data-nosnippet>722</a>        <span class="kw">let </span>result: PaginatedResult&lt;i32&gt; = paginate(<span class="macro">vec!</span>[], count_rows, <span class="kw-2">&amp;</span>pagination);
+<a href=#723 id=723 data-nosnippet>723</a>        <span class="macro">assert_eq!</span>(result.total, <span class="number">42</span>);
+<a href=#724 id=724 data-nosnippet>724</a>        <span class="macro">assert_eq!</span>(result.offset, <span class="number">20</span>);
+<a href=#725 id=725 data-nosnippet>725</a>        <span class="macro">assert_eq!</span>(result.limit, <span class="number">50</span>);
+<a href=#726 id=726 data-nosnippet>726</a>    }
+<a href=#727 id=727 data-nosnippet>727</a>
+<a href=#728 id=728 data-nosnippet>728</a>    <span class="comment">// --- DbError::AlreadyExists propagation (compile-time check via From) ---
+<a href=#729 id=729 data-nosnippet>729</a>
+<a href=#730 id=730 data-nosnippet>730</a>    </span><span class="attr">#[test]
+<a href=#731 id=731 data-nosnippet>731</a>    </span><span class="kw">fn </span>already_exists_converts_to_axiam_error() {
+<a href=#732 id=732 data-nosnippet>732</a>        <span class="kw">use </span>axiam_core::error::AxiamError;
+<a href=#733 id=733 data-nosnippet>733</a>        <span class="kw">let </span>db_err = DbError::AlreadyExists {
+<a href=#734 id=734 data-nosnippet>734</a>            entity: <span class="string">"user"</span>.to_string(),
+<a href=#735 id=735 data-nosnippet>735</a>        };
+<a href=#736 id=736 data-nosnippet>736</a>        <span class="kw">let </span>axiam_err: AxiamError = db_err.into();
+<a href=#737 id=737 data-nosnippet>737</a>        <span class="kw">match </span>axiam_err {
+<a href=#738 id=738 data-nosnippet>738</a>            AxiamError::AlreadyExists { entity } =&gt; {
+<a href=#739 id=739 data-nosnippet>739</a>                <span class="macro">assert_eq!</span>(entity, <span class="string">"user"</span>);
+<a href=#740 id=740 data-nosnippet>740</a>            }
+<a href=#741 id=741 data-nosnippet>741</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected AxiamError::AlreadyExists, got {other:?}"</span>),
+<a href=#742 id=742 data-nosnippet>742</a>        }
 <a href=#743 id=743 data-nosnippet>743</a>    }
 <a href=#744 id=744 data-nosnippet>744</a>
-<a href=#745 id=745 data-nosnippet>745</a>    <span class="doccomment">/// The safety property, stated as a test: an outage must never read as a
-<a href=#746 id=746 data-nosnippet>746</a>    /// conflict. A false "already exists" turns a 5xx into a 409, and at a
-<a href=#747 id=747 data-nosnippet>747</a>    /// replay guard a false ReplayDetected refuses legitimate traffic.
-<a href=#748 id=748 data-nosnippet>748</a>    </span><span class="attr">#[test]
-<a href=#749 id=749 data-nosnippet>749</a>    </span><span class="kw">fn </span>is_unique_violation_rejects_failures_that_are_not_conflicts() {
-<a href=#750 id=750 data-nosnippet>750</a>        <span class="kw">for </span>msg <span class="kw">in </span>[
-<a href=#751 id=751 data-nosnippet>751</a>            <span class="string">"There was a problem with the database: connection reset by peer"</span>,
-<a href=#752 id=752 data-nosnippet>752</a>            <span class="string">"IO error: broken pipe"</span>,
-<a href=#753 id=753 data-nosnippet>753</a>            <span class="string">"There was a problem with the database: transaction timed out"</span>,
-<a href=#754 id=754 data-nosnippet>754</a>            <span class="string">"Serialization error: invalid UTF-8"</span>,
-<a href=#755 id=755 data-nosnippet>755</a>            <span class="string">""</span>,
-<a href=#756 id=756 data-nosnippet>756</a>        ] {
-<a href=#757 id=757 data-nosnippet>757</a>            <span class="macro">assert!</span>(!is_unique_violation(msg), <span class="string">"should NOT have matched: {msg}"</span>);
-<a href=#758 id=758 data-nosnippet>758</a>        }
+<a href=#745 id=745 data-nosnippet>745</a>    <span class="comment">// --- classify_write_error ---
+<a href=#746 id=746 data-nosnippet>746</a>
+<a href=#747 id=747 data-nosnippet>747</a>    </span><span class="attr">#[test]
+<a href=#748 id=748 data-nosnippet>748</a>    </span><span class="kw">fn </span>is_write_conflict_matches_the_real_surrealdb_message() {
+<a href=#749 id=749 data-nosnippet>749</a>        <span class="comment">// Verbatim from a SurrealDB v3 write that lost an optimistic-concurrency
+<a href=#750 id=750 data-nosnippet>750</a>        // race, captured off the wire from the `grpc_admin_validate` benchmark
+<a href=#751 id=751 data-nosnippet>751</a>        // cell (it reaches the client as the gRPC INTERNAL message).
+<a href=#752 id=752 data-nosnippet>752</a>        </span><span class="kw">let </span>msg = <span class="string">"Database error: Migration failed: There was a problem with the \
+<a href=#753 id=753 data-nosnippet>753</a>                   key-value store: Transaction conflict: Transaction write \
+<a href=#754 id=754 data-nosnippet>754</a>                   conflict. This transaction can be retried"</span>;
+<a href=#755 id=755 data-nosnippet>755</a>        <span class="macro">assert!</span>(is_write_conflict(msg));
+<a href=#756 id=756 data-nosnippet>756</a>        <span class="comment">// A conflict is NOT a constraint violation — misfiling it as one would
+<a href=#757 id=757 data-nosnippet>757</a>        // answer a transient race with a 409.
+<a href=#758 id=758 data-nosnippet>758</a>        </span><span class="macro">assert!</span>(!is_unique_violation(msg));
 <a href=#759 id=759 data-nosnippet>759</a>    }
 <a href=#760 id=760 data-nosnippet>760</a>
-<a href=#761 id=761 data-nosnippet>761</a>    <span class="doccomment">/// The three replay guards must agree, because they now share one
-<a href=#762 id=762 data-nosnippet>762</a>    /// definition. This test is what fails if somebody reintroduces a local
-<a href=#763 id=763 data-nosnippet>763</a>    /// copy that answers differently for one table.
-<a href=#764 id=764 data-nosnippet>764</a>    </span><span class="attr">#[test]
-<a href=#765 id=765 data-nosnippet>765</a>    </span><span class="kw">fn </span>classify_replay_write_error_reports_every_real_violation_as_a_replay() {
-<a href=#766 id=766 data-nosnippet>766</a>        <span class="kw">for </span>msg <span class="kw">in </span>REAL_VIOLATION_MESSAGES {
-<a href=#767 id=767 data-nosnippet>767</a>            <span class="kw">match </span>classify_replay_write_error(msg) {
-<a href=#768 id=768 data-nosnippet>768</a>                AxiamError::ReplayDetected =&gt; {}
-<a href=#769 id=769 data-nosnippet>769</a>                other =&gt; <span class="macro">panic!</span>(<span class="string">"expected ReplayDetected for {msg}, got {other:?}"</span>),
-<a href=#770 id=770 data-nosnippet>770</a>            }
-<a href=#771 id=771 data-nosnippet>771</a>        }
-<a href=#772 id=772 data-nosnippet>772</a>    }
-<a href=#773 id=773 data-nosnippet>773</a>
-<a href=#774 id=774 data-nosnippet>774</a>    <span class="attr">#[test]
-<a href=#775 id=775 data-nosnippet>775</a>    </span><span class="kw">fn </span>classify_replay_write_error_passes_an_outage_through_as_database() {
-<a href=#776 id=776 data-nosnippet>776</a>        <span class="kw">let </span>msg = <span class="string">"There was a problem with the database: connection reset by peer"</span>;
-<a href=#777 id=777 data-nosnippet>777</a>        <span class="kw">match </span>classify_replay_write_error(msg) {
-<a href=#778 id=778 data-nosnippet>778</a>            AxiamError::Database(m) =&gt; <span class="macro">assert_eq!</span>(m, msg),
-<a href=#779 id=779 data-nosnippet>779</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected AxiamError::Database, got {other:?}"</span>),
-<a href=#780 id=780 data-nosnippet>780</a>        }
-<a href=#781 id=781 data-nosnippet>781</a>    }
-<a href=#782 id=782 data-nosnippet>782</a>
-<a href=#783 id=783 data-nosnippet>783</a>    <span class="doccomment">/// The three classifiers read one predicate, so they cannot disagree about
-<a href=#784 id=784 data-nosnippet>784</a>    /// whether a given message is a conflict -- only about what to call it.
-<a href=#785 id=785 data-nosnippet>785</a>    </span><span class="attr">#[test]
-<a href=#786 id=786 data-nosnippet>786</a>    </span><span class="kw">fn </span>the_three_classifiers_agree_on_what_a_conflict_is() {
-<a href=#787 id=787 data-nosnippet>787</a>        <span class="kw">for </span>msg <span class="kw">in </span>REAL_VIOLATION_MESSAGES
-<a href=#788 id=788 data-nosnippet>788</a>            .iter()
-<a href=#789 id=789 data-nosnippet>789</a>            .copied()
-<a href=#790 id=790 data-nosnippet>790</a>            .chain([<span class="string">"connection reset by peer"</span>, <span class="string">"transaction timed out"</span>])
-<a href=#791 id=791 data-nosnippet>791</a>        {
-<a href=#792 id=792 data-nosnippet>792</a>            <span class="kw">let </span>expected = is_unique_violation(msg);
-<a href=#793 id=793 data-nosnippet>793</a>            <span class="macro">assert_eq!</span>(
-<a href=#794 id=794 data-nosnippet>794</a>                <span class="macro">matches!</span>(classify_replay_write_error(msg), AxiamError::ReplayDetected),
-<a href=#795 id=795 data-nosnippet>795</a>                expected,
-<a href=#796 id=796 data-nosnippet>796</a>                <span class="string">"classify_replay_write_error disagreed on: {msg}"
-<a href=#797 id=797 data-nosnippet>797</a>            </span>);
-<a href=#798 id=798 data-nosnippet>798</a>            <span class="macro">assert_eq!</span>(
-<a href=#799 id=799 data-nosnippet>799</a>                <span class="macro">matches!</span>(
-<a href=#800 id=800 data-nosnippet>800</a>                    classify_conflict_write_error(msg, <span class="string">"thing"</span>),
-<a href=#801 id=801 data-nosnippet>801</a>                    AxiamError::AlreadyExists { .. }
-<a href=#802 id=802 data-nosnippet>802</a>                ),
-<a href=#803 id=803 data-nosnippet>803</a>                expected,
-<a href=#804 id=804 data-nosnippet>804</a>                <span class="string">"classify_conflict_write_error disagreed on: {msg}"
-<a href=#805 id=805 data-nosnippet>805</a>            </span>);
-<a href=#806 id=806 data-nosnippet>806</a>            <span class="macro">assert_eq!</span>(
-<a href=#807 id=807 data-nosnippet>807</a>                <span class="macro">matches!</span>(
-<a href=#808 id=808 data-nosnippet>808</a>                    classify_write_error(msg, <span class="string">"thing"</span>),
-<a href=#809 id=809 data-nosnippet>809</a>                    DbError::AlreadyExists { .. }
-<a href=#810 id=810 data-nosnippet>810</a>                ),
-<a href=#811 id=811 data-nosnippet>811</a>                expected,
-<a href=#812 id=812 data-nosnippet>812</a>                <span class="string">"classify_write_error disagreed on: {msg}"
-<a href=#813 id=813 data-nosnippet>813</a>            </span>);
+<a href=#761 id=761 data-nosnippet>761</a>    <span class="attr">#[test]
+<a href=#762 id=762 data-nosnippet>762</a>    </span><span class="kw">fn </span>is_write_conflict_matches_the_commit_time_phrasing() {
+<a href=#763 id=763 data-nosnippet>763</a>        <span class="macro">assert!</span>(is_write_conflict(
+<a href=#764 id=764 data-nosnippet>764</a>            <span class="string">"Failed to commit transaction due to a read or write conflict"
+<a href=#765 id=765 data-nosnippet>765</a>        </span>));
+<a href=#766 id=766 data-nosnippet>766</a>    }
+<a href=#767 id=767 data-nosnippet>767</a>
+<a href=#768 id=768 data-nosnippet>768</a>    <span class="attr">#[test]
+<a href=#769 id=769 data-nosnippet>769</a>    </span><span class="kw">fn </span>is_write_conflict_ignores_unrelated_failures() {
+<a href=#770 id=770 data-nosnippet>770</a>        <span class="comment">// An outage must never be treated as retryable-and-then-fine.
+<a href=#771 id=771 data-nosnippet>771</a>        </span><span class="macro">assert!</span>(!is_write_conflict(<span class="string">"There was a problem with the datastore"</span>));
+<a href=#772 id=772 data-nosnippet>772</a>        <span class="macro">assert!</span>(!is_write_conflict(
+<a href=#773 id=773 data-nosnippet>773</a>            <span class="string">"Database index `idx_users_username_unique` already contains ['alice']"
+<a href=#774 id=774 data-nosnippet>774</a>        </span>));
+<a href=#775 id=775 data-nosnippet>775</a>    }
+<a href=#776 id=776 data-nosnippet>776</a>
+<a href=#777 id=777 data-nosnippet>777</a>    <span class="attr">#[test]
+<a href=#778 id=778 data-nosnippet>778</a>    </span><span class="kw">fn </span>write_conflict_backoff_grows_and_stays_bounded() {
+<a href=#779 id=779 data-nosnippet>779</a>        <span class="macro">assert_eq!</span>(write_conflict_backoff(<span class="number">1</span>).as_millis(), <span class="number">2</span>);
+<a href=#780 id=780 data-nosnippet>780</a>        <span class="macro">assert_eq!</span>(write_conflict_backoff(<span class="number">2</span>).as_millis(), <span class="number">4</span>);
+<a href=#781 id=781 data-nosnippet>781</a>        <span class="macro">assert_eq!</span>(write_conflict_backoff(<span class="number">3</span>).as_millis(), <span class="number">8</span>);
+<a href=#782 id=782 data-nosnippet>782</a>        <span class="comment">// Never a runaway shift, even if a caller passes a large attempt.
+<a href=#783 id=783 data-nosnippet>783</a>        </span><span class="macro">assert_eq!</span>(write_conflict_backoff(<span class="number">99</span>).as_millis(), <span class="number">64</span>);
+<a href=#784 id=784 data-nosnippet>784</a>    }
+<a href=#785 id=785 data-nosnippet>785</a>
+<a href=#786 id=786 data-nosnippet>786</a>    <span class="doccomment">/// The exact message the deployed engine produced when a concurrent SCIM
+<a href=#787 id=787 data-nosnippet>787</a>    /// `PATCH /scim/v2/Users/{id}` lost its race — captured from
+<a href=#788 id=788 data-nosnippet>788</a>    /// `bench-axiam-server` during the first run of the `scim_provisioning`
+<a href=#789 id=789 data-nosnippet>789</a>    /// benchmark cell, which failed 20 of 907 operations on it.
+<a href=#790 id=790 data-nosnippet>790</a>    </span><span class="kw">const </span>LIVE_V3_CONFLICT: <span class="kw-2">&amp;</span>str = <span class="string">"There was a problem with the key-value store: \
+<a href=#791 id=791 data-nosnippet>791</a>         Transaction conflict: Transaction write conflict. This transaction can be retried"</span>;
+<a href=#792 id=792 data-nosnippet>792</a>
+<a href=#793 id=793 data-nosnippet>793</a>    <span class="attr">#[test]
+<a href=#794 id=794 data-nosnippet>794</a>    </span><span class="kw">fn </span>classify_write_error_maps_a_write_conflict_to_conflict_not_migration() {
+<a href=#795 id=795 data-nosnippet>795</a>        <span class="comment">// The regression this guards: the conflict fell through to
+<a href=#796 id=796 data-nosnippet>796</a>        // `DbError::Migration`, so a contended user write reached the operator
+<a href=#797 id=797 data-nosnippet>797</a>        // as "Migration failed: ..." — sending them after a broken schema
+<a href=#798 id=798 data-nosnippet>798</a>        // migration for a write the datastore had said to retry.
+<a href=#799 id=799 data-nosnippet>799</a>        </span><span class="kw">match </span>classify_write_error(LIVE_V3_CONFLICT, <span class="string">"user"</span>) {
+<a href=#800 id=800 data-nosnippet>800</a>            DbError::Conflict(msg) =&gt; <span class="macro">assert!</span>(msg.contains(<span class="string">"Transaction write conflict"</span>)),
+<a href=#801 id=801 data-nosnippet>801</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected DbError::Conflict, got {other:?}"</span>),
+<a href=#802 id=802 data-nosnippet>802</a>        }
+<a href=#803 id=803 data-nosnippet>803</a>    }
+<a href=#804 id=804 data-nosnippet>804</a>
+<a href=#805 id=805 data-nosnippet>805</a>    <span class="attr">#[test]
+<a href=#806 id=806 data-nosnippet>806</a>    </span><span class="kw">fn </span>classify_write_error_still_prefers_a_unique_violation_over_a_conflict() {
+<a href=#807 id=807 data-nosnippet>807</a>        <span class="comment">// Ordering matters: a UNIQUE violation is a statement about the
+<a href=#808 id=808 data-nosnippet>808</a>        // caller's request (409, and retrying reproduces it identically),
+<a href=#809 id=809 data-nosnippet>809</a>        // so it must win over the weaker, retryable conflict classification.
+<a href=#810 id=810 data-nosnippet>810</a>        </span><span class="kw">let </span>msg = <span class="string">"Database index `idx_users_username_unique` already contains ['alice']"</span>;
+<a href=#811 id=811 data-nosnippet>811</a>        <span class="kw">match </span>classify_write_error(msg, <span class="string">"user"</span>) {
+<a href=#812 id=812 data-nosnippet>812</a>            DbError::AlreadyExists { entity } =&gt; <span class="macro">assert_eq!</span>(entity, <span class="string">"user"</span>),
+<a href=#813 id=813 data-nosnippet>813</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected DbError::AlreadyExists, got {other:?}"</span>),
 <a href=#814 id=814 data-nosnippet>814</a>        }
 <a href=#815 id=815 data-nosnippet>815</a>    }
 <a href=#816 id=816 data-nosnippet>816</a>
 <a href=#817 id=817 data-nosnippet>817</a>    <span class="attr">#[test]
-<a href=#818 id=818 data-nosnippet>818</a>    </span><span class="kw">fn </span>classify_conflict_write_error_names_the_constrained_thing() {
-<a href=#819 id=819 data-nosnippet>819</a>        <span class="kw">match </span>classify_conflict_write_error(
-<a href=#820 id=820 data-nosnippet>820</a>            <span class="string">"Database index `idx_state_uniq` already contains ['s']"</span>,
-<a href=#821 id=821 data-nosnippet>821</a>            <span class="string">"federation_login_state.state"</span>,
-<a href=#822 id=822 data-nosnippet>822</a>        ) {
-<a href=#823 id=823 data-nosnippet>823</a>            AxiamError::AlreadyExists { entity } =&gt; {
-<a href=#824 id=824 data-nosnippet>824</a>                <span class="macro">assert_eq!</span>(entity, <span class="string">"federation_login_state.state"</span>);
-<a href=#825 id=825 data-nosnippet>825</a>            }
-<a href=#826 id=826 data-nosnippet>826</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected AlreadyExists, got {other:?}"</span>),
+<a href=#818 id=818 data-nosnippet>818</a>    </span><span class="kw">fn </span>conflict_converts_to_a_database_error_not_a_conflict_status() {
+<a href=#819 id=819 data-nosnippet>819</a>        <span class="comment">// Deliberate: the variant exists to stop MISLABELING, not to change the
+<a href=#820 id=820 data-nosnippet>820</a>        // client-visible contract. A 503 with Retry-After would be defensible
+<a href=#821 id=821 data-nosnippet>821</a>        // and is a separate decision.
+<a href=#822 id=822 data-nosnippet>822</a>        </span><span class="kw">use </span>axiam_core::error::AxiamError;
+<a href=#823 id=823 data-nosnippet>823</a>        <span class="kw">let </span>axiam_err: AxiamError = DbError::Conflict(LIVE_V3_CONFLICT.to_string()).into();
+<a href=#824 id=824 data-nosnippet>824</a>        <span class="kw">match </span>axiam_err {
+<a href=#825 id=825 data-nosnippet>825</a>            AxiamError::Database(msg) =&gt; <span class="macro">assert!</span>(msg.contains(<span class="string">"Write conflict"</span>)),
+<a href=#826 id=826 data-nosnippet>826</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected AxiamError::Database, got {other:?}"</span>),
 <a href=#827 id=827 data-nosnippet>827</a>        }
 <a href=#828 id=828 data-nosnippet>828</a>    }
-<a href=#829 id=829 data-nosnippet>829</a>}
+<a href=#829 id=829 data-nosnippet>829</a>
+<a href=#830 id=830 data-nosnippet>830</a>    <span class="attr">#[test]
+<a href=#831 id=831 data-nosnippet>831</a>    </span><span class="kw">fn </span>is_transaction_conflict_matches_the_live_v3_message() {
+<a href=#832 id=832 data-nosnippet>832</a>        <span class="comment">// THE BUG THIS PINS. `is_transaction_conflict` matched only
+<a href=#833 id=833 data-nosnippet>833</a>        // "failed transaction" / "Failed to commit transaction", and the
+<a href=#834 id=834 data-nosnippet>834</a>        // message SurrealDB v3 actually emits contains NEITHER. It guards the
+<a href=#835 id=835 data-nosnippet>835</a>        // single-use consume on device_grant, permission_ticket,
+<a href=#836 id=836 data-nosnippet>836</a>        // pushed_auth_request and oauth2_auth_code — so on the deployed engine
+<a href=#837 id=837 data-nosnippet>837</a>        // their "someone else got there first" branch could not fire, and a
+<a href=#838 id=838 data-nosnippet>838</a>        // correctly-refused replay surfaced as a 500 instead of "no row
+<a href=#839 id=839 data-nosnippet>839</a>        // consumed". Fail-closed, so a robustness defect rather than a hole.
+<a href=#840 id=840 data-nosnippet>840</a>        </span><span class="macro">assert!</span>(is_transaction_conflict(<span class="kw-2">&amp;</span>LIVE_V3_CONFLICT));
+<a href=#841 id=841 data-nosnippet>841</a>    }
+<a href=#842 id=842 data-nosnippet>842</a>
+<a href=#843 id=843 data-nosnippet>843</a>    <span class="attr">#[test]
+<a href=#844 id=844 data-nosnippet>844</a>    </span><span class="kw">fn </span>is_transaction_conflict_still_matches_the_legacy_phrasings() {
+<a href=#845 id=845 data-nosnippet>845</a>        <span class="comment">// Unifying the marker sets must not drop what the old set caught.
+<a href=#846 id=846 data-nosnippet>846</a>        </span><span class="macro">assert!</span>(is_transaction_conflict(
+<a href=#847 id=847 data-nosnippet>847</a>            <span class="kw-2">&amp;</span><span class="string">"the failed transaction was rolled back"
+<a href=#848 id=848 data-nosnippet>848</a>        </span>));
+<a href=#849 id=849 data-nosnippet>849</a>        <span class="macro">assert!</span>(is_transaction_conflict(
+<a href=#850 id=850 data-nosnippet>850</a>            <span class="kw-2">&amp;</span><span class="string">"Failed to commit transaction due to a read or write conflict"
+<a href=#851 id=851 data-nosnippet>851</a>        </span>));
+<a href=#852 id=852 data-nosnippet>852</a>        <span class="comment">// And still refuses everything that is not a conflict.
+<a href=#853 id=853 data-nosnippet>853</a>        </span><span class="macro">assert!</span>(!is_transaction_conflict(<span class="kw-2">&amp;</span><span class="string">"Connection refused"</span>));
+<a href=#854 id=854 data-nosnippet>854</a>        <span class="macro">assert!</span>(!is_transaction_conflict(
+<a href=#855 id=855 data-nosnippet>855</a>            <span class="kw-2">&amp;</span><span class="string">"Database index `idx_x` already contains ['a']"
+<a href=#856 id=856 data-nosnippet>856</a>        </span>));
+<a href=#857 id=857 data-nosnippet>857</a>    }
+<a href=#858 id=858 data-nosnippet>858</a>
+<a href=#859 id=859 data-nosnippet>859</a>    <span class="attr">#[tokio::test]
+<a href=#860 id=860 data-nosnippet>860</a>    </span><span class="kw">async fn </span>retry_on_write_conflict_retries_a_conflict_then_succeeds() {
+<a href=#861 id=861 data-nosnippet>861</a>        <span class="kw">use </span>std::cell::Cell;
+<a href=#862 id=862 data-nosnippet>862</a>        <span class="kw">let </span>calls = Cell::new(<span class="number">0u32</span>);
+<a href=#863 id=863 data-nosnippet>863</a>        <span class="kw">let </span>out: <span class="prelude-ty">Result</span>&lt;<span class="kw-2">&amp;</span>str, DbError&gt; = retry_on_write_conflict(|| <span class="kw">async </span>{
+<a href=#864 id=864 data-nosnippet>864</a>            calls.set(calls.get() + <span class="number">1</span>);
+<a href=#865 id=865 data-nosnippet>865</a>            <span class="kw">if </span>calls.get() &lt; <span class="number">3 </span>{
+<a href=#866 id=866 data-nosnippet>866</a>                <span class="prelude-val">Err</span>(DbError::Conflict(LIVE_V3_CONFLICT.to_string()))
+<a href=#867 id=867 data-nosnippet>867</a>            } <span class="kw">else </span>{
+<a href=#868 id=868 data-nosnippet>868</a>                <span class="prelude-val">Ok</span>(<span class="string">"committed"</span>)
+<a href=#869 id=869 data-nosnippet>869</a>            }
+<a href=#870 id=870 data-nosnippet>870</a>        })
+<a href=#871 id=871 data-nosnippet>871</a>        .<span class="kw">await</span>;
+<a href=#872 id=872 data-nosnippet>872</a>        <span class="macro">assert_eq!</span>(out.unwrap(), <span class="string">"committed"</span>);
+<a href=#873 id=873 data-nosnippet>873</a>        <span class="macro">assert_eq!</span>(calls.get(), <span class="number">3</span>, <span class="string">"should have retried twice then succeeded"</span>);
+<a href=#874 id=874 data-nosnippet>874</a>    }
+<a href=#875 id=875 data-nosnippet>875</a>
+<a href=#876 id=876 data-nosnippet>876</a>    <span class="attr">#[tokio::test]
+<a href=#877 id=877 data-nosnippet>877</a>    </span><span class="kw">async fn </span>retry_on_write_conflict_does_not_retry_anything_else() {
+<a href=#878 id=878 data-nosnippet>878</a>        <span class="comment">// A hard failure must fail FAST — an outage turned into four slow
+<a href=#879 id=879 data-nosnippet>879</a>        // attempts is strictly worse than one quick one.
+<a href=#880 id=880 data-nosnippet>880</a>        </span><span class="kw">use </span>std::cell::Cell;
+<a href=#881 id=881 data-nosnippet>881</a>        <span class="kw">let </span>calls = Cell::new(<span class="number">0u32</span>);
+<a href=#882 id=882 data-nosnippet>882</a>        <span class="kw">let </span>out: <span class="prelude-ty">Result</span>&lt;(), DbError&gt; = retry_on_write_conflict(|| <span class="kw">async </span>{
+<a href=#883 id=883 data-nosnippet>883</a>            calls.set(calls.get() + <span class="number">1</span>);
+<a href=#884 id=884 data-nosnippet>884</a>            <span class="prelude-val">Err</span>(DbError::Migration(<span class="string">"Connection refused"</span>.to_string()))
+<a href=#885 id=885 data-nosnippet>885</a>        })
+<a href=#886 id=886 data-nosnippet>886</a>        .<span class="kw">await</span>;
+<a href=#887 id=887 data-nosnippet>887</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(out, <span class="prelude-val">Err</span>(DbError::Migration(<span class="kw">_</span>))));
+<a href=#888 id=888 data-nosnippet>888</a>        <span class="macro">assert_eq!</span>(calls.get(), <span class="number">1</span>, <span class="string">"a non-conflict must not be retried"</span>);
+<a href=#889 id=889 data-nosnippet>889</a>    }
+<a href=#890 id=890 data-nosnippet>890</a>
+<a href=#891 id=891 data-nosnippet>891</a>    <span class="attr">#[tokio::test]
+<a href=#892 id=892 data-nosnippet>892</a>    </span><span class="kw">async fn </span>retry_on_write_conflict_is_bounded_and_surfaces_the_last_error() {
+<a href=#893 id=893 data-nosnippet>893</a>        <span class="comment">// Sustained contention must eventually surface rather than be retried
+<a href=#894 id=894 data-nosnippet>894</a>        // forever — past a few attempts this is no longer masking a race.
+<a href=#895 id=895 data-nosnippet>895</a>        </span><span class="kw">use </span>std::cell::Cell;
+<a href=#896 id=896 data-nosnippet>896</a>        <span class="kw">let </span>calls = Cell::new(<span class="number">0u32</span>);
+<a href=#897 id=897 data-nosnippet>897</a>        <span class="kw">let </span>out: <span class="prelude-ty">Result</span>&lt;(), DbError&gt; = retry_on_write_conflict(|| <span class="kw">async </span>{
+<a href=#898 id=898 data-nosnippet>898</a>            calls.set(calls.get() + <span class="number">1</span>);
+<a href=#899 id=899 data-nosnippet>899</a>            <span class="prelude-val">Err</span>(DbError::Conflict(LIVE_V3_CONFLICT.to_string()))
+<a href=#900 id=900 data-nosnippet>900</a>        })
+<a href=#901 id=901 data-nosnippet>901</a>        .<span class="kw">await</span>;
+<a href=#902 id=902 data-nosnippet>902</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(out, <span class="prelude-val">Err</span>(DbError::Conflict(<span class="kw">_</span>))));
+<a href=#903 id=903 data-nosnippet>903</a>        <span class="macro">assert_eq!</span>(calls.get(), MAX_WRITE_ATTEMPTS);
+<a href=#904 id=904 data-nosnippet>904</a>    }
+<a href=#905 id=905 data-nosnippet>905</a>
+<a href=#906 id=906 data-nosnippet>906</a>    <span class="attr">#[tokio::test]
+<a href=#907 id=907 data-nosnippet>907</a>    </span><span class="kw">async fn </span>retry_on_write_conflict_recognises_a_conflict_in_any_variant() {
+<a href=#908 id=908 data-nosnippet>908</a>        <span class="comment">// A conflict can arrive as Conflict, Surreal or Migration depending on
+<a href=#909 id=909 data-nosnippet>909</a>        // where in the write path it surfaced; the predicate reads the rendered
+<a href=#910 id=910 data-nosnippet>910</a>        // message, so every one of them must retry.
+<a href=#911 id=911 data-nosnippet>911</a>        </span><span class="kw">use </span>std::cell::Cell;
+<a href=#912 id=912 data-nosnippet>912</a>        <span class="kw">for </span>seed <span class="kw">in </span>[
+<a href=#913 id=913 data-nosnippet>913</a>            DbError::Conflict(LIVE_V3_CONFLICT.to_string()),
+<a href=#914 id=914 data-nosnippet>914</a>            DbError::Migration(LIVE_V3_CONFLICT.to_string()),
+<a href=#915 id=915 data-nosnippet>915</a>        ] {
+<a href=#916 id=916 data-nosnippet>916</a>            <span class="kw">let </span>rendered = seed.to_string();
+<a href=#917 id=917 data-nosnippet>917</a>            <span class="kw">let </span>calls = Cell::new(<span class="number">0u32</span>);
+<a href=#918 id=918 data-nosnippet>918</a>            <span class="kw">let </span>out: <span class="prelude-ty">Result</span>&lt;(), DbError&gt; = retry_on_write_conflict(|| <span class="kw">async </span>{
+<a href=#919 id=919 data-nosnippet>919</a>                calls.set(calls.get() + <span class="number">1</span>);
+<a href=#920 id=920 data-nosnippet>920</a>                <span class="prelude-val">Err</span>(DbError::Migration(rendered.clone()))
+<a href=#921 id=921 data-nosnippet>921</a>            })
+<a href=#922 id=922 data-nosnippet>922</a>            .<span class="kw">await</span>;
+<a href=#923 id=923 data-nosnippet>923</a>            <span class="macro">assert!</span>(out.is_err());
+<a href=#924 id=924 data-nosnippet>924</a>            <span class="macro">assert_eq!</span>(
+<a href=#925 id=925 data-nosnippet>925</a>                calls.get(),
+<a href=#926 id=926 data-nosnippet>926</a>                MAX_WRITE_ATTEMPTS,
+<a href=#927 id=927 data-nosnippet>927</a>                <span class="string">"a conflict rendered as {rendered} should have been retried"
+<a href=#928 id=928 data-nosnippet>928</a>            </span>);
+<a href=#929 id=929 data-nosnippet>929</a>        }
+<a href=#930 id=930 data-nosnippet>930</a>    }
+<a href=#931 id=931 data-nosnippet>931</a>
+<a href=#932 id=932 data-nosnippet>932</a>    <span class="attr">#[test]
+<a href=#933 id=933 data-nosnippet>933</a>    </span><span class="kw">fn </span>classify_write_error_maps_index_violation_to_already_exists() {
+<a href=#934 id=934 data-nosnippet>934</a>        <span class="comment">// Real SurrealDB v3 UNIQUE index violation message shape.
+<a href=#935 id=935 data-nosnippet>935</a>        </span><span class="kw">let </span>msg = <span class="string">"Database index `idx_users_username_unique` already contains \
+<a href=#936 id=936 data-nosnippet>936</a>                    the value ['alice'], with record `user:abc123`"</span>;
+<a href=#937 id=937 data-nosnippet>937</a>        <span class="kw">let </span>err = classify_write_error(msg, <span class="string">"user"</span>);
+<a href=#938 id=938 data-nosnippet>938</a>        <span class="kw">match </span>err {
+<a href=#939 id=939 data-nosnippet>939</a>            DbError::AlreadyExists { entity } =&gt; <span class="macro">assert_eq!</span>(entity, <span class="string">"user"</span>),
+<a href=#940 id=940 data-nosnippet>940</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected DbError::AlreadyExists, got {other:?}"</span>),
+<a href=#941 id=941 data-nosnippet>941</a>        }
+<a href=#942 id=942 data-nosnippet>942</a>    }
+<a href=#943 id=943 data-nosnippet>943</a>
+<a href=#944 id=944 data-nosnippet>944</a>    <span class="attr">#[test]
+<a href=#945 id=945 data-nosnippet>945</a>    </span><span class="kw">fn </span>classify_write_error_passes_non_marker_error_through_as_migration() {
+<a href=#946 id=946 data-nosnippet>946</a>        <span class="comment">// A DB outage/connection error carries none of the confirmed unique-
+<a href=#947 id=947 data-nosnippet>947</a>        // index markers and must NEVER be misclassified as a false 409.
+<a href=#948 id=948 data-nosnippet>948</a>        </span><span class="kw">let </span>msg = <span class="string">"There was a problem with the database: connection reset by peer"</span>;
+<a href=#949 id=949 data-nosnippet>949</a>        <span class="kw">let </span>err = classify_write_error(msg, <span class="string">"user"</span>);
+<a href=#950 id=950 data-nosnippet>950</a>        <span class="kw">match </span>err {
+<a href=#951 id=951 data-nosnippet>951</a>            DbError::Migration(m) =&gt; <span class="macro">assert_eq!</span>(m, msg),
+<a href=#952 id=952 data-nosnippet>952</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected DbError::Migration, got {other:?}"</span>),
+<a href=#953 id=953 data-nosnippet>953</a>        }
+<a href=#954 id=954 data-nosnippet>954</a>    }
+<a href=#955 id=955 data-nosnippet>955</a>
+<a href=#956 id=956 data-nosnippet>956</a>    <span class="comment">// --- is_unique_violation / classify_replay_write_error (F5, D-09) ---
+<a href=#957 id=957 data-nosnippet>957</a>
+<a href=#958 id=958 data-nosnippet>958</a>    </span><span class="doccomment">/// Real SurrealDB v3 UNIQUE-index violation messages, one per replay table.
+<a href=#959 id=959 data-nosnippet>959</a>    ///
+<a href=#960 id=960 data-nosnippet>960</a>    /// These are the exact shapes the three guards see. They are quoted here
+<a href=#961 id=961 data-nosnippet>961</a>    /// rather than paraphrased because the classifier is a substring match:
+<a href=#962 id=962 data-nosnippet>962</a>    /// a paraphrase that happens to contain "already contains" would pass this
+<a href=#963 id=963 data-nosnippet>963</a>    /// test while telling us nothing about the message the server sends.
+<a href=#964 id=964 data-nosnippet>964</a>    </span><span class="kw">const </span>REAL_VIOLATION_MESSAGES: [<span class="kw-2">&amp;</span>str; <span class="number">3</span>] = [
+<a href=#965 id=965 data-nosnippet>965</a>        <span class="string">"Database index `idx_replay_uniq` already contains ['t1', 'assertion-1'], \
+<a href=#966 id=966 data-nosnippet>966</a>         with record `saml_assertion_replay:abc`"</span>,
+<a href=#967 id=967 data-nosnippet>967</a>        <span class="string">"Database index `idx_amqp_nonce_uniq` already contains ['t1', 'n-1'], \
+<a href=#968 id=968 data-nosnippet>968</a>         with record `amqp_nonce_replay:def`"</span>,
+<a href=#969 id=969 data-nosnippet>969</a>        <span class="string">"Database index `idx_proof_replay_uniq` already contains ['t1', 'dpop', 'jti-1'], \
+<a href=#970 id=970 data-nosnippet>970</a>         with record `oauth2_proof_replay:ghi`"</span>,
+<a href=#971 id=971 data-nosnippet>971</a>    ];
+<a href=#972 id=972 data-nosnippet>972</a>
+<a href=#973 id=973 data-nosnippet>973</a>    <span class="attr">#[test]
+<a href=#974 id=974 data-nosnippet>974</a>    </span><span class="kw">fn </span>is_unique_violation_recognises_every_real_index_message() {
+<a href=#975 id=975 data-nosnippet>975</a>        <span class="kw">for </span>msg <span class="kw">in </span>REAL_VIOLATION_MESSAGES {
+<a href=#976 id=976 data-nosnippet>976</a>            <span class="macro">assert!</span>(is_unique_violation(msg), <span class="string">"should have matched: {msg}"</span>);
+<a href=#977 id=977 data-nosnippet>977</a>        }
+<a href=#978 id=978 data-nosnippet>978</a>    }
+<a href=#979 id=979 data-nosnippet>979</a>
+<a href=#980 id=980 data-nosnippet>980</a>    <span class="attr">#[test]
+<a href=#981 id=981 data-nosnippet>981</a>    </span><span class="kw">fn </span>is_unique_violation_recognises_the_fallback_markers() {
+<a href=#982 id=982 data-nosnippet>982</a>        <span class="macro">assert!</span>(is_unique_violation(<span class="string">"record already exists"</span>));
+<a href=#983 id=983 data-nosnippet>983</a>        <span class="macro">assert!</span>(is_unique_violation(<span class="string">"violates unique constraint"</span>));
+<a href=#984 id=984 data-nosnippet>984</a>    }
+<a href=#985 id=985 data-nosnippet>985</a>
+<a href=#986 id=986 data-nosnippet>986</a>    <span class="doccomment">/// The safety property, stated as a test: an outage must never read as a
+<a href=#987 id=987 data-nosnippet>987</a>    /// conflict. A false "already exists" turns a 5xx into a 409, and at a
+<a href=#988 id=988 data-nosnippet>988</a>    /// replay guard a false ReplayDetected refuses legitimate traffic.
+<a href=#989 id=989 data-nosnippet>989</a>    </span><span class="attr">#[test]
+<a href=#990 id=990 data-nosnippet>990</a>    </span><span class="kw">fn </span>is_unique_violation_rejects_failures_that_are_not_conflicts() {
+<a href=#991 id=991 data-nosnippet>991</a>        <span class="kw">for </span>msg <span class="kw">in </span>[
+<a href=#992 id=992 data-nosnippet>992</a>            <span class="string">"There was a problem with the database: connection reset by peer"</span>,
+<a href=#993 id=993 data-nosnippet>993</a>            <span class="string">"IO error: broken pipe"</span>,
+<a href=#994 id=994 data-nosnippet>994</a>            <span class="string">"There was a problem with the database: transaction timed out"</span>,
+<a href=#995 id=995 data-nosnippet>995</a>            <span class="string">"Serialization error: invalid UTF-8"</span>,
+<a href=#996 id=996 data-nosnippet>996</a>            <span class="string">""</span>,
+<a href=#997 id=997 data-nosnippet>997</a>        ] {
+<a href=#998 id=998 data-nosnippet>998</a>            <span class="macro">assert!</span>(!is_unique_violation(msg), <span class="string">"should NOT have matched: {msg}"</span>);
+<a href=#999 id=999 data-nosnippet>999</a>        }
+<a href=#1000 id=1000 data-nosnippet>1000</a>    }
+<a href=#1001 id=1001 data-nosnippet>1001</a>
+<a href=#1002 id=1002 data-nosnippet>1002</a>    <span class="doccomment">/// The three replay guards must agree, because they now share one
+<a href=#1003 id=1003 data-nosnippet>1003</a>    /// definition. This test is what fails if somebody reintroduces a local
+<a href=#1004 id=1004 data-nosnippet>1004</a>    /// copy that answers differently for one table.
+<a href=#1005 id=1005 data-nosnippet>1005</a>    </span><span class="attr">#[test]
+<a href=#1006 id=1006 data-nosnippet>1006</a>    </span><span class="kw">fn </span>classify_replay_write_error_reports_every_real_violation_as_a_replay() {
+<a href=#1007 id=1007 data-nosnippet>1007</a>        <span class="kw">for </span>msg <span class="kw">in </span>REAL_VIOLATION_MESSAGES {
+<a href=#1008 id=1008 data-nosnippet>1008</a>            <span class="kw">match </span>classify_replay_write_error(msg) {
+<a href=#1009 id=1009 data-nosnippet>1009</a>                AxiamError::ReplayDetected =&gt; {}
+<a href=#1010 id=1010 data-nosnippet>1010</a>                other =&gt; <span class="macro">panic!</span>(<span class="string">"expected ReplayDetected for {msg}, got {other:?}"</span>),
+<a href=#1011 id=1011 data-nosnippet>1011</a>            }
+<a href=#1012 id=1012 data-nosnippet>1012</a>        }
+<a href=#1013 id=1013 data-nosnippet>1013</a>    }
+<a href=#1014 id=1014 data-nosnippet>1014</a>
+<a href=#1015 id=1015 data-nosnippet>1015</a>    <span class="attr">#[test]
+<a href=#1016 id=1016 data-nosnippet>1016</a>    </span><span class="kw">fn </span>classify_replay_write_error_passes_an_outage_through_as_database() {
+<a href=#1017 id=1017 data-nosnippet>1017</a>        <span class="kw">let </span>msg = <span class="string">"There was a problem with the database: connection reset by peer"</span>;
+<a href=#1018 id=1018 data-nosnippet>1018</a>        <span class="kw">match </span>classify_replay_write_error(msg) {
+<a href=#1019 id=1019 data-nosnippet>1019</a>            AxiamError::Database(m) =&gt; <span class="macro">assert_eq!</span>(m, msg),
+<a href=#1020 id=1020 data-nosnippet>1020</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected AxiamError::Database, got {other:?}"</span>),
+<a href=#1021 id=1021 data-nosnippet>1021</a>        }
+<a href=#1022 id=1022 data-nosnippet>1022</a>    }
+<a href=#1023 id=1023 data-nosnippet>1023</a>
+<a href=#1024 id=1024 data-nosnippet>1024</a>    <span class="doccomment">/// The three classifiers read one predicate, so they cannot disagree about
+<a href=#1025 id=1025 data-nosnippet>1025</a>    /// whether a given message is a conflict -- only about what to call it.
+<a href=#1026 id=1026 data-nosnippet>1026</a>    </span><span class="attr">#[test]
+<a href=#1027 id=1027 data-nosnippet>1027</a>    </span><span class="kw">fn </span>the_three_classifiers_agree_on_what_a_conflict_is() {
+<a href=#1028 id=1028 data-nosnippet>1028</a>        <span class="kw">for </span>msg <span class="kw">in </span>REAL_VIOLATION_MESSAGES
+<a href=#1029 id=1029 data-nosnippet>1029</a>            .iter()
+<a href=#1030 id=1030 data-nosnippet>1030</a>            .copied()
+<a href=#1031 id=1031 data-nosnippet>1031</a>            .chain([<span class="string">"connection reset by peer"</span>, <span class="string">"transaction timed out"</span>])
+<a href=#1032 id=1032 data-nosnippet>1032</a>        {
+<a href=#1033 id=1033 data-nosnippet>1033</a>            <span class="kw">let </span>expected = is_unique_violation(msg);
+<a href=#1034 id=1034 data-nosnippet>1034</a>            <span class="macro">assert_eq!</span>(
+<a href=#1035 id=1035 data-nosnippet>1035</a>                <span class="macro">matches!</span>(classify_replay_write_error(msg), AxiamError::ReplayDetected),
+<a href=#1036 id=1036 data-nosnippet>1036</a>                expected,
+<a href=#1037 id=1037 data-nosnippet>1037</a>                <span class="string">"classify_replay_write_error disagreed on: {msg}"
+<a href=#1038 id=1038 data-nosnippet>1038</a>            </span>);
+<a href=#1039 id=1039 data-nosnippet>1039</a>            <span class="macro">assert_eq!</span>(
+<a href=#1040 id=1040 data-nosnippet>1040</a>                <span class="macro">matches!</span>(
+<a href=#1041 id=1041 data-nosnippet>1041</a>                    classify_conflict_write_error(msg, <span class="string">"thing"</span>),
+<a href=#1042 id=1042 data-nosnippet>1042</a>                    AxiamError::AlreadyExists { .. }
+<a href=#1043 id=1043 data-nosnippet>1043</a>                ),
+<a href=#1044 id=1044 data-nosnippet>1044</a>                expected,
+<a href=#1045 id=1045 data-nosnippet>1045</a>                <span class="string">"classify_conflict_write_error disagreed on: {msg}"
+<a href=#1046 id=1046 data-nosnippet>1046</a>            </span>);
+<a href=#1047 id=1047 data-nosnippet>1047</a>            <span class="macro">assert_eq!</span>(
+<a href=#1048 id=1048 data-nosnippet>1048</a>                <span class="macro">matches!</span>(
+<a href=#1049 id=1049 data-nosnippet>1049</a>                    classify_write_error(msg, <span class="string">"thing"</span>),
+<a href=#1050 id=1050 data-nosnippet>1050</a>                    DbError::AlreadyExists { .. }
+<a href=#1051 id=1051 data-nosnippet>1051</a>                ),
+<a href=#1052 id=1052 data-nosnippet>1052</a>                expected,
+<a href=#1053 id=1053 data-nosnippet>1053</a>                <span class="string">"classify_write_error disagreed on: {msg}"
+<a href=#1054 id=1054 data-nosnippet>1054</a>            </span>);
+<a href=#1055 id=1055 data-nosnippet>1055</a>        }
+<a href=#1056 id=1056 data-nosnippet>1056</a>    }
+<a href=#1057 id=1057 data-nosnippet>1057</a>
+<a href=#1058 id=1058 data-nosnippet>1058</a>    <span class="attr">#[test]
+<a href=#1059 id=1059 data-nosnippet>1059</a>    </span><span class="kw">fn </span>classify_conflict_write_error_names_the_constrained_thing() {
+<a href=#1060 id=1060 data-nosnippet>1060</a>        <span class="kw">match </span>classify_conflict_write_error(
+<a href=#1061 id=1061 data-nosnippet>1061</a>            <span class="string">"Database index `idx_state_uniq` already contains ['s']"</span>,
+<a href=#1062 id=1062 data-nosnippet>1062</a>            <span class="string">"federation_login_state.state"</span>,
+<a href=#1063 id=1063 data-nosnippet>1063</a>        ) {
+<a href=#1064 id=1064 data-nosnippet>1064</a>            AxiamError::AlreadyExists { entity } =&gt; {
+<a href=#1065 id=1065 data-nosnippet>1065</a>                <span class="macro">assert_eq!</span>(entity, <span class="string">"federation_login_state.state"</span>);
+<a href=#1066 id=1066 data-nosnippet>1066</a>            }
+<a href=#1067 id=1067 data-nosnippet>1067</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected AlreadyExists, got {other:?}"</span>),
+<a href=#1068 id=1068 data-nosnippet>1068</a>        }
+<a href=#1069 id=1069 data-nosnippet>1069</a>    }
+<a href=#1070 id=1070 data-nosnippet>1070</a>}
 </code></pre></div></section></main></body></html>

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["hash_code"],"struct":["AuthorizeRequest","AuthorizeResponse","AuthorizeService"]};
+window.SIDEBAR_ITEMS = {"enum":["AuthorizeOutcome","RequestObject"],"fn":["hash_code"],"struct":["AuthorizeRequest","AuthorizeResponse","AuthorizeService","SessionEvidence"]};

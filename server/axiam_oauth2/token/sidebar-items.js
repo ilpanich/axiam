@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["IntrospectRequest","IntrospectionResponse","RevokeRequest","TokenRequest","TokenRequestContext","TokenResponse","TokenService"]};
+window.SIDEBAR_ITEMS = {"constant":["CLIENT_AUTH_FAILED","REFRESH_ROTATION_GRACE_SECS"],"struct":["IntrospectRequest","IntrospectionResponse","RevokeRequest","TokenRequest","TokenRequestContext","TokenResponse","TokenService"]};

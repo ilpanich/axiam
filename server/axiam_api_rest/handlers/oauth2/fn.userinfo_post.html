@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="`POST /oauth2/userinfo` — the same endpoint, the other method (W6, plan §4.9 G10; OIDC Core §5.3, which says an OP MUST support both)."><title>userinfo_post in axiam_api_rest::handlers::oauth2 - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">userinfo_post</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.0.0-beta13</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">userinfo_<wbr>post</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-a-second-handler-rather-than-a-second-extractor" title="Why a second handler rather than a second extractor">Why a second handler rather than a second extractor</a></li><li><a href="#the-refusals-and-where-each-is-decided" title="The refusals, and where each is decided">The refusals, and where each is decided</a></li><li><a href="#an-empty-field-is-not-a-carrier" title="An empty field is not a carrier">An empty field is not a carrier</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In axiam_<wbr>api_<wbr>rest::<wbr>handlers::<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_rest</a>::<wbr><a href="../index.html">handlers</a>::<wbr><a href="index.html">oauth2</a></div><h1>Function <span class="fn">userinfo_<wbr>post</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_rest/handlers/oauth2.rs.html#3049-3091">Source</a> </span></div><pre class="rust item-decl"><code>pub async fn userinfo_post&lt;C: Connection + <a class="trait" href="https://doc.rust-lang.org/1.98.1/core/clone/trait.Clone.html" title="trait core::clone::Clone">Clone</a>&gt;(
+    req: HttpRequest,
+    form: <a class="enum" href="https://doc.rust-lang.org/1.98.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;Form&lt;<a class="struct" href="struct.UserInfoPostForm.html" title="struct axiam_api_rest::handlers::oauth2::UserInfoPostForm">UserInfoPostForm</a>&gt;&gt;,
+    maybe_user: <a class="struct" href="../../extractors/auth/struct.MaybeAuthenticatedUser.html" title="struct axiam_api_rest::extractors::auth::MaybeAuthenticatedUser">MaybeAuthenticatedUser</a>,
+    state: Data&lt;<a class="struct" href="../../state/struct.AppState.html" title="struct axiam_api_rest::state::AppState">AppState</a>&lt;C&gt;&gt;,
+) -&gt; HttpResponse</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><code>POST /oauth2/userinfo</code> — the same endpoint, the other method (W6, plan
+§4.9 G10; OIDC Core §5.3, which says an OP MUST support both).</p>
+<h2 id="why-a-second-handler-rather-than-a-second-extractor"><a class="doc-anchor" href="#why-a-second-handler-rather-than-a-second-extractor">§</a>Why a second handler rather than a second extractor</h2>
+<p>The access token may arrive in the <code>Authorization</code> header (RFC 6750 §2.1) or
+— on POST only — in an <code>access_token</code> form field (§2.2). The second carrier
+lives in the body, which <a href="../../extractors/auth/struct.AuthenticatedUser.html" title="struct axiam_api_rest::extractors::auth::AuthenticatedUser"><code>AuthenticatedUser</code></a>’s <code>FromRequest</code> impl does not
+read and must not start reading: that impl is on the path <code>GET</code> takes, and
+on the path every other authenticated route in the tree takes. Resolving the
+token here instead leaves all of them untouched, which is what makes “GET
+behaviour is unchanged” a property of the routing table rather than a claim
+about a shared code path. Both arms then hand the same
+<a href="../../extractors/auth/struct.AuthenticatedUser.html" title="struct axiam_api_rest::extractors::auth::AuthenticatedUser"><code>AuthenticatedUser</code></a> to the same [<code>userinfo_claims</code>].</p>
+<h2 id="the-refusals-and-where-each-is-decided"><a class="doc-anchor" href="#the-refusals-and-where-each-is-decided">§</a>The refusals, and where each is decided</h2>
+<ul>
+<li><strong>Two carriers, one request.</strong> RFC 6750 §2: <em>“Clients MUST NOT use more
+than one method to transmit the token in each request.”</em> A form field
+presented together with an <code>Authorization</code> header is refused here with
+<code>400 invalid_request</code>, and the refusal names neither token — it does not
+read them at all, so there is nothing to leak into the body or the log.
+The <code>axiam_access</code> cookie is refused alongside the form field for the same
+reason even though it is not one of RFC 6750’s methods: it is a second
+credential naming a possibly different subject, and the alternative to
+refusing is choosing silently between two identities.</li>
+<li><strong>The cookie alone still authenticates, exactly as on GET.</strong> That is
+today’s behaviour and invariant 4 keeps it. It is a CSRF surface in
+principle — <code>/oauth2</code> is not wrapped in <code>CsrfMiddleware</code>, only <code>/api/v1</code>
+is — and it fails closed in practice because <code>axiam_access</code> is
+<code>SameSite=Strict</code> (<code>middleware::csrf::access_cookie</code>), so a cross-site
+form POST carries no cookie and lands here unauthenticated. That is a
+property of the cookie, not of this handler, so it is pinned by a test
+rather than asserted by this comment
+(<code>oauth2_userinfo_post_test.rs::the_access_cookie_is_strict_so_a_cross_site_post_cannot_be_authenticated_by_it</code>).</li>
+<li><strong><code>access_token</code> in the query string is never read</strong> — on either method.
+RFC 6750 §2.3 deprecates that form because it puts a credential in a URL,
+a <code>Referer</code> and every access log in the path. Refusing it would mean
+reading it first, and the parameter’s problem is that it exists at all,
+not that a server honours it. So there is no code here that looks at the
+query string, and a <code>GET /oauth2/userinfo?access_token=…</code> is simply an
+unauthenticated request with an odd URL.</li>
+</ul>
+<h2 id="an-empty-field-is-not-a-carrier"><a class="doc-anchor" href="#an-empty-field-is-not-a-carrier">§</a>An empty field is not a carrier</h2>
+<p><code>access_token=</code> transmits no token, so it is treated as absent rather than
+as a second method or as an invalid credential. A request carrying an empty
+field and a real <code>Authorization</code> header is answered, not refused.</p>
+</div></details></section></div></main></body></html>

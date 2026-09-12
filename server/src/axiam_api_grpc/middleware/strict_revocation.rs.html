@@ -313,5 +313,159 @@
 <a href=#313 id=313 data-nosnippet>313</a>            <span class="prelude-val">None
 <a href=#314 id=314 data-nosnippet>314</a>        </span>);
 <a href=#315 id=315 data-nosnippet>315</a>    }
-<a href=#316 id=316 data-nosnippet>316</a>}
+<a href=#316 id=316 data-nosnippet>316</a>
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="comment">// -----------------------------------------------------------------
+<a href=#318 id=318 data-nosnippet>318</a>    // The layer itself
+<a href=#319 id=319 data-nosnippet>319</a>    //
+<a href=#320 id=320 data-nosnippet>320</a>    // The tests above cover `session_ref_from_request` — deciding WHICH
+<a href=#321 id=321 data-nosnippet>321</a>    // session a request names. They stop short of what the middleware then
+<a href=#322 id=322 data-nosnippet>322</a>    // DOES with that answer, which is the part that either denies a request or
+<a href=#323 id=323 data-nosnippet>323</a>    // does not. Both outcomes matter and neither was exercised: a layer that
+<a href=#324 id=324 data-nosnippet>324</a>    // never denied would leave revoked sessions working on this transport,
+<a href=#325 id=325 data-nosnippet>325</a>    // and one that denied too eagerly would break health and reflection,
+<a href=#326 id=326 data-nosnippet>326</a>    // which carry no credentials at all.
+<a href=#327 id=327 data-nosnippet>327</a>    // -----------------------------------------------------------------
+<a href=#328 id=328 data-nosnippet>328</a>
+<a href=#329 id=329 data-nosnippet>329</a>    </span><span class="kw">use </span>std::sync::atomic::{AtomicUsize, Ordering};
+<a href=#330 id=330 data-nosnippet>330</a>    <span class="kw">use </span>tower::{Layer, Service};
+<a href=#331 id=331 data-nosnippet>331</a>
+<a href=#332 id=332 data-nosnippet>332</a>    <span class="doccomment">/// Answers one fixed verdict and records nothing else.
+<a href=#333 id=333 data-nosnippet>333</a>    </span><span class="kw">struct </span>Sessions(bool);
+<a href=#334 id=334 data-nosnippet>334</a>
+<a href=#335 id=335 data-nosnippet>335</a>    <span class="kw">impl </span>SessionRevocationCheck <span class="kw">for </span>Sessions {
+<a href=#336 id=336 data-nosnippet>336</a>        <span class="kw">fn </span>is_session_active(
+<a href=#337 id=337 data-nosnippet>337</a>            <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#338 id=338 data-nosnippet>338</a>            _tenant_id: Uuid,
+<a href=#339 id=339 data-nosnippet>339</a>            _session_id: Uuid,
+<a href=#340 id=340 data-nosnippet>340</a>        ) -&gt; Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = bool&gt; + Send + <span class="lifetime">'_</span>&gt;&gt; {
+<a href=#341 id=341 data-nosnippet>341</a>            <span class="kw">let </span>active = <span class="self">self</span>.<span class="number">0</span>;
+<a href=#342 id=342 data-nosnippet>342</a>            Box::pin(<span class="kw">async move </span>{ active })
+<a href=#343 id=343 data-nosnippet>343</a>        }
+<a href=#344 id=344 data-nosnippet>344</a>    }
+<a href=#345 id=345 data-nosnippet>345</a>
+<a href=#346 id=346 data-nosnippet>346</a>    <span class="doccomment">/// Counts the calls that actually reached the service behind the layer.
+<a href=#347 id=347 data-nosnippet>347</a>    </span><span class="attr">#[derive(Clone)]
+<a href=#348 id=348 data-nosnippet>348</a>    </span><span class="kw">struct </span>Downstream(Arc&lt;AtomicUsize&gt;);
+<a href=#349 id=349 data-nosnippet>349</a>
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="kw">impl </span>Service&lt;Request&lt;tonic::body::Body&gt;&gt; <span class="kw">for </span>Downstream {
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="kw">type </span>Response = Response&lt;tonic::body::Body&gt;;
+<a href=#352 id=352 data-nosnippet>352</a>        <span class="kw">type </span>Error = std::convert::Infallible;
+<a href=#353 id=353 data-nosnippet>353</a>        <span class="kw">type </span>Future = Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>::Response, <span class="self">Self</span>::Error&gt;&gt; + Send&gt;&gt;;
+<a href=#354 id=354 data-nosnippet>354</a>
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="kw">fn </span>poll_ready(<span class="kw-2">&amp;mut </span><span class="self">self</span>, _cx: <span class="kw-2">&amp;mut </span>Context&lt;<span class="lifetime">'_</span>&gt;) -&gt; Poll&lt;<span class="prelude-ty">Result</span>&lt;(), <span class="self">Self</span>::Error&gt;&gt; {
+<a href=#356 id=356 data-nosnippet>356</a>            Poll::Ready(<span class="prelude-val">Ok</span>(()))
+<a href=#357 id=357 data-nosnippet>357</a>        }
+<a href=#358 id=358 data-nosnippet>358</a>
+<a href=#359 id=359 data-nosnippet>359</a>        <span class="kw">fn </span>call(<span class="kw-2">&amp;mut </span><span class="self">self</span>, _req: Request&lt;tonic::body::Body&gt;) -&gt; <span class="self">Self</span>::Future {
+<a href=#360 id=360 data-nosnippet>360</a>            <span class="self">self</span>.<span class="number">0</span>.fetch_add(<span class="number">1</span>, Ordering::SeqCst);
+<a href=#361 id=361 data-nosnippet>361</a>            Box::pin(<span class="kw">async </span>{
+<a href=#362 id=362 data-nosnippet>362</a>                <span class="prelude-val">Ok</span>(Response::builder()
+<a href=#363 id=363 data-nosnippet>363</a>                    .status(<span class="number">200</span>)
+<a href=#364 id=364 data-nosnippet>364</a>                    .body(tonic::body::Body::empty())
+<a href=#365 id=365 data-nosnippet>365</a>                    .expect(<span class="string">"a 200 with an empty body always builds"</span>))
+<a href=#366 id=366 data-nosnippet>366</a>            })
+<a href=#367 id=367 data-nosnippet>367</a>        }
+<a href=#368 id=368 data-nosnippet>368</a>    }
+<a href=#369 id=369 data-nosnippet>369</a>
+<a href=#370 id=370 data-nosnippet>370</a>    <span class="kw">fn </span>bearer_request(
+<a href=#371 id=371 data-nosnippet>371</a>        config: <span class="kw-2">&amp;</span>AuthConfig,
+<a href=#372 id=372 data-nosnippet>372</a>        tenant_id: Uuid,
+<a href=#373 id=373 data-nosnippet>373</a>        session_id: Uuid,
+<a href=#374 id=374 data-nosnippet>374</a>    ) -&gt; Request&lt;tonic::body::Body&gt; {
+<a href=#375 id=375 data-nosnippet>375</a>        <span class="kw">let </span>token = issue_access_token(
+<a href=#376 id=376 data-nosnippet>376</a>            Uuid::new_v4(),
+<a href=#377 id=377 data-nosnippet>377</a>            tenant_id,
+<a href=#378 id=378 data-nosnippet>378</a>            Uuid::new_v4(),
+<a href=#379 id=379 data-nosnippet>379</a>            <span class="kw-2">&amp;</span>[],
+<a href=#380 id=380 data-nosnippet>380</a>            config,
+<a href=#381 id=381 data-nosnippet>381</a>            session_id.to_string(),
+<a href=#382 id=382 data-nosnippet>382</a>            AUD_USER,
+<a href=#383 id=383 data-nosnippet>383</a>        )
+<a href=#384 id=384 data-nosnippet>384</a>        .expect(<span class="string">"issue token"</span>);
+<a href=#385 id=385 data-nosnippet>385</a>        Request::builder()
+<a href=#386 id=386 data-nosnippet>386</a>            .header(<span class="string">"authorization"</span>, <span class="macro">format!</span>(<span class="string">"Bearer {token}"</span>))
+<a href=#387 id=387 data-nosnippet>387</a>            .body(tonic::body::Body::empty())
+<a href=#388 id=388 data-nosnippet>388</a>            .expect(<span class="string">"request builds"</span>)
+<a href=#389 id=389 data-nosnippet>389</a>    }
+<a href=#390 id=390 data-nosnippet>390</a>
+<a href=#391 id=391 data-nosnippet>391</a>    <span class="doccomment">/// Drive one request through the layer, returning the response status and
+<a href=#392 id=392 data-nosnippet>392</a>    /// how many times the service behind it was reached.
+<a href=#393 id=393 data-nosnippet>393</a>    </span><span class="kw">async fn </span>through_the_layer(
+<a href=#394 id=394 data-nosnippet>394</a>        session_is_active: bool,
+<a href=#395 id=395 data-nosnippet>395</a>        req: Request&lt;tonic::body::Body&gt;,
+<a href=#396 id=396 data-nosnippet>396</a>        config: AuthConfig,
+<a href=#397 id=397 data-nosnippet>397</a>    ) -&gt; (http::StatusCode, usize) {
+<a href=#398 id=398 data-nosnippet>398</a>        <span class="kw">let </span>reached = Arc::new(AtomicUsize::new(<span class="number">0</span>));
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="kw">let </span>layer = GrpcStrictRevocationLayer::new(Arc::new(Sessions(session_is_active)), config);
+<a href=#400 id=400 data-nosnippet>400</a>        <span class="kw">let </span><span class="kw-2">mut </span>service = layer.layer(Downstream(Arc::clone(<span class="kw-2">&amp;</span>reached)));
+<a href=#401 id=401 data-nosnippet>401</a>        <span class="kw">let </span>response = service
+<a href=#402 id=402 data-nosnippet>402</a>            .call(req)
+<a href=#403 id=403 data-nosnippet>403</a>            .<span class="kw">await
+<a href=#404 id=404 data-nosnippet>404</a>            </span>.expect(<span class="string">"the downstream is infallible"</span>);
+<a href=#405 id=405 data-nosnippet>405</a>        (response.status(), reached.load(Ordering::SeqCst))
+<a href=#406 id=406 data-nosnippet>406</a>    }
+<a href=#407 id=407 data-nosnippet>407</a>
+<a href=#408 id=408 data-nosnippet>408</a>    <span class="attr">#[tokio::test]
+<a href=#409 id=409 data-nosnippet>409</a>    </span><span class="kw">async fn </span>a_request_whose_session_is_gone_is_denied_and_never_reaches_the_service() {
+<a href=#410 id=410 data-nosnippet>410</a>        <span class="comment">// The point of the layer. Returning the refusal is not enough on its
+<a href=#411 id=411 data-nosnippet>411</a>        // own — the handler behind it must not run, or a revoked session still
+<a href=#412 id=412 data-nosnippet>412</a>        // has its side effects.
+<a href=#413 id=413 data-nosnippet>413</a>        </span><span class="kw">let </span>config = test_config();
+<a href=#414 id=414 data-nosnippet>414</a>
+<a href=#415 id=415 data-nosnippet>415</a>        <span class="kw">let </span>(status, reached) = through_the_layer(
+<a href=#416 id=416 data-nosnippet>416</a>            <span class="bool-val">false</span>,
+<a href=#417 id=417 data-nosnippet>417</a>            bearer_request(<span class="kw-2">&amp;</span>config, Uuid::new_v4(), Uuid::new_v4()),
+<a href=#418 id=418 data-nosnippet>418</a>            config.clone(),
+<a href=#419 id=419 data-nosnippet>419</a>        )
+<a href=#420 id=420 data-nosnippet>420</a>        .<span class="kw">await</span>;
+<a href=#421 id=421 data-nosnippet>421</a>
+<a href=#422 id=422 data-nosnippet>422</a>        <span class="macro">assert_eq!</span>(
+<a href=#423 id=423 data-nosnippet>423</a>            status,
+<a href=#424 id=424 data-nosnippet>424</a>            tonic::Status::unauthenticated(<span class="string">"session revoked"</span>)
+<a href=#425 id=425 data-nosnippet>425</a>                .into_http::&lt;tonic::body::Body&gt;()
+<a href=#426 id=426 data-nosnippet>426</a>                .status(),
+<a href=#427 id=427 data-nosnippet>427</a>            <span class="string">"a revoked session is refused as unauthenticated"
+<a href=#428 id=428 data-nosnippet>428</a>        </span>);
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="macro">assert_eq!</span>(reached, <span class="number">0</span>, <span class="string">"the handler behind the layer must not run"</span>);
+<a href=#430 id=430 data-nosnippet>430</a>    }
+<a href=#431 id=431 data-nosnippet>431</a>
+<a href=#432 id=432 data-nosnippet>432</a>    <span class="attr">#[tokio::test]
+<a href=#433 id=433 data-nosnippet>433</a>    </span><span class="kw">async fn </span>a_request_whose_session_is_live_passes_straight_through() {
+<a href=#434 id=434 data-nosnippet>434</a>        <span class="kw">let </span>config = test_config();
+<a href=#435 id=435 data-nosnippet>435</a>
+<a href=#436 id=436 data-nosnippet>436</a>        <span class="kw">let </span>(status, reached) = through_the_layer(
+<a href=#437 id=437 data-nosnippet>437</a>            <span class="bool-val">true</span>,
+<a href=#438 id=438 data-nosnippet>438</a>            bearer_request(<span class="kw-2">&amp;</span>config, Uuid::new_v4(), Uuid::new_v4()),
+<a href=#439 id=439 data-nosnippet>439</a>            config.clone(),
+<a href=#440 id=440 data-nosnippet>440</a>        )
+<a href=#441 id=441 data-nosnippet>441</a>        .<span class="kw">await</span>;
+<a href=#442 id=442 data-nosnippet>442</a>
+<a href=#443 id=443 data-nosnippet>443</a>        <span class="macro">assert_eq!</span>(status, http::StatusCode::OK);
+<a href=#444 id=444 data-nosnippet>444</a>        <span class="macro">assert_eq!</span>(reached, <span class="number">1</span>);
+<a href=#445 id=445 data-nosnippet>445</a>    }
+<a href=#446 id=446 data-nosnippet>446</a>
+<a href=#447 id=447 data-nosnippet>447</a>    <span class="attr">#[tokio::test]
+<a href=#448 id=448 data-nosnippet>448</a>    </span><span class="kw">async fn </span>a_request_naming_no_session_is_passed_on_rather_than_denied() {
+<a href=#449 id=449 data-nosnippet>449</a>        <span class="comment">// Health and reflection carry no credentials, and the verifying
+<a href=#450 id=450 data-nosnippet>450</a>        // interceptor — not this layer — is what refuses a call that needs
+<a href=#451 id=451 data-nosnippet>451</a>        // them. Denying here would take those endpoints down, which is the
+<a href=#452 id=452 data-nosnippet>452</a>        // failure mode the "fall through" rule exists to prevent.
+<a href=#453 id=453 data-nosnippet>453</a>        </span><span class="kw">let </span>config = test_config();
+<a href=#454 id=454 data-nosnippet>454</a>
+<a href=#455 id=455 data-nosnippet>455</a>        <span class="kw">let </span>(status, reached) = through_the_layer(
+<a href=#456 id=456 data-nosnippet>456</a>            <span class="bool-val">false</span>, <span class="comment">// even with every session revoked
+<a href=#457 id=457 data-nosnippet>457</a>            </span>Request::builder()
+<a href=#458 id=458 data-nosnippet>458</a>                .body(tonic::body::Body::empty())
+<a href=#459 id=459 data-nosnippet>459</a>                .expect(<span class="string">"request builds"</span>),
+<a href=#460 id=460 data-nosnippet>460</a>            config,
+<a href=#461 id=461 data-nosnippet>461</a>        )
+<a href=#462 id=462 data-nosnippet>462</a>        .<span class="kw">await</span>;
+<a href=#463 id=463 data-nosnippet>463</a>
+<a href=#464 id=464 data-nosnippet>464</a>        <span class="macro">assert_eq!</span>(status, http::StatusCode::OK);
+<a href=#465 id=465 data-nosnippet>465</a>        <span class="macro">assert_eq!</span>(
+<a href=#466 id=466 data-nosnippet>466</a>            reached, <span class="number">1</span>,
+<a href=#467 id=467 data-nosnippet>467</a>            <span class="string">"an unauthenticated call is not this layer's to refuse"
+<a href=#468 id=468 data-nosnippet>468</a>        </span>);
+<a href=#469 id=469 data-nosnippet>469</a>    }
+<a href=#470 id=470 data-nosnippet>470</a>}
 </code></pre></div></section></main></body></html>

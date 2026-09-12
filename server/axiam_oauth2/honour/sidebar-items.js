@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Outcome","Reason"],"fn":["evaluate"],"struct":["Interaction","Request"]};

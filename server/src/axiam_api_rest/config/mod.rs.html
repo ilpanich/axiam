@@ -97,194 +97,295 @@
 <a href=#97 id=97 data-nosnippet>97</a>    /// handshake is rejected if the client presents no certificate or an
 <a href=#98 id=98 data-nosnippet>98</a>    /// unverifiable one (`WebPkiClientVerifier::builder(..).build()`).
 <a href=#99 id=99 data-nosnippet>99</a>    </span>Required,
-<a href=#100 id=100 data-nosnippet>100</a>}
-<a href=#101 id=101 data-nosnippet>101</a>
-<a href=#102 id=102 data-nosnippet>102</a><span class="doccomment">/// Default [`TlsConfig::reload_interval_secs`]: one hour.
-<a href=#103 id=103 data-nosnippet>103</a>///
-<a href=#104 id=104 data-nosnippet>104</a>/// Chosen against the renewal cadence it exists to catch, not against how fast
-<a href=#105 id=105 data-nosnippet>105</a>/// a change could be noticed. Let's Encrypt issues for 90 days and ACME clients
-<a href=#106 id=106 data-nosnippet>106</a>/// renew at 60, so the window between "a new certificate is on disk" and "the
-<a href=#107 id=107 data-nosnippet>107</a>/// old one stops being accepted" is thirty days. An hourly poll closes it with
-<a href=#108 id=108 data-nosnippet>108</a>/// four orders of magnitude to spare, and is rare enough that the `stat` never
-<a href=#109 id=109 data-nosnippet>109</a>/// shows up anywhere.
-<a href=#110 id=110 data-nosnippet>110</a></span><span class="kw">pub const </span>DEFAULT_TLS_RELOAD_INTERVAL_SECS: u64 = <span class="number">3600</span>;
-<a href=#111 id=111 data-nosnippet>111</a>
-<a href=#112 id=112 data-nosnippet>112</a><span class="doccomment">/// Direct-TLS configuration for the REST API listener.
-<a href=#113 id=113 data-nosnippet>113</a>///
-<a href=#114 id=114 data-nosnippet>114</a>/// TLS is **opt-in**: the default (`enabled = false`) preserves the plaintext
-<a href=#115 id=115 data-nosnippet>115</a>/// bind used behind a TLS-terminating proxy. When `enabled = true`, both
-<a href=#116 id=116 data-nosnippet>116</a>/// `cert_path` and `key_path` must point at readable PEM files; the server
-<a href=#117 id=117 data-nosnippet>117</a>/// negotiates TLS 1.3 only (ASVS V9.1.2), whose cipher suites are all
-<a href=#118 id=118 data-nosnippet>118</a>/// ASVS-approved (V9.1.3).
-<a href=#119 id=119 data-nosnippet>119</a></span><span class="attr">#[derive(Debug, Clone, Deserialize)]
-<a href=#120 id=120 data-nosnippet>120</a>#[serde(default)]
-<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">pub struct </span>TlsConfig {
-<a href=#122 id=122 data-nosnippet>122</a>    <span class="doccomment">/// Enable direct TLS termination in the server process.
-<a href=#123 id=123 data-nosnippet>123</a>    </span><span class="kw">pub </span>enabled: bool,
-<a href=#124 id=124 data-nosnippet>124</a>    <span class="doccomment">/// Path to the PEM-encoded certificate chain (leaf first).
-<a href=#125 id=125 data-nosnippet>125</a>    </span><span class="kw">pub </span>cert_path: <span class="prelude-ty">Option</span>&lt;PathBuf&gt;,
-<a href=#126 id=126 data-nosnippet>126</a>    <span class="doccomment">/// Path to the PEM-encoded private key (PKCS#8, PKCS#1, or SEC1).
-<a href=#127 id=127 data-nosnippet>127</a>    </span><span class="kw">pub </span>key_path: <span class="prelude-ty">Option</span>&lt;PathBuf&gt;,
-<a href=#128 id=128 data-nosnippet>128</a>    <span class="doccomment">/// Offer HTTP/2 (`h2`) over ALPN alongside `http/1.1`. Default `true`
-<a href=#129 id=129 data-nosnippet>129</a>    /// (backward-compatible; matches what the actix-web rustls bind advertises).
-<a href=#130 id=130 data-nosnippet>130</a>    ///
-<a href=#131 id=131 data-nosnippet>131</a>    /// Set `false` to build the rustls listener advertising `http/1.1` only —
-<a href=#132 id=132 data-nosnippet>132</a>    /// used to run the p2 benchmark apples-to-apples with the plaintext p0
-<a href=#133 id=133 data-nosnippet>133</a>    /// listener (which is HTTP/1.1), isolating the h2-vs-h1.1 throughput effect
-<a href=#134 id=134 data-nosnippet>134</a>    /// (B2). See `axiam-server`'s `tls` module for the important caveat that the
-<a href=#135 id=135 data-nosnippet>135</a>    /// actix-web `HttpServer` bind re-adds `h2` to ALPN regardless.
-<a href=#136 id=136 data-nosnippet>136</a>    </span><span class="kw">pub </span>http2: bool,
-<a href=#137 id=137 data-nosnippet>137</a>    <span class="doccomment">/// Native client-certificate (mTLS) policy (D3). Default `off` keeps the
-<a href=#138 id=138 data-nosnippet>138</a>    /// server-auth-only behaviour. `optional`/`required` build the rustls config
-<a href=#139 id=139 data-nosnippet>139</a>    /// with a `WebPkiClientVerifier` over [`Self::client_ca_path`].
-<a href=#140 id=140 data-nosnippet>140</a>    </span><span class="kw">pub </span>client_auth: ClientAuth,
-<a href=#141 id=141 data-nosnippet>141</a>    <span class="doccomment">/// Path to the PEM CA bundle used to verify client certificates. Required
-<a href=#142 id=142 data-nosnippet>142</a>    /// (and must be readable) when `client_auth` is `optional` or `required`;
-<a href=#143 id=143 data-nosnippet>143</a>    /// ignored when `off`.
-<a href=#144 id=144 data-nosnippet>144</a>    </span><span class="kw">pub </span>client_ca_path: <span class="prelude-ty">Option</span>&lt;PathBuf&gt;,
-<a href=#145 id=145 data-nosnippet>145</a>    <span class="doccomment">/// Where to write the client-CA bundle built from the organization CAs an
-<a href=#146 id=146 data-nosnippet>146</a>    /// operator flagged as mTLS trust anchors.
-<a href=#147 id=147 data-nosnippet>147</a>    ///
-<a href=#148 id=148 data-nosnippet>148</a>    /// The flag lives on the CA
-<a href=#149 id=149 data-nosnippet>149</a>    /// ([`axiam_core::models::certificate::CaCertificate::mtls_trust_anchor`]),
-<a href=#150 id=150 data-nosnippet>150</a>    /// set through the admin UI or the API. At startup the server collects every
-<a href=#151 id=151 data-nosnippet>151</a>    /// flagged CA's **public** certificate, writes them here as one PEM bundle,
-<a href=#152 id=152 data-nosnippet>152</a>    /// and — only if the operator has not set [`Self::client_auth`] and
-<a href=#153 id=153 data-nosnippet>153</a>    /// [`Self::client_ca_path`] themselves — points client-certificate
-<a href=#154 id=154 data-nosnippet>154</a>    /// verification at it in `optional` mode.
-<a href=#155 id=155 data-nosnippet>155</a>    ///
-<a href=#156 id=156 data-nosnippet>156</a>    /// A deployment that flags no CA never writes this file and is unaffected.
-<a href=#157 id=157 data-nosnippet>157</a>    /// An operator who configures `client_auth` and `client_ca_path` explicitly
-<a href=#158 id=158 data-nosnippet>158</a>    /// keeps exactly what they configured: a value someone typed is a decision,
-<a href=#159 id=159 data-nosnippet>159</a>    /// and quietly overriding it is how a trust store ends up containing
-<a href=#160 id=160 data-nosnippet>160</a>    /// something nobody chose.
-<a href=#161 id=161 data-nosnippet>161</a>    ///
-<a href=#162 id=162 data-nosnippet>162</a>    /// Defaults to `client-ca-bundle.pem` beside the server's other TLS
-<a href=#163 id=163 data-nosnippet>163</a>    /// material when `cert_path` is set, and is otherwise required for the
-<a href=#164 id=164 data-nosnippet>164</a>    /// feature to do anything.
-<a href=#165 id=165 data-nosnippet>165</a>    </span><span class="kw">pub </span>client_ca_bundle_path: <span class="prelude-ty">Option</span>&lt;PathBuf&gt;,
-<a href=#166 id=166 data-nosnippet>166</a>    <span class="doccomment">/// How often, in seconds, to re-read [`Self::cert_path`] and
-<a href=#167 id=167 data-nosnippet>167</a>    /// [`Self::key_path`] and install the leaf certificate when it differs from
-<a href=#168 id=168 data-nosnippet>168</a>    /// the one being served. `0` disables polling. Default `3600`.
-<a href=#169 id=169 data-nosnippet>169</a>    ///
-<a href=#170 id=170 data-nosnippet>170</a>    /// The comparison is on the parsed DER chain, not on file metadata: an
-<a href=#171 id=171 data-nosnippet>171</a>    /// mtime can change without the certificate changing (a `touch`, a
-<a href=#172 id=172 data-nosnippet>172</a>    /// re-render of an identical file) and — worse — can fail to change when
-<a href=#173 id=173 data-nosnippet>173</a>    /// the content does. Comparing what will actually be served costs one file
-<a href=#174 id=174 data-nosnippet>174</a>    /// read an hour and cannot be fooled either way.
-<a href=#175 id=175 data-nosnippet>175</a>    ///
-<a href=#176 id=176 data-nosnippet>176</a>    /// # Why this exists
-<a href=#177 id=177 data-nosnippet>177</a>    ///
-<a href=#178 id=178 data-nosnippet>178</a>    /// rustls resolves the server's certificate per handshake, but the pair is
-<a href=#179 id=179 data-nosnippet>179</a>    /// read from disk exactly once unless something re-reads it. An ACME client
-<a href=#180 id=180 data-nosnippet>180</a>    /// renewing a 90-day Let's Encrypt certificate at day 60 therefore has no
-<a href=#181 id=181 data-nosnippet>181</a>    /// effect on a running server, and the listener serves an expired
-<a href=#182 id=182 data-nosnippet>182</a>    /// certificate on day 90.
-<a href=#183 id=183 data-nosnippet>183</a>    ///
-<a href=#184 id=184 data-nosnippet>184</a>    /// `SIGHUP` is the primary, immediate trigger and is what an ACME deploy
-<a href=#185 id=185 data-nosnippet>185</a>    /// hook should send. This poll is the safety net for the case that actually
-<a href=#186 id=186 data-nosnippet>186</a>    /// happens in the field: the hook was never wired up, or the process runs
-<a href=#187 id=187 data-nosnippet>187</a>    /// under something that does not forward signals, and nobody finds out
-<a href=#188 id=188 data-nosnippet>188</a>    /// until the certificate expires. Reading two small files an hour costs
-<a href=#189 id=189 data-nosnippet>189</a>    /// nothing.
-<a href=#190 id=190 data-nosnippet>190</a>    ///
-<a href=#191 id=191 data-nosnippet>191</a>    /// A poll can observe a half-updated pair — certbot writes the chain and
-<a href=#192 id=192 data-nosnippet>192</a>    /// the key as two operations — so a reload that fails to produce a matching
-<a href=#193 id=193 data-nosnippet>193</a>    /// pair leaves the previous certificate serving and is retried on the next
-<a href=#194 id=194 data-nosnippet>194</a>    /// tick. See `axiam_server::tls::reload_leaf_certificate`.
-<a href=#195 id=195 data-nosnippet>195</a>    </span><span class="kw">pub </span>reload_interval_secs: u64,
-<a href=#196 id=196 data-nosnippet>196</a>}
-<a href=#197 id=197 data-nosnippet>197</a>
-<a href=#198 id=198 data-nosnippet>198</a><span class="kw">impl </span>Default <span class="kw">for </span>TlsConfig {
-<a href=#199 id=199 data-nosnippet>199</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-<a href=#200 id=200 data-nosnippet>200</a>        <span class="self">Self </span>{
-<a href=#201 id=201 data-nosnippet>201</a>            enabled: <span class="bool-val">false</span>,
-<a href=#202 id=202 data-nosnippet>202</a>            cert_path: <span class="prelude-val">None</span>,
-<a href=#203 id=203 data-nosnippet>203</a>            key_path: <span class="prelude-val">None</span>,
-<a href=#204 id=204 data-nosnippet>204</a>            http2: <span class="bool-val">true</span>,
-<a href=#205 id=205 data-nosnippet>205</a>            client_auth: ClientAuth::Off,
-<a href=#206 id=206 data-nosnippet>206</a>            client_ca_path: <span class="prelude-val">None</span>,
-<a href=#207 id=207 data-nosnippet>207</a>            client_ca_bundle_path: <span class="prelude-val">None</span>,
-<a href=#208 id=208 data-nosnippet>208</a>            reload_interval_secs: DEFAULT_TLS_RELOAD_INTERVAL_SECS,
-<a href=#209 id=209 data-nosnippet>209</a>        }
-<a href=#210 id=210 data-nosnippet>210</a>    }
-<a href=#211 id=211 data-nosnippet>211</a>}
-<a href=#212 id=212 data-nosnippet>212</a>
-<a href=#213 id=213 data-nosnippet>213</a><span class="kw">impl </span>ServerConfig {
-<a href=#214 id=214 data-nosnippet>214</a>    <span class="doccomment">/// Returns the socket bind address as "host:port".
-<a href=#215 id=215 data-nosnippet>215</a>    </span><span class="kw">pub fn </span>bind_address(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; String {
-<a href=#216 id=216 data-nosnippet>216</a>        <span class="macro">format!</span>(<span class="string">"{}:{}"</span>, <span class="self">self</span>.host, <span class="self">self</span>.port)
-<a href=#217 id=217 data-nosnippet>217</a>    }
-<a href=#218 id=218 data-nosnippet>218</a>}
-<a href=#219 id=219 data-nosnippet>219</a>
-<a href=#220 id=220 data-nosnippet>220</a><span class="attr">#[cfg(test)]
-<a href=#221 id=221 data-nosnippet>221</a></span><span class="kw">mod </span>tests {
-<a href=#222 id=222 data-nosnippet>222</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#223 id=223 data-nosnippet>223</a>
-<a href=#224 id=224 data-nosnippet>224</a>    <span class="doccomment">/// I5: the whole point of the knob is that the socket option is now set
-<a href=#225 id=225 data-nosnippet>225</a>    /// *explicitly*. If this default ever flips to `false`, the REST listener
-<a href=#226 id=226 data-nosnippet>226</a>    /// silently goes back to running with Nagle enabled while gRPC does not.
-<a href=#227 id=227 data-nosnippet>227</a>    </span><span class="attr">#[test]
-<a href=#228 id=228 data-nosnippet>228</a>    </span><span class="kw">fn </span>tcp_nodelay_defaults_to_enabled() {
-<a href=#229 id=229 data-nosnippet>229</a>        <span class="macro">assert!</span>(
-<a href=#230 id=230 data-nosnippet>230</a>            ServerConfig::default().tcp_nodelay,
-<a href=#231 id=231 data-nosnippet>231</a>            <span class="string">"TCP_NODELAY must default to enabled — actix-web leaves the socket \
-<a href=#232 id=232 data-nosnippet>232</a>             option untouched when unset, which means Nagle stays on"
-<a href=#233 id=233 data-nosnippet>233</a>        </span>);
-<a href=#234 id=234 data-nosnippet>234</a>    }
-<a href=#235 id=235 data-nosnippet>235</a>
-<a href=#236 id=236 data-nosnippet>236</a>    <span class="doccomment">/// The knob must be reachable from configuration, since the run-5
-<a href=#237 id=237 data-nosnippet>237</a>    /// measurement plan depends on being able to turn it off.
-<a href=#238 id=238 data-nosnippet>238</a>    </span><span class="attr">#[test]
-<a href=#239 id=239 data-nosnippet>239</a>    </span><span class="kw">fn </span>tcp_nodelay_can_be_disabled_from_config() {
-<a href=#240 id=240 data-nosnippet>240</a>        <span class="kw">let </span>parsed: ServerConfig = serde_json::from_str(<span class="string">r#"{"tcp_nodelay": false}"#</span>)
-<a href=#241 id=241 data-nosnippet>241</a>            .expect(<span class="string">"a partial server config must deserialize"</span>);
-<a href=#242 id=242 data-nosnippet>242</a>        <span class="macro">assert!</span>(!parsed.tcp_nodelay);
-<a href=#243 id=243 data-nosnippet>243</a>        <span class="comment">// Everything else still falls back to the defaults.
-<a href=#244 id=244 data-nosnippet>244</a>        </span><span class="macro">assert_eq!</span>(parsed.port, ServerConfig::default().port);
-<a href=#245 id=245 data-nosnippet>245</a>    }
-<a href=#246 id=246 data-nosnippet>246</a>
-<a href=#247 id=247 data-nosnippet>247</a>    <span class="attr">#[test]
-<a href=#248 id=248 data-nosnippet>248</a>    </span><span class="kw">fn </span>client_auth_defaults_to_off() {
-<a href=#249 id=249 data-nosnippet>249</a>        <span class="macro">assert_eq!</span>(ClientAuth::default(), ClientAuth::Off);
-<a href=#250 id=250 data-nosnippet>250</a>        <span class="macro">assert_eq!</span>(TlsConfig::default().client_auth, ClientAuth::Off);
-<a href=#251 id=251 data-nosnippet>251</a>        <span class="macro">assert!</span>(TlsConfig::default().client_ca_path.is_none());
-<a href=#252 id=252 data-nosnippet>252</a>    }
-<a href=#253 id=253 data-nosnippet>253</a>
-<a href=#254 id=254 data-nosnippet>254</a>    <span class="attr">#[test]
-<a href=#255 id=255 data-nosnippet>255</a>    </span><span class="kw">fn </span>client_auth_parses_all_three_values() {
-<a href=#256 id=256 data-nosnippet>256</a>        <span class="kw">for </span>(raw, expected) <span class="kw">in </span>[
-<a href=#257 id=257 data-nosnippet>257</a>            (<span class="string">"\"off\""</span>, ClientAuth::Off),
-<a href=#258 id=258 data-nosnippet>258</a>            (<span class="string">"\"optional\""</span>, ClientAuth::Optional),
-<a href=#259 id=259 data-nosnippet>259</a>            (<span class="string">"\"required\""</span>, ClientAuth::Required),
-<a href=#260 id=260 data-nosnippet>260</a>        ] {
-<a href=#261 id=261 data-nosnippet>261</a>            <span class="kw">let </span>parsed: ClientAuth =
-<a href=#262 id=262 data-nosnippet>262</a>                serde_json::from_str(raw).unwrap_or_else(|e| <span class="macro">panic!</span>(<span class="string">"{raw} must parse: {e}"</span>));
-<a href=#263 id=263 data-nosnippet>263</a>            <span class="macro">assert_eq!</span>(parsed, expected, <span class="string">"{raw}"</span>);
-<a href=#264 id=264 data-nosnippet>264</a>        }
-<a href=#265 id=265 data-nosnippet>265</a>    }
-<a href=#266 id=266 data-nosnippet>266</a>
-<a href=#267 id=267 data-nosnippet>267</a>    <span class="attr">#[test]
-<a href=#268 id=268 data-nosnippet>268</a>    </span><span class="kw">fn </span>client_auth_rejects_invalid_value() {
-<a href=#269 id=269 data-nosnippet>269</a>        <span class="kw">let </span>err = serde_json::from_str::&lt;ClientAuth&gt;(<span class="string">"\"enabled\""</span>);
-<a href=#270 id=270 data-nosnippet>270</a>        <span class="macro">assert!</span>(err.is_err(), <span class="string">"unknown client_auth value must be rejected"</span>);
-<a href=#271 id=271 data-nosnippet>271</a>    }
-<a href=#272 id=272 data-nosnippet>272</a>
-<a href=#273 id=273 data-nosnippet>273</a>    <span class="attr">#[test]
-<a href=#274 id=274 data-nosnippet>274</a>    </span><span class="kw">fn </span>tls_config_deserializes_client_auth_fields() {
-<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">let </span>cfg: TlsConfig = serde_json::from_value(<span class="macro">serde_json::json!</span>({
-<a href=#276 id=276 data-nosnippet>276</a>            <span class="string">"enabled"</span>: <span class="bool-val">true</span>,
-<a href=#277 id=277 data-nosnippet>277</a>            <span class="string">"cert_path"</span>: <span class="string">"/etc/axiam/server.crt"</span>,
-<a href=#278 id=278 data-nosnippet>278</a>            <span class="string">"key_path"</span>: <span class="string">"/etc/axiam/server.key"</span>,
-<a href=#279 id=279 data-nosnippet>279</a>            <span class="string">"client_auth"</span>: <span class="string">"required"</span>,
-<a href=#280 id=280 data-nosnippet>280</a>            <span class="string">"client_ca_path"</span>: <span class="string">"/etc/axiam/ca.crt"</span>,
-<a href=#281 id=281 data-nosnippet>281</a>        }))
-<a href=#282 id=282 data-nosnippet>282</a>        .expect(<span class="string">"TlsConfig with client-auth fields must deserialize"</span>);
-<a href=#283 id=283 data-nosnippet>283</a>        <span class="macro">assert_eq!</span>(cfg.client_auth, ClientAuth::Required);
-<a href=#284 id=284 data-nosnippet>284</a>        <span class="macro">assert_eq!</span>(
-<a href=#285 id=285 data-nosnippet>285</a>            cfg.client_ca_path.as_deref(),
-<a href=#286 id=286 data-nosnippet>286</a>            <span class="prelude-val">Some</span>(std::path::Path::new(<span class="string">"/etc/axiam/ca.crt"</span>))
-<a href=#287 id=287 data-nosnippet>287</a>        );
-<a href=#288 id=288 data-nosnippet>288</a>    }
-<a href=#289 id=289 data-nosnippet>289</a>}
+<a href=#100 id=100 data-nosnippet>100</a>    <span class="doccomment">/// Like [`Self::Optional`], **plus** accept a client certificate that
+<a href=#101 id=101 data-nosnippet>101</a>    /// chains to no configured anchor at all — RFC 8705 §2.2
+<a href=#102 id=102 data-nosnippet>102</a>    /// (`self_signed_tls_client_auth`) and nothing else.
+<a href=#103 id=103 data-nosnippet>103</a>    ///
+<a href=#104 id=104 data-nosnippet>104</a>    /// The configuration value is `optional_self_signed`:
+<a href=#105 id=105 data-nosnippet>105</a>    ///
+<a href=#106 id=106 data-nosnippet>106</a>    /// ```text
+<a href=#107 id=107 data-nosnippet>107</a>    /// AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed
+<a href=#108 id=108 data-nosnippet>108</a>    /// ```
+<a href=#109 id=109 data-nosnippet>109</a>    ///
+<a href=#110 id=110 data-nosnippet>110</a>    /// Spelled with an explicit `#[serde(rename)]` because this enum's
+<a href=#111 id=111 data-nosnippet>111</a>    /// `rename_all = "lowercase"` would otherwise have made it
+<a href=#112 id=112 data-nosnippet>112</a>    /// `optionalselfsigned`, which is not a word and would be transcribed
+<a href=#113 id=113 data-nosnippet>113</a>    /// wrongly by roughly everyone who had to type it once.
+<a href=#114 id=114 data-nosnippet>114</a>    ///
+<a href=#115 id=115 data-nosnippet>115</a>    /// # Why a fourth variant rather than a flag on `Optional`
+<a href=#116 id=116 data-nosnippet>116</a>    ///
+<a href=#117 id=117 data-nosnippet>117</a>    /// A `self_signed_tls_client_auth` client cannot complete a TLS handshake
+<a href=#118 id=118 data-nosnippet>118</a>    /// with a chain-building verifier: its certificate is self-signed *by
+<a href=#119 id=119 data-nosnippet>119</a>    /// design*, so webpki returns an error and rustls sends `bad_certificate`
+<a href=#120 id=120 data-nosnippet>120</a>    /// before AXIAM sees a request. Fixing that inside `Optional` would change
+<a href=#121 id=121 data-nosnippet>121</a>    /// what every existing mTLS deployment accepts. This variant is a value no
+<a href=#122 id=122 data-nosnippet>122</a>    /// deployment sets today, which is what makes the change non-regressive
+<a href=#123 id=123 data-nosnippet>123</a>    /// rather than merely tested: [`Self::Off`], [`Self::Optional`] and
+<a href=#124 id=124 data-nosnippet>124</a>    /// [`Self::Required`] are byte-for-byte unaffected.
+<a href=#125 id=125 data-nosnippet>125</a>    ///
+<a href=#126 id=126 data-nosnippet>126</a>    /// # What accepting an unchained certificate does and does not grant
+<a href=#127 id=127 data-nosnippet>127</a>    ///
+<a href=#128 id=128 data-nosnippet>128</a>    /// It grants exactly one thing: the ability to authenticate as an OAuth2
+<a href=#129 id=129 data-nosnippet>129</a>    /// client whose SHA-256 thumbprint an administrator registered. TLS 1.3's
+<a href=#130 id=130 data-nosnippet>130</a>    /// `CertificateVerify` still proves the peer holds the private key, so the
+<a href=#131 id=131 data-nosnippet>131</a>    /// certificate is not anonymous — it simply carries no CA's opinion of who
+<a href=#132 id=132 data-nosnippet>132</a>    /// its holder is. Every other consumer of a peer certificate (device/IoT
+<a href=#133 id=133 data-nosnippet>133</a>    /// authentication, RFC 8705 §2.1 `tls_client_auth`) refuses it; see
+<a href=#134 id=134 data-nosnippet>134</a>    /// [`axiam_core::models::certificate::CertTrust`].
+<a href=#135 id=135 data-nosnippet>135</a>    ///
+<a href=#136 id=136 data-nosnippet>136</a>    /// Client authentication stays **optional** in the handshake, never
+<a href=#137 id=137 data-nosnippet>137</a>    /// mandatory, for the same reason [`Self::Optional`] exists: one listener
+<a href=#138 id=138 data-nosnippet>138</a>    /// serves both the certificate-authenticating clients and the ones that
+<a href=#139 id=139 data-nosnippet>139</a>    /// present no certificate at all.
+<a href=#140 id=140 data-nosnippet>140</a>    </span><span class="attr">#[serde(rename = <span class="string">"optional_self_signed"</span>)]
+<a href=#141 id=141 data-nosnippet>141</a>    </span>OptionalSelfSigned,
+<a href=#142 id=142 data-nosnippet>142</a>}
+<a href=#143 id=143 data-nosnippet>143</a>
+<a href=#144 id=144 data-nosnippet>144</a><span class="kw">impl </span>ClientAuth {
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="doccomment">/// Whether this policy makes the listener request a client certificate.
+<a href=#146 id=146 data-nosnippet>146</a>    ///
+<a href=#147 id=147 data-nosnippet>147</a>    /// True for everything except [`Self::Off`]. The call sites that used to
+<a href=#148 id=148 data-nosnippet>148</a>    /// spell this `!= ClientAuth::Off` would each have had to grow the new
+<a href=#149 id=149 data-nosnippet>149</a>    /// variant by hand, and one of them is "read the client-CA bundle at
+<a href=#150 id=150 data-nosnippet>150</a>    /// startup" — the failure mode of forgetting it there is a listener that
+<a href=#151 id=151 data-nosnippet>151</a>    /// silently trusts no anchors.
+<a href=#152 id=152 data-nosnippet>152</a>    </span><span class="kw">pub fn </span>requests_client_certificate(<span class="self">self</span>) -&gt; bool {
+<a href=#153 id=153 data-nosnippet>153</a>        !<span class="macro">matches!</span>(<span class="self">self</span>, <span class="self">Self</span>::Off)
+<a href=#154 id=154 data-nosnippet>154</a>    }
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a>    <span class="doccomment">/// Whether an unchained (self-signed) client certificate may complete the
+<a href=#157 id=157 data-nosnippet>157</a>    /// handshake — RFC 8705 §2.2.
+<a href=#158 id=158 data-nosnippet>158</a>    </span><span class="kw">pub fn </span>accepts_self_asserted(<span class="self">self</span>) -&gt; bool {
+<a href=#159 id=159 data-nosnippet>159</a>        <span class="macro">matches!</span>(<span class="self">self</span>, <span class="self">Self</span>::OptionalSelfSigned)
+<a href=#160 id=160 data-nosnippet>160</a>    }
+<a href=#161 id=161 data-nosnippet>161</a>}
+<a href=#162 id=162 data-nosnippet>162</a>
+<a href=#163 id=163 data-nosnippet>163</a><span class="doccomment">/// Default [`TlsConfig::reload_interval_secs`]: one hour.
+<a href=#164 id=164 data-nosnippet>164</a>///
+<a href=#165 id=165 data-nosnippet>165</a>/// Chosen against the renewal cadence it exists to catch, not against how fast
+<a href=#166 id=166 data-nosnippet>166</a>/// a change could be noticed. Let's Encrypt issues for 90 days and ACME clients
+<a href=#167 id=167 data-nosnippet>167</a>/// renew at 60, so the window between "a new certificate is on disk" and "the
+<a href=#168 id=168 data-nosnippet>168</a>/// old one stops being accepted" is thirty days. An hourly poll closes it with
+<a href=#169 id=169 data-nosnippet>169</a>/// four orders of magnitude to spare, and is rare enough that the `stat` never
+<a href=#170 id=170 data-nosnippet>170</a>/// shows up anywhere.
+<a href=#171 id=171 data-nosnippet>171</a></span><span class="kw">pub const </span>DEFAULT_TLS_RELOAD_INTERVAL_SECS: u64 = <span class="number">3600</span>;
+<a href=#172 id=172 data-nosnippet>172</a>
+<a href=#173 id=173 data-nosnippet>173</a><span class="doccomment">/// Direct-TLS configuration for the REST API listener.
+<a href=#174 id=174 data-nosnippet>174</a>///
+<a href=#175 id=175 data-nosnippet>175</a>/// TLS is **opt-in**: the default (`enabled = false`) preserves the plaintext
+<a href=#176 id=176 data-nosnippet>176</a>/// bind used behind a TLS-terminating proxy. When `enabled = true`, both
+<a href=#177 id=177 data-nosnippet>177</a>/// `cert_path` and `key_path` must point at readable PEM files; the server
+<a href=#178 id=178 data-nosnippet>178</a>/// negotiates TLS 1.3 only (ASVS V9.1.2), whose cipher suites are all
+<a href=#179 id=179 data-nosnippet>179</a>/// ASVS-approved (V9.1.3).
+<a href=#180 id=180 data-nosnippet>180</a></span><span class="attr">#[derive(Debug, Clone, Deserialize)]
+<a href=#181 id=181 data-nosnippet>181</a>#[serde(default)]
+<a href=#182 id=182 data-nosnippet>182</a></span><span class="kw">pub struct </span>TlsConfig {
+<a href=#183 id=183 data-nosnippet>183</a>    <span class="doccomment">/// Enable direct TLS termination in the server process.
+<a href=#184 id=184 data-nosnippet>184</a>    </span><span class="kw">pub </span>enabled: bool,
+<a href=#185 id=185 data-nosnippet>185</a>    <span class="doccomment">/// Path to the PEM-encoded certificate chain (leaf first).
+<a href=#186 id=186 data-nosnippet>186</a>    </span><span class="kw">pub </span>cert_path: <span class="prelude-ty">Option</span>&lt;PathBuf&gt;,
+<a href=#187 id=187 data-nosnippet>187</a>    <span class="doccomment">/// Path to the PEM-encoded private key (PKCS#8, PKCS#1, or SEC1).
+<a href=#188 id=188 data-nosnippet>188</a>    </span><span class="kw">pub </span>key_path: <span class="prelude-ty">Option</span>&lt;PathBuf&gt;,
+<a href=#189 id=189 data-nosnippet>189</a>    <span class="doccomment">/// Offer HTTP/2 (`h2`) over ALPN alongside `http/1.1`. Default `true`
+<a href=#190 id=190 data-nosnippet>190</a>    /// (backward-compatible; matches what the actix-web rustls bind advertises).
+<a href=#191 id=191 data-nosnippet>191</a>    ///
+<a href=#192 id=192 data-nosnippet>192</a>    /// Set `false` to build the rustls listener advertising `http/1.1` only —
+<a href=#193 id=193 data-nosnippet>193</a>    /// used to run the p2 benchmark apples-to-apples with the plaintext p0
+<a href=#194 id=194 data-nosnippet>194</a>    /// listener (which is HTTP/1.1), isolating the h2-vs-h1.1 throughput effect
+<a href=#195 id=195 data-nosnippet>195</a>    /// (B2). See `axiam-server`'s `tls` module for the important caveat that the
+<a href=#196 id=196 data-nosnippet>196</a>    /// actix-web `HttpServer` bind re-adds `h2` to ALPN regardless.
+<a href=#197 id=197 data-nosnippet>197</a>    </span><span class="kw">pub </span>http2: bool,
+<a href=#198 id=198 data-nosnippet>198</a>    <span class="doccomment">/// Native client-certificate (mTLS) policy (D3). Default `off` keeps the
+<a href=#199 id=199 data-nosnippet>199</a>    /// server-auth-only behaviour. `optional`/`required` build the rustls config
+<a href=#200 id=200 data-nosnippet>200</a>    /// with a `WebPkiClientVerifier` over [`Self::client_ca_path`];
+<a href=#201 id=201 data-nosnippet>201</a>    /// `optional_self_signed` additionally accepts a certificate that chains to
+<a href=#202 id=202 data-nosnippet>202</a>    /// nothing, for RFC 8705 §2.2 clients (see [`ClientAuth`]).
+<a href=#203 id=203 data-nosnippet>203</a>    </span><span class="kw">pub </span>client_auth: ClientAuth,
+<a href=#204 id=204 data-nosnippet>204</a>    <span class="doccomment">/// Path to the PEM CA bundle used to verify client certificates. Required
+<a href=#205 id=205 data-nosnippet>205</a>    /// (and must be readable) when `client_auth` is `optional` or `required`;
+<a href=#206 id=206 data-nosnippet>206</a>    /// ignored when `off`.
+<a href=#207 id=207 data-nosnippet>207</a>    </span><span class="kw">pub </span>client_ca_path: <span class="prelude-ty">Option</span>&lt;PathBuf&gt;,
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="doccomment">/// Where to write the client-CA bundle built from the organization CAs an
+<a href=#209 id=209 data-nosnippet>209</a>    /// operator flagged as mTLS trust anchors.
+<a href=#210 id=210 data-nosnippet>210</a>    ///
+<a href=#211 id=211 data-nosnippet>211</a>    /// The flag lives on the CA
+<a href=#212 id=212 data-nosnippet>212</a>    /// ([`axiam_core::models::certificate::CaCertificate::mtls_trust_anchor`]),
+<a href=#213 id=213 data-nosnippet>213</a>    /// set through the admin UI or the API. At startup the server collects every
+<a href=#214 id=214 data-nosnippet>214</a>    /// flagged CA's **public** certificate, writes them here as one PEM bundle,
+<a href=#215 id=215 data-nosnippet>215</a>    /// and — only if the operator has not set [`Self::client_auth`] and
+<a href=#216 id=216 data-nosnippet>216</a>    /// [`Self::client_ca_path`] themselves — points client-certificate
+<a href=#217 id=217 data-nosnippet>217</a>    /// verification at it in `optional` mode.
+<a href=#218 id=218 data-nosnippet>218</a>    ///
+<a href=#219 id=219 data-nosnippet>219</a>    /// A deployment that flags no CA never writes this file and is unaffected.
+<a href=#220 id=220 data-nosnippet>220</a>    /// An operator who configures `client_auth` and `client_ca_path` explicitly
+<a href=#221 id=221 data-nosnippet>221</a>    /// keeps exactly what they configured: a value someone typed is a decision,
+<a href=#222 id=222 data-nosnippet>222</a>    /// and quietly overriding it is how a trust store ends up containing
+<a href=#223 id=223 data-nosnippet>223</a>    /// something nobody chose.
+<a href=#224 id=224 data-nosnippet>224</a>    ///
+<a href=#225 id=225 data-nosnippet>225</a>    /// Defaults to `client-ca-bundle.pem` beside the server's other TLS
+<a href=#226 id=226 data-nosnippet>226</a>    /// material when `cert_path` is set, and is otherwise required for the
+<a href=#227 id=227 data-nosnippet>227</a>    /// feature to do anything.
+<a href=#228 id=228 data-nosnippet>228</a>    </span><span class="kw">pub </span>client_ca_bundle_path: <span class="prelude-ty">Option</span>&lt;PathBuf&gt;,
+<a href=#229 id=229 data-nosnippet>229</a>    <span class="doccomment">/// How often, in seconds, to re-read [`Self::cert_path`] and
+<a href=#230 id=230 data-nosnippet>230</a>    /// [`Self::key_path`] and install the leaf certificate when it differs from
+<a href=#231 id=231 data-nosnippet>231</a>    /// the one being served. `0` disables polling. Default `3600`.
+<a href=#232 id=232 data-nosnippet>232</a>    ///
+<a href=#233 id=233 data-nosnippet>233</a>    /// The comparison is on the parsed DER chain, not on file metadata: an
+<a href=#234 id=234 data-nosnippet>234</a>    /// mtime can change without the certificate changing (a `touch`, a
+<a href=#235 id=235 data-nosnippet>235</a>    /// re-render of an identical file) and — worse — can fail to change when
+<a href=#236 id=236 data-nosnippet>236</a>    /// the content does. Comparing what will actually be served costs one file
+<a href=#237 id=237 data-nosnippet>237</a>    /// read an hour and cannot be fooled either way.
+<a href=#238 id=238 data-nosnippet>238</a>    ///
+<a href=#239 id=239 data-nosnippet>239</a>    /// # Why this exists
+<a href=#240 id=240 data-nosnippet>240</a>    ///
+<a href=#241 id=241 data-nosnippet>241</a>    /// rustls resolves the server's certificate per handshake, but the pair is
+<a href=#242 id=242 data-nosnippet>242</a>    /// read from disk exactly once unless something re-reads it. An ACME client
+<a href=#243 id=243 data-nosnippet>243</a>    /// renewing a 90-day Let's Encrypt certificate at day 60 therefore has no
+<a href=#244 id=244 data-nosnippet>244</a>    /// effect on a running server, and the listener serves an expired
+<a href=#245 id=245 data-nosnippet>245</a>    /// certificate on day 90.
+<a href=#246 id=246 data-nosnippet>246</a>    ///
+<a href=#247 id=247 data-nosnippet>247</a>    /// `SIGHUP` is the primary, immediate trigger and is what an ACME deploy
+<a href=#248 id=248 data-nosnippet>248</a>    /// hook should send. This poll is the safety net for the case that actually
+<a href=#249 id=249 data-nosnippet>249</a>    /// happens in the field: the hook was never wired up, or the process runs
+<a href=#250 id=250 data-nosnippet>250</a>    /// under something that does not forward signals, and nobody finds out
+<a href=#251 id=251 data-nosnippet>251</a>    /// until the certificate expires. Reading two small files an hour costs
+<a href=#252 id=252 data-nosnippet>252</a>    /// nothing.
+<a href=#253 id=253 data-nosnippet>253</a>    ///
+<a href=#254 id=254 data-nosnippet>254</a>    /// A poll can observe a half-updated pair — certbot writes the chain and
+<a href=#255 id=255 data-nosnippet>255</a>    /// the key as two operations — so a reload that fails to produce a matching
+<a href=#256 id=256 data-nosnippet>256</a>    /// pair leaves the previous certificate serving and is retried on the next
+<a href=#257 id=257 data-nosnippet>257</a>    /// tick. See `axiam_server::tls::reload_leaf_certificate`.
+<a href=#258 id=258 data-nosnippet>258</a>    </span><span class="kw">pub </span>reload_interval_secs: u64,
+<a href=#259 id=259 data-nosnippet>259</a>}
+<a href=#260 id=260 data-nosnippet>260</a>
+<a href=#261 id=261 data-nosnippet>261</a><span class="kw">impl </span>Default <span class="kw">for </span>TlsConfig {
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="self">Self </span>{
+<a href=#264 id=264 data-nosnippet>264</a>            enabled: <span class="bool-val">false</span>,
+<a href=#265 id=265 data-nosnippet>265</a>            cert_path: <span class="prelude-val">None</span>,
+<a href=#266 id=266 data-nosnippet>266</a>            key_path: <span class="prelude-val">None</span>,
+<a href=#267 id=267 data-nosnippet>267</a>            http2: <span class="bool-val">true</span>,
+<a href=#268 id=268 data-nosnippet>268</a>            client_auth: ClientAuth::Off,
+<a href=#269 id=269 data-nosnippet>269</a>            client_ca_path: <span class="prelude-val">None</span>,
+<a href=#270 id=270 data-nosnippet>270</a>            client_ca_bundle_path: <span class="prelude-val">None</span>,
+<a href=#271 id=271 data-nosnippet>271</a>            reload_interval_secs: DEFAULT_TLS_RELOAD_INTERVAL_SECS,
+<a href=#272 id=272 data-nosnippet>272</a>        }
+<a href=#273 id=273 data-nosnippet>273</a>    }
+<a href=#274 id=274 data-nosnippet>274</a>}
+<a href=#275 id=275 data-nosnippet>275</a>
+<a href=#276 id=276 data-nosnippet>276</a><span class="kw">impl </span>ServerConfig {
+<a href=#277 id=277 data-nosnippet>277</a>    <span class="doccomment">/// Returns the socket bind address as "host:port".
+<a href=#278 id=278 data-nosnippet>278</a>    </span><span class="kw">pub fn </span>bind_address(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; String {
+<a href=#279 id=279 data-nosnippet>279</a>        <span class="macro">format!</span>(<span class="string">"{}:{}"</span>, <span class="self">self</span>.host, <span class="self">self</span>.port)
+<a href=#280 id=280 data-nosnippet>280</a>    }
+<a href=#281 id=281 data-nosnippet>281</a>}
+<a href=#282 id=282 data-nosnippet>282</a>
+<a href=#283 id=283 data-nosnippet>283</a><span class="attr">#[cfg(test)]
+<a href=#284 id=284 data-nosnippet>284</a></span><span class="kw">mod </span>tests {
+<a href=#285 id=285 data-nosnippet>285</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#286 id=286 data-nosnippet>286</a>
+<a href=#287 id=287 data-nosnippet>287</a>    <span class="doccomment">/// I5: the whole point of the knob is that the socket option is now set
+<a href=#288 id=288 data-nosnippet>288</a>    /// *explicitly*. If this default ever flips to `false`, the REST listener
+<a href=#289 id=289 data-nosnippet>289</a>    /// silently goes back to running with Nagle enabled while gRPC does not.
+<a href=#290 id=290 data-nosnippet>290</a>    </span><span class="attr">#[test]
+<a href=#291 id=291 data-nosnippet>291</a>    </span><span class="kw">fn </span>tcp_nodelay_defaults_to_enabled() {
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="macro">assert!</span>(
+<a href=#293 id=293 data-nosnippet>293</a>            ServerConfig::default().tcp_nodelay,
+<a href=#294 id=294 data-nosnippet>294</a>            <span class="string">"TCP_NODELAY must default to enabled — actix-web leaves the socket \
+<a href=#295 id=295 data-nosnippet>295</a>             option untouched when unset, which means Nagle stays on"
+<a href=#296 id=296 data-nosnippet>296</a>        </span>);
+<a href=#297 id=297 data-nosnippet>297</a>    }
+<a href=#298 id=298 data-nosnippet>298</a>
+<a href=#299 id=299 data-nosnippet>299</a>    <span class="doccomment">/// The knob must be reachable from configuration, since the run-5
+<a href=#300 id=300 data-nosnippet>300</a>    /// measurement plan depends on being able to turn it off.
+<a href=#301 id=301 data-nosnippet>301</a>    </span><span class="attr">#[test]
+<a href=#302 id=302 data-nosnippet>302</a>    </span><span class="kw">fn </span>tcp_nodelay_can_be_disabled_from_config() {
+<a href=#303 id=303 data-nosnippet>303</a>        <span class="kw">let </span>parsed: ServerConfig = serde_json::from_str(<span class="string">r#"{"tcp_nodelay": false}"#</span>)
+<a href=#304 id=304 data-nosnippet>304</a>            .expect(<span class="string">"a partial server config must deserialize"</span>);
+<a href=#305 id=305 data-nosnippet>305</a>        <span class="macro">assert!</span>(!parsed.tcp_nodelay);
+<a href=#306 id=306 data-nosnippet>306</a>        <span class="comment">// Everything else still falls back to the defaults.
+<a href=#307 id=307 data-nosnippet>307</a>        </span><span class="macro">assert_eq!</span>(parsed.port, ServerConfig::default().port);
+<a href=#308 id=308 data-nosnippet>308</a>    }
+<a href=#309 id=309 data-nosnippet>309</a>
+<a href=#310 id=310 data-nosnippet>310</a>    <span class="attr">#[test]
+<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="kw">fn </span>client_auth_defaults_to_off() {
+<a href=#312 id=312 data-nosnippet>312</a>        <span class="macro">assert_eq!</span>(ClientAuth::default(), ClientAuth::Off);
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="macro">assert_eq!</span>(TlsConfig::default().client_auth, ClientAuth::Off);
+<a href=#314 id=314 data-nosnippet>314</a>        <span class="macro">assert!</span>(TlsConfig::default().client_ca_path.is_none());
+<a href=#315 id=315 data-nosnippet>315</a>    }
+<a href=#316 id=316 data-nosnippet>316</a>
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="doccomment">/// The four values an operator may write, spelled exactly as the
+<a href=#318 id=318 data-nosnippet>318</a>    /// documentation tells them to.
+<a href=#319 id=319 data-nosnippet>319</a>    ///
+<a href=#320 id=320 data-nosnippet>320</a>    /// Hard-coded strings rather than a serde round trip: the point is what an
+<a href=#321 id=321 data-nosnippet>321</a>    /// operator has to type into
+<a href=#322 id=322 data-nosnippet>322</a>    /// `AXIAM__SERVER__TLS__CLIENT_AUTH`, and a round trip would agree with
+<a href=#323 id=323 data-nosnippet>323</a>    /// whatever the server happens to emit — including
+<a href=#324 id=324 data-nosnippet>324</a>    /// `optionalselfsigned`, which `rename_all = "lowercase"` would have
+<a href=#325 id=325 data-nosnippet>325</a>    /// produced and which nobody would guess.
+<a href=#326 id=326 data-nosnippet>326</a>    </span><span class="attr">#[test]
+<a href=#327 id=327 data-nosnippet>327</a>    </span><span class="kw">fn </span>client_auth_parses_all_four_documented_values() {
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="kw">for </span>(raw, expected) <span class="kw">in </span>[
+<a href=#329 id=329 data-nosnippet>329</a>            (<span class="string">"\"off\""</span>, ClientAuth::Off),
+<a href=#330 id=330 data-nosnippet>330</a>            (<span class="string">"\"optional\""</span>, ClientAuth::Optional),
+<a href=#331 id=331 data-nosnippet>331</a>            (<span class="string">"\"required\""</span>, ClientAuth::Required),
+<a href=#332 id=332 data-nosnippet>332</a>            (<span class="string">"\"optional_self_signed\""</span>, ClientAuth::OptionalSelfSigned),
+<a href=#333 id=333 data-nosnippet>333</a>        ] {
+<a href=#334 id=334 data-nosnippet>334</a>            <span class="kw">let </span>parsed: ClientAuth =
+<a href=#335 id=335 data-nosnippet>335</a>                serde_json::from_str(raw).unwrap_or_else(|e| <span class="macro">panic!</span>(<span class="string">"{raw} must parse: {e}"</span>));
+<a href=#336 id=336 data-nosnippet>336</a>            <span class="macro">assert_eq!</span>(parsed, expected, <span class="string">"{raw}"</span>);
+<a href=#337 id=337 data-nosnippet>337</a>        }
+<a href=#338 id=338 data-nosnippet>338</a>    }
+<a href=#339 id=339 data-nosnippet>339</a>
+<a href=#340 id=340 data-nosnippet>340</a>    <span class="doccomment">/// The three pre-existing policies must not have acquired the new
+<a href=#341 id=341 data-nosnippet>341</a>    /// behaviour, and the new one must not have acquired `required`'s.
+<a href=#342 id=342 data-nosnippet>342</a>    ///
+<a href=#343 id=343 data-nosnippet>343</a>    /// This is the whole non-regression claim, stated as one table: a
+<a href=#344 id=344 data-nosnippet>344</a>    /// deployment that never changes its configuration cannot reach any of the
+<a href=#345 id=345 data-nosnippet>345</a>    /// new code, because `accepts_self_asserted()` is what every new branch is
+<a href=#346 id=346 data-nosnippet>346</a>    /// gated on.
+<a href=#347 id=347 data-nosnippet>347</a>    </span><span class="attr">#[test]
+<a href=#348 id=348 data-nosnippet>348</a>    </span><span class="kw">fn </span>only_the_new_variant_accepts_a_self_asserted_certificate() {
+<a href=#349 id=349 data-nosnippet>349</a>        <span class="kw">for </span>(policy, requests_cert, accepts_self_asserted) <span class="kw">in </span>[
+<a href=#350 id=350 data-nosnippet>350</a>            (ClientAuth::Off, <span class="bool-val">false</span>, <span class="bool-val">false</span>),
+<a href=#351 id=351 data-nosnippet>351</a>            (ClientAuth::Optional, <span class="bool-val">true</span>, <span class="bool-val">false</span>),
+<a href=#352 id=352 data-nosnippet>352</a>            (ClientAuth::Required, <span class="bool-val">true</span>, <span class="bool-val">false</span>),
+<a href=#353 id=353 data-nosnippet>353</a>            (ClientAuth::OptionalSelfSigned, <span class="bool-val">true</span>, <span class="bool-val">true</span>),
+<a href=#354 id=354 data-nosnippet>354</a>        ] {
+<a href=#355 id=355 data-nosnippet>355</a>            <span class="macro">assert_eq!</span>(
+<a href=#356 id=356 data-nosnippet>356</a>                policy.requests_client_certificate(),
+<a href=#357 id=357 data-nosnippet>357</a>                requests_cert,
+<a href=#358 id=358 data-nosnippet>358</a>                <span class="string">"{policy:?}.requests_client_certificate()"
+<a href=#359 id=359 data-nosnippet>359</a>            </span>);
+<a href=#360 id=360 data-nosnippet>360</a>            <span class="macro">assert_eq!</span>(
+<a href=#361 id=361 data-nosnippet>361</a>                policy.accepts_self_asserted(),
+<a href=#362 id=362 data-nosnippet>362</a>                accepts_self_asserted,
+<a href=#363 id=363 data-nosnippet>363</a>                <span class="string">"{policy:?}.accepts_self_asserted()"
+<a href=#364 id=364 data-nosnippet>364</a>            </span>);
+<a href=#365 id=365 data-nosnippet>365</a>        }
+<a href=#366 id=366 data-nosnippet>366</a>    }
+<a href=#367 id=367 data-nosnippet>367</a>
+<a href=#368 id=368 data-nosnippet>368</a>    <span class="attr">#[test]
+<a href=#369 id=369 data-nosnippet>369</a>    </span><span class="kw">fn </span>client_auth_rejects_invalid_value() {
+<a href=#370 id=370 data-nosnippet>370</a>        <span class="kw">let </span>err = serde_json::from_str::&lt;ClientAuth&gt;(<span class="string">"\"enabled\""</span>);
+<a href=#371 id=371 data-nosnippet>371</a>        <span class="macro">assert!</span>(err.is_err(), <span class="string">"unknown client_auth value must be rejected"</span>);
+<a href=#372 id=372 data-nosnippet>372</a>    }
+<a href=#373 id=373 data-nosnippet>373</a>
+<a href=#374 id=374 data-nosnippet>374</a>    <span class="attr">#[test]
+<a href=#375 id=375 data-nosnippet>375</a>    </span><span class="kw">fn </span>tls_config_deserializes_client_auth_fields() {
+<a href=#376 id=376 data-nosnippet>376</a>        <span class="kw">let </span>cfg: TlsConfig = serde_json::from_value(<span class="macro">serde_json::json!</span>({
+<a href=#377 id=377 data-nosnippet>377</a>            <span class="string">"enabled"</span>: <span class="bool-val">true</span>,
+<a href=#378 id=378 data-nosnippet>378</a>            <span class="string">"cert_path"</span>: <span class="string">"/etc/axiam/server.crt"</span>,
+<a href=#379 id=379 data-nosnippet>379</a>            <span class="string">"key_path"</span>: <span class="string">"/etc/axiam/server.key"</span>,
+<a href=#380 id=380 data-nosnippet>380</a>            <span class="string">"client_auth"</span>: <span class="string">"required"</span>,
+<a href=#381 id=381 data-nosnippet>381</a>            <span class="string">"client_ca_path"</span>: <span class="string">"/etc/axiam/ca.crt"</span>,
+<a href=#382 id=382 data-nosnippet>382</a>        }))
+<a href=#383 id=383 data-nosnippet>383</a>        .expect(<span class="string">"TlsConfig with client-auth fields must deserialize"</span>);
+<a href=#384 id=384 data-nosnippet>384</a>        <span class="macro">assert_eq!</span>(cfg.client_auth, ClientAuth::Required);
+<a href=#385 id=385 data-nosnippet>385</a>        <span class="macro">assert_eq!</span>(
+<a href=#386 id=386 data-nosnippet>386</a>            cfg.client_ca_path.as_deref(),
+<a href=#387 id=387 data-nosnippet>387</a>            <span class="prelude-val">Some</span>(std::path::Path::new(<span class="string">"/etc/axiam/ca.crt"</span>))
+<a href=#388 id=388 data-nosnippet>388</a>        );
+<a href=#389 id=389 data-nosnippet>389</a>    }
+<a href=#390 id=390 data-nosnippet>390</a>}
 </code></pre></div></section></main></body></html>

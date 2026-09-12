@@ -99,6 +99,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0-beta13] - 2026-09-12
 
+### Changed
+
+- **A contended write answers `503` with `Retry-After: 1`, not `500`** (T-262)
+
+  A write that loses an optimistic-concurrency race in the datastore, and
+  stays lost after every retry the server spends on it, used to reach the
+  client as `500 internal_error`. That is the wrong instruction: the request
+  was fine, it lost a race, and the correct advice is to come back in a
+  moment. An IdP driving SCIM provisioning — Okta, Entra — reads a `500` as a
+  failed sync and re-sends the whole record.
+
+  It is now `503` with the slug `write_contention` and a `Retry-After: 1`
+  header; over gRPC it is `UNAVAILABLE` rather than `INTERNAL`. `409` was the
+  other candidate and is deliberately not used: in SCIM (RFC 7644 §3.12) it
+  means your request conflicts with the resource's state, which a caller
+  responds to by changing the request — and that cannot help here.
+
+  Uniqueness violations and state preconditions keep their `409` and carry no
+  `Retry-After`. The new answer carries no message of its own beyond a fixed
+  sentence, so the datastore's own words stay in the server log where they
+  were.
+
+  AXIAM's SDKs need no change: their retry policy (CONTRACT §16) already
+  treats `5xx` as transient on a side-effect-free operation and already
+  honours `Retry-After` as a floor. Note that a contended `PATCH` is a
+  mutation, so no SDK retries it automatically — that decision stays with the
+  caller.
+
 ### Added
 
 - **A default tenant that is not a UUID is reported at startup** (T-244)

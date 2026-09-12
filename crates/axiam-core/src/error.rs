@@ -84,6 +84,29 @@ pub enum AxiamError {
     #[error("this tenant requires OPAQUE authentication")]
     OpaqueRequired,
 
+    /// A write that lost an optimistic-concurrency race in the datastore and
+    /// stayed lost after every retry `retry_on_write_conflict` was willing to
+    /// spend on it (T-262).
+    ///
+    /// Maps to `503 Service Unavailable` with `Retry-After: 1`, and to gRPC
+    /// `UNAVAILABLE`. It is a statement about the **server** — come back in a
+    /// moment — which is what makes `503` right and the two nearby answers
+    /// wrong:
+    ///
+    /// - `500`, which is what this was, tells a client to stop when the
+    ///   correct advice is to retry. An IdP driving SCIM provisioning (Okta,
+    ///   Entra) reads it as a failed sync and re-sends the whole record.
+    /// - `409`, which [`Self::Conflict`] and [`Self::AlreadyExists`] keep,
+    ///   means "your request conflicts with the resource's state" — SCIM
+    ///   RFC 7644 §3.12 — and a caller who believes that will change the
+    ///   request rather than resend it, which cannot help here.
+    ///
+    /// **It carries no payload.** The engine's own words ("Transaction write
+    /// conflict…") belong in the log, where `DbError::Conflict` keeps them,
+    /// and nowhere near a response body.
+    #[error("the datastore is busy; retry this request")]
+    WriteContention,
+
     #[error("SAML assertion replay detected")]
     ReplayDetected,
 

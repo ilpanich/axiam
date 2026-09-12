@@ -456,6 +456,50 @@ unparseable value is treated as unset and logged at WARN at startup".
 
 ## 5. R-4 — the HTTP status of a contended write (decision A)
 
+> **EXECUTED (server side) — R-4, 2026-09-12.** One payload-free
+> `AxiamError::WriteContention`, one mapping. `From<DbError>` routes
+> `DbError::Conflict` to it instead of through the `other =>
+> AxiamError::Database` catch-all; REST answers `503` with the slug
+> `write_contention` and `Retry-After: 1`; gRPC answers `UNAVAILABLE` in both
+> `axiam_err_to_status` mappers.
+>
+> The header is inserted next to the `HttpResponse::build(self.status_code())`
+> call rather than inside the slug match, so the status and the header cannot
+> drift apart — the mapper had no machinery for a header before this, and one
+> conditional insertion is all it has now. The slug is its own rather than
+> `service_unavailable`: the Argon2-gate `503` and a contended write are
+> different operational events, and an operator reading logs has to tell them
+> apart.
+>
+> Tests: four in `api-rest/src/error.rs` — the `503` and the header; that the
+> body never carries the engine's words (checked against `Transaction`,
+> `write conflict`, `surreal`); the **I4 twin**, that both `409` answers are
+> untouched and carry no `Retry-After`; and that `service_unavailable` keeps
+> its own slug and gains nothing. Two in `axiam-db/src/helpers.rs`: the
+> conversion, with the engine's message asserted **present** on the `DbError`
+> and **absent** from the `AxiamError`; and the second I4 twin, that a UNIQUE
+> violation still maps to `AlreadyExists` — the `classify_write_error`
+> ordering is load-bearing and is now pinned from the other end too. The old
+> `conflict_converts_to_a_database_error_not_a_conflict_status`, whose comment
+> recorded the deferral, is replaced by the two above.
+>
+> **`docs/compliance/oauth2-rfc-compliance.md` gains no row, and that is the
+> deliverable of the check the plan asked for.** No OAuth2 endpoint can
+> surface the status: every OAuth2 write that could contend is a single-use
+> redemption, and those answer `invalid_grant` by design — the fail-closed
+> branch T-262 records, which never reaches `retry_on_write_conflict`.
+>
+> Docs: `docs/api/README.md` gained an **Errors** section — it had none, which
+> is why the plan's "the errors docs page source" pointed at a page that did
+> not exist — with the full status/slug table, the three-way argument for
+> `503` over `409` and `500`, and the gRPC equivalence. `CHANGELOG.md` under
+> **Changed**. Threat model: T-262's deferral sentence replaced in
+> `Axiam.json`, `threat-model-stride.md` and `threat-modeling-and-security.md`;
+> status unchanged, no count moves.
+>
+> The SDK half — one test per repository, no behaviour change — rides each
+> SDK's PR; §13.1 records it.
+
 **Closes** the residual T-262 records: *"the HTTP status deliberately stays
 `5xx`, since narrowing it to `503` with `Retry-After` is a client-visible
 contract change and a separate decision."* This plan is that decision; see §10.

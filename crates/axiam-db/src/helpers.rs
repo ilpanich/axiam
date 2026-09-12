@@ -814,17 +814,46 @@ mod tests {
         }
     }
 
+    /// T-262 / R-4. The separate decision the variant deferred was taken on
+    /// 2026-09-12: a contended write is a statement about the server, so it
+    /// answers `503` with `Retry-After: 1` rather than the `500` a client
+    /// reads as "stop".
     #[test]
-    fn conflict_converts_to_a_database_error_not_a_conflict_status() {
-        // Deliberate: the variant exists to stop MISLABELING, not to change the
-        // client-visible contract. A 503 with Retry-After would be defensible
-        // and is a separate decision.
+    fn a_conflict_becomes_write_contention() {
         use axiam_core::error::AxiamError;
         let axiam_err: AxiamError = DbError::Conflict(LIVE_V3_CONFLICT.to_string()).into();
-        match axiam_err {
-            AxiamError::Database(msg) => assert!(msg.contains("Write conflict")),
-            other => panic!("expected AxiamError::Database, got {other:?}"),
-        }
+        assert!(
+            matches!(axiam_err, AxiamError::WriteContention),
+            "expected AxiamError::WriteContention, got {axiam_err:?}"
+        );
+        // And the engine's own words stay on the DbError, for the log. The
+        // client-facing variant carries no payload at all, which is what makes
+        // it safe to echo in a response body.
+        assert!(
+            !axiam_err.to_string().contains("Transaction write conflict"),
+            "the engine's message must not reach the client-facing error"
+        );
+        assert!(
+            DbError::Conflict(LIVE_V3_CONFLICT.to_string())
+                .to_string()
+                .contains("Transaction write conflict"),
+            "the engine's message must stay on the DbError for the log"
+        );
+    }
+
+    /// **I4 twin.** The ordering in `classify_write_error` is load-bearing: a
+    /// UNIQUE violation is a statement about the *request*, which retrying
+    /// only reproduces, so it must keep its `409` and must never be routed
+    /// through the new transient answer.
+    #[test]
+    fn a_unique_violation_is_still_not_write_contention() {
+        use axiam_core::error::AxiamError;
+        let msg = "Database index `idx_users_username_unique` already contains ['alice']";
+        let axiam_err: AxiamError = classify_write_error(msg, "user").into();
+        assert!(
+            matches!(axiam_err, AxiamError::AlreadyExists { .. }),
+            "a constraint violation must stay AlreadyExists, got {axiam_err:?}"
+        );
     }
 
     #[test]

@@ -43,6 +43,56 @@ cargo build -p axiam-server --no-default-features
 ./target/debug/axiam-server --dump-openapi > sdks/openapi.json
 ```
 
+## Errors
+
+Every REST error carries the same JSON envelope, whatever endpoint produced
+it — `{ "error": "<slug>", "message": "<sentence>" }`, plus `action` and
+`resource_id` on an authorization denial (SDK-Q02). The slug is the stable
+part; the message is for a human and may be reworded.
+
+5xx messages are deliberately generic. Internal detail — datastore strings,
+crypto messages, anything derived from a secret — never reaches a response
+body (SEC-011/SEC-039/CQ-B33), so a `500` says only that an internal error
+occurred and the detail is in the server log.
+
+| Status | Slug | Meaning | Retry? |
+|---|---|---|---|
+| 400 | `validation_error`, `tenant_context`, `email_config_error` | The request is wrong. Resending it unchanged will fail identically | No |
+| 401 | `authentication_failed` | Unauthenticated, or the credential was refused | No — refresh, then retry once (CONTRACT §9) |
+| 403 | `authorization_denied` | Authenticated, and not permitted. Carries `action` and `resource_id` when known | No |
+| 404 | `not_found` | No such resource in this tenant | No |
+| 409 | `already_exists` | A uniqueness constraint refused the write | No |
+| 409 | `conflict` | The resource is not in a state that permits this. The caller must do something else first, not resend | No |
+| 422 | `password_policy_violation` | The password was rejected by policy | No |
+| 429 | `rate_limited` | Over a rate limit. Carries `Retry-After` | Yes, after the header's delay |
+| 503 | `service_unavailable` | A capacity gate refused the request — most often the Argon2id hash gate under load | Yes |
+| 503 | `write_contention` | A write lost an optimistic-concurrency race in the datastore and stayed lost after every retry the server was willing to spend. Carries `Retry-After: 1` | **Yes** |
+| 500 | `internal_error` | Everything else. The detail is in the server log | No |
+
+**On `write_contention` (T-262).** It answers `503` rather than `409` or `500`
+deliberately, and the distinction is worth stating because all three are
+plausible. A `409` in SCIM means "your request conflicts with the resource's
+state" (RFC 7644 §3.12) — a statement about the *request*, which a caller
+correctly responds to by changing it; that cannot help here, because the
+request was fine and lost a race. A `500` tells a client to stop, which is
+exactly wrong advice: an IdP driving SCIM provisioning reads it as a failed
+sync and re-sends the whole record. `503` with `Retry-After` says the true
+thing — come back in a moment — and is what Okta- and Entra-shaped
+provisioning already retries.
+
+The `Retry-After: 1` is a convention, not a measurement: the server does not
+know how long contention will last, and a fabricated number would be worse
+than a conventional one. Every AXIAM SDK honours it as a **floor** and never a
+ceiling (CONTRACT §16.1), so a client's own backoff still governs the wait.
+Note that §16.2 makes only side-effect-free operations eligible for automatic
+retry — a contended `PATCH` is *not* retried by the SDK, and the caller owns
+that decision.
+
+Over gRPC the same condition is `UNAVAILABLE` (14), which CONTRACT §2 maps to
+`NetworkError` — the same place the REST `503` lands. It stays distinct from
+`RESOURCE_EXHAUSTED` (8), which is this listener's rate-limit answer: "the
+server is busy" and "you sent too much" are different instructions.
+
 ## gRPC
 
 See [`grpc.md`](./grpc.md) for the service summary and how to consume the

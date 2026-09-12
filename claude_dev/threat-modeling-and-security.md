@@ -76,7 +76,9 @@
 > column means, both erasure statements rendered from it, and a gate that
 > introspects the live schema and fails on a column classified nowhere); the datastore's own write-conflict phrasing
 > going unrecognised by the single-use guard — fail-closed, and now one marker
-> set (T-262); RFC 8705 §2.2 self-signed client certificates admitted under an
+> set, with the contended write answering `503` and `Retry-After: 1` since the
+> 2026-09-12 residual pass rather than the `500` an IdP reads as a failed sync
+> (T-262); RFC 8705 §2.2 self-signed client certificates admitted under an
 > opt-in listener policy, with the trust level carried to every consumer so
 > device authentication refuses one and `tls_client_auth` demands a chain
 > (T-263); a Vault CA bundle that parsed to nothing and silently fell back to

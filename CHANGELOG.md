@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The refresh-rotation grace window is a FAPI 2.0 behaviour again** (T-254)
+
+  A client on the `standard` profile that presents a refresh token it has
+  already rotated is answered `400 invalid_grant`, "refresh token already
+  consumed". Since 1.0.0-beta13 it was answered `200` for sixty seconds, and
+  rotated again.
+
+  FAPI 2.0 Security Profile §5.3.2.1-9 requires an authorization server that
+  rotates refresh tokens to keep accepting the previous one for a short period
+  — it is the only recovery a client has from a rotation response lost in
+  transit — and 1.0.0-beta13 implemented it for every client. But the profile
+  that requires the window also binds every token to a key the client must
+  hold, so a replay inside it needs the client's private key as well; on
+  `standard` the refresh token *is* the credential, and the same sixty seconds
+  was a replay window the server could not tell from an honest retry. The
+  window now applies only to a client registered `profile: fapi2`, decided by
+  the registration and never by the request. `fapi2` clients see no change:
+  the previous token still stays redeemable for sixty seconds after rotation.
+
+  **What to do.** Nothing, unless a `standard` client of yours was relying on
+  the window — in which case it was relying on behaviour that existed for three
+  days. A client that needs the recovery should be registered `profile: fapi2`,
+  which brings the sender-constraining that makes the window affordable.
+
+- **A refresh token presented after rotation is now recorded** (T-254)
+
+  Whether it is served under the FAPI grace or refused, presenting an
+  already-rotated refresh token leaves two marks. An audit entry under a new
+  action, `oauth2.refresh_token_replayed`, naming the client, its profile, the
+  session and a `disposition` of `accepted_under_fapi_grace` or `refused` — and
+  never the token or its digest. And a pair of counters on the session the
+  token belongs to, readable through a new
+  `GET /api/v1/users/{user_id}/sessions`, which the admin UI surfaces as a
+  **Sessions** action on each row of *Users*: an amber "FAPI grace retry" badge
+  or a red "Replay refused" one.
+
+  A `refused` is worth alerting on — nothing a conformant client does produces
+  one. A `fapi_grace_retry` on a `fapi2` client is the mechanism working, and a
+  rate to watch rather than a page.
+
+  Schema **v60** adds four optional columns and backfills nothing, so a rolled
+  back binary reads a migrated database exactly as it read the unmigrated one.
+  A credential revoked at logout is not recorded as a replay: only rotation
+  stamps the column the two are told apart by.
+
 ## [1.0.0-beta13] - 2026-09-12
 
 ### Added

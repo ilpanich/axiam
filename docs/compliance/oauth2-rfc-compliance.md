@@ -29,8 +29,9 @@ RFC 7662 (Token Introspection)
 | 14 | Client credentials: wrong secret MUST return 401 | §5.2 | Pass | `oauth2_flow_test.rs::client_credentials_wrong_secret` |
 | 15 | Client credentials: unauthorized grant type rejected | §4.4 | Pass | `oauth2_flow_test.rs::client_credentials_unauthorized_grant` |
 | 16 | Refresh token grant: success + rotation | §6 | Pass | `oauth2_flow_test.rs::refresh_token_grant` |
-| 17 | Old refresh token MUST be invalidated after rotation | §6 | Pass | `oauth2_flow_test.rs::refresh_token_rotation_invalidates_old` |
+| 17 | Old refresh token MUST be invalidated after rotation | §6 | Pass | `oauth2_flow_test.rs::refresh_token_rotation_retires_old_on_a_standard_client`. The predecessor is revoked at rotation and a second presentation is `invalid_grant`, "already consumed". A client registered `profile: fapi2` is the documented exception: FAPI 2.0 §5.3.2.1-9 requires the previous token to stay redeemable for a short period, so it is retired on a 60-second clock instead — and every token on that profile is sender-constrained (T-254). Either way the second presentation is audited as `oauth2.refresh_token_replayed`: `token_service.rs::t254_*` |
 | 18 | Refresh token MUST be bound to issuing client | §6 | Pass | `oauth2_conformance.rs::refresh_token_bound_to_original_client` |
+| 18a | A refresh token presented after rotation is detectable and recorded | §6, BCP §4.14.2 | Pass | Rotation stamps `rotated_at`, so a later presentation is a *replay* rather than an ordinary stale credential; it increments a per-outcome counter on the session and appends an `oauth2.refresh_token_replayed` audit row naming the client, the profile, the session and the disposition — never the token. `token_service.rs::t254_a_replay_on_a_standard_client_is_refused_and_marked`, `::t254_an_ordinary_stale_refresh_token_is_not_a_replay`, `oauth2_flow_test.rs::a_refused_refresh_replay_is_audited` |
 
 ## RFC 7636 — PKCE
 

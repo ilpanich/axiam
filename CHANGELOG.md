@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A personal-data column can no longer be added to `user` without being
+  classified** (T-261)
+
+  Nothing an operator or a client observes changes. Erasure erases exactly what
+  it erased, and an Art. 15 export shows exactly what it showed.
+
+  What changes is what happens to the *next* column. Three code paths decided
+  what a `user` column means by writing its name out by hand — the Art. 17
+  erasure statement, the administrator's tombstone, and the export's `profile`
+  section — so a column added to the schema and to none of them survived
+  erasure and never reached an export. That is how `phone_number` and `address`
+  were nearly stranded, and the fix at the time was to name them in all three
+  and write a warning for whoever came next.
+
+  There is now one declaration instead of three lists
+  (`axiam_core::personal_data::USER_COLUMNS`), both erasure statements render
+  their shared clauses from it, and a test introspects the live `user` schema
+  after migrations and fails on any column the declaration does not classify —
+  naming the column, and saying what a classification has to answer. The
+  comparison runs the other way too: a classification for a column that no
+  longer exists reads as coverage and is not.
+
 - **The refresh-rotation grace window is a FAPI 2.0 behaviour again** (T-254)
 
   A client on the `standard` profile that presents a refresh token it has

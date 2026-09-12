@@ -62,6 +62,55 @@ not know about is a fix the website will not show.
 
 ## 2. R-1 — the personal-data column lists become structural
 
+> **EXECUTED — R-1, 2026-09-12.** `crates/axiam-core/src/personal_data.rs` is
+> the one declaration: a `UserColumn` row per column of the `user` table, with
+> `erasure` and `export` as **two** fields rather than one "is personal data"
+> flag — the shape that lets `password_hash` be erased and never exported
+> (D-10) and `created_at` be exported and never erased, both of which a single
+> flag gets wrong — and a `note` required wherever either is `None`, so
+> "nobody classified this" and "classified as neither" stay different states.
+>
+> `anonymize_user` and `delete` render their shared `SET` fragment from it
+> (`shared_erasure_fragment`) and keep their own path-specific clauses; the
+> asymmetries between them are recorded on the columns they belong to rather
+> than harmonised. The two `email` bind names were unified to
+> `email_replacement`, which is the only visible consequence and is internal to
+> the two statements. The export literal stays hand-written and gained a home
+> of its own, `cleanup.rs::profile_section`, because two of its entries are not
+> column reads — `id` is the record identifier, and `phone_number_verified` is
+> a derived boolean — and deriving it would have to special-case both.
+>
+> Gates, all three green: `user_schema_matches_the_declared_inventory`
+> (`crates/axiam-db/tests/personal_data_gate.rs`) reads `INFO FOR TABLE user`
+> off a live in-memory datastore after migrations and compares both ways;
+> `the_profile_section_shows_exactly_the_declared_export_keys` and
+> `no_credential_column_is_exported` (in `cleanup.rs`); and
+> `every_unerased_or_unexported_column_says_why` plus the verbatim fragment pin
+> (in `personal_data.rs`). The gate carries its own I4 twin —
+> `the_gate_detects_a_column_the_inventory_does_not_declare` builds the same
+> comparison against a schema set with one extra column and requires it to be
+> reported — so a green run means the check runs rather than that it cannot
+> fail. `crates/axiam-db/tests/w7_sensitive_columns_test.rs` is **untouched**,
+> all eight still green: reading the row back is the one assertion a fourth
+> path sharing a bad statement cannot satisfy.
+>
+> One thing the plan did not anticipate: `INFO FOR TABLE` does not decode into
+> `serde_json::Value` through `Response::take` on surrealdb 3.2 — the index
+> must be a `usize` and the target an `Option<T>`. Taking
+> `Option<serde_json::Value>` keeps the test free of the driver's own value
+> model, which has changed shape across majors.
+>
+> Docs: `docs/compliance/gdpr-compliance.md` §1 (the warning paragraph becomes
+> a three-row table of what fails and where) and §2 (the tombstone paragraph
+> names the shared render and its own additions); `CHANGELOG.md` under
+> **Security**. Threat model: T-261's residual sentence replaced in
+> `Axiam.json` (model 2.12.0 → **2.13.0**; the version string had lagged behind
+> the prose, which already said 2.12.1 for the T-254 state),
+> `threat-model-stride.md` and `threat-modeling-and-security.md`. Status
+> unchanged (Mitigated), so no count moves;
+> `node website/scripts/gen-threat-model.mjs` prints `9 diagrams, 266 threats
+> (250 mitigated, 16 open)` and the generated files were reverted.
+
 **Closes** the residual T-261 records: *"the three lists are still
 hand-maintained, and the compile-time guard covers only the SCIM one."*
 
@@ -128,9 +177,11 @@ Then:
   clauses verbatim — `status = 'Anonymized'` versus `'Deleted'`,
   `deletion_pending = false` and `scheduled_purge_at = NONE` on the Art. 17 path
   only, `email_verified_at`/`totp_last_used_step`/`failed_login_attempts` on the
-  tombstone only. **The emitted SQL is byte-identical to today's** for the
-  columns the inventory covers, asserted by a test that pins the fragment
-  string; the two paths' present asymmetries are preserved rather than
+  tombstone only. **The clause set is identical to today's** for the
+  columns the inventory covers, asserted by a test that pins the rendered
+  fragment verbatim. Clause *order* becomes the inventory's — which neither
+  statement depended on (the two already disagreed about it) and SurrealDB does
+  not observe. The two paths' present asymmetries are preserved rather than
   harmonised, because harmonising them is a behaviour change and this item is a
   gate.
 - **The export keeps its `json!` literal** — it maps `phone_number_verified_at`

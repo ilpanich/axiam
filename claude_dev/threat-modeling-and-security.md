@@ -71,7 +71,10 @@
 > **The rest** (T-260…T-266): three CodeQL alerts of one class, a credential in
 > a panic message (T-260); the explicit column lists that would have left an
 > erased subject holding a telephone number and a postal address, and a SCIM
-> patch that erased nothing (T-261); the datastore's own write-conflict phrasing
+> patch that erased nothing (T-261 — and, since the 2026-09-12 residual pass,
+> the lists themselves are gone: one declared inventory of what each `user`
+> column means, both erasure statements rendered from it, and a gate that
+> introspects the live schema and fails on a column classified nowhere); the datastore's own write-conflict phrasing
 > going unrecognised by the single-use guard — fail-closed, and now one marker
 > set (T-262); RFC 8705 §2.2 self-signed client certificates admitted under an
 > opt-in listener policy, with the trust level carried to every consumer so

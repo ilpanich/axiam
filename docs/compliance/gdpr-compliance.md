@@ -68,13 +68,32 @@ single sectioned JSON "Art. 15 personal-data inventory" for a user, covering:
 | `audit_entries` | `AuditLogRepository::list` (paginated, 1,000-row pages, looped to completion) | action, outcome, timestamp, resource_id for every entry where the user was the actor |
 | `webauthn_credentials` | `WebauthnCredentialRepository::list_by_user` | id, credential_id, name, credential_type, timestamps — **excludes** the encrypted `passkey_json` secret material |
 
-**A new column is not exported for free (W7).** `aggregate_export_data` builds
-the `profile` section from an **explicit field list**, so a column added to the
-`user` table is absent from every export until it is named there. W7's plan text
-assumed the opposite — that `phone_number` and `address` would be "covered by
-the existing export path because they are user-row fields" — and they were not.
-Anybody adding a user column that holds personal data must add it here as well,
-and the same is true of the two erasure statements in §2.
+**A new column is not exported for free (W7) — and can no longer be added
+without being classified (T-261).** `aggregate_export_data` builds the `profile`
+section from an explicit field list, so a column added to the `user` table is
+absent from every export until it is named there. W7's plan text assumed the
+opposite — that `phone_number` and `address` would be "covered by the existing
+export path because they are user-row fields" — and they were not.
+
+That used to be a warning addressed to the next author's memory. It is now a
+gate. [`axiam_core::personal_data::USER_COLUMNS`](../../crates/axiam-core/src/personal_data.rs)
+is a single declaration with one row per `user` column, recording for each
+whether erasure clears it, which key the Art. 15 `profile` section shows it
+under, and — where either answer is "neither" — why. Three checks hold it to
+that:
+
+| Check | Where | What fails |
+|---|---|---|
+| `user_schema_matches_the_declared_inventory` | [`crates/axiam-db/tests/personal_data_gate.rs`](../../crates/axiam-db/tests/personal_data_gate.rs) | Runs `INFO FOR TABLE user` against a live datastore after migrations and compares the field set with the inventory **in both directions**. A column added to the schema and classified nowhere fails, naming itself; so does a classification for a column that no longer exists. |
+| `the_profile_section_shows_exactly_the_declared_export_keys` | [`crates/axiam-server/src/cleanup.rs`](../../crates/axiam-server/src/cleanup.rs) | A column declared exported and missing from the `profile` literal, or a key in the literal that no column declares. |
+| `every_unerased_or_unexported_column_says_why` | [`crates/axiam-core/src/personal_data.rs`](../../crates/axiam-core/src/personal_data.rs) | A column classified as neither erased nor exported and carrying no reason — so "nobody classified this" and "classified as neither" stay different states. |
+
+The two erasure statements in §2 no longer carry column lists at all: they
+render their shared `SET` fragment from the same inventory
+(`shared_erasure_fragment`), so a column declared personal data is erased by
+both paths by construction rather than by two authors remembering the same
+thing. What each path still spells out is its own path-specific clauses, and
+the asymmetries between them are recorded on the columns they belong to.
 
 **Executable proof:**
 - `export_completeness` — asserts every named section is present in the
@@ -187,6 +206,13 @@ behind either, so it erases the same data the purge pipeline does.
 `UserRepository::delete` overwrites `username`, `email` and `metadata` with
 values derived from the row's own id (an internal identifier, not personal
 data), clears every credential column, and sets `status = 'Deleted'`. The
+personal-data clauses are rendered from
+[`axiam_core::personal_data::USER_COLUMNS`](../../crates/axiam-core/src/personal_data.rs),
+the same declaration the Art. 17 pipeline above renders — see §1 for the gate
+that keeps a new column from escaping both — and what this path adds to it is
+its own: the `Deleted` status, and the reset of `totp_last_used_step`,
+`failed_login_attempts` and `email_verified_at`, none of which the Art. 17
+pipeline performs. The
 handler additionally revokes all sessions **before** the row is touched, then
 deletes the user's WebAuthn credentials, federation identity links and password
 history, and strips their group memberships and role assignments.

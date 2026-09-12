@@ -677,42 +677,39 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         // assumes one chokes on it. `.invalid` is reserved by RFC 2606 precisely
         // so it can never be routed.
         let pseudonym = format!("deleted-{id_str}");
-        let email_placeholder = format!("deleted-{id_str}@deleted.invalid");
+        let email_replacement = format!("deleted-{id_str}@deleted.invalid");
+
+        // Every personal-data clause comes from `axiam_core::personal_data`,
+        // which is the single declaration the Art. 17 pipeline below shares
+        // with this path and the Art. 15 export is checked against (T-261). A
+        // column added to the `user` schema and to nothing else fails the
+        // introspection gate in `crates/axiam-db/tests/personal_data_gate.rs`
+        // rather than silently surviving erasure here.
+        //
+        // The clauses appended after it are this path's own, and deliberately
+        // so: `status = 'Deleted'` is what distinguishes the administrator's
+        // tombstone from the certified erasure, and the three resets after it
+        // are ones the Art. 17 pipeline does not perform. Those asymmetries
+        // are recorded on the columns they belong to, not flattened here.
+        let statement = format!(
+            "UPDATE type::record('user', $id) SET {}, \
+             status = 'Deleted', \
+             totp_last_used_step = NONE, \
+             failed_login_attempts = 0, \
+             email_verified_at = NONE, \
+             updated_at = time::now() \
+             WHERE tenant_id = $tenant_id RETURN BEFORE",
+            axiam_core::personal_data::shared_erasure_fragment()
+        );
 
         let result = self
             .db
             .current()
-            .query(
-                // `password_hash` is TYPE string (not nullable), so the empty
-                // string is the tombstone — Argon2 output is never empty, so no
-                // password can verify against it even if some future code path
-                // skipped the status check.
-                //
-                // `metadata = {}` because it is operator-supplied and free-form:
-                // whatever personal data someone put in it goes too.
-                "UPDATE type::record('user', $id) SET \
-                 username = $pseudonym, \
-                 email = $email_placeholder, \
-                 status = 'Deleted', \
-                 password_hash = '', \
-                 mfa_secret = NONE, \
-                 mfa_enabled = false, \
-                 totp_last_used_step = NONE, \
-                 metadata = {}, \
-                 locked_until = NONE, \
-                 last_failed_login_at = NONE, \
-                 failed_login_attempts = 0, \
-                 email_verified_at = NONE, \
-                 phone_number = NONE, \
-                 phone_number_verified_at = NONE, \
-                 address = NONE, \
-                 updated_at = time::now() \
-                 WHERE tenant_id = $tenant_id RETURN BEFORE",
-            )
+            .query(statement)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
             .bind(("pseudonym", pseudonym))
-            .bind(("email_placeholder", email_placeholder))
+            .bind(("email_replacement", email_replacement))
             .await
             .map_err(DbError::from)?;
 
@@ -938,29 +935,26 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         // password_hash is TYPE string (not nullable) — use empty string as
         // tombstone value. Argon2 output is never empty, so login is permanently
         // blocked without needing to make the column nullable.
+        // The shared fragment is the same declaration `delete` renders
+        // (T-261); what follows it is this path's own. Clearing
+        // `deletion_pending` is the step that marks the erasure done — it is
+        // the only one that does — which is why it is here and not in the
+        // shared set.
+        let statement = format!(
+            "UPDATE type::record('user', $id) SET {}, \
+             deletion_pending = false, \
+             scheduled_purge_at = NONE, \
+             status = 'Anonymized', \
+             updated_at = time::now() \
+             WHERE tenant_id = $tenant_id",
+            axiam_core::personal_data::shared_erasure_fragment()
+        );
+
         self.db
             .current()
-            .query(
-                "UPDATE type::record('user', $id) SET \
-                 email = $email_hash, \
-                 username = $pseudonym, \
-                 password_hash = '', \
-                 mfa_secret = NONE, \
-                 mfa_enabled = false, \
-                 metadata = {}, \
-                 locked_until = NONE, \
-                 last_failed_login_at = NONE, \
-                 deletion_pending = false, \
-                 scheduled_purge_at = NONE, \
-                 phone_number = NONE, \
-                 phone_number_verified_at = NONE, \
-                 address = NONE, \
-                 status = 'Anonymized', \
-                 updated_at = time::now() \
-                 WHERE tenant_id = $tenant_id",
-            )
+            .query(statement)
             .bind(("id", user_id.to_string()))
-            .bind(("email_hash", email_hash.to_string()))
+            .bind(("email_replacement", email_hash.to_string()))
             .bind(("pseudonym", pseudonym.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
             .await

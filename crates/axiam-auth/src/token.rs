@@ -925,7 +925,18 @@ pub fn issue_access_token_enriched(
     // `sid` is absent, so these tokens resolve to the same session they always
     // did, and no login path had to change for the OAuth2 fix.
     issue_access_token_for_client(
-        user_id, tenant_id, org_id, scopes, config, jti, aud, cnf, ext, None, None,
+        user_id,
+        tenant_id,
+        org_id,
+        scopes,
+        config,
+        jti,
+        aud,
+        cnf,
+        ext,
+        None,
+        None,
+        &[],
     )
 }
 
@@ -941,6 +952,13 @@ pub fn issue_access_token_enriched(
 /// other issuance site — login, WebAuthn, federation, device flow, token
 /// exchange — mints a token that no relying party was granted, and naming one
 /// would be asserting something untrue about it.
+///
+/// `requested_userinfo_claims` is the OIDC Core §5.5 list the grant asked for
+/// by name (T-241). An **empty slice produces a byte-identical token** to one
+/// minted without it, which is the same relationship — and the reason for it —
+/// that `cnf`, `ext` and `client_id` already have to the wrappers above. The
+/// list is a *request*, already filtered by `claims_request::RELEASABLE` at
+/// the authorization endpoint; nothing here decides a release.
 #[allow(clippy::too_many_arguments)]
 pub fn issue_access_token_for_client(
     user_id: Uuid,
@@ -954,6 +972,7 @@ pub fn issue_access_token_for_client(
     ext: Option<std::collections::BTreeMap<String, String>>,
     client_id: Option<&str>,
     session_id: Option<Uuid>,
+    requested_userinfo_claims: &[String],
 ) -> Result<String, AuthError> {
     AccessTokenSpec::user(user_id, tenant_id, org_id, jti)
         .aud(aud)
@@ -965,6 +984,7 @@ pub fn issue_access_token_for_client(
         // both pass it. Without this the token is unusable at every
         // session-validated endpoint, UserInfo included.
         .session(session_id)
+        .requested_userinfo_claims(requested_userinfo_claims)
         .issue(config)
 }
 

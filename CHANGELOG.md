@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A refreshing client keeps the claims it asked for** (T-241)
+
+  A client that names claims with the OIDC Core §5.5 `claims` parameter used to
+  receive them on its first access token and not on its second. The resolved
+  list rode the authorization code; the refresh grant minted a token without
+  it, so access to consented claims ended fifteen minutes after the consent was
+  given and the only recovery was a whole new authorization — which the end
+  user experiences as the consent not having worked.
+
+  The list now rides the refresh token too (schema v61, additive, no backfill),
+  and rotation copies it onto each successor exactly as it copies the session.
+  A refreshed access token asserts the same `axiam_requested_claims` the
+  code-exchanged one did.
+
+  This carries a request, not a release decision. The filter that decides which
+  claims may ever be named — `claims_request::RELEASABLE`, which no request can
+  use to reach `phone_number`, `phone_number_verified` or `address` — still runs
+  at the authorization endpoint and nowhere else, and every consent gate is
+  re-asked at each UserInfo call as before. A refresh token issued before v61
+  names no claims and mints exactly the token it minted before.
+
 - **A personal-data column can no longer be added to `user` without being
   classified** (T-261)
 

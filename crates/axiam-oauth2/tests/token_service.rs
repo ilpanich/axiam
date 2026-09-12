@@ -411,6 +411,11 @@ struct MockRefreshRepo {
     /// whole decision, and it has no visible effect on the response, so the
     /// only way to assert it is to record the call.
     retired: RetireLog,
+    /// T-241 — every `CreateRefreshToken` this repository was handed. What
+    /// rotation writes onto the *successor* row is invisible in the response
+    /// (the raw token is opaque), so recording the call is the only way to
+    /// assert that the claims request was copied forward rather than dropped.
+    created: Arc<Mutex<Vec<CreateRefreshToken>>>,
 }
 
 impl MockRefreshRepo {
@@ -421,6 +426,7 @@ impl MockRefreshRepo {
             revoke: RevokeMode::Ok,
             rotated: None,
             retired: Arc::new(Mutex::new(Vec::new())),
+            created: Arc::new(Mutex::new(Vec::new())),
         }
     }
     fn with_get(mut self, rt: RefreshToken) -> Self {
@@ -442,6 +448,7 @@ impl MockRefreshRepo {
 
 impl RefreshTokenRepository for MockRefreshRepo {
     async fn create(&self, i: CreateRefreshToken) -> AxiamResult<RefreshToken> {
+        self.created.lock().unwrap().push(i.clone());
         if self.create_ok {
             Ok(RefreshToken {
                 id: Uuid::new_v4(),
@@ -451,6 +458,7 @@ impl RefreshTokenRepository for MockRefreshRepo {
                 user_id: i.user_id,
                 scopes: i.scopes,
                 session_id: i.session_id,
+                requested_userinfo_claims: i.requested_userinfo_claims,
                 expires_at: i.expires_at,
                 revoked: false,
                 created_at: Utc::now(),
@@ -692,6 +700,7 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
         user_id,
         scopes: scopes.iter().map(|s| s.to_string()).collect(),
         session_id: None,
+        requested_userinfo_claims: Vec::new(),
         expires_at: Utc::now() + chrono::Duration::days(30),
         revoked: false,
         created_at: Utc::now(),
@@ -3834,4 +3843,192 @@ async fn t254_the_replay_audit_record_never_carries_the_token() {
         rendered.contains(&session_id.to_string()),
         "the session is what an investigation follows, and must be there"
     );
+}
+
+// ---------------------------------------------------------------------------
+// T-241 — the OIDC Core §5.5 claims request survives a refresh
+// ---------------------------------------------------------------------------
+//
+// The claims a client names with the `claims` parameter are resolved at the
+// authorization endpoint, filtered through `claims_request::RELEASABLE`, and
+// carried on the code into `axiam_requested_claims`. Until R-1…R-8 the refresh
+// grant minted a token without them: the client's first access token released
+// what it asked for and its second, fifteen minutes later, did not — with no
+// recovery short of a whole new authorization. The end user experiences that
+// as the consent not having worked.
+//
+// Four of the five tests below are about carrying the list; the fifth is the
+// one that matters most, and it is a negative. The refresh path must copy, and
+// must never *widen*.
+
+/// The list travels onto the refresh token the code exchange issues, so a
+/// rotation has something to carry.
+#[tokio::test]
+async fn the_code_exchange_puts_the_claims_request_on_the_refresh_token() {
+    let mut code = make_auth_code(&["openid", "profile"], Some(PKCE_CHALLENGE));
+    code.requested_userinfo_claims = vec!["email".into(), "email_verified".into()];
+    let refresh = MockRefreshRepo::new();
+    let created = refresh.created.clone();
+
+    let svc = build(
+        ClientOutcome::Found(make_client(
+            &["authorization_code", "refresh_token"],
+            &["openid", "profile"],
+        )),
+        MockCodeRepo::ok(code),
+        TenantOutcome::Found,
+        refresh,
+    );
+    svc.exchange(
+        Uuid::new_v4(),
+        auth_code_req(Some(PKCE_VERIFIER)),
+        &no_cert(),
+    )
+    .await
+    .unwrap();
+
+    let calls = created.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].requested_userinfo_claims,
+        vec!["email".to_owned(), "email_verified".to_owned()]
+    );
+}
+
+/// The refreshed access token asserts the same claims the code-exchanged one
+/// did — which is the whole point.
+#[tokio::test]
+async fn a_refreshed_access_token_carries_the_requested_claims() {
+    let mut stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["openid", "profile"]);
+    stored.requested_userinfo_claims = vec!["email".into(), "name".into()];
+
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["openid", "profile"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new().with_get(stored),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("raw-token"), &no_cert())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        decode_claims(&resp.access_token)["axiam_requested_claims"],
+        serde_json::json!(["email", "name"])
+    );
+}
+
+/// And the successor refresh token carries it too, so the *second* rotation
+/// still has it. A one-hop carry would look right in every test that refreshes
+/// once and fail the first client that refreshes twice.
+#[tokio::test]
+async fn rotation_copies_the_claims_request_onto_the_successor() {
+    let mut stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["openid"]);
+    stored.requested_userinfo_claims = vec!["email".into()];
+
+    let refresh = MockRefreshRepo::new().with_get(stored);
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["openid"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    svc.exchange(Uuid::new_v4(), refresh_req("raw-token"), &no_cert())
+        .await
+        .unwrap();
+
+    let calls = created.lock().unwrap();
+    assert_eq!(calls.len(), 1, "rotation creates exactly one successor");
+    assert_eq!(
+        calls[0].requested_userinfo_claims,
+        vec!["email".to_owned()],
+        "the successor must name the same claims, or the second refresh loses \
+         them and the defect returns one rotation later"
+    );
+}
+
+/// **I4 twin.** A refresh token written before schema v61 decodes with an
+/// empty list — that is what `option<array>` and `unwrap_or_default` mean — and
+/// refreshing it mints a token with no `axiam_requested_claims` at all. Today's
+/// behaviour, for every token in flight across the migration.
+#[tokio::test]
+async fn a_pre_migration_refresh_token_still_mints_todays_token() {
+    let stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["openid"]);
+    assert!(
+        stored.requested_userinfo_claims.is_empty(),
+        "the pre-v61 decode is the empty vector"
+    );
+
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["openid"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new().with_get(stored),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("raw-token"), &no_cert())
+        .await
+        .unwrap();
+
+    let claims = decode_claims(&resp.access_token);
+    assert!(
+        claims.get("axiam_requested_claims").is_none(),
+        "an empty list must leave the member absent, not present and empty — \
+         a token that gained a member is not byte-identical to the one this \
+         path minted before v61: {claims}"
+    );
+}
+
+/// The negative, and the reason this item needed one.
+///
+/// The refresh path must not become a way to name a sensitive claim into
+/// release. The row here is **hand-built**, naming `phone_number` and
+/// `address` as though `claims_request::RELEASABLE` had been bypassed at the
+/// authorization endpoint or the datastore edited directly — because that is
+/// the only shape in which the question is interesting. The token is minted;
+/// what it says releases nothing, because the release decision is UserInfo's
+/// and UserInfo re-asks all four W7 gates on every call.
+///
+/// The assertion here is the one this layer can make: the refresh path
+/// **copies**, it does not filter and it does not widen. The companion
+/// assertion — that a token carrying these members still releases neither at
+/// UserInfo — already exists as
+/// `oauth2_userinfo_post_test::a_consent_gated_claim_is_not_released_by_requesting_it`,
+/// which mints a token "assuming the authorization-endpoint filter had been
+/// bypassed entirely" for exactly this reason. The refresh path produces that
+/// same shape, so the property is pinned where it belongs — at the endpoint
+/// that would leak — rather than duplicated here.
+#[tokio::test]
+async fn the_refresh_path_copies_a_claims_request_and_never_widens_it() {
+    let mut stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["openid"]);
+    stored.requested_userinfo_claims = vec!["phone_number".into(), "address".into()];
+
+    let refresh = MockRefreshRepo::new().with_get(stored);
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["openid"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("raw-token"), &no_cert())
+        .await
+        .unwrap();
+
+    // Copied verbatim: nothing added.
+    assert_eq!(
+        decode_claims(&resp.access_token)["axiam_requested_claims"],
+        serde_json::json!(["phone_number", "address"])
+    );
+    assert_eq!(
+        created.lock().unwrap()[0].requested_userinfo_claims,
+        vec!["phone_number".to_owned(), "address".to_owned()]
+    );
+    // And no scope was granted on the strength of the request: the scopes on
+    // the successor are the stored scopes, not the named claims. A refresh
+    // that read the claims request as an authorization would show up here.
+    assert_eq!(created.lock().unwrap()[0].scopes, vec!["openid".to_owned()]);
 }

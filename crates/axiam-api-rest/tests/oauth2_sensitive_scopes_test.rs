@@ -299,6 +299,10 @@ fn userinfo_token(
         // No session: these fixtures mint a token directly rather than through
         // an authorization, and the reader falls back to `jti`.
         None,
+        // And no claims request: this helper's callers exercise the scope
+        // gates, not §5.5. `userinfo_token_naming_claims` is the one that
+        // names them.
+        &[],
     )
     .unwrap()
 }

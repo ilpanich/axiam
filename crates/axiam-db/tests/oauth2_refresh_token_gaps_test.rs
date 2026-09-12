@@ -73,6 +73,7 @@ async fn insert_token_expiring(
         client_id: client_id.into(),
         scopes: vec!["openid".into()],
         session_id: None,
+        requested_userinfo_claims: Vec::new(),
         expires_at,
     })
     .await

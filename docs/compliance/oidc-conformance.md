@@ -448,6 +448,21 @@ and [`docs/admin/fapi2-profile.md`](../admin/fapi2-profile.md#the-refresh-rotati
 | 156 | **Invariant 4.** Every client that is not registered `profile: fapi2` has its predecessor revoked at rotation, and a second presentation is `invalid_grant`, "already consumed" — the behaviour it had before beta13. The registration decides, never the request, and no other per-client switch buys a window | — (invariant 4) | Pass | `fapi.rs::a_standard_client_gets_no_refresh_rotation_grace`, `::nothing_but_the_profile_buys_a_grace_window`; `token_service.rs::t254_a_standard_rotation_revokes_the_predecessor`, `::t254_the_registration_decides_a_superseded_row_is_refused_off_fapi`; `oauth2_flow_test.rs::refresh_token_rotation_retires_old_on_a_standard_client` |
 | 157 | A refresh token presented **after** rotation is recorded whichever way it is answered: a per-outcome counter on its session and an `oauth2.refresh_token_replayed` audit row naming the client, the profile, the session and the disposition — never the token or its digest. A credential merely revoked at logout is not filed as a replay | BCP §4.14.2 | Pass | `token_service.rs::t254_the_replay_audit_record_never_carries_the_token`, `::t254_an_ordinary_stale_refresh_token_is_not_a_replay`; `oauth2_flow_test.rs::a_refused_refresh_replay_is_audited`; `session.rs::mark_refresh_replay_counts_each_outcome_separately`; `user_sessions_test.rs` |
 
+### The OIDC Core §5.5 claims request across a refresh (T-241, R-2)
+
+Rows 104–129 recorded the `claims` parameter being honoured for the `userinfo`
+member, and recorded one limitation with it: the resolved list rode the
+authorization code and nothing else, so the token minted by the **refresh**
+grant named no claims. A client that asked for `email` by name received it on
+its first access token and not on its second — fifteen minutes later — with no
+recovery short of a whole new authorization.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 158 | The claims an authorization asked for by name ride the **refresh token** as well as the code (schema v61), and rotation copies them onto each successor. A refreshed access token asserts the same `axiam_requested_claims` the code-exchanged one did, and the second rotation still carries them | Core §5.5 | Pass | `token_service.rs::the_code_exchange_puts_the_claims_request_on_the_refresh_token`, `::a_refreshed_access_token_carries_the_requested_claims`, `::rotation_copies_the_claims_request_onto_the_successor`; `oauth2_refresh_token.rs::the_claims_request_round_trips_through_the_row` |
+| 159 | The refresh path **copies** the request and never widens it: `claims_request::RELEASABLE` still runs only at the authorization endpoint, a hand-built row naming `phone_number` or `address` is carried verbatim and releases neither at UserInfo, and no scope is granted on the strength of a named claim | Core §5.5; GDPR Art. 6 | Pass | `token_service.rs::the_refresh_path_copies_a_claims_request_and_never_widens_it`; `oauth2_userinfo_post_test.rs::a_consent_gated_claim_is_not_released_by_requesting_it` |
+| 160 | **Invariant 4.** A refresh token issued before v61 decodes to no claims and mints exactly the token it minted before — the column is `option<array>` with no backfill, so every token in flight across the migration keeps working and gains nothing | — (invariant 4) | Pass (I4) | `token_service.rs::a_pre_migration_refresh_token_still_mints_todays_token`; `oauth2_refresh_token.rs::a_row_written_before_v61_decodes_to_no_claims`; `schema.rs::v61_carries_the_claims_request_onto_the_refresh_token_additively` |
+
 ---
 
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
@@ -585,3 +600,4 @@ and [`docs/admin/fapi2-profile.md`](../admin/fapi2-profile.md#the-refresh-rotati
 *Rows 130–140 added: wave W8 (`client_secret_basic`) — 2026-09-08*
 *Rows 141–148 added: wave W9 (the first conformance-suite execution) — 2026-09-08*
 *Row 148 closed and rows 149–154 added: the first execution in which modules reached assertions — 2026-09-08*
+*Rows 158–160 added: R-2 of the 2026-09-12 residual pass (the claims request across a refresh) — 2026-09-12*

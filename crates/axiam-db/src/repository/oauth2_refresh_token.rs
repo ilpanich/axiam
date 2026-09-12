@@ -45,6 +45,12 @@ struct RefreshTokenRow {
     /// still decode.
     #[surreal(default)]
     rotated_at: Option<DateTime<Utc>>,
+    /// T-241 — see [`RefreshToken::requested_userinfo_claims`]. Absent on
+    /// every row written before schema v61; `None` decodes to the empty
+    /// vector, which is a refreshed token with no `axiam_requested_claims` —
+    /// exactly what such a row produced before the column existed.
+    #[surreal(default)]
+    requested_userinfo_claims: Option<Vec<String>>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -63,6 +69,9 @@ struct RefreshTokenRowWithId {
     /// T-254 — see [`RefreshToken::rotated_at`].
     #[surreal(default)]
     rotated_at: Option<DateTime<Utc>>,
+    /// T-241 — see [`RefreshToken::requested_userinfo_claims`].
+    #[surreal(default)]
+    requested_userinfo_claims: Option<Vec<String>>,
 }
 
 impl RefreshTokenRowWithId {
@@ -91,6 +100,7 @@ impl RefreshTokenRowWithId {
             revoked: self.revoked,
             created_at: self.created_at,
             rotated_at: self.rotated_at,
+            requested_userinfo_claims: self.requested_userinfo_claims.unwrap_or_default(),
         })
     }
 }
@@ -135,6 +145,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
                  user_id = $user_id, \
                  scopes = $scopes, \
                  session_id = $session_id, \
+                 requested_userinfo_claims = $requested_userinfo_claims, \
                  expires_at = $expires_at, \
                  revoked = false",
             )
@@ -145,6 +156,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             .bind(("user_id", user_id_str))
             .bind(("scopes", input.scopes))
             .bind(("session_id", input.session_id.map(|id| id.to_string())))
+            .bind(("requested_userinfo_claims", input.requested_userinfo_claims))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -178,6 +190,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             revoked: row.revoked,
             created_at: row.created_at,
             rotated_at: row.rotated_at,
+            requested_userinfo_claims: row.requested_userinfo_claims.unwrap_or_default(),
         })
     }
 
@@ -491,10 +504,100 @@ mod tests {
             user_id: Some(Uuid::new_v4()),
             scopes: vec!["openid".into()],
             session_id: Some(Uuid::new_v4()),
+            requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now() + chrono::Duration::days(30),
         })
         .await
         .unwrap()
+    }
+
+    // -----------------------------------------------------------------
+    // T-241 — the claims request on the refresh token (schema v61)
+    // -----------------------------------------------------------------
+
+    /// Round-trip: what `create` was handed is what `get_by_token_hash`
+    /// returns, in order. Order matters because the list is minted verbatim
+    /// into `axiam_requested_claims`, which a relying party reads.
+    #[tokio::test]
+    async fn the_claims_request_round_trips_through_the_row() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+
+        let created = repo
+            .create(CreateRefreshToken {
+                tenant_id,
+                token_hash: "t241-roundtrip".into(),
+                client_id: "oa_test".into(),
+                user_id: Some(Uuid::new_v4()),
+                scopes: vec!["openid".into()],
+                session_id: None,
+                requested_userinfo_claims: vec!["email".into(), "name".into()],
+                expires_at: Utc::now() + chrono::Duration::days(30),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            created.requested_userinfo_claims,
+            vec!["email".to_owned(), "name".to_owned()]
+        );
+
+        let read = repo
+            .get_by_token_hash(tenant_id, "t241-roundtrip")
+            .await
+            .unwrap();
+        assert_eq!(
+            read.requested_userinfo_claims,
+            vec!["email".to_owned(), "name".to_owned()]
+        );
+    }
+
+    /// **I4 twin.** A row written before v61 has no column at all. It must
+    /// still decode — every refresh token in flight across the migration is
+    /// one of these — and it must decode to the empty list, which mints a
+    /// token with no `axiam_requested_claims`: exactly what such a row
+    /// produced before the column existed.
+    ///
+    /// The row is written with `UNSET` rather than by omitting the field from
+    /// a `CREATE`, because `create` now always writes the column; removing it
+    /// afterwards is the only way to reproduce the pre-migration shape against
+    /// a migrated schema.
+    #[tokio::test]
+    async fn a_row_written_before_v61_decodes_to_no_claims() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db.clone());
+        let tenant_id = Uuid::new_v4();
+        repo.create(CreateRefreshToken {
+            tenant_id,
+            token_hash: "t241-premigration".into(),
+            client_id: "oa_test".into(),
+            user_id: Some(Uuid::new_v4()),
+            scopes: vec!["openid".into()],
+            session_id: None,
+            requested_userinfo_claims: vec!["email".into()],
+            expires_at: Utc::now() + chrono::Duration::days(30),
+        })
+        .await
+        .unwrap();
+
+        db.query(
+            "UPDATE oauth2_refresh_token UNSET requested_userinfo_claims \
+             WHERE token_hash = $h",
+        )
+        .bind(("h", "t241-premigration"))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let read = repo
+            .get_by_token_hash(tenant_id, "t241-premigration")
+            .await
+            .expect("a pre-v61 row must still decode, not error");
+        assert!(
+            read.requested_userinfo_claims.is_empty(),
+            "absent means the grant named no claims, which is today's behaviour"
+        );
     }
 
     // -----------------------------------------------------------------

@@ -232,6 +232,56 @@ inventory and the two gates. Status unchanged (Mitigated); no count moves.
 
 ## 3. R-2 — requested claims survive a refresh
 
+> **EXECUTED — R-2, 2026-09-12.** Schema **v61**: one optional array on
+> `oauth2_refresh_token`, v59's shape on the other side of the grant and for
+> the same reasons, with no backfill and no index. `RefreshToken` and
+> `CreateRefreshToken` carry `requested_userinfo_claims: Vec<String>`; the row
+> structs decode `Option<Vec<String>>` through `#[surreal(default)]` and
+> `unwrap_or_default`, so a pre-v61 row still reads and reads as "named no
+> claims" — which is what it was.
+>
+> The code exchange writes the list onto the refresh token it issues, and the
+> refresh grant copies it onto the successor and passes it to the mint.
+> `issue_access_token_for_client` gained a twelfth parameter rather than a
+> second function, and `issue_access_token_enriched` passes `&[]`: the empty
+> slice produces a byte-identical token, which is the relationship `cnf`, `ext`
+> and `client_id` already have to the wrappers above them, and the doc comment
+> now says so for one more of them.
+>
+> Tests: five in `token_service.rs` — the list reaches the refresh token the
+> code exchange issues; a refreshed access token asserts it; **rotation copies
+> it onto the successor**, which is the one a single-refresh test would not
+> catch and which would have let the defect return one rotation later; the I4
+> twin (a pre-v61 row mints a token with the member *absent*, not present and
+> empty); and the negative, against a **hand-built row** naming `phone_number`
+> and `address` — carried verbatim, with no scope granted on the strength of
+> the request. Two in the repository: the round trip, and a row whose column is
+> `UNSET` after the fact, which is the only way to produce the pre-migration
+> shape against a migrated schema. One in `schema.rs`, asserting v61 is
+> additive and indexless. The migration tripwire moved 60 → 61.
+>
+> The companion assertion — that a token naming a sensitive claim releases
+> nothing at UserInfo — was **already there**:
+> `oauth2_userinfo_post_test::a_consent_gated_claim_is_not_released_by_requesting_it`
+> mints a token "assuming the authorization-endpoint filter had been bypassed
+> entirely", which is exactly the shape the refresh path now produces. Pinning
+> it at the endpoint that would leak is where it belongs; a second copy here
+> would assert the same property one layer further from the leak.
+>
+> Docs: `docs/compliance/oidc-conformance.md` rows **158–160** (carried,
+> copied-never-widened, and the I4 twin) under a short section explaining what
+> rows 104–129's limitation was; `CHANGELOG.md` under **Security**. Threat
+> model: T-241's "Known limitation" sentence replaced in `Axiam.json`,
+> `threat-model-stride.md`. Status unchanged (Mitigated), no count moves.
+>
+> Verified: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+> --no-default-features -- -D warnings`, `cargo test -p axiam-oauth2`
+> (389 + 112 + 7 + 1), and the six `axiam-db` binaries this touches (232 lib,
+> and the gate, W7, refresh-gaps, revoke-all and permission-ticket suites).
+> `-p axiam-db` unscoped fills the sandbox disk — fifteen integration binaries
+> — which is what `CLAUDE.md`'s hygiene section warns about; scoping to `--lib`
+> plus named `--test` targets is the way to run it here.
+
 **Closes** the residual T-241 records: *"Known limitation, stated rather than
 discovered: the requested claims ride the authorization code, not the refresh
 token, so a refreshing client must ask again."*

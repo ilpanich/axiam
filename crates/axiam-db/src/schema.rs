@@ -342,6 +342,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "refresh_rotation_replay_marker",
         sql: SCHEMA_V60,
     },
+    Migration {
+        version: 61,
+        name: "oidc_requested_claims_on_refresh",
+        sql: SCHEMA_V61,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3302,9 +3307,83 @@ DEFINE FIELD IF NOT EXISTS refresh_replay_grace_accepted ON TABLE session TYPE o
 DEFINE FIELD IF NOT EXISTS refresh_replay_refused ON TABLE session TYPE option<int>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v61 — T-241: the OIDC Core §5.5 claims request survives a refresh
+// -----------------------------------------------------------------------
+//
+// One optional array, no backfill, no index — v59's shape, on the other table,
+// and for the same reason. v59 put the claims an authorization asked for by
+// name on the authorization code; the refresh grant minted a token without
+// them, so a refreshing client lost access to consented claims fifteen minutes
+// after the consent was given and had to start a whole new authorization. The
+// column carries the same list onto the refresh token, where rotation copies
+// it forward exactly as it copies `session_id`.
+//
+// `option<array>` rather than `array DEFAULT []`: a refresh token issued
+// before this migration named no claims, and absent says that exactly. The
+// decode path substitutes the empty vector, which mints a token with no
+// `axiam_requested_claims` — today's behaviour, unchanged, for every row that
+// predates this.
+//
+// **This is not a release decision.** `claims_request::RELEASABLE` runs at the
+// authorization endpoint and this column carries a list that has already been
+// through it; the refresh path copies, it never widens. A hand-edited row
+// naming a sensitive claim releases nothing, because UserInfo re-asks all four
+// gates on every call — which is what `a_hand_built_refresh_row_cannot_name_a_
+// sensitive_claim_into_release` asserts.
+//
+// **No index.** The column is never a search key: it is read from a row
+// already located by `token_hash` and its unique index.
+const SCHEMA_V61: &str = "\
+DEFINE FIELD IF NOT EXISTS requested_userinfo_claims ON TABLE oauth2_refresh_token \
+    TYPE option<array>;
+DEFINE FIELD IF NOT EXISTS requested_userinfo_claims.* ON TABLE oauth2_refresh_token TYPE string;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-241 — v61 is one additive, optional column and nothing else, on the
+    /// table v59's column already lives on the other side of. The three things
+    /// that would make it dangerous are the three asserted absent: a backfill
+    /// (which would claim a claims request no existing grant made), a
+    /// non-optional column (which would make every pre-v61 refresh token
+    /// unreadable, locking out every live session) and an index (which a
+    /// column read from a row already found by `token_hash` has no query for).
+    #[test]
+    fn v61_carries_the_claims_request_onto_the_refresh_token_additively() {
+        assert!(
+            SCHEMA_V61.contains(
+                "requested_userinfo_claims ON TABLE oauth2_refresh_token \
+                 TYPE option<array>"
+            ),
+            "v61 must define requested_userinfo_claims as an optional array"
+        );
+        assert!(
+            SCHEMA_V61
+                .contains("requested_userinfo_claims.* ON TABLE oauth2_refresh_token TYPE string"),
+            "v61 must type the array members, as v59 does"
+        );
+        for forbidden in [
+            "UPDATE",
+            "DELETE",
+            "DEFAULT",
+            "OVERWRITE",
+            "DEFINE INDEX",
+            "REMOVE",
+        ] {
+            assert!(
+                !SCHEMA_V61.contains(forbidden),
+                "v61 must stay additive; found {forbidden}"
+            );
+        }
+        assert_eq!(
+            SCHEMA_V61.matches("DEFINE FIELD").count(),
+            2,
+            "v61 defines the column and its member type, and nothing else"
+        );
+    }
 
     /// T-254 — v60 is four additive, optional columns and nothing else. The
     /// three things that would make it dangerous are the three asserted
@@ -3523,8 +3602,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&60),
-            "v60 is the newest migration (T-254 refresh-rotation replay marker). \
+            Some(&61),
+            "v61 is the newest migration (T-241 — the claims request on the \
+             refresh token). \
              This assertion is a tripwire, not bookkeeping: bumping it is how a new \
              migration is declared deliberate rather than merged in by accident."
         );

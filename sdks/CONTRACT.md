@@ -4059,18 +4059,38 @@ is failing the default.
 "mtls_endpoint_aliases": { "token_endpoint": "/oauth2/token", "userinfo_endpoint": "http://mtls.iam.example.test/oauth2/userinfo" }
 ```
 
-An SDK MUST **refuse** — a discovery-level error surfaced to the caller — and
-MUST NOT fall back to the top-level endpoint. Falling back is the dangerous
+An SDK MUST **refuse** — an error surfaced to the caller, naming the member —
+and MUST NOT fall back to the top-level endpoint. Falling back is the dangerous
 answer, not the safe one: the caller asked to authenticate with a certificate,
 the operator published something unusable, and quietly presenting the
 certificate to the front-channel host authenticates nothing while appearing to
-work. Both defects in the vector are refusals on their own: a relative URL, and
-a scheme that is not `https` (§6 forbids it).
+work. Both defects are refusals on their own:
 
-An SDK with **no certificate configured** MUST NOT read the member at all, in
-any of the three vectors — asserted by observing that every call goes to the
-top-level entry, including against vector C, which such an SDK must not even
-fail on.
+1. **Not an absolute URL.** A relative alias resolves against nothing a client
+   holds, and the one base that might seem obvious — the issuer's host — is
+   precisely the host the alias exists to name a different one from.
+2. **A scheme weaker than the issuer's.** An `http` alias published by a
+   deployment whose `issuer` is `https` is a downgrade, and mutual TLS over
+   cleartext is a contradiction rather than a weaker option.
+
+   The test is "weaker than the issuer", **not** "is not `https`", and the
+   difference is load-bearing in both directions. The server itself permits an
+   `http` alias for local development (`build_mtls_aliases` accepts both
+   schemes), so a flat `https` requirement would refuse the dev and test
+   topologies AXIAM ships — and refuse the mock-server harness every SDK's own
+   suite is built on, which is how this was found. An alias that is *stronger*
+   than the issuer (`https` under an `http` issuer) is not a downgrade and is
+   accepted.
+
+The refusal is at the **point of use**, not at decode. An SDK with no
+certificate configured MUST NOT read the member at all, in any of the three
+vectors — not even to validate it. A deployment whose aliases are malformed
+must not break the clients that never use them, and asserting that is what
+proves the check sits where it belongs.
+
+An SDK with **no certificate configured** is asserted separately in each
+vector: every call goes to the top-level entry, including against vector C,
+which such an SDK must not even fail on.
 
 ### §21.4 RFC 9207 `iss` on authorization responses (informative, act on it)
 

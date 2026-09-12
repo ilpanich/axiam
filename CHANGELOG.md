@@ -154,7 +154,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vendored artifact, so eleven repositories assert the same bytes. A malformed
   alias must be **refused**, not fallen back from: quietly presenting a
   certificate to the front-channel host authenticates nothing while appearing
-  to work.
+  to work. "Malformed" means not an absolute URL, or a scheme weaker than the
+  issuer's — not "not `https`", since the server accepts an `http` alias for
+  local development and a flat rule would refuse the topologies AXIAM ships.
 
   §21.10 records, per SDK, whether it decodes the member and whether it prefers
   the alias — in the style §21.9 already uses for DPoP, where an unrecorded row

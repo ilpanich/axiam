@@ -55,7 +55,15 @@ check_skip() {
 
 # Pending guard — the costliest bypass: this cell is pending precisely because
 # running it unsupervised turns a skip into a red matrix cell.
-check_skip axiam    scim_provisioning    scim_provisioning "pending scenario"
+#
+# The fixture must name a cell that is ACTUALLY in PENDING_SCENARIOS, so it
+# moves whenever that list does. It read `scim_provisioning` until 2026-09-12,
+# when that cell was un-pended after its first clean run — which turned this
+# guard red while the filter it guards was working perfectly. Now
+# `oauth2_client_credentials_reactor_hook`, the one entry still pending
+# (no admin-session helper in lib/auth.js, nothing answering the reactor queue).
+check_skip axiam    oauth2_client_credentials_reactor_hook \
+                    oauth2_client_credentials_reactor_hook "pending scenario"
 # Target-scoping guard — an AXIAM-only cell run against another vendor.
 check_skip keycloak authz_check_rest     authz_check_rest  "AXIAM-only scenario"
 # Same guard, for the two cells that were missing from AXIAM_ONLY_SCENARIOS for
@@ -67,7 +75,8 @@ check_skip keycloak opaque_login_start    opaque_login_start    "AXIAM-only scen
 check_skip zitadel  opaque_register_start opaque_register_start "AXIAM-only scenario"
 # The already-correct spelling must behave identically — normalization is
 # idempotent, not a second code path.
-check_skip axiam    scim_provisioning.js scim_provisioning "pending scenario, spelled with .js"
+check_skip axiam    oauth2_client_credentials_reactor_hook.js \
+                    oauth2_client_credentials_reactor_hook "pending scenario, spelled with .js"
 
 [ "$fail" -eq 0 ] || { echo "[scenario-filter-selftest] FAILED" >&2; exit 1; }
 echo "[scenario-filter-selftest] OK — extension-less --scenario names are normalized before filtering."

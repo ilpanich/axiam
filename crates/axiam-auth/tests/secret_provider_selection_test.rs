@@ -34,9 +34,16 @@ fn a_vault_kind(ca_cert_path: Option<std::path::PathBuf>) -> SecretProviderKind 
 fn a_logical_key_name_maps_to_the_documented_environment_variable() {
     // Operators set these by hand from the deployment docs, so the mapping is
     // a contract: lowercase logical name, uppercased under one fixed prefix.
+    //
+    // Asserted against a name the docs actually carry, rather than a plausible
+    // invented one. `jwt_private_key_pem` is the lowercase field the secret
+    // provider looks for on the configuration page, and
+    // `AXIAM__AUTH__JWT_PRIVATE_KEY_PEM` is the variable listed beside it — so
+    // this pins the real published pair, and `check-config-key-coverage.py`
+    // sees a key it can find in the docs instead of one that exists nowhere.
     assert_eq!(
-        EnvSecretProvider::var_name("jwt_signing_key"),
-        "AXIAM__AUTH__JWT_SIGNING_KEY"
+        EnvSecretProvider::var_name("jwt_private_key_pem"),
+        "AXIAM__AUTH__JWT_PRIVATE_KEY_PEM"
     );
 }
 

@@ -1,9 +1,0 @@
-{
-  "namespace": "AxiamUI",
-  "source": "frontend@0.0.0",
-  "shape": "package",
-  "provider": "AxiamSurface",
-  "componentCount": 27,
-  "skippedStoryIds": [],
-  "runtimeFontPrefixes": []
-}

@@ -343,6 +343,12 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // credential, and it carries only endpoint URLs the deployment publishes.
     "/.well-known/uma2-configuration",
     "/oauth2/jwks",
+    // T-39/T-143. Public for the same reason as the JWKS beside it: a route
+    // guard fetches it before it holds any credential, and it carries only
+    // hashes — never a session id, a subject or a tenant. Mounted only where
+    // `AXIAM__AUTH__REVOCATION_FEED_ENABLED` is set, so on most deployments
+    // this entry describes a path that does not exist.
+    "/oauth2/revocations",
     "/oauth2/authorize",
     "/oauth2/token",
     "/oauth2/userinfo",

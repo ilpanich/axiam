@@ -54,7 +54,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ["AXIAM__DB__DATABASE", "SurrealDB database.", "axiam"],
           [
             "AXIAM__AMQP__URL",
-            "RabbitMQ connection string, assembled from the broker credentials at the deployment layer. Must be amqps:// — AMQP is TLS-only and every other scheme is refused at startup.",
+            "RabbitMQ connection string, assembled from the broker credentials at the deployment layer. Must be amqps:// — AMQP is TLS-only and every other scheme is refused at startup. It embeds the broker password inline, which is why `AmqpConfig`'s `Debug` prints the host and never the userinfo. Also resolvable through the secret provider as `amqp_url`; this variable stays as a permanent fallback, and a non-`env` deployment that still supplies it here gets one `WARN` at boot.",
             "amqps://user:pass@rabbitmq:5671",
           ],
           [
@@ -135,8 +135,16 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         type: "table",
         headers: ["Variable", "Meaning", "Example"],
         rows: [
-          ["AXIAM__DB__USERNAME", "SurrealDB username.", "axiam"],
-          ["AXIAM__DB__PASSWORD", "SurrealDB password.", "<set-in-secret-manager>"],
+          [
+            "AXIAM__DB__USERNAME",
+            "SurrealDB username. Also resolvable through the secret provider as `db_username` — on a Vault or `file` deployment put it there and leave this unset, and the Vault token becomes the only credential the container spec carries. This variable stays as a permanent fallback (`env` is a supported provider kind); what a non-`env` deployment gets, if the value arrives here anyway, is one `WARN` at boot naming it.",
+            "axiam",
+          ],
+          [
+            "AXIAM__DB__PASSWORD",
+            "SurrealDB password — read-write access to every tenant's data. Also resolvable through the secret provider as `db_password`; see the note on the username above. Never rendered by `DbConfig`'s `Debug`, so it cannot reach a log line or a panic message that prints a configuration.",
+            "<set-in-secret-manager>",
+          ],
           [
             "AXIAM__AUTH__JWT_PRIVATE_KEY_PEM",
             "Ed25519 JWT signing private key (PEM).",
@@ -265,6 +273,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID",
             "Tenant that the bare discovery document describes when the caller names none. Every client-authenticating OAuth2 endpoint takes a required `tenant_id`, so a relying party that reads the document and uses the URLs verbatim is otherwise refused. Set it on a single-tenant deployment — the shape an OP is certified as. Leave unset when one issuer serves many tenants: it only changes what the document publishes, never how an endpoint behaves, and a request arriving without `tenant_id` is still refused.",
             "0b5f4d2e-6c31-4a8e-9f77-2d1c8a4b6e90",
+          ],
+          [
+            "AXIAM__AUTH__REVOCATION_FEED_ENABLED",
+            "Publish `GET /oauth2/revocations` — the hashed ids of sessions revoked within the last access-token lifetime, so an SDK route guard that polls it rejects a revoked session within one poll interval instead of within one token lifetime. Default `false`, and with it off the route is not mounted and no row is written. The document carries base64url SHA-256 hashes and nothing else: never a session id, a subject or a tenant. It is a narrowing of a residual window and never a control — a guard that cannot fetch it behaves exactly as it does without it, and the token itself still decides. Turn it on where sign-out has to take effect faster than fifteen minutes and routing every authorization decision through gRPC introspection is too expensive.",
+            "true",
           ],
           [
             "AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS",
@@ -684,6 +697,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "AXIAM__AUDIT_RETENTION_DAYS",
             "How long audit entries are kept. A background sweep prunes anything older, through the audit table's only deletion path — deployment-wide, reachable from no HTTP handler. `0` disables pruning and restores unbounded growth, which is an explicit opt-out for deployments that archive out of band rather than something you fall into. Default `730`, chosen longer than most regimes ask because discarding evidence early is irreversible where keeping it is a storage cost.",
             "365",
+          ],
+          [
+            "AXIAM__AUDIT__MINIMISE",
+            "Whether to reduce what is collected into the audit log before the append. With it on, a client address is truncated to its /24 (IPv4) or /48 (IPv6) prefix and a user-agent string is reduced to a coarse family; an address that does not parse is dropped rather than written through, because a value that cannot be parsed cannot be shown to have been minimised. Structured metadata that producers write for accountability — the client and disposition on a refresh-token replay, the names of released claims, a federated subject — is never touched: dropping it would weaken the controls that depend on it. Default `false`. Deployment-wide and deliberately not per tenant, because audit is an accountability control the deployment relies on including against a tenant administrator. Both states are logged at startup.",
+            "true",
           ],
         ],
       },

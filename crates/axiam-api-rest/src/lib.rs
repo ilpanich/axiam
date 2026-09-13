@@ -33,8 +33,8 @@ pub use extractors::tenant::TenantContext;
 pub use health::HealthChecker;
 pub use openapi::ApiDoc;
 pub use server::{
-    api_v1_routes, build_cors, build_governor, health_routes, openapi_routes,
-    register_api_v1_routes,
+    RouteOptions, api_v1_routes, build_cors, build_governor, health_routes, openapi_routes,
+    register_api_v1_routes, register_api_v1_routes_with,
 };
 pub use state::AppState;
 

@@ -11,8 +11,8 @@
 > **The headline.** Two releases — beta12 and beta13 — carried the OpenID Connect
 > **Basic OP** programme (waves W1–W9 of [`basic-op-gap-plan.md`](basic-op-gap-plan.md))
 > and the first runs of the OpenID Foundation's conformance suite against a live
-> AXIAM. The Threat Dragon model is at **2.12.1 — 266 threats, 250 mitigated /
-> 16 open**, with a tenth element on the OAuth2 diagram; the generated files under
+> AXIAM. The Threat Dragon model is at **2.13.0 — 266 threats, 251 mitigated /
+> 15 open** (2.12.1 was 250 / 16; the 2026-09-12 residual pass closed T-110), with a tenth element on the OAuth2 diagram; the generated files under
 > `website/src/` still render **236 / 220 / 16**, the Security prose is at
 > `1.0.0-beta11`, and `SECURITY_VERIFIED_RELEASE` says so. The OAuth2 Docs pages
 > describe an authorization server that could not answer an anonymous browser,
@@ -56,15 +56,24 @@ documents do not**.
 | beta13 | Three CodeQL alerts of one class — a credential in a derived `Debug` or a panic message — closed with redacting impls and compare-then-assert tests | T-260 |
 | beta13 | Trivy filesystem scan scoped to what AXIAM ships (`benchmarks/`, `conformance/` excluded, stated) | T-236 amended |
 | beta13 | Conformance receipts: `docs/conformance/` — four plans, 165 modules, zero `FAILED` on 2026-09-11; `REVIEW`/`WARNING` published, not counted as passes; not a submission | Compliance row |
+| post-beta13 | **The 2026-09-12 residual pass** ([`remediation-plan-2026-09-12.md`](remediation-plan-2026-09-12.md)). One declared personal-data inventory for the `user` table with a gate that introspects the live schema; the OIDC Core §5.5 claims request carried across a refresh (schema v61); a `WARN` at boot for an unparseable `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`; a contended write answering `503` + `Retry-After: 1` instead of `500`; `AXIAM__AUDIT__MINIMISE` bounding audit **collection** as T-119 bounds retention | **T-110 closed**; T-241, T-244, T-261, T-262 amended |
 
 Seven existing entries gained clauses: T-37, T-58, T-163, T-164, T-166, T-172,
-T-236. The open register **neither gains nor loses**, so it is 16: T-254 entered
+T-236. The open register **neither gains nor loses** at beta13, so it was 16: T-254 entered
 it at beta13 and left it on 2026-09-12, closed by the maintainer's decision that
 confines the FAPI 2.0 grace window to the `fapi2` profile and makes every
 presentation of a rotated refresh token marked on its session and audited as
 `oauth2.refresh_token_replayed`. AXIAM's own request path therefore carries
 **no open finding at all** — the sentence after "no open Critical or High" now
 says that, and no longer names a Medium.
+
+The **2026-09-12 residual pass** then took the register to **15**: T-110
+(*Personal data over-collected into an immutable log*) became Mitigated when
+audit collection became configurable, which also takes the *Audit, webhooks,
+email & notifications* diagram to **1 open** and Medium-severity open to **5**.
+Model **2.13.0**. If R-6 of that plan lands before this pass runs, T-39 and
+T-143 close too and the numbers move again — **check the model rather than this
+paragraph**, which is exactly what §Appendix A is for.
 
 ## 2. Ground rules (unchanged; they are why the pass has value)
 

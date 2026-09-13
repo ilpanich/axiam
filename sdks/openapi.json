@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta13",
-    "x-axiam-spec-digest": "sha256:3ac97d8afd891f6d4ccfc392e99703cef25e7661da46d7e8abb765ab5a66abb2"
+    "x-axiam-spec-digest": "sha256:be3a0da45f7064b5945f5d3a903c101f18b8decaf839118cc3c0ecf1073da19d"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -11075,6 +11075,31 @@
         }
       }
     },
+    "/oauth2/revocations": {
+      "get": {
+        "tags": [
+          "oidc"
+        ],
+        "summary": "`GET /oauth2/revocations` -- sessions revoked within the last access-token\nlifetime, as unlinkable hashes (T-39, T-143).",
+        "description": "Mounted only where `AXIAM__AUTH__REVOCATION_FEED_ENABLED` is set; a\ndeployment that has not opted in does not serve this path at all.\n\nAn SDK route guard that polls this rejects a revoked session within one\npoll interval rather than within one access-token lifetime. It is a\nnarrowing of a residual window and **not** a control: a guard that cannot\nfetch the document, or that cannot interpret it, must behave exactly as it\ndoes today. See `sdks/CONTRACT.md` §10.4.",
+        "operationId": "revocations",
+        "responses": {
+          "200": {
+            "description": "Revocation feed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevocationFeedDocument"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not Modified -- ETag matches If-None-Match"
+          }
+        }
+      }
+    },
     "/oauth2/revoke": {
       "post": {
         "tags": [
@@ -17376,6 +17401,40 @@
             "type": "integer",
             "format": "int32",
             "description": "Maximum number of retry attempts.",
+            "minimum": 0
+          }
+        }
+      },
+      "RevocationFeedDocument": {
+        "type": "object",
+        "description": "The session-revocation feed document (T-39, T-143).",
+        "required": [
+          "alg",
+          "issued_at",
+          "ttl",
+          "revoked"
+        ],
+        "properties": {
+          "alg": {
+            "type": "string",
+            "description": "The digest algorithm the entries are computed with. Always `SHA-256`.\nA client that does not recognise the value MUST treat the document as\nunusable and behave exactly as it does when the feed is unreachable —\nnever as though the list were empty, which is a guard that silently\nhonours no revocations at all."
+          },
+          "issued_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When this document was produced, as a Unix timestamp."
+          },
+          "revoked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Base64url-unpadded SHA-256 of each revoked session id, in no\nsecurity-significant order. Never a session id, a subject or a tenant."
+          },
+          "ttl": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long an entry is published for, in seconds: one access-token\nlifetime. After that every token naming the session has expired on its\nown `exp`, so the entry proves nothing and is dropped.",
             "minimum": 0
           }
         }

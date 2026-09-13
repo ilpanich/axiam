@@ -186,6 +186,8 @@ fn axiam_err_to_status(err: axiam_core::error::AxiamError) -> Status {
         axiam_core::error::AxiamError::Validation { .. } => {
             Status::invalid_argument(err.to_string())
         }
+        // T-262 / R-4 — see `services::user::axiam_err_to_status`.
+        axiam_core::error::AxiamError::WriteContention => Status::unavailable(err.to_string()),
         _ => Status::internal(err.to_string()),
     }
 }

@@ -448,6 +448,53 @@ and [`docs/admin/fapi2-profile.md`](../admin/fapi2-profile.md#the-refresh-rotati
 | 156 | **Invariant 4.** Every client that is not registered `profile: fapi2` has its predecessor revoked at rotation, and a second presentation is `invalid_grant`, "already consumed" — the behaviour it had before beta13. The registration decides, never the request, and no other per-client switch buys a window | — (invariant 4) | Pass | `fapi.rs::a_standard_client_gets_no_refresh_rotation_grace`, `::nothing_but_the_profile_buys_a_grace_window`; `token_service.rs::t254_a_standard_rotation_revokes_the_predecessor`, `::t254_the_registration_decides_a_superseded_row_is_refused_off_fapi`; `oauth2_flow_test.rs::refresh_token_rotation_retires_old_on_a_standard_client` |
 | 157 | A refresh token presented **after** rotation is recorded whichever way it is answered: a per-outcome counter on its session and an `oauth2.refresh_token_replayed` audit row naming the client, the profile, the session and the disposition — never the token or its digest. A credential merely revoked at logout is not filed as a replay | BCP §4.14.2 | Pass | `token_service.rs::t254_the_replay_audit_record_never_carries_the_token`, `::t254_an_ordinary_stale_refresh_token_is_not_a_replay`; `oauth2_flow_test.rs::a_refused_refresh_replay_is_audited`; `session.rs::mark_refresh_replay_counts_each_outcome_separately`; `user_sessions_test.rs` |
 
+### The OIDC Core §5.5 claims request across a refresh (T-241, R-2)
+
+Rows 104–129 recorded the `claims` parameter being honoured for the `userinfo`
+member, and recorded one limitation with it: the resolved list rode the
+authorization code and nothing else, so the token minted by the **refresh**
+grant named no claims. A client that asked for `email` by name received it on
+its first access token and not on its second — fifteen minutes later — with no
+recovery short of a whole new authorization.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 158 | The claims an authorization asked for by name ride the **refresh token** as well as the code (schema v61), and rotation copies them onto each successor. A refreshed access token asserts the same `axiam_requested_claims` the code-exchanged one did, and the second rotation still carries them | Core §5.5 | Pass | `token_service.rs::the_code_exchange_puts_the_claims_request_on_the_refresh_token`, `::a_refreshed_access_token_carries_the_requested_claims`, `::rotation_copies_the_claims_request_onto_the_successor`; `oauth2_refresh_token.rs::the_claims_request_round_trips_through_the_row` |
+| 159 | The refresh path **copies** the request and never widens it: `claims_request::RELEASABLE` still runs only at the authorization endpoint, a hand-built row naming `phone_number` or `address` is carried verbatim and releases neither at UserInfo, and no scope is granted on the strength of a named claim | Core §5.5; GDPR Art. 6 | Pass | `token_service.rs::the_refresh_path_copies_a_claims_request_and_never_widens_it`; `oauth2_userinfo_post_test.rs::a_consent_gated_claim_is_not_released_by_requesting_it` |
+| 160 | **Invariant 4.** A refresh token issued before v61 decodes to no claims and mints exactly the token it minted before — the column is `option<array>` with no backfill, so every token in flight across the migration keeps working and gains nothing | — (invariant 4) | Pass (I4) | `token_service.rs::a_pre_migration_refresh_token_still_mints_todays_token`; `oauth2_refresh_token.rs::a_row_written_before_v61_decodes_to_no_claims`; `schema.rs::v61_carries_the_claims_request_onto_the_refresh_token_additively` |
+
+### `mtls_endpoint_aliases`, and what an SDK owes it (T-266, R-8)
+
+Contract 1.40 made preferring an alias normative for the §21 client role. The
+server has published the member since 1.0.0-beta12 and, until 2026-09-12, no
+SDK read it. Contract **1.43** adds the clause that was implicit — an alias is
+used **verbatim** — and publishes the three test vectors every SDK pins, so
+eleven repositories assert the same bytes rather than eleven hand-written
+documents.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 161 | The alias object carries **exactly** the six endpoints where reaching the mTLS host is meaningful, and never `authorization_endpoint`, `end_session_endpoint`, `jwks_uri` or `issuer`. The member set is what SDKs pin, so a seventh would break every one of them | RFC 8705 §5 | Pass | `oidc.rs::the_alias_object_has_exactly_the_six_members_the_contract_names` |
+| 162 | An alias carries the tenant as a query component, and an SDK preserves that component rather than appending to it: appending its own `?tenant_id=` gives a duplicate the server cannot resolve to one tenant, and rebuilding the URL from host and path strips whatever else the deployment put there. Displacing the value with the caller's own tenant is correct — the multi-tenant document names none — and is explicitly not what the clause forbids | RFC 6749 §3.1, §3.2; contract 1.43 §21.3 rule 2 clause 4 | Pass | `oidc.rs::the_mtls_aliases_carry_the_tenant_too`; `::every_tenant_scoped_endpoint_has_exactly_one_query_string` |
+| 163 | An unusable mTLS base is refused at the source rather than published: a relative URL, a scheme that is neither `https` nor `http`, a query or a fragment each fail discovery. So no conformant deployment can serve contract §21.3.1 vector C, and an SDK's refusal of one is defence in depth rather than the only line. `http` is accepted here for local development, which is why the SDK-side rule compares an alias against the top-level endpoint it replaces rather than against `https` or against the issuer | contract 1.43 §21.3.1 | Pass | `oidc.rs::an_unusable_mtls_base_is_refused_rather_than_published` |
+| 164 | **Invariant 4.** A deployment that configures no mTLS host omits the member entirely — absent, never `null` — and an SDK reads absence as "no separate host", not "unsupported". That is the most common AXIAM topology, so an SDK that refuses on absence refuses the default | contract 1.43 §21.3.1 vector B | Pass (I4) | `oidc.rs::no_mtls_host_omits_the_member_entirely` |
+
+### The session-revocation feed (T-39, T-143, R-6)
+
+Both threats were **Open**: an access token is valid for fifteen minutes and an
+SDK guard verifies it locally, so a logout, a role removal or an account
+disable does not reach a token already in a caller's hands. The recorded remedy
+on both — call gRPC introspection instead of verifying locally — is real and
+costs a round trip per request, which is why integrators do not adopt it.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 165 | `GET /oauth2/revocations` publishes the base64url-unpadded SHA-256 of each session id revoked within the last access-token lifetime — never an id, a subject or a tenant. A guard that polls it rejects a revoked session within one poll interval rather than one token lifetime | contract 1.44 §10.4 | Pass | `revocation_feed_test.rs::a_logout_publishes_the_session_hash_and_nothing_else`; `revocation_feed.rs::the_entry_never_contains_the_session_id` |
+| 166 | The feed is **bounded**: an entry is published for exactly one access-token lifetime, after which every token naming the session has expired on its own `exp`. Filtered on read as well as swept, so a late sweep makes the table large and never the document untruthful | contract 1.44 §10.4 | Pass | `revocation_feed_test.rs::an_entry_stops_being_published_when_its_tokens_have_expired`, `::the_sweep_keeps_a_live_entry` |
+| 167 | The three deliberate revocation paths publish — a logout, a password or MFA reset, and "sign out everywhere else" (which does **not** publish the session it keeps). The two single-use redemption paths deliberately do not: a handoff being exchanged is not a session being withdrawn, and publishing it would make a guard reject a caller whose grant is proceeding normally | — | Pass | `revocation_feed_test.rs::a_reset_publishes_every_session_it_revoked`, `::the_session_a_reset_deliberately_keeps_is_not_published`, `::a_consumed_session_is_not_published_as_a_revocation` |
+| 168 | **Invariant 4.** With `AXIAM__AUTH__REVOCATION_FEED_ENABLED` unset the route is **not mounted** and no `revoked_session` row is written — a deployment that did not opt in is byte-identical to one built before the feed existed, 404 included, and the revocations themselves still happen | — (invariant 4) | Pass (I4) | `revocation_feed_route_test.rs::the_feed_does_not_exist_unless_the_deployment_asked_for_it`; `revocation_feed_test.rs::with_the_feed_off_no_row_is_ever_written` |
+| 169 | A conditional poll is answered `304` with the same `ETag`, and the `ETag` covers the entry list rather than the document — `issued_at` changes on every call, so covering it would make every poll a full transfer | RFC 7232 | Pass | `revocation_feed_route_test.rs::a_conditional_poll_is_answered_not_modified` |
+
 ---
 
 ## OpenID Connect Discovery 1.0 §3 — X7.1 additions
@@ -585,3 +632,6 @@ and [`docs/admin/fapi2-profile.md`](../admin/fapi2-profile.md#the-refresh-rotati
 *Rows 130–140 added: wave W8 (`client_secret_basic`) — 2026-09-08*
 *Rows 141–148 added: wave W9 (the first conformance-suite execution) — 2026-09-08*
 *Row 148 closed and rows 149–154 added: the first execution in which modules reached assertions — 2026-09-08*
+*Rows 158–160 added: R-2 of the 2026-09-12 residual pass (the claims request across a refresh) — 2026-09-12*
+*Rows 161–164 added: R-8 of the same pass (the SDK half of contract 1.40–1.42) — 2026-09-12*
+*Rows 165–169 added: R-6 of the same pass (the session-revocation feed) — 2026-09-12*

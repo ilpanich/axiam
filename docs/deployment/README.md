@@ -1077,6 +1077,109 @@ allowlisted host. Every use is logged.
 The full reasoning, and the five properties that keep this from being a bypass,
 are in [`../security-profiles.md`](../security-profiles.md#outbound-ssrf-guard--the-operator-override-sec-107).
 
+## Session revocation feed (optional, T-39 / T-143)
+
+`AXIAM__AUTH__REVOCATION_FEED_ENABLED` — default `false`.
+
+An AXIAM access token is self-contained and valid for up to fifteen minutes,
+and an SDK route guard verifies it locally. A logout, a role removal or an
+account disable therefore does not reach a token already in a caller's hands
+until it expires. The documented answer has been "route the decision through
+gRPC introspection instead" — correct, and a network round trip **per
+request**, which is why integrations rarely take it.
+
+With this set, the server publishes `GET /oauth2/revocations`:
+
+```json
+{ "alg": "SHA-256", "issued_at": 1757664000, "ttl": 900,
+  "revoked": ["i9N2lYMTV4FhA0husWjGYCqJXXTb7_fMBuomhWjSsgQ"] }
+```
+
+An SDK guard that polls it (contract §10.4, opt-in on that side too) rejects a
+revoked session within **one poll interval** instead of one token lifetime.
+
+**What the document does and does not disclose.** An entry is the base64url
+SHA-256 of a session id — never an id, a subject, a tenant or a timestamp. A
+session id is not a subject, so the feed says neither who was revoked nor how
+many people are behind the entries; and a reader who does not already hold a
+`sid` learns nothing they can use, because a UUIDv4 preimage space is not
+walkable. That is a non-enumerability argument, not a guarantee, and it is
+stated that way on purpose.
+
+**What bounds it.** An entry is published for exactly one access-token
+lifetime, after which every token naming that session has expired on its own
+`exp` and the entry proves nothing. So the document's size tracks your
+revocation rate over fifteen minutes and never your history. It is filtered on
+read as well as swept: a sweep that falls behind makes the table large, never
+the document wrong.
+
+**What it is not.** It is not a control. A guard that cannot fetch the feed
+behaves exactly as it does without it — the contract requires that, and it is
+what stops a network blip from becoming an outage. The feed can only ever turn
+an accept into a reject, never the reverse, and every local verification rule
+still runs first and still decides.
+
+**With it off** — the default — the route is not mounted, no `revoked_session`
+row is written, and the deployment is byte-identical to one built before the
+feed existed.
+
+Turn it on where sign-out has to take effect faster than fifteen minutes and
+routing every authorization decision through gRPC is too expensive. Leave it
+off if neither is true: it is one more public endpoint, and an endpoint nobody
+polls narrows nothing.
+
+## Audit collection minimisation (optional, T-110)
+
+`AXIAM__AUDIT__MINIMISE` — default `false`.
+
+The audit log is append-only by design, which is in direct tension with the
+Art. 17 erasure path AXIAM also offers: what is written into it cannot later be
+removed, only aged out. `AXIAM__AUDIT_RETENTION_DAYS` bounds the *retention*
+side (default 730 days, the table's only deletion path). This bounds the
+**collection** side, which was previously not configurable at all.
+
+With it on, two fields are reduced immediately before the append — after it
+there is no second chance, by construction:
+
+| Field | Becomes | Kept for |
+|---|---|---|
+| `ip_address` | the `/24` (IPv4) or `/48` (IPv6) prefix, e.g. `203.0.113.42` → `203.0.113.0/24` | seeing a pattern, correlating a burst, answering "was this the office" |
+| `metadata.user_agent`, where a producer sets one | a coarse family — `Firefox`, `Chrome`, `curl`, `other` | the part an investigation reads |
+
+An address that does not parse is **dropped** rather than written through: a
+value that cannot be parsed cannot be shown to have been minimised, and passing
+it would be a silent hole in the control. A `host:port` string is handled, so
+the common `realip_remote_addr` shape does not lose a field for no reason, and
+a v4-mapped v6 address is minimised as the v4 address it is.
+
+**What it does not touch, deliberately.** The structured metadata domain
+producers write is accountability evidence other controls depend on — the
+client, profile and disposition on a refresh-token replay (T-254), the names of
+released claims (T-241), the provider and external subject on a JIT provision
+(T-161). Dropping it would weaken three controls to narrow one, and none of it
+is request metadata. The request-audit middleware itself records only
+`http_status` and `authenticated`, which is pinned by a test rather than left
+to habit.
+
+**Erasure and export are unaffected.** The Art. 17 scrub clears `ip_address`
+outright, so a truncated value is erased by exactly the same statement as a
+whole one. The Art. 15 export's `audit_entries` section reads `action`,
+`outcome`, `timestamp` and `resource_id` and never the address, so a data
+subject's inventory is identical either way.
+
+**Deployment-wide, and deliberately not per tenant.** Audit is an
+accountability control the deployment relies on *including against a tenant
+administrator*; a per-tenant switch would let a tenant weaken the evidence used
+to investigate that tenant. It is the same argument that makes
+`sensitive_scopes_enabled` disable-only for a tenant, applied to a control
+where the tenant is a possible subject rather than a possible victim.
+
+Off by default because turning it on reduces forensic precision, and that is a
+lawful-basis judgement to make deliberately rather than inherit. **Both states
+are logged at startup**, exactly as retention is: an operator opening an
+incident needs to know, before they start reading rows, whether the addresses
+in them are whole.
+
 ## Software Bill of Materials (SBOM)
 
 Every tagged release (`v*`) publishes a CycloneDX 1.5 SBOM for each Cargo

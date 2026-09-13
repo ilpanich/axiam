@@ -45,11 +45,13 @@ pub enum DbError {
     /// sustained rather than incidental — the retries are exhausted, not
     /// skipped — which is a capacity signal worth being able to grep for.
     ///
-    /// Falls through the same `other => AxiamError::Database` catch-all below,
-    /// so the observable HTTP status is unchanged (still 5xx). Narrowing it to
-    /// a 503 with `Retry-After` would be defensible and is deliberately NOT
-    /// done here: that is a client-visible contract change, and this variant
-    /// exists to stop mislabeling one.
+    /// Maps to [`AxiamError::WriteContention`] — `503 Service Unavailable`
+    /// with `Retry-After: 1` over REST, `UNAVAILABLE` over gRPC. That was the
+    /// separate decision this variant's introduction deferred, taken on
+    /// 2026-09-12 (R-4): the answer is a statement about the server, and a
+    /// `500` tells a client to stop when the correct advice is to come back in
+    /// a moment. The message stays **here**, for the log; the client-facing
+    /// error carries no payload at all.
     #[error("Write conflict: {0}")]
     Conflict(String),
 }
@@ -59,6 +61,13 @@ impl From<DbError> for AxiamError {
         match err {
             DbError::NotFound { entity, id } => AxiamError::NotFound { entity, id },
             DbError::AlreadyExists { entity } => AxiamError::AlreadyExists { entity },
+            // T-262 / R-4. Note the ordering this relies on:
+            // `classify_write_error` checks the UNIQUE-violation marker BEFORE
+            // the conflict markers, so a constraint violation — a statement
+            // about the request, which retrying only reproduces — is already
+            // an `AlreadyExists` by the time it reaches here and keeps its
+            // `409`.
+            DbError::Conflict(_) => AxiamError::WriteContention,
             other => AxiamError::Database(other.to_string()),
         }
     }

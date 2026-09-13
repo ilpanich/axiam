@@ -20,6 +20,15 @@ EXPECTED = [
     "auth_pepper",
     "jwt_private_key_pem",
     "jwt_public_key_pem",
+    # T-132's follow-up (R-5). Absence here is not a failure the way an absent
+    # `jwt_private_key_pem` is: the server falls back to `AXIAM__DB__PASSWORD`
+    # and friends and says so at WARN. It is reported so an operator who
+    # *intended* to move them into Vault can see whether they did — which was
+    # the whole complaint T-132 closed on, one release earlier and one secret
+    # class short.
+    "db_username",
+    "db_password",
+    "amqp_url",
 ]
 
 # What AXIAM's runtime token is supposed to be able to do on a path it is not

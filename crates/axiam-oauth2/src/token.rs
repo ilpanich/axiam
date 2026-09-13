@@ -1787,6 +1787,12 @@ where
                     user_id: Some(auth_code.user_id),
                     scopes: auth_code.scopes.clone(),
                     session_id: auth_code.session_id,
+                    // T-241 — the claims this authorization asked for by name
+                    // travel with the grant, not with the one access token
+                    // that happened to be minted first. Without this the
+                    // client's second token, fifteen minutes later, releases
+                    // nothing it consented to and it must re-authorize.
+                    requested_userinfo_claims: auth_code.requested_userinfo_claims.clone(),
                     expires_at: refresh_expires,
                 })
                 .await
@@ -2273,6 +2279,11 @@ where
                 // replaced the one that did, which the end user would
                 // experience as the session silently ending mid-flow.
                 stored.session_id,
+                // And the claims request, for exactly the same reason (T-241).
+                // Empty for every grant that sent no `claims` parameter, and
+                // an empty list leaves this token byte-identical to what it
+                // was before §5.5.
+                &stored.requested_userinfo_claims,
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         } else {
@@ -2310,6 +2321,12 @@ where
                 // Rotation preserves the session: the new token descends from
                 // the same login, so it must carry the same `sid`.
                 session_id: stored.session_id,
+                // And the claims request, for the same reason and by the same
+                // rule (T-241): the successor names the grant its predecessor
+                // named. Copied, never widened — the list has already been
+                // through `claims_request::RELEASABLE` at the authorization
+                // endpoint, and UserInfo re-asks every gate on every call.
+                requested_userinfo_claims: stored.requested_userinfo_claims.clone(),
                 expires_at: refresh_expires,
             })
             .await

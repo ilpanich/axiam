@@ -12,6 +12,8 @@ import unittest
 from unittest import mock
 
 from vault_seed_payload import (
+    CREDENTIAL_ENV,
+    CREDENTIAL_NAMES,
     KEY_NAMES,
     PEM_NAMES,
     SeedAbort,
@@ -380,6 +382,64 @@ class NothingAlreadyThereIsEverReplaced(unittest.TestCase):
             {"jwt_private_key_pem": "old"},
             {"jwt_private_key_pem": "from-disk"},
             overwritable=("jwt_private_key_pem",),
+        )
+
+
+class DatastoreAndBrokerCredentials(unittest.TestCase):
+    """T-132's follow-up (R-5): the three credentials the seeder carries but
+    never invents."""
+
+    def _keygen(self):
+        return ("PRIVATE", "PUBLIC")
+
+    def test_a_credential_is_never_minted(self):
+        """A key is meaningful only to AXIAM, so minting one into an empty slot
+        is the point of seeding. A datastore password has to match what the
+        datastore was configured with; inventing one produces a Vault that
+        looks configured and a server that cannot connect."""
+        out, minted = build({}, {}, keygen=self._keygen)
+        for name in CREDENTIAL_NAMES:
+            self.assertNotIn(name, out, f"{name} must not be invented")
+            self.assertNotIn(name, minted)
+
+    def test_a_supplied_credential_is_seeded(self):
+        env = {var: f"value-for-{name}" for name, var in CREDENTIAL_ENV.items()}
+        out, minted = build({}, env, keygen=self._keygen)
+        for name in CREDENTIAL_NAMES:
+            self.assertEqual(out[name], f"value-for-{name}")
+            self.assertIn(name, minted)
+
+    def test_an_existing_credential_is_never_overwritten(self):
+        """T-231's rule. The case it protects is an operator who rotated the
+        datastore password in Vault while a stale variable is still set in the
+        shell that runs the seeder — which would otherwise undo the rotation
+        silently, under a live datastore."""
+        existing = {name: f"rotated-{name}" for name in CREDENTIAL_NAMES}
+        env = {var: "stale-environment-value" for var in CREDENTIAL_ENV.values()}
+        out, minted = build(existing, env, keygen=self._keygen)
+        for name in CREDENTIAL_NAMES:
+            self.assertEqual(out[name], f"rotated-{name}")
+            self.assertNotIn(name, minted)
+
+    def test_a_second_run_writes_nothing_new(self):
+        """Idempotence over the whole payload, credentials included."""
+        env = {var: f"value-for-{name}" for name, var in CREDENTIAL_ENV.items()}
+        first, _ = build({}, env, keygen=self._keygen)
+        second, minted = build(first, env, keygen=self._keygen)
+        self.assertEqual(first, second)
+        self.assertEqual(minted, [])
+
+    def test_the_environment_table_matches_the_shipped_variable_names(self):
+        """The same table exists in `axiam_core::secrets::env_var_override`.
+        If the two disagree, an operator's variable seeds a field the server
+        never reads."""
+        self.assertEqual(
+            CREDENTIAL_ENV,
+            {
+                "db_username": "AXIAM__DB__USERNAME",
+                "db_password": "AXIAM__DB__PASSWORD",
+                "amqp_url": "AXIAM__AMQP__URL",
+            },
         )
 
 

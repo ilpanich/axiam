@@ -117,8 +117,61 @@ pub const JWT_PRIVATE_KEY_PEM: &str = "jwt_private_key_pem";
 /// private key and a mismatched pair is a confusing outage.
 pub const JWT_PUBLIC_KEY_PEM: &str = "jwt_public_key_pem";
 
+/// The SurrealDB username AXIAM signs in with.
+///
+/// Not a key and not a password, but it travels with one and belongs in the
+/// same place: a deployment that keeps its datastore password in Vault and its
+/// username in a ConfigMap has told an attacker half of a credential for no
+/// gain (T-132's follow-up).
+pub const DB_USERNAME: &str = "db_username";
+
+/// The SurrealDB password AXIAM signs in with.
+///
+/// Read-write access to every tenant's data. Ranks with the token signing key
+/// for blast radius, and until this port carried it, it was the one secret
+/// still required to be in the container spec.
+pub const DB_PASSWORD: &str = "db_password";
+
+/// The AMQP broker URL, credentials included.
+///
+/// The whole URL rather than a username and a password, because that is the
+/// shape `AmqpConfig` takes and splitting it here would mean reassembling it at
+/// the composition root against a format the broker defines. It carries the
+/// credential inline, which is exactly why its `Debug` redacts.
+pub const AMQP_URL: &str = "amqp_url";
+
 /// Every text secret this port defines, for providers that preload.
-pub const ALL_SECRETS: &[&str] = &[AUTH_PEPPER, JWT_PRIVATE_KEY_PEM, JWT_PUBLIC_KEY_PEM];
+pub const ALL_SECRETS: &[&str] = &[
+    AUTH_PEPPER,
+    JWT_PRIVATE_KEY_PEM,
+    JWT_PUBLIC_KEY_PEM,
+    DB_USERNAME,
+    DB_PASSWORD,
+    AMQP_URL,
+];
+
+/// The environment variable each of the three datastore and broker credentials
+/// is read from when the provider does not supply it (T-132's follow-up).
+///
+/// These are the **existing, shipped** variable names, and they keep their
+/// existing spellings — `AXIAM__DB__USERNAME`, not `AXIAM__AUTH__DB_USERNAME`.
+/// Renaming a variable every deployment already sets, to tidy a namespace, is a
+/// breaking change dressed as housekeeping.
+///
+/// Declared here rather than in the `env` provider because two places consult
+/// it: the provider, which resolves a logical name to a variable, and the
+/// composition root, which reports at `WARN` that a value arrived from the
+/// environment on a deployment that configured a different provider. Two copies
+/// of that table is how the warning ends up naming a variable nobody reads.
+#[must_use]
+pub fn env_var_override(name: &str) -> Option<&'static str> {
+    match name {
+        DB_USERNAME => Some("AXIAM__DB__USERNAME"),
+        DB_PASSWORD => Some("AXIAM__DB__PASSWORD"),
+        AMQP_URL => Some("AXIAM__AMQP__URL"),
+        _ => None,
+    }
+}
 
 /// A source of 256-bit symmetric keys, addressed by a stable logical name.
 ///
@@ -154,4 +207,56 @@ pub trait SecretProvider: Send + Sync {
     /// answered — the commonest OPAQUE misconfiguration is believing a key came
     /// from somewhere it did not.
     fn describe(&self) -> &'static str;
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    /// The three datastore and broker credentials keep the variable names
+    /// every shipped deployment already sets. Renaming one to tidy the
+    /// namespace would break every `docker-compose.yml`, k8s manifest and CI
+    /// job in the field, for no security gain.
+    #[test]
+    fn the_three_credentials_keep_their_shipped_variable_names() {
+        assert_eq!(env_var_override(DB_USERNAME), Some("AXIAM__DB__USERNAME"));
+        assert_eq!(env_var_override(DB_PASSWORD), Some("AXIAM__DB__PASSWORD"));
+        assert_eq!(env_var_override(AMQP_URL), Some("AXIAM__AMQP__URL"));
+    }
+
+    /// And nothing else gets an override. A key that quietly acquired one
+    /// would be read from a variable nobody documented, and the composition
+    /// root's warning would name a different one from the provider's read.
+    #[test]
+    fn no_other_secret_has_an_environment_override() {
+        for name in ALL_KEYS
+            .iter()
+            .chain(&[AUTH_PEPPER, JWT_PRIVATE_KEY_PEM, JWT_PUBLIC_KEY_PEM])
+        {
+            assert_eq!(
+                env_var_override(name),
+                None,
+                "{name} must use the default AXIAM__AUTH__ spelling"
+            );
+        }
+    }
+
+    /// The three are in `ALL_SECRETS`, which is what makes a preloading
+    /// provider fetch them in the round trip it already makes. Absent from
+    /// that list, a Vault deployment would answer `None` for all three and
+    /// silently fall back to the environment — passing every test that only
+    /// checks the mapping.
+    #[test]
+    fn the_three_credentials_are_preloaded_with_everything_else() {
+        for name in [DB_USERNAME, DB_PASSWORD, AMQP_URL] {
+            assert!(
+                ALL_SECRETS.contains(&name),
+                "{name} must be in ALL_SECRETS or no preloading provider fetches it"
+            );
+        }
+        // And the originals are still there — this list grew, it did not move.
+        for name in [AUTH_PEPPER, JWT_PRIVATE_KEY_PEM, JWT_PUBLIC_KEY_PEM] {
+            assert!(ALL_SECRETS.contains(&name));
+        }
+    }
 }

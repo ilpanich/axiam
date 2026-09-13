@@ -106,6 +106,12 @@ fn status_to_string(status: &UserStatus) -> String {
 fn axiam_err_to_status(err: AxiamError) -> Status {
     match &err {
         AxiamError::NotFound { .. } => Status::not_found(err.to_string()),
+        // T-262 / R-4: a contended write is transient server state, so
+        // UNAVAILABLE — which CONTRACT §2's gRPC table already maps to
+        // `NetworkError`, the same place the REST 503 lands. RESOURCE_EXHAUSTED
+        // is this listener's rate-limit answer and must stay distinct: "the
+        // server is busy" and "you sent too much" are different instructions.
+        AxiamError::WriteContention => Status::unavailable(err.to_string()),
         _ => Status::internal(err.to_string()),
     }
 }

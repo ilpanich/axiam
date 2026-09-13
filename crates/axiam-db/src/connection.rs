@@ -97,7 +97,14 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const ROOT_TOKEN_DURATION: Duration = Duration::from_secs(4 * 7 * 24 * 3600);
 
 /// Configuration for connecting to SurrealDB.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Debug` is hand-written and redacts `password` (T-132's follow-up, R-5).
+/// The credential is read-write access to every tenant's data, and a derived
+/// `Debug` puts it into any log line, panic message or error chain that
+/// renders a configuration — the shape of the three CodeQL findings T-260
+/// closed. `username` is kept: a connection failure is the commonest reason to
+/// print this, and "which account" is the fact that answers it.
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct DbConfig {
     /// Server address (e.g., `127.0.0.1:8000`).
@@ -156,6 +163,23 @@ pub struct DbConfig {
     /// (matches B1's `hash_acquire_timeout_secs` so backpressure feels the same
     /// across the Argon2id gate and the DB pool).
     pub pool_acquire_timeout_secs: u64,
+}
+
+impl std::fmt::Debug for DbConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DbConfig")
+            .field("url", &self.url)
+            .field("namespace", &self.namespace)
+            .field("database", &self.database)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("token_refresh_fraction", &self.token_refresh_fraction)
+            .field("reconnect_base_ms", &self.reconnect_base_ms)
+            .field("reconnect_ceiling_ms", &self.reconnect_ceiling_ms)
+            .field("reconnect_max_retries", &self.reconnect_max_retries)
+            .field("pool_size", &self.pool_size)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for DbConfig {
@@ -978,5 +1002,37 @@ mod tests {
                 "`{literal}` must not parse to a duration"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod db_config_redaction_tests {
+    use super::*;
+
+    /// T-132's follow-up: read-write access to every tenant's data must not
+    /// appear in a log line, a panic message or an error chain that renders a
+    /// configuration.
+    ///
+    /// The value comes from `axiam_test_support::test_password` rather than a
+    /// literal: a literal datastore password here is indistinguishable, to a
+    /// secret scanner, from a real one, and the only honest ways out are a
+    /// scanner exemption — `.gitguardian.yaml` is for published RFC test
+    /// vectors and nothing else — or not writing one. This is not writing one,
+    /// and the assertion is stronger for it, since it holds for whatever value
+    /// the helper produces rather than for one string.
+    #[test]
+    fn the_debug_never_renders_the_datastore_password() {
+        let password = axiam_test_support::test_password();
+        let config = DbConfig {
+            username: "root".into(),
+            password: password.clone(),
+            ..DbConfig::default()
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains(&password));
+        assert!(rendered.contains("<redacted>"));
+        // The username stays: a connection failure asks "as whom", and that is
+        // the field that answers it.
+        assert!(rendered.contains("root"));
     }
 }

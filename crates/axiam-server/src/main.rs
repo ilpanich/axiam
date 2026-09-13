@@ -39,8 +39,8 @@ use axiam_api_rest::state::AppState;
 use axiam_api_rest::state::bundles;
 use axiam_api_rest::webhook_consumer::{WebhookRetryConfig, start_webhook_consumer};
 use axiam_api_rest::{
-    HealthChecker, RateLimitConfig, ServerConfig, build_cors, health_routes, openapi_routes,
-    register_api_v1_routes,
+    HealthChecker, RateLimitConfig, RouteOptions, ServerConfig, build_cors, health_routes,
+    openapi_routes, register_api_v1_routes_with,
 };
 use axiam_audit::AuditMiddleware;
 use axiam_auth::config::AuthConfig;
@@ -106,6 +106,20 @@ fn default_audit_retention_days() -> u64 {
 }
 
 /// Top-level configuration aggregating all sub-configs.
+/// `AXIAM__AUDIT__*` — what reaches the append-only log (T-110).
+///
+/// Its own struct rather than a flat `audit_minimise` field because the
+/// config layer maps `AXIAM__AUDIT__MINIMISE` onto `audit.minimise`, and
+/// `AXIAM__AUDIT_RETENTION_DAYS` (single underscore, T-119) is deliberately
+/// left where it is — renaming a shipped variable to tidy a namespace is a
+/// breaking change for every deployment that sets it.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct AuditCollectionConfig {
+    /// See [`AppConfig::audit`].
+    minimise: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct AppConfig {
     #[serde(default)]
@@ -140,6 +154,20 @@ struct AppConfig {
     /// into, since the default is [`default_audit_retention_days`].
     #[serde(default = "default_audit_retention_days")]
     audit_retention_days: u64,
+    /// Whether this deployment minimises what it collects into the audit log
+    /// (T-110).
+    ///
+    /// `AXIAM__AUDIT__MINIMISE`. `false` — today's behaviour — by default,
+    /// because turning it on reduces forensic precision and that is a
+    /// lawful-basis judgement a deployment must make deliberately rather than
+    /// inherit. Deployment-wide and deliberately not per tenant: audit is an
+    /// accountability control the deployment relies on *including against a
+    /// tenant administrator*, and a tenant-level switch would let a tenant
+    /// weaken the evidence used to investigate that tenant.
+    ///
+    /// Both states are logged at startup, exactly as retention is.
+    #[serde(default)]
+    audit: AuditCollectionConfig,
     /// AES-256-GCM key (32 bytes) for encrypting email provider secrets at rest
     /// (D-17). Loaded from `AXIAM__EMAIL_ENCRYPTION_KEY` (hex-encoded, 64 chars).
     /// Skipped by serde — populated manually from env at startup.
@@ -359,6 +387,80 @@ async fn main() -> std::io::Result<()> {
         config.auth.jwt_public_key_pem = (*pem).clone();
     }
 
+    // ---------------------------------------------------------------------
+    // Datastore and broker credentials (T-132's follow-up, R-5)
+    // ---------------------------------------------------------------------
+    //
+    // The three credentials T-132 left behind. They were read by
+    // `load_config` from `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and
+    // `AXIAM__AMQP__URL` before any provider existed, so a deployment that put
+    // every key in Vault still had its datastore password in the pod spec —
+    // which is the exact sentence T-132 was closed on.
+    //
+    // Now: the Vault token (or the `file` provider's mount) is the only
+    // credential the container spec has to carry, and these three are fetched
+    // in the same round trip as the other eleven secrets.
+    //
+    // The environment variables **stay, permanently** (decision B of the
+    // 2026-09-12 plan). `env` is a supported provider kind, not a legacy path:
+    // a single-node deployment, the dev compose file and the E2E stack all use
+    // it deliberately, and deprecating the variables would deprecate the
+    // provider that reads them.
+    //
+    // The WARN is scoped to the one case where the operator believes something
+    // untrue — a *non-`env`* provider configured, and the value arriving from
+    // the environment anyway. Under `env` there is nothing to warn about:
+    // reading an environment variable is what that provider is for.
+    {
+        let provider_is_env = secret_provider.describe() == "env";
+        let overlay = |name: &'static str, target: &mut String, what: &str| match read_secret(name)
+        {
+            Some(value) => {
+                *target = (*value).clone();
+                tracing::info!(
+                    provider = secret_provider.describe(),
+                    credential = what,
+                    "datastore/broker credential loaded from the secret provider"
+                );
+            }
+            None if provider_is_env || target.is_empty() => {}
+            None => tracing::warn!(
+                provider = secret_provider.describe(),
+                variable = axiam_core::secrets::env_var_override(name).unwrap_or("(none)"),
+                credential = what,
+                "this credential was read from the environment; the configured secret \
+                     provider has no entry for it. Environment variables appear in pod specs, \
+                     crash dumps and orchestrator APIs — see docs/deployment/vault.md"
+            ),
+        };
+        overlay(
+            keys::DB_USERNAME,
+            &mut config.db.username,
+            "datastore username",
+        );
+        overlay(
+            keys::DB_PASSWORD,
+            &mut config.db.password,
+            "datastore password",
+        );
+        overlay(keys::AMQP_URL, &mut config.amqp.url, "broker URL");
+    }
+
+    // R-5: the credential checks that `load_config` used to make, moved here so
+    // they run once **every** source has been consulted. Doing it there meant a
+    // `vault` deployment had to keep setting the very variables the provider
+    // exists to replace.
+    assert!(
+        !config.auth.jwt_private_key_pem.is_empty(),
+        "the token signing key is not configured: set AXIAM__AUTH__JWT_PRIVATE_KEY_PEM, \
+         or provide `jwt_private_key_pem` through the configured secret provider"
+    );
+    assert!(
+        !config.auth.jwt_public_key_pem.is_empty(),
+        "the token verification key is not configured: set AXIAM__AUTH__JWT_PUBLIC_KEY_PEM, \
+         or provide `jwt_public_key_pem` through the configured secret provider"
+    );
+
     // CQ-B14: Parse Ed25519 JWT keys once at startup and cache them in the
     // AuthConfig so per-request token issuance/verification skips PEM parsing.
     config
@@ -409,6 +511,27 @@ async fn main() -> std::io::Result<()> {
     // handles (default `pool_size = 1` ⇒ byte-for-byte today's single handle).
     // Held as `Arc` because it is both the source of every repository's bound
     // handle (`handle_for_repo`) and the process health checker.
+    // Audit collection minimisation (T-110). Logged either way, for the same
+    // reason retention is logged either way further down: the posture in force
+    // has to be readable from the startup log rather than inferable only from
+    // a manifest. An operator investigating an incident needs to know, before
+    // they start reading rows, whether the addresses in them are whole.
+    let audit_minimisation =
+        axiam_core::audit_minimisation::AuditMinimisation::new(config.audit.minimise);
+    if audit_minimisation.is_enabled() {
+        tracing::info!(
+            "audit collection minimisation is ON (AXIAM__AUDIT__MINIMISE=true) — client \
+             addresses are truncated to /24 or /48 and a user-agent is reduced to its family \
+             before the append; structured accountability metadata is unaffected"
+        );
+    } else {
+        tracing::info!(
+            "audit collection minimisation is OFF (AXIAM__AUDIT__MINIMISE) — full client \
+             addresses are recorded; set it when your lawful basis does not support holding \
+             them for the retention window"
+        );
+    }
+
     let pool = Arc::new(
         axiam_db::DbPool::connect(&config.db)
             .await
@@ -471,7 +594,8 @@ async fn main() -> std::io::Result<()> {
     {
         let boot_fed_repo =
             axiam_db::SurrealFederationConfigRepository::new(pool.handle_for_repo());
-        let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(pool.handle_for_repo());
+        let boot_audit_repo = axiam_db::SurrealAuditLogRepository::new(pool.handle_for_repo())
+            .with_minimisation(audit_minimisation);
         if let Some(fed_key) = config.auth.federation_encryption_key {
             match axiam_federation::secrets::migrate_plaintext_federation_secrets(
                 &boot_fed_repo,
@@ -653,7 +777,46 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    // T-39/T-143: the revocation feed. Resolved once, and the same value both
+    // mounts the route and turns on the write side — two switches for one
+    // feature is how a deployment ends up publishing an empty feed forever, or
+    // writing rows nothing serves.
+    let revocation_feed_ttl = config
+        .auth
+        .revocation_feed_enabled
+        .then(|| chrono::Duration::seconds(config.auth.access_token_lifetime_secs as i64));
+    let route_options = RouteOptions {
+        revocation_feed_enabled: config.auth.revocation_feed_enabled,
+    };
+    if let Some(ttl) = revocation_feed_ttl {
+        tracing::info!(
+            ttl_secs = ttl.num_seconds(),
+            "session revocation feed is ON (AXIAM__AUTH__REVOCATION_FEED_ENABLED=true) — \
+             GET /oauth2/revocations publishes hashed session ids for one access-token \
+             lifetime; an SDK guard that polls it rejects a revoked session within one \
+             poll interval rather than one token lifetime"
+        );
+    } else {
+        tracing::info!(
+            "session revocation feed is OFF (AXIAM__AUTH__REVOCATION_FEED_ENABLED) — \
+             GET /oauth2/revocations is not served and no revocation row is written; a \
+             revoked session's access token stays verifiable locally until it expires"
+        );
+    }
+
     let session_repo = SurrealSessionRepository::new(pool.handle_for_repo());
+    let session_repo = match revocation_feed_ttl {
+        Some(ttl) => session_repo.with_revocation_feed(ttl),
+        None => session_repo,
+    };
+    // Built here, beside the writer, and only when the feed is on: the sweep
+    // that prunes the table and the path that fills it are two halves of one
+    // decision and must not be able to disagree about whether it was taken.
+    let revoked_session_repo = revocation_feed_ttl.map(|_| {
+        Arc::new(axiam_db::SurrealRevokedSessionRepository::new(
+            pool.handle_for_repo(),
+        ))
+    });
     // I6: optional short-TTL session-validation cache. Opt-in via
     // `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` (0 = off, the default);
     // every session-deleting path in the repository invalidates it, so on a
@@ -716,7 +879,8 @@ async fn main() -> std::io::Result<()> {
             scim_token_repo.clone(),
             axiam_db::SurrealUserRepository::new(pool.handle_for_repo()),
         ));
-    let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo());
+    let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo())
+        .with_minimisation(audit_minimisation);
     let ca_cert_repo = SurrealCaCertificateRepository::new(pool.handle_for_repo());
     let federation_link_repo_for_auth =
         SurrealFederationLinkRepository::new(pool.handle_for_repo());
@@ -780,7 +944,10 @@ async fn main() -> std::io::Result<()> {
             // registration's `failure_policy` decides, which is the same
             // closed set §22.8 puts a timeout in.
             axiam_amqp::LapinReactorTransport::start(Arc::clone(&amqp), amqp_signing_key.clone()),
-            axiam_amqp::RepositoryAuditSink(SurrealAuditLogRepository::new(pool.handle_for_repo())),
+            axiam_amqp::RepositoryAuditSink(
+                SurrealAuditLogRepository::new(pool.handle_for_repo())
+                    .with_minimisation(audit_minimisation),
+            ),
             amqp_signing_key.clone(),
             axiam_amqp::ReactorGateConfig::default(),
         ));
@@ -1307,6 +1474,25 @@ async fn main() -> std::io::Result<()> {
     // session-validation cache's startup `warn!` — announce the opt-in mode
     // that carries the caveat, say nothing when the safe default is active.
     config.rate_limit.warn_on_mintable_key();
+
+    // T-244: a default tenant that does not parse is treated as unset, which
+    // is the right behaviour — discovery is a public, unauthenticated document
+    // and a fat-fingered UUID must not `500` for every relying party — and was
+    // also completely silent, so a deployment that set it concluded the
+    // setting does not work. Said once here, never on the request path (the
+    // accessor is called per discovery request, and a warning there is a log
+    // flood any anonymous caller can drive), and describing the value's shape
+    // rather than the value: this variable is not proven to hold a tenant id,
+    // so it is not proven to hold something safe to print.
+    if let Some(problem) = config.auth.default_tenant_id_diagnostic() {
+        tracing::warn!(
+            variable = "AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID",
+            value_shape = %problem,
+            "the configured default tenant is not a UUID and is being ignored; \
+             discovery will serve the document it serves when the variable is \
+             unset, and no endpoint URL will carry a tenant"
+        );
+    }
 
     // I3: should the machine-traffic throttling advisory be armed on the
     // shared rate-limit counter built further down? Only when the shipped
@@ -2244,6 +2430,7 @@ async fn main() -> std::io::Result<()> {
         config.email_encryption_key,
         Duration::from_secs(config.cleanup_interval_secs),
         audit_retention,
+        revoked_session_repo,
         job_health.clone(),
         cleanup_shutdown_rx,
     );
@@ -2462,7 +2649,9 @@ async fn main() -> std::io::Result<()> {
             // lives on this one AppState<C> value (see above).
             .app_data(web::Data::new(app_state.clone()))
             .configure(health_routes::<axiam_db::DbClient>)
-            .configure(|cfg| register_api_v1_routes::<axiam_db::DbClient>(cfg, &rl))
+            .configure(|cfg| {
+                register_api_v1_routes_with::<axiam_db::DbClient>(cfg, &rl, route_options)
+            })
             // R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.
             // R5.2: hand it the SAME resolved RateLimitConfig the /api/v1
             // wiring gets, so `AXIAM__RATE_LIMIT__SCIM_PER_MIN` (and the
@@ -2592,15 +2781,14 @@ fn load_config() -> AppConfig {
         .and_then(|c| c.try_deserialize())
         .expect("Failed to load configuration — check config/default.toml or AXIAM__* env vars");
 
-    // Validate critical fields to fail fast instead of booting an insecure/broken server.
-    assert!(
-        !config.auth.jwt_private_key_pem.is_empty(),
-        "AXIAM__AUTH__JWT_PRIVATE_KEY_PEM must be set (Ed25519 PEM)"
-    );
-    assert!(
-        !config.auth.jwt_public_key_pem.is_empty(),
-        "AXIAM__AUTH__JWT_PUBLIC_KEY_PEM must be set (Ed25519 PEM)"
-    );
+    // The signing keys are NOT asserted here (T-132 follow-up, R-5). They are
+    // asserted in `validate_credentials_after_secrets`, which runs after the
+    // secret provider has been consulted — because on a `vault` or `file`
+    // deployment they legitimately are not in the environment at all, and
+    // asserting here forced every such deployment to keep the very variable
+    // the provider exists to replace. The check did not move because it was
+    // wrong; it moved because it ran at the one point where it could only see
+    // one of the two sources.
 
     // Validate oauth2_issuer_url when explicitly configured.
     // jwt_issuer is intentionally unconstrained — it is used as the

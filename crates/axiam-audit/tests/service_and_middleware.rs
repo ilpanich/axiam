@@ -285,6 +285,60 @@ async fn middleware_records_client_ip() {
     assert_eq!(entries[0].ip_address.as_deref(), Some("203.0.113.7"));
 }
 
+/// T-110. The third of the three minimisations the GDPR document names —
+/// "no request metadata" — is already true of the request-audit middleware,
+/// and this is what keeps it true.
+///
+/// The middleware records the outcome of a request and nothing about its
+/// content: `http_status` and `authenticated`, both derived, neither personal
+/// data. That was never written down as a rule, so the way it regresses is
+/// somebody adding a header, a query string or a body excerpt "for
+/// debugging" — into an append-only table with a 730-day retention window.
+///
+/// Deliberately an **exact** key-set assertion rather than a set of
+/// absence checks: absence checks only catch the fields whoever wrote them
+/// thought of.
+#[tokio::test]
+async fn the_request_audit_middleware_collects_only_the_outcome() {
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+
+    let app = test::init_service(App::new().wrap(mw).route(
+        "/api/metadata",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    ))
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/api/metadata?secret_query_param=value")
+        .insert_header(("User-Agent", "Mozilla/5.0 (X11; Linux) Firefox/128.0"))
+        .insert_header(("X-Something-Personal", "a name"))
+        .peer_addr("203.0.113.7:5555".parse().unwrap())
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+
+    wait_for_entries(&repo, 1).await;
+    let entries = repo.snapshot();
+    let metadata = entries[0]
+        .metadata
+        .as_ref()
+        .expect("the middleware always writes metadata");
+    let mut keys: Vec<&str> = metadata
+        .as_object()
+        .expect("metadata is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["authenticated", "http_status"],
+        "the request-audit middleware must collect the outcome and nothing \
+         else; a header, a query parameter or a body excerpt added here goes \
+         into an append-only table and stays for the retention window"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Authenticated middleware paths (JWT extraction from header / cookie + cache)
 // ---------------------------------------------------------------------------
@@ -314,6 +368,7 @@ fn test_auth_config() -> AuthConfig {
         oauth2_issuer_url: String::new(),
         oauth2_mtls_base_url: String::new(),
         oauth2_default_tenant_id: String::new(),
+        revocation_feed_enabled: false,
         sso_spa_origins: Vec::new(),
         pepper: None,
         pepper_previous: None,

@@ -9,6 +9,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Datastore and broker credentials come from the secret provider** (T-132)
+
+  `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` were read
+  before any secret provider existed, so a deployment that kept every key in
+  Vault still had its datastore password in the pod spec — which is the exact
+  thing T-132 was closed on, one secret class short.
+
+  They are now three more entries on the provider — `db_username`,
+  `db_password`, `amqp_url` — fetched in the same round trip as the other
+  eleven. **The Vault token, or the `file` provider's mount, is now the only
+  credential a container spec has to carry.**
+
+  The environment variables stay, permanently. `env` is a supported provider
+  kind, not a legacy path. What changed is that a deployment configuring a
+  *different* provider, and still supplying a value through the environment,
+  now gets one `WARN` at boot naming the variable — the one case where an
+  operator believes something untrue.
+
+  `just vault-seed` carries the three forward and never invents them: a
+  datastore password has to match what SurrealDB was configured with, and an
+  invented one gives a Vault that looks configured and a server that cannot
+  connect. A value already in Vault always wins over one in your shell, so
+  re-running the seeder after a rotation cannot undo it. The Vault policy needs
+  no change — it grants read on the path, and the new fields are in it.
+
+  `DbConfig` and `AmqpConfig` no longer derive `Debug`. The broker URL carries
+  its password inline by the AMQP URI's own design; it now renders as scheme,
+  host and path with the userinfo removed, and a value that does not parse as a
+  URL is not echoed at all.
+
+- **A refreshing client keeps the claims it asked for** (T-241)
+
+  A client that names claims with the OIDC Core §5.5 `claims` parameter used to
+  receive them on its first access token and not on its second. The resolved
+  list rode the authorization code; the refresh grant minted a token without
+  it, so access to consented claims ended fifteen minutes after the consent was
+  given and the only recovery was a whole new authorization — which the end
+  user experiences as the consent not having worked.
+
+  The list now rides the refresh token too (schema v61, additive, no backfill),
+  and rotation copies it onto each successor exactly as it copies the session.
+  A refreshed access token asserts the same `axiam_requested_claims` the
+  code-exchanged one did.
+
+  This carries a request, not a release decision. The filter that decides which
+  claims may ever be named — `claims_request::RELEASABLE`, which no request can
+  use to reach `phone_number`, `phone_number_verified` or `address` — still runs
+  at the authorization endpoint and nowhere else, and every consent gate is
+  re-asked at each UserInfo call as before. A refresh token issued before v61
+  names no claims and mints exactly the token it minted before.
+
+- **A personal-data column can no longer be added to `user` without being
+  classified** (T-261)
+
+  Nothing an operator or a client observes changes. Erasure erases exactly what
+  it erased, and an Art. 15 export shows exactly what it showed.
+
+  What changes is what happens to the *next* column. Three code paths decided
+  what a `user` column means by writing its name out by hand — the Art. 17
+  erasure statement, the administrator's tombstone, and the export's `profile`
+  section — so a column added to the schema and to none of them survived
+  erasure and never reached an export. That is how `phone_number` and `address`
+  were nearly stranded, and the fix at the time was to name them in all three
+  and write a warning for whoever came next.
+
+  There is now one declaration instead of three lists
+  (`axiam_core::personal_data::USER_COLUMNS`), both erasure statements render
+  their shared clauses from it, and a test introspects the live `user` schema
+  after migrations and fails on any column the declaration does not classify —
+  naming the column, and saying what a classification has to answer. The
+  comparison runs the other way too: a classification for a column that no
+  longer exists reads as coverage and is not.
+
 - **The refresh-rotation grace window is a FAPI 2.0 behaviour again** (T-254)
 
   A client on the `standard` profile that presents a refresh token it has
@@ -56,7 +129,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0-beta13] - 2026-09-12
 
+### Changed
+
+- **Contract 1.43 — an mTLS alias is used verbatim, and the vectors SDKs pin
+  are published** (T-266)
+
+  Nothing an operator observes changes; the server publishes exactly what it
+  published. This is the SDK half of a rule that has been normative since
+  contract 1.40 and was implemented by nobody.
+
+  §21.3 rule 2 gains the clause that was implicit in it: an SDK preserves an
+  alias's query component rather than appending to it. AXIAM's aliases carry
+  the tenant that way, so an SDK that appends its own `?tenant_id=` produces a
+  duplicate the server cannot resolve to one tenant, and one that rebuilds the
+  URL from host and path drops whatever else the deployment put there.
+  Displacing the tenant with the one the caller authenticated against is
+  correct and is explicitly not what the clause forbids — the multi-tenant
+  document names no tenant and the client supplies its own. Either way the
+  failure shows up only on a two-listener deployment, which is the deployment
+  the rule exists for.
+
+  §21.3.1 publishes the three documents every SDK pins — the member present,
+  absent, and malformed — inside `CONTRACT.md` itself rather than as a fourth
+  vendored artifact, so eleven repositories assert the same bytes. A malformed
+  alias must be **refused**, not fallen back from: quietly presenting a
+  certificate to the front-channel host authenticates nothing while appearing
+  to work. "Malformed" means not an absolute URL, or a scheme weaker than the
+  top-level endpoint the alias replaces — comparing like with like, since an
+  alias substitutes for exactly one endpoint. Neither "must be `https`" nor
+  "weaker than the issuer" survives contact with the topologies AXIAM ships.
+
+  §21.10 records, per SDK, whether it decodes the member and whether it prefers
+  the alias — in the style §21.9 already uses for DPoP, where an unrecorded row
+  is not a supported answer.
+
+- **A contended write answers `503` with `Retry-After: 1`, not `500`** (T-262)
+
+  A write that loses an optimistic-concurrency race in the datastore, and
+  stays lost after every retry the server spends on it, used to reach the
+  client as `500 internal_error`. That is the wrong instruction: the request
+  was fine, it lost a race, and the correct advice is to come back in a
+  moment. An IdP driving SCIM provisioning — Okta, Entra — reads a `500` as a
+  failed sync and re-sends the whole record.
+
+  It is now `503` with the slug `write_contention` and a `Retry-After: 1`
+  header; over gRPC it is `UNAVAILABLE` rather than `INTERNAL`. `409` was the
+  other candidate and is deliberately not used: in SCIM (RFC 7644 §3.12) it
+  means your request conflicts with the resource's state, which a caller
+  responds to by changing the request — and that cannot help here.
+
+  Uniqueness violations and state preconditions keep their `409` and carry no
+  `Retry-After`. The new answer carries no message of its own beyond a fixed
+  sentence, so the datastore's own words stay in the server log where they
+  were.
+
+  AXIAM's SDKs need no change: their retry policy (CONTRACT §16) already
+  treats `5xx` as transient on a side-effect-free operation and already
+  honours `Retry-After` as a floor. Note that a contended `PATCH` is a
+  mutation, so no SDK retries it automatically — that decision stays with the
+  caller.
+
 ### Added
+
+- **An optional session-revocation feed** (T-39, T-143)
+
+  `AXIAM__AUTH__REVOCATION_FEED_ENABLED`, default `false`. With it off nothing
+  changes at all: the route is not mounted, no row is written, and the
+  deployment is byte-identical to one built before the feed existed.
+
+  With it on, `GET /oauth2/revocations` publishes the base64url SHA-256 of each
+  session id revoked within the last access-token lifetime. An SDK route guard
+  that polls it (contract §10.4, opt-in on that side too) rejects a revoked
+  session within one poll interval instead of within one token lifetime — for
+  one cacheable fetch per interval, rather than the per-request round trip
+  gRPC introspection costs.
+
+  The document carries hashes and nothing else: never a session id, a subject,
+  a tenant or a timestamp. It is bounded by your revocation rate over fifteen
+  minutes rather than by history, and filtered on read as well as swept, so a
+  sweep that falls behind makes the table large and never the document wrong.
+
+  It is not a control. A guard that cannot fetch the feed behaves exactly as it
+  does without it; the feed can only turn an accept into a reject, and local
+  verification still decides.
+
+- **`AXIAM__AUDIT__MINIMISE` — bound what the audit log collects, not just
+  how long it keeps it** (T-110)
+
+  The audit log is append-only, so what reaches it cannot be erased, only aged
+  out. `AXIAM__AUDIT_RETENTION_DAYS` has bounded the retention side since
+  1.0.0-beta12. Collection was not configurable at all, so a deployment whose
+  lawful basis does not support holding a full client address for two years had
+  nothing to turn off.
+
+  With this on, a client address is truncated to its `/24` (IPv4) or `/48`
+  (IPv6) prefix and a user-agent string is reduced to a coarse family, both
+  immediately before the append. An address that does not parse is dropped
+  rather than written through: a value that cannot be parsed cannot be shown to
+  have been minimised.
+
+  It does not touch the structured metadata AXIAM's own producers write — the
+  client and disposition on a refresh-token replay, the names of released
+  claims, a federated subject. Those are accountability evidence other controls
+  depend on, and none of it is request metadata.
+
+  Deployment-wide and deliberately not per tenant: audit is a control the
+  deployment relies on including against a tenant administrator, and a
+  per-tenant switch would let a tenant weaken the evidence used to investigate
+  it. Default `false`, and **both states are logged at startup** — an operator
+  opening an incident needs to know, before reading rows, whether the addresses
+  in them are whole.
+
+  Erasure and the Art. 15 export are unaffected: the erasure scrub clears the
+  address outright either way, and the export's audit section never carried it.
+
+- **A default tenant that is not a UUID is reported at startup** (T-244)
+
+  `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` is ignored when it does not parse,
+  which stays: the value is read while building a public, unauthenticated
+  document, and a fat-fingered UUID must not `500` for every relying party. But
+  the deployment was never told, so an operator who set it concluded the
+  setting does not work.
+
+  There is now one `WARN` at boot naming the variable and saying what will
+  happen — the document served is the one served with the variable unset, and
+  no endpoint URL will carry a tenant. It describes the value's shape (its
+  length, and whether its characters could belong to a UUID) and never the
+  value. Nothing is logged on the request path, and the discovery document is
+  unchanged in every configuration.
 
 - Hold the full profile claim set, and honour the claims parameter (§5.1, §5.5)
 

@@ -90,6 +90,7 @@ async fn insert_token(
         client_id: "test-client".into(),
         scopes: vec![],
         session_id: None,
+        requested_userinfo_claims: Vec::new(),
         expires_at: Utc::now() + Duration::days(30),
     })
     .await

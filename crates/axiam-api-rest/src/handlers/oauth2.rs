@@ -2442,6 +2442,122 @@ pub async fn discovery<C: Connection + Clone>(
     HttpResponse::Ok().json(doc)
 }
 
+/// The session-revocation feed document (T-39, T-143).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct RevocationFeedDocument {
+    /// The digest algorithm the entries are computed with. Always `SHA-256`.
+    /// A client that does not recognise the value MUST treat the document as
+    /// unusable and behave exactly as it does when the feed is unreachable —
+    /// never as though the list were empty, which is a guard that silently
+    /// honours no revocations at all.
+    pub alg: String,
+    /// When this document was produced, as a Unix timestamp.
+    pub issued_at: i64,
+    /// How long an entry is published for, in seconds: one access-token
+    /// lifetime. After that every token naming the session has expired on its
+    /// own `exp`, so the entry proves nothing and is dropped.
+    pub ttl: u64,
+    /// Base64url-unpadded SHA-256 of each revoked session id, in no
+    /// security-significant order. Never a session id, a subject or a tenant.
+    pub revoked: Vec<String>,
+}
+
+/// `GET /oauth2/revocations` -- sessions revoked within the last access-token
+/// lifetime, as unlinkable hashes (T-39, T-143).
+///
+/// Mounted only where `AXIAM__AUTH__REVOCATION_FEED_ENABLED` is set; a
+/// deployment that has not opted in does not serve this path at all.
+///
+/// An SDK route guard that polls this rejects a revoked session within one
+/// poll interval rather than within one access-token lifetime. It is a
+/// narrowing of a residual window and **not** a control: a guard that cannot
+/// fetch the document, or that cannot interpret it, must behave exactly as it
+/// does today. See `sdks/CONTRACT.md` §10.4.
+//
+// F3 note, deliberately not a doc comment: the reasoning for the entry format,
+// the bound and the five properties lives in `axiam_core::revocation_feed`,
+// where whoever changes this will read it. utoipa lifts a doc block verbatim
+// into the OpenAPI `description` and eleven SDK repositories vendor that file
+// byte-for-byte, so a design argument here becomes a re-vendor round.
+#[utoipa::path(
+    get,
+    path = "/oauth2/revocations",
+    tag = "oidc",
+    responses(
+        (status = 200, description = "Revocation feed", body = RevocationFeedDocument),
+        (status = 304, description = "Not Modified -- ETag matches If-None-Match"),
+    ),
+)]
+pub async fn revocations<C: Connection + Clone>(
+    req: HttpRequest,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    let ttl = state.auth_config.access_token_lifetime_secs;
+    let repo = axiam_db::SurrealRevokedSessionRepository::new(state.db.clone());
+    let revoked = match repo.list_live(chrono::Utc::now()).await {
+        Ok(hashes) => hashes,
+        Err(e) => {
+            // A guard treats an unreachable feed exactly as it treats one it
+            // never fetched, so failing loudly here costs nothing a client can
+            // act on. Answering `200` with an empty list would be worse than
+            // failing: it asserts that nothing has been revoked.
+            tracing::warn!(error = %e, "revocation feed could not be read");
+            return HttpResponse::ServiceUnavailable().finish();
+        }
+    };
+
+    let document = RevocationFeedDocument {
+        alg: axiam_core::revocation_feed::REVOCATION_HASH_ALG.to_owned(),
+        issued_at: chrono::Utc::now().timestamp(),
+        ttl,
+        revoked,
+    };
+
+    // The ETag covers the entry list and nothing else. `issued_at` changes on
+    // every call by construction, so including it would make every poll a
+    // full transfer — which is the one thing a feed meant to be polled must
+    // not do.
+    let etag = {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        for entry in &document.revoked {
+            hasher.update(entry.as_bytes());
+            hasher.update(b"\n");
+        }
+        format!(
+            "\"{}\"",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                hasher.finalize()
+            )
+        )
+    };
+
+    // Half a poll interval's worth of caching at the shortest interval the
+    // contract permits: long enough that a misbehaving poller cannot turn the
+    // feed into a load source, short enough that it cannot widen the window
+    // the feed exists to narrow.
+    let cache_control = "public, max-age=15";
+
+    if req
+        .headers()
+        .get(actix_web::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == etag)
+    {
+        return HttpResponse::NotModified()
+            .insert_header(("Cache-Control", cache_control))
+            .insert_header(("ETag", etag))
+            .finish();
+    }
+
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .insert_header(("Cache-Control", cache_control))
+        .insert_header(("ETag", etag))
+        .json(document)
+}
+
 /// `GET /oauth2/jwks` -- JSON Web Key Set.
 ///
 /// Returns the public signing keys used by the authorization server

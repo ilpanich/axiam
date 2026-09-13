@@ -230,6 +230,7 @@ use crate::handlers;
         // OIDC
         handlers::oauth2::discovery,
         handlers::oauth2::jwks,
+        handlers::oauth2::revocations,
         handlers::oauth2::userinfo,
         // W7 — the POST method W6 added and could not document: annotating it
         // regenerates `sdks/openapi.json`, and W6's environment could not
@@ -523,6 +524,7 @@ use crate::handlers;
         // JSON and dangle for every generator the eleven SDKs run.
         axiam_oauth2::oidc::MtlsEndpointAliases,
         axiam_oauth2::oidc::JwksDocument,
+        handlers::oauth2::RevocationFeedDocument,
         axiam_oauth2::oidc::Jwk,
         axiam_oauth2::oidc::UserInfoResponse,
         handlers::oauth2::UserInfoPostForm,

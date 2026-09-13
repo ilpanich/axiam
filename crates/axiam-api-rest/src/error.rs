@@ -57,7 +57,9 @@ impl actix_web::ResponseError for AxiamApiError {
             AxiamError::PasswordPolicy { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AxiamError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             AxiamError::EmailConfig(_) => StatusCode::BAD_REQUEST,
-            AxiamError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            AxiamError::ServiceUnavailable(_) | AxiamError::WriteContention => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             AxiamError::Database(_)
             | AxiamError::Certificate(_)
             | AxiamError::Crypto(_)
@@ -88,6 +90,11 @@ impl actix_web::ResponseError for AxiamApiError {
             AxiamError::RateLimited => "rate_limited",
             AxiamError::EmailConfig(_) => "email_config_error",
             AxiamError::ServiceUnavailable(_) => "service_unavailable",
+            // T-262 / R-4. Its own slug rather than `service_unavailable`,
+            // because the two are different operational events and an operator
+            // reading logs needs to tell "the datastore is contended" from
+            // "the Argon2 gate is saturated".
+            AxiamError::WriteContention => "write_contention",
             // Server-error variants: log detail, return generic message.
             _ => "internal_error",
         };
@@ -108,7 +115,11 @@ impl actix_web::ResponseError for AxiamApiError {
             | AxiamError::TenantContext
             | AxiamError::RateLimited
             | AxiamError::EmailConfig(_)
-            | AxiamError::ServiceUnavailable(_) => self.0.to_string(),
+            | AxiamError::ServiceUnavailable(_)
+            // Safe to echo: the variant carries no payload, so its `Display`
+            // is the fixed sentence written on it and never the engine's own
+            // words, which stay on `DbError::Conflict` for the log.
+            | AxiamError::WriteContention => self.0.to_string(),
             // 5xx variants: log the detail server-side, return only a generic message.
             _ => {
                 error!(
@@ -132,11 +143,114 @@ impl actix_web::ResponseError for AxiamApiError {
             _ => (None, None),
         };
 
-        HttpResponse::build(self.status_code()).json(ErrorBody {
+        let mut builder = HttpResponse::build(self.status_code());
+        // T-262 / R-4: the one response that carries a header. A contended
+        // write is transient, and `Retry-After` is how an HTTP client is told
+        // so — CONTRACT §16.1 makes every SDK honour it as a **floor**, so a
+        // caller's own backoff still governs the wait and a `1` cannot shorten
+        // it. One second is a convention, not a measurement: the server does
+        // not know how long contention will last, and a fabricated number
+        // would be worse than a conventional one.
+        //
+        // Set here rather than inside the slug match above so the status and
+        // the header cannot drift apart.
+        if matches!(self.0, AxiamError::WriteContention) {
+            builder.insert_header((actix_web::http::header::RETRY_AFTER, "1"));
+        }
+        builder.json(ErrorBody {
             error: error_code.into(),
             message,
             action,
             resource_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod write_contention_tests {
+    use actix_web::ResponseError;
+    use actix_web::body::MessageBody;
+    use actix_web::http::header::RETRY_AFTER;
+
+    use super::*;
+
+    fn render(err: AxiamError) -> (u16, Option<String>, serde_json::Value) {
+        let response = AxiamApiError(err).error_response();
+        let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .map(|v| v.to_str().unwrap().to_owned());
+        let bytes = response.into_body().try_into_bytes().unwrap();
+        (status, retry_after, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// T-262 / R-4. A write that lost a datastore race and stayed lost is a
+    /// statement about the server, so it answers `503` and says when to come
+    /// back — the answer an IdP driving SCIM provisioning retries, rather than
+    /// the `500` it reads as a failed sync and recovers from by re-sending the
+    /// whole record.
+    #[test]
+    fn a_contended_write_answers_503_with_retry_after() {
+        let (status, retry_after, body) = render(AxiamError::WriteContention);
+        assert_eq!(status, 503);
+        assert_eq!(retry_after.as_deref(), Some("1"));
+        assert_eq!(body["error"], "write_contention");
+    }
+
+    /// The response body must never carry the engine's own words. The variant
+    /// has no payload, so this cannot regress by accident — but it could
+    /// regress by somebody giving it one "for debugging", which is what this
+    /// pins.
+    #[test]
+    fn the_body_never_carries_the_engines_message() {
+        let (_, _, body) = render(AxiamError::WriteContention);
+        let rendered = body.to_string();
+        for leak in ["Transaction", "write conflict", "surreal", "SurrealDB"] {
+            assert!(
+                !rendered.contains(leak),
+                "{leak:?} must not appear in the response body: {rendered}"
+            );
+        }
+    }
+
+    /// **I4 twin.** The two neighbouring answers are unchanged, and they are
+    /// the ones it would be easy to fold this into. A uniqueness violation and
+    /// a state precondition are both statements about the *request*: they stay
+    /// `409`, carry no `Retry-After`, and mean "do something else", not "come
+    /// back".
+    #[test]
+    fn the_409_answers_are_untouched_and_carry_no_retry_after() {
+        for (err, slug) in [
+            (
+                AxiamError::AlreadyExists {
+                    entity: "user".into(),
+                },
+                "already_exists",
+            ),
+            (
+                AxiamError::Conflict {
+                    reason: "the export is stale".into(),
+                },
+                "conflict",
+            ),
+        ] {
+            let (status, retry_after, body) = render(err);
+            assert_eq!(status, 409);
+            assert_eq!(retry_after, None, "a 409 must not advertise a retry");
+            assert_eq!(body["error"], slug);
+        }
+    }
+
+    /// And `503 service_unavailable` — the Argon2-gate answer — keeps its own
+    /// slug and gains no header. The two are different operational events and
+    /// an operator reading logs has to be able to tell them apart.
+    #[test]
+    fn the_other_503_is_a_different_answer() {
+        let (status, retry_after, body) =
+            render(AxiamError::ServiceUnavailable("hash gate saturated".into()));
+        assert_eq!(status, 503);
+        assert_eq!(retry_after, None);
+        assert_eq!(body["error"], "service_unavailable");
     }
 }

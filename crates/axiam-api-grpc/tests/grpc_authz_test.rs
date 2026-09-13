@@ -65,6 +65,7 @@ fn test_auth_config() -> AuthConfig {
         oauth2_issuer_url: String::new(),
         oauth2_mtls_base_url: String::new(),
         oauth2_default_tenant_id: String::new(),
+        revocation_feed_enabled: false,
         sso_spa_origins: Vec::new(),
         pepper: None,
         pepper_previous: None,

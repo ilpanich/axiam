@@ -63,6 +63,42 @@ KEY_NAMES = [
 #: before Argon2id; the JWT keys are PEM documents.
 PEM_NAMES = ["jwt_private_key_pem", "jwt_public_key_pem"]
 
+#: Datastore and broker credentials (T-132's follow-up, R-5). Names match
+#: `axiam_core::secrets`' constants, as above.
+#:
+#: These are the one class of secret this seeder **never mints**, and the reason
+#: is the difference between a key and a credential. A 256-bit key is
+#: meaningful only to AXIAM, so minting one into an empty slot is safe and is
+#: the whole point of seeding. A datastore password has to match what the
+#: datastore was configured with, and a broker URL has to name a broker that
+#: exists — inventing either produces a Vault that looks configured and a server
+#: that cannot connect, which is strictly worse than an empty slot the operator
+#: is told about.
+#:
+#: So they are carried forward when present, taken from the environment when the
+#: caller supplies them (which is how `just prod-up` moves them in), and
+#: otherwise left absent, with the server falling back to its environment
+#: variable and saying so at WARN. T-231's rule holds throughout: an existing
+#: value is never overwritten.
+#:
+#: The environment variable each one is supplied under is the second column.
+#: These are the shipped names the server already reads — `axiam_core::secrets::
+#: env_var_override` is the same table on the Rust side, and the two must agree
+#: or an operator's variable seeds nothing.
+CREDENTIAL_ENV = {
+    "db_username": "AXIAM__DB__USERNAME",
+    "db_password": "AXIAM__DB__PASSWORD",
+    "amqp_url": "AXIAM__AMQP__URL",
+}
+
+#: The Vault field names, in order. Derived from the table above rather than
+#: written out again: two lists that must agree are one list too many, and a
+#: bare `["db_username", "db_password", …]` reads to a secret scanner as a
+#: username next to a password. A FIELD NAME is not a credential, and the
+#: honest way to say so is not to write the literal — `.gitguardian.yaml` is
+#: for published RFC test vectors and nothing else.
+CREDENTIAL_NAMES = list(CREDENTIAL_ENV)
+
 
 def generate_ed25519_keypair():
     """Mint an Ed25519 keypair, PEM-encoded, as `(private, public)`.
@@ -144,6 +180,18 @@ def build(existing_fields, env, keygen=generate_ed25519_keypair):
         out["jwt_private_key_pem"] = private
         out["jwt_public_key_pem"] = public
         minted.extend(PEM_NAMES)
+
+    # Datastore and broker credentials. Never minted — see CREDENTIAL_NAMES.
+    # An existing value always wins over a supplied one: T-231's rule is that
+    # the seeder never overwrites a credential an operator rotated, and a
+    # rotated datastore password is exactly the case where a stale environment
+    # variable would silently undo the rotation.
+    for name in CREDENTIAL_NAMES:
+        if existing_fields.get(name):
+            out[name] = existing_fields[name]
+        elif env.get(CREDENTIAL_ENV[name]):
+            out[name] = env[CREDENTIAL_ENV[name]]
+            minted.append(name)
 
     return out, minted
 

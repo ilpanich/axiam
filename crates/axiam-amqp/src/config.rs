@@ -100,7 +100,14 @@ impl AmqpTlsConfig {
 }
 
 /// Configuration for connecting to RabbitMQ.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Debug` is hand-written and redacts (T-132's follow-up, R-5). Two fields
+/// carry credentials: `url`, which embeds the broker username and password
+/// inline by the AMQP URI's own design, and `signing_key`. A derived `Debug`
+/// on this type puts both into any log line, panic message or error chain that
+/// renders a configuration — which is the shape of the three CodeQL findings
+/// T-260 closed, in the one struct that most invites it.
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct AmqpConfig {
     /// AMQP connection URI. **Must** be `amqps://host:5671` (A6).
@@ -151,6 +158,50 @@ pub struct AmqpConfig {
     /// [`crate::messages::DEFAULT_FRESHNESS_SKEW_SECS`] (5 minutes).
     #[serde(default = "default_replay_skew_secs")]
     pub replay_skew_secs: u64,
+}
+
+impl std::fmt::Debug for AmqpConfig {
+    /// Everything except the two fields that carry credentials.
+    ///
+    /// `url` renders as scheme + host + port with the userinfo removed rather
+    /// than as a blanket `<redacted>`: the commonest reason to print this
+    /// struct is a connection failure, and "which broker" is the fact that
+    /// answers it while "which password" is never the fact anybody needed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AmqpConfig")
+            .field("url", &redact_amqp_url(&self.url))
+            .field("tls", &self.tls)
+            .field("prefetch_count", &self.prefetch_count)
+            .field("reconnect_delay_ms", &self.reconnect_delay_ms)
+            .field("max_retries", &self.max_retries)
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field(
+                "signing_key",
+                &self.signing_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// An AMQP URL with its userinfo removed.
+///
+/// Deliberately string surgery rather than a URL parser: this runs on an error
+/// path, and a value that fails to parse is exactly the value most likely to be
+/// being logged. An unparseable input must still redact — so anything with an
+/// `@` before the first `/` of the authority loses everything up to it,
+/// whatever else is wrong with it.
+fn redact_amqp_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        // Not a URL at all. It may still be a credential somebody pasted into
+        // the wrong variable, so it does not get printed.
+        return "<unparseable>".to_owned();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        Some((_userinfo, host)) => format!("{scheme}://<redacted>@{host}{path}"),
+        None => format!("{scheme}://{authority}{path}"),
+    }
 }
 
 fn default_replay_skew_secs() -> u64 {
@@ -505,5 +556,76 @@ mod tests {
                  production and turns TLS into an expensive no-op"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    fn config_with(url: &str) -> AmqpConfig {
+        AmqpConfig {
+            url: url.to_owned(),
+            signing_key: Some("deadbeef".repeat(8)),
+            ..AmqpConfig::default()
+        }
+    }
+
+    /// T-132's follow-up: the broker URL embeds the credential inline, so a
+    /// derived `Debug` on this struct is a password in every log line that
+    /// renders a configuration.
+    ///
+    /// The password comes from `axiam_test_support::test_password` rather than
+    /// a literal, for the same reason the datastore twin in
+    /// `axiam-db`'s `connection.rs` does: a literal broker password is
+    /// indistinguishable, to a secret scanner, from a real one, and the
+    /// assertion is stronger without it — it holds for whatever the helper
+    /// produces rather than for one string.
+    #[test]
+    fn the_debug_never_renders_the_broker_password() {
+        let password = axiam_test_support::test_password();
+        let rendered = format!(
+            "{:?}",
+            config_with(&format!(
+                "amqps://axiam:{password}@rabbit.internal:5671/axiam"
+            ))
+        );
+        assert!(!rendered.contains(&password));
+        assert!(!rendered.contains("deadbeef"));
+        // And it still answers the question a connection failure asks.
+        assert!(rendered.contains("rabbit.internal:5671"));
+        assert!(rendered.contains("/axiam"));
+    }
+
+    /// A URL with no userinfo has nothing to hide and is shown whole — the
+    /// dev and E2E stacks use one, and blanket-redacting it would make every
+    /// local debugging session worse for no gain.
+    #[test]
+    fn a_url_with_no_credential_is_shown() {
+        assert_eq!(
+            redact_amqp_url("amqps://rabbit.internal:5671/axiam"),
+            "amqps://rabbit.internal:5671/axiam"
+        );
+    }
+
+    /// The case that matters most: a value that is not a URL is the value most
+    /// likely to be a credential pasted into the wrong variable, and it is
+    /// exactly what an error path prints. It must not be echoed.
+    #[test]
+    fn an_unparseable_value_is_not_echoed_at_all() {
+        for bad in ["s3cr3t", "", "axiam:password", "amqps:/broken"] {
+            let rendered = redact_amqp_url(bad);
+            assert_eq!(rendered, "<unparseable>", "{bad:?} must not be echoed");
+        }
+    }
+
+    /// A password containing an `@` or a `:` still redacts: the split is on
+    /// the LAST `@` of the authority, so userinfo that itself contains one
+    /// cannot walk the boundary backwards.
+    #[test]
+    fn a_password_containing_an_at_sign_still_redacts() {
+        let rendered = redact_amqp_url("amqps://user:p@ss@rabbit.internal:5671/axiam");
+        assert!(!rendered.contains("p@ss"));
+        assert_eq!(rendered, "amqps://<redacted>@rabbit.internal:5671/axiam");
     }
 }

@@ -728,6 +728,7 @@ mod single_use_serialisation {
             user_id: Some(Uuid::new_v4()),
             scopes: vec!["openid".into()],
             session_id: None,
+            requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now() + Duration::seconds(3600),
         })
         .await

@@ -10,6 +10,28 @@ fn default_true() -> bool {
     true
 }
 
+/// What is wrong with `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`, in terms that
+/// name no part of the value (T-244).
+///
+/// Rendered into one boot-time `WARN` by the composition root. It describes
+/// the value's **shape** — how long it is, and whether its characters could
+/// belong to a UUID at all — because those two facts distinguish the mistakes
+/// an operator actually makes (a truncated paste, a tenant *slug* where an id
+/// belongs, a different identifier entirely) without echoing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefaultTenantProblem {
+    /// Character count of the trimmed value. A UUID is 36.
+    pub length: usize,
+    /// A short phrase describing the character class.
+    pub shape: &'static str,
+}
+
+impl std::fmt::Display for DefaultTenantProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} characters, {}", self.length, self.shape)
+    }
+}
+
 /// Configuration for the authentication service.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -143,6 +165,20 @@ pub struct AuthConfig {
     /// therefore safe and is the correct setting for a deployment that serves
     /// many tenants from one issuer.
     pub oauth2_default_tenant_id: String,
+    /// T-39/T-143 — whether this deployment publishes
+    /// `GET /oauth2/revocations`.
+    ///
+    /// `AXIAM__AUTH__REVOCATION_FEED_ENABLED`, default `false`. With it off the
+    /// route is not mounted and no `revoked_session` row is written, so the
+    /// deployment is byte-identical to one built before the feed existed.
+    ///
+    /// The feed narrows the window in which a revoked session's access token
+    /// still verifies — from one token lifetime to one poll interval — for an
+    /// SDK guard that opts into polling it. It is never a control: a guard
+    /// that cannot fetch it behaves exactly as it does today, and the token
+    /// itself still decides.
+    #[serde(default)]
+    pub revocation_feed_enabled: bool,
     /// Extra browser origins this deployment will hand a **federation SSO
     /// handoff code** to (`AXIAM__AUTH__SSO_SPA_ORIGINS`; a list, set the same
     /// way as `AXIAM__SERVER__CORS_ALLOWED_ORIGINS`).
@@ -412,6 +448,46 @@ impl AuthConfig {
         uuid::Uuid::parse_str(trimmed).ok()
     }
 
+    /// Whether [`Self::default_tenant_id`] is silently discarding a value the
+    /// operator set (T-244, R-1…R-8).
+    ///
+    /// Treating an unparseable value as unset is right and stays — a public,
+    /// unauthenticated document should not `500` for every relying party
+    /// because somebody fat-fingered a UUID — but the operator was never told,
+    /// so the deployment concluded the setting does not work. This answers
+    /// `Some` exactly when a non-empty value failed to parse, and the caller
+    /// logs it **once at boot**.
+    ///
+    /// # Why not on the request path
+    ///
+    /// [`Self::default_tenant_id`] is called per discovery request. A warning
+    /// there is a log flood any anonymous caller can drive by requesting the
+    /// document in a loop.
+    ///
+    /// # Why the shape and never the value
+    ///
+    /// A tenant id is not a secret, but a variable this code cannot prove *is*
+    /// a tenant id may hold anything an operator pasted — including the
+    /// contents of the wrong clipboard. The diagnostic therefore carries the
+    /// length and a character class and nothing else.
+    #[must_use]
+    pub fn default_tenant_id_diagnostic(&self) -> Option<DefaultTenantProblem> {
+        let trimmed = self.oauth2_default_tenant_id.trim();
+        // Empty and whitespace-only are "unset", which is the default and
+        // needs no warning.
+        if trimmed.is_empty() || uuid::Uuid::parse_str(trimmed).is_ok() {
+            return None;
+        }
+        Some(DefaultTenantProblem {
+            length: trimmed.chars().count(),
+            shape: if trimmed.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+                "hexadecimal, but not a 36-character UUID"
+            } else {
+                "contains characters a UUID cannot"
+            },
+        })
+    }
+
     pub fn mtls_base_url(&self) -> Option<&str> {
         let trimmed = self.oauth2_mtls_base_url.trim().trim_end_matches('/');
         (!trimmed.is_empty()).then_some(trimmed)
@@ -473,6 +549,7 @@ impl Default for AuthConfig {
             // today's behaviour and the right default for a multi-tenant
             // deployment. A single-tenant issuer sets it.
             oauth2_default_tenant_id: String::new(),
+            revocation_feed_enabled: false,
             sso_spa_origins: Vec::new(),
             pepper: None,
             pepper_previous: None,
@@ -504,5 +581,101 @@ impl Default for AuthConfig {
             // I6: opt-in. 0 = no session-validation cache (today's behaviour).
             session_validation_cache_ttl_secs: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod default_tenant_tests {
+    use super::*;
+
+    fn config_with(value: &str) -> AuthConfig {
+        AuthConfig {
+            oauth2_default_tenant_id: value.to_owned(),
+            ..AuthConfig::default()
+        }
+    }
+
+    /// Unset, whitespace-only and valid all mean "nothing to say". A warning
+    /// in any of these is a warning an operator learns to scroll past.
+    #[test]
+    fn a_valid_or_absent_default_tenant_says_nothing() {
+        for quiet in [
+            "",
+            "   ",
+            "\n",
+            "6f3e0a5c-1b2d-4e8f-9a7b-0c1d2e3f4a5b",
+            "  6f3e0a5c-1b2d-4e8f-9a7b-0c1d2e3f4a5b  ",
+        ] {
+            assert_eq!(
+                config_with(quiet).default_tenant_id_diagnostic(),
+                None,
+                "{quiet:?} must produce no diagnostic"
+            );
+        }
+    }
+
+    /// A value that is set and unusable is exactly the case the operator
+    /// never heard about.
+    #[test]
+    fn an_unparseable_default_tenant_is_reported() {
+        let problem = config_with("not-a-uuid")
+            .default_tenant_id_diagnostic()
+            .expect("an unparseable value must be reported");
+        assert_eq!(problem.length, 10);
+        assert_eq!(problem.shape, "contains characters a UUID cannot");
+    }
+
+    /// A truncated paste is the commonest way to get here, and it is worth
+    /// distinguishing from a value that was never a UUID at all: the first is
+    /// "you lost some characters", the second is "that is a different thing".
+    #[test]
+    fn a_truncated_uuid_is_reported_as_the_right_shape() {
+        let problem = config_with("6f3e0a5c-1b2d-4e8f")
+            .default_tenant_id_diagnostic()
+            .expect("a truncated UUID must be reported");
+        assert_eq!(problem.length, 18);
+        assert_eq!(problem.shape, "hexadecimal, but not a 36-character UUID");
+    }
+
+    /// The rendered line carries the length and the class, and **no substring
+    /// of the value**. The check is deliberately crude — every three-character
+    /// window of the value — because the failure mode is somebody adding the
+    /// value to the message to make it easier to debug.
+    #[test]
+    fn the_rendered_diagnostic_never_echoes_the_value() {
+        let value = "tenant-acme-production";
+        let rendered = config_with(value)
+            .default_tenant_id_diagnostic()
+            .unwrap()
+            .to_string();
+        for window in value
+            .as_bytes()
+            .windows(3)
+            .map(|w| std::str::from_utf8(w).unwrap())
+        {
+            assert!(
+                !rendered.contains(window),
+                "the diagnostic must not echo any part of the value; \
+                 found {window:?} in {rendered:?}"
+            );
+        }
+        assert!(rendered.contains("22 characters"));
+    }
+
+    /// **I4 twin, and the proof this item changed nothing.** The accessor the
+    /// discovery builder actually reads answers `None` for an unparseable
+    /// value exactly as it did before the diagnostic existed — so the document
+    /// a misconfigured deployment serves is the document an unconfigured one
+    /// serves, which is what `oidc.rs::a_document_that_names_no_tenant_carries_no_query_string`
+    /// pins on the other side.
+    #[test]
+    fn an_unparseable_default_tenant_is_still_treated_as_unset() {
+        assert_eq!(config_with("not-a-uuid").default_tenant_id(), None);
+        assert_eq!(config_with("").default_tenant_id(), None);
+        assert_eq!(
+            config_with("not-a-uuid").default_tenant_id(),
+            config_with("").default_tenant_id(),
+            "a bad value and no value must be indistinguishable to the builder"
+        );
     }
 }

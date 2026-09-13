@@ -92,6 +92,15 @@ pub struct CleanupTask<C: Connection> {
     interval: Duration,
     /// Audit retention (T-119). `None` = never prune.
     audit_retention: Option<chrono::Duration>,
+    /// T-39/T-143: the revocation feed's table, when the deployment runs one.
+    ///
+    /// `None` — the default — means the feed is off, no row is ever written,
+    /// and this sweep is a no-op. A `Some` here is not optional in the way
+    /// `audit_retention`'s is: the entries have their own `expires_at` and the
+    /// read path filters on it, so a sweep that never ran would publish a
+    /// truthful document over a table that grows forever. It is a size bound,
+    /// not a correctness one.
+    revoked_session_repo: Option<Arc<axiam_db::SurrealRevokedSessionRepository<C>>>,
     /// T-129: records each sweep's outcome for `GET /health/jobs`.
     job_health: crate::job_health::JobHealth,
     shutdown: watch::Receiver<bool>,
@@ -166,6 +175,43 @@ where
     Ok(())
 }
 
+/// The Art. 15 `profile` section of one user's export.
+///
+/// A free function, and tested as one, because its **key set** is half of
+/// T-261's gate: `axiam_core::personal_data::export_keys()` is the declared
+/// answer to "what does a subject get to see", and
+/// `the_profile_section_shows_exactly_the_declared_export_keys` requires this
+/// literal to match it. A column classified as exported and missing here is a
+/// column the subject is never shown — the defect that nearly stranded
+/// `phone_number` and `address`, whose own entry warned that the path is an
+/// explicit field list and that a column not named in it is never exported.
+///
+/// The literal is deliberately **not** derived from the inventory. Two of its
+/// entries are not plain column reads: `id` is the record identifier rather
+/// than a `DEFINE FIELD`, and `phone_number_verified` is a derived boolean
+/// rather than the `phone_number_verified_at` timestamp — matching the claim
+/// the subject would have seen released, since exporting the internal column
+/// name would describe AXIAM's storage rather than the subject's data.
+/// Deriving the section would have to special-case both, which is a worse
+/// thing to maintain than a checked list.
+///
+/// EXCLUDED (D-10): `password_hash`, `mfa_secret`, any token_hash values.
+fn profile_section(user: &axiam_core::models::user::User) -> serde_json::Value {
+    serde_json::json!({
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "status": user.status,
+        "mfa_enabled": user.mfa_enabled,
+        "phone_number": user.phone_number,
+        "phone_number_verified": user.phone_number_verified_at.is_some(),
+        "address": user.address,
+        "metadata": user.metadata,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+    })
+}
+
 impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// Construct a new `CleanupTask`.
     #[allow(clippy::too_many_arguments)]
@@ -198,6 +244,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         // would ever complain. Being unable to construct the task without
         // stating a retention policy is the point.
         audit_retention: Option<chrono::Duration>,
+        // T-39/T-143. `None` when the deployment does not run the feed.
+        revoked_session_repo: Option<Arc<axiam_db::SurrealRevokedSessionRepository<C>>>,
         // T-129: passed in rather than constructed here so `main` can hand
         // the same handle to `AppState`, which is what lets the HTTP layer
         // read what this loop writes.
@@ -228,6 +276,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             export_encryption_key,
             interval,
             audit_retention,
+            revoked_session_repo,
             job_health,
             shutdown,
         }
@@ -302,6 +351,18 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         self.sweep_audit_retention().await,
                         tracing::Level::INFO,
                     );
+
+                    // T-39/T-143: drop revocation entries whose access tokens
+                    // have all expired. DEBUG, not INFO: unlike the audit
+                    // sweep this destroys nothing anyone could want back —
+                    // an expired entry describes only tokens that have
+                    // expired on their own `exp`.
+                    Self::record(
+                        &self.job_health,
+                        "revocation_feed",
+                        self.sweep_revocation_feed().await,
+                        tracing::Level::DEBUG,
+                    );
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && *self.shutdown.borrow() {
@@ -375,6 +436,17 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         };
         let cutoff = Utc::now() - retention;
         self.audit_repo.prune_older_than(cutoff).await
+    }
+
+    /// Drop revocation-feed entries that have expired (T-39/T-143).
+    ///
+    /// A no-op returning `Ok(0)` when the deployment does not run the feed —
+    /// in which case there are no rows to drop, because nothing wrote any.
+    async fn sweep_revocation_feed(&self) -> Result<u64, AxiamError> {
+        let Some(repo) = &self.revoked_session_repo else {
+            return Ok(0);
+        };
+        repo.prune_expired(Utc::now()).await
     }
 
     // -----------------------------------------------------------------------
@@ -738,31 +810,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     ) -> Result<serde_json::Value, AxiamError> {
         // Profile — no password_hash or mfa_secret.
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
-        // W7 / X7 G8: `phone_number` and `address` are in the inventory
-        // because Art. 15(1) is about *all* personal data being processed,
-        // and these two are the most obviously personal columns on the row.
-        // The plan's §4.8 assumed they would be covered for free by "the
-        // existing export path"; the path is an explicit field list, so a
-        // column not named here is a column the subject is never shown. The
-        // same defect, in the same shape, as the two erasure statements.
-        //
-        // `phone_number_verified` rather than the timestamp, matching the
-        // claim the subject would have seen released: exporting the internal
-        // column name would describe AXIAM's storage rather than the subject's
-        // data.
-        let profile = serde_json::json!({
-            "id": user.id,
-            "username": user.username,
-            "email": user.email,
-            "status": user.status,
-            "mfa_enabled": user.mfa_enabled,
-            "phone_number": user.phone_number,
-            "phone_number_verified": user.phone_number_verified_at.is_some(),
-            "address": user.address,
-            "metadata": user.metadata,
-            "created_at": user.created_at,
-            "updated_at": user.updated_at,
-        });
+        let profile = profile_section(&user);
 
         // Consents — propagate errors (CQ-B38 / SEC-056): a section that fails to
         // query must fail the whole export job rather than emit a legally
@@ -925,5 +973,105 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         });
 
         Ok(export)
+    }
+}
+
+#[cfg(test)]
+mod personal_data_export_tests {
+    use std::collections::BTreeSet;
+
+    use axiam_core::models::user::{User, UserStatus};
+    use axiam_core::personal_data::{USER_COLUMNS, export_keys};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use super::profile_section;
+
+    fn a_user() -> User {
+        User {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            username: "subject".into(),
+            email: "subject@example.test".into(),
+            password_hash: "$argon2id$irrelevant".into(),
+            status: UserStatus::Active,
+            mfa_enabled: false,
+            mfa_secret: None,
+            failed_login_attempts: 0,
+            last_failed_login_at: None,
+            locked_until: None,
+            metadata: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            email_verified_at: None,
+            deletion_pending: false,
+            scheduled_purge_at: None,
+            totp_last_used_step: None,
+            phone_number: None,
+            phone_number_verified_at: None,
+            address: None,
+        }
+    }
+
+    /// The other half of T-261's gate. `axiam-db`'s
+    /// `user_schema_matches_the_declared_inventory` proves every column is
+    /// classified; this proves the export honours the classification.
+    ///
+    /// Both directions again: a column declared `export: Some(_)` and missing
+    /// from the literal is a column the subject is never shown, and a key in
+    /// the literal that no column declares is an export nobody classified.
+    #[test]
+    fn the_profile_section_shows_exactly_the_declared_export_keys() {
+        let profile = profile_section(&a_user());
+        let rendered: BTreeSet<&str> = profile
+            .as_object()
+            .expect("the profile section is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let declared: BTreeSet<&str> = export_keys().into_iter().collect();
+
+        let missing: Vec<_> = declared.difference(&rendered).collect();
+        assert!(
+            missing.is_empty(),
+            "these are declared exported in \
+             `axiam_core::personal_data::USER_COLUMNS` and are absent from the \
+             Art. 15 `profile` section: {missing:?}. A column not named here is \
+             a column the data subject is never shown."
+        );
+
+        let undeclared: Vec<_> = rendered.difference(&declared).collect();
+        assert!(
+            undeclared.is_empty(),
+            "the `profile` section carries these keys and no column declares \
+             them: {undeclared:?}. Either classify the column with an `export` \
+             key or add the key to `EXPORT_KEYS_NOT_FROM_COLUMNS` with the \
+             reason it is not a column."
+        );
+    }
+
+    /// D-10, asserted rather than commented: the two credentials on the row
+    /// are erased and never exported, and this is the test that fails if
+    /// somebody "completes" the profile section by adding them.
+    #[test]
+    fn no_credential_column_is_exported() {
+        for name in ["password_hash", "mfa_secret"] {
+            let column = USER_COLUMNS
+                .iter()
+                .find(|c| c.name == name)
+                .expect("credential columns are classified");
+            assert!(
+                column.export.is_none(),
+                "{name} must never be exported (D-10)"
+            );
+            assert!(
+                column.erasure.is_some(),
+                "{name} must be erased by both paths"
+            );
+        }
+        let profile = profile_section(&a_user());
+        let object = profile.as_object().unwrap();
+        assert!(!object.contains_key("password_hash"));
+        assert!(!object.contains_key("mfa_secret"));
     }
 }

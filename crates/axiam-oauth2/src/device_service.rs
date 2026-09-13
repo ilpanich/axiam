@@ -284,6 +284,7 @@ where
                 // and the approval happened elsewhere, so there is no AXIAM
                 // session for a back-channel logout to name.
                 session_id: None,
+                requested_userinfo_claims: Vec::new(),
                 expires_at: Utc::now() + Duration::seconds(self.refresh_token_lifetime_secs),
             })
             .await

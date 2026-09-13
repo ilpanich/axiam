@@ -830,6 +830,24 @@ pub struct RefreshToken {
     /// [`RefreshTokenRepository::revoke_rotated`]: crate::repository::RefreshTokenRepository::revoke_rotated
     #[serde(default)]
     pub rotated_at: Option<DateTime<Utc>>,
+    /// T-241 — the OIDC Core §5.5 claims this grant asked for by name.
+    ///
+    /// Carried so that a refreshed access token asserts the *same*
+    /// `axiam_requested_claims` the code-exchanged one did. Without it a
+    /// client that named claims lost them fifteen minutes after the consent
+    /// was given and had to start a whole new authorization, which the end
+    /// user experiences as the consent not having worked.
+    ///
+    /// Copied forward at rotation, exactly as [`Self::session_id`] is. It is a
+    /// **request**, not a release decision: the list has already been through
+    /// `claims_request::RELEASABLE` at the authorization endpoint, and every
+    /// gate UserInfo applies is re-asked on every call — so a row naming a
+    /// sensitive claim releases nothing.
+    ///
+    /// Empty for every row written before schema v61, which is the honest
+    /// value and today's behaviour: those grants named no claims.
+    #[serde(default)]
+    pub requested_userinfo_claims: Vec<String>,
 }
 
 /// Input for creating a new refresh token.
@@ -842,6 +860,10 @@ pub struct CreateRefreshToken {
     pub scopes: Vec<String>,
     /// B5 — see [`RefreshToken::session_id`].
     pub session_id: Option<Uuid>,
+    /// T-241 — see [`RefreshToken::requested_userinfo_claims`]. Empty for
+    /// every grant that named no claims, which is every grant that sent no
+    /// `claims` parameter.
+    pub requested_userinfo_claims: Vec<String>,
     pub expires_at: DateTime<Utc>,
 }
 

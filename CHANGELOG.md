@@ -75,6 +75,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `return_to` is now carried through the setup page and resumed, re-validated
   at each hand-off.
 
+- `sdks/CONTRACT.md` moves to **1.45** (C-3), additive throughout: the §27
+  management surface's `certificates` namespace documents `sign_csr` and
+  states plainly that its response is not `GeneratedCertificate` — a type
+  whose key field is mandatory and would always be absent is a type that
+  lies about every value it holds; §24 and §25 document the two WebAuthn
+  setup-registration operations; and §5.2 rule 4 documents the self-service
+  `mfa_enforced` refusal. The Breaking Changes Log records the whole revision
+  as non-breaking: no existing operation, field, or error code changes
+  meaning, and a client built against 1.44 keeps working unchanged against a
+  1.45 server. `docs/pki/README.md` gains a "bring a CSR" walkthrough for
+  operators, and the website's PKI and MFA pages reflect the same additions.
+
+- The STRIDE threat model moves to **2.15.0** (C-3), reconciling the counts
+  T-267 (M-2), T-268 (C-1) and T-269 (M-3) moved: 269 threats identified, 256
+  mitigated and 13 open — the open count is unchanged, since all three land
+  Mitigated on arrival. `claude_dev/threat-model-stride.md`'s by-STRIDE,
+  by-severity and by-diagram tables are updated to match; the website's
+  generated threat-model views are regenerated at publish time from the same
+  model rather than carried here.
+
 ## [1.0.0-beta14] - 2026-09-13
 
 ### Added

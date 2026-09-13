@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 266 |
-| **Mitigated / Open** | 253 / 13 |
+| **Threats identified** | 269 |
+| **Mitigated / Open** | 256 / 13 |
 | **Owner** | ilpanich |
 
 ---
@@ -2615,7 +2615,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-13 of 266 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. The one entry that did sit on the request path, T-254's refresh-rotation grace window, was closed by the maintainer's decision of 2026-09-12 and is no longer listed here; the two that sat on the token service and on the SDK guard since the first version of this model, T-39 and T-143, closed together on 2026-09-13 when the revocation feed gained a poller in every SDK, and are recorded under *Closed at 1.0.0-beta14* below. They are listed most severe first.
+13 of 269 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. The one entry that did sit on the request path, T-254's refresh-rotation grace window, was closed by the maintainer's decision of 2026-09-12 and is no longer listed here; the two that sat on the token service and on the SDK guard since the first version of this model, T-39 and T-143, closed together on 2026-09-13 when the revocation feed gained a poller in every SDK, and are recorded under *Closed at 1.0.0-beta14* below. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -2690,14 +2690,14 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Repudiation | 6 |
 | Information disclosure | 65 |
 | Denial of service | 24 |
-| Elevation of privilege | 48 |
+| Elevation of privilege | 51 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 30 | 1 |
-| High | 122 | 8 |
+| High | 125 | 8 |
 | Medium | 106 | 3 |
 | Low | 8 | 1 |
 
@@ -2706,11 +2706,11 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Diagram | Threats | Open |
 |---|---|---|
 | System diagram | 31 | 2 |
-| Authentication & session management | 33 | 0 |
+| Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 47 | 0 |
 | Federation — SAML SP & OIDC relying party | 31 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 26 | 0 |
-| PKI, certificates & IoT device identity | 25 | 1 |
+| PKI, certificates & IoT device identity | 26 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
 | Deployment & platform (Kubernetes) | 27 | 5 |
 | Client SDKs & admin UI integration surface | 28 | 3 |

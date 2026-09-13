@@ -954,6 +954,61 @@ one wave.
 
 ### C-3 — contract 1.45, PKI guide, website, threat model (Sonnet 5)
 
+> **EXECUTED — C-3, 2026-09-13** (Sonnet 5 subagent, briefed on the committed
+> code and on the EXECUTED blocks above rather than on the plan's draft — so its
+> PKI-guide copy names all three refused extension requests and the Vault
+> reasoning behind them, not the SANs-only rule the plan drafted).
+>
+> **Contract 1.45.** §27.1's `certificates` row 4 → 5 ops with `sign_csr` in
+> place, and the preamble's "the server mints key material" sentence gained its
+> counterpart; §27.5 states that `sign_csr`'s response carries no sensitive
+> field and that an SDK MUST NOT reuse a `GeneratedCertificate`-shaped model for
+> it; one Breaking Changes Log entry, **non-breaking / additive**, listing the
+> three additions and stating that no existing name changes meaning. The §5.2,
+> §24 and §25 text written during M-2 and M-3 was left untouched, as briefed.
+>
+> **One thing the agent got half-right, and the orchestrator finished.** The
+> version line gained its dated clause in the established style — correctly —
+> but its *opening* still read `Contract version: 1.44`. Every prior bump moved
+> both: the opening number tracks the latest clause, and at 1.44 the two agreed.
+> An SDK reading the version to decide what it may implement would have been
+> told 1.44 by a document whose body specifies 1.45. Bumped to **1.45**; the
+> lesson is that "append a clause in the existing style" and "bump the version"
+> are two edits, and the file makes them look like one.
+>
+> **`docs/pki/README.md`** gained "Or bring a CSR" under "Issue a leaf
+> certificate" — possession proved, subject kept, the three refused extension
+> requests with the Vault `sign-verbatim` reason, the key policy, no key in the
+> response, the custody note — and a `curl` twin of the walkthrough. The "What
+> `vault_pki` does not remove" paragraph now says leaf keys are AXIAM's *unless
+> the caller brings a CSR*.
+>
+> **Website.** `operate.ts` gained the leaf-CSR paragraph and endpoint row;
+> `authentication.ts`'s three-outcome sentence gained the passkey clause and the
+> MFA page describes the chooser. `apiIndex.ts` was **regenerated** rather than
+> hand-edited, which turned up staleness M-3 and C-1 had left in it
+> (219 operations / 153 paths → 222 / 156) — worth recording, because nothing
+> in this plan said to run that generator and nothing would have caught it.
+> `docSectionsAreComplete()` is unaffected: no slug or section moved.
+>
+> **Threat model 2.15.0.** Every count reconciled by counting the model
+> programmatically, and each figure independently recomputed by the orchestrator
+> before the commit — all nine agree: header 266 → **269** threats, mitigated
+> 253 → **256**, open **13** unchanged; §6's sentence follows; Elevation of
+> privilege 48 → **51** (all three new threats are E); High 122 → **125** total
+> with open unchanged at 8 (all three are High); Authentication & session
+> management 33 → **35** (T-267, T-269) and PKI, certificates & IoT device
+> identity 25 → **26** (T-268). `gen-threat-model.mjs` printed
+> `9 diagrams, 269 threats (256 mitigated, 13 open)` — matching — and its
+> generated output was reverted, as §7 prescribes and as the 2026-09-12 pass
+> did.
+>
+> **`check-website-links.py` reports 23 of 55 external links failing.** All are
+> pre-existing SDK-repo fetches (coveralls.io, javadoc.io, docs.rs,
+> `ilpanich.github.io/*-sdk`) that this sandbox's egress proxy refuses; no
+> relative link and no on-repo link fails, and none of them is a file this plan
+> touched. Recorded rather than chased.
+
 Runs after M-3 and C-1 have merged; F-1 re-vendors what this produces.
 
 1. **`sdks/CONTRACT.md`** — one version bump, **1.45**, additive:

@@ -103,7 +103,7 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "`login` has **three** outcomes, not two: authenticated, MFA required, and MFA *setup* required — the last on a tenant that enforces MFA for an account that has none. It comes back as a `403` carrying a setup token, and it is recoverable: see [Multi-factor auth](#/docs/mfa) for the branch and what to do with it.",
+        text: "`login` has **three** outcomes, not two: authenticated, MFA required, and MFA *setup* required — the last on a tenant that enforces MFA for an account that has none. It comes back as a `403` carrying a setup token, and it is recoverable — and the setup token now enrols a passkey or a security key as readily as TOTP: see [Multi-factor auth](#/docs/mfa) for the branch and what to do with it.",
       },
       {
         type: "codegroup",
@@ -556,13 +556,17 @@ await client.confirmPasswordReset({
           },
           {
             title: "Enrol with the setup token",
-            body: "`POST /api/v1/auth/mfa/setup/enroll`. The setup token *is* the credential — there is no session to authenticate with yet.",
+            body: "`POST /api/v1/auth/mfa/setup/enroll` for TOTP, or `POST /api/v1/auth/webauthn/setup/register/start` to enrol a passkey or a security key instead — the setup token *is* the credential on both, and there is no session to authenticate with yet. Present the choice: a device that already offers a platform authenticator has no reason to be steered at a QR code.",
           },
           {
             title: "Confirm, and the login completes",
-            body: "`POST /api/v1/auth/mfa/setup/confirm` returns the normal login success, cookies and all. Nothing needs re-submitting a password.",
+            body: "`POST /api/v1/auth/mfa/setup/confirm` (TOTP) or `POST /api/v1/auth/webauthn/setup/register/finish` (passkey/security key) returns the normal login success, cookies and all. Nothing needs re-submitting a password.",
           },
         ],
+      },
+      {
+        type: "note",
+        text: "The two ceremonies enrol the account's **first** factor and nothing about the ceremony itself changes: the same attestation and user-verification policy the tenant already applies to a voluntary passkey enrolment governs a forced one, and an account that already has a factor gets the same refusal `mfa/setup/enroll` gives — the setup token adds a first factor, never a second.",
       },
       {
         type: "codegroup",
@@ -622,6 +626,8 @@ elif result.mfa_setup_required:
           { method: "POST", path: "/api/v1/auth/mfa/confirm", summary: "Arm the factor with a generated code. **Requires a session.**" },
           { method: "POST", path: "/api/v1/auth/mfa/setup/enroll", summary: "Begin forced enrolment, authenticated by the login's setup token.", public: true },
           { method: "POST", path: "/api/v1/auth/mfa/setup/confirm", summary: "Arm it and complete the interrupted login.", public: true },
+          { method: "POST", path: "/api/v1/auth/webauthn/setup/register/start", summary: "Begin forced enrolment of a passkey or security key, authenticated by the setup token.", public: true },
+          { method: "POST", path: "/api/v1/auth/webauthn/setup/register/finish", summary: "Complete it and the interrupted login.", public: true },
           { method: "POST", path: "/api/v1/auth/mfa/verify", summary: "Answer an MFA challenge during login.", public: true },
           { method: "GET", path: "/api/v1/users/{user_id}/mfa-methods", summary: "List a user's enrolled factors." },
           { method: "DELETE", path: "/api/v1/users/{user_id}/mfa-methods/{method_id}", summary: "Remove one factor." },

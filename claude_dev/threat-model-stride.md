@@ -473,7 +473,7 @@ A code observed by a proxy or shoulder-surfer stays valid for the remainder of i
 
 MFA enrolment reset must exist for lost devices, but an attacker who reaches an admin account can use it to strip the second factor from any user.
 
-> Only org/tenant admins can reset MFA state; the reset is audited and raises an admin notification. Enrolment must be redone on next login before any resource is reachable.
+> Only org/tenant admins can reset MFA state; the reset is audited and raises an admin notification. Enrolment must be redone on next login before any resource is reachable. **Amended 2026-09-13 (M-1):** the reset now evicts **every** factor — the WebAuthn credentials as well as the TOTP secret — in the same call that clears `mfa_enabled` and revokes the sessions (`MfaMethodService::reset_mfa`, which is where it moved to so that it could). Until then it cleared the challenge and not the factor: the credential rows survived, the forced TOTP setup at the next login turned `mfa_enabled` back on, and `available_method_types` offered `webauthn` again off a count that had never reached zero — so an authenticator an administrator reset the account *because of* became a live second factor once more, with nobody having re-registered it. Covered by `reset_mfa_then_totp_setup_does_not_resurrect_the_old_passkey`.
 
 **T-35 — Lockout weaponised to deny service to a known user**  
 `Lockout & rate limiting` (Process) · Denial of service · Medium · Mitigated

@@ -227,3 +227,91 @@ async fn mfa_methods_require_authentication() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
 }
+
+// ---------------------------------------------------------------------------
+// M-1 — the administrative reset evicts WebAuthn credentials too (T-34)
+// ---------------------------------------------------------------------------
+
+#[actix_web::test]
+async fn reset_mfa_removes_passkeys_as_well_as_totp() {
+    use axiam_core::models::user::UpdateUser;
+    use axiam_core::models::webauthn_credential::{
+        CreateWebauthnCredential, WebauthnCredentialType,
+    };
+    use axiam_core::repository::WebauthnCredentialRepository;
+    use axiam_db::SurrealWebauthnCredentialRepository;
+
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+
+    // A user with both kinds of factor: a confirmed TOTP secret and a passkey.
+    let user_repo = SurrealUserRepository::new(db.clone());
+    user_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                mfa_enabled: Some(true),
+                mfa_secret: Some(Some("encrypted-secret-placeholder".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let cred_repo = SurrealWebauthnCredentialRepository::new(db.clone());
+    cred_repo
+        .create(CreateWebauthnCredential {
+            tenant_id,
+            user_id,
+            credential_id: "cred-suspect".into(),
+            name: "Suspected authenticator".into(),
+            credential_type: WebauthnCredentialType::Passkey,
+            passkey_json: r#"{"dummy":"passkey"}"#.into(),
+            aaguid: None,
+            attestation_format: None,
+            attested: false,
+            authenticator_name: None,
+        })
+        .await
+        .unwrap();
+
+    let app = test_app!(db, auth);
+
+    // Both factors are listed before the reset.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/users/{user_id}/mfa-methods"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let body: Value = test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(body.as_array().unwrap().len(), 2);
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/users/{user_id}/reset-mfa"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    // The admin UI says the reset "removes ALL MFA methods". Through the wire,
+    // it now does — before M-1 the passkey was still here.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/users/{user_id}/mfa-methods"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let body: Value = test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(
+        body.as_array().unwrap().len(),
+        0,
+        "every factor must be gone after an administrative reset, got {body}"
+    );
+    assert_eq!(
+        cred_repo.count_by_user(tenant_id, user_id).await.unwrap(),
+        0
+    );
+}

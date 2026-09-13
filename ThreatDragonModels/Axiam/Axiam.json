@@ -2405,7 +2405,7 @@
                   "severity": "High",
                   "type": "Elevation of privilege",
                   "description": "MFA enrolment reset must exist for lost devices, but an attacker who reaches an admin account can use it to strip the second factor from any user.",
-                  "mitigation": "Only org/tenant admins can reset MFA state; the reset is audited and raises an admin notification. Enrolment must be redone on next login before any resource is reachable.",
+                  "mitigation": "Only org/tenant admins can reset MFA state; the reset is audited and raises an admin notification. Enrolment must be redone on next login before any resource is reachable. Amended 2026-09-13 (M-1): the reset evicts every factor \u2014 the WebAuthn credentials as well as the TOTP secret \u2014 in the same call that clears mfa_enabled and revokes the sessions. Until then it cleared the challenge and not the factor: the credential rows survived, the forced TOTP setup at the next login turned mfa_enabled back on, and available_method_types offered webauthn again off a count that had never reached zero.",
                   "modelType": "STRIDE",
                   "number": 34
                 },

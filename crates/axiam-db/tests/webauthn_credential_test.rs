@@ -291,3 +291,99 @@ async fn get_by_id_wrong_tenant_returns_not_found() {
         "credential from tenant_a must not be visible to tenant_b"
     );
 }
+
+// -------------------------------------------------------------------
+// `delete_by_user` — the eviction half of an administrative MFA reset
+// (T-34, M-1)
+// -------------------------------------------------------------------
+
+#[tokio::test]
+async fn delete_by_user_removes_every_credential_and_reports_how_many() {
+    let db = setup().await;
+    let repo = SurrealWebauthnCredentialRepository::new(db);
+
+    let tenant_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+
+    for (name, kind) in [
+        ("Phone passkey", WebauthnCredentialType::Passkey),
+        ("YubiKey 5", WebauthnCredentialType::SecurityKey),
+        ("Laptop passkey", WebauthnCredentialType::Passkey),
+    ] {
+        repo.create(make_input(tenant_id, user_id, name, kind))
+            .await
+            .unwrap();
+    }
+    assert_eq!(repo.count_by_user(tenant_id, user_id).await.unwrap(), 3);
+
+    let evicted = repo.delete_by_user(tenant_id, user_id).await.unwrap();
+
+    // The count is of rows that existed and went, not of a `SELECT` taken
+    // before the `DELETE` — that is what `RETURN BEFORE` is for.
+    assert_eq!(evicted, 3, "every credential should be reported as evicted");
+    assert_eq!(repo.count_by_user(tenant_id, user_id).await.unwrap(), 0);
+    assert!(
+        repo.list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn delete_by_user_leaves_other_users_and_other_tenants_alone() {
+    let db = setup().await;
+    let repo = SurrealWebauthnCredentialRepository::new(db);
+
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    let alice = Uuid::new_v4();
+    let bob = Uuid::new_v4();
+
+    repo.create(make_input(
+        tenant_a,
+        alice,
+        "alice key",
+        WebauthnCredentialType::Passkey,
+    ))
+    .await
+    .unwrap();
+    repo.create(make_input(
+        tenant_a,
+        bob,
+        "bob key",
+        WebauthnCredentialType::Passkey,
+    ))
+    .await
+    .unwrap();
+    // Same user id in a different tenant: the cross-tenant case, which a
+    // filter on `user_id` alone would wrongly sweep up (T-98).
+    repo.create(make_input(
+        tenant_b,
+        alice,
+        "alice key in tenant B",
+        WebauthnCredentialType::Passkey,
+    ))
+    .await
+    .unwrap();
+
+    let evicted = repo.delete_by_user(tenant_a, alice).await.unwrap();
+
+    assert_eq!(evicted, 1);
+    assert_eq!(repo.count_by_user(tenant_a, alice).await.unwrap(), 0);
+    assert_eq!(repo.count_by_user(tenant_a, bob).await.unwrap(), 1);
+    assert_eq!(repo.count_by_user(tenant_b, alice).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn delete_by_user_on_a_user_with_no_credentials_reports_zero() {
+    let db = setup().await;
+    let repo = SurrealWebauthnCredentialRepository::new(db);
+
+    // The TOTP-only reset: nothing to evict, and that is not an error.
+    let evicted = repo
+        .delete_by_user(Uuid::new_v4(), Uuid::new_v4())
+        .await
+        .unwrap();
+    assert_eq!(evicted, 0);
+}

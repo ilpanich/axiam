@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- An administrative MFA reset now removes a user's passkeys and security keys,
+  not only their TOTP secret (M-1, T-34). The reset previously cleared
+  `mfa_enabled` and the secret and left every registered WebAuthn credential in
+  place, so the authenticator an administrator reset the account over came back
+  as a live second factor at the next login — the forced TOTP setup turned the
+  flag on again and the credential count had never been zero. Operators who
+  reset an account because a key was lost or suspected compromised should know
+  that, before this release, the key still worked.
+
 ## [1.0.0-beta14] - 2026-09-13
 
 ### Added

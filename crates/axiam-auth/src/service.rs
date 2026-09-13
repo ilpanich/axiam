@@ -1270,27 +1270,13 @@ impl<
         .await
     }
 
-    /// Reset MFA for a user — disables MFA, clears the secret, and
-    /// revokes all existing sessions.
-    pub async fn reset_mfa(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
-        self.user_repo
-            .update(
-                tenant_id,
-                user_id,
-                UpdateUser {
-                    mfa_enabled: Some(false),
-                    mfa_secret: Some(None),
-                    ..Default::default()
-                },
-            )
-            .await?;
-
-        self.session_repo
-            .invalidate_user_sessions(tenant_id, user_id)
-            .await?;
-
-        Ok(())
-    }
+    // `reset_mfa` used to live here. It moved to
+    // [`crate::mfa_methods::MfaMethodService::reset_mfa`], which holds the
+    // WebAuthn credential repository this service does not: a reset that
+    // cleared the TOTP secret and left every registered passkey in place was
+    // T-34's residual, and from here there was nothing to clear them with.
+    // See that method for why the eviction belongs in the same call as the
+    // flag and the session revocation rather than beside it.
 
     // -------------------------------------------------------------------
     // Private helpers

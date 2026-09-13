@@ -8,23 +8,41 @@ use axiam_core::error::AxiamResult;
 use axiam_core::models::mfa_method::{MfaMethod, MfaMethodType};
 use axiam_core::models::user::UpdateUser;
 use axiam_core::models::webauthn_credential::WebauthnCredentialType;
-use axiam_core::repository::{UserRepository, WebauthnCredentialRepository};
+use axiam_core::repository::{SessionRepository, UserRepository, WebauthnCredentialRepository};
 use uuid::Uuid;
 
 use crate::error::AuthError;
 
 /// Service for listing and managing a user's MFA methods.
+///
+/// `S` is the session repository, held for [`Self::reset_mfa`] alone. The
+/// reset used to live on `AuthService`, which holds sessions but not
+/// credentials, and that split was the defect T-34's residual describes: the
+/// reset cleared the TOTP secret and revoked the sessions and left every
+/// registered passkey in place, because from where it stood there was nothing
+/// to clear them with. Putting it here — where both halves of "this account
+/// has a second factor" already live, and where `delete_method` already owns
+/// "the last method goes" — makes the eviction and the revocation one call
+/// that no caller can half-perform.
 #[derive(Clone)]
-pub struct MfaMethodService<U: UserRepository, W: WebauthnCredentialRepository> {
+pub struct MfaMethodService<
+    U: UserRepository,
+    W: WebauthnCredentialRepository,
+    S: SessionRepository,
+> {
     user_repo: U,
     credential_repo: W,
+    session_repo: S,
 }
 
-impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> {
-    pub fn new(user_repo: U, credential_repo: W) -> Self {
+impl<U: UserRepository, W: WebauthnCredentialRepository, S: SessionRepository>
+    MfaMethodService<U, W, S>
+{
+    pub fn new(user_repo: U, credential_repo: W, session_repo: S) -> Self {
         Self {
             user_repo,
             credential_repo,
+            session_repo,
         }
     }
 
@@ -253,5 +271,56 @@ impl<U: UserRepository, W: WebauthnCredentialRepository> MfaMethodService<U, W> 
         }
 
         Ok(())
+    }
+
+    /// Reset every MFA factor a user holds and revoke their sessions — the
+    /// administrative unlock behind `POST /api/v1/users/{id}/reset-mfa`.
+    ///
+    /// Returns how many WebAuthn credentials were evicted, which is the part a
+    /// caller could not otherwise observe and the part the audit record wants.
+    ///
+    /// # Why the credentials go, and not just the flag
+    ///
+    /// Clearing `mfa_enabled` and the TOTP secret does not remove a factor; it
+    /// removes the *challenge*. The credential rows survive, and every reader
+    /// downstream keys on them rather than on the flag: at the next login the
+    /// gate sees `mfa_enabled == false` and hands out a setup token, the user
+    /// enrols TOTP, `enable_after_enrollment` flips the flag back on, and
+    /// [`Self::available_method_types`] lists `webauthn` again because
+    /// `count_by_user` was never zero. A passkey an administrator reset the
+    /// account *because of* is a live second factor once more, with nobody
+    /// having re-registered it. That is T-34's residual, and the eviction is
+    /// what closes it.
+    ///
+    /// # Order
+    ///
+    /// Credentials first, then the user row, then the sessions. Each step
+    /// narrows what an attacker holding the old state can do, so a failure
+    /// part-way leaves the account *more* locked down rather than less:
+    /// credentials gone but sessions alive is a user who must re-enrol;
+    /// sessions gone but credentials alive would be the hole this closes.
+    pub async fn reset_mfa(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
+        let evicted = self
+            .credential_repo
+            .delete_by_user(tenant_id, user_id)
+            .await?;
+
+        self.user_repo
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    mfa_enabled: Some(false),
+                    mfa_secret: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        self.session_repo
+            .invalidate_user_sessions(tenant_id, user_id)
+            .await?;
+
+        Ok(evicted)
     }
 }

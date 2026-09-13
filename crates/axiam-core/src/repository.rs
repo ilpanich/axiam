@@ -2811,6 +2811,35 @@ pub trait WebauthnCredentialRepository: Send + Sync {
     /// Delete a WebAuthn credential.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 
+    /// Delete **every** WebAuthn credential a user holds, returning how many
+    /// rows went.
+    ///
+    /// The eviction half of an administrative MFA reset (T-34). Removing the
+    /// TOTP secret and clearing `mfa_enabled` leaves a registered passkey or
+    /// security key a valid factor the moment the account re-enables MFA,
+    /// because every reader downstream — `MfaMethodService::list_methods`,
+    /// `available_method_types`, the WebAuthn authentication path — keys on
+    /// the credential rows and not on the flag. An administrator who resets a
+    /// user because an authenticator is suspected compromised has to see it
+    /// gone, which is what the admin UI already promises.
+    ///
+    /// Distinct from calling [`Self::delete`] per credential because the reset
+    /// must not depend on a listing the caller could race, and because the
+    /// count is the evidence the audit record carries.
+    ///
+    /// Required, with no provided default, unlike [`Self::list_by_tenant`]
+    /// above. A default returning zero would compile everywhere and would make
+    /// every test double silently *not* evict: the reset test would assert an
+    /// empty method list against a double that had never been asked to delete
+    /// anything, and pass. For a listing that is a harmless hole; for the
+    /// eviction that closes T-34 it is the whole assertion. Five doubles grew
+    /// four lines each and now each says what it does.
+    fn delete_by_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
     /// Count how many WebAuthn credentials a user has registered.
     fn count_by_user(
         &self,
@@ -3336,6 +3365,9 @@ mod tests {
                 unreachable!("not exercised by this test")
             }
             async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {
+                unreachable!("not exercised by this test")
+            }
+            async fn delete_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {
                 unreachable!("not exercised by this test")
             }
             // list_by_tenant deliberately NOT overridden — the default is

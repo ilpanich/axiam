@@ -101,6 +101,9 @@ impl WebauthnCredentialRepository for MockCredRepo {
     async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {
         Ok(self.creds.len() as u64)
     }
+    async fn delete_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {
+        unimplemented!("this double is not exercised by the reset path")
+    }
 }
 
 fn empty_repo() -> MockCredRepo {

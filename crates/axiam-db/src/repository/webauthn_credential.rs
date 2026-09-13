@@ -294,6 +294,33 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
         Ok(())
     }
 
+    /// Evict every credential a user holds — the WebAuthn half of an
+    /// administrative MFA reset (T-34).
+    ///
+    /// `RETURN BEFORE` makes the statement return the rows as they were, so
+    /// the count is of rows that actually existed and were removed, rather
+    /// than of rows a separate `SELECT` saw before the `DELETE` ran. A
+    /// count-then-delete pair would report a number the delete never touched
+    /// if a registration landed in between.
+    async fn delete_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "DELETE webauthn_credential \
+                 WHERE tenant_id = $tenant_id \
+                 AND user_id = $user_id \
+                 RETURN BEFORE",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<WebauthnCredentialRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
+    }
+
     async fn count_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
         let mut result = self
             .db

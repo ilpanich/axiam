@@ -214,6 +214,58 @@ per `CLAUDE.md` after any `target/` wipe.
 
 ### M-1 — `reset_mfa` evicts WebAuthn credentials (Sonnet 5)
 
+> **EXECUTED — M-1, 2026-09-13.** `WebauthnCredentialRepository::delete_by_user`
+> is the new eviction, and it is a **required** trait method rather than one
+> with a provided default. The plan did not say which, and `list_by_tenant`
+> right above it is the precedent for a default — but a default returning `0`
+> compiles everywhere and makes every test double silently *not* evict, so
+> `reset_mfa_removes_passkeys_as_well_as_totp` would have asserted an empty
+> method list against a double that was never asked to delete anything, and
+> passed. For a listing that is a harmless hole; for the eviction that closes
+> T-34 it is the whole assertion. Five doubles grew four lines each. The
+> SurrealDB implementation deletes with `RETURN BEFORE` and counts the returned
+> rows, so the number reported is of rows that existed and went rather than of
+> a `SELECT` a concurrent registration could have raced.
+>
+> The reset itself **moved** from `AuthService::reset_mfa` to
+> `MfaMethodService::reset_mfa`, which the plan named as the fallback and which
+> turned out to be the only honest option: `AuthService` holds no credential
+> repository, and splitting the reset into "clear the flag here, evict there"
+> would have left two calls a handler could half-perform. `MfaMethodService`
+> gained a third type parameter, the session repository, so the eviction, the
+> flag and the session revocation are one call in the order
+> credentials → user row → sessions — each step narrowing what the old state
+> is worth, so a failure part-way leaves the account *more* locked down. It
+> returns the eviction count. Four construction sites changed; the handler's
+> `state.auth_service` became `state.mfa_method_service` and nothing else in
+> `axiam-api-rest` moved, as the plan asked.
+>
+> Tests, all green: three in `crates/axiam-db/tests/webauthn_credential_test.rs`
+> (every credential goes and the count is right; another user's and another
+> tenant's survive — the `user_id`-only filter that T-98 would have caught; a
+> user with no credentials reports zero rather than erroring); four in
+> `crates/axiam-auth/tests/mfa_methods_test.rs`, of which
+> `reset_mfa_then_totp_setup_does_not_resurrect_the_old_passkey` is R-A end to
+> end — reset, re-enrol TOTP, and assert `available_method_types` is `["totp"]`
+> and not `["totp", "webauthn"]`; and one at the HTTP layer in
+> `crates/axiam-api-rest/tests/mfa_methods_test.rs` asserting
+> `GET /users/{id}/mfa-methods` returns an empty array after the reset, which
+> is the sentence the admin UI shows the operator.
+>
+> T-34's mitigation carries the amendment in both
+> `claude_dev/threat-model-stride.md` and `ThreatDragonModels/Axiam/Axiam.json`;
+> status stays Mitigated and no count moves. `website/src/docs/authentication.ts`
+> does not describe the reset, so nothing there changed (plan step 4's
+> "otherwise none").
+>
+> One thing the plan did not anticipate: the sandbox had no `protoc`, so
+> `cargo build --workspace` failed in `axiam-api-grpc`'s build script before any
+> of this could be checked workspace-wide. `apt-get update` then
+> `apt-get install protobuf-compiler libxml2-dev libxmlsec1-dev` fixes it and is
+> worth doing at the start of a session rather than at the first workspace
+> build — `CLAUDE.md`'s hygiene section mentions the swagger-ui zip and the
+> libxml2 workaround but not this one.
+
 **Closes** R-A. **Threat:** T-34's mitigation text gains the sentence.
 
 1. `axiam-core/src/repository.rs` — `WebauthnCredentialRepository::delete_by_user(tenant_id, user_id) -> u64`.

@@ -1166,9 +1166,10 @@ pub async fn me<C: Connection + Clone>(
 
 /// `POST /api/v1/users/{user_id}/reset-mfa`
 ///
-/// Reset MFA for a user — disables MFA, clears the secret, and
-/// revokes all existing sessions. Requires admin access (caller must
-/// be in the same tenant).
+/// Reset MFA for a user — evicts **every** factor: the WebAuthn credentials
+/// as well as the TOTP secret, clears `mfa_enabled`, and revokes all existing
+/// sessions (T-34). Requires admin access (caller must be in the same
+/// tenant), or that the caller is the target.
 #[utoipa::path(
     post,
     path = "/api/v1/users/{user_id}/reset-mfa",
@@ -1197,7 +1198,7 @@ pub async fn reset_mfa<C: Connection + Clone>(
             .await?;
     }
     state
-        .auth_service
+        .mfa_method_service
         .reset_mfa(user_scope_tenant(&caller, target_user_id), target_user_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())

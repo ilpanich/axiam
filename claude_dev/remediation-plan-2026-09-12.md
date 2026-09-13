@@ -1376,7 +1376,8 @@ These bind R-4's check, R-6 and R-8.
 
 ### 13.1 Fan-out record
 
-Filled in as PRs are opened; `—` means not reached this session.
+Filled in as PRs are opened. The first eight landed on 2026-09-12; csharp, php and
+swift followed once the toolchain claims in §13.1 were re-tested.
 
 | SDK | R-4 test | R-6 guard | R-8 alias | PR | CI at session end |
 |---|---|---|---|---|---|
@@ -1385,31 +1386,31 @@ Filled in as PRs are opened; `—` means not reached this session.
 | python | yes | yes | yes | [#80](https://github.com/ilpanich/axiam-python-sdk/pull/80) | opened |
 | java | yes | yes | yes | [#92](https://github.com/ilpanich/axiam-java-sdk/pull/92) | opened |
 | kotlin | yes | yes | yes | [#62](https://github.com/ilpanich/axiam-kotlin-sdk/pull/62) | opened |
-| csharp | — | — | — | — | not reached — see below |
-| php | — | — | — | — | not reached — see below |
+| csharp | yes | yes | yes | [#87](https://github.com/ilpanich/axiam-csharp-sdk/pull/87) | opened |
+| php | yes | yes | yes | [#67](https://github.com/ilpanich/axiam-php-sdk/pull/67) | opened |
 | go | yes | yes | yes | [#77](https://github.com/ilpanich/axiam-go-sdk/pull/77) | opened |
-| swift | — | — | — | — | not reached — see below |
+| swift | yes | yes | yes | [#60](https://github.com/ilpanich/axiam-swift-sdk/pull/60) | opened — **CI-verified only**, no Swift toolchain available locally |
 | c | yes | yes | yes | [#59](https://github.com/ilpanich/axiam-c-sdk/pull/59) | opened |
 | cplusplus | yes | yes | yes | [#60](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/60) | opened |
 
-**Three SDKs were not reached, and the reason is the same in each case: this
-session could not run their test suites, and the fan-out rules require passing
-"that SDK's own §27 drift-check, its contract-conformance suite, its linter and
-its full test suite the way its CI runs them" before a branch is pushed.** Code
-written against a suite nobody ran is exactly the thing §16.7 exists to
-forbid, so nothing was pushed to them rather than something unverified.
+**Three SDKs were not reached in the first pass, and have since been
+completed.** The original record is kept below, corrected, because two of the
+three blockers were overstated and the correction is the useful part.
 
-| SDK | What blocked it |
-|---|---|
-| csharp | No .NET SDK in the image, and the egress proxy denies `builds.dotnet.microsoft.com`, so `dotnet-install.sh` cannot be fetched. `dotnet restore/build/test` are all unavailable. |
-| php | `composer install` cannot fetch the dev dependencies: every dist download resolves to `api.github.com`, which the proxy answers unauthenticated, and `--prefer-source` fails at Composer's own GitHub auth check before any clone. **PHPUnit itself** is among the packages that will not install, so `composer test` and `phpstan` cannot run at all. Disabling `use-github-api` and pointing `COMPOSER_HOME` at a scratch config changed nothing. |
-| swift | No Swift toolchain in the image; `swift` and `swiftc` are both absent. |
+| SDK | First-pass claim | What was actually true |
+|---|---|---|
+| csharp | "No .NET SDK in the image, and the egress proxy denies `builds.dotnet.microsoft.com`, so `dotnet-install.sh` cannot be fetched." | **Wrong, and it cost a whole SDK.** The proxy does deny `dot.net`/`builds.dotnet.microsoft.com`, but that only rules out the install-script route: `dotnet-sdk-8.0` is packaged in Ubuntu's own apt repository, and `api.nuget.org` is reachable. `apt-get install dotnet-sdk-8.0` then `dotnet restore/build/test` all work. The first pass checked one way of obtaining the toolchain and reported the toolchain as unobtainable. |
+| php | "**PHPUnit itself** is among the packages that will not install, so `composer test` and `phpstan` cannot run at all." | **Half right.** `composer install` really does fail: every dist download resolves to an `api.github.com` zipball, which the proxy answers `403`, and `--prefer-source` still dies in Composer's own `AuthHelper` before `installed.json` is written. But `--no-dev --prefer-source` completes and produces a working autoloader, and `phpunit` 9.6.17 — inside the `^9.6` constraint — installs from apt. The unit suite runs: 1361 → 1396 tests with the pre-existing 63 errors / 2 failures unchanged, all of them `google/protobuf` and `symfony/http-foundation`, both `require-dev`. `phpstan` and `php-cs-fixer` genuinely cannot run here; CI runs both. |
+| swift | "No Swift toolchain in the image; `swift` and `swiftc` are both absent." | **Correct.** `download.swift.org` is refused by the proxy and apt's `swift` package is OpenStack Swift, not the language. `swift build`/`swift test` were not run; the §27 drift-check and the §6 TLS-bypass gate were, both clean. This SDK's branch is verified by CI alone, and its commit message says so. |
 
-Each of the three needs the same work the other eight received — R-4's two §16
+The lesson worth keeping: **"the toolchain is unavailable" is a claim about a
+search, not about the environment**, and it is worth one more search before it
+is written down as a blocker. Two of the three rows above were a search that
+stopped early.
+
+All three now carry the same work the other eight received — R-4's two §16
 tests, R-6's `§10.4` poller, R-8's vector C refusal — and their §10.4.1 and
-§21.10 rows stay `—`, which §10.4.1 itself defines as "not a claim either way"
-rather than a decline. That is the honest record: a `declines` row would assert
-a decision nobody made.
+§21.10 rows are filled in.
 
 **One ordering consequence, recorded so it is not discovered as a surprise.**
 §10.4.1 and §21.10 are tables *inside* `CONTRACT.md`, which every SDK vendors

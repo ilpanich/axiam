@@ -1363,9 +1363,9 @@ As §21.9 and §21.10: an unrecorded row is not a supported answer, and
 | go | yes — `RevocationFeed`, attached with `JWKSVerifier.WithRevocationFeed` |
 | java | yes — `RevocationFeed`, passed to the three-argument `JwksVerifier` |
 | kotlin | yes — `RevocationFeed`, attached with `Builder.revocationFeed` |
-| csharp | — |
-| php | — |
-| swift | — |
+| csharp | yes — `RevocationFeed`, passed as `JwksVerifier(revocationFeed:)` |
+| php | yes — `RevocationFeed`, passed as the sixth `JwksVerifier` argument |
+| swift | yes — `RevocationFeed`, enabled with `AxiamConfig.revocationFeedEnabled` |
 | c | yes — `axiam_client_enable_revocation_feed`, off by default |
 | cplusplus | yes — `RevocationFeed`, set as `AuthenticatorOptions::revocation_feed` |
 
@@ -4277,9 +4277,9 @@ the §21 client role has a call to prefer with; check §21.9 before reading a
 | go | yes | yes |
 | java | yes | yes |
 | kotlin | yes | yes |
-| csharp | — | — |
-| php | — | — |
-| swift | — | — |
+| csharp | yes | yes |
+| php | yes | yes |
+| swift | yes | yes |
 | c | yes | yes |
 | cplusplus | yes | yes |
 

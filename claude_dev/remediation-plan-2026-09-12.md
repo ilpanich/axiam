@@ -1385,12 +1385,31 @@ Filled in as PRs are opened; `—` means not reached this session.
 | python | yes | yes | yes | [#80](https://github.com/ilpanich/axiam-python-sdk/pull/80) | opened |
 | java | yes | yes | yes | [#92](https://github.com/ilpanich/axiam-java-sdk/pull/92) | opened |
 | kotlin | yes | yes | yes | [#62](https://github.com/ilpanich/axiam-kotlin-sdk/pull/62) | opened |
-| csharp | — | — | — | — | — |
-| php | — | — | — | — | — |
+| csharp | — | — | — | — | not reached — see below |
+| php | — | — | — | — | not reached — see below |
 | go | yes | yes | yes | [#77](https://github.com/ilpanich/axiam-go-sdk/pull/77) | opened |
-| swift | — | — | — | — | — |
+| swift | — | — | — | — | not reached — see below |
 | c | yes | yes | yes | [#59](https://github.com/ilpanich/axiam-c-sdk/pull/59) | opened |
 | cplusplus | yes | yes | yes | [#60](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/60) | opened |
+
+**Three SDKs were not reached, and the reason is the same in each case: this
+session could not run their test suites, and the fan-out rules require passing
+"that SDK's own §27 drift-check, its contract-conformance suite, its linter and
+its full test suite the way its CI runs them" before a branch is pushed.** Code
+written against a suite nobody ran is exactly the thing §16.7 exists to
+forbid, so nothing was pushed to them rather than something unverified.
+
+| SDK | What blocked it |
+|---|---|
+| csharp | No .NET SDK in the image, and the egress proxy denies `builds.dotnet.microsoft.com`, so `dotnet-install.sh` cannot be fetched. `dotnet restore/build/test` are all unavailable. |
+| php | `composer install` cannot fetch the dev dependencies: every dist download resolves to `api.github.com`, which the proxy answers unauthenticated, and `--prefer-source` fails at Composer's own GitHub auth check before any clone. **PHPUnit itself** is among the packages that will not install, so `composer test` and `phpstan` cannot run at all. Disabling `use-github-api` and pointing `COMPOSER_HOME` at a scratch config changed nothing. |
+| swift | No Swift toolchain in the image; `swift` and `swiftc` are both absent. |
+
+Each of the three needs the same work the other eight received — R-4's two §16
+tests, R-6's `§10.4` poller, R-8's vector C refusal — and their §10.4.1 and
+§21.10 rows stay `—`, which §10.4.1 itself defines as "not a claim either way"
+rather than a decline. That is the honest record: a `declines` row would assert
+a decision nobody made.
 
 **One ordering consequence, recorded so it is not discovered as a surprise.**
 §10.4.1 and §21.10 are tables *inside* `CONTRACT.md`, which every SDK vendors

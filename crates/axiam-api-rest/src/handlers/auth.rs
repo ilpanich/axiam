@@ -1168,8 +1168,14 @@ pub async fn me<C: Connection + Clone>(
 ///
 /// Reset MFA for a user — evicts **every** factor: the WebAuthn credentials
 /// as well as the TOTP secret, clears `mfa_enabled`, and revokes all existing
-/// sessions (T-34). Requires admin access (caller must be in the same
+/// sessions (T-34). Requires `users:admin` (caller must be in the same
 /// tenant), or that the caller is the target.
+///
+/// A caller resetting their **own** account is refused with `403
+/// mfa_enforced` where their tenant's effective policy enforces MFA (D-1,
+/// T-267): the reset is otherwise the one self-service path below the floor
+/// an administrator set. `users:admin` is unaffected — an administrator
+/// resetting a locked-out user is what the endpoint exists for.
 #[utoipa::path(
     post,
     path = "/api/v1/users/{user_id}/reset-mfa",
@@ -1180,7 +1186,13 @@ pub async fn me<C: Connection + Clone>(
     responses(
         (status = 204, description = "MFA reset successful"),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden — cross-tenant access"),
+        (
+            status = 403,
+            description = "Forbidden — cross-tenant access, or `mfa_enforced`: \
+                           the caller is resetting their own account and their \
+                           tenant enforces MFA, so only an administrator may \
+                           reset it"
+        ),
         (status = 404, description = "User not found"),
     ),
     security(("bearer" = []))
@@ -1192,7 +1204,34 @@ pub async fn reset_mfa<C: Connection + Clone>(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let target_user_id = path.into_inner();
-    if !is_own_resource(&caller, target_user_id) {
+    if is_own_resource(&caller, target_user_id) {
+        // D-1 / T-267. The reset is the one self-service path that takes an
+        // account *below* the floor its tenant sets: sessions are revoked, but
+        // the next password login hands out a setup token and whoever holds
+        // the password enrols a factor of their choosing. The per-method
+        // delete already refuses to remove the last factor
+        // (`MfaCannotRemoveLastMethod`); this is the same rule, stated for the
+        // operation that removes all of them at once.
+        //
+        // From the tenant the caller *lives in*, never the one they are acting
+        // on — the same rule `start_registration` explains at
+        // `handlers/webauthn.rs`, and for the same reason: this is a fact
+        // about the caller's own account, and an organization-level principal
+        // with a child tenant selected in the admin UI would otherwise be
+        // measured against a policy that does not bind them.
+        //
+        // The error is propagated rather than defaulted to "not enforced": a
+        // settings read that fails must not be the way the floor is escaped.
+        let scope = caller.principal_tenant_id;
+        let tenant = state.tenant_repo.get_by_id(scope).await?;
+        let settings = state
+            .settings_repo
+            .get_effective_settings(tenant.organization_id, scope)
+            .await?;
+        if settings.mfa.mfa_enforced {
+            return Err(AxiamError::MfaEnforced.into());
+        }
+    } else {
         RequirePermission::new("users:admin", Uuid::nil())
             .check(&caller, authz.get_ref().as_ref())
             .await?;

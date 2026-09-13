@@ -233,6 +233,32 @@ describe("UserDetailPage", () => {
     );
   });
 
+  it("shows the server's sentence when a self-reset is refused under an enforcing tenant", async () => {
+    // T-267 / M-2. The refusal reaches an administrator only on their OWN
+    // account, which is the self-service branch. Before the dialog carried an
+    // error the request failed silently and the button read as dead.
+    routeGet(defaults());
+    apiMock.post.mockRejectedValue({
+      response: {
+        status: 403,
+        data: {
+          error: "mfa_enforced",
+          message:
+            "your tenant requires multi-factor authentication; an administrator must reset it for you",
+        },
+      },
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Reset MFA/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      /an administrator must reset it for you/
+    );
+    // The dialog stays open so the message is readable.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
   it("disables Reset MFA when there are no MFA methods", async () => {
     routeGet(defaults({ [URLS.mfa]: [] }));
     renderPage();

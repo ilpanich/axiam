@@ -23,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2, Trash2, ShieldX, Unlink } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
+import { getApiErrorMessage } from "@/lib/apiError";
 import { SectionCard, ToggleField } from "@/components/shared";
 import { invalidateEntity } from "@/lib/queryInvalidation";
 
@@ -234,6 +235,11 @@ export function UserDetailPage() {
   // ─── Reset MFA state ──────────────────────────────────────────────────────────
   const [resetMfaOpen, setResetMfaOpen] = useState(false);
 
+  // The refusal this can now carry is `403 mfa_enforced` (T-267), which an
+  // administrator sees only when resetting their OWN account under an
+  // enforcing tenant — the self-service branch. The server writes the sentence
+  // that names who can act ("an administrator must reset it for you"), so the
+  // dialog renders it verbatim rather than classifying it here.
   const resetMfaMutation = useMutation({
     mutationFn: () => userService.resetMfa(userId!),
     onSuccess: () => {
@@ -516,6 +522,11 @@ export function UserDetailPage() {
         title="Reset MFA"
         description="This will remove ALL MFA methods and reset the MFA state for this user. They will need to re-enroll. Are you sure?"
         isLoading={resetMfaMutation.isPending}
+        error={
+          resetMfaMutation.isError
+            ? getApiErrorMessage(resetMfaMutation.error)
+            : null
+        }
       />
 
       {/* Assign role dialog */}

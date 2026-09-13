@@ -11,6 +11,15 @@ interface ConfirmDialogProps {
   isLoading?: boolean;
   confirmLabel?: string;
   cancelLabel?: string;
+  /**
+   * A refusal to show in place, instead of closing the dialog.
+   *
+   * Optional, and omitted by every caller whose action cannot be refused for a
+   * reason the user could act on. Where it can — `reset-mfa` under a tenant
+   * that enforces MFA answers `403 mfa_enforced` (T-267) — the dialog stayed
+   * open with no explanation, which reads as a dead button.
+   */
+  error?: string | null;
 }
 
 export function ConfirmDialog({
@@ -22,6 +31,7 @@ export function ConfirmDialog({
   isLoading = false,
   confirmLabel,
   cancelLabel,
+  error,
 }: ConfirmDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -94,6 +104,11 @@ export function ConfirmDialog({
         >
           {description}
         </p>
+        {error ? (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
         <div className="flex justify-end gap-3 pt-4 border-t border-primary/10">
           <button
             ref={cancelRef}

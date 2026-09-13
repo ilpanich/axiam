@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta14",
-    "x-axiam-spec-digest": "sha256:a668acf9bfa2bdd2565ba72fc1befbb7ddc6c06d8e8954239ef7934a5d23f4eb"
+    "x-axiam-spec-digest": "sha256:02fdcfb6e603751f90a77d61bbeb575391b46af49a957903ad2a03357e35588b"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -9991,7 +9991,7 @@
           "users"
         ],
         "summary": "`POST /api/v1/users/{user_id}/reset-mfa`",
-        "description": "Reset MFA for a user — disables MFA, clears the secret, and\nrevokes all existing sessions. Requires admin access (caller must\nbe in the same tenant).",
+        "description": "Reset MFA for a user — evicts **every** factor: the WebAuthn credentials\nas well as the TOTP secret, clears `mfa_enabled`, and revokes all existing\nsessions (T-34). Requires `users:admin` (caller must be in the same\ntenant), or that the caller is the target.\n\nA caller resetting their **own** account is refused with `403\nmfa_enforced` where their tenant's effective policy enforces MFA (D-1,\nT-267): the reset is otherwise the one self-service path below the floor\nan administrator set. `users:admin` is unaffected — an administrator\nresetting a locked-out user is what the endpoint exists for.",
         "operationId": "reset_mfa",
         "parameters": [
           {
@@ -10013,7 +10013,7 @@
             "description": "Unauthorized"
           },
           "403": {
-            "description": "Forbidden — cross-tenant access"
+            "description": "Forbidden — cross-tenant access, or `mfa_enforced`: the caller is resetting their own account and their tenant enforces MFA, so only an administrator may reset it"
           },
           "404": {
             "description": "User not found"

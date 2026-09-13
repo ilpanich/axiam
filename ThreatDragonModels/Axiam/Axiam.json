@@ -2452,6 +2452,17 @@
                   "mitigation": "Fixed in 1.0.0-beta09. No existing credential is weakened: `webauthn-rs` records the policy a credential was registered under and demands user verification at authentication whenever *either* that or the current policy says `required`, so every credential enrolled before this change carries the old hard-coded `required` for the rest of its life and the setting governs new enrolments only. Schema v53 adds the column with `DEFAULT 'preferred'` and backfills rows that predate it. The admin UI sends the field explicitly on the organization settings `PUT`, and it is a required field in the request type on purpose \u2014 a test fixture that has to be updated is exactly the friction that buys. `docs/admin/authenticator-policies.md` states the ordering, the two ceremonies that ignore the setting, and the per-credential rule.",
                   "modelType": "STRIDE",
                   "number": 230
+                },
+                {
+                  "id": "1445452d-6198-5975-ab25-f4029980bd14",
+                  "title": "A user lowers their own account below the tenant's MFA floor through self-service reset",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "POST /api/v1/users/{id}/reset-mfa is self-service as well as administrative: a signed-in user could reset their own MFA with no fresh authentication, no password and no policy check. Under a tenant that enforces MFA this was the one path by which a user took their own account below the floor their administrator set \u2014 sessions are revoked, but the next password login hands out a setup token and whoever holds the password enrols a factor of their choosing. The per-method delete already refused to remove the last factor; the reset, which removes all of them at once, did not.",
+                  "mitigation": "M-2 (2026-09-13): the self-service branch reads the caller's own tenant's effective settings and refuses with 403 and the error code mfa_enforced where MfaPolicy::mfa_enforced is true. Its own code rather than authorization_denied, because the caller holds every permission the action needs and only an administrator can act against the policy; the message names the administrator. The users:admin branch is unaffected \u2014 unlocking a user who lost their only factor is what the endpoint exists for, and an enforcing tenant is where it matters most. Where the tenant does not enforce MFA the self-service reset is still allowed: such a user was free to run at one factor anyway, so refusing them protects nothing (D-1). The settings read is propagated rather than defaulted to not-enforced, so a datastore failure is not the way the floor is escaped.",
+                  "modelType": "STRIDE",
+                  "number": 267
                 }
               ]
             }
@@ -15349,6 +15360,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 266
+    "threatTop": 267
   }
 }

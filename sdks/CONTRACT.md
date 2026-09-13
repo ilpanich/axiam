@@ -502,6 +502,15 @@ Three rules:
    tenant, and an SDK that strips it would break reading another tenant's user in order
    to fix reading its own. Send the header as normal; the server decides.
 
+   **`POST /users/{own id}/reset-mfa` is refused with `403` and the error code
+   `mfa_enforced` where the caller's own tenant enforces MFA** (contract 1.45): the reset
+   removes every factor at once, and an enforcing tenant's floor is not the user's to
+   lower — an administrator resets it for them. The administrative form of the same
+   endpoint, under `users:admin`, is unaffected. An SDK surfaces the code as it surfaces
+   `opaque_required`: it is not an `authorization_denied`, the caller holds every
+   permission the call needs, and a client that renders it as "forbidden" tells the user
+   the wrong thing about their own account.
+
 `permissions` on `/auth/me` is the caller's effective actions **in the scope it is acting
 on**: across a tenant boundary it carries only the caller's global grants, mirroring the
 authorization engine. It is advisory — the server enforces every action independently —

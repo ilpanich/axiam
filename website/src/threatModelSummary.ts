@@ -53,28 +53,28 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.11.0",
+ "version": "2.14.0",
  "diagramCount": 9,
- "total": 236,
- "open": 16,
- "mitigated": 220,
+ "total": 266,
+ "open": 13,
+ "mitigated": 253,
  "areas": [
   {
    "id": 0,
    "title": "System diagram",
-   "total": 29,
+   "total": 31,
    "open": 2
   },
   {
    "id": 1,
    "title": "Authentication & session management",
-   "total": 32,
-   "open": 1
+   "total": 33,
+   "open": 0
   },
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 24,
+   "total": 47,
    "open": 0
   },
   {
@@ -92,79 +92,79 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "total": 24,
+   "total": 25,
    "open": 1
   },
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
    "total": 18,
-   "open": 2
+   "open": 1
   },
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "total": 26,
+   "total": 27,
    "open": 5
   },
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
-   "total": 26,
-   "open": 4
+   "total": 28,
+   "open": 3
   }
  ],
  "categories": [
   {
    "name": "Spoofing",
-   "total": 58,
+   "total": 66,
    "open": 3
   },
   {
    "name": "Tampering",
-   "total": 49,
+   "total": 57,
    "open": 1
   },
   {
    "name": "Repudiation",
-   "total": 5,
+   "total": 6,
    "open": 0
   },
   {
    "name": "Information disclosure",
-   "total": 57,
-   "open": 7
+   "total": 65,
+   "open": 6
   },
   {
    "name": "Denial of service",
-   "total": 22,
+   "total": 24,
    "open": 2
   },
   {
    "name": "Elevation of privilege",
-   "total": 45,
-   "open": 3
+   "total": 48,
+   "open": 1
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 28,
+   "total": 30,
    "open": 1
   },
   {
    "name": "High",
-   "total": 113,
+   "total": 122,
    "open": 8
   },
   {
    "name": "Medium",
-   "total": 88,
-   "open": 6
+   "total": 106,
+   "open": 3
   },
   {
    "name": "Low",
-   "total": 7,
+   "total": 8,
    "open": 1
   }
  ],
@@ -247,7 +247,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "diagramId": 7,
    "area": "Deployment & platform (Kubernetes)",
    "element": "Secrets (Vault / K8s Secrets / ConfigMap)",
-   "residualRisk": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since H-4 it CHECKS rather than merely advises: just vault-status queries sys/capabilities-self and reports the capabilities the token in hand actually holds on AXIAM's KV path, flagging anything beyond read — and a root token as what it is — with --strict to make it a failure in a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists. Since 1.0.0-beta10 the token is no longer strictly read-only: it holds `read` on the startup path and `create`/`update` on `secret/data/axiam/ca-keys/*`, from the one policy file `docker/vault/axiam-policy.hcl`, and `just vault-status` reports missing capabilities as well as excess ones (T-232)."
+   "residualRisk": "Deployment responsibility, stated in docs/deployment/vault.md rather than enforceable in-product: run a production-mode Vault with TLS (the shipped prod stack does — TLS material, init, unseal, then seed), scope AXIAM's token to read-only on its own KV path with the documented policy, keep unseal keys and the root token offline, and enable Vault's audit device so secret reads are attributable. The tooling is shaped to help, and since H-4 it CHECKS rather than merely advises: just vault-status queries sys/capabilities-self and reports the capabilities the token in hand actually holds on AXIAM's KV path, flagging anything beyond read — and a root token as what it is — with --strict to make it a failure in a deployment smoke test. It still reports secret presence only, never a value, and the seeder never rewrites a secret that already exists. Since 1.0.0-beta10 the token is no longer strictly read-only: it holds `read` on the startup path and `create`/`update` on `secret/data/axiam/ca-keys/*`, from the one policy file `docker/vault/axiam-policy.hcl`, and `just vault-status` reports missing capabilities as well as excess ones (T-232). Since 2026-09-12 (R-5) three more secrets sit behind that one credential — the datastore username and password and the broker URL, moved off the container spec to close T-132's follow-up — which widens exactly the concentration this entry records rather than narrowing it, and is the honest trade: a credential in a pod spec is readable by anyone with `get pod`, while a credential behind Vault is readable by whoever holds the token and revocable after the fact. The policy needed no change, because it grants `read` on the path rather than on fields."
   },
   {
    "number": 216,
@@ -270,26 +270,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "residualRisk": "Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is a deployment responsibility and is not shipped with AXIAM."
   },
   {
-   "number": 39,
-   "title": "Access token still valid after entitlement revocation",
-   "category": "Elevation of privilege",
-   "severity": "Medium",
-   "diagramId": 1,
-   "area": "Authentication & session management",
-   "element": "Token service EdDSA JWT + refresh rotation",
-   "residualRisk": "Accepted trade-off for stateless verification. The 15-minute lifetime bounds the window; sessions are invalidated on password change; deployments needing immediate revocation should use the gRPC introspection path rather than local JWT verification."
-  },
-  {
-   "number": 110,
-   "title": "Personal data over-collected into an immutable log",
-   "category": "Information disclosure",
-   "severity": "Medium",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "Audit middleware & service",
-   "residualRisk": "Partially addressed: audit metadata is deliberately minimised, erasure anonymises the subject rather than deleting audit records, and a default retention sweep bounds the log at 730 days — the table's only deletion path, configurable and disableable with 0 (T-119). What remains open is the collection side: nothing prevents a deployment from writing personal data into fields the sweep will hold for the full window, so the retention period must still be set consistent with the deployment's lawful basis."
-  },
-  {
    "number": 123,
    "title": "Final mail hop is not confidential",
    "category": "Information disclosure",
@@ -308,16 +288,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Deployment & platform (Kubernetes)",
    "element": "scheduled backup",
    "residualRisk": "Deployment responsibility: use an encrypted transport and server-side encryption on the backup target."
-  },
-  {
-   "number": 143,
-   "title": "Local JWT verification misses a revoked entitlement",
-   "category": "Elevation of privilege",
-   "severity": "Medium",
-   "diagramId": 8,
-   "area": "Client SDKs & admin UI integration surface",
-   "element": "SDK token verification (JWKS cache, iss/aud)",
-   "residualRisk": "Bounded by the 15-minute access-token lifetime. CONTRACT §10 and §11 expose route-guard and declarative-authorization helpers; integrations needing immediate revocation should call gRPC introspection or CheckAccess rather than verifying locally."
   },
   {
    "number": 161,

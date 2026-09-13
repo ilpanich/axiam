@@ -23,9 +23,9 @@ export interface ApiGroup {
 }
 
 /** The API version the document was exported from. */
-export const API_VERSION = "1.0.0-beta11";
-export const API_OPERATION_COUNT = 213;
-export const API_PATH_COUNT = 148;
+export const API_VERSION = "1.0.0-beta14";
+export const API_OPERATION_COUNT = 219;
+export const API_PATH_COUNT = 153;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -221,7 +221,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "GET",
     "path": "/.well-known/openid-configuration",
-    "summary": "Returns the OpenID Provider metadata per OpenID Connect Discovery 1.0.",
+    "summary": "",
     "public": true
    },
    {
@@ -252,7 +252,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "GET",
     "path": "/oauth2/authorize",
-    "summary": "The user must be authenticated (redirected to login first if not)."
+    "summary": "A request carrying an access token authorizes as its subject."
    },
    {
     "method": "POST",
@@ -285,6 +285,12 @@ export const API_INDEX: ApiGroup[] = [
     "public": true
    },
    {
+    "method": "GET",
+    "path": "/oauth2/revocations",
+    "summary": "Mounted only where `AXIAM__AUTH__REVOCATION_FEED_ENABLED` is set; a deployment that has not opted in does not serve this path at all.",
+    "public": true
+   },
+   {
     "method": "POST",
     "path": "/oauth2/revoke",
     "summary": "Accepts form-encoded body.",
@@ -300,6 +306,11 @@ export const API_INDEX: ApiGroup[] = [
     "method": "GET",
     "path": "/oauth2/userinfo",
     "summary": "Returns claims about the authenticated user."
+   },
+   {
+    "method": "POST",
+    "path": "/oauth2/userinfo",
+    "summary": "# Why a second handler rather than a second extractor The access token may arrive in the `Authorization` header (RFC 6750 §2.1) or — on POST only — in an `access_token` form field (§2.2)."
    }
   ]
  },
@@ -533,6 +544,11 @@ export const API_INDEX: ApiGroup[] = [
     "summary": "Reset MFA for a user — disables MFA, clears the secret, and revokes all existing sessions."
    },
    {
+    "method": "GET",
+    "path": "/api/v1/users/{user_id}/sessions",
+    "summary": "List the sessions a user currently holds, with the T-254 refresh-replay marker on each."
+   },
+   {
     "method": "POST",
     "path": "/api/v1/users/{user_id}/unlock",
     "summary": "Resets a locked user account: clears `locked_until`, resets `failed_login_attempts` to 0, and sets status back to `Active`."
@@ -549,6 +565,21 @@ export const API_INDEX: ApiGroup[] = [
   "label": "Data-subject rights",
   "blurb": "GDPR export (Art. 15) and erasure (Art. 17), acting on the caller's own account.",
   "operations": [
+   {
+    "method": "GET",
+    "path": "/api/v1/account/consents",
+    "summary": "Art. 7(1) says a controller must be able to demonstrate that consent was given; Art. 15(1)(a) says the subject may see what is held about them."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/account/consents/oidc-scopes",
+    "summary": "What the SPA's consent screen calls when the end user says yes."
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/account/consents/oidc-scopes/{client_id}",
+    "summary": "Art. 7(3): as easy to withdraw as to give."
+   },
    {
     "method": "POST",
     "path": "/api/v1/account/delete",

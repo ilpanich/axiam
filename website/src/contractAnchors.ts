@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.39";
+export const CONTRACT_VERSION = "1.44";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -48,6 +48,8 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "8b": "#§8b-amqp-transport-security-a6",
  "10.1": "#§101-minimum-local-verification-set-normative",
  "10.2": "#§102-revocation-posture-differs-per-transport-informative-must-be-documented",
+ "10.4": "#§104-the-revocation-feed-contract-144",
+ "10.4.1": "#§1041-per-sdk-posture",
  "10.3": "#§103-sender-constrained-tokens-over-grpc-contract-117-normative",
  "11.1": "#§111-canonical-helper-vocabulary",
  "11.2": "#§112-semantics-normative-identical-in-all-sdks",
@@ -104,6 +106,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "21.1": "#§211-what-an-sdk-must-do-normative",
  "21.2": "#§212-client-registration-fields-informative",
  "21.3": "#§213-authenticating-as-an-mtls-client-informative",
+ "21.3.1": "#§2131-test-vectors-normative-contract-143",
  "21.4": "#§214-rfc-9207-iss-on-authorization-responses-informative-act-on-it",
  "21.5": "#§215-discovery-additions-informative",
  "21.6": "#§216-what-is-not-in-this-contract-version",
@@ -113,6 +116,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "21.7.3": "#§2173-declining-is-a-supported-answer",
  "21.8": "#§218-private_key_jwt-client-authentication-contract-116-rfc-7523-§22",
  "21.9": "#§219-per-sdk-dpop-posture",
+ "21.10": "#§2110-per-sdk-mtls_endpoint_aliases-posture-contract-143",
  "22.1": "#§221-topology",
  "22.2": "#§222-message-security--§8-in-both-directions",
  "22.3": "#§223-the-event-server--reactor",

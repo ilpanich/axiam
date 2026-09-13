@@ -1382,7 +1382,7 @@ Filled in as PRs are opened; `—` means not reached this session.
 |---|---|---|---|---|---|
 | rust | yes | yes | yes | [#104](https://github.com/ilpanich/axiam-rust-sdk/pull/104) | opened |
 | typescript | yes | yes | yes | [#103](https://github.com/ilpanich/axiam-typescript-sdk/pull/103) | opened |
-| python | — | — | — | — | — |
+| python | yes | yes | yes | [#80](https://github.com/ilpanich/axiam-python-sdk/pull/80) | opened |
 | java | — | — | — | — | — |
 | kotlin | — | — | — | — | — |
 | csharp | — | — | — | — | — |

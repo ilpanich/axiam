@@ -9,7 +9,7 @@
 //! taxonomy into it so handlers can freely `?`-propagate repository and
 //! authorization errors without hand-mapping each call site.
 
-use actix_web::http::StatusCode;
+use actix_web::http::{StatusCode, header};
 use actix_web::{HttpResponse, ResponseError};
 use axiam_api_rest::AxiamApiError;
 use axiam_core::error::AxiamError;
@@ -26,6 +26,14 @@ pub struct ScimError {
     /// (401/403/404/5xx).
     pub scim_type: Option<&'static str>,
     pub detail: String,
+    /// Seconds to put in `Retry-After`, set only on a *retry advisory* — a
+    /// transient failure the caller is being told to repeat (T-262 / R-4).
+    ///
+    /// Its presence does two things in [`ResponseError::error_response`]: it
+    /// emits the header, and it exempts the body from the blanket 5xx
+    /// redaction. Set it only from a fixed, payload-free `detail`; see
+    /// [`ScimError::retry_later`].
+    pub retry_after: Option<u32>,
 }
 
 impl ScimError {
@@ -34,6 +42,7 @@ impl ScimError {
             status,
             scim_type: None,
             detail: detail.into(),
+            retry_after: None,
         }
     }
 
@@ -46,6 +55,24 @@ impl ScimError {
             status,
             scim_type: Some(scim_type),
             detail: detail.into(),
+            retry_after: None,
+        }
+    }
+
+    /// A transient failure the caller is being told to repeat: `503` plus the
+    /// `Retry-After: secs` that makes the status actionable (T-262 / R-4).
+    ///
+    /// Unlike every other 5xx this type produces, the `detail` reaches the
+    /// client verbatim — so it MUST be a fixed sentence carrying no payload.
+    /// Nothing derived from a datastore message, a query, or a caller's input
+    /// may be interpolated into it.
+    pub fn retry_later(detail: impl Into<String>, secs: u32) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            // RFC 7644 §3.12 defines no `scimType` for 503.
+            scim_type: None,
+            detail: detail.into(),
+            retry_after: Some(secs),
         }
     }
 
@@ -112,18 +139,38 @@ impl ResponseError for ScimError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        if self.status.is_server_error() {
-            // SEC-011/CQ-B33 parity with AxiamApiError: never leak internal
-            // detail (DB strings, etc.) in a 5xx body — log it instead.
-            tracing::error!(status = %self.status, detail = %self.detail, "SCIM internal error");
-            return HttpResponse::build(self.status).json(ScimErrorBody {
-                schemas: [SCIM_ERROR_SCHEMA],
-                status: self.status.as_u16().to_string(),
-                scim_type: None,
-                detail: "An internal error occurred".to_string(),
-            });
+        let mut builder = HttpResponse::build(self.status);
+        // T-262 / R-4: the half of the contract that makes a 503 useful.
+        // CONTRACT §16.1 makes every SDK honour `Retry-After` as a **floor**,
+        // so the caller's own backoff still governs the wait. Set from the
+        // same field the redaction carve-out below reads, so the header and
+        // the body it explains cannot drift apart.
+        if let Some(secs) = self.retry_after {
+            builder.insert_header((header::RETRY_AFTER, secs.to_string()));
         }
-        HttpResponse::build(self.status).json(ScimErrorBody {
+
+        if self.status.is_server_error() {
+            if self.retry_after.is_none() {
+                // SEC-011/CQ-B33 parity with AxiamApiError: never leak internal
+                // detail (DB strings, etc.) in a 5xx body — log it instead.
+                tracing::error!(status = %self.status, detail = %self.detail, "SCIM internal error");
+                return builder.json(ScimErrorBody {
+                    schemas: [SCIM_ERROR_SCHEMA],
+                    status: self.status.as_u16().to_string(),
+                    scim_type: None,
+                    detail: "An internal error occurred".to_string(),
+                });
+            }
+            // A retry advisory is the one 5xx whose detail is echoed: it is a
+            // fixed constant (see `retry_later`), and redacting it would turn
+            // "retry this request" into "the server broke" — a dead end for
+            // the provisioning IdP the `Retry-After` above is aimed at. Still
+            // logged, at WARN rather than ERROR: sustained contention is worth
+            // an operator's attention, but it is not a fault.
+            tracing::warn!(status = %self.status, detail = %self.detail, "SCIM transient failure");
+        }
+
+        builder.json(ScimErrorBody {
             schemas: [SCIM_ERROR_SCHEMA],
             status: self.status.as_u16().to_string(),
             scim_type: self.scim_type,
@@ -162,6 +209,18 @@ impl From<AxiamError> for ScimError {
             AxiamError::ServiceUnavailable(msg) => {
                 Self::new(StatusCode::SERVICE_UNAVAILABLE, msg.clone())
             }
+            // T-262 / R-4, completing `3ccef6a30`, which wired this variant
+            // into REST and gRPC but not here. A SCIM caller that lost an
+            // optimistic-concurrency race must be told to repeat the request,
+            // not that the server broke: an IdP reading a 500 marks the sync
+            // failed and re-sends the whole record. `err.to_string()` is safe
+            // to echo because the variant carries no payload — the engine's
+            // own words stay on `DbError::Conflict`, in the log.
+            //
+            // Not a 409/`uniqueness`: RFC 7644 §3.12 reads that as "your
+            // request conflicts with the resource's state", which would have
+            // the client change the request rather than resend it.
+            AxiamError::WriteContention => Self::retry_later(err.to_string(), 1),
             // 5xx-shaped variants: message content is dropped by
             // `error_response`'s server-error branch above regardless of what
             // we put in `detail`, so a plain `to_string()` here is fine.
@@ -182,6 +241,8 @@ impl From<AxiamApiError> for ScimError {
 
 #[cfg(test)]
 mod tests {
+    use actix_web::body::MessageBody;
+
     use super::*;
 
     /// The whole point of this module: a SCIM client must never receive AXIAM's
@@ -247,6 +308,14 @@ mod tests {
                 StatusCode::SERVICE_UNAVAILABLE,
                 None,
             ),
+            // T-262 / R-4: 503, NOT the 500 the catch-all used to give it, and
+            // not the 409 `uniqueness` that would have the client rewrite the
+            // request instead of repeating it.
+            (
+                AxiamError::WriteContention,
+                StatusCode::SERVICE_UNAVAILABLE,
+                None,
+            ),
             // The catch-all: every remaining variant is 5xx-shaped.
             (
                 AxiamError::Database("connection reset".into()),
@@ -301,17 +370,103 @@ mod tests {
         assert!(s.contains("User 42 not found"), "{s}");
     }
 
+    /// Render an error the way Actix will, so a test can read the status, the
+    /// `Retry-After` header and the JSON body a SCIM client actually receives
+    /// — the three things the T-262 contract is written in terms of.
+    fn render(err: ScimError) -> (StatusCode, Option<String>, serde_json::Value) {
+        let response = ResponseError::error_response(&err);
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .map(|v| v.to_str().unwrap().to_owned());
+        let bytes = response.into_body().try_into_bytes().unwrap();
+        (status, retry_after, serde_json::from_slice(&bytes).unwrap())
+    }
+
     /// SEC-011: a 5xx body must not echo the internal detail — the DB string
     /// that produced it goes to the log, not to a SCIM client. This is the
     /// asymmetry worth pinning, since the 4xx branch DOES echo detail.
+    ///
+    /// It is also the **control** for the `WriteContention` carve-out below:
+    /// that carve-out must stay one variant wide, so this asserts the actual
+    /// body, not merely the status.
     #[test]
     fn server_errors_do_not_leak_detail_into_the_body() {
-        let internal: ScimError = AxiamError::Database("host=db-1 user=axiam".into()).into();
-        let resp = ResponseError::error_response(&internal);
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let (status, retry_after, body) =
+            render(AxiamError::Database("host=db-1 user=axiam".into()).into());
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(retry_after, None, "a 500 must not advertise a retry");
+        assert_eq!(body["detail"], "An internal error occurred");
+        let rendered = body.to_string();
+        for leak in ["host=db-1", "user=axiam"] {
+            assert!(
+                !rendered.contains(leak),
+                "{leak:?} must not appear in the response body: {rendered}"
+            );
+        }
 
         let client_error = ScimError::invalid_value("userName is required");
         let resp = ResponseError::error_response(&client_error);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// T-262 / R-4, completing `3ccef6a30`. A SCIM caller that loses an
+    /// optimistic-concurrency race is told to come back, not that the server
+    /// broke — the whole point being that an IdP (Okta, Entra) can tell a
+    /// repeatable request from a failed sync it must re-send in full.
+    #[test]
+    fn a_contended_write_answers_503_with_retry_after() {
+        let (status, retry_after, body) = render(AxiamError::WriteContention.into());
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_ne!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the catch-all must no longer swallow this variant"
+        );
+        assert_eq!(retry_after.as_deref(), Some("1"));
+        assert_eq!(body["status"], "503");
+        // RFC 7644 §3.12 defines no `scimType` for 5xx.
+        assert_eq!(body.get("scimType"), None);
+    }
+
+    /// The half a naïve match arm alone would still get wrong: the blanket 5xx
+    /// redaction would replace the one detail that is worth sending, leaving a
+    /// client with a `Retry-After` and a body saying the server is broken.
+    #[test]
+    fn the_retry_advisory_detail_survives_the_5xx_redaction() {
+        let (_, _, body) = render(AxiamError::WriteContention.into());
+        assert_ne!(
+            body["detail"], "An internal error occurred",
+            "the carve-out is what makes the 503 actionable"
+        );
+        assert_eq!(body["detail"], AxiamError::WriteContention.to_string());
+    }
+
+    /// The variant carries no payload, so the engine's own words cannot reach
+    /// the body by accident — only by somebody giving it a payload "for
+    /// debugging". That is what this pins, now that the detail is echoed.
+    #[test]
+    fn the_retry_advisory_never_carries_the_engines_message() {
+        let (_, _, body) = render(AxiamError::WriteContention.into());
+        let rendered = body.to_string();
+        for leak in ["Transaction", "write conflict", "surreal", "SurrealDB"] {
+            assert!(
+                !rendered.contains(leak),
+                "{leak:?} must not appear in the response body: {rendered}"
+            );
+        }
+    }
+
+    /// The other 503 is a different operational event — the Argon2 gate, not
+    /// the datastore — and it is not a retry advisory: it gains no header and
+    /// keeps the blanket redaction. Same split `axiam-api-rest` draws.
+    #[test]
+    fn the_other_503_is_a_different_answer() {
+        let (status, retry_after, body) =
+            render(AxiamError::ServiceUnavailable("hash gate saturated".into()).into());
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(retry_after, None);
+        assert_eq!(body["detail"], "An internal error occurred");
     }
 }

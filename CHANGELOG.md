@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta14] - 2026-09-13
+
+### Added
+
+- Datastore and broker credentials through the provider (R-5, T-132)
+
+- An optional session-revocation feed (R-6, T-39/T-143) — contract 1.44
+
+- An mTLS alias is used verbatim, and the vectors SDKs pin (R-8, T-266) — contract 1.43
+
+- Bound what the audit log collects, not just how long it keeps it (R-7, T-110)
+
+- A contended write answers 503 with Retry-After (R-4, T-262)
+
+- Say so when the default tenant is not a UUID (R-3, T-244)
+
+- The §5.5 claims request survives a refresh (R-2, T-241)
+
+### Changed
+
+- Fill the §10.4.1 and §21.10 rows for csharp, php and swift
+
+- Record csharp, php and swift as not reached, and why
+
+- Record the kotlin SDK PR in §13.1
+
+- Record kotlin in §10.4.1 and §21.10
+
+- Record the cplusplus SDK PR in §13.1
+
+- Record cplusplus in §10.4.1 and §21.10
+
+- Record the c SDK PR in §13.1
+
+- Record c in §10.4.1 and §21.10
+
+- Record the java SDK PR in §13.1
+
+- Record java in §10.4.1 and §21.10
+
+- Record the go SDK PR in §13.1
+
+- Record go in §10.4.1 and §21.10
+
+- Record the python SDK PR in §13.1
+
+- Record python in §10.4.1 and §21.10
+
+- Record rust and typescript in §10.4.1 and §21.10
+
+- The plan for the 2026-09-12 residual pass (R-1…R-8)
+
+- Close T-254 — the grace window is a fapi2 behaviour, and every replay is marked
+
+- Record the beta12…beta13 wave — T-237…T-266, model 2.12.0
+
+### Fixed
+
+- Mint the two redaction fixtures instead of writing them down
+
+- Vector C tests for a downgrade, not for `https` (R-8, T-266)
+
+- Clause 4 forbids appending and stripping, not displacing (R-8, T-266)
+
+- One declared personal-data inventory, and a gate on the schema (R-1, T-261)
+
+- Confine the refresh-rotation grace to fapi2, and mark every replay (T-254)
+
 ### Security
 
 - **Datastore and broker credentials come from the secret provider** (T-132)

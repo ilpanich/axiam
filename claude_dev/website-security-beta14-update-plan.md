@@ -1,5 +1,90 @@
 # Website — the 1.0.0-beta14 security and docs catch-up pass
 
+> **EXECUTED 2026-09-13, at `1.0.0-beta14`.** Waves 0–4 were worked in order,
+> on `claude/inspiring-mayer-ydfk7g`, in three commits. The website now renders
+> the model it is generated from: **266 threats, 253 mitigated / 13 open**,
+> model 2.14.0. `SECURITY_VERIFIED_RELEASE` is `1.0.0-beta14` / 2026-09-13 and
+> moved in the same commit as the Security prose and the generated files;
+> `DOCS_VERIFIED_RELEASE` is `1.0.0-beta14`, which was earned rather than
+> assumed — see Wave 4. What landed:
+>
+> - **Wave 0.** All three generators printed exactly the predicted lines:
+>   `threatModel.ts: 9 diagrams, 266 threats (253 mitigated, 13 open)`,
+>   `apiIndex.ts: 219 operations across 153 paths, 11 domains`,
+>   `contractAnchors.ts: 167 sections at contract 1.44`. The generated summary
+>   matches Appendix A row for row — the nine areas, the six STRIDE categories,
+>   the four severities, and the thirteen open items in that order — and the
+>   open register loses T-39, T-110 and T-143 against what the site rendered.
+>   T-39 is on diagram 1 and T-143 on diagram 8, both Mitigated. The OAuth2
+>   diagram gained the `Resource-endpoint token validation (cnf, DPoP jti, sid)`
+>   process and its two flows; no coordinate needed adjusting and no generated
+>   file was hand-edited. Re-running all three at the end produced an empty diff.
+> - **Wave 1.** `security.ts` mirrored section by section against
+>   [`threat-modeling-and-security.md`](threat-modeling-and-security.md) — the
+>   beta13 plan's §5 checklist under this plan's §5 overrides. The hedges are
+>   untouched: "no open Critical or High finding *in AXIAM's own request path*"
+>   is now the source's own stronger, still-scoped "no open finding at all";
+>   the conformance result reads "165 modules with zero `FAILED` … a self-run
+>   against a working-tree build, not a certification"; and every sentence about
+>   the revocation feed says it is a narrowing and not a control. The register
+>   stays generated, the shared-responsibility section is intact, and the three
+>   bullets whose bold markers deliberately differ were left alone. One
+>   *fourth* such bullet was created for the same documented reason — *Audit
+>   what your ingress logs* encloses `client_secret_basic` in the source's bold
+>   span, which the inline renderer would leave bold to the end of the
+>   sentence — so the marker moved and the claim did not. No sentence was added
+>   that the source document does not make.
+> - **Wave 2.** Every row of the beta13 plan's §6 and of this plan's §6, on
+>   nineteen pages. The PAR correction landed in all three places it was wrong
+>   (the two-parameter list, the `require_par` sentence on `fapi2`, and the
+>   `fapi2` paragraph on `par`): inline parameters beside a `request_uri` are
+>   **ignored**, not refused, and the security argument is kept. One §6 source
+>   was wrong in the plan rather than in the repository: the `errors` row names
+>   `docs/deployment/README.md` *Errors*, but `write_contention` is documented
+>   in `docs/api/README.md`, which is what the page was written from. The
+>   `configuration` rows the config-key-coverage gate had already added were
+>   verified against `docs/deployment/README.md` rather than rewritten.
+> - **Wave 3.** One new post, dated 13 September 2026, tag `Release`, covering
+>   beta12 → beta14 as one story — the Basic OP waves, the conformance runs and
+>   what they found ([T-246](#/security/diagram/2/T-246),
+>   [T-247](#/security/diagram/2/T-247)), the residual pass, the SDK fan-out
+>   ([T-39](#/security/diagram/1/T-39), [T-143](#/security/diagram/8/T-143))
+>   with its honest residual, and the model. Every anchor was checked against
+>   the generated model rather than typed from Appendix A. "AXIAM reaches beta"
+>   and its 5 September addendum are untouched. Phase 20 stays `ongoing` with an
+>   extended `focus`; nothing closed, no phase added.
+> - **Wave 4.** The full sweep of all 30 stamped pages, so the stamp is a
+>   statement about verification. It found three real errors, which is why the
+>   constant moved: `AXIAM__SERVER__TLS__CLIENT_AUTH` was documented as three
+>   values on both `service-accounts` and `pki`, missing `optional_self_signed`;
+>   and the `service-accounts` client-authentication table listed four methods,
+>   omitting `client_secret_basic`. Four narrower corrections came with it — the
+>   `GET /oauth2/userinfo` entry on `organization-scope`, the tutorial's
+>   revocation-reach paragraph, the `secrets` page's "ten secrets" framing, and
+>   the `configuration` page's provider field list, none of which mentioned the
+>   three provider-supplied credentials.
+>
+> **Verified** with §9: the generators are idempotent against the committed
+> files; `npm run build` (`tsc -b && vite build`) and `npm run lint` (oxlint)
+> are clean; `docSectionsAreComplete()` reports no problems across 41 pages;
+> `scripts/check-doc-links.sh` resolves 228 relative links across 46 files; and
+> the §9 grep returns only the historical news addendum, the roadmap's own
+> naming of the beta08…beta11 wave, and one "since the beta11 remediation"
+> sentence on `grpc` — all three statements about the past, all three correct.
+>
+> **Left deliberately.** The pages §6 lists as not-to-touch were re-read in
+> Wave 4 and not rewritten. The `sdks` conformance matrix keeps its
+> `1.0.0-beta07` provenance note, which is a true statement about when the
+> table was transcribed. Two pre-existing bullets on the Security page —
+> *Derive `AXIAM__RATE_LIMIT__TRUSTED_HOPS`* and *Strip `X-Forwarded-For`* —
+> enclose a code span inside a bold span and therefore render bold to the end
+> of the sentence; they are inherited from the source document, predate this
+> pass, and were left rather than silently restyled, but they are the next two
+> candidates for the marker-moving treatment the handoff block describes.
+> `npm run build` emits a chunk-size advisory on the Docs bundle; it is a hint,
+> not an error, and code-splitting the docs section is out of scope here.
+> No SDK repository, no server code and no conformance receipt was touched.
+
 > **Who this is for.** A fresh Claude session (Opus 5) tasked with bringing the
 > website's **Security** section, and the **Docs**, **News** and **Roadmap**
 > content the same releases touched, up to `1.0.0-beta14`. It is the entry

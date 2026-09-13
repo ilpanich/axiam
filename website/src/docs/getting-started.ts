@@ -891,7 +891,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "No decision is cached by the helpers — every request is a fresh check — so a grant takes effect on the next call rather than on the next session. Sessions are a different matter: revoking a role does not retract a token already issued, which is what the short access-token lifetime and the revocation paths are for.",
+        text: "No decision is cached by the helpers — every request is a fresh check — so a grant takes effect on the next call rather than on the next session. Sessions are a different matter: revoking a role does not retract a token already issued, which is what the short access-token lifetime and the revocation paths are for. Where fifteen minutes is too long to wait, the answers are gRPC introspection per request, or — since `1.0.0-beta14` — the optional [revocation feed](#/docs/oauth2) with the SDK poller attached, which narrows the wait to one poll interval. Neither is on by default.",
       },
       { type: "h", id: "next", text: "Where to go next" },
       {

@@ -90,6 +90,23 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Mutations are audited.** Every write lands in the append-only audit log with the acting principal.",
         ],
       },
+      { type: "h", id: "recent", text: "Endpoints added since 1.0.0-beta12" },
+      {
+        type: "api",
+        endpoints: [
+          { method: "POST", path: "/oauth2/userinfo", summary: "The OIDC claims, with the token in a header or (POST only) an access_token form field.", public: true },
+          { method: "GET", path: "/oauth2/revocations", summary: "Hashed ids of sessions revoked within the last access-token lifetime. Optional, off by default, public by argument.", public: true },
+          { method: "GET", path: "/api/v1/account/consents", summary: "The signed-in subject's own OIDC scope consents." },
+          { method: "POST", path: "/api/v1/account/consents/oidc-scopes", summary: "Consent to a client and an exact scope set." },
+          { method: "DELETE", path: "/api/v1/account/consents/oidc-scopes", summary: "Withdraw every OIDC scope consent." },
+          { method: "DELETE", path: "/api/v1/account/consents/oidc-scopes/{client_id}", summary: "Withdraw it for one client." },
+          { method: "GET", path: "/api/v1/users/{user_id}/sessions", summary: "A user's sessions with their refresh-replay counters." },
+        ],
+      },
+      {
+        type: "note",
+        text: "The three consent endpoints take **no `user_id`**: consent is the data subject's own (GDPR Art. 4(11)), so there is nothing for an administrator to give on somebody's behalf. `GET /api/v1/users/{user_id}/sessions` carries the `refresh_replay_verdict`, `refresh_replay_grace_accepted`, `refresh_replay_refused` and `refresh_replay_at` fields the admin UI's **Sessions** badges are drawn from — see [Authentication & sessions](#/docs/auth).",
+      },
       { type: "h", id: "acting-tenant", text: "Acting on another tenant" },
       {
         type: "p",
@@ -475,6 +492,10 @@ export const INTEGRATE_PAGES: DocPage[] = [
             "PATCH operations",
             "`add` / `replace` / `remove` on the standard attribute paths Okta and Entra actually send.",
           ],
+          [
+            "`phoneNumbers`, `addresses`",
+            "Mapped onto the user on create, replace and patch. A `remove`, or an empty array, erases them.",
+          ],
           ["Discovery", "`/Schemas`, `/ServiceProviderConfig`, `/ResourceTypes`."],
           ["Bulk operations", "**Not supported** — `POST /Bulk` returns `501` with a SCIM error body."],
           [
@@ -576,6 +597,16 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "p",
         text: "Deactivation is immediate and complete. A SCIM `password` write, an `active: false` (by `PUT` or `PATCH`), and `DELETE /scim/v2/Users/{id}` each revoke every live session **and** every OAuth2 refresh token the target holds, on top of flushing the authorization decision cache.",
+      },
+      { type: "h", id: "contact", text: "Provisioning a phone number is not releasing one" },
+      {
+        type: "p",
+        text: "`phoneNumbers` and `addresses` provision the values onto the user record; **whether any relying party ever sees them is a separate decision**, taken by the four OIDC gates on the `phone` and `address` scopes — the organization's switch, the client registration, the end user's consent, and the FAPI profile exclusion. See [the `address` and `phone` scopes](#/docs/oauth2). A directory that syncs a telephone number has therefore not consented to anything on the user's behalf.",
+      },
+      { type: "h", id: "contention", text: "A concurrent PATCH that loses a race" },
+      {
+        type: "p",
+        text: "Two provisioning writes that reach the same record at once are an optimistic-concurrency conflict in the datastore. AXIAM retries such a write, and one that **stays** lost answers `503` with the slug `write_contention` and `Retry-After: 1` — deliberately not `409`, which in SCIM means the request conflicts with the resource's *state* (RFC 7644 §3.12) and which a caller answers by changing the request, and deliberately not `500`, which an identity provider reads as a failed sync and answers by re-sending the whole record. Uniqueness violations and state preconditions still answer `409`, as they always did. See [Error reference](#/docs/errors).",
       },
       {
         type: "note",
@@ -1320,6 +1351,7 @@ try await reactorServe(config: config, transport: yourTransport, handler: router
           ["403", "AuthzError", "Authenticated but not authorized."],
           ["408, 429", "NetworkError", "Timeout, or rate-limited."],
           ["409", "AuthzError", "Conflict — resource-level access denied."],
+          ["503 with slug `write_contention`", "NetworkError", "**Retryable.** A write lost an optimistic-concurrency race and stayed lost after every retry the server would spend. Carries `Retry-After: 1`."],
           ["5xx", "NetworkError", "Server error. An SDK must **not** retry authentication."],
           ["connection / DNS / TLS failure", "NetworkError", "Carries the underlying transport error as its cause."],
         ],
@@ -1338,7 +1370,20 @@ try await reactorServe(config: config, transport: yourTransport, handler: router
           ["UNAVAILABLE (14)", "NetworkError", "Server unreachable."],
           ["DEADLINE_EXCEEDED (4)", "NetworkError", "Request timed out."],
           ["INTERNAL (13)", "NetworkError", "Server-side error."],
-          ["RESOURCE_EXHAUSTED (8)", "NetworkError", "Rate-limited."],
+          ["RESOURCE_EXHAUSTED (8)", "NetworkError", "Rate-limited — *you sent too much*, and deliberately distinct from UNAVAILABLE."],
+        ],
+      },
+      { type: "h", id: "write-contention", text: "`503 write_contention` — why not `409`, and why not `500`" },
+      {
+        type: "p",
+        text: "All three are plausible answers to a write that lost a datastore race, and the choice is worth stating. A `409` in SCIM means *your request conflicts with the resource's state* (RFC 7644 §3.12) — a statement about the **request**, which a caller correctly answers by changing it; that cannot help here, because the request was fine and lost a race. A `500` tells a client to stop, which is exactly the wrong advice: an identity provider driving SCIM provisioning reads it as a failed sync and re-sends the whole record. `503` with `Retry-After` says the true thing — *come back in a moment* — and is what Okta- and Entra-shaped provisioning already retries.",
+      },
+      {
+        type: "list",
+        items: [
+          "**`Retry-After: 1` is a convention, not a measurement.** The server does not know how long contention will last, and a fabricated number would be worse than a conventional one. Every SDK honours it as a **floor** and never a ceiling (contract §16.1), so your own backoff still governs the wait.",
+          "**A contended `PATCH` is not auto-retried.** Contract §16.2 makes only side-effect-free operations eligible for automatic retry; the caller owns that decision.",
+          "**Over gRPC the same condition is `UNAVAILABLE` (14)**, which lands in `NetworkError` exactly as the REST `503` does — and stays distinct from `RESOURCE_EXHAUSTED` (8), because *the server is busy* and *you sent too much* are different instructions.",
         ],
       },
       { type: "h", id: "rules", text: "Rules that prevent bad retries" },
@@ -1350,6 +1395,20 @@ try await reactorServe(config: config, transport: yourTransport, handler: router
           "**Errors never contain token strings** — not in messages, not in context fields, not in stack traces.",
           "**`AuthzError` carries the denied action and resource** where the response body provides them, so a log line says what was refused rather than only that something was.",
         ],
+      },
+      { type: "h", id: "oauth2-codes", text: "OAuth2 protocol errors" },
+      {
+        type: "list",
+        items: [
+          "**`error_description` is `NQSCHAR`** (RFC 6749 §5.2): ASCII only. A `§` is transliterated to the word *section* rather than silently stripped, so a description is never truncated at its first non-ASCII byte and never carries a byte the grammar forbids.",
+          "**`invalid_dpop_proof` (400)** is now the answer where a missing or unverifiable DPoP proof used to produce `invalid_client` (401). The proof is a property of the request, not of the client's identity.",
+          "**`login_required`, `consent_required`, `interaction_required`, `account_selection_required`, `unmet_authentication_requirements`** — the answers a client on the [authentication-request honour lane](#/docs/oauth2) can now receive. On the `ignore` lane none of them can occur.",
+          "**`invalid_request_uri`** — a pushed `request_uri` that expired, was already consumed, or does not exist. **`request_not_supported`** and **`request_uri_not_supported`** — a request object, and a non-PAR `request_uri`: rejected rather than half-implemented.",
+        ],
+      },
+      {
+        type: "note",
+        text: "Authorization errors reach the relying party **by redirect**, with `state` and `iss`, whenever the client and `redirect_uri` are registered; a page is rendered only on an explicit `Accept: text/html`, and it echoes nothing the request carried.",
       },
       { type: "h", id: "device", text: "Device-grant answers" },
       {

@@ -40,7 +40,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           [
             "Refresh Token",
             "Extending a session without re-authenticating.",
-            "Opaque, server-stored, single-use, rotating on every refresh.",
+            "Opaque, server-stored, single-use, rotating on every refresh — the predecessor is revoked, except on a `fapi2` client. See the lifetimes table below.",
           ],
           [
             "Device Authorization",
@@ -65,10 +65,39 @@ export const OAUTH2_PAGES: DocPage[] = [
           { method: "POST", path: "/oauth2/token", summary: "Token endpoint — every grant.", public: true },
           { method: "POST", path: "/oauth2/introspect", summary: "Token introspection (RFC 7662).", public: true },
           { method: "POST", path: "/oauth2/revoke", summary: "Token revocation (RFC 7009).", public: true },
-          { method: "GET", path: "/oauth2/userinfo", summary: "OIDC userinfo claims for the bearer.", public: true },
+          { method: "GET", path: "/oauth2/userinfo", summary: "OIDC userinfo claims for the bearer. Also accepts POST — see below.", public: true },
+          { method: "POST", path: "/oauth2/userinfo", summary: "The same claims, with the token in an Authorization header or (POST only) an access_token form field.", public: true },
+          { method: "GET", path: "/oauth2/revocations", summary: "Hashed ids of recently revoked sessions. Optional, off by default.", public: true },
           { method: "POST", path: "/oauth2/device_authorization", summary: "Begin a device grant (RFC 8628).", public: true },
           { method: "GET", path: "/oauth2/end_session", summary: "RP-initiated logout.", public: true },
         ],
+      },
+      {
+        type: "note",
+        text: "`/oauth2/userinfo` answers **`GET` and `POST`** since `1.0.0-beta13`. The token may ride the `Authorization` header on either, or — on `POST` only — an `access_token` field in an `application/x-www-form-urlencoded` body, which is RFC 6750 §2.2's form-encoded carrier. Presenting it **twice** is refused rather than resolved in the caller's favour, and the query-string carrier (RFC 6750 §2.3) is never read on either method.",
+      },
+      { type: "h", id: "revocations", text: "The session revocation feed" },
+      {
+        type: "p",
+        text: "An access token is self-contained and lives fifteen minutes, so a logout, a role removal or an account disable does not reach one already in a caller's hands until it expires. The documented answer has been to route the decision through gRPC introspection — correct, and a network round trip per request. Since `1.0.0-beta14` a deployment can instead set `AXIAM__AUTH__REVOCATION_FEED_ENABLED=true` and publish `GET /oauth2/revocations`.",
+      },
+      {
+        type: "code",
+        caption: "GET /oauth2/revocations",
+        code: "{\n  \"alg\": \"SHA-256\",\n  \"issued_at\": 1757664000,\n  \"ttl\": 900,\n  \"revoked\": [\"i9N2lYMTV4FhA0husWjGYCqJXXTb7_fMBuomhWjSsgQ\"]\n}",
+      },
+      {
+        type: "list",
+        items: [
+          "**What an entry is.** The base64url-unpadded SHA-256 of a session id, in the exact string form the `sid` claim carries. Never an id, a subject, a tenant or a timestamp — so the feed says neither who was revoked nor how many people are behind the entries.",
+          "**What bounds it.** An entry is published for exactly one access-token lifetime, after which every token naming that session has expired on its own `exp`. The document's size therefore tracks your revocation rate over fifteen minutes and never your history, and it is cacheable with an `ETag` like the JWKS beside it.",
+          "**What it is not.** It is **not a control**. A guard that cannot fetch the feed behaves exactly as it does without it — the [SDK contract §10.4](#/docs/sdks) requires that — the feed can only ever turn an accept into a reject, and every local verification rule still runs first and still decides.",
+          "**With it off** — the default — the route is not mounted, no revocation row is written, and the deployment is byte-identical to one built before the feed existed. See the [`AXIAM__AUTH__REVOCATION_FEED_ENABLED` row](#/docs/configuration) and the deployment guide.",
+        ],
+      },
+      {
+        type: "note",
+        text: "Both halves are opt-in, and a feed nobody polls narrows nothing: turn it on where sign-out has to take effect faster than fifteen minutes *and* attach the SDK poller (contract §10.4, shipped by all eleven SDKs since `1.0.0-beta14`).",
       },
       { type: "h", id: "tenant", text: "Naming the tenant" },
       {
@@ -84,7 +113,16 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "The discovery document is **deployment-wide**, not per-tenant: one issuer, served at `/.well-known/openid-configuration`. `AXIAM__AUTH__OAUTH2_ISSUER_URL` must be an origin — a path-based issuer is rejected at startup. An off-the-shelf OIDC client that cannot add a `tenant_id` query parameter to the token endpoint therefore needs a small shim, or a per-tenant gateway route in front of AXIAM.",
+        text: "There is **one issuer**, served at `/.well-known/openid-configuration`, and `AXIAM__AUTH__OAUTH2_ISSUER_URL` must be an origin — a path-based issuer is rejected at startup. Since `1.0.0-beta13` the document can *describe* a tenant: `GET /.well-known/openid-configuration?tenant_id=<uuid>` returns the same document with the tenant carried in the endpoint URLs that need one. `issuer` is never aliased and never changes, so `iss` validation is unaffected. An off-the-shelf OIDC client that cannot add a `tenant_id` query parameter to the token endpoint can therefore be pointed at the tenant-scoped document instead of needing a shim.",
+      },
+      {
+        type: "list",
+        items: [
+          "**An unknown tenant is answered identically to a known one**, apart from the value it echoes — the document is not an enumeration oracle.",
+          "**`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`** names the tenant an unparameterised request describes. It states a fact in a document and is not a fallback in a handler: no endpoint's behaviour changes, and a caller that names a different tenant gets that one. A value that does not parse as a UUID is ignored and **reported once at boot**, describing the value's shape and never the value — so a deployment that set it can tell that it did not take, without the variable's contents reaching a log.",
+          "**`mtls_endpoint_aliases`** (RFC 8705 §5) appears when `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` is set, naming a separate mTLS host for the six back-channel endpoints. Absent by default; the front channel is never aliased. An unusable value fails discovery with a `500` rather than being silently dropped.",
+          "**`claims_parameter_supported: true`** — the OIDC Core §5.5 `claims` parameter is honoured for its `userinfo` member. On a client in the honour lane it also reads `claims.id_token.acr`.",
+        ],
       },
       {
         type: "code",
@@ -115,7 +153,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           },
           {
             title: "Handle the redirect",
-            body: "Check `state` against what you sent, and check `iss` names the server you started with. The code is single-use and short-lived.",
+            body: "Check `state` against what you sent, and check `iss` names the server you started with. The code is single-use and short-lived — and since `1.0.0-beta13` presenting it a second time **revokes the session it minted**, as RFC 6749 §10.5 asks. The cost is worth stating: a legitimate client that retries after a lost token response is signed out exactly as an attacker would be, so retry the *authorization request*, not the redemption.",
             code: "GET https://app.acme.dev/callback\n  ?code=<authorization-code>\n  &state=<what-you-sent>\n  &iss=https://iam.acme.dev",
           },
           {
@@ -150,7 +188,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       { type: "h", id: "tokens", text: "The tokens you get back" },
       {
         type: "p",
-        text: "Access tokens are EdDSA (Ed25519) JWTs, short-lived, and verifiable offline against the JWKS — which is the fast path for a resource server, and the one to prefer over introspecting on every request. ID tokens carry `sid`, the session identifier, which is stable across refresh. Refresh tokens are opaque and single-use.",
+        text: "Access tokens are EdDSA (Ed25519) JWTs, short-lived, and verifiable offline against the JWKS — which is the fast path for a resource server, and the one to prefer over introspecting on every request. ID tokens carry `sid`, the session identifier, which is stable across refresh; since `1.0.0-beta13` the access tokens the code and refresh grants issue carry the **same `sid`**, so a password or MFA reset revokes the tokens in flight rather than only the session behind them. Refresh tokens are opaque and single-use.",
       },
       {
         type: "p",
@@ -196,14 +234,122 @@ export const OAUTH2_PAGES: DocPage[] = [
         headers: ["Token", "Lifetime", "Shape"],
         rows: [
           ["Access token", "15 minutes", "EdDSA (Ed25519) JWT, verifiable offline against the JWKS."],
-          ["Authorization code", "10 minutes", "Single-use."],
-          ["Refresh token", "30 days", "Opaque, server-stored, single-use, rotating on every refresh."],
+          ["Authorization code", "10 minutes — 60 seconds on a `fapi2` client", "Single-use. A second presentation revokes the session the first one minted (RFC 6749 §10.5)."],
+          [
+            "Refresh token",
+            "30 days",
+            "Opaque, server-stored, single-use, rotating on every refresh — the predecessor is revoked and a second presentation refused. On a `fapi2` client it instead stays redeemable for 60 seconds after rotation (FAPI 2.0 §5.3.2.1-9), then expires. A refresh token presented after rotation is audited as `oauth2.refresh_token_replayed` either way, and counted on its session ([T-254](#/security/diagram/2/T-254), closed).",
+          ],
           ["MFA challenge", "5 minutes", "Single-use."],
         ],
       },
       {
         type: "note",
         text: "Two claims are worth reading twice. `act` is absent on an impersonation exchange **by design** — impersonation's whole definition is that the result is indistinguishable from a token the subject obtained directly, which is why it is off by default, gated per client, and visible only in the audit record. And `permissions` is a record of a decision already made, never an input to a future one: nothing in the authorization path reads it to grant anything, and a live check re-evaluates against the engine.",
+      },
+      { type: "h", id: "claims-request", text: "The `claims` request, and what survives a refresh" },
+      {
+        type: "p",
+        text: "A relying party can ask for individual claims with the OIDC Core §5.5 `claims` parameter; AXIAM advertises `claims_parameter_supported: true` and honours the `userinfo` member. Since `1.0.0-beta14` (schema v61) the request **rides the refresh token**, and rotation copies it, so a refreshed access token asserts the same requested claims as the code-exchanged one did — before, a long-lived session quietly lost the request at its first refresh. The release filter still runs only at the authorization endpoint, and every consent gate is re-asked at UserInfo, so carrying the request forward widens nothing: it carries the *request*, not a decision.",
+      },
+      { type: "h", id: "browser-sso", text: "Signing in from a relying party" },
+      {
+        type: "p",
+        text: "A third-party relying party redirects the browser to `/oauth2/authorize` cross-site, and the `SameSite=Strict` API cookie does not travel on that navigation — so until `1.0.0-beta13` an anonymous authorization request could only be answered `401`. A per-client `browser_sso` switch, **off by default**, lets AXIAM answer it with a sign-in page instead.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["The browser", "The answer"],
+        rows: [
+          ["carries a valid `axiam_op_session` cookie for this tenant", "authorized as that user; the ordinary code redirect follows"],
+          ["carries none", "`302` to `/login?return_to=…`, and back here afterwards"],
+          ["carries one that names no live session", "`302` to `/login?return_to=…&reauth=1`; the dead cookie is cleared"],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**With the switch off — the default — nothing changes.** The answer is the same `401` object it always was, byte for byte, and the `axiam_op_session` cookie is not read at all.",
+          "**The cookie is a fourth cookie**, beside the three that already exist and change in no way: `HttpOnly`, `Path=/oauth2/authorize`, `SameSite=Lax` and `Secure` **unconditionally** — it is the only `SameSite=Lax` cookie AXIAM sets, so unlike the other three it does not follow the deployment's cookie-`Secure` flag. Only its SHA-256 is stored. `Lax` is the point: it travels on a top-level navigation and not inside a frame, so cross-site hidden-iframe silent renew does not work and **fails closed** — which is the same property that defeats cross-site login-status probing. Relying parties renew with a top-level `prompt=none` navigation, or with a refresh token.",
+          "**`return_to` is validated three times** — by the builder, by the deployment-origin rule, and by the SPA before it navigates. It is exactly the authorization endpoint plus a query, on the API's own origin.",
+          "**A chain is bounded at two authorization requests and one sign-in page.** Every login redirect carries an `axiam_login_hop=1` marker, and a request that arrives with it is never redirected again; if it still has no principal the answer is `login_required`, naming the two candidates — a browser refusing the cookie, or a sign-in against a different tenant.",
+          "**An anonymous request must name its tenant**, with the same `tenant_id` parameter `/oauth2/token` and `/oauth2/end_session` already take. It is ignored whenever a principal was resolved from an access token, and omitting it gives today's `401` — which is why adding the parameter changed nothing for any client registered today.",
+        ],
+      },
+      {
+        type: "note",
+        text: "Unlike the other lane switch below, `browser_sso` **is** permitted on a `fapi2` client. Full detail: [`docs/admin/browser-login-hop.md`](https://github.com/ilpanich/axiam/blob/main/docs/admin/browser-login-hop.md).",
+      },
+      { type: "h", id: "authn-params", text: "Authentication-request parameters" },
+      {
+        type: "p",
+        text: "`prompt`, `max_age`, `acr_values` and `id_token_hint` change what a token *means*. A server that accepts them and acts on none has told the relying party it got a guarantee it did not get, so AXIAM does not: a per-client `authn_request_params` field selects `ignore` (the default, and what every client registered before `1.0.0-beta13` is) or `honour`.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Parameter", "On the `honour` lane"],
+        rows: [
+          ["`prompt`", "`login` reauthenticates; `none` is answered without interaction and is refused outright for an anonymous browser and on a return leg; `select_account` can answer `account_selection_required`. `none` combined with another value is `invalid_request`."],
+          ["`max_age`", "Compared as `elapsed >= max_age`, with **no leeway** in the relying party's disfavour — so `max_age=0` can never succeed, and a relying party meaning *authenticate them now* wants `prompt=login`."],
+          ["`acr_values` / `claims.id_token.acr`", "Matched against the session's own recorded authentication evidence through a function no request parameter can reach. An **essential** `acr` the end user cannot reach is `unmet_authentication_requirements`."],
+          ["`id_token_hint`", "Checked against the established session; naming somebody else is `login_required`."],
+          ["`login_hint`, `display`, `ui_locales`, `claims_locales`", "Cosmetic, and honoured without becoming an oracle: `login_hint` is carried and **looked up by nothing**, `display` is allow-listed, `ui_locales` is matched server-side (RFC 4647) against the five shipped locales, `claims_locales` is ignored."],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**A FAPI 2.0 client is refused the lane outright**, on create and on update: the two settings are two answers to the same question, and a registration may hold at most one.",
+          "**Request objects are rejected, not half-implemented** — `request` gives `request_not_supported` and a non-PAR `request_uri` gives `request_uri_not_supported`.",
+          "**Authentication evidence is the provider's for a federated login** — `auth_time` comes from the upstream `auth_time` or `AuthnInstant`, never AXIAM's clock — and is copied, never restamped, across a refresh.",
+          "**On the `ignore` lane none of the new refusals can occur**: a value AXIAM cannot parse is dropped, exactly as it always was.",
+        ],
+      },
+      {
+        type: "note",
+        text: "`prompt=none` is inherently a login-status oracle for a registered relying party. It is bounded to clients registered in the tenant with exact `redirect_uri` matching, and every outcome is audited as `oauth2.prompt_none.code` or `oauth2.prompt_none.login_required` with the `client_id`, so a relying party polling it is visible. Full detail: [`docs/admin/oidc-authn-parameters.md`](https://github.com/ilpanich/axiam/blob/main/docs/admin/oidc-authn-parameters.md).",
+      },
+      { type: "h", id: "sensitive-scopes", text: "The `address` and `phone` scopes" },
+      {
+        type: "p",
+        text: "These two OIDC scopes release data AXIAM holds for no purpose of its own, so they sit behind four gates — all four checked at **every** UserInfo call, not once at issuance:",
+      },
+      {
+        type: "list",
+        items: [
+          "the **organization** must enable them (`sensitive_scopes_enabled`; a tenant may only *disable*, never enable — see [Settings](#/docs/settings));",
+          "the **operator** must register them on the client;",
+          "the **end user** must consent, per client and per exact scope set, at the consent screen served at `/consent` in the five shipped languages;",
+          "the client must **not** be on the FAPI profile, which collects no consent.",
+        ],
+      },
+      {
+        type: "p",
+        text: "Because the gates are re-checked per call, a withdrawal takes effect on the relying party's *next* request with the token it already holds. The claims are returned from UserInfo only and never in an ID token, the `claims` parameter cannot name them into release, and a release is audited by claim name and never by value.",
+      },
+      {
+        type: "api",
+        endpoints: [
+          { method: "GET", path: "/api/v1/account/consents", summary: "What the signed-in subject has consented to, per client." },
+          { method: "POST", path: "/api/v1/account/consents/oidc-scopes", summary: "Grant consent for a client and an exact scope set." },
+          { method: "DELETE", path: "/api/v1/account/consents/oidc-scopes", summary: "Withdraw all OIDC scope consent." },
+          { method: "DELETE", path: "/api/v1/account/consents/oidc-scopes/{client_id}", summary: "Withdraw it for one client." },
+        ],
+      },
+      {
+        type: "note",
+        text: "Withdrawal is one call with **no confirmation step** — GDPR Art. 7(3) requires it to be as easy to withdraw as to give. These endpoints take no `user_id`: consent is the subject's own (Art. 4(11)). See [`docs/compliance/gdpr-compliance.md`](https://github.com/ilpanich/axiam/blob/main/docs/compliance/gdpr-compliance.md) §3.1.",
+      },
+      { type: "h", id: "authz-errors", text: "How an authorization error reaches you" },
+      {
+        type: "list",
+        items: [
+          "**By redirect, with `state` and `iss`**, whenever the client and its `redirect_uri` are registered — which is what lets a relying party handle the failure in code rather than showing the user a server page.",
+          "**As a page, only on an explicit `Accept: text/html`**, and that page echoes nothing the request carried.",
+          "**`error_description` is ASCII** (RFC 6749 §5.2 `NQSCHAR`): a `§` is transliterated to the word rather than silently stripped, so a description is never truncated at the first non-ASCII byte. See [Error reference](#/docs/errors).",
+        ],
       },
       { type: "h", id: "par", text: "Pushed authorization requests" },
       {
@@ -401,7 +547,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "`sid` is stable across refresh: a token minted by the refresh grant carries the same `sid` as the one issued at login, so a relying party that stored it can still match a logout token to its own session.",
+        text: "`sid` is stable across refresh: a token minted by the refresh grant carries the same `sid` as the one issued at login, so a relying party that stored it can still match a logout token to its own session — and since `1.0.0-beta13` the access tokens the code and refresh grants issue carry the same `sid` too, so a session ending reaches the tokens in flight and not only the session row.",
       },
       { type: "h", id: "rp", text: "RP-initiated logout" },
       {
@@ -409,6 +555,10 @@ export const OAUTH2_PAGES: DocPage[] = [
         endpoints: [
           { method: "GET", path: "/oauth2/end_session", summary: "End the session and redirect the browser back.", public: true },
         ],
+      },
+      {
+        type: "note",
+        text: "`end_session` also clears the `axiam_op_session` cookie the [browser login hop](#/docs/oauth2) sets, so a relying party that signed the user in through AXIAM's own sign-in page does not leave a cookie behind that would silently re-authorize the next authorization request.",
       },
       {
         type: "table",
@@ -482,11 +632,40 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "A client carrying `require_par` is then refused at `/oauth2/authorize` if it sends its parameters inline, so the constraint holds at use as well as at registration — see [Pushed authorization](#/docs/par).",
+        text: "A client carrying `require_par` is then refused at `/oauth2/authorize` if it arrives with **no** `request_uri`, so the constraint holds at use as well as at registration. Parameters sent *beside* a `request_uri` are ignored rather than refused — see [Pushed authorization](#/docs/par).",
       },
       {
         type: "note",
         text: "That refusal is the point. A client satisfying eleven of twelve FAPI constraints is not \"mostly FAPI\" — it is a client with a hole. The bundle cannot be half-applied, so a reviewer can answer *is this client conformant?* by reading one field.",
+      },
+      { type: "h", id: "client-auth", text: "The client-authentication methods" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Method", "On a `fapi2` client", "Notes"],
+        rows: [
+          ["`tls_client_auth`", "yes", "A CA-chained client certificate. Requires a chain — a self-asserted certificate is not this method."],
+          ["`self_signed_tls_client_auth`", "yes", "RFC 8705 §2.2. Needs `AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed` on the listener."],
+          ["`private_key_jwt`", "yes", "A signed assertion with a single-use `jti` and a hard lifetime cap."],
+          ["`client_secret_post`", "**refused**", "A copyable shared secret in the body."],
+          ["`client_secret_basic`", "**refused**", "Accepted on an ordinary client since `1.0.0-beta13`, and **not recommended** — see below."],
+        ],
+      },
+      {
+        type: "p",
+        text: "**`client_secret_basic` is accepted, and not recommended.** The OpenID Foundation's Basic OP plan runs 37 of its 38 modules with it, so AXIAM accepts it — decoded as RFC 6749 §2.3.1 actually specifies, and kept out of every log AXIAM writes. It is refused on a `fapi2` client exactly as `client_secret_post` is. The **registration decides the channel**, so it is never a second way in: a body secret sent by a client registered for Basic is `invalid_request`, and a Basic header presented by a client registered for the body channel is ignored with a `warn`. AXIAM's own SDKs never send it.",
+      },
+      {
+        type: "warn",
+        text: "Audit what your ingress logs before you register a client for `client_secret_basic`. AXIAM keeps the `Authorization` header out of its own logs, but a proxy in front of it may log headers by default, and a client secret in an access log is the same exposure as one in a repository. Prefer `client_secret_post` for a shared secret, and a strong method for anything that matters.",
+      },
+      {
+        type: "list",
+        items: [
+          "**`private_key_jwt` now works** — it was defined but never wired until `1.0.0-beta13`. On a `fapi2` client the assertion's `aud` **must be the issuer identifier as a string**; an array is refused even when it contains the issuer. `client_id` may be omitted beside the assertion, which the conformance suite sends that way.",
+          "**`tls_client_auth` compares the registered DN against both correct renderings** — the `openssl -nameopt rfc2253` order and the encoded order — by exact match, because the two are both legitimate spellings of the same name and picking one silently refuses half of real certificates.",
+          "**`self_signed_tls_client_auth` needs the listener to admit a chainless certificate.** `AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed` does that, and nothing else changes: the trust level a certificate earned travels with it to every consumer, so a self-asserted certificate authenticates exactly the client whose thumbprint an administrator registered — and is **refused outright** as a device identity (see [PKI & mTLS](#/docs/pki)) and for `tls_client_auth`, which requires a chain.",
+        ],
       },
       { type: "h", id: "mtls", text: "mTLS client authentication" },
       {
@@ -509,6 +688,39 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "p",
         text: "This is the single highest-value item on this page for an ordinary deployment, FAPI or not. Bearer tokens are bearer material; sender-constrained tokens are not.",
+      },
+      { type: "h", id: "dpop", text: "DPoP on the FAPI lane" },
+      {
+        type: "list",
+        items: [
+          "**The authorization code can be bound to a DPoP key.** Send `dpop_jkt` on the PAR request or on the plain authorization request, or a `DPoP` header on the PAR request — RFC 9449 §10.1 names both carriers. A mismatch between the two is `invalid_dpop_proof`; a code bound to a key the caller cannot demonstrate is `invalid_grant`, refused **before** the code is consumed, so a wrong caller cannot burn it.",
+          "**Proofs are single-use at the resource endpoints too**, not only at the token endpoint. The `jti` is recorded through the same store *after* the proof verifies, so a forged proof cannot burn a victim's key, and a proof that cannot be recorded is refused rather than admitted.",
+          "**`htu` is compared in canonical form** — scheme and host lowercased, the default port and any query or fragment removed — so a proof is not refused for a spelling of the URL the caller had no way to predict.",
+        ],
+      },
+      { type: "h", id: "lifetimes", text: "What the profile changes about lifetimes" },
+      {
+        type: "list",
+        items: [
+          "**The authorization code is capped at 60 seconds** on a `fapi2` client, rather than the ordinary 10 minutes.",
+          "**A rotated refresh token stays redeemable for 60 seconds**, then expires — FAPI 2.0 §5.3.2.1-9's recovery for a client whose rotation response was lost in transit. The profile can afford it because every token on it is sender-constrained, so a replay inside the window needs the client's private key as well. **This is a `fapi2` behaviour only**: every other client has its predecessor revoked at rotation and a second presentation refused ([T-254](#/security/diagram/2/T-254)).",
+        ],
+      },
+      {
+        type: "note",
+        text: "Either way, a refresh token presented **after** it was rotated is marked on its session and written to the audit log as `oauth2.refresh_token_replayed`, naming the client, its profile and a disposition of `accepted_under_fapi_grace` or `refused` — and never the token or its digest. `GET /api/v1/users/{user_id}/sessions` reads the counters; the admin UI shows them as badges on the **Sessions** action of any row in *Users*. Alert on `refused`: nothing a conformant client does produces one.",
+      },
+      { type: "h", id: "conformance", text: "Conformance" },
+      {
+        type: "p",
+        text: "AXIAM is run against the OpenID Foundation's conformance suite — the OIDC Core Basic OP plan and the three FAPI 2.0 Security Profile (Final) variants (mTLS, self-signed, `private_key_jwt`). The 2026-09-11 run was **165 modules with zero `FAILED`**. That is a self-run against a working-tree build, **not a certification**, and the `REVIEW` and `WARNING` verdicts are published rather than counted as passes: four `REVIEW`s on the Basic plan and ten on each FAPI plan are screenshot-evidence modules a human must judge, one `WARNING` per FAPI plan is a module that now runs where it used to be skipped, and `conformance-run` itself exits non-zero on them.",
+      },
+      {
+        type: "links",
+        links: [
+          { label: "Conformance receipts", href: "https://github.com/ilpanich/axiam/blob/main/docs/conformance/README.md", note: "how the runs are made, and the hedges that go with them" },
+          { label: "The latest run", href: "https://github.com/ilpanich/axiam/blob/main/docs/conformance/index.md", note: "every report committed in full, green and red alike" },
+        ],
       },
       { type: "h", id: "who", text: "Who needs this" },
       {
@@ -591,10 +803,14 @@ Content-Type: application/json
       {
         type: "list",
         items: [
-          "**The authorization URL carries exactly two parameters.** Not `response_type`, not `redirect_uri`, not `scope`, not `state`, not the PKCE pair. The server **refuses** a request that mixes a `request_uri` with any inline authorization parameter rather than merging them — and re-adding them “for compatibility” restores the parameter-confusion attack the refusal prevents, where an attacker supplies the inline value they want and lets the pushed copy satisfy whichever check reads the other one.",
+          "**The authorization URL carries exactly two parameters.** Not `response_type`, not `redirect_uri`, not `scope`, not `state`, not the PKCE pair. The server **reads only the pushed copy**; anything sent inline beside a `request_uri` is ignored, so it cannot be confused with the pushed value. RFC 9101 §6.3 says the server MUST use only the request object's parameters, and RFC 9126 §4 never asked for a refusal. The security argument is unchanged: re-adding them “for compatibility” would restore the parameter-confusion attack, where an attacker supplies the inline value they want and lets the pushed copy satisfy whichever check reads the other one.",
           "**The `request_uri` is single-use and short-lived** — 60 seconds, consumed the moment `/oauth2/authorize` reads it. There is deliberately no configuration knob: the window only has to cover one browser redirect, and a tunable that only trends longer is a tunable that only widens a replay window. A second use is `invalid_request`, not a duplicate-suppressed success.",
           "**A push is never retried.** It is a `POST` that creates server state, so it sits outside the SDKs' read-only retry eligibility. A transport failure after the request left the client is surfaced rather than retried — the safe recovery is a fresh push, which costs one round trip and cannot double-consume anything.",
           "**Treat the `request_uri` as opaque.** Do not parse it, do not validate its `urn:` prefix as a precondition, do not reconstruct one. Checking the prefix buys nothing and breaks the moment the format is versioned.",
+          "**A pushed `request_uri` is refused.** RFC 9126 §2.1 forbids it: pushing a handle to a request object at the endpoint that mints handles is a fetch AXIAM would have to perform, and an SSRF surface it declines to open.",
+          "**PAR errors are JSON**, not a redirect and not an HTML page — there is no user agent on this call to send anywhere.",
+          "**`dpop_jkt` rides the pushed copy** (or a `DPoP` header on the push itself), which is where a FAPI 2.0 client binds its code to a key — see [FAPI 2.0 & mTLS](#/docs/fapi2).",
+          "**A `request_uri` that expires during a login hop answers `invalid_request_uri`** on the return leg. A handle lives 60 seconds and a person typing a password can take longer, so a relying party that uses PAR *and* sends its end users to sign in at AXIAM should expect this and recover by pushing again.",
         ],
       },
       { type: "h", id: "auth", text: "It is authenticated, and that is the point" },
@@ -609,7 +825,7 @@ Content-Type: application/json
       { type: "h", id: "fapi", text: "Required for FAPI 2.0" },
       {
         type: "p",
-        text: "Registering a client with `profile: \"fapi2\"` forces `require_par`, and a client with `require_par` set is **refused** at `/oauth2/authorize` when it sends its parameters inline. A FAPI 2.0 client therefore cannot authorize any other way — which is the intent: the profile is a constraint bundle a client cannot half-apply.",
+        text: "Registering a client with `profile: \"fapi2\"` forces `require_par`, and a client with `require_par` set is **refused** at `/oauth2/authorize` when it sends **no** `request_uri` at all. A FAPI 2.0 client therefore cannot authorize any other way — which is the intent: the profile is a constraint bundle a client cannot half-apply. Inline parameters sent *beside* a `request_uri` are ignored rather than refused, as above.",
       },
       { type: "h", id: "sdks", text: "From an SDK" },
       {

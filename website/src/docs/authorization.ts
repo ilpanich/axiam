@@ -542,7 +542,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
           "`POST /api/v1/auth/webauthn/register/start` and `/finish` — including the attestation policy applied, which is the policy of the tenant the credential is stored in",
           "`POST /api/v1/users/me/resend-verification`",
           "The GDPR self-service endpoints (`/account/export`, `/account/delete`) for the caller's own id",
-          "`GET /oauth2/userinfo` — the token subject's own",
+          "`GET` and `POST /oauth2/userinfo` — the token subject's own",
         ],
       },
       {

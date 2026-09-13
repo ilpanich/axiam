@@ -1389,7 +1389,7 @@ Filled in as PRs are opened; `—` means not reached this session.
 | php | — | — | — | — | — |
 | go | yes | yes | yes | [#77](https://github.com/ilpanich/axiam-go-sdk/pull/77) | opened |
 | swift | — | — | — | — | — |
-| c | — | — | — | — | — |
+| c | yes | yes | yes | [#59](https://github.com/ilpanich/axiam-c-sdk/pull/59) | opened |
 | cplusplus | — | — | — | — | — |
 
 **One ordering consequence, recorded so it is not discovered as a surprise.**

@@ -795,3 +795,269 @@ async fn signing_a_tenant_csr_uses_sign_intermediate_not_sign_verbatim() {
     assert!(signed.encrypted_private_key.is_none());
     assert_eq!(signed.subject, "Offline Tenant CA");
 }
+
+// ---------------------------------------------------------------------------
+// Signing a caller's CSR under `vault_pki` custody (C-1 rule 6, T-268)
+// ---------------------------------------------------------------------------
+
+/// Like [`SignVerbatim`], but records the request body so a test can assert
+/// what AXIAM actually sent — which is the only half of the Vault contract a
+/// test here can prove. What Vault then *does* with it is Vault's, and is
+/// documented rather than mocked.
+struct RecordingSignVerbatim {
+    issuer_key_pem: String,
+    issuer_cert_pem: String,
+    seen: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+
+impl Respond for RecordingSignVerbatim {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        self.seen.lock().unwrap().push(body.clone());
+
+        let csr_pem = body["csr"].as_str().expect("a CSR must be sent");
+        assert!(
+            !csr_pem.contains("PRIVATE KEY"),
+            "the subscriber's key must never leave the subscriber"
+        );
+        let csr = rcgen::CertificateSigningRequestParams::from_pem(csr_pem)
+            .expect("AXIAM must send a CSR Vault could parse");
+        let issuer = Issuer::from_ca_cert_pem(
+            &self.issuer_cert_pem,
+            KeyPair::from_pem(&self.issuer_key_pem).unwrap(),
+        )
+        .unwrap();
+        let signed = csr.signed_by(&issuer).unwrap();
+
+        ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "certificate": signed.pem(), "ca_chain": [self.issuer_cert_pem] }
+        }))
+    }
+}
+
+/// A caller's CSR, carrying nothing but a common name.
+fn caller_csr(common_name: &str) -> String {
+    let key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
+    params.serialize_request(&key).unwrap().pem().unwrap()
+}
+
+#[tokio::test]
+async fn signing_a_caller_csr_sends_the_csr_verbatim_and_states_the_usages() {
+    // The Vault half of C-1's rule 6, and what it can and cannot establish.
+    //
+    // `sign-verbatim` honours the CSR's subject, ignores its basic constraints,
+    // and — the part that decided the design — **discards** the `key_usage` and
+    // `ext_key_usage` request parameters whenever the CSR carries those
+    // extensions, issuing what the CSR asked for instead. So the guarantee that
+    // no requester-chosen extension reaches the certificate cannot be made here
+    // by stating parameters; it is made in `CertService::sign_csr`, which
+    // refuses such a CSR on every custodian before anything reaches Vault.
+    //
+    // What this test proves is the other half: that AXIAM sends the caller's
+    // bytes unaltered, and states the AXIAM-decided fields explicitly rather
+    // than inheriting whichever defaults the Vault version in front of it
+    // happens to have (`DigitalSignature`, `KeyAgreement`, `KeyEncipherment`).
+    let server = MockServer::start().await;
+    let root = ca_pair("Acme Root", None);
+    let int = ca_pair("Acme Intermediate", Some(&root));
+    mock_generation(&server, &root, &int).await;
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/issuer/int-issuer-id/sign-verbatim"))
+        .and(header("X-Vault-Token", TOKEN))
+        .respond_with(RecordingSignVerbatim {
+            issuer_key_pem: int.0.clone(),
+            issuer_cert_pem: int.1.clone(),
+            seen: Arc::clone(&seen),
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let db = setup_db().await;
+    let org = Uuid::new_v4();
+    let ca = ca_service(db.clone(), &server)
+        .generate(create_ca("Acme Root", org))
+        .await
+        .unwrap();
+
+    let cert_service = CertService::new(
+        SurrealCaCertificateRepository::new(db.clone()),
+        SurrealCertificateRepository::new(db),
+        PkiConfig::default(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        custodians(&server),
+    );
+
+    let tenant = Uuid::new_v4();
+    let csr_pem = caller_csr("byok-device");
+    let issued = cert_service
+        .sign_csr(
+            org,
+            axiam_core::models::certificate::SignCertificateCsr {
+                tenant_id: tenant,
+                issuer_ca_id: ca.certificate.id,
+                csr_pem: csr_pem.clone(),
+                cert_type: CertificateType::Device,
+                validity_days: 30,
+                metadata: None,
+            },
+            Some(90),
+        )
+        .await
+        .expect("a caller's CSR is signed through Vault");
+
+    let body = seen.lock().unwrap()[0].clone();
+    assert_eq!(
+        body["csr"].as_str(),
+        Some(csr_pem.as_str()),
+        "the caller's request goes to Vault byte for byte — AXIAM does not \
+         rewrite a document it did not author"
+    );
+    assert_eq!(
+        body["key_usage"],
+        json!([]),
+        "stated explicitly so the shape is AXIAM's decision and not a Vault default"
+    );
+    assert_eq!(body["ext_key_usage"], json!([]));
+    assert!(
+        body["ttl"].as_str().is_some(),
+        "a PKCS#10 request cannot carry a validity window, so the TTL is sent \
+         out of band"
+    );
+
+    assert_eq!(issued.subject, "byok-device");
+    assert!(issued.public_cert_pem.contains("BEGIN CERTIFICATE"));
+    assert!(
+        !issued.public_cert_pem.contains("PRIVATE KEY"),
+        "no key was made, so none can be returned"
+    );
+
+    // The row describes what came back rather than what was asked for: a remote
+    // signer caps a TTL without failing the call.
+    let fetched = cert_service.get(tenant, issued.id).await.unwrap();
+    assert_eq!(fetched.fingerprint, issued.fingerprint);
+}
+
+#[tokio::test]
+async fn a_generated_leaf_still_sends_no_usage_parameters() {
+    // The other side of `csr_is_caller_supplied`: AXIAM builds that CSR itself
+    // from a key it just generated, so there is nothing in it a caller chose
+    // and nothing for this to defend against. Certificates already issued to
+    // deployments on this path keep the shape they have.
+    let server = MockServer::start().await;
+    let root = ca_pair("Acme Root", None);
+    let int = ca_pair("Acme Intermediate", Some(&root));
+    mock_generation(&server, &root, &int).await;
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/issuer/int-issuer-id/sign-verbatim"))
+        .and(header("X-Vault-Token", TOKEN))
+        .respond_with(RecordingSignVerbatim {
+            issuer_key_pem: int.0.clone(),
+            issuer_cert_pem: int.1.clone(),
+            seen: Arc::clone(&seen),
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let db = setup_db().await;
+    let org = Uuid::new_v4();
+    let ca = ca_service(db.clone(), &server)
+        .generate(create_ca("Acme Root", org))
+        .await
+        .unwrap();
+
+    CertService::new(
+        SurrealCaCertificateRepository::new(db.clone()),
+        SurrealCertificateRepository::new(db),
+        PkiConfig::default(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        custodians(&server),
+    )
+    .generate(
+        org,
+        CreateCertificate {
+            tenant_id: Uuid::new_v4(),
+            issuer_ca_id: ca.certificate.id,
+            subject: "axiam-made".into(),
+            cert_type: CertificateType::Device,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 30,
+            metadata: None,
+        },
+        Some(90),
+    )
+    .await
+    .expect("issued");
+
+    let body = seen.lock().unwrap()[0].clone();
+    assert!(
+        body.get("key_usage").is_none() && body.get("ext_key_usage").is_none(),
+        "the generation path's request body is unchanged: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_caller_csr_asking_for_a_key_usage_never_reaches_vault() {
+    // The refusal is upstream of the custodian on purpose. If it were in the
+    // Vault branch, the same CSR would be accepted on a database-custody
+    // deployment and refused on a Vault one — and Vault would have issued
+    // whatever the CSR asked for in the meantime, because `sign-verbatim`
+    // discards the parameters that would have said otherwise.
+    let server = MockServer::start().await;
+    let root = ca_pair("Acme Root", None);
+    let int = ca_pair("Acme Intermediate", Some(&root));
+    mock_generation(&server, &root, &int).await;
+
+    // No `sign-verbatim` mock at all: reaching Vault is itself the failure.
+    let db = setup_db().await;
+    let org = Uuid::new_v4();
+    let ca = ca_service(db.clone(), &server)
+        .generate(create_ca("Acme Root", org))
+        .await
+        .unwrap();
+
+    let key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "ambitious-byok");
+    params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+    params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let csr_pem = params.serialize_request(&key).unwrap().pem().unwrap();
+
+    let err = CertService::new(
+        SurrealCaCertificateRepository::new(db.clone()),
+        SurrealCertificateRepository::new(db),
+        PkiConfig::default(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        custodians(&server),
+    )
+    .sign_csr(
+        org,
+        axiam_core::models::certificate::SignCertificateCsr {
+            tenant_id: Uuid::new_v4(),
+            issuer_ca_id: ca.certificate.id,
+            csr_pem,
+            cert_type: CertificateType::Device,
+            validity_days: 30,
+            metadata: None,
+        },
+        Some(90),
+    )
+    .await
+    .expect_err("a CSR requesting a key usage is refused before any signing");
+
+    assert!(
+        matches!(&err, axiam_core::error::AxiamError::Validation { message } if message.contains("keyUsage")),
+        "got {err:?}"
+    );
+}

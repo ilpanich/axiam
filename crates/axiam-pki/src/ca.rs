@@ -1013,14 +1013,60 @@ fn window_days(not_before: DateTime<Utc>, not_after: DateTime<Utc>) -> u32 {
     u32::try_from((hours + 23) / 24).unwrap_or(u32::MAX).max(1)
 }
 
-/// The common name a CSR asks for.
+/// What a certificate signing request says about itself, once its signature has
+/// been checked.
 ///
-/// Read here rather than inside the signing task so a malformed request — the
-/// likeliest failure on an endpoint whose input is pasted by hand — is a 400
-/// naming the CSR rather than a 500 out of a custodian. A request with no
-/// common name is refused: the subject is what distinguishes one tenant signing
-/// CA from another in every list that shows them.
-fn csr_common_name(pem: &str) -> AxiamResult<String> {
+/// Everything here comes from a **single** parse and a **single** signature
+/// verification. Reading the common name in one function, the key in another
+/// and the requested extensions in a third would verify possession up to three
+/// times on the way to three different answers, and would let a future caller
+/// reach one of the facts without having verified anything at all.
+#[derive(Debug)]
+pub(crate) struct CsrFacts {
+    /// The common name the request asks for. Non-empty: a subject is what
+    /// distinguishes one certificate from another in every list that shows
+    /// them.
+    pub(crate) common_name: String,
+    /// The key algorithm, read from the request's own public key rather than
+    /// taken from the caller.
+    pub(crate) key_algorithm: KeyAlgorithm,
+    /// The RSA modulus size in bits, or `None` for a key that is not RSA.
+    ///
+    /// Separate from `key_algorithm` because [`KeyAlgorithm`] has no way to say
+    /// "RSA, 2048" — the variant is named `Rsa4096` — and a caller enforcing a
+    /// modulus floor must see the real number rather than the label.
+    pub(crate) rsa_modulus_bits: Option<usize>,
+    /// The names of the requested extensions AXIAM refuses to sign over, in
+    /// the order they appear. Empty when the request asks for none of them.
+    ///
+    /// Exactly `subjectAltName`, `keyUsage` and `extendedKeyUsage` — the three
+    /// a leaf caller can put in a CSR that would otherwise reach the
+    /// certificate, and the three that must be refused rather than dropped.
+    ///
+    /// Refused, and not silently stripped, for two reasons. A caller who put
+    /// SANs in a leaf CSR meant them, and a certificate issued without them
+    /// and with nothing said is a credential that fails where it is deployed.
+    /// And a caller who put a key usage in one **would get it** under
+    /// `vault_pki` custody: Vault's `sign-verbatim` discards the `key_usage`
+    /// and `ext_key_usage` request parameters when the CSR carries those
+    /// extensions and issues what the CSR asked for. Dropping them would
+    /// therefore be a promise AXIAM can keep on one custodian and not the
+    /// other, which is worse than a rule that holds everywhere.
+    ///
+    /// `basicConstraints` is deliberately **not** here: the DB path overwrites
+    /// the whole parameter set before signing, and Vault ignores a CSR's basic
+    /// constraints outright (warning that it did). A CSR asking to be a CA is
+    /// signed as a leaf on both, which is the test
+    /// `a_csr_that_asked_to_be_a_ca_does_not_get_to_be_one` asserts.
+    pub(crate) refused_extensions: Vec<&'static str>,
+}
+
+/// Read a CSR, refusing anything that does not prove possession of its own key.
+///
+/// Called outside the signing task so a malformed request — by far the likeliest
+/// failure on an endpoint whose input is pasted by hand — is a `400` naming the
+/// CSR rather than a `500` out of a custodian.
+pub(crate) fn inspect_csr(pem: &str) -> AxiamResult<CsrFacts> {
     let block = pem::parse(pem).map_err(|e| AxiamError::Validation {
         message: format!("the certificate signing request is not PEM-encoded: {e}"),
     })?;
@@ -1029,13 +1075,18 @@ fn csr_common_name(pem: &str) -> AxiamResult<String> {
             .map_err(|e| AxiamError::Validation {
                 message: format!("the certificate signing request could not be parsed: {e}"),
             })?;
+    // The whole point of the endpoint: this is the only evidence that whoever
+    // sent the request holds the matching private key. Without it a caller
+    // could have a certificate minted for somebody else's public key.
     csr.verify_signature().map_err(|_| AxiamError::Validation {
         message: "the certificate signing request's signature does not verify against the \
                   public key it carries, so nothing proves the sender holds the matching \
                   private key"
             .into(),
     })?;
-    csr.certification_request_info
+
+    let common_name = csr
+        .certification_request_info
         .subject
         .iter_common_name()
         .next()
@@ -1044,7 +1095,68 @@ fn csr_common_name(pem: &str) -> AxiamResult<String> {
         .filter(|cn| !cn.trim().is_empty())
         .ok_or_else(|| AxiamError::Validation {
             message: "the certificate signing request has no common name in its subject".into(),
-        })
+        })?;
+
+    let spki = &csr.certification_request_info.subject_pki;
+    let (key_algorithm, rsa_modulus_bits) = match spki.algorithm.algorithm.to_id_string().as_str() {
+        // RFC 8410 §3 — id-Ed25519.
+        "1.3.101.112" => (KeyAlgorithm::Ed25519, None),
+        // RFC 8017 — rsaEncryption. The modulus is read here and checked by the
+        // caller: `KeyAlgorithm::Rsa4096` is a label and not a measurement, and
+        // `parse_ca_certificate` above maps *any* RSA OID onto it deliberately
+        // (an imported root of another size is still a usable root). A path
+        // that enforces a floor cannot reuse that mapping.
+        "1.2.840.113549.1.1.1" => {
+            let bits = match spki.parsed() {
+                Ok(x509_parser::public_key::PublicKey::RSA(rsa)) => rsa.key_size(),
+                // A key whose OID says RSA but whose bytes will not parse as an
+                // RSA key reports zero, which fails every floor. Fail closed:
+                // the alternative is treating "unreadable" as "large enough".
+                _ => 0,
+            };
+            (KeyAlgorithm::Rsa4096, Some(bits))
+        }
+        other => {
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "the certificate signing request carries a {other} public key; AXIAM signs \
+                     Ed25519 and RSA keys only"
+                ),
+            });
+        }
+    };
+
+    let mut refused_extensions = Vec::new();
+    if let Some(exts) = csr.requested_extensions() {
+        use x509_parser::extensions::ParsedExtension;
+        for ext in exts {
+            match ext {
+                ParsedExtension::SubjectAlternativeName(_) => {
+                    refused_extensions.push("subjectAltName")
+                }
+                ParsedExtension::KeyUsage(_) => refused_extensions.push("keyUsage"),
+                ParsedExtension::ExtendedKeyUsage(_) => refused_extensions.push("extendedKeyUsage"),
+                _ => {}
+            }
+        }
+        refused_extensions.dedup();
+    }
+
+    Ok(CsrFacts {
+        common_name,
+        key_algorithm,
+        rsa_modulus_bits,
+        refused_extensions,
+    })
+}
+
+/// The common name a CSR asks for, with its signature verified.
+///
+/// A thin reading of [`inspect_csr`], kept because the intermediate path wants
+/// only this one fact. The verification is the shared part, and sharing it is
+/// the point: two possession checks are two places for one to be forgotten.
+fn csr_common_name(pem: &str) -> AxiamResult<String> {
+    Ok(inspect_csr(pem)?.common_name)
 }
 
 /// What an imported certificate actually says about itself.

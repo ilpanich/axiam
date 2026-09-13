@@ -55,6 +55,14 @@ axiam-db = { workspace = true }
 # crates in this workspace.
 wiremock = "0.6"
 
+# Test-only: build an RSA-2048 CSR, which is the case the leaf CSR path's
+# modulus check exists for and the one `parse_ca_certificate`'s OID mapping
+# would otherwise accept as `Rsa4096`. rcgen's signer cannot generate RSA keys
+# (see `crypto::generate_rsa_keypair`), so the test has to make one the same
+# way production does.
+rsa = { version = "0.9", features = ["pem"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
 criterion = { version = "0.8.2", features = ["html_reports"] }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 uuid = { workspace = true }

@@ -209,6 +209,20 @@ pub struct LeafSigningRequest {
     /// to the CA's own remaining validity by the caller; the custodian may cap
     /// it further, which is why the answer is parsed rather than assumed.
     pub ttl_seconds: i64,
+    /// Whether the CSR came from the caller rather than from AXIAM.
+    ///
+    /// `false` for `CertService::generate`, which builds the request itself
+    /// from a key it just generated and a subject it was given, and therefore
+    /// knows exactly what is in it. `true` for `CertService::sign_csr`, where
+    /// the bytes are a caller's.
+    ///
+    /// A custodian that can be *told* what to put in a certificate reads this
+    /// and states the AXIAM-decided fields explicitly rather than letting its
+    /// own defaults apply to a document AXIAM did not write. It is not a
+    /// substitute for validating the CSR — the caller has already refused the
+    /// extensions that would survive — but a second statement of the same
+    /// intent at the place the certificate is actually minted.
+    pub csr_is_caller_supplied: bool,
 }
 
 /// What a remote signer returned.
@@ -584,6 +598,7 @@ mod tests {
         let leaf = LeafSigningRequest {
             csr_pem: "CSR".to_string(),
             ttl_seconds: 3600,
+            csr_is_caller_supplied: false,
         };
         assert!(custodian.sign_csr(&parent, &leaf).await.is_err());
 

@@ -126,6 +126,14 @@ impl NotificationEventType {
             ("POST /api/v1/certificates", "Success") => {
                 vec![Self::CertificateIssued]
             }
+            // The same event as generation: what an operator watching this
+            // wants to know is that a certificate now exists under their CA,
+            // which is equally true whichever way the key was made. A separate
+            // event would split one subscription into two and quietly stop
+            // telling anybody who had only subscribed to the first.
+            ("POST /api/v1/certificates/sign-csr", "Success") => {
+                vec![Self::CertificateIssued]
+            }
             ("POST /api/v1/certificates/{id}/revoke", "Success") => vec![Self::CertificateRevoked],
             ("POST /api/v1/organizations/{id}/ca-certificates/{id}/revoke", "Success") => {
                 vec![Self::CaCertificateRevoked]

@@ -1596,6 +1596,7 @@ Organization and tenant CA lifecycle with per-CA key custody (sealed database ro
 | T-198 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | S | Revoked or unflagged CA lingers in the mTLS trust-anchor bundle | Medium | Mitigated |
 | T-206 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | S | Certificate chaining to a CA never enabled as a trust anchor authenticates on the proxy path | High | Mitigated |
 | T-263 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | E | Accepting an unchained certificate for RFC 8705 §2.2 lets a self-minted certificate authenticate as a device or as a `tls_client_auth` client | Critical | Mitigated |
+| T-268 | Certificate issuance (rcgen, policy enforcement) <br/>*Process* | E | Leaf CSR signed with the requester's extensions, a weak key, or onto a key the requester does not hold | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1626,7 +1627,7 @@ The signing CA key allows forging any tenant, user, service or device identity i
 
 A CA or leaf key generated from a weak source is factorable or predictable, silently invalidating the whole hierarchy.
 
-> Key generation uses the platform CSPRNG — Ed25519 through rcgen/ring, RSA-4096 through the rsa crate's OS-seeded generator handed to rcgen as PKCS#8, since ring deliberately implements no RSA key generation (1.0.0-beta01). No custom or seeded RNG is used anywhere in the PKI path.
+> Key generation uses the platform CSPRNG — Ed25519 through rcgen/ring, RSA-4096 through the rsa crate's OS-seeded generator handed to rcgen as PKCS#8, since ring deliberately implements no RSA key generation (1.0.0-beta01). No custom or seeded RNG is used anywhere in the PKI path. **Extended 2026-09-13 (C-1):** a key AXIAM did not generate now reaches the PKI path, through `POST /api/v1/certificates/sign-csr`, where entropy is the caller's problem and *size* is AXIAM's. The CSR's modulus is measured and an RSA key below 4096 bits is refused, rather than mapped onto `KeyAlgorithm::Rsa4096` by the any-RSA-OID rule `parse_ca_certificate` applies to imported CAs — which would have signed a 2048-bit key and written 4096 on the row. See T-268.
 
 **T-97 — Certificate issued beyond the tenant's validity policy**  
 `Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · Medium · Mitigated
@@ -1754,7 +1755,7 @@ Flipping a stored entry's status reports directly in the datastore would let an 
 
 The tenant signing-CA endpoint signs a PKCS#10 request whose key was generated elsewhere. Honouring the request's own extensions would let a caller mint an unconstrained CA; skipping verification of the request's self-signature would mint a CA certificate for somebody else's public key.
 
-> The CSR's subject is honoured; its requested extensions are not — AXIAM states CA:TRUE, path length zero and keyCertSign/cRLSign itself, so a request that asked to be an unconstrained CA does not become one (1.0.0-alpha44). from_pem verifies the request's self-signature as proof of possession. The parent must be unexpired, unrevoked, key-holding and not itself tenant-scoped — refused up front rather than downstream — the intermediate's validity is capped to the parent's expiry, and the row records custody External because AXIAM never held the key.
+> The CSR's subject is honoured; its requested extensions are not — AXIAM states CA:TRUE, path length zero and keyCertSign/cRLSign itself, so a request that asked to be an unconstrained CA does not become one (1.0.0-alpha44). from_pem verifies the request's self-signature as proof of possession. **T-268 is the leaf twin of this entry** (2026-09-13), and the two now share one parse and one possession check in `ca::inspect_csr`; the leaf path refuses the extensions it cannot guarantee are dropped on every custodian, rather than stripping them as this one does — a CA has no SANs and a caller cannot have meant them here, while a leaf caller can and did. The parent must be unexpired, unrevoked, key-holding and not itself tenant-scoped — refused up front rather than downstream — the intermediate's validity is capped to the parent's expiry, and the row records custody External because AXIAM never held the key.
 
 **T-195 — One tenant's compromised issuance burns the organization trust anchor**  
 `Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · High · Mitigated
@@ -1762,6 +1763,25 @@ The tenant signing-CA endpoint signs a PKCS#10 request whose key was generated e
 When every tenant's user, service and device certificates issue straight from the organization CA, a compromised issuance path in one tenant is the whole estate's problem: the anchor is long-lived, widely distributed and painful to replace, and rotating it is a coordinated change at every relying party.
 
 > Tenant signing CAs (1.0.0-alpha44): an intermediate created beneath the organization CA, constrained to a path length of zero, named as issuer_ca_id when issuing for that tenant, its key held by the configured custodian — Vault where configured, even when the parent's key predates Vault adoption. Revoking it revokes exactly one tenant's issuance. Under vault_pki the signing chain deliberately reaches past the path-length-zero issuing intermediate to the root, because signing from the issuing intermediate would produce certificates Vault accepts and every chain validator rejects.
+
+**T-268 — Leaf CSR signed with the requester's extensions, a weak key, or onto a key the requester does not hold**  
+`Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · High · Mitigated
+
+`POST /api/v1/certificates/sign-csr` issues an end-entity certificate over a public key supplied by the caller — the point being a private key AXIAM never sees. Three things a naive implementation gets wrong. It signs a request whose signature it never checked, minting a certificate over somebody else's public key. It honours the extensions the request asks for, so a CSR saying `CA:TRUE` and `keyCertSign` becomes a CA that can sign anything under the tenant's trust anchor — the leaf twin of T-194. And it records the key algorithm the caller states rather than the one the key is, so an RSA-2048 key is signed and written down as `Rsa4096` (T-96, on the leaf path).
+
+> **C-1 (2026-09-13).** `ca::inspect_csr` parses the request **once**, verifies its self-signature before anything else — the only proof the sender holds the matching private key — and reports the subject, the key and the requested extensions from that single parse. Three functions each doing their own parse would have verified possession up to three times on the way to three answers, and would have let a future caller reach one fact without having verified anything.
+>
+> The key must be Ed25519, or RSA with a **measured** modulus of at least 4096 bits. `KeyAlgorithm::Rsa4096` is a label and not a measurement — `parse_ca_certificate` maps any RSA OID onto it deliberately, so an imported root of another size stays usable — and reusing that mapping here is exactly how T-96 would reappear.
+>
+> A CSR requesting `subjectAltName`, `keyUsage` or `extendedKeyUsage` is refused **by name** rather than silently stripped; every other requested extension is discarded when rcgen's parameter set is overwritten with the shared `leaf_params`, the same function `CertService::generate` builds a generated leaf from — so "a CSR-signed leaf is the same shape as a generated one" is true because one function says what the shape is, not because two agree. `basicConstraints` needs no rule: the in-process path overwrites it and Vault ignores it outright, so a CSR asking to be a CA comes back a leaf on both.
+>
+> **The `keyUsage` refusal is load-bearing under `vault_pki`, and this is the finding that shaped the design.** The plan expected to state `key_usage`/`ext_key_usage` in the Vault request body and get parity that way. Vault's own API documentation is explicit that `sign-verbatim` **discards** those parameters whenever the CSR carries the matching extensions, and issues what the CSR asked for. So the parameters alone guarantee nothing, and a silent strip would have been a promise AXIAM keeps on a database-custody deployment and breaks on a Vault one, for the same CSR. Refusing in the shared inspection makes one rule that holds on every custodian. Having refused them, the Vault body *also* states both as empty, so the shape is AXIAM's decision rather than whichever default the Vault version in front of it carries (`DigitalSignature`, `KeyAgreement`, `KeyEncipherment`) — neither half is sufficient alone.
+>
+> The issuer, the tenant scope and the validity come from the same `prepare_leaf_issuance` the generate path uses, so a revoked CA, an expired one, one in another organization (T-98) and a certificate that would outlive its issuer are refused identically on both. The permission is `certificates:generate`, following `signing-cas/sign-csr`'s reuse of `ca_certificates:generate`: a caller allowed to mint a certificate under a CA is allowed to mint one for a key they already hold, and this path is the less powerful of the two. No private key exists here, so the response type has no field for one (T-99, T-105 hold by construction).
+>
+> Tests: twenty in `crates/axiam-pki/tests/sign_csr_test.rs`, one per rule; three against the Vault mock in `vault_pki_test.rs`, including one asserting the exact request body AXIAM sends and one proving a `keyUsage`-requesting CSR never reaches Vault at all; four at the HTTP layer in `certificate_test.rs`; and `a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one` in `mtls_test.rs`, which is the property the feature exists for.
+>
+> **Residual.** What Vault does with the body is documented rather than observed: the tests here run against a mock, and a real Vault was not available. The security property does not rest on that — it rests on the refusal, which is enforced before any custodian is chosen — but the cosmetic parity of the key-usage extension under `vault_pki` is the part taken on the documentation's word.
 
 **T-196 — Vault configured, CA keys silently sealed into database rows**  
 `ca_certificate (sealed row or Vault custody)` (Store) · Information disclosure · High · Mitigated

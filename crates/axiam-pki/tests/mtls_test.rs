@@ -434,3 +434,112 @@ async fn mtls_rejects_revoked_cert() {
         "error must mention inactive status, got: {err_msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A CSR-signed certificate binds and authenticates exactly like a generated one
+// (C-1 rule 8, T-268)
+// ---------------------------------------------------------------------------
+
+/// The property the whole feature exists for.
+///
+/// A device whose key was born in its own secure element, and which AXIAM has
+/// therefore never held, must authenticate over mTLS exactly as one whose key
+/// AXIAM generated and handed back. Nothing in the binding or the
+/// authentication path was changed for this — both key on the fingerprint and
+/// the chain — which is precisely why it is worth asserting: "nothing to
+/// change" is a claim, and this is the test of it.
+#[tokio::test]
+async fn a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one() {
+    use axiam_core::models::certificate::SignCertificateCsr;
+    use axiam_core::repository::ServiceAccountRepository;
+
+    let db = setup_db().await;
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let ca = CaService::new(
+        ca_repo.clone(),
+        test_pki_config(),
+        sem.clone(),
+        test_ca_custodians(),
+    )
+    .generate(CreateCaCertificate {
+        organization_id: org_id,
+        subject: "BYOK Device CA".into(),
+        key_algorithm: KeyAlgorithm::Ed25519,
+        validity_days: 365,
+        intermediate_subject: None,
+        intermediate_validity_days: None,
+        issue_from_root: false,
+    })
+    .await
+    .expect("CA generation");
+
+    ca_repo
+        .set_mtls_trust_anchor(org_id, ca.certificate.id, true)
+        .await
+        .expect("trust anchor");
+
+    // The device's own key, generated here to stand in for a secure element —
+    // and never given to AXIAM. Only the CSR crosses.
+    let device_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("device key");
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "device-byok-001");
+    let csr_pem = params
+        .serialize_request(&device_key)
+        .expect("csr")
+        .pem()
+        .expect("pem");
+
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let leaf = CertService::new(
+        ca_repo,
+        cert_repo.clone(),
+        test_pki_config(),
+        sem,
+        test_ca_custodians(),
+    )
+    .sign_csr(
+        org_id,
+        SignCertificateCsr {
+            tenant_id,
+            issuer_ca_id: ca.certificate.id,
+            csr_pem,
+            cert_type: CertificateType::Device,
+            validity_days: 30,
+            metadata: None,
+        },
+        None,
+    )
+    .await
+    .expect("the device's CSR is signed");
+
+    let sa_repo = SurrealServiceAccountRepository::new(db.clone());
+    let (sa, _secret) = sa_repo
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "BYOK Device SA".into(),
+            description: None,
+        })
+        .await
+        .expect("service account");
+
+    cert_repo
+        .bind_to_service_account(tenant_id, leaf.id, sa.id)
+        .await
+        .expect("a CSR-signed certificate binds like any other");
+
+    let identity =
+        DeviceAuthService::new(cert_repo, SurrealCaCertificateRepository::new(db.clone()))
+            .authenticate(&leaf.public_cert_pem)
+            .await
+            .expect("and authenticates like any other");
+
+    assert_eq!(identity.service_account_id, sa.id);
+    assert_eq!(identity.tenant_id, tenant_id);
+    assert_eq!(identity.certificate_id, leaf.id);
+}

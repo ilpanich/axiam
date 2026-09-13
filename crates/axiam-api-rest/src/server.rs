@@ -1124,6 +1124,15 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     .route(web::post().to(handlers::certificates::generate::<C>))
                     .route(web::get().to(handlers::certificates::list::<C>)),
             )
+            // Before `/certificates/{id}`: a literal segment registered after a
+            // path parameter that would also match it is a route actix never
+            // reaches. `sign-csr` is not a UUID, so `{id}` would answer it with
+            // a parse failure rather than a 404 — which is a confusing way to
+            // learn the route is in the wrong place.
+            .service(
+                web::resource("/certificates/sign-csr")
+                    .route(web::post().to(handlers::certificates::sign_csr::<C>)),
+            )
             .service(
                 web::resource("/certificates/{id}")
                     .route(web::get().to(handlers::certificates::get::<C>)),

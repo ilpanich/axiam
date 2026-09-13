@@ -639,6 +639,25 @@ impl CaKeyStore for VaultPkiCaKeyStore {
     /// a compromised AXIAM and a certificate for any name at all. An operator
     /// who wants Vault to enforce names as well can point the mount's role at
     /// the same issuer; what they cannot do is have neither.
+    ///
+    /// # A caller's CSR is not AXIAM's CSR
+    ///
+    /// When [`LeafSigningRequest::csr_is_caller_supplied`] is set, the request
+    /// body states `key_usage` and `ext_key_usage` as empty rather than letting
+    /// Vault apply its own defaults (`DigitalSignature`, `KeyAgreement`,
+    /// `KeyEncipherment`). What a certificate says about its key usage should be
+    /// AXIAM's decision, not a default of whichever Vault version answers, and
+    /// empty is what the in-process path produces for the same request.
+    ///
+    /// This is a *second* statement of an intent already enforced upstream, and
+    /// it has to be, because it is not sufficient on its own: `sign-verbatim`
+    /// **discards** these two parameters when the CSR itself carries the
+    /// matching extensions and issues what the CSR asked for. So
+    /// `CertService::sign_csr` refuses a CSR requesting `keyUsage` or
+    /// `extendedKeyUsage` before anything reaches here, and this says what the
+    /// certificate should carry once that is true. Neither half alone would do:
+    /// the refusal without this leaves the shape to a Vault default, and this
+    /// without the refusal is a parameter Vault would throw away.
     fn sign_csr<'a>(
         &'a self,
         key_ref: &'a CaKeyRef,
@@ -650,16 +669,17 @@ impl CaKeyStore for VaultPkiCaKeyStore {
                 &locator.issuing.mount,
                 &format!("issuer/{}/sign-verbatim", locator.issuing.issuer),
             );
-            let data = self
-                .post(
-                    &url,
-                    serde_json::json!({
-                        "csr": request.csr_pem,
-                        "ttl": format!("{}s", request.ttl_seconds.max(1)),
-                        "format": "pem",
-                    }),
-                )
-                .await?;
+            let mut body = serde_json::json!({
+                "csr": request.csr_pem,
+                "ttl": format!("{}s", request.ttl_seconds.max(1)),
+                "format": "pem",
+            });
+            if request.csr_is_caller_supplied {
+                let map = body.as_object_mut().expect("a JSON object was just built");
+                map.insert("key_usage".into(), serde_json::json!([]));
+                map.insert("ext_key_usage".into(), serde_json::json!([]));
+            }
+            let data = self.post(&url, body).await?;
 
             let certificate_pem = string_field(&data, "certificate", &url)?;
             // `ca_chain` means different things at different Vault versions —

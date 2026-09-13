@@ -9839,6 +9839,17 @@
                   "mitigation": "Tenant signing CAs (1.0.0-alpha44): an intermediate created beneath the organization CA, constrained to a path length of zero, named as issuer_ca_id when issuing for that tenant, its key held by the configured custodian \u2014 Vault where configured, even when the parent's key predates Vault adoption. Revoking it revokes exactly one tenant's issuance. Under vault_pki the signing chain deliberately reaches past the path-length-zero issuing intermediate to the root, because signing from the issuing intermediate would produce certificates Vault accepts and every chain validator rejects.",
                   "modelType": "STRIDE",
                   "number": 195
+                },
+                {
+                  "id": "e8c36bff-0f5a-5b22-8758-468fb08475b4",
+                  "title": "Leaf CSR signed with the requester's extensions, a weak key, or onto a key the requester does not hold",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "POST /api/v1/certificates/sign-csr issues an end-entity certificate over a public key supplied by the caller. Three things a naive implementation gets wrong: it signs a request whose signature it never checked, minting a certificate over somebody else's public key; it honours the extensions the request asks for, so a CSR saying CA:TRUE and keyCertSign becomes a CA that can sign anything under the tenant's trust anchor; and it records the key algorithm the caller states rather than the one the key is, so an RSA-2048 key is signed and written down as Rsa4096 (the leaf twin of T-194, and T-96 on the leaf path).",
+                  "mitigation": "C-1 (2026-09-13): ca::inspect_csr parses the request once, verifies its self-signature before anything else \u2014 the only proof the sender holds the matching private key \u2014 and reports the subject, the key and the requested extensions from that single parse. The key must be Ed25519 or RSA with a measured modulus of at least 4096 bits; the label KeyAlgorithm::Rsa4096 is never taken on trust, which is what closes T-96 here. A CSR requesting subjectAltName, keyUsage or extendedKeyUsage is refused by name rather than silently stripped, and every other requested extension is discarded when rcgen's parameter set is overwritten with the shared leaf_params \u2014 the same function CertService::generate builds a generated leaf from, so the two paths cannot issue different shapes. basicConstraints needs no rule: the in-process path overwrites it and Vault ignores it outright, so a CSR asking to be a CA comes back a leaf on both. Under vault_pki custody the refusal of keyUsage and extendedKeyUsage is load-bearing rather than cosmetic: Vault's sign-verbatim discards the key_usage and ext_key_usage request parameters whenever the CSR carries those extensions and issues what the CSR asked for, so a silent strip would be a promise AXIAM keeps on one custodian and breaks on the other. Having refused them, the Vault request body states both as empty so the shape is AXIAM's decision and not a Vault default. The issuer, the tenant scope and the validity come from the same prepare_leaf_issuance the generate path uses. No private key exists on this path, so the response type has no field for one. Twenty tests in sign_csr_test.rs, three against a Vault mock in vault_pki_test.rs, four at the HTTP layer, and one in mtls_test.rs proving a CSR-signed device certificate binds and authenticates exactly like a generated one.",
+                  "modelType": "STRIDE",
+                  "number": 268
                 }
               ]
             }
@@ -15360,6 +15371,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 267
+    "threatTop": 268
   }
 }

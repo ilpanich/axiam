@@ -742,6 +742,16 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     // Certificates
     ("GET", "/api/v1/certificates", "certificates:list"),
     ("POST", "/api/v1/certificates", "certificates:generate"),
+    // The same permission as generation, deliberately: a caller allowed to mint
+    // a certificate under a CA is allowed to mint one for a key they already
+    // hold, and this path is the less powerful of the two — no key material is
+    // produced and none is returned. `signing-cas/sign-csr` reuses
+    // `ca_certificates:generate` for the same reason.
+    (
+        "POST",
+        "/api/v1/certificates/sign-csr",
+        "certificates:generate",
+    ),
     ("GET", "/api/v1/certificates/{id}", "certificates:get"),
     (
         "POST",

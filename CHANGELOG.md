@@ -26,6 +26,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was free to run at one factor anyway. Contract §5.2 rule 4 carries the rule
   for SDKs.
 
+### Added
+
+- **A certificate for a key AXIAM never sees.** `POST /api/v1/certificates/sign-csr`
+  issues an end-entity certificate from an uploaded PKCS#10 request, so a key
+  can be born in an HSM, an offline ceremony or a device's own secure element
+  and never cross the wire in either direction (C-1, T-268). The response is a
+  `Certificate` and carries no key field, because there is no key to carry.
+  Permission `certificates:generate`, the same as generation — a caller allowed
+  to mint a certificate under a CA is allowed to mint one for a key they
+  already hold, and this path is the less powerful of the two.
+
+  What AXIAM decides rather than the request: possession is proved by the
+  request's own signature; the key must be Ed25519 or RSA with a measured
+  modulus of at least 4096 bits; a request asking for a `subjectAltName`,
+  `keyUsage` or `extendedKeyUsage` is refused by name rather than silently
+  stripped, and every other requested extension is discarded. A CSR asking to
+  be a CA comes back a leaf. A CSR-signed certificate is byte-for-byte the same
+  shape as a generated one, and binds and authenticates over mTLS identically.
+
+  Contract 1.45 adds `certificates.sign_csr` to the §27 management surface,
+  taking it from 159 operations to 160.
+
 ### Changed
 
 - Forced first-login MFA enrolment now returns the user to the application

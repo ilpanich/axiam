@@ -513,6 +513,105 @@ was not the one that enrolled → `401`; the happy path unchanged. Update
 
 ### C-1 — `POST /api/v1/certificates/sign-csr` (Opus 5)
 
+> **EXECUTED — C-1, 2026-09-13. One decision in rule 6 had to be revisited;
+> everything else landed as written.**
+>
+> **The finding that changed the design.** Rule 6 says to establish parity under
+> `vault_pki` by "stating `key_usage`/`ext_key_usage` explicitly in the request
+> body (empty, for parity with the DB path)". That does not work, and reading
+> Vault's API documentation before writing the branch — which rule 6 told me to
+> do — is what caught it. `sign-verbatim` **discards** both parameters whenever
+> the CSR itself carries the matching extensions, and issues the `keyUsage` and
+> `extendedKeyUsage` the CSR asked for. So a caller's `keyCertSign` would have
+> reached the certificate on a Vault deployment no matter what AXIAM put in the
+> request body, while the in-process path dropped it — the same CSR, two
+> different certificates, and the promise in §2 ("a CSR's requested extensions
+> never reach the certificate") true on one custodian and false on the other.
+>
+> Rule 6's fallback is to refuse CSR signing under `vault_pki` entirely. That
+> was not necessary, and it would have made the feature unavailable to exactly
+> the deployments with the best key custody. The rule was generalised instead:
+> **a CSR requesting `subjectAltName`, `keyUsage` or `extendedKeyUsage` is
+> refused**, in the shared inspection, before any custodian is chosen. Those
+> three are precisely the extensions Vault would honour, and D-3's reasoning
+> covers all three identically — a caller who put a key usage in a leaf CSR
+> meant it, and a certificate issued without it and with nothing said fails
+> where it is deployed. `basicConstraints` needs no rule: the in-process path
+> overwrites it and Vault ignores it outright (warning that it did), so a CSR
+> asking to be a CA comes back a leaf on both. Having refused the three, the
+> Vault request body *also* states the two usages as empty, so the shape is
+> AXIAM's decision rather than whichever default the Vault version carries —
+> neither half is sufficient alone, and the code says so at both places.
+>
+> **Two smaller deviations.**
+> * Rule 3 says the leaf parameters get
+>   `use_authority_key_identifier_extension`. Setting it put an
+>   `authorityKeyIdentifier` on a CSR-signed leaf that a *generated* leaf does
+>   not carry — caught by `a_csr_signed_leaf_is_the_same_shape_as_a_generated_one`,
+>   which compares the two extension sets. That is exactly the divergence D-5
+>   forbids, so it was dropped. An AKI on leaves is worth having and belongs
+>   with the KU/EKU profiles in §8: decided once, for both paths.
+> * The plan says to make `csr_common_name` `pub(crate)` and reuse it. The leaf
+>   path needs three facts, not one, and three readers would have verified
+>   possession up to three times. Instead `ca::inspect_csr` does one parse and
+>   one signature check and returns all of them as `CsrFacts`;
+>   `csr_common_name` is now a two-line reading of it, so the intermediate path
+>   is unchanged and the possession check exists once.
+>
+> **What shipped.** `SignCertificateCsr` in `axiam-core` with the length-eliding
+> `Debug`, and no `subject` or `key_algorithm` field — both are read from the
+> CSR, which is the only way the row and the certificate cannot disagree.
+> `CertService::sign_csr` beside `generate`; `prepare_leaf_issuance` factored
+> out of `generate` and shared, so the validity bounds, the CA status and window
+> check, the organization scope and the issuer-expiry refusal are one
+> implementation; `leaf_params` likewise, so "the same shape" is true because
+> one function says what the shape is. `LeafSigningRequest` gained
+> `csr_is_caller_supplied`, `false` on the generation path — whose issued
+> certificates are therefore byte-identical to before.
+> `POST /api/v1/certificates/sign-csr` registered **before** `/certificates/{id}`
+> (a literal segment after a matching path parameter is a route actix never
+> reaches), `certificates:generate` in the permission table, and
+> `CertificateIssued` as its notification event — the same event as generation,
+> because what an operator watching it wants to know is that a certificate now
+> exists under their CA, and a second event would silently stop telling anyone
+> subscribed to the first.
+>
+> **Tests, 38 in all and every one green.** Twenty in
+> `crates/axiam-pki/tests/sign_csr_test.rs`, one per rule — including the
+> RSA-2048 refusal (T-96: the modulus is measured, never taken from the
+> `Rsa4096` label), the P-256 refusal, the CA-asking CSR coming back a leaf, the
+> three extension refusals, the cross-organization CA being *not found* rather
+> than refused, revoked and expired issuers, an `External`-custody CA with no
+> key, and the validity caps. Three in `vault_pki_test.rs`, of which
+> `signing_a_caller_csr_sends_the_csr_verbatim_and_states_the_usages` asserts
+> the exact body AXIAM sends and
+> `a_caller_csr_asking_for_a_key_usage_never_reaches_vault` mounts no
+> `sign-verbatim` at all, so reaching Vault is itself the failure. Four at the
+> HTTP layer in `certificate_test.rs`, including one asserting the response has
+> no `private_key_pem` **key** rather than a null one. And
+> `a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one` in
+> `mtls_test.rs` — the property the feature exists for, and the test of the
+> plan's claim that binding needed "nothing to change".
+>
+> The plan also asked for an HTTP test for `signing-cas/sign-csr`, which had
+> none: `signing_a_tenant_ca_csr_over_http_yields_an_intermediate_with_external_custody`.
+> No `CaCertificateIssued` event exists, so no mapping was added — recorded in
+> §8 as the follow-up it already was.
+>
+> Spec regenerated with `--dump-openapi` (built `--no-default-features`) and
+> re-stamped; `gen-management-registry.py` run after adding the entry, and
+> `--check` agrees: **159 → 160 operations across 24 namespaces**, exactly as
+> predicted, which is what every SDK's surface test will fail on until F-1
+> lands. T-268 is in the STRIDE document and the model at `threatTop` 268, with
+> the Vault finding written into its mitigation and the one residual stated: the
+> tests run against a mock, so what Vault does with the body is documented
+> rather than observed. T-96 and T-194 carry their cross-references.
+>
+> One thing the plan did not anticipate: a full `cargo test -p axiam-pki`
+> filled the disk twice. The workspace's `target/` reaches ~30 GB against a
+> ~38 GB quota, so `cargo clean` belongs *between every pair* of Rust items,
+> not between plan steps.
+
 **Builds** feature 2. **Decisions** D-3…D-6. **Threat:** new **T-268** (§7).
 
 **Core** (`axiam-core/src/models/certificate.rs`): next to

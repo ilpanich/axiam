@@ -491,6 +491,75 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "basic-op-and-the-residual-pass",
+    date: "September 13, 2026",
+    dateShort: "Sep 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "Basic OP, a conformance suite, and the residuals we had been living with",
+    excerpt:
+      "Three releases: the OpenID Connect Basic OP surface, the first runs of the OpenID Foundation's conformance suite — which found something no internal review had — and a pass over the caveats the threat model had been carrying quietly.",
+    body: [
+      {
+        type: "p",
+        text: "`1.0.0-beta12` through `1.0.0-beta14` cover two pieces of work. The first is the OpenID Connect **Basic OP** programme and the first runs of the OpenID Foundation's own conformance suite against a live AXIAM. The second, a week later, is a pass over the residual risks the threat model had recorded and then lived with — the sentences at the end of a mitigation that begin *the residual is*.",
+      },
+      { type: "h", text: "Running somebody else's tests" },
+      {
+        type: "p",
+        text: "Until beta13 our OAuth2 and OIDC evidence was our own: RFC MUST matrices, checked in control by control, with the test that satisfies each row. That is worth having and it is not the same thing as running the suite the ecosystem actually uses. Four plans now run against a live server — the OIDC Core Basic OP plan and the three FAPI 2.0 Security Profile (Final) variants — and every report is committed alongside the earlier ones, green and red alike.",
+      },
+      {
+        type: "p",
+        text: "The 2026-09-11 result is **165 modules with zero `FAILED`**. It is worth being precise about what that is and is not. It is a self-run against a working-tree build, **not a certification**, and no submission has been made. The `REVIEW` and `WARNING` verdicts are published rather than counted as passes — a `REVIEW` is a screenshot-evidence module the suite cannot decide automatically and a human must judge, and the one `WARNING` per FAPI plan is a module that now runs where it used to be skipped. `conformance-run` exits non-zero on them, deliberately.",
+      },
+      {
+        type: "p",
+        text: "Getting there took nine waves. The authorization endpoint could not answer an anonymous browser, so a third-party relying party had nowhere to send a user who was not already signed in; it can now, through a per-client `browser_sso` switch and an OP session cookie scoped to that one path. Nine OIDC authentication-request parameters were parsed and honoured by nobody, which is worse than not accepting them: a per-client honour lane now makes them mean what they say, and a FAPI 2.0 client is refused them outright rather than half-served. `address` and `phone` scopes arrived behind four gates re-asked at every UserInfo call, with a consent screen and Art. 7 self-service withdrawal. `POST /oauth2/userinfo` answers the body carrier RFC 6750 §2.2 specifies. And `client_secret_basic` is accepted — the Basic OP plan runs 37 of its 38 modules with it — while remaining the method we tell you not to use.",
+      },
+      { type: "h", text: "What the suite found" },
+      {
+        type: "p",
+        text: "The point of publishing receipts is that the reader learns it from us. The first run found a **Critical**: the identity cache was laundering a bound token into a bearer one. Signature and expiry are facts about a token and can be cached; which certificate the connection presented and which DPoP proof accompanied it are facts about the *request*, and the cache was serving the first while skipping the second. A sender-constrained token could therefore be presented by anyone who had a copy of it. It is recorded as the Critical it was ([T-246](#/security/diagram/2/T-246)) rather than filed as a conformance detail, and the extractors every protected route runs now re-derive the request facts even when the cached identity is used.",
+      },
+      {
+        type: "p",
+        text: "The second was a replay: a DPoP proof was single-use at the token endpoint and not at the resource endpoints, so one proof could be replayed against a protected resource ([T-247](#/security/diagram/2/T-247)). Proofs are now recorded through the same store at the resource endpoints too — *after* they verify, so a forged proof cannot burn a victim's key — and a proof that cannot be recorded is refused rather than admitted. No internal review had found either.",
+      },
+      { type: "h", text: "The residuals" },
+      {
+        type: "p",
+        text: "A residual recorded inside an entry the model calls *Mitigated* is the most expensive thing to leave alone: it is invisible to every count and every page, and the next reader sees a control that sounds whole. Five of them are now structural rather than written down. The personal-data column lists behind erasure and export became one declared inventory, with a test that introspects the live schema after migrations and fails on a column classified nowhere — so adding a column is a failing build rather than a subject who keeps a telephone number. A `claims` request now rides the refresh token, so a long-lived session no longer quietly loses it. A default tenant id that does not parse is reported once at boot, describing the value's shape and never the value. A contended write that stays lost answers `503` with `Retry-After: 1` rather than `500`, which an identity provider reads as a failed sync. And the datastore and broker credentials come through the secret provider, so the Vault token is now the only credential a container spec has to carry.",
+      },
+      {
+        type: "p",
+        text: "Two entries were open because the remedy had never been built. Audit **collection** is now boundable as retention always was, deployment-wide and off by default ([T-110](#/security/diagram/6/T-110), closed). And the server can publish an optional revocation feed — the hashed ids of sessions revoked within the last token lifetime — which narrows the fifteen-minute window a stateless access token leaves open.",
+      },
+      { type: "h", text: "A feed nobody polls narrows nothing" },
+      {
+        type: "p",
+        text: "That last one was deliberately left **open** when the server half shipped. Two entries — [T-39](#/security/diagram/1/T-39) on the token service and [T-143](#/security/diagram/8/T-143) on the SDK route guard — are the same fifteen-minute window seen from each side, and they had sat there since the first version of the model. Publishing a document no client reads does not close either of them.",
+      },
+      {
+        type: "p",
+        text: "On 13 September the client half landed in all eleven SDK repositories: a poller attached to the JWKS verifier, opt-in, never on the request path, and never fail-closed — an unreachable feed, a non-`200`, an unparseable body or an unknown `alg` verifies exactly as with no feed at all, and specifically **not** as an empty list, which would be a guard silently honouring no revocations while appearing to honour them. It can only ever turn an accept into a reject. Both entries are closed, and the honest residual is stated: the window is now one poll interval rather than zero, and both halves are opt-in. The accepted-trade-off bullet stays on the Security page for exactly that reason — the trade is narrowed, not removed.",
+      },
+      { type: "h", text: "The model" },
+      {
+        type: "p",
+        text: "The threat model is at **266 threats, 253 mitigated and 13 open**. The authentication diagram now carries no open item at all, for the first time. So does the OAuth2 diagram — including the one item this work opened on AXIAM's own request path: the 60-second grace a rotated refresh token kept, recorded open at beta13 ([T-254](#/security/diagram/2/T-254)) rather than absorbed, and then closed by a decision in the same release. The grace is now a FAPI 2.0 behaviour only, where it is required and where every token is sender-constrained; every other client has its predecessor revoked at rotation, and a refresh token presented after rotation is counted on its session and audited either way.",
+      },
+      {
+        type: "p",
+        text: "The thirteen that remain are in the open risk register on the Security page, generated from the same model the diagrams render from. They are backup encryption, cluster RBAC, package-registry trust and the rest — the things AXIAM cannot close from inside the application, written down with what to do about each.",
+      },
+      {
+        type: "p",
+        text: "The caution has not changed and is not about to. AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and running somebody else's conformance suite is not either of those things — it is evidence that a protocol surface behaves as specified, which is a narrower claim and a useful one. Do not put it in front of production identity traffic yet.",
+      },
+    ],
+  },
+  {
     slug: "beta-phase",
     date: "August 30, 2026",
     dateShort: "Aug 2026",
@@ -844,7 +913,7 @@ export const PHASES: Phase[] = [
     n: 20,
     title: "Beta line — stabilisation toward 1.0",
     focus:
-      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store",
+      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories",
     start: "Aug 26, 2026",
     end: "Ongoing",
     status: "ongoing",

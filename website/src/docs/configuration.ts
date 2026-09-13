@@ -190,7 +190,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       { type: "h", id: "provider", text: "Where secrets come from" },
       {
         type: "p",
-        text: "The keys above do not have to be environment variables. `AXIAM__AUTH__SECRET_PROVIDER` selects where the server fetches them at startup, and the field names it looks for are the lowercase forms — `jwt_private_key_pem`, `opaque_setup_key`, `pki_encryption_key`, `auth_pepper` and the rest. See [Secrets & HashiCorp Vault](#/docs/secrets) for the full story.",
+        text: "The keys above do not have to be environment variables. `AXIAM__AUTH__SECRET_PROVIDER` selects where the server fetches them at startup, and the field names it looks for are the lowercase forms — `jwt_private_key_pem`, `opaque_setup_key`, `pki_encryption_key`, `auth_pepper` and the rest. Since `1.0.0-beta14` that also covers `db_username`, `db_password` and `amqp_url`, so on a Vault or `file` deployment the token or the mount is the only credential the container spec carries. See [Secrets & HashiCorp Vault](#/docs/secrets) for the full story.",
       },
       {
         type: "table",

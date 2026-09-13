@@ -212,7 +212,7 @@ export const OPERATE_PAGES: DocPage[] = [
     navLabel: "Secrets & Vault",
     title: "Secrets & HashiCorp Vault",
     intro:
-      "AXIAM holds ten long-lived secrets. Two of them are the difference between \"an attacker read your database\" and \"an attacker owns your identity provider\".",
+      "AXIAM holds ten long-lived secrets, plus the datastore and broker credentials. Two of them are the difference between \"an attacker read your database\" and \"an attacker owns your identity provider\".",
     blocks: [
       { type: "h", id: "what", text: "The secrets" },
       {
@@ -626,7 +626,7 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "table",
         headers: ["Variable", "Values", "Default", "Meaning"],
         rows: [
-          ["AXIAM__SERVER__TLS__CLIENT_AUTH", "off | optional | required", "off", "Client-certificate policy."],
+          ["AXIAM__SERVER__TLS__CLIENT_AUTH", "off | optional | required | optional_self_signed", "off", "Client-certificate policy. The fourth value additionally admits a chainless certificate, for the OAuth2 `self_signed_tls_client_auth` method — and only for that."],
           ["AXIAM__SERVER__TLS__CLIENT_CA_PATH", "PEM bundle path", "—", "Trust anchors for client certificates."],
           ["AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH", "path", "beside CERT_PATH", "Where the bundle assembled from organization CAs flagged as mTLS trust anchors is written at startup."],
         ],

@@ -286,6 +286,31 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::post().to(handlers::webauthn::finish_registration::<C>)),
             )
+            // M-3: the setup-token twins of the two above, for a forced
+            // first-login enrolment that has no session yet. Same rate-limit
+            // buckets and the same D8 reasoning: a ceremony authenticates a
+            // user and carries no OAuth2 client identity to key on. Separate
+            // bucket names so a burst against the session-less pair is
+            // distinguishable in the counters from one against the profile
+            // page's.
+            .service(
+                web::resource("/webauthn/setup/register/start")
+                    .wrap(build_governor(rate_limit_cfg.webauthn_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "webauthn_setup_register_start",
+                        rate_limit_cfg.webauthn_per_min,
+                    ))
+                    .route(web::post().to(handlers::webauthn::setup_start_registration::<C>)),
+            )
+            .service(
+                web::resource("/webauthn/setup/register/finish")
+                    .wrap(build_governor(rate_limit_cfg.webauthn_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "webauthn_setup_register_finish",
+                        rate_limit_cfg.webauthn_per_min,
+                    ))
+                    .route(web::post().to(handlers::webauthn::setup_finish_registration::<C>)),
+            )
             .service(
                 web::resource("/webauthn/authenticate/start")
                     .wrap(build_governor(rate_limit_cfg.webauthn_per_min))

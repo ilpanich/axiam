@@ -319,6 +319,14 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/auth/webauthn/register/finish",
     "/api/v1/auth/webauthn/authenticate/start",
     "/api/v1/auth/webauthn/authenticate/finish",
+    // M-3: the setup-token registration pair, public for the same reason
+    // `/mfa/setup/enroll` and `/setup/confirm` are — the caller is in the
+    // middle of a forced first-login enrolment and has no session yet, so
+    // requiring one to reach them would be circular. The setup token is the
+    // credential, checked by the handler; `AuthzMiddleware` would otherwise
+    // 401 the request before the handler could look at it.
+    "/api/v1/auth/webauthn/setup/register/start",
+    "/api/v1/auth/webauthn/setup/register/finish",
     // Usernameless sign-in: public for the same reason as the pair above —
     // these ARE the authentication, so requiring a credential to reach them
     // would be circular.

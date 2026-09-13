@@ -66,6 +66,8 @@ use crate::handlers;
         // WebAuthn
         handlers::webauthn::start_registration,
         handlers::webauthn::finish_registration,
+        handlers::webauthn::setup_start_registration,
+        handlers::webauthn::setup_finish_registration,
         handlers::webauthn::start_authentication,
         handlers::webauthn::finish_authentication,
         handlers::webauthn::start_discoverable_authentication,
@@ -342,6 +344,8 @@ use crate::handlers;
         // WebAuthn
         handlers::webauthn::StartRegistrationResponse,
         handlers::webauthn::FinishRegistrationRequest,
+        handlers::webauthn::SetupRegisterStartRequest,
+        handlers::webauthn::SetupRegisterFinishRequest,
         handlers::webauthn::CredentialResponse,
         handlers::webauthn::StartAuthenticationRequest,
         handlers::webauthn::StartDiscoverableAuthenticationRequest,

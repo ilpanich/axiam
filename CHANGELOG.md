@@ -46,7 +46,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape as a generated one, and binds and authenticates over mTLS identically.
 
   Contract 1.45 adds `certificates.sign_csr` to the §27 management surface,
-  taking it from 159 operations to 160.
+  taking it from 159 operations to 160. The admin UI's Certificates page gains
+  a **Sign a CSR** action that takes the request as a paste or a file upload
+  (C-2).
+
+- **A passkey or a security key can be the first factor.** Forced first-login
+  enrolment under a tenant that requires MFA offered TOTP only, so a tenant
+  whose authenticator policy is built around security keys still had to hand
+  every new user a TOTP app to get in (M-3, T-269). `POST
+  /api/v1/auth/webauthn/setup/register/start` and `/finish` run the same
+  registration ceremony from the same setup token, under the same attestation
+  and user-verification policies as the profile page's, and `finish` completes
+  the interrupted login exactly as `POST /auth/mfa/setup/confirm` does. The
+  setup page now offers the choice. A setup token still adds an account's
+  **first** factor and never a second: an account that already has one is
+  refused, as it is on the TOTP path.
+
+  Contract 1.45 adds `webauthn_setup_register_start` and
+  `webauthn_setup_register_finish` to §24 and §25; the §27 management surface is
+  unchanged, since the `webauthn` tag is not part of it.
 
 ### Changed
 

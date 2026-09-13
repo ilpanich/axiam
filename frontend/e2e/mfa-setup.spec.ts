@@ -92,6 +92,17 @@ test.describe("MFA-setup no-dead-end (CORR-05b / D-16)", () => {
     ).toBeVisible();
     await expect(page.getByText(/enter this key manually/i)).toBeVisible();
     await expect(page.getByLabel("Verification Code")).toBeVisible();
+
+    // M-3: the method chooser above the TOTP panel. The ceremony itself is
+    // not exercised here (a real browser has no authenticator plugged in to
+    // answer a WebAuthn prompt) — this only asserts the chooser rendered,
+    // offering a passkey/security key alongside the authenticator app that
+    // has already started enrolling.
+    await expect(page.getByText("Authenticator app")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /passkey on this device/i })
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: /security key/i })).toBeVisible();
   });
 
   test.skip(

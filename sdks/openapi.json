@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta14",
-    "x-axiam-spec-digest": "sha256:59784c97c2a366c7f5587d04653462fa6cbacffcd971ac1ee54a9631f1a68f66"
+    "x-axiam-spec-digest": "sha256:39a774afb12dadc0d2140e6c3aee98930456933b537b7c6c7c2daadce9598e53"
   },
   "paths": {
     "/.well-known/openid-configuration": {
@@ -1924,6 +1924,88 @@
             "bearer": []
           }
         ]
+      }
+    },
+    "/api/v1/auth/webauthn/setup/register/finish": {
+      "post": {
+        "tags": [
+          "webauthn"
+        ],
+        "summary": "`POST /api/v1/auth/webauthn/setup/register/finish`",
+        "description": "Complete the registration and, with it, the login the forced enrolment\ninterrupted — the setup-token twin of `POST /auth/mfa/setup/confirm`. Sets\nthe same three cookies and returns the same `LoginSuccessResponse` body,\nbecause it is the same event: a first factor was enrolled and the sign-in\nthat demanded it now completes.",
+        "operationId": "setup_finish_registration",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupRegisterFinishRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Credential registered and login complete. Sets the axiam_access, axiam_refresh and axiam_csrf cookies and echoes the CSRF token in X-CSRF-Token, exactly as POST /api/v1/auth/mfa/setup/confirm does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginSuccessResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "This account already has an MFA factor"
+          },
+          "401": {
+            "description": "The setup token is missing, expired, or not a setup token; or the ceremony failed"
+          },
+          "403": {
+            "description": "Denied by the tenant's attestation policy"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/webauthn/setup/register/start": {
+      "post": {
+        "tags": [
+          "webauthn"
+        ],
+        "summary": "`POST /api/v1/auth/webauthn/setup/register/start`",
+        "description": "Begin registering a passkey or security key as the **first** factor, during\na forced first-login enrolment. The setup-token twin of\n`POST /auth/webauthn/register/start`, which needs a session this caller does\nnot have.\n\nNothing about *what may register* differs from the profile-page ceremony:\nthe tenant's attestation policy and its user-verification policy are read\nfrom the same places and passed to the same function. A tenant that excludes\nsynced passkeys excludes them here too, and a tenant that requires user\nverification requires it here too (T-229/T-230).",
+        "operationId": "setup_start_registration",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupRegisterStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Registration ceremony started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartRegistrationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "This account already has an MFA factor — a setup token adds the first one, never a second. The same answer POST /auth/mfa/setup/enroll gives for the same reason."
+          },
+          "401": {
+            "description": "The setup token is missing, expired, or not a setup token"
+          },
+          "403": {
+            "description": "Denied by the tenant's attestation policy"
+          }
+        }
       }
     },
     "/api/v1/authz/check": {
@@ -18332,6 +18414,42 @@
           "Org",
           "Tenant"
         ]
+      },
+      "SetupRegisterFinishRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/auth/webauthn/setup/register/finish`.\n\n[`FinishRegistrationRequest`] plus the setup token, for the same reason:\nthere is no session to identify the account with.",
+        "required": [
+          "setup_token",
+          "state_token",
+          "credential_name",
+          "response"
+        ],
+        "properties": {
+          "credential_name": {
+            "type": "string"
+          },
+          "response": {
+            "type": "object"
+          },
+          "setup_token": {
+            "type": "string"
+          },
+          "state_token": {
+            "type": "string"
+          }
+        }
+      },
+      "SetupRegisterStartRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/auth/webauthn/setup/register/start`.\n\nThe setup token is the **only** credential: this endpoint takes no session,\nexactly as `POST /auth/mfa/setup/enroll` takes none (contract §25.2 rule 1).\nA caller in the middle of a forced first-login enrolment has no session to\npresent — that is the situation the token exists for.",
+        "required": [
+          "setup_token"
+        ],
+        "properties": {
+          "setup_token": {
+            "type": "string"
+          }
+        }
       },
       "SignAuditBatchRequest": {
         "type": "object",

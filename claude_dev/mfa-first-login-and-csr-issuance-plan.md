@@ -364,6 +364,116 @@ per `CLAUDE.md` after any `target/` wipe.
 
 ### M-3 — a passkey or security key as the first factor (Opus 5)
 
+> **EXECUTED — M-3, 2026-09-13.**
+>
+> **Server.** Two endpoints under the `webauthn_per_min` buckets, with their own
+> bucket names so a burst against the session-less pair is distinguishable in
+> the counters from one against the profile page's. Both share
+> `setup_token_registration_context`, which establishes the three things every
+> rule depends on: the token is a *setup* token (the purpose-checked decoder
+> the TOTP twins use — a challenge token, an expired one and a session bearer
+> are all `401`), the account has **no** factor yet, and which tenant's policy
+> governs.
+>
+> Rule 2's check is asked of `MfaMethodService`, not `AuthService`, and that is
+> the whole of it: the question spans the TOTP secret *and* the WebAuthn
+> credential rows, and a check that read only the TOTP half — which is all
+> `AuthService` can see — would let a captured token add a second passkey to an
+> account that already had one. Rule 3 needed no new code: the attestation and
+> user-verification policies are read from the same places and handed to the
+> same `start_registration_for_policy` / `finish_registration_for_policy`, so
+> T-229/T-230 hold by construction rather than by a second implementation
+> agreeing.
+>
+> Rule 5's shared tail is `AuthService::complete_setup_token_login`, which both
+> completions call. It takes the **token** rather than three `Uuid`s: one decode
+> per entry point would be enough for correctness, but a signature taking
+> `(user_id, tenant_id, org_id)` accepts values from anywhere, and this function
+> issues a session. No new choke point — everything still funnels through
+> `create_session_and_tokens`, which is what `basic-op-gap-plan.md` §4's list
+> makes checkable.
+>
+> **Rule 4, and where the plan's parenthetical was overtaken by the code.** The
+> plan asked for the evidence the authentication path records for the same
+> credential kind, and separately for "`Amr::User` when user verification
+> happened". Those two are not the same instruction, and the first wins:
+> `finish_authentication` deliberately does **not** claim `user`, because the
+> tenant's policy is `preferred` by default and a PIN-less key proves presence
+> only. Nothing at registration reports whether the `UV` bit was actually set,
+> so "when user verification happened" is not a question this code can answer
+> truthfully — except under `Required`, the one policy value that *rejects* a
+> ceremony with the bit clear. So `user` is claimed under `Required` and under
+> nothing else, which is strictly more truthful than either reading and never
+> overstates. `hwk`/`swk` follow the credential type the registration recorded.
+> The session lands in `urn:axiam:acr:mfa` through `mfa` in every combination.
+>
+> One deliberate asymmetry with the profile-page `finish`, which the plan called
+> for and which is worth restating: there, a failure of
+> `enable_after_enrollment` is logged and swallowed; here it **fails the
+> request**. There is no profile page to correct it from, and a session issued
+> while the account still reads "no second factor" would send the user through
+> forced enrolment again at the next sign-in — with a credential already
+> registered that `setup/register/start` would then refuse as a second factor.
+>
+> **Two registries the plan did not mention, and the tests found.** The new
+> routes 403'd before the handler ran until they were added to
+> `middleware::csrf::CSRF_EXEMPT_SUFFIXES` and `permissions::PUBLIC_PATHS` —
+> both, as the CSRF module's own comment warns. The exemption is safe here for
+> the opposite reason the profile-page registration pair is *not* exempt: that
+> caller is signed in and carries the cookie an attacker would ride, this one
+> has no session and the only credential is a body token.
+>
+> **Statuses.** `MfaAlreadyConfigured` maps to `Validation` → **400**, not the
+> 409 the draft annotation said. 400 is right and the annotation was corrected:
+> rule 2 says "the same answer `setup/enroll` gives", and this is it.
+>
+> **Tests.** Five at the HTTP layer in `webauthn_test.rs` — the happy `start`,
+> an empty and a garbage token, a *session bearer* presented as a setup token
+> (the case that matters: an access token is a perfectly valid JWT signed by the
+> same key, and only the `purpose` claim separates them), the already-has-a-factor
+> refusal with its message, and `finish` refusing what `start` refuses. Four
+> unit tests on the evidence function in the handler module.
+>
+> **What could not be tested, and why it is a unit test instead.** The ceremony
+> cannot be completed in-process — it needs a real authenticator, which is why
+> every pre-existing WebAuthn handler test covers the refusal paths and stops at
+> `finish`. So rule 4's assertion could not be made "through `/oauth2/authorize`'s
+> honour lane" as the plan asked. It is made instead on
+> `setup_registration_amr` composed with `acr_for` — the same two functions the
+> honour lane would have exercised, asserted directly: every credential kind
+> under every user-verification policy yields `Acr::MultiFactor`, `user` appears
+> only under `Required`, and the list equals `finish_authentication`'s for the
+> default policy. Recorded here rather than quietly substituted.
+>
+> **Admin UI** (Sonnet 5 subagent). `MfaSetupPage.tsx` gained the chooser;
+> `services/webauthn.ts` gained `registerWithSetupToken` beside `register`,
+> mirroring its shape and its `classifyWebauthnError` handling. The TOTP branch's
+> post-success tail was factored into a shared `completeSetup()` so the WebAuthn
+> branch runs M-4's `resumeLoginHop` too rather than a second copy of it. The
+> `enrolledRef` guard stays on the TOTP branch only; the WebAuthn branch is
+> click-started and uses pending state instead. One deviation, reported and
+> accepted: TOTP still auto-enrols on mount, so "Authenticator app" renders as an
+> already-active pill rather than a third button — the pre-existing tests assert
+> that auto-enrolment and the plan did not ask to change it. Seven tests in
+> `MfaSetupPage.test.tsx`, four in `webauthn.test.ts`, the chooser assertion in
+> the e2e spec. Full frontend suite: 101 files, 1574 tests, green.
+>
+> **Contract text** written now, versioned at 1.45 in C-3: §24.1 gains the two
+> rows and the paragraph explaining why they take no session (and why an SDK
+> MUST NOT attach one); §24.5 cross-references §25.3 for the `setup_token`
+> rather than restating it; §24.7 gains the per-language rows; §24.8 gains the
+> adoption test and a second one asserting no session credential is sent; §25.1
+> gains the two rows and its count sentence; §25.2 gains the paragraph and rule 2
+> becomes "either completion". **The plan was wrong about one thing here:** it
+> says `state_token` "is already unwrapped in §24.5". §24.5 in fact requires it
+> to be **wrapped**, along with `challenge_token`. Nothing needed changing —
+> the existing text is right — but the note is recorded so the next reader does
+> not "fix" it.
+>
+> Spec regenerated and re-stamped (156 paths). The management registry is
+> unmoved at 160: the `webauthn` tag is excluded from §27, exactly as the plan
+> predicted. T-269 added at `threatTop` 269; T-201, T-229 and T-230 amended.
+
 **Closes** R-C. **Decision** D-2. **Threats:** T-201 and T-229/T-230 texts gain
 a sentence; new **T-269** (§7).
 
@@ -494,6 +604,41 @@ rule 2 says "either completion". §25.3's `Sensitive<T>` table already covers
    mocked `403` gets the parameter.
 
 ### M-5 — setup token single-use (Sonnet 5, optional)
+
+> **EXECUTED — M-5, 2026-09-13: assessed and NOT taken. R-E stays open, and
+> T-32 now says so.**
+>
+> The plan's own condition was "do this only if it costs less than a day". It
+> does not, and the reason is the thing the plan told me to check first.
+>
+> **There is no consumption store to reuse.** T-32's mitigation said the
+> challenge token is "consumed on use", and reading `verify_mfa` shows that what
+> is consumed is the **TOTP step**: `totp_last_used_step` under a
+> compare-and-swap. The token itself carries no `jti` and nothing records that
+> it was presented. So M-5 would not be wiring into an existing mechanism; it
+> would be building the first one — a repository trait method, a SurrealDB
+> implementation, a **fifth** repository on `AuthService` (already generic over
+> four, with every construction site and test harness to follow), and the
+> enrol→confirm `jti` binding on *both* the TOTP pair and the WebAuthn pair M-3
+> just added, with their tests. Comfortably more than a day, for a window of
+> 300 seconds under TLS against a token delivered in a `403` body to the caller
+> who just authenticated, and inert once the legitimate completion has run.
+> Spending it here would have come out of C-3 or the SDK wave.
+>
+> What was done instead, because a wrong sentence in the threat model is worse
+> than a missing feature:
+> * **T-32's mitigation is corrected.** "Consumed on use" described a step store
+>   as if it were a token store. It now says precisely what holds — a captured
+>   challenge token cannot be replayed *with the same code*, and re-presenting
+>   it needs the authenticator — and records R-E as a known residual with its
+>   severity and its reasoning, in both `threat-model-stride.md` and the Threat
+>   Dragon model.
+> * **`MfaSetupPage.tsx`'s comment is corrected**, the opposite way round from
+>   what the plan expected. The plan said M-5 would make "a single-use
+>   `setup_token`" true; since M-5 did not happen, the comment was false and now
+>   says what is actually true and why the once-guard still matters: a second
+>   `enroll` under the same token *replaces* the pending secret, so the user
+>   would be shown a QR code for a secret the server has discarded.
 
 **Closes** R-E. Do this only if it costs less than a day; otherwise leave R-E
 recorded as a known residual in T-32's text and say so.
@@ -726,6 +871,43 @@ one wave.
 ## 5. Admin UI work
 
 ### C-2 — "Sign a CSR" on the Certificates page (Sonnet 5)
+
+> **EXECUTED — C-2, 2026-09-13** (Sonnet 5 subagent, briefed on the merged C-1
+> code rather than on the plan's draft of it).
+>
+> `certificateService.signCsr` posts to `/api/v1/certificates/sign-csr` and
+> returns a plain `Certificate`. `CertificatesPage.tsx` gained a second primary
+> action with the `Upload` icon; the plan's "reuse `GenerateFields`' CA select
+> and its `maxValidityDays` derivation rather than duplicating them" was taken
+> literally — `useIssuerValidityCap`, `IssuingCaSelect` and `ValidityDaysField`
+> were extracted out of `GenerateFields` and both dialogs now use them. The CSR
+> is both a textarea and a file input reading through `File.text()` into the
+> same textarea, so the user sees what will be sent. No key-algorithm field: the
+> key is the caller's. Success goes straight to `CertificateViewDialog` and never
+> `SecretRevealModal`, which the test asserts by the absence of that modal's own
+> labels from the DOM.
+>
+> **One thing the brief had to correct in the plan.** C-1 refuses a CSR
+> requesting `subjectAltName`, `keyUsage` **or** `extendedKeyUsage`, not SANs
+> alone — see C-1's block for why. The helper text names all three, and the
+> legacy OpenSSL `BEGIN NEW CERTIFICATE REQUEST` header as unaccepted. Had the
+> agent been briefed on the plan's draft it would have shipped copy that was
+> wrong about two thirds of the rule.
+>
+> `SigningCaPanel.tsx` got the same file input beside its existing textarea, and
+> its "rejects a paste that is not a certificate signing request" test gained a
+> file twin. Five tests in `CertificatesPage.test.tsx`, two in
+> `SigningCaPanel.test.tsx`, one in `services.test.ts`: 94 passing across the
+> three files, lint and `tsc -b` clean.
+>
+> **Not done, and why.** `frontend/e2e/certificates.spec.ts` has no signing-CA
+> fixture — it is a live-backend suite that probes with `isVisible()` — so the
+> plan's own "otherwise the matrix case in C-1 covers it" applies. The agent also
+> noticed that spec already expects labels ("Common Name *", "Key Type") the page
+> has not used for some time, so it has drifted independently of this work; that
+> is recorded here as a finding, not fixed, because fixing it is not this plan's
+> scope. The C-1 permission-matrix fixture case (`frontend/e2e/matrix/pki.spec.ts`)
+> was **not** added either — see the final report.
 
 1. `services/certificates.ts`: `SignCsrPayload { issuer_ca_id, csr_pem, cert_type, validity_days, metadata? }`,
    `certificateService.signCsr(payload): Promise<Certificate>`; unit test in

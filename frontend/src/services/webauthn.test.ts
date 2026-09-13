@@ -159,6 +159,84 @@ describe("registration", () => {
   });
 });
 
+describe("registerWithSetupToken (M-3)", () => {
+  const loginSuccess = {
+    user: { id: "u1", username: "alice", email: "alice@x.io", tenant_id: "ten-1" },
+    session_id: "sess-1",
+    expires_in: 900,
+  };
+
+  it("carries the setup token on both routes and returns the LoginSuccessResponse", async () => {
+    apiMock.post.mockImplementation((url: string) => {
+      if (url.endsWith("/setup/register/start")) {
+        return Promise.resolve(res(registrationChallenge));
+      }
+      return Promise.resolve(res(loginSuccess));
+    });
+    startRegistrationMock.mockResolvedValue({ id: "cred-1" });
+
+    await expect(
+      webauthnService.registerWithSetupToken("setup-tok-1", "My laptop", "platform"),
+    ).resolves.toEqual(loginSuccess);
+
+    expect(apiMock.post).toHaveBeenCalledWith(
+      "/api/v1/auth/webauthn/setup/register/start",
+      { setup_token: "setup-tok-1" },
+    );
+    expect(apiMock.post).toHaveBeenCalledWith(
+      "/api/v1/auth/webauthn/setup/register/finish",
+      {
+        setup_token: "setup-tok-1",
+        state_token: "state-abc",
+        credential_name: "My laptop",
+        response: { id: "cred-1" },
+      },
+    );
+  });
+
+  it("hints the requested attachment, same as register", async () => {
+    apiMock.post.mockImplementation((url: string) =>
+      url.endsWith("/setup/register/start")
+        ? Promise.resolve(res(registrationChallenge))
+        : Promise.resolve(res(loginSuccess)),
+    );
+    startRegistrationMock.mockResolvedValue({ id: "c" });
+
+    await webauthnService.registerWithSetupToken("tok", "n", "cross-platform");
+
+    expect(
+      startRegistrationMock.mock.calls[0][0].optionsJSON.authenticatorSelection
+        .authenticatorAttachment,
+    ).toBe("cross-platform");
+  });
+
+  it("does not post a finish when the ceremony fails", async () => {
+    apiMock.post.mockResolvedValue(res(registrationChallenge));
+    const err = new Error("cancelled");
+    err.name = "NotAllowedError";
+    startRegistrationMock.mockRejectedValue(err);
+
+    await expect(
+      webauthnService.registerWithSetupToken("tok", "n", "platform"),
+    ).rejects.toThrow();
+
+    expect(apiMock.post).toHaveBeenCalledTimes(1);
+    expect(apiMock.post).not.toHaveBeenCalledWith(
+      "/api/v1/auth/webauthn/setup/register/finish",
+      expect.anything(),
+    );
+  });
+
+  it("propagates a rejected start (e.g. an already-configured account or an invalid token)", async () => {
+    apiMock.post.mockRejectedValueOnce({ response: { status: 400, data: {} } });
+
+    await expect(
+      webauthnService.registerWithSetupToken("tok", "n", "platform"),
+    ).rejects.toMatchObject({ response: { status: 400 } });
+    expect(startRegistrationMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("authentication", () => {
   it("runs the ceremony and returns the session result", async () => {
     apiMock.post.mockImplementation((url: string) => {

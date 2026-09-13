@@ -624,3 +624,198 @@ async fn discoverable_authentication_refuses_an_unreachable_workspace() {
         "the organization is still required"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Forced first-login enrolment: the setup-token registration pair
+// (M-3, T-269)
+// ---------------------------------------------------------------------------
+//
+// The ceremony itself still cannot be completed here — see this file's header
+// — so what is asserted is everything up to it: that the setup token is the
+// only credential, that only a *setup* token works, and that an account with a
+// factor is refused. The evidence a completion records, and the assurance class
+// it lands in, are pinned by unit tests on `setup_registration_amr` in the
+// handler module, where they can be reached without an authenticator.
+
+/// Enable `mfa_enforced` at the organization level, so a password login
+/// answers `403 { mfa_setup_required, setup_token }` instead of a session.
+async fn enforce_mfa(db: &Surreal<TestDb>, org_id: Uuid) {
+    use axiam_core::models::settings::system_defaults;
+    use axiam_core::repository::SettingsRepository;
+
+    let mut defaults = system_defaults();
+    defaults.mfa_enforced = true;
+    axiam_db::SurrealSettingsRepository::new(db.clone())
+        .set_org_settings(org_id, defaults)
+        .await
+        .unwrap();
+}
+
+/// Sign in far enough to be handed a setup token — the situation a user of an
+/// enforcing tenant is in on their very first login.
+async fn setup_token_for<S>(app: &S, org_id: Uuid, tenant_id: Uuid, username: &str) -> String
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(json!({
+            "tenant_id": tenant_id,
+            "org_id": org_id,
+            "username_or_email": username,
+            "password": TEST_PASSWORD,
+        }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "an enforcing tenant interrupts the login of a user with no factor"
+    );
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["mfa_setup_required"], true);
+    body["setup_token"].as_str().unwrap().to_string()
+}
+
+fn setup_start(setup_token: &str) -> test::TestRequest {
+    test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/webauthn/setup/register/start")
+        .set_json(json!({ "setup_token": setup_token }))
+}
+
+#[actix_web::test]
+async fn setup_register_start_issues_a_challenge_for_a_factorless_account() {
+    let (db, org_id, tenant_id, _user_id) = setup().await;
+    enforce_mfa(&db, org_id).await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let token = setup_token_for(&app, org_id, tenant_id, "wa-user-a").await;
+    let resp = test::call_service(&app, setup_start(&token).to_request()).await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        body.get("challenge").is_some(),
+        "the same response shape as the profile-page ceremony: {body}"
+    );
+    assert!(body.get("state_token").and_then(Value::as_str).is_some());
+}
+
+#[actix_web::test]
+async fn setup_register_start_takes_the_token_and_nothing_else() {
+    // Rule 1. The token is the only credential — no session, no bearer — which
+    // is the whole point: a user mid-forced-enrolment has no session to
+    // present. An empty or absent token is a 401, not a 500.
+    let (db, org_id, _tenant_id, _user_id) = setup().await;
+    enforce_mfa(&db, org_id).await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    for (what, token) in [("empty", ""), ("not a JWT at all", "garbage")] {
+        let resp = test::call_service(&app, setup_start(token).to_request()).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            401,
+            "a {what} setup token must be a 401"
+        );
+    }
+}
+
+#[actix_web::test]
+async fn setup_register_start_refuses_a_session_bearer_as_the_setup_token() {
+    // Rule 1, the case that matters: an access token is a perfectly valid JWT
+    // signed by the same key. What makes a setup token a setup token is its
+    // `purpose` claim, and `decode_setup_token` checks it. Without that check
+    // any signed-in caller could register a credential against any account
+    // whose id they could put in a token.
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    enforce_mfa(&db, org_id).await;
+    let auth = test_auth_config();
+    let access_token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let resp = test::call_service(&app, setup_start(&access_token).to_request()).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "an access token is not a setup token, however well signed"
+    );
+}
+
+#[actix_web::test]
+async fn setup_register_start_refuses_an_account_that_already_has_a_factor() {
+    // Rule 2. A setup token adds the account's FIRST factor, never a second —
+    // the same answer `setup/enroll` gives. The check spans the TOTP secret and
+    // the WebAuthn credential rows, so it is asked of `MfaMethodService`: a
+    // check that read only the TOTP half would let a captured token add a
+    // second passkey to an account that already had one, which is the shape of
+    // T-269.
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    enforce_mfa(&db, org_id).await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    // Take the token while the account still has nothing, then give it a
+    // factor — the race a captured token would be replayed into.
+    let token = setup_token_for(&app, org_id, tenant_id, "wa-user-a").await;
+
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                mfa_enabled: Some(true),
+                mfa_secret: Some(Some("encrypted-secret-placeholder".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let resp = test::call_service(&app, setup_start(&token).to_request()).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "an account with a factor is refused, however valid the token — with \
+         the same status `POST /auth/mfa/setup/enroll` gives for the same \
+         refusal, because it is the same rule"
+    );
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already"),
+        "and the message says so: {body}"
+    );
+}
+
+#[actix_web::test]
+async fn setup_register_finish_refuses_the_same_tokens_start_refuses() {
+    // Both halves take the token, so both must check it. A `finish` that
+    // trusted the state token alone would let a caller who never held a setup
+    // token complete a ceremony somebody else started.
+    let (db, org_id, _tenant_id, _user_id) = setup().await;
+    enforce_mfa(&db, org_id).await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/webauthn/setup/register/finish")
+        .set_json(json!({
+            "setup_token": "garbage",
+            "state_token": fake_state_token(b"{}"),
+            "credential_name": "My key",
+            "response": dummy_register_response_json(),
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 401);
+}

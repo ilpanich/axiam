@@ -173,6 +173,56 @@ describe("SigningCaPanel", () => {
     expect(apiMock.post).not.toHaveBeenCalled();
   });
 
+  it("rejects an uploaded file that is not a certificate signing request", async () => {
+    const user = userEvent.setup();
+    mockRoutes();
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+
+    await user.click(screen.getByRole("button", { name: /Sign a CSR/ }));
+    const file = new File(["just some text"], "notes.txt", {
+      type: "text/plain",
+    });
+    await user.upload(
+      screen.getByLabelText("Upload certificate signing request file"),
+      file
+    );
+    expect(screen.getByLabelText(/Certificate signing request/)).toHaveValue(
+      "just some text"
+    );
+    await user.click(screen.getByRole("button", { name: "Sign" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /PEM-encoded certificate signing request/
+    );
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("fills the textarea from an uploaded file", async () => {
+    const user = userEvent.setup();
+    mockRoutes();
+    renderPanel();
+    await screen.findByText("CN=Acme R&D Signing CA");
+
+    await user.click(screen.getByRole("button", { name: /Sign a CSR/ }));
+    const pem =
+      "-----BEGIN CERTIFICATE REQUEST-----\nreq\n-----END CERTIFICATE REQUEST-----";
+    const file = new File([pem], "request.csr", {
+      type: "application/pkcs10",
+    });
+    await user.upload(
+      screen.getByLabelText("Upload certificate signing request file"),
+      file
+    );
+    expect(
+      await screen.findByLabelText(/Certificate signing request/)
+    ).toHaveValue(pem);
+
+    await user.click(screen.getByRole("button", { name: "Sign" }));
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+    expect(apiMock.post.mock.calls[0][1]).toMatchObject({ csr_pem: pem });
+  });
+
   it("signs a CSR and shows the certificate, which is the whole product of the call", async () => {
     const user = userEvent.setup();
     mockRoutes();

@@ -5628,7 +5628,7 @@ authenticator the user is prompted for, not what the server will accept.
 
 ### §24.1 Canonical operation set and endpoint map
 
-Six wire operations and three composed helpers. Every row is verified against
+Eight wire operations and three composed helpers. Every row is verified against
 `openapi.json`.
 
 | Canonical operation | Wire call | Auth | Request | Success |
@@ -5639,6 +5639,8 @@ Six wire operations and three composed helpers. Every row is verified against
 | `webauthn_authenticate_finish` | `POST /api/v1/auth/webauthn/authenticate/finish` | none | `application/json` / `FinishAuthenticationRequest` | `200` `WebauthnLoginResponse` |
 | `webauthn_discoverable_start` | `POST /api/v1/auth/webauthn/authenticate/discoverable/start` | none | `application/json` / `StartDiscoverableAuthenticationRequest` | `200` `StartAuthenticationResponse` |
 | `webauthn_discoverable_finish` | `POST /api/v1/auth/webauthn/authenticate/discoverable/finish` | none | `application/json` / `FinishAuthenticationRequest` | `200` `WebauthnLoginResponse` |
+| `webauthn_setup_register_start` | `POST /api/v1/auth/webauthn/setup/register/start` | **none (setup token)** | `application/json` / `SetupRegisterStartRequest` | `200` `StartRegistrationResponse` |
+| `webauthn_setup_register_finish` | `POST /api/v1/auth/webauthn/setup/register/finish` | **none (setup token)** | `application/json` / `SetupRegisterFinishRequest` | `200` `LoginSuccessResponse` |
 | `webauthn_register` | the register pair, composed with a §24.6 ceremony | | | `CredentialResponse` |
 | `webauthn_login` | the authenticate pair, composed | | | token set |
 | `webauthn_discoverable_login` | the discoverable pair, composed | | | token set |
@@ -5670,6 +5672,21 @@ request itself:
 something an already-signed-in user does to their own account. Calling either
 without credentials MUST raise the §2 `AuthenticationError` **client-side, with no
 wire call**, exactly as §1.1 rule 3 requires of `get_user_info`.
+
+**`setup/register/*` is the exception, and takes no session at all** (contract
+1.45). It is the WebAuthn twin of `mfa_setup_enroll` / `mfa_setup_confirm`
+(§25.1): its caller is in the middle of a forced first-login enrolment under a
+tenant that requires MFA, and *has* no session — the setup token from the
+login's `403` is the only credential the pair accepts, and it travels in the
+request body. An SDK MUST NOT attach its session credential to these two, MUST
+NOT require one to call them, and MUST treat the setup token as opaque exactly
+as it treats a `state_token`.
+
+The account whose first factor is being enrolled is named by the token, never by
+the caller: there is no `user_id` on either request and an SDK MUST NOT invent
+one. The server refuses an account that already has a factor with `400` — the
+same answer `mfa_setup_enroll` gives, because it is the same rule: a setup token
+adds the **first** factor, never a second.
 
 ### §24.2 The two authentication ceremonies are different flows, not one with a flag
 
@@ -5780,6 +5797,12 @@ be logged at any level.
 
 `access_token` and `refresh_token` from `WebauthnLoginResponse` are wrapped
 exactly as the same two fields are everywhere else in this contract.
+
+The `setup_token` the `setup/register/*` pair carries (contract 1.45) is wrapped
+too, by §25.3's row for it — it is the same token and the same credential, and it
+is listed there rather than duplicated here so the two sections cannot disagree
+about it. It is a bearer credential that completes a login, which makes it the
+most sensitive field either section names.
 
 The **challenge**, the **authenticator response** and the `CredentialResponse` are
 **not** sensitive in the §7 sense and MUST remain readable: a caller that cannot
@@ -5898,6 +5921,8 @@ three composed helpers of §24.1 — `*_start`, ceremony, `*_finish` in one call
 | `webauthn_authenticate_finish` | `webauthn_authenticate_finish` | `webauthnAuthenticateFinish` | `webauthn_authenticate_finish` | `webauthnAuthenticateFinish` | `webauthnAuthenticateFinish` | `WebauthnAuthenticateFinishAsync` | `webauthnAuthenticateFinish` | `WebauthnAuthenticateFinish` | `webauthnAuthenticateFinish` | `axiam_webauthn_authenticate_finish` | `webauthn_authenticate_finish` |
 | `webauthn_discoverable_start` | `webauthn_discoverable_start` | `webauthnDiscoverableStart` | `webauthn_discoverable_start` | `webauthnDiscoverableStart` | `webauthnDiscoverableStart` | `WebauthnDiscoverableStartAsync` | `webauthnDiscoverableStart` | `WebauthnDiscoverableStart` | `webauthnDiscoverableStart` | `axiam_webauthn_discoverable_start` | `webauthn_discoverable_start` |
 | `webauthn_discoverable_finish` | `webauthn_discoverable_finish` | `webauthnDiscoverableFinish` | `webauthn_discoverable_finish` | `webauthnDiscoverableFinish` | `webauthnDiscoverableFinish` | `WebauthnDiscoverableFinishAsync` | `webauthnDiscoverableFinish` | `WebauthnDiscoverableFinish` | `webauthnDiscoverableFinish` | `axiam_webauthn_discoverable_finish` | `webauthn_discoverable_finish` |
+| `webauthn_setup_register_start` | `webauthn_setup_register_start` | `webauthnSetupRegisterStart` | `webauthn_setup_register_start` | `webauthnSetupRegisterStart` | `webauthnSetupRegisterStart` | `WebauthnSetupRegisterStartAsync` | `webauthnSetupRegisterStart` | `WebauthnSetupRegisterStart` | `webauthnSetupRegisterStart` | `axiam_webauthn_setup_register_start` | `webauthn_setup_register_start` |
+| `webauthn_setup_register_finish` | `webauthn_setup_register_finish` | `webauthnSetupRegisterFinish` | `webauthn_setup_register_finish` | `webauthnSetupRegisterFinish` | `webauthnSetupRegisterFinish` | `WebauthnSetupRegisterFinishAsync` | `webauthnSetupRegisterFinish` | `WebauthnSetupRegisterFinish` | `webauthnSetupRegisterFinish` | `axiam_webauthn_setup_register_finish` | `webauthn_setup_register_finish` |
 | `webauthn_request_json` (§24.6a) | `request_json` | `requestJson` | `request_json` | `requestJson` | `requestJson` | `RequestJson` | `requestJson` | `RequestJSON` | `requestJson` | `axiam_webauthn_request_json` | `request_json` |
 | `webauthn_register` (§24.6b) | — | `webauthnRegister` | — | — | — | — | — | — | `webauthnRegister` | — | — |
 | `webauthn_login` (§24.6b) | — | `webauthnLogin` | — | — | — | — | — | — | `webauthnLogin` | — | — |
@@ -5964,6 +5989,19 @@ framework.
   (§24.3 rule 4).
 - **`register/*` without a session** raises `AuthenticationError` with **zero**
   wire calls — assert on the transport, not on the exception type alone.
+- **`setup/register/finish` adopts credentials exactly as `mfa_setup_confirm`
+  does** (§25.2 rule 2, contract 1.45). Run the same adoption assertions §24.3
+  requires of `webauthn_authenticate_finish` against a successful
+  `webauthn_setup_register_finish`: the client is authenticated afterwards, a
+  cookie-jar SDK has captured the CSRF token, and a state-changing call made
+  immediately afterwards carries it. The two completions of a forced first-login
+  enrolment must leave the client in the same state, or a caller's next request
+  succeeds or fails depending on which factor the user happened to choose.
+- **`setup/register/*` carries no session credential.** With a session
+  configured *and* a setup token supplied, assert on the transport that neither
+  call sent the session's `Authorization` header or cookie. The setup token is
+  the credential; attaching a second one invites a server that changes its mind
+  about which to trust.
 - **The `503` is not retried.** A `register/start` answering `503` produces
   exactly one request. This is §24.4 rule 2 and it will regress the moment
   someone tidies the retry predicate, which is why it is asserted on the request
@@ -6038,6 +6076,8 @@ exists because reusing the ninth for a signed-in caller is what made a profile p
 | `mfa_confirm` | `POST /api/v1/auth/mfa/confirm` | **session** | `MfaConfirmRequest` | `200` `MfaConfirmResponse` |
 | `mfa_setup_enroll` | `POST /api/v1/auth/mfa/setup/enroll` | none (setup token) | `MfaSetupEnrollRequest` | `200` `MfaEnrollResponse` |
 | `mfa_setup_confirm` | `POST /api/v1/auth/mfa/setup/confirm` | none (setup token) | `MfaSetupConfirmRequest` | `200` `LoginSuccessResponse` |
+| `webauthn_setup_register_start` | `POST /api/v1/auth/webauthn/setup/register/start` | none (setup token) | `SetupRegisterStartRequest` | `200` `StartRegistrationResponse` |
+| `webauthn_setup_register_finish` | `POST /api/v1/auth/webauthn/setup/register/finish` | none (setup token) | `SetupRegisterFinishRequest` | `200` `LoginSuccessResponse` |
 | `verify_email` | `POST /api/v1/auth/verify-email` | none | `VerifyEmailRequest` | `200`, empty body |
 | `resend_verification` | `POST /api/v1/auth/resend-verification` | none | `ResendVerificationRequest` | `200`, empty body |
 | `resend_own_verification` | `POST /api/v1/users/me/resend-verification` | **session** | no body | `200` `{ "sent": true }` |
@@ -6056,9 +6096,14 @@ reads the address off the caller's own record, and an SDK MUST NOT add a paramet
 for it: a signature that accepts an address is a signature that lets an authenticated
 session mail an arbitrary one.
 
-Six of the ten are **deliberately unauthenticated**: a user who cannot log in is
-the entire audience for a password reset, and a user whose email is unverified may
-have no session at all.
+Eight of the twelve are **deliberately unauthenticated**: a user who cannot log in
+is the entire audience for a password reset, and a user whose email is unverified
+may have no session at all.
+
+The last two rows are the WebAuthn half of forced enrolment, added at contract
+1.45 and specified in full in §24.1 and §24.7 — they are listed here because
+this is where a reader looks for "what can I do with a setup token", and the
+answer is no longer "TOTP only".
 
 ### §25.2 The two MFA enrolment paths are different, and confusing them locks users out
 
@@ -6071,6 +6116,16 @@ is reached when `POST /api/v1/auth/login` answers `403` with
 this account has none. There is no session yet — the setup token *is* the
 credential — and `mfa_setup_confirm` answers `LoginSuccessResponse`, completing the
 login that was interrupted.
+
+**As of contract 1.45 that path has a second pair**:
+`webauthn_setup_register_start` / `webauthn_setup_register_finish` enrol a passkey
+or a security key instead of TOTP, from the same setup token, and
+`webauthn_setup_register_finish` answers the same `LoginSuccessResponse`. A user
+of an enforcing tenant chooses their first factor; they are no longer required to
+own a TOTP app to get in. An SDK that surfaces the setup branch (rule 1) SHOULD
+make both reachable from it, and MUST NOT present TOTP as the only option where
+its runtime can perform a ceremony (§24.6's feature-detection predicate is how it
+knows).
 
 1. **`login` MUST surface the setup branch as an outcome, not as an error.** An SDK
    whose `login` maps the `403` to §2 `AuthorizationError` has told the caller they
@@ -6087,9 +6142,13 @@ login that was interrupted.
    as a refusal, and no amount of documentation makes a caller handle a variant the
    type does not have.*
 
-2. **`mfa_setup_confirm` adopts credentials exactly as `login` does** — it *is* the
-   completion of a login. §24.3's five adoption rules apply verbatim, including
-   clearing the §17 decision memo.
+2. **Either completion adopts credentials exactly as `login` does** — both
+   `mfa_setup_confirm` and `webauthn_setup_register_finish` *are* the completion
+   of a login, and answer the same `LoginSuccessResponse`. §24.3's five adoption
+   rules apply verbatim to both, including clearing the §17 decision memo. An SDK
+   that adopted on one and not the other would leave a caller authenticated or
+   not depending on which factor the user chose, which is not a distinction any
+   caller can be expected to handle. §24.8 requires the test.
 
 3. **`mfa_enroll` does not adopt anything and does not change the session.** An SDK
    MUST NOT clear the decision memo on it: the subject has not changed, and

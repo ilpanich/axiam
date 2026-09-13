@@ -1,9 +1,19 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiMock, res } from "@/test/apiMock";
 
 vi.mock("@/lib/api", () => ({ default: apiMock }));
+
+// M-3: the passkey/security key branch calls `@simplewebauthn/browser`
+// directly (webauthn.ts is not mockable at the api-call layer for the
+// ceremony itself), exactly as `webauthn.test.ts` mocks it for the service's
+// own tests.
+const startRegistrationMock = vi.fn();
+vi.mock("@simplewebauthn/browser", () => ({
+  startRegistration: (...args: unknown[]) => startRegistrationMock(...args),
+  startAuthentication: vi.fn(),
+}));
 
 const navigate = vi.fn();
 let searchParamsString = "setup_token=setup-tok-1";
@@ -20,6 +30,15 @@ import { MfaSetupPage } from "./MfaSetupPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
 import { useAuthStore } from "@/stores/auth";
 
+/** Toggle `window.PublicKeyCredential`, mirroring `webauthn.test.ts`'s helper. */
+function setPublicKeyCredential(value: unknown) {
+  Object.defineProperty(window, "PublicKeyCredential", {
+    value,
+    configurable: true,
+    writable: true,
+  });
+}
+
 const enrollData = {
   secret_base32: "JBSWY3DPEHPK3PXP",
   totp_uri: "otpauth://totp/AXIAM:user?secret=JBSWY3DPEHPK3PXP&issuer=AXIAM",
@@ -35,6 +54,14 @@ beforeEach(() => {
     isAuthenticated: false,
     isInitializing: false,
   });
+  // Unsupported by default, exactly as most real browsers under test would
+  // be absent an explicit opt-in — the tests that need the passkey/security
+  // key options define this themselves (M-3).
+  setPublicKeyCredential(undefined);
+});
+
+afterEach(() => {
+  setPublicKeyCredential(undefined);
 });
 
 async function getToReadyState() {
@@ -270,6 +297,168 @@ describe("MfaSetupPage", () => {
 
       await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
       expect(assign).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * M-3 — a passkey or security key as the first factor, offered alongside
+   * the authenticator app the effect above already started enrolling. The
+   * server half (`crates/axiam-api-rest/src/handlers/webauthn.rs`) is
+   * already covered elsewhere; these tests exercise the page's method
+   * chooser, its unsupported-browser fallback, a completed ceremony landing
+   * signed in, and the one status this branch renders differently from the
+   * TOTP branch's "invalid link" bounce (403, a tenant policy denial).
+   */
+  describe("M-3 — passkey or security key as the first factor", () => {
+    const registrationChallenge = {
+      challenge: {
+        publicKey: {
+          challenge: "Y2hhbGxlbmdl",
+          rp: { id: "localhost", name: "AXIAM" },
+          user: { id: "dTE", name: "u1", displayName: "u1" },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          authenticatorSelection: { residentKey: "required", userVerification: "preferred" },
+        },
+      },
+      state_token: "wa-state-1",
+    };
+
+    const loginSuccess = {
+      user: { id: "u1", username: "alice", email: "alice@x.io", tenant_id: "ten-1" },
+      session_id: "sess-1",
+      expires_in: 900,
+    };
+
+    const fetchMeResponse = res({
+      user: { id: "u1", username: "alice", email: "alice@x.io", tenant_id: "ten-1" },
+      permissions: ["*"],
+      tenant_slug: "main",
+      org_slug: "acme",
+    });
+
+    beforeEach(() => {
+      setPublicKeyCredential(function PublicKeyCredential() {});
+    });
+
+    it("shows the method chooser with a passkey and a security key option", async () => {
+      await getToReadyState();
+      expect(screen.getByText("Authenticator app")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /passkey on this device/i })
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /security key/i })).toBeInTheDocument();
+    });
+
+    it("falls back to the authenticator-app option only when the browser has no WebAuthn support", async () => {
+      setPublicKeyCredential(undefined);
+      await getToReadyState();
+      expect(screen.getByText("Authenticator app")).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /passkey on this device/i })
+      ).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /security key/i })).not.toBeInTheDocument();
+    });
+
+    it("completes a passkey enrolment, calling the two setup/register routes, and lands signed in", async () => {
+      await getToReadyState();
+      apiMock.post.mockResolvedValueOnce(res(registrationChallenge)); // setup/register/start
+      startRegistrationMock.mockResolvedValueOnce({ id: "cred-1" });
+      apiMock.post.mockResolvedValueOnce(res(loginSuccess)); // setup/register/finish
+      apiMock.get.mockResolvedValueOnce(fetchMeResponse);
+
+      await userEvent.click(screen.getByRole("button", { name: /passkey on this device/i }));
+
+      await waitFor(() =>
+        expect(apiMock.post).toHaveBeenCalledWith(
+          "/api/v1/auth/webauthn/setup/register/start",
+          { setup_token: "setup-tok-1" }
+        )
+      );
+      await waitFor(() =>
+        expect(apiMock.post).toHaveBeenCalledWith(
+          "/api/v1/auth/webauthn/setup/register/finish",
+          expect.objectContaining({
+            setup_token: "setup-tok-1",
+            state_token: "wa-state-1",
+            credential_name: "Passkey",
+            response: { id: "cred-1" },
+          })
+        )
+      );
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
+      expect(useAuthStore.getState().user?.username).toBe("alice");
+      expect(useAuthStore.getState().tenantSlug).toBe("main");
+    });
+
+    it("honours return_to for a completed security-key enrolment (M-4 parity)", async () => {
+      const returnTo =
+        "/oauth2/authorize?response_type=code&client_id=oa_1&axiam_login_hop=1";
+      searchParamsString = `setup_token=setup-tok-1&return_to=${encodeURIComponent(returnTo)}`;
+      const assign = vi.fn();
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: { ...window.location, assign },
+      });
+
+      await getToReadyState();
+      apiMock.post.mockResolvedValueOnce(res(registrationChallenge));
+      startRegistrationMock.mockResolvedValueOnce({ id: "cred-1" });
+      apiMock.post.mockResolvedValueOnce(res(loginSuccess));
+      apiMock.get.mockResolvedValueOnce(fetchMeResponse);
+
+      await userEvent.click(screen.getByRole("button", { name: /security key/i }));
+
+      await waitFor(() => expect(assign).toHaveBeenCalledWith(returnTo));
+      expect(navigate).not.toHaveBeenCalledWith("/dashboard");
+    });
+
+    it("renders a tenant policy denial (403) inline instead of bouncing to the invalid-link state", async () => {
+      await getToReadyState();
+      apiMock.post.mockRejectedValueOnce({
+        response: {
+          status: 403,
+          data: {
+            message:
+              "Security keys are not permitted by this tenant's authenticator policy.",
+          },
+        },
+      });
+
+      await userEvent.click(screen.getByRole("button", { name: /security key/i }));
+
+      expect(
+        await screen.findByText(
+          "Security keys are not permitted by this tenant's authenticator policy."
+        )
+      ).toBeInTheDocument();
+      // Still the ready state — the token was fine, only this device/kind was
+      // refused — not bounced to "invalid link" the way a 401 is below.
+      expect(screen.getByText("Set up your authenticator")).toBeInTheDocument();
+      expect(navigate).not.toHaveBeenCalled();
+    });
+
+    it("bounces to the invalid-link state on a 401 from the WebAuthn setup routes", async () => {
+      await getToReadyState();
+      apiMock.post.mockRejectedValueOnce({ response: { status: 401, data: {} } });
+
+      await userEvent.click(screen.getByRole("button", { name: /passkey on this device/i }));
+
+      expect(await screen.findByText("Invalid setup link")).toBeInTheDocument();
+    });
+
+    it("shows the browser's own cancellation copy when the ceremony is dismissed", async () => {
+      await getToReadyState();
+      apiMock.post.mockResolvedValueOnce(res(registrationChallenge));
+      const cancelled = new Error("cancelled");
+      cancelled.name = "NotAllowedError";
+      startRegistrationMock.mockRejectedValueOnce(cancelled);
+
+      await userEvent.click(screen.getByRole("button", { name: /passkey on this device/i }));
+
+      expect(
+        await screen.findByText(/cancelled or timed out/i)
+      ).toBeInTheDocument();
+      expect(screen.getByText("Set up your authenticator")).toBeInTheDocument();
     });
   });
 });

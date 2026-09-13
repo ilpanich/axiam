@@ -2383,7 +2383,7 @@
                   "severity": "Critical",
                   "type": "Elevation of privilege",
                   "description": "If the intermediate MFA challenge token is accepted as a full session, or can be exchanged more than once, the second factor is bypassed.",
-                  "mitigation": "The challenge token is a distinct, short-lived, single-use credential that only authorises the MFA verification call; it carries no API authority and is consumed on use.",
+                  "mitigation": "The challenge token is a distinct, short-lived credential that only authorises the MFA verification call and carries no API authority. Corrected 2026-09-13: what is consumed is the TOTP step, not the token \u2014 verify_mfa records totp_last_used_step under a compare-and-swap and refuses a code from a step already spent, so a captured challenge token cannot be replayed with the same code, and re-presenting it requires the authenticator. Known residual R-E: the setup token (purpose mfa_setup) is stateless in the same way and has no second factor behind it, so within its 300-second window a captured token lets a second party enrol a factor and complete the login. Low: the window is short, the token travels only under TLS in a 403 body to the caller who authenticated, and it is inert once the legitimate completion has run. The single-use hardening (M-5) was assessed and not taken \u2014 there is no consumption store to reuse and it needs a new repository on a service already generic over four \u2014 and remains a follow-up.",
                   "modelType": "STRIDE",
                   "number": 32
                 },
@@ -2463,6 +2463,17 @@
                   "mitigation": "M-2 (2026-09-13): the self-service branch reads the caller's own tenant's effective settings and refuses with 403 and the error code mfa_enforced where MfaPolicy::mfa_enforced is true. Its own code rather than authorization_denied, because the caller holds every permission the action needs and only an administrator can act against the policy; the message names the administrator. The users:admin branch is unaffected \u2014 unlocking a user who lost their only factor is what the endpoint exists for, and an enforcing tenant is where it matters most. Where the tenant does not enforce MFA the self-service reset is still allowed: such a user was free to run at one factor anyway, so refusing them protects nothing (D-1). The settings read is propagated rather than defaulted to not-enforced, so a datastore failure is not the way the floor is escaped.",
                   "modelType": "STRIDE",
                   "number": 267
+                },
+                {
+                  "id": "fbc23168-ac82-5461-8a04-240d50e58866",
+                  "title": "A setup token enrols a passkey on an account that already has a factor, or one the tenant's authenticator policy forbids",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "Forced first-login enrolment offered TOTP only, so a tenant whose authenticator policy is built around security keys still had to hand every new user a TOTP app. Opening the WebAuthn registration ceremony to a setup token creates two ways to get it wrong. The token could be used to add a factor to an account that already has one \u2014 a captured token would then be a way to register an attacker's own authenticator onto an account whose owner had just finished enrolling. And the session-less ceremony could skip the attestation and user-verification policies the profile-page ceremony applies, so an authenticator the tenant forbids would enrol through the one path that runs before the user has a session.",
+                  "mitigation": "M-3 (2026-09-13): POST /auth/webauthn/setup/register/start and /finish both decode the token with the same purpose-checked decoder the TOTP twins use \u2014 a challenge token, an expired token or a session bearer are all 401 \u2014 and both then ask MfaMethodService whether the account already has any factor, refusing with 400, the same answer setup/enroll gives. The question is asked of MfaMethodService and not AuthService because it spans the TOTP secret and the WebAuthn credential rows, and a check that read only the TOTP half would let a captured token add a second passkey. Nothing about what may register differs from the profile-page ceremony: the attestation policy and the user-verification policy are read from the token's tenant \u2014 which for a setup token is the principal tenant \u2014 and passed to the same start_registration_for_policy, and finish runs the same enforce_mds_freshness and finish_registration_for_policy (T-229/T-230 hold unchanged). The completion shares one session-issuance tail with the TOTP path, complete_setup_token_login, rather than a second copy: basic-op-gap-plan.md \u00a74 lists every path funnelling through create_session_and_tokens and this adds no unlisted one. The evidence recorded matches what the WebAuthn authentication path records for the same credential kind \u2014 pwd for the password that earned the token, hwk or swk for the credential, mfa for the two factors, and user only under a Required user-verification policy, the one setting that rejects a ceremony whose UV bit is clear \u2014 so the session lands in urn:axiam:acr:mfa. Unlike the profile-page finish, a failure to mark MFA required fails the request: there is no profile page to correct it from and a session issued while the account still reads no-second-factor would send the user through forced enrolment again with a credential already registered. Both routes are CSRF-exempt and public for the same reason the TOTP twins are \u2014 the caller has no session and no cookie to echo, and the only credential is a body token, so there is no ambient credential for a cross-site request to ride.",
+                  "modelType": "STRIDE",
+                  "number": 269
                 }
               ]
             }
@@ -15371,6 +15382,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 268
+    "threatTop": 269
   }
 }

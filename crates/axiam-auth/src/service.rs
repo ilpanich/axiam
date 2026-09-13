@@ -1250,24 +1250,79 @@ impl<
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AxiamResult<LoginOutput> {
-        let (user_id, tenant_id, org_id) = self.decode_mfa_setup_token(setup_token)?;
+        let (user_id, tenant_id, _org_id) = self.decode_mfa_setup_token(setup_token)?;
 
         // Confirm MFA (validates code, flips mfa_enabled to true).
         self.confirm_mfa(tenant_id, user_id, totp_code).await?;
 
-        // Create session and issue tokens.
-        self.create_session_and_tokens(
-            user_id,
-            tenant_id,
-            org_id,
-            ip_address,
-            user_agent,
+        self.complete_setup_token_login(
+            setup_token,
             // Same evidence as `verify_mfa`: the setup token descends from a
             // verified password, and the TOTP code was just checked by
             // `confirm_mfa` above.
             AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Otp, Amr::Mfa]),
+            ip_address,
+            user_agent,
         )
         .await
+    }
+
+    /// Complete the login a setup token interrupted, whatever factor was just
+    /// enrolled.
+    ///
+    /// The shared tail of every forced first-login enrolment: TOTP through
+    /// [`Self::confirm_mfa_with_setup_token`], and a passkey or security key
+    /// through `POST /auth/webauthn/setup/register/finish`. The caller has
+    /// already enrolled and verified a factor; this issues the session.
+    ///
+    /// Factored out rather than copied because session issuance is a choke
+    /// point, not a convenience: `basic-op-gap-plan.md` §4 lists every path
+    /// that funnels through [`Self::create_session_and_tokens`], and that list
+    /// is what makes "the OP session cookie is minted on every browser login"
+    /// checkable. A second copy of this tail would be a place for the next
+    /// thing minted there to be forgotten, and it would be discovered by a
+    /// relying party rather than by the compiler.
+    ///
+    /// The token is decoded again here rather than passed as three `Uuid`s.
+    /// One decode per entry point would be enough for correctness, but a
+    /// signature taking `(user_id, tenant_id, org_id)` accepts values from
+    /// anywhere — including a request body — and this function issues a
+    /// session. Taking the token keeps the identity it grants tied to
+    /// something signed.
+    ///
+    /// `evidence` is the caller's, because only the caller knows what was
+    /// actually proved: the TOTP path records `otp`, the WebAuthn path records
+    /// the possession factor it just registered. Both record `pwd`, because a
+    /// setup token is only ever minted by a login that verified one, and both
+    /// record `mfa`, because two distinct factors were verified.
+    pub async fn complete_setup_token_login(
+        &self,
+        setup_token: &str,
+        evidence: AuthenticationEvidence,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> AxiamResult<LoginOutput> {
+        let (user_id, tenant_id, org_id) = self.decode_mfa_setup_token(setup_token)?;
+        self.create_session_and_tokens(user_id, tenant_id, org_id, ip_address, user_agent, evidence)
+            .await
+    }
+
+    /// Decode a setup token for a caller that is about to enrol the account's
+    /// **first** factor, returning `(user_id, tenant_id, org_id)`.
+    ///
+    /// Public because the WebAuthn setup endpoints live in `axiam-api-rest`
+    /// and need exactly this: the token is their only credential, as §25.2
+    /// says it is for the TOTP twins. A `mfa_challenge`-purpose token, an
+    /// expired one, or a session bearer are all rejected by
+    /// [`Self::decode_mfa_setup_token`], which checks the `purpose` claim.
+    ///
+    /// It does **not** check whether the account already has a factor: that
+    /// question spans the TOTP secret and the WebAuthn credential rows, and
+    /// this service holds only the first. The caller asks
+    /// [`crate::mfa_methods::MfaMethodService::available_method_types`], which
+    /// holds both.
+    pub fn decode_setup_token(&self, setup_token: &str) -> AxiamResult<(Uuid, Uuid, Uuid)> {
+        self.decode_mfa_setup_token(setup_token).map_err(Into::into)
     }
 
     // `reset_mfa` used to live here. It moved to

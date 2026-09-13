@@ -1143,9 +1143,9 @@ Per repository, one branch named for this plan, one PR:
 | kotlin | | | | |
 | csharp | | | | |
 | php | | | | |
-| go | | | | |
+| go | yes | yes | [#78](https://github.com/ilpanich/axiam-go-sdk/pull/78) | build, vet, gofmt, drift (160) and `go test ./...` 1032/1032 green locally; `buf generate` and `govulncheck` blocked by the sandbox proxy, CI-verified |
 | swift | yes | yes | [#61](https://github.com/ilpanich/axiam-swift-sdk/pull/61) | drift check + §6 TLS gate green locally; **compile and tests CI-verified only** — no Swift toolchain in the sandbox, re-tested and confirmed |
-| c | | | | |
+| c | yes | yes | [#60](https://github.com/ilpanich/axiam-c-sdk/pull/60) | 54/54 on gcc+clang × C11+C23 and under ASan/UBSan; valgrind clean but for a pre-existing TLS-timeout test unrelated to this change; conan recipe job CI-verified |
 | cplusplus | | | | |
 
 ---

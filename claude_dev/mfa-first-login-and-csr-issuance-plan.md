@@ -1144,7 +1144,7 @@ Per repository, one branch named for this plan, one PR:
 | csharp | | | | |
 | php | | | | |
 | go | | | | |
-| swift | | | | |
+| swift | yes | yes | [#61](https://github.com/ilpanich/axiam-swift-sdk/pull/61) | drift check + §6 TLS gate green locally; **compile and tests CI-verified only** — no Swift toolchain in the sandbox, re-tested and confirmed |
 | c | | | | |
 | cplusplus | | | | |
 

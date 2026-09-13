@@ -907,7 +907,15 @@ one wave.
 > has not used for some time, so it has drifted independently of this work; that
 > is recorded here as a finding, not fixed, because fixing it is not this plan's
 > scope. The C-1 permission-matrix fixture case (`frontend/e2e/matrix/pki.spec.ts`)
-> was **not** added either — see the final report.
+> was **not** added by this agent; the orchestrator added it afterwards, as a
+> permission-row probe rather than a full issuance: nothing in the e2e suite's
+> dependencies builds a PKCS#10 request, and hand-rolling DER there would be a
+> lot of fragile code proving something about encoding rather than about
+> permissions. A *malformed* CSR separates the two statuses exactly — the caller
+> holding `certificates:generate` reaches the handler and is answered `400` by
+> the parser, a caller without it is stopped at `403` before the parser runs —
+> which is the row the matrix exists to prove, isolated from everything else the
+> endpoint does. It also asserts no row is left behind by the refusal.
 
 1. `services/certificates.ts`: `SignCsrPayload { issuer_ca_id, csr_pem, cert_type, validity_days, metadata? }`,
    `certificateService.signCsr(payload): Promise<Certificate>`; unit test in

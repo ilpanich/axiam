@@ -210,7 +210,7 @@ await client.confirmPasswordReset({
         type: "list",
         items: [
           "**`SameSite=Lax` by necessity.** A relying party's redirect is a cross-site top-level navigation, on which a `Strict` cookie does not travel. `Lax` travels there and **not** inside a frame, so cross-site hidden-iframe login-status probing fails closed.",
-          "**`Secure` unconditionally.** Unlike the other three it does not follow `AXIAM__AUTH__COOKIE_SECURE`: it is the only cookie AXIAM sends on a cross-site navigation, and the endpoint it is scoped to must be TLS-protected anyway. Loopback development is unaffected.",
+          "**`Secure` unconditionally.** Unlike the other three it does not follow the deployment's cookie-`Secure` flag: it is the only cookie AXIAM sends on a cross-site navigation, and the endpoint it is scoped to must be TLS-protected anyway. Loopback development is unaffected — browsers store `Secure` cookies set from `localhost`. What it refuses is a browser login hop over plaintext to a non-loopback host, and the fix there is TLS rather than a flag.",
           "**`HttpOnly`, and stored only as a SHA-256**, the way a refresh token is. Its `Max-Age` is the session's lifetime, because the value names the session row.",
           "**A browser that sends it cross-site can obtain exactly one thing**: an authorization code, for a registered client, at an exactly-matched `redirect_uri`, bound to the relying party's own PKCE and `state`. It reaches no API endpoint.",
         ],

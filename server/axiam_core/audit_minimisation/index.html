@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Deployment-wide minimisation of what reaches the append-only audit log (T-110)."><title>axiam_core::audit_minimisation - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module audit_minimisation</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_core/index.html">axiam_<wbr>core</a><span class="version">1.0.0-beta14</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module audit_<wbr>minimisation</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-problem-this-answers" title="The problem this answers">The problem this answers</a></li><li><a href="#what-it-does-and-what-it-deliberately-does-not" title="What it does, and what it deliberately does not">What it does, and what it deliberately does not</a></li><li><a href="#why-deployment-wide-and-not-per-tenant" title="Why deployment-wide and not per tenant">Why deployment-wide and not per tenant</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_core</a></div><h1>Module <span>audit_<wbr>minimisation</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_core/audit_minimisation.rs.html#1-321">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Deployment-wide minimisation of what reaches the append-only audit log
+(T-110).</p>
+<h2 id="the-problem-this-answers"><a class="doc-anchor" href="#the-problem-this-answers">§</a>The problem this answers</h2>
+<p>The audit log is append-only by design, which is in direct tension with the
+Art. 17 erasure path AXIAM also offers: personal data written into it cannot
+later be removed, only aged out. T-119 bounded the <em>retention</em> side — a
+default 730-day sweep, the table’s only deletion path. The collection side
+was never configurable at all, so a deployment whose lawful basis does not
+support holding a full client IP address for two years had nothing to turn
+off.</p>
+<h2 id="what-it-does-and-what-it-deliberately-does-not"><a class="doc-anchor" href="#what-it-does-and-what-it-deliberately-does-not">§</a>What it does, and what it deliberately does not</h2>
+<p>With minimisation on, two fields are reduced <strong>before</strong> the write, because
+after it there is no second chance by construction:</p>
+<ul>
+<li><code>ip_address</code> is truncated to its <code>/24</code> (IPv4) or <code>/48</code> (IPv6) prefix. That
+keeps the network an action came from — enough to see a pattern, to
+correlate a burst, to answer “was this the office” — and drops the part
+that identifies a subscriber line or a device.</li>
+<li>a <code>user_agent</code> member of <code>metadata</code>, where a producer sets one, is reduced
+to a coarse family. A full user-agent string is a fingerprint; the family
+is the part an investigation actually reads.</li>
+</ul>
+<p><strong>It does not strip the structured metadata domain producers write</strong>, and
+that limit is the design rather than an omission.
+<code>oauth2.refresh_token_replayed</code> names the client, its profile and the
+disposition (T-254); a sensitive-scope release names the claim by name
+(T-241); a JIT provision names the provider and the external subject
+(T-161). Those are accountability evidence that other threats’ mitigations
+depend on. Dropping them would weaken three controls to narrow one, and
+none of them is request metadata: the request-audit middleware collects
+<code>http_status</code> and <code>authenticated</code> and nothing else, which is pinned by its
+own test rather than left to habit.</p>
+<h2 id="why-deployment-wide-and-not-per-tenant"><a class="doc-anchor" href="#why-deployment-wide-and-not-per-tenant">§</a>Why deployment-wide and not per tenant</h2>
+<p>Audit is an accountability control the deployment relies on, <strong>including
+against a tenant administrator</strong>. A per-tenant switch would let a tenant
+weaken the evidence that would be used to investigate that tenant. It is
+the same argument that makes <code>sensitive_scopes_enabled</code> disable-only for a
+tenant under T-241, applied to a control where the tenant is a possible
+subject rather than a possible victim.</p>
+<p>Off by default, because turning it on reduces forensic precision and that
+is a lawful-basis judgement a deployment must make deliberately rather than
+inherit.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AuditMinimisation.html" title="struct axiam_core::audit_minimisation::AuditMinimisation">Audit<wbr>Minimisation</a></dt><dd>Whether a deployment minimises what it collects into the audit log.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.truncate_ip.html" title="fn axiam_core::audit_minimisation::truncate_ip">truncate_<wbr>ip</a></dt><dd>Truncate an address to its <code>/24</code> (IPv4) or <code>/48</code> (IPv6) prefix.</dd><dt><a class="fn" href="fn.user_agent_family.html" title="fn axiam_core::audit_minimisation::user_agent_family">user_<wbr>agent_<wbr>family</a></dt><dd>A coarse family for a user-agent string.</dd></dl></section></div></main></body></html>

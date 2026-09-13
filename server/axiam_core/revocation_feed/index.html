@@ -1,0 +1,42 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The session-revocation feed (T-39, T-143)."><title>axiam_core::revocation_feed - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module revocation_feed</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_core/index.html">axiam_<wbr>core</a><span class="version">1.0.0-beta14</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module revocation_<wbr>feed</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-gap-this-narrows" title="The gap this narrows">The gap this narrows</a></li><li><a href="#five-properties-each-load-bearing" title="Five properties, each load-bearing">Five properties, each load-bearing</a></li></ul><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_core</a></div><h1>Module <span>revocation_<wbr>feed</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_core/revocation_feed.rs.html#1-156">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The session-revocation feed (T-39, T-143).</p>
+<h2 id="the-gap-this-narrows"><a class="doc-anchor" href="#the-gap-this-narrows">§</a>The gap this narrows</h2>
+<p>An AXIAM access token is self-contained and valid for up to fifteen
+minutes, and an SDK route guard verifies it locally. A role removal, an
+account disable or a logout therefore does not reach a token already in a
+caller’s hands: the two threats are the server-side and client-side faces
+of one trade, and both recorded the same remedy — call gRPC introspection
+instead of verifying locally. That remedy is real and costs a network round
+trip <strong>per request</strong>, which is why integrators demonstrably do not adopt it.</p>
+<p>The feed is the cheaper shape of the same answer: a small, bounded,
+unlinkable list of revoked sessions, published beside the JWKS, polled on an
+interval rather than per request. A guard that polls it rejects a revoked
+session within one poll interval instead of within one token lifetime.</p>
+<h2 id="five-properties-each-load-bearing"><a class="doc-anchor" href="#five-properties-each-load-bearing">§</a>Five properties, each load-bearing</h2>
+<ol>
+<li><strong>Hashes, never identifiers.</strong> An entry is
+<a href="fn.revocation_hash.html" title="fn axiam_core::revocation_feed::revocation_hash"><code>revocation_hash</code></a> of the session id — base64url-unpadded SHA-256, the
+same encoding <code>cnf.x5t#S256</code> and <code>jkt</code> already use, so no SDK needs a new
+primitive. A <code>sid</code> is a session id and not a subject, so the feed
+discloses neither who was revoked nor how many distinct users are behind
+the entries. This is not a privacy <em>guarantee</em> — it is a
+non-enumerability argument, and it holds because a <code>sid</code> is a UUIDv4 and
+the preimage space is not walkable, not because a hash is magic.</li>
+<li><strong>Bounded.</strong> An entry lives exactly one access-token lifetime past the
+revocation. After that every token naming that session has expired on its
+own <code>exp</code> and the entry proves nothing. So the document’s size tracks the
+revocation rate over fifteen minutes, never the deployment’s history.</li>
+<li><strong>Rate-limited and cacheable</strong>, like the JWKS beside it.</li>
+<li><strong>Never fail closed on the feed.</strong> A guard that cannot fetch it, or that
+fetches something malformed, MUST behave exactly as it does today. This
+is the rule that makes the feature safe to ship at all: a revocation feed
+that can deny requests when it is unreachable turns a network blip into
+an outage, and would be a worse control than the window it narrows. The
+feed can only ever turn an accept into a reject, never the reverse.</li>
+<li><strong>Additive to the token.</strong> Nothing about the JWT changes. <code>sid</code> has been
+there since T-249.</li>
+</ol>
+<p>Off by default, per deployment. A deployment that does not enable it writes
+no row, serves no route, and is byte-identical to one built before this
+module existed.</p>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.REVOCATION_HASH_ALG.html" title="constant axiam_core::revocation_feed::REVOCATION_HASH_ALG">REVOCATION_<wbr>HASH_<wbr>ALG</a></dt><dd>The digest algorithm the feed publishes, and the only value a client may
+accept in the document’s <code>alg</code> member.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.revocation_hash.html" title="fn axiam_core::revocation_feed::revocation_hash">revocation_<wbr>hash</a></dt><dd>The feed entry for a session id.</dd><dt><a class="fn" href="fn.revocation_hash_of.html" title="fn axiam_core::revocation_feed::revocation_hash_of">revocation_<wbr>hash_<wbr>of</a></dt><dd><a href="fn.revocation_hash.html" title="fn axiam_core::revocation_feed::revocation_hash"><code>revocation_hash</code></a> for a <code>sid</code> that has already been read as text.</dd></dl></section></div></main></body></html>

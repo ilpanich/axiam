@@ -1,0 +1,436 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-core/src/personal_data.rs`."><title>personal_data.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_core/</div>personal_data.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! The declared inventory of what each column of the `user` table means
+<a href=#2 id=2 data-nosnippet>2</a>//! (T-261).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! # Why this exists
+<a href=#5 id=5 data-nosnippet>5</a>//!
+<a href=#6 id=6 data-nosnippet>6</a>//! Four code paths decide what a `user` column means, and three of them used
+<a href=#7 id=7 data-nosnippet>7</a>//! to decide it by writing the column name out by hand: the Art. 17 erasure
+<a href=#8 id=8 data-nosnippet>8</a>//! statement, the administrator's tombstone behind `DELETE
+<a href=#9 id=9 data-nosnippet>9</a>//! /api/v1/users/{id}`, and the Art. 15 export's `profile` section. A column
+<a href=#10 id=10 data-nosnippet>10</a>//! named by none of them survives erasure and never reaches an export — which
+<a href=#11 id=11 data-nosnippet>11</a>//! is precisely what nearly happened to `phone_number` and `address`, added by
+<a href=#12 id=12 data-nosnippet>12</a>//! the release that also added the paths that would have stranded them. The
+<a href=#13 id=13 data-nosnippet>13</a>//! fourth path, SCIM's no-op detection, was guarded because somebody wrote a
+<a href=#14 id=14 data-nosnippet>14</a>//! destructure of `UpdateUser`; that guard does not generalise, because
+<a href=#15 id=15 data-nosnippet>15</a>//! `UpdateUser` is not the `user` table.
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! So the lists stop being lists. [`USER_COLUMNS`] is the one declaration; the
+<a href=#18 id=18 data-nosnippet>18</a>//! two erasure statements derive their shared `SET` fragment from it
+<a href=#19 id=19 data-nosnippet>19</a>//! ([`shared_erasure_fragment`]), and two gates make an unclassified column
+<a href=#20 id=20 data-nosnippet>20</a>//! impossible to add quietly:
+<a href=#21 id=21 data-nosnippet>21</a>//!
+<a href=#22 id=22 data-nosnippet>22</a>//! 1. `user_schema_matches_the_declared_inventory` (in `axiam-db`, against a
+<a href=#23 id=23 data-nosnippet>23</a>//!    live datastore after migrations) introspects `INFO FOR TABLE user` and
+<a href=#24 id=24 data-nosnippet>24</a>//!    requires the field set and [`USER_COLUMNS`] to agree **in both
+<a href=#25 id=25 data-nosnippet>25</a>//!    directions** — a removed column fails as loudly as an added one.
+<a href=#26 id=26 data-nosnippet>26</a>//! 2. [`audit_declarations`] requires every row that classifies a column as
+<a href=#27 id=27 data-nosnippet>27</a>//!    neither erased nor exported to say, in `note`, why.
+<a href=#28 id=28 data-nosnippet>28</a>//!
+<a href=#29 id=29 data-nosnippet>29</a>//! # Why `erasure` and `export` are two fields and not one flag
+<a href=#30 id=30 data-nosnippet>30</a>//!
+<a href=#31 id=31 data-nosnippet>31</a>//! Because a single "is personal data" boolean gets two real cases wrong.
+<a href=#32 id=32 data-nosnippet>32</a>//! `password_hash` and `mfa_secret` are erased and are deliberately **not**
+<a href=#33 id=33 data-nosnippet>33</a>//! exported (D-10: handing a data subject — or whoever compromised their
+<a href=#34 id=34 data-nosnippet>34</a>//! mailbox — the offline-crackable artefact is not an Art. 15 obligation),
+<a href=#35 id=35 data-nosnippet>35</a>//! while `created_at` is exported and deliberately not erased. Both are
+<a href=#36 id=36 data-nosnippet>36</a>//! expressible only because the two questions are asked separately.
+<a href=#37 id=37 data-nosnippet>37</a>//!
+<a href=#38 id=38 data-nosnippet>38</a>//! # What this inventory does not decide
+<a href=#39 id=39 data-nosnippet>39</a>//!
+<a href=#40 id=40 data-nosnippet>40</a>//! Each erasure path keeps its own path-specific clauses: the terminal
+<a href=#41 id=41 data-nosnippet>41</a>//! `status` value, the Art. 17 pipeline's `deletion_pending` /
+<a href=#42 id=42 data-nosnippet>42</a>//! `scheduled_purge_at` reset, the tombstone's `email_verified_at`,
+<a href=#43 id=43 data-nosnippet>43</a>//! `totp_last_used_step` and `failed_login_attempts` reset. Those asymmetries
+<a href=#44 id=44 data-nosnippet>44</a>//! are **recorded** in the `note` of the column they belong to rather than
+<a href=#45 id=45 data-nosnippet>45</a>//! harmonised here: harmonising them would change erasure behaviour, and this
+<a href=#46 id=46 data-nosnippet>46</a>//! module is a gate.
+<a href=#47 id=47 data-nosnippet>47</a>
+<a href=#48 id=48 data-nosnippet>48</a>/// What an erasure statement writes into a column.
+<a href=#49 id=49 data-nosnippet>49</a>///
+<a href=#50 id=50 data-nosnippet>50</a>/// Only columns cleared by **both** erasure paths appear as `Some` on
+<a href=#51 id=51 data-nosnippet>51</a>/// [`UserColumn::erasure`]; a column one path clears and the other does not is
+<a href=#52 id=52 data-nosnippet>52</a>/// path-specific, stays `None`, and says so in its `note`.
+<a href=#53 id=53 data-nosnippet>53</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#54 id=54 data-nosnippet>54</a></span><span class="kw">pub enum </span>Erasure {
+<a href=#55 id=55 data-nosnippet>55</a>    <span class="doccomment">/// `SET &lt;column&gt; = NONE`.
+<a href=#56 id=56 data-nosnippet>56</a>    </span>ToNone,
+<a href=#57 id=57 data-nosnippet>57</a>    <span class="doccomment">/// `SET &lt;column&gt; = &lt;literal&gt;` — a SurrealQL literal such as `''`, `{}` or
+<a href=#58 id=58 data-nosnippet>58</a>    /// `false`, written verbatim into the statement.
+<a href=#59 id=59 data-nosnippet>59</a>    </span>ToLiteral(<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str),
+<a href=#60 id=60 data-nosnippet>60</a>    <span class="doccomment">/// `SET &lt;column&gt; = $&lt;param&gt;` — the calling path binds the value, because
+<a href=#61 id=61 data-nosnippet>61</a>    /// it derives from the row: a pseudonym, an email hash, an `.invalid`
+<a href=#62 id=62 data-nosnippet>62</a>    /// placeholder.
+<a href=#63 id=63 data-nosnippet>63</a>    </span>ToParam(<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str),
+<a href=#64 id=64 data-nosnippet>64</a>}
+<a href=#65 id=65 data-nosnippet>65</a>
+<a href=#66 id=66 data-nosnippet>66</a><span class="kw">impl </span>Erasure {
+<a href=#67 id=67 data-nosnippet>67</a>    <span class="doccomment">/// The right-hand side this variant renders into a `SET` clause.
+<a href=#68 id=68 data-nosnippet>68</a>    </span><span class="attr">#[must_use]
+<a href=#69 id=69 data-nosnippet>69</a>    </span><span class="kw">pub fn </span>render(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; String {
+<a href=#70 id=70 data-nosnippet>70</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#71 id=71 data-nosnippet>71</a>            <span class="self">Self</span>::ToNone =&gt; <span class="string">"NONE"</span>.to_owned(),
+<a href=#72 id=72 data-nosnippet>72</a>            <span class="self">Self</span>::ToLiteral(literal) =&gt; (<span class="kw-2">*</span>literal).to_owned(),
+<a href=#73 id=73 data-nosnippet>73</a>            <span class="self">Self</span>::ToParam(param) =&gt; <span class="macro">format!</span>(<span class="string">"${param}"</span>),
+<a href=#74 id=74 data-nosnippet>74</a>        }
+<a href=#75 id=75 data-nosnippet>75</a>    }
+<a href=#76 id=76 data-nosnippet>76</a>}
+<a href=#77 id=77 data-nosnippet>77</a>
+<a href=#78 id=78 data-nosnippet>78</a><span class="doccomment">/// One column of the `user` table, classified.
+<a href=#79 id=79 data-nosnippet>79</a>///
+<a href=#80 id=80 data-nosnippet>80</a>/// Every column has a row. A column with no row fails the schema-introspection
+<a href=#81 id=81 data-nosnippet>81</a>/// gate in `axiam-db`, naming itself.
+<a href=#82 id=82 data-nosnippet>82</a></span><span class="attr">#[derive(Debug, Clone, Copy)]
+<a href=#83 id=83 data-nosnippet>83</a></span><span class="kw">pub struct </span>UserColumn {
+<a href=#84 id=84 data-nosnippet>84</a>    <span class="doccomment">/// The column name exactly as `DEFINE FIELD` spells it.
+<a href=#85 id=85 data-nosnippet>85</a>    </span><span class="kw">pub </span>name: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="doccomment">/// What **both** erasure paths write, or `None` when the column is not
+<a href=#87 id=87 data-nosnippet>87</a>    /// erased by both — `note` then says why.
+<a href=#88 id=88 data-nosnippet>88</a>    </span><span class="kw">pub </span>erasure: <span class="prelude-ty">Option</span>&lt;Erasure&gt;,
+<a href=#89 id=89 data-nosnippet>89</a>    <span class="doccomment">/// The key this column appears under in the Art. 15 export's `profile`
+<a href=#90 id=90 data-nosnippet>90</a>    /// section, or `None` when it is deliberately withheld — `note` says why.
+<a href=#91 id=91 data-nosnippet>91</a>    ///
+<a href=#92 id=92 data-nosnippet>92</a>    /// The key is not always the column name: `phone_number_verified_at` is
+<a href=#93 id=93 data-nosnippet>93</a>    /// exported as the derived boolean `phone_number_verified`, because
+<a href=#94 id=94 data-nosnippet>94</a>    /// exporting the internal column name would describe AXIAM's storage
+<a href=#95 id=95 data-nosnippet>95</a>    /// rather than the subject's data.
+<a href=#96 id=96 data-nosnippet>96</a>    </span><span class="kw">pub </span>export: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt;,
+<a href=#97 id=97 data-nosnippet>97</a>    <span class="doccomment">/// Why, in the cases where either of the two above is `None`. Required to
+<a href=#98 id=98 data-nosnippet>98</a>    /// be non-empty there, so that "nobody classified this" and "classified as
+<a href=#99 id=99 data-nosnippet>99</a>    /// neither" are different states rather than the same silence.
+<a href=#100 id=100 data-nosnippet>100</a>    </span><span class="kw">pub </span>note: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#101 id=101 data-nosnippet>101</a>}
+<a href=#102 id=102 data-nosnippet>102</a>
+<a href=#103 id=103 data-nosnippet>103</a><span class="doccomment">/// Keys the Art. 15 `profile` section carries that are not `user` columns.
+<a href=#104 id=104 data-nosnippet>104</a>///
+<a href=#105 id=105 data-nosnippet>105</a>/// `id` is the record identifier. It is not a `DEFINE FIELD`, so it cannot
+<a href=#106 id=106 data-nosnippet>106</a>/// appear in [`USER_COLUMNS`] without breaking the schema gate, and it is
+<a href=#107 id=107 data-nosnippet>107</a>/// exported because a subject asking what is held about them is entitled to
+<a href=#108 id=108 data-nosnippet>108</a>/// the handle everything else is keyed by.
+<a href=#109 id=109 data-nosnippet>109</a></span><span class="kw">pub const </span>EXPORT_KEYS_NOT_FROM_COLUMNS: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str] = <span class="kw-2">&amp;</span>[<span class="string">"id"</span>];
+<a href=#110 id=110 data-nosnippet>110</a>
+<a href=#111 id=111 data-nosnippet>111</a><span class="doccomment">/// Every column of the `user` table, in schema-declaration order.
+<a href=#112 id=112 data-nosnippet>112</a></span><span class="kw">pub const </span>USER_COLUMNS: <span class="kw-2">&amp;</span>[UserColumn] = <span class="kw-2">&amp;</span>[
+<a href=#113 id=113 data-nosnippet>113</a>    UserColumn {
+<a href=#114 id=114 data-nosnippet>114</a>        name: <span class="string">"tenant_id"</span>,
+<a href=#115 id=115 data-nosnippet>115</a>        erasure: <span class="prelude-val">None</span>,
+<a href=#116 id=116 data-nosnippet>116</a>        export: <span class="prelude-val">None</span>,
+<a href=#117 id=117 data-nosnippet>117</a>        note: <span class="string">"The tenant this row is scoped to. Erasing it would orphan the \
+<a href=#118 id=118 data-nosnippet>118</a>               row from every tenant-scoped read, including the ones that \
+<a href=#119 id=119 data-nosnippet>119</a>               prove the erasure happened; it is an internal scoping \
+<a href=#120 id=120 data-nosnippet>120</a>               identifier and not the subject's data."</span>,
+<a href=#121 id=121 data-nosnippet>121</a>    },
+<a href=#122 id=122 data-nosnippet>122</a>    UserColumn {
+<a href=#123 id=123 data-nosnippet>123</a>        name: <span class="string">"username"</span>,
+<a href=#124 id=124 data-nosnippet>124</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToParam(<span class="string">"pseudonym"</span>)),
+<a href=#125 id=125 data-nosnippet>125</a>        export: <span class="prelude-val">Some</span>(<span class="string">"username"</span>),
+<a href=#126 id=126 data-nosnippet>126</a>        note: <span class="string">""</span>,
+<a href=#127 id=127 data-nosnippet>127</a>    },
+<a href=#128 id=128 data-nosnippet>128</a>    UserColumn {
+<a href=#129 id=129 data-nosnippet>129</a>        name: <span class="string">"email"</span>,
+<a href=#130 id=130 data-nosnippet>130</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToParam(<span class="string">"email_replacement"</span>)),
+<a href=#131 id=131 data-nosnippet>131</a>        export: <span class="prelude-val">Some</span>(<span class="string">"email"</span>),
+<a href=#132 id=132 data-nosnippet>132</a>        note: <span class="string">"Both paths replace it, with different values bound under the \
+<a href=#133 id=133 data-nosnippet>133</a>               same parameter: the Art. 17 pipeline writes a keyed hash, the \
+<a href=#134 id=134 data-nosnippet>134</a>               tombstone writes a `deleted-&lt;id&gt;@deleted.invalid` placeholder. \
+<a href=#135 id=135 data-nosnippet>135</a>               Overwriting rather than hiding is what frees the address from \
+<a href=#136 id=136 data-nosnippet>136</a>               the unique index so the person can sign up again."</span>,
+<a href=#137 id=137 data-nosnippet>137</a>    },
+<a href=#138 id=138 data-nosnippet>138</a>    UserColumn {
+<a href=#139 id=139 data-nosnippet>139</a>        name: <span class="string">"password_hash"</span>,
+<a href=#140 id=140 data-nosnippet>140</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToLiteral(<span class="string">"''"</span>)),
+<a href=#141 id=141 data-nosnippet>141</a>        export: <span class="prelude-val">None</span>,
+<a href=#142 id=142 data-nosnippet>142</a>        note: <span class="string">"D-10: a credential. The column is TYPE string and not nullable, \
+<a href=#143 id=143 data-nosnippet>143</a>               so the empty string is the tombstone — Argon2 output is never \
+<a href=#144 id=144 data-nosnippet>144</a>               empty, so nothing can verify against it even if some future \
+<a href=#145 id=145 data-nosnippet>145</a>               path skipped the status check. Never exported."</span>,
+<a href=#146 id=146 data-nosnippet>146</a>    },
+<a href=#147 id=147 data-nosnippet>147</a>    UserColumn {
+<a href=#148 id=148 data-nosnippet>148</a>        name: <span class="string">"status"</span>,
+<a href=#149 id=149 data-nosnippet>149</a>        erasure: <span class="prelude-val">None</span>,
+<a href=#150 id=150 data-nosnippet>150</a>        export: <span class="prelude-val">Some</span>(<span class="string">"status"</span>),
+<a href=#151 id=151 data-nosnippet>151</a>        note: <span class="string">"Path-specific: the Art. 17 pipeline writes `Anonymized` and the \
+<a href=#152 id=152 data-nosnippet>152</a>               tombstone writes `Deleted`, and the difference is the whole \
+<a href=#153 id=153 data-nosnippet>153</a>               point of having two paths. Not personal data."</span>,
+<a href=#154 id=154 data-nosnippet>154</a>    },
+<a href=#155 id=155 data-nosnippet>155</a>    UserColumn {
+<a href=#156 id=156 data-nosnippet>156</a>        name: <span class="string">"mfa_enabled"</span>,
+<a href=#157 id=157 data-nosnippet>157</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToLiteral(<span class="string">"false"</span>)),
+<a href=#158 id=158 data-nosnippet>158</a>        export: <span class="prelude-val">Some</span>(<span class="string">"mfa_enabled"</span>),
+<a href=#159 id=159 data-nosnippet>159</a>        note: <span class="string">""</span>,
+<a href=#160 id=160 data-nosnippet>160</a>    },
+<a href=#161 id=161 data-nosnippet>161</a>    UserColumn {
+<a href=#162 id=162 data-nosnippet>162</a>        name: <span class="string">"mfa_secret"</span>,
+<a href=#163 id=163 data-nosnippet>163</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToNone),
+<a href=#164 id=164 data-nosnippet>164</a>        export: <span class="prelude-val">None</span>,
+<a href=#165 id=165 data-nosnippet>165</a>        note: <span class="string">"D-10: a credential. Exported as the derived `mfa_enabled` \
+<a href=#166 id=166 data-nosnippet>166</a>               boolean and never as the secret itself."</span>,
+<a href=#167 id=167 data-nosnippet>167</a>    },
+<a href=#168 id=168 data-nosnippet>168</a>    UserColumn {
+<a href=#169 id=169 data-nosnippet>169</a>        name: <span class="string">"failed_login_attempts"</span>,
+<a href=#170 id=170 data-nosnippet>170</a>        erasure: <span class="prelude-val">None</span>,
+<a href=#171 id=171 data-nosnippet>171</a>        export: <span class="prelude-val">None</span>,
+<a href=#172 id=172 data-nosnippet>172</a>        note: <span class="string">"Path-specific: the tombstone zeroes it, the Art. 17 pipeline \
+<a href=#173 id=173 data-nosnippet>173</a>               does not. Operational lockout state rather than the subject's \
+<a href=#174 id=174 data-nosnippet>174</a>               data; not in the `profile` section today, which is recorded \
+<a href=#175 id=175 data-nosnippet>175</a>               here so the omission is a decision on the record rather than an \
+<a href=#176 id=176 data-nosnippet>176</a>               absence."</span>,
+<a href=#177 id=177 data-nosnippet>177</a>    },
+<a href=#178 id=178 data-nosnippet>178</a>    UserColumn {
+<a href=#179 id=179 data-nosnippet>179</a>        name: <span class="string">"last_failed_login_at"</span>,
+<a href=#180 id=180 data-nosnippet>180</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToNone),
+<a href=#181 id=181 data-nosnippet>181</a>        export: <span class="prelude-val">None</span>,
+<a href=#182 id=182 data-nosnippet>182</a>        note: <span class="string">"Erased by both paths because it is a timestamp of the \
+<a href=#183 id=183 data-nosnippet>183</a>               subject's own activity. Not in the `profile` section today — \
+<a href=#184 id=184 data-nosnippet>184</a>               the export's `sessions` section is where activity is shown, \
+<a href=#185 id=185 data-nosnippet>185</a>               and moving this one would be an Art. 15 change rather than a \
+<a href=#186 id=186 data-nosnippet>186</a>               gate."</span>,
+<a href=#187 id=187 data-nosnippet>187</a>    },
+<a href=#188 id=188 data-nosnippet>188</a>    UserColumn {
+<a href=#189 id=189 data-nosnippet>189</a>        name: <span class="string">"locked_until"</span>,
+<a href=#190 id=190 data-nosnippet>190</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToNone),
+<a href=#191 id=191 data-nosnippet>191</a>        export: <span class="prelude-val">None</span>,
+<a href=#192 id=192 data-nosnippet>192</a>        note: <span class="string">"Erased by both paths. Operational lockout state; see \
+<a href=#193 id=193 data-nosnippet>193</a>               `last_failed_login_at` for why it is not in `profile` today."</span>,
+<a href=#194 id=194 data-nosnippet>194</a>    },
+<a href=#195 id=195 data-nosnippet>195</a>    UserColumn {
+<a href=#196 id=196 data-nosnippet>196</a>        name: <span class="string">"metadata"</span>,
+<a href=#197 id=197 data-nosnippet>197</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToLiteral(<span class="string">"{}"</span>)),
+<a href=#198 id=198 data-nosnippet>198</a>        export: <span class="prelude-val">Some</span>(<span class="string">"metadata"</span>),
+<a href=#199 id=199 data-nosnippet>199</a>        note: <span class="string">"Operator-supplied and free-form, so whatever personal data \
+<a href=#200 id=200 data-nosnippet>200</a>               somebody put in it goes with the rest."</span>,
+<a href=#201 id=201 data-nosnippet>201</a>    },
+<a href=#202 id=202 data-nosnippet>202</a>    UserColumn {
+<a href=#203 id=203 data-nosnippet>203</a>        name: <span class="string">"created_at"</span>,
+<a href=#204 id=204 data-nosnippet>204</a>        erasure: <span class="prelude-val">None</span>,
+<a href=#205 id=205 data-nosnippet>205</a>        export: <span class="prelude-val">Some</span>(<span class="string">"created_at"</span>),
+<a href=#206 id=206 data-nosnippet>206</a>        note: <span class="string">"Kept through erasure deliberately: the row survives to preserve \
+<a href=#207 id=207 data-nosnippet>207</a>               referential integrity for audit references, and an erased row \
+<a href=#208 id=208 data-nosnippet>208</a>               with no age cannot be reasoned about by retention. Not \
+<a href=#209 id=209 data-nosnippet>209</a>               personal data on its own."</span>,
+<a href=#210 id=210 data-nosnippet>210</a>    },
+<a href=#211 id=211 data-nosnippet>211</a>    UserColumn {
+<a href=#212 id=212 data-nosnippet>212</a>        name: <span class="string">"updated_at"</span>,
+<a href=#213 id=213 data-nosnippet>213</a>        erasure: <span class="prelude-val">None</span>,
+<a href=#214 id=214 data-nosnippet>214</a>        export: <span class="prelude-val">Some</span>(<span class="string">"updated_at"</span>),
+<a href=#215 id=215 data-nosnippet>215</a>        note: <span class="string">"Both erasure paths set it to `time::now()`, which is the \
+<a href=#216 id=216 data-nosnippet>216</a>               write's own timestamp and not an erasure of anything."</span>,
+<a href=#217 id=217 data-nosnippet>217</a>    },
+<a href=#218 id=218 data-nosnippet>218</a>    UserColumn {
+<a href=#219 id=219 data-nosnippet>219</a>        name: <span class="string">"email_verified_at"</span>,
+<a href=#220 id=220 data-nosnippet>220</a>        erasure: <span class="prelude-val">None</span>,
+<a href=#221 id=221 data-nosnippet>221</a>        export: <span class="prelude-val">None</span>,
+<a href=#222 id=222 data-nosnippet>222</a>        note: <span class="string">"Path-specific: the tombstone clears it, the Art. 17 pipeline \
+<a href=#223 id=223 data-nosnippet>223</a>               leaves it, because by then the address itself has been replaced \
+<a href=#224 id=224 data-nosnippet>224</a>               by its hash and the timestamp describes an address that no \
+<a href=#225 id=225 data-nosnippet>225</a>               longer exists on the row. Asymmetry recorded rather than \
+<a href=#226 id=226 data-nosnippet>226</a>               harmonised — harmonising it is a behaviour change."</span>,
+<a href=#227 id=227 data-nosnippet>227</a>    },
+<a href=#228 id=228 data-nosnippet>228</a>    UserColumn {
+<a href=#229 id=229 data-nosnippet>229</a>        name: <span class="string">"deletion_pending"</span>,
+<a href=#230 id=230 data-nosnippet>230</a>        erasure: <span class="prelude-val">None</span>,
+<a href=#231 id=231 data-nosnippet>231</a>        export: <span class="prelude-val">None</span>,
+<a href=#232 id=232 data-nosnippet>232</a>        note: <span class="string">"Path-specific: the Art. 17 pipeline clears it, and clearing it \
+<a href=#233 id=233 data-nosnippet>233</a>               is what marks the erasure as done — it is the only step that \
+<a href=#234 id=234 data-nosnippet>234</a>               does. The tombstone never sets it. Workflow state, not the \
+<a href=#235 id=235 data-nosnippet>235</a>               subject's data."</span>,
+<a href=#236 id=236 data-nosnippet>236</a>    },
+<a href=#237 id=237 data-nosnippet>237</a>    UserColumn {
+<a href=#238 id=238 data-nosnippet>238</a>        name: <span class="string">"scheduled_purge_at"</span>,
+<a href=#239 id=239 data-nosnippet>239</a>        erasure: <span class="prelude-val">None</span>,
+<a href=#240 id=240 data-nosnippet>240</a>        export: <span class="prelude-val">None</span>,
+<a href=#241 id=241 data-nosnippet>241</a>        note: <span class="string">"Path-specific: cleared by the Art. 17 pipeline alongside \
+<a href=#242 id=242 data-nosnippet>242</a>               `deletion_pending`. Workflow state."</span>,
+<a href=#243 id=243 data-nosnippet>243</a>    },
+<a href=#244 id=244 data-nosnippet>244</a>    UserColumn {
+<a href=#245 id=245 data-nosnippet>245</a>        name: <span class="string">"totp_last_used_step"</span>,
+<a href=#246 id=246 data-nosnippet>246</a>        erasure: <span class="prelude-val">None</span>,
+<a href=#247 id=247 data-nosnippet>247</a>        export: <span class="prelude-val">None</span>,
+<a href=#248 id=248 data-nosnippet>248</a>        note: <span class="string">"Path-specific: cleared by the tombstone. A TOTP replay counter, \
+<a href=#249 id=249 data-nosnippet>249</a>               meaningless once `mfa_secret` is gone — which both paths do \
+<a href=#250 id=250 data-nosnippet>250</a>               clear."</span>,
+<a href=#251 id=251 data-nosnippet>251</a>    },
+<a href=#252 id=252 data-nosnippet>252</a>    UserColumn {
+<a href=#253 id=253 data-nosnippet>253</a>        name: <span class="string">"phone_number"</span>,
+<a href=#254 id=254 data-nosnippet>254</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToNone),
+<a href=#255 id=255 data-nosnippet>255</a>        export: <span class="prelude-val">Some</span>(<span class="string">"phone_number"</span>),
+<a href=#256 id=256 data-nosnippet>256</a>        note: <span class="string">""</span>,
+<a href=#257 id=257 data-nosnippet>257</a>    },
+<a href=#258 id=258 data-nosnippet>258</a>    UserColumn {
+<a href=#259 id=259 data-nosnippet>259</a>        name: <span class="string">"phone_number_verified_at"</span>,
+<a href=#260 id=260 data-nosnippet>260</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToNone),
+<a href=#261 id=261 data-nosnippet>261</a>        export: <span class="prelude-val">Some</span>(<span class="string">"phone_number_verified"</span>),
+<a href=#262 id=262 data-nosnippet>262</a>        note: <span class="string">"Exported as the derived boolean rather than the timestamp: that \
+<a href=#263 id=263 data-nosnippet>263</a>               is the claim the subject would have seen released, and \
+<a href=#264 id=264 data-nosnippet>264</a>               exporting the column name would describe AXIAM's storage."</span>,
+<a href=#265 id=265 data-nosnippet>265</a>    },
+<a href=#266 id=266 data-nosnippet>266</a>    UserColumn {
+<a href=#267 id=267 data-nosnippet>267</a>        name: <span class="string">"address"</span>,
+<a href=#268 id=268 data-nosnippet>268</a>        erasure: <span class="prelude-val">Some</span>(Erasure::ToNone),
+<a href=#269 id=269 data-nosnippet>269</a>        export: <span class="prelude-val">Some</span>(<span class="string">"address"</span>),
+<a href=#270 id=270 data-nosnippet>270</a>        note: <span class="string">"An object with its own `DEFINE FIELD` members. The schema gate \
+<a href=#271 id=271 data-nosnippet>271</a>               folds `address.*` into this row rather than requiring a row per \
+<a href=#272 id=272 data-nosnippet>272</a>               member — the members are erased and exported with the object \
+<a href=#273 id=273 data-nosnippet>273</a>               they belong to, and cannot be reached without it."</span>,
+<a href=#274 id=274 data-nosnippet>274</a>    },
+<a href=#275 id=275 data-nosnippet>275</a>];
+<a href=#276 id=276 data-nosnippet>276</a>
+<a href=#277 id=277 data-nosnippet>277</a><span class="doccomment">/// The `SET` clause fragment both erasure statements share, derived from
+<a href=#278 id=278 data-nosnippet>278</a>/// [`USER_COLUMNS`].
+<a href=#279 id=279 data-nosnippet>279</a>///
+<a href=#280 id=280 data-nosnippet>280</a>/// Rendered without a trailing comma and without surrounding whitespace, so a
+<a href=#281 id=281 data-nosnippet>281</a>/// caller composes it with its own path-specific clauses. The clause **set** is
+<a href=#282 id=282 data-nosnippet>282</a>/// what this guarantees; clause order is the inventory's order, which neither
+<a href=#283 id=283 data-nosnippet>283</a>/// erasure statement depended on (the two already disagreed about it) and
+<a href=#284 id=284 data-nosnippet>284</a>/// SurrealDB does not observe.
+<a href=#285 id=285 data-nosnippet>285</a></span><span class="attr">#[must_use]
+<a href=#286 id=286 data-nosnippet>286</a></span><span class="kw">pub fn </span>shared_erasure_fragment() -&gt; String {
+<a href=#287 id=287 data-nosnippet>287</a>    USER_COLUMNS
+<a href=#288 id=288 data-nosnippet>288</a>        .iter()
+<a href=#289 id=289 data-nosnippet>289</a>        .filter_map(|column| {
+<a href=#290 id=290 data-nosnippet>290</a>            column
+<a href=#291 id=291 data-nosnippet>291</a>                .erasure
+<a href=#292 id=292 data-nosnippet>292</a>                .map(|erasure| <span class="macro">format!</span>(<span class="string">"{} = {}"</span>, column.name, erasure.render()))
+<a href=#293 id=293 data-nosnippet>293</a>        })
+<a href=#294 id=294 data-nosnippet>294</a>        .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
+<a href=#295 id=295 data-nosnippet>295</a>        .join(<span class="string">", "</span>)
+<a href=#296 id=296 data-nosnippet>296</a>}
+<a href=#297 id=297 data-nosnippet>297</a>
+<a href=#298 id=298 data-nosnippet>298</a><span class="doccomment">/// Every parameter name [`shared_erasure_fragment`] expects a caller to bind.
+<a href=#299 id=299 data-nosnippet>299</a>///
+<a href=#300 id=300 data-nosnippet>300</a>/// A path that renders the fragment and forgets one of these produces a query
+<a href=#301 id=301 data-nosnippet>301</a>/// SurrealDB refuses at parse time rather than one that silently writes
+<a href=#302 id=302 data-nosnippet>302</a>/// nothing, but the list is here so a caller can be checked against it in a
+<a href=#303 id=303 data-nosnippet>303</a>/// test rather than at runtime.
+<a href=#304 id=304 data-nosnippet>304</a></span><span class="attr">#[must_use]
+<a href=#305 id=305 data-nosnippet>305</a></span><span class="kw">pub fn </span>shared_erasure_params() -&gt; Vec&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt; {
+<a href=#306 id=306 data-nosnippet>306</a>    USER_COLUMNS
+<a href=#307 id=307 data-nosnippet>307</a>        .iter()
+<a href=#308 id=308 data-nosnippet>308</a>        .filter_map(|column| <span class="kw">match </span>column.erasure {
+<a href=#309 id=309 data-nosnippet>309</a>            <span class="prelude-val">Some</span>(Erasure::ToParam(param)) =&gt; <span class="prelude-val">Some</span>(param),
+<a href=#310 id=310 data-nosnippet>310</a>            <span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#311 id=311 data-nosnippet>311</a>        })
+<a href=#312 id=312 data-nosnippet>312</a>        .collect()
+<a href=#313 id=313 data-nosnippet>313</a>}
+<a href=#314 id=314 data-nosnippet>314</a>
+<a href=#315 id=315 data-nosnippet>315</a><span class="doccomment">/// Every export key the `profile` section must carry: the columns' keys plus
+<a href=#316 id=316 data-nosnippet>316</a>/// [`EXPORT_KEYS_NOT_FROM_COLUMNS`].
+<a href=#317 id=317 data-nosnippet>317</a></span><span class="attr">#[must_use]
+<a href=#318 id=318 data-nosnippet>318</a></span><span class="kw">pub fn </span>export_keys() -&gt; Vec&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt; {
+<a href=#319 id=319 data-nosnippet>319</a>    EXPORT_KEYS_NOT_FROM_COLUMNS
+<a href=#320 id=320 data-nosnippet>320</a>        .iter()
+<a href=#321 id=321 data-nosnippet>321</a>        .copied()
+<a href=#322 id=322 data-nosnippet>322</a>        .chain(USER_COLUMNS.iter().filter_map(|column| column.export))
+<a href=#323 id=323 data-nosnippet>323</a>        .collect()
+<a href=#324 id=324 data-nosnippet>324</a>}
+<a href=#325 id=325 data-nosnippet>325</a>
+<a href=#326 id=326 data-nosnippet>326</a><span class="doccomment">/// The declaration gate: every column classified as neither erased nor
+<a href=#327 id=327 data-nosnippet>327</a>/// exported must say why, and no column may be declared twice.
+<a href=#328 id=328 data-nosnippet>328</a>///
+<a href=#329 id=329 data-nosnippet>329</a>/// Returns the offending column names rather than panicking, so the test that
+<a href=#330 id=330 data-nosnippet>330</a>/// calls it can report all of them at once.
+<a href=#331 id=331 data-nosnippet>331</a></span><span class="attr">#[must_use]
+<a href=#332 id=332 data-nosnippet>332</a></span><span class="kw">pub fn </span>audit_declarations() -&gt; Vec&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt; {
+<a href=#333 id=333 data-nosnippet>333</a>    <span class="kw">let </span><span class="kw-2">mut </span>problems = Vec::new();
+<a href=#334 id=334 data-nosnippet>334</a>    <span class="kw">for </span>(index, column) <span class="kw">in </span>USER_COLUMNS.iter().enumerate() {
+<a href=#335 id=335 data-nosnippet>335</a>        <span class="kw">if </span>(column.erasure.is_none() || column.export.is_none()) &amp;&amp; column.note.is_empty() {
+<a href=#336 id=336 data-nosnippet>336</a>            problems.push(column.name);
+<a href=#337 id=337 data-nosnippet>337</a>        }
+<a href=#338 id=338 data-nosnippet>338</a>        <span class="kw">if </span>USER_COLUMNS[..index].iter().any(|c| c.name == column.name) {
+<a href=#339 id=339 data-nosnippet>339</a>            problems.push(column.name);
+<a href=#340 id=340 data-nosnippet>340</a>        }
+<a href=#341 id=341 data-nosnippet>341</a>    }
+<a href=#342 id=342 data-nosnippet>342</a>    problems
+<a href=#343 id=343 data-nosnippet>343</a>}
+<a href=#344 id=344 data-nosnippet>344</a>
+<a href=#345 id=345 data-nosnippet>345</a><span class="attr">#[cfg(test)]
+<a href=#346 id=346 data-nosnippet>346</a></span><span class="kw">mod </span>tests {
+<a href=#347 id=347 data-nosnippet>347</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#348 id=348 data-nosnippet>348</a>
+<a href=#349 id=349 data-nosnippet>349</a>    <span class="doccomment">/// Gate 2. A column classified as neither erased nor exported is a
+<a href=#350 id=350 data-nosnippet>350</a>    /// decision, and a decision with no reason recorded is how the next author
+<a href=#351 id=351 data-nosnippet>351</a>    /// concludes it was an oversight and "fixes" it.
+<a href=#352 id=352 data-nosnippet>352</a>    </span><span class="attr">#[test]
+<a href=#353 id=353 data-nosnippet>353</a>    </span><span class="kw">fn </span>every_unerased_or_unexported_column_says_why() {
+<a href=#354 id=354 data-nosnippet>354</a>        <span class="macro">assert!</span>(
+<a href=#355 id=355 data-nosnippet>355</a>            audit_declarations().is_empty(),
+<a href=#356 id=356 data-nosnippet>356</a>            <span class="string">"these columns are not erased and/or not exported and carry no \
+<a href=#357 id=357 data-nosnippet>357</a>             `note` saying why: {:?}"</span>,
+<a href=#358 id=358 data-nosnippet>358</a>            audit_declarations()
+<a href=#359 id=359 data-nosnippet>359</a>        );
+<a href=#360 id=360 data-nosnippet>360</a>    }
+<a href=#361 id=361 data-nosnippet>361</a>
+<a href=#362 id=362 data-nosnippet>362</a>    <span class="attr">#[test]
+<a href=#363 id=363 data-nosnippet>363</a>    </span><span class="kw">fn </span>the_shared_fragment_names_every_column_that_declares_an_erasure() {
+<a href=#364 id=364 data-nosnippet>364</a>        <span class="kw">let </span>fragment = shared_erasure_fragment();
+<a href=#365 id=365 data-nosnippet>365</a>        <span class="kw">for </span>column <span class="kw">in </span>USER_COLUMNS.iter().filter(|c| c.erasure.is_some()) {
+<a href=#366 id=366 data-nosnippet>366</a>            <span class="macro">assert!</span>(
+<a href=#367 id=367 data-nosnippet>367</a>                fragment.contains(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{} = "</span>, column.name)),
+<a href=#368 id=368 data-nosnippet>368</a>                <span class="string">"`{}` declares an erasure but is missing from the fragment"</span>,
+<a href=#369 id=369 data-nosnippet>369</a>                column.name
+<a href=#370 id=370 data-nosnippet>370</a>            );
+<a href=#371 id=371 data-nosnippet>371</a>        }
+<a href=#372 id=372 data-nosnippet>372</a>        <span class="comment">// And nothing else: a column with `erasure: None` in the fragment
+<a href=#373 id=373 data-nosnippet>373</a>        // would be an erasure nobody declared.
+<a href=#374 id=374 data-nosnippet>374</a>        </span><span class="kw">let </span>clauses = fragment.split(<span class="string">", "</span>).count();
+<a href=#375 id=375 data-nosnippet>375</a>        <span class="kw">let </span>declared = USER_COLUMNS.iter().filter(|c| c.erasure.is_some()).count();
+<a href=#376 id=376 data-nosnippet>376</a>        <span class="macro">assert_eq!</span>(clauses, declared);
+<a href=#377 id=377 data-nosnippet>377</a>    }
+<a href=#378 id=378 data-nosnippet>378</a>
+<a href=#379 id=379 data-nosnippet>379</a>    <span class="doccomment">/// The fragment is pinned verbatim. Not because the text matters to
+<a href=#380 id=380 data-nosnippet>380</a>    /// SurrealDB — it does not — but because this is the one place a change to
+<a href=#381 id=381 data-nosnippet>381</a>    /// what erasure writes becomes visible in a diff, and a derived statement
+<a href=#382 id=382 data-nosnippet>382</a>    /// that nobody can see is worse than the hand-written one it replaced.
+<a href=#383 id=383 data-nosnippet>383</a>    </span><span class="attr">#[test]
+<a href=#384 id=384 data-nosnippet>384</a>    </span><span class="kw">fn </span>the_shared_fragment_is_exactly_this() {
+<a href=#385 id=385 data-nosnippet>385</a>        <span class="macro">assert_eq!</span>(
+<a href=#386 id=386 data-nosnippet>386</a>            shared_erasure_fragment(),
+<a href=#387 id=387 data-nosnippet>387</a>            <span class="string">"username = $pseudonym, \
+<a href=#388 id=388 data-nosnippet>388</a>             email = $email_replacement, \
+<a href=#389 id=389 data-nosnippet>389</a>             password_hash = '', \
+<a href=#390 id=390 data-nosnippet>390</a>             mfa_enabled = false, \
+<a href=#391 id=391 data-nosnippet>391</a>             mfa_secret = NONE, \
+<a href=#392 id=392 data-nosnippet>392</a>             last_failed_login_at = NONE, \
+<a href=#393 id=393 data-nosnippet>393</a>             locked_until = NONE, \
+<a href=#394 id=394 data-nosnippet>394</a>             metadata = {}, \
+<a href=#395 id=395 data-nosnippet>395</a>             phone_number = NONE, \
+<a href=#396 id=396 data-nosnippet>396</a>             phone_number_verified_at = NONE, \
+<a href=#397 id=397 data-nosnippet>397</a>             address = NONE"
+<a href=#398 id=398 data-nosnippet>398</a>        </span>);
+<a href=#399 id=399 data-nosnippet>399</a>    }
+<a href=#400 id=400 data-nosnippet>400</a>
+<a href=#401 id=401 data-nosnippet>401</a>    <span class="attr">#[test]
+<a href=#402 id=402 data-nosnippet>402</a>    </span><span class="kw">fn </span>the_fragment_expects_exactly_two_bound_parameters() {
+<a href=#403 id=403 data-nosnippet>403</a>        <span class="macro">assert_eq!</span>(
+<a href=#404 id=404 data-nosnippet>404</a>            shared_erasure_params(),
+<a href=#405 id=405 data-nosnippet>405</a>            <span class="macro">vec!</span>[<span class="string">"pseudonym"</span>, <span class="string">"email_replacement"</span>]
+<a href=#406 id=406 data-nosnippet>406</a>        );
+<a href=#407 id=407 data-nosnippet>407</a>    }
+<a href=#408 id=408 data-nosnippet>408</a>
+<a href=#409 id=409 data-nosnippet>409</a>    <span class="attr">#[test]
+<a href=#410 id=410 data-nosnippet>410</a>    </span><span class="kw">fn </span>export_keys_are_unique_and_include_the_record_id() {
+<a href=#411 id=411 data-nosnippet>411</a>        <span class="kw">let </span>keys = export_keys();
+<a href=#412 id=412 data-nosnippet>412</a>        <span class="kw">let </span><span class="kw-2">mut </span>sorted = keys.clone();
+<a href=#413 id=413 data-nosnippet>413</a>        sorted.sort_unstable();
+<a href=#414 id=414 data-nosnippet>414</a>        sorted.dedup();
+<a href=#415 id=415 data-nosnippet>415</a>        <span class="macro">assert_eq!</span>(sorted.len(), keys.len(), <span class="string">"duplicate export key"</span>);
+<a href=#416 id=416 data-nosnippet>416</a>        <span class="macro">assert!</span>(keys.contains(<span class="kw-2">&amp;</span><span class="string">"id"</span>));
+<a href=#417 id=417 data-nosnippet>417</a>    }
+<a href=#418 id=418 data-nosnippet>418</a>
+<a href=#419 id=419 data-nosnippet>419</a>    <span class="doccomment">/// I4 twin for the gate above: an inventory that *does* carry the defect
+<a href=#420 id=420 data-nosnippet>420</a>    /// is reported, so a green `audit_declarations` means the check runs rather
+<a href=#421 id=421 data-nosnippet>421</a>    /// than that it cannot fail.
+<a href=#422 id=422 data-nosnippet>422</a>    </span><span class="attr">#[test]
+<a href=#423 id=423 data-nosnippet>423</a>    </span><span class="kw">fn </span>a_column_with_no_note_and_no_classification_would_be_reported() {
+<a href=#424 id=424 data-nosnippet>424</a>        <span class="kw">let </span>offender = UserColumn {
+<a href=#425 id=425 data-nosnippet>425</a>            name: <span class="string">"a_column_somebody_added"</span>,
+<a href=#426 id=426 data-nosnippet>426</a>            erasure: <span class="prelude-val">None</span>,
+<a href=#427 id=427 data-nosnippet>427</a>            export: <span class="prelude-val">None</span>,
+<a href=#428 id=428 data-nosnippet>428</a>            note: <span class="string">""</span>,
+<a href=#429 id=429 data-nosnippet>429</a>        };
+<a href=#430 id=430 data-nosnippet>430</a>        <span class="macro">assert!</span>(
+<a href=#431 id=431 data-nosnippet>431</a>            (offender.erasure.is_none() || offender.export.is_none()) &amp;&amp; offender.note.is_empty(),
+<a href=#432 id=432 data-nosnippet>432</a>            <span class="string">"the condition `audit_declarations` applies must hold for this shape"
+<a href=#433 id=433 data-nosnippet>433</a>        </span>);
+<a href=#434 id=434 data-nosnippet>434</a>    }
+<a href=#435 id=435 data-nosnippet>435</a>}
+</code></pre></div></section></main></body></html>

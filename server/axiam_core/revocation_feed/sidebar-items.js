@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REVOCATION_HASH_ALG"],"fn":["revocation_hash","revocation_hash_of"]};

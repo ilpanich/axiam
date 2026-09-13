@@ -57,28 +57,29 @@
 <a href=#57 id=57 data-nosnippet>57</a>    SurrealPasswordResetTokenRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
 <a href=#58 id=58 data-nosnippet>58</a>    SurrealProofReplayRepository, SurrealPushedAuthRequestRepository,
 <a href=#59 id=59 data-nosnippet>59</a>    SurrealRateLimitBucketRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
-<a href=#60 id=60 data-nosnippet>60</a>    SurrealResourceRepository, SurrealRoleRepository, SurrealScimTokenRepository,
-<a href=#61 id=61 data-nosnippet>61</a>    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
-<a href=#62 id=62 data-nosnippet>62</a>    SurrealSessionRepository, SurrealSettingsRepository, SurrealSsoHandoffCodeRepository,
-<a href=#63 id=63 data-nosnippet>63</a>    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
-<a href=#64 id=64 data-nosnippet>64</a>    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
-<a href=#65 id=65 data-nosnippet>65</a>};
-<a href=#66 id=66 data-nosnippet>66</a>
-<a href=#67 id=67 data-nosnippet>67</a><span class="doccomment">/// Client-secret hashing (OBS-1). Re-exported at the `axiam_db` root because
-<a href=#68 id=68 data-nosnippet>68</a>/// every stored `client_secret_hash` in this crate is produced by it, and
-<a href=#69 id=69 data-nosnippet>69</a>/// because it replaces the former `axiam_db::hash_client_secret` free
-<a href=#70 id=70 data-nosnippet>70</a>/// function — which could hash without a key and is therefore gone.
-<a href=#71 id=71 data-nosnippet>71</a></span><span class="kw">pub use </span>axiam_auth::client_secret::{<span class="self">self</span>, ClientSecretHasher, ClientSecretVerdict};
-<a href=#72 id=72 data-nosnippet>72</a><span class="kw">pub use </span>schema::{run_migrations, schema_v1};
-<a href=#73 id=73 data-nosnippet>73</a><span class="kw">pub use </span>seeder::{
-<a href=#74 id=74 data-nosnippet>74</a>    ReconcileOutcome, SeedRolesResult, SeederStateRow, mint_bootstrap_setup_token_if_needed,
-<a href=#75 id=75 data-nosnippet>75</a>    reconcile_default_role_grants, seed_default_roles, seed_permissions,
-<a href=#76 id=76 data-nosnippet>76</a>};
-<a href=#77 id=77 data-nosnippet>77</a><span class="kw">pub use </span>session_validation_cache::SessionValidationCache;
-<a href=#78 id=78 data-nosnippet>78</a><span class="doccomment">/// Re-export SurrealDB connection types for use in repository type aliases.
-<a href=#79 id=79 data-nosnippet>79</a></span><span class="kw">pub use </span>surrealdb::Connection;
-<a href=#80 id=80 data-nosnippet>80</a><span class="doccomment">/// Production SurrealDB client type — the stateless HTTP engine (see `connection.rs`
-<a href=#81 id=81 data-nosnippet>81</a>/// for why HTTP over WebSocket). Named `DbClient` (engine-neutral) since it is no
-<a href=#82 id=82 data-nosnippet>82</a>/// longer the WebSocket client.
-<a href=#83 id=83 data-nosnippet>83</a></span><span class="kw">pub use </span>surrealdb::engine::remote::http::Client <span class="kw">as </span>DbClient;
+<a href=#60 id=60 data-nosnippet>60</a>    SurrealResourceRepository, SurrealRevokedSessionRepository, SurrealRoleRepository,
+<a href=#61 id=61 data-nosnippet>61</a>    SurrealScimTokenRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+<a href=#62 id=62 data-nosnippet>62</a>    SurrealSessionClientRepository, SurrealSessionRepository, SurrealSettingsRepository,
+<a href=#63 id=63 data-nosnippet>63</a>    SurrealSsoHandoffCodeRepository, SurrealTenantRepository, SurrealUserRepository,
+<a href=#64 id=64 data-nosnippet>64</a>    SurrealWebauthnAttestationPolicyRepository, SurrealWebauthnCredentialRepository,
+<a href=#65 id=65 data-nosnippet>65</a>    SurrealWebhookRepository,
+<a href=#66 id=66 data-nosnippet>66</a>};
+<a href=#67 id=67 data-nosnippet>67</a>
+<a href=#68 id=68 data-nosnippet>68</a><span class="doccomment">/// Client-secret hashing (OBS-1). Re-exported at the `axiam_db` root because
+<a href=#69 id=69 data-nosnippet>69</a>/// every stored `client_secret_hash` in this crate is produced by it, and
+<a href=#70 id=70 data-nosnippet>70</a>/// because it replaces the former `axiam_db::hash_client_secret` free
+<a href=#71 id=71 data-nosnippet>71</a>/// function — which could hash without a key and is therefore gone.
+<a href=#72 id=72 data-nosnippet>72</a></span><span class="kw">pub use </span>axiam_auth::client_secret::{<span class="self">self</span>, ClientSecretHasher, ClientSecretVerdict};
+<a href=#73 id=73 data-nosnippet>73</a><span class="kw">pub use </span>schema::{run_migrations, schema_v1};
+<a href=#74 id=74 data-nosnippet>74</a><span class="kw">pub use </span>seeder::{
+<a href=#75 id=75 data-nosnippet>75</a>    ReconcileOutcome, SeedRolesResult, SeederStateRow, mint_bootstrap_setup_token_if_needed,
+<a href=#76 id=76 data-nosnippet>76</a>    reconcile_default_role_grants, seed_default_roles, seed_permissions,
+<a href=#77 id=77 data-nosnippet>77</a>};
+<a href=#78 id=78 data-nosnippet>78</a><span class="kw">pub use </span>session_validation_cache::SessionValidationCache;
+<a href=#79 id=79 data-nosnippet>79</a><span class="doccomment">/// Re-export SurrealDB connection types for use in repository type aliases.
+<a href=#80 id=80 data-nosnippet>80</a></span><span class="kw">pub use </span>surrealdb::Connection;
+<a href=#81 id=81 data-nosnippet>81</a><span class="doccomment">/// Production SurrealDB client type — the stateless HTTP engine (see `connection.rs`
+<a href=#82 id=82 data-nosnippet>82</a>/// for why HTTP over WebSocket). Named `DbClient` (engine-neutral) since it is no
+<a href=#83 id=83 data-nosnippet>83</a>/// longer the WebSocket client.
+<a href=#84 id=84 data-nosnippet>84</a></span><span class="kw">pub use </span>surrealdb::engine::remote::http::Client <span class="kw">as </span>DbClient;
 </code></pre></div></section></main></body></html>

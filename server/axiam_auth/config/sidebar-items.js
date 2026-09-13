@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["AuthConfig"]};
+window.SIDEBAR_ITEMS = {"struct":["AuthConfig","DefaultTenantProblem"]};

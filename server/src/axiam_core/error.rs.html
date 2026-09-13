@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-core/src/error.rs`."><title>error.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_core/</div>error.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-2"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Error types for the AXIAM system.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-core/src/error.rs`."><title>error.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_core/</div>error.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Error types for the AXIAM system.
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>thiserror::Error;
 <a href=#4 id=4 data-nosnippet>4</a>
@@ -84,12 +84,35 @@
 <a href=#84 id=84 data-nosnippet>84</a>    </span><span class="attr">#[error(<span class="string">"this tenant requires OPAQUE authentication"</span>)]
 <a href=#85 id=85 data-nosnippet>85</a>    </span>OpaqueRequired,
 <a href=#86 id=86 data-nosnippet>86</a>
-<a href=#87 id=87 data-nosnippet>87</a>    <span class="attr">#[error(<span class="string">"SAML assertion replay detected"</span>)]
-<a href=#88 id=88 data-nosnippet>88</a>    </span>ReplayDetected,
-<a href=#89 id=89 data-nosnippet>89</a>
-<a href=#90 id=90 data-nosnippet>90</a>    <span class="attr">#[error(<span class="string">"Internal error: {0}"</span>)]
-<a href=#91 id=91 data-nosnippet>91</a>    </span>Internal(String),
-<a href=#92 id=92 data-nosnippet>92</a>}
-<a href=#93 id=93 data-nosnippet>93</a>
-<a href=#94 id=94 data-nosnippet>94</a><span class="kw">pub type </span>AxiamResult&lt;T&gt; = <span class="prelude-ty">Result</span>&lt;T, AxiamError&gt;;
+<a href=#87 id=87 data-nosnippet>87</a>    <span class="doccomment">/// A write that lost an optimistic-concurrency race in the datastore and
+<a href=#88 id=88 data-nosnippet>88</a>    /// stayed lost after every retry `retry_on_write_conflict` was willing to
+<a href=#89 id=89 data-nosnippet>89</a>    /// spend on it (T-262).
+<a href=#90 id=90 data-nosnippet>90</a>    ///
+<a href=#91 id=91 data-nosnippet>91</a>    /// Maps to `503 Service Unavailable` with `Retry-After: 1`, and to gRPC
+<a href=#92 id=92 data-nosnippet>92</a>    /// `UNAVAILABLE`. It is a statement about the **server** — come back in a
+<a href=#93 id=93 data-nosnippet>93</a>    /// moment — which is what makes `503` right and the two nearby answers
+<a href=#94 id=94 data-nosnippet>94</a>    /// wrong:
+<a href=#95 id=95 data-nosnippet>95</a>    ///
+<a href=#96 id=96 data-nosnippet>96</a>    /// - `500`, which is what this was, tells a client to stop when the
+<a href=#97 id=97 data-nosnippet>97</a>    ///   correct advice is to retry. An IdP driving SCIM provisioning (Okta,
+<a href=#98 id=98 data-nosnippet>98</a>    ///   Entra) reads it as a failed sync and re-sends the whole record.
+<a href=#99 id=99 data-nosnippet>99</a>    /// - `409`, which [`Self::Conflict`] and [`Self::AlreadyExists`] keep,
+<a href=#100 id=100 data-nosnippet>100</a>    ///   means "your request conflicts with the resource's state" — SCIM
+<a href=#101 id=101 data-nosnippet>101</a>    ///   RFC 7644 §3.12 — and a caller who believes that will change the
+<a href=#102 id=102 data-nosnippet>102</a>    ///   request rather than resend it, which cannot help here.
+<a href=#103 id=103 data-nosnippet>103</a>    ///
+<a href=#104 id=104 data-nosnippet>104</a>    /// **It carries no payload.** The engine's own words ("Transaction write
+<a href=#105 id=105 data-nosnippet>105</a>    /// conflict…") belong in the log, where `DbError::Conflict` keeps them,
+<a href=#106 id=106 data-nosnippet>106</a>    /// and nowhere near a response body.
+<a href=#107 id=107 data-nosnippet>107</a>    </span><span class="attr">#[error(<span class="string">"the datastore is busy; retry this request"</span>)]
+<a href=#108 id=108 data-nosnippet>108</a>    </span>WriteContention,
+<a href=#109 id=109 data-nosnippet>109</a>
+<a href=#110 id=110 data-nosnippet>110</a>    <span class="attr">#[error(<span class="string">"SAML assertion replay detected"</span>)]
+<a href=#111 id=111 data-nosnippet>111</a>    </span>ReplayDetected,
+<a href=#112 id=112 data-nosnippet>112</a>
+<a href=#113 id=113 data-nosnippet>113</a>    <span class="attr">#[error(<span class="string">"Internal error: {0}"</span>)]
+<a href=#114 id=114 data-nosnippet>114</a>    </span>Internal(String),
+<a href=#115 id=115 data-nosnippet>115</a>}
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a><span class="kw">pub type </span>AxiamResult&lt;T&gt; = <span class="prelude-ty">Result</span>&lt;T, AxiamError&gt;;
 </code></pre></div></section></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["EXPORT_KEYS_NOT_FROM_COLUMNS","USER_COLUMNS"],"enum":["Erasure"],"fn":["audit_declarations","export_keys","shared_erasure_fragment","shared_erasure_params"],"struct":["UserColumn"]};

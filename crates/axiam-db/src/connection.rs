@@ -1012,15 +1012,24 @@ mod db_config_redaction_tests {
     /// T-132's follow-up: read-write access to every tenant's data must not
     /// appear in a log line, a panic message or an error chain that renders a
     /// configuration.
+    ///
+    /// The value comes from `axiam_test_support::test_password` rather than a
+    /// literal: a literal datastore password here is indistinguishable, to a
+    /// secret scanner, from a real one, and the only honest ways out are a
+    /// scanner exemption — `.gitguardian.yaml` is for published RFC test
+    /// vectors and nothing else — or not writing one. This is not writing one,
+    /// and the assertion is stronger for it, since it holds for whatever value
+    /// the helper produces rather than for one string.
     #[test]
     fn the_debug_never_renders_the_datastore_password() {
+        let password = axiam_test_support::test_password();
         let config = DbConfig {
             username: "root".into(),
-            password: "s3cr3t-datastore-pw".into(),
+            password: password.clone(),
             ..DbConfig::default()
         };
         let rendered = format!("{config:?}");
-        assert!(!rendered.contains("s3cr3t-datastore-pw"));
+        assert!(!rendered.contains(&password));
         assert!(rendered.contains("<redacted>"));
         // The username stays: a connection failure asks "as whom", and that is
         // the field that answers it.

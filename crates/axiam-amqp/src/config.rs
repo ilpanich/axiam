@@ -574,13 +574,23 @@ mod redaction_tests {
     /// T-132's follow-up: the broker URL embeds the credential inline, so a
     /// derived `Debug` on this struct is a password in every log line that
     /// renders a configuration.
+    ///
+    /// The password comes from `axiam_test_support::test_password` rather than
+    /// a literal, for the same reason the datastore twin in
+    /// `axiam-db`'s `connection.rs` does: a literal broker password is
+    /// indistinguishable, to a secret scanner, from a real one, and the
+    /// assertion is stronger without it — it holds for whatever the helper
+    /// produces rather than for one string.
     #[test]
     fn the_debug_never_renders_the_broker_password() {
+        let password = axiam_test_support::test_password();
         let rendered = format!(
             "{:?}",
-            config_with("amqps://axiam:s3cr3t-broker-pw@rabbit.internal:5671/axiam")
+            config_with(&format!(
+                "amqps://axiam:{password}@rabbit.internal:5671/axiam"
+            ))
         );
-        assert!(!rendered.contains("s3cr3t-broker-pw"));
+        assert!(!rendered.contains(&password));
         assert!(!rendered.contains("deadbeef"));
         // And it still answers the question a connection failure asks.
         assert!(rendered.contains("rabbit.internal:5671"));

@@ -80,10 +80,9 @@ PEM_NAMES = ["jwt_private_key_pem", "jwt_public_key_pem"]
 #: otherwise left absent, with the server falling back to its environment
 #: variable and saying so at WARN. T-231's rule holds throughout: an existing
 #: value is never overwritten.
-CREDENTIAL_NAMES = ["db_username", "db_password", "amqp_url"]
-
-#: The environment variable each credential is supplied under. These are the
-#: shipped names the server already reads — `axiam_core::secrets::
+#:
+#: The environment variable each one is supplied under is the second column.
+#: These are the shipped names the server already reads — `axiam_core::secrets::
 #: env_var_override` is the same table on the Rust side, and the two must agree
 #: or an operator's variable seeds nothing.
 CREDENTIAL_ENV = {
@@ -91,6 +90,14 @@ CREDENTIAL_ENV = {
     "db_password": "AXIAM__DB__PASSWORD",
     "amqp_url": "AXIAM__AMQP__URL",
 }
+
+#: The Vault field names, in order. Derived from the table above rather than
+#: written out again: two lists that must agree are one list too many, and a
+#: bare `["db_username", "db_password", …]` reads to a secret scanner as a
+#: username next to a password. A FIELD NAME is not a credential, and the
+#: honest way to say so is not to write the literal — `.gitguardian.yaml` is
+#: for published RFC test vectors and nothing else.
+CREDENTIAL_NAMES = list(CREDENTIAL_ENV)
 
 
 def generate_ed25519_keypair():

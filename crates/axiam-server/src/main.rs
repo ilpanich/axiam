@@ -985,7 +985,11 @@ async fn main() -> std::io::Result<()> {
     let webauthn_cred_repo = SurrealWebauthnCredentialRepository::new(pool.handle_for_repo());
     let webauthn_service = WebauthnService::new(webauthn_cred_repo.clone(), config.auth.clone())
         .expect("Failed to build WebauthnService");
-    let mfa_method_service = MfaMethodService::new(user_repo.clone(), webauthn_cred_repo.clone());
+    let mfa_method_service = MfaMethodService::new(
+        user_repo.clone(),
+        webauthn_cred_repo.clone(),
+        session_repo.clone(),
+    );
 
     // X3 wave 3: attestation-policy resolution, MDS metadata, and the
     // process-wide CA-list cache the attested registration ceremony needs.

@@ -483,6 +483,7 @@ async fn certificate_endpoints_require_auth() {
 
     let endpoints = vec![
         ("POST", "/api/v1/certificates".to_string()),
+        ("POST", "/api/v1/certificates/sign-csr".to_string()),
         ("GET", "/api/v1/certificates".to_string()),
         ("GET", format!("/api/v1/certificates/{}", Uuid::new_v4())),
         (
@@ -507,4 +508,241 @@ async fn certificate_endpoints_require_auth() {
             "{method} {uri} should require auth"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `POST /api/v1/certificates/sign-csr` — a certificate for a key AXIAM never
+// sees (C-1, T-268)
+// ---------------------------------------------------------------------------
+
+/// A PEM PKCS#10 request carrying nothing but a common name.
+fn plain_csr(common_name: &str) -> String {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("key");
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, common_name);
+    params
+        .serialize_request(&key)
+        .expect("csr")
+        .pem()
+        .expect("pem")
+}
+
+#[actix_rt::test]
+async fn sign_csr_issues_a_certificate_that_carries_no_private_key() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+    let ca_id = generate_ca!(app, org_id, ca_token);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/certificates/sign-csr")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "issuer_ca_id": ca_id,
+            "csr_pem": plain_csr("byok-device-001"),
+            "cert_type": "Device",
+            "validity_days": 90
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    // Not merely null or empty: the key is **absent**, because the response
+    // type has no field for it. A `GeneratedCertificate` here would be a type
+    // with a mandatory key field that is always missing.
+    assert!(
+        body.get("private_key_pem").is_none(),
+        "the response must carry no key field at all, got: {body}"
+    );
+    assert!(
+        !serde_json::to_string(&body)
+            .unwrap()
+            .contains("PRIVATE KEY"),
+        "and no key material anywhere in it"
+    );
+    assert_eq!(body["subject"], "byok-device-001");
+    assert_eq!(body["key_algorithm"], "Ed25519");
+    assert_eq!(body["status"], "Active");
+
+    // It is an ordinary certificate afterwards: readable, and listed unbound.
+    let id = body["id"].as_str().unwrap().to_string();
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/certificates/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let fetched: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(fetched["fingerprint"], body["fingerprint"]);
+
+    let req = test::TestRequest::get()
+        .uri("/api/v1/certificates")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let listed: serde_json::Value = test::read_body_json(test::call_service(&app, req).await).await;
+    let row = listed["items"]
+        .as_array()
+        .expect("a page of items")
+        .iter()
+        .find(|c| c["id"] == body["id"])
+        .expect("the new certificate is listed");
+    assert!(
+        row["bound_to"].is_null(),
+        "a freshly signed certificate is bound to nothing"
+    );
+}
+
+#[actix_rt::test]
+async fn sign_csr_refusals_are_400s_that_say_what_is_wrong() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+    let ca_id = generate_ca!(app, org_id, ca_token);
+
+    // A CSR asking for a subjectAltName, which is refused by name rather than
+    // dropped (D-3).
+    let san_csr = {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("key");
+        let mut params =
+            rcgen::CertificateParams::new(vec!["svc.example.com".to_string()]).expect("params");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "svc.example.com");
+        params
+            .serialize_request(&key)
+            .expect("csr")
+            .pem()
+            .expect("pem")
+    };
+
+    let cases: Vec<(&str, serde_json::Value, &str)> = vec![
+        (
+            "a request that is not a CSR at all",
+            serde_json::json!({
+                "issuer_ca_id": ca_id, "csr_pem": "hello",
+                "cert_type": "Device", "validity_days": 30
+            }),
+            "certificate signing request",
+        ),
+        (
+            "a CSR asking for a subjectAltName",
+            serde_json::json!({
+                "issuer_ca_id": ca_id, "csr_pem": san_csr,
+                "cert_type": "Service", "validity_days": 30
+            }),
+            "subjectAltName",
+        ),
+        (
+            "a validity beyond the 825-day hard cap",
+            serde_json::json!({
+                "issuer_ca_id": ca_id, "csr_pem": plain_csr("too-long"),
+                "cert_type": "Device", "validity_days": 900
+            }),
+            "validity_days",
+        ),
+    ];
+
+    for (what, payload, expected) in cases {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/certificates/sign-csr")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .insert_header(("Content-Type", "application/json"))
+            .set_json(payload)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 400, "{what} must be a 400");
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(expected),
+            "{what}: the message reaches the operator who pasted the request \
+             and must name the problem — expected {expected:?}, got {message:?}"
+        );
+    }
+}
+
+#[actix_rt::test]
+async fn sign_csr_cannot_reach_another_organizations_ca() {
+    // T-98. The issuer is resolved within the caller's organization, so a CA id
+    // from elsewhere is not found rather than usable.
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/certificates/sign-csr")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "issuer_ca_id": Uuid::new_v4(),
+            "csr_pem": plain_csr("stranger"),
+            "cert_type": "Device",
+            "validity_days": 30
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// `signing-cas/sign-csr` had no HTTP-level test at all before C-1
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn signing_a_tenant_ca_csr_over_http_yields_an_intermediate_with_external_custody() {
+    // The review found `grep signing-cas crates/axiam-api-rest/tests` empty:
+    // the endpoint the leaf path is modelled on had service-level coverage and
+    // nothing at the wire. This is the twenty-line twin of the leaf test above.
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+    let ca_id = generate_ca!(app, org_id, ca_token);
+
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr"
+        ))
+        .insert_header(("Authorization", format!("Bearer {ca_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "parent_ca_id": ca_id,
+            "csr_pem": plain_csr("Offline Tenant CA"),
+            // Less than the parent's own 365: an intermediate may not outlive
+            // the CA that signs it, and the refusal quotes the real remainder.
+            "validity_days": 180
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(status, 201, "a tenant CSR is signed; got {body}");
+
+    assert_eq!(body["subject"], "Offline Tenant CA");
+    // AXIAM signed it and holds nothing: the key is wherever the CSR was made
+    // (T-194).
+    assert_eq!(body["key_custody"], "external");
+    assert!(
+        body.get("private_key_pem").is_none() || body["private_key_pem"].is_null(),
+        "there is no key to return, got: {body}"
+    );
 }

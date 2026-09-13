@@ -56,6 +56,27 @@ export interface WebauthnLoginResult {
 }
 
 /**
+ * `LoginSuccessResponse` from the server (`handlers/auth.rs`), as returned by
+ * `POST /api/v1/auth/webauthn/setup/register/finish` (M-3). Tokens themselves
+ * arrive as `Set-Cookie` headers, not in this body — the same split
+ * `authService.setupConfirmMfa` relies on for the TOTP twin, which is why the
+ * page that calls {@link registerWithSetupToken} still runs `fetchCurrentUser()`
+ * afterwards rather than reading the session out of this shape.
+ */
+export interface LoginSuccessResponse {
+  user: {
+    id: string;
+    username: string;
+    email: string;
+    tenant_id: string;
+    tenant_slug?: string;
+    org_slug?: string;
+  };
+  session_id: string;
+  expires_in: number;
+}
+
+/**
  * Which kind of authenticator the user asked for.
  *
  * A hint only — see the module docs. `platform` is a passkey built into the
@@ -192,6 +213,61 @@ export const webauthnService = {
       credential_name: name,
       response,
     });
+  },
+
+  /**
+   * Register a passkey or security key as the account's **first** MFA
+   * factor during forced first-login enrolment (M-3) — the setup-token twin
+   * of {@link register}.
+   *
+   * `register` runs against a signed-in session (`AuthenticatedUser`); this
+   * runs against a `setup_token` instead, exactly as `authService.setupEnrollMfa`
+   * / `setupConfirmMfa` carry one through the TOTP branch of the same flow —
+   * a caller mid-forced-enrolment has no session to present. Everything else
+   * about the ceremony — the challenge, `residentKey`, `userVerification`,
+   * the attestation policy — is unchanged: the server reads the same tenant
+   * policy and calls the same `start_registration_for_policy` /
+   * `finish_registration_for_policy` functions `register` reaches.
+   *
+   * A success here does two things at once, which is why the return type is
+   * `LoginSuccessResponse` rather than `void`: the credential is enrolled
+   * *and* the login the forced setup interrupted completes, with the same
+   * three cookies a password+MFA sign-in sets. The caller runs the same
+   * `fetchCurrentUser()` tail the TOTP branch runs — this module does not
+   * write to the auth store itself, matching every other function here.
+   */
+  async registerWithSetupToken(
+    setupToken: string,
+    name: string,
+    kind: AuthenticatorKind,
+  ): Promise<LoginSuccessResponse> {
+    const { data } = await api.post<StartRegistrationDto>(
+      "/api/v1/auth/webauthn/setup/register/start",
+      { setup_token: setupToken },
+    );
+
+    const options: PublicKeyCredentialCreationOptionsJSON = {
+      ...data.challenge.publicKey,
+      authenticatorSelection: {
+        ...data.challenge.publicKey.authenticatorSelection,
+        authenticatorAttachment: kind,
+      },
+    };
+
+    const response: RegistrationResponseJSON = await startRegistration({
+      optionsJSON: options,
+    });
+
+    const result = await api.post<LoginSuccessResponse>(
+      "/api/v1/auth/webauthn/setup/register/finish",
+      {
+        setup_token: setupToken,
+        state_token: data.state_token,
+        credential_name: name,
+        response,
+      },
+    );
+    return result.data;
   },
 
   /**

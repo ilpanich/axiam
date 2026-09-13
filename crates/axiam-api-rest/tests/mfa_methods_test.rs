@@ -227,3 +227,225 @@ async fn mfa_methods_require_authentication() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
 }
+
+// ---------------------------------------------------------------------------
+// M-1 — the administrative reset evicts WebAuthn credentials too (T-34)
+// ---------------------------------------------------------------------------
+
+#[actix_web::test]
+async fn reset_mfa_removes_passkeys_as_well_as_totp() {
+    use axiam_core::models::user::UpdateUser;
+    use axiam_core::models::webauthn_credential::{
+        CreateWebauthnCredential, WebauthnCredentialType,
+    };
+    use axiam_core::repository::WebauthnCredentialRepository;
+    use axiam_db::SurrealWebauthnCredentialRepository;
+
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+
+    // A user with both kinds of factor: a confirmed TOTP secret and a passkey.
+    let user_repo = SurrealUserRepository::new(db.clone());
+    user_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                mfa_enabled: Some(true),
+                mfa_secret: Some(Some("encrypted-secret-placeholder".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let cred_repo = SurrealWebauthnCredentialRepository::new(db.clone());
+    cred_repo
+        .create(CreateWebauthnCredential {
+            tenant_id,
+            user_id,
+            credential_id: "cred-suspect".into(),
+            name: "Suspected authenticator".into(),
+            credential_type: WebauthnCredentialType::Passkey,
+            passkey_json: r#"{"dummy":"passkey"}"#.into(),
+            aaguid: None,
+            attestation_format: None,
+            attested: false,
+            authenticator_name: None,
+        })
+        .await
+        .unwrap();
+
+    let app = test_app!(db, auth);
+
+    // Both factors are listed before the reset.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/users/{user_id}/mfa-methods"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let body: Value = test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(body.as_array().unwrap().len(), 2);
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/users/{user_id}/reset-mfa"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    // The admin UI says the reset "removes ALL MFA methods". Through the wire,
+    // it now does — before M-1 the passkey was still here.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/users/{user_id}/mfa-methods"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let body: Value = test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(
+        body.as_array().unwrap().len(),
+        0,
+        "every factor must be gone after an administrative reset, got {body}"
+    );
+    assert_eq!(
+        cred_repo.count_by_user(tenant_id, user_id).await.unwrap(),
+        0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M-2 — self-service reset refused where the tenant enforces MFA (D-1, T-267)
+// ---------------------------------------------------------------------------
+
+/// Enable `mfa_enforced` at the organization level, which every tenant under
+/// it inherits (`clamp_enable_only!`: a tenant may not switch off what the
+/// organization enforces).
+async fn enforce_mfa(db: &Surreal<TestDb>, org_id: Uuid) {
+    use axiam_core::models::settings::system_defaults;
+    use axiam_core::repository::SettingsRepository;
+
+    let mut defaults = system_defaults();
+    defaults.mfa_enforced = true;
+    axiam_db::SurrealSettingsRepository::new(db.clone())
+        .set_org_settings(org_id, defaults)
+        .await
+        .unwrap();
+}
+
+/// Give the user a TOTP factor, so that a reset that went through would have
+/// something to remove — otherwise the refusal and a no-op look alike.
+async fn give_totp(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) {
+    use axiam_core::models::user::UpdateUser;
+
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                mfa_enabled: Some(true),
+                mfa_secret: Some(Some("encrypted-secret-placeholder".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[actix_web::test]
+async fn self_reset_is_refused_under_an_enforcing_tenant() {
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    enforce_mfa(&db, org_id).await;
+    give_totp(&db, tenant_id, user_id).await;
+
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/users/{user_id}/reset-mfa"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(
+        body["error"], "mfa_enforced",
+        "the code must be distinguishable from `authorization_denied`: the \
+         caller holds every permission, and only an administrator can act \
+         against the policy — got {body}"
+    );
+
+    // The factor is untouched. A refusal that had already removed something
+    // would be the hole with an error message on it.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/users/{user_id}/mfa-methods"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let body: Value = test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+}
+
+#[actix_web::test]
+async fn self_reset_still_works_where_mfa_is_optional() {
+    // D-1's other half: a user of a non-enforcing tenant was free to run at
+    // one factor anyway, so nothing is protected by refusing them.
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    give_totp(&db, tenant_id, user_id).await;
+
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/users/{user_id}/reset-mfa"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+}
+
+#[actix_web::test]
+async fn admin_reset_ignores_the_enforcement_flag() {
+    // The endpoint exists so that an administrator can unlock a user who lost
+    // their only factor. An enforcing tenant is exactly where that matters
+    // most, so the enforcement check must not reach this branch.
+    let (db, org_id, tenant_id, admin_id) = setup().await;
+    enforce_mfa(&db, org_id).await;
+
+    let target = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id,
+            username: "locked-out".into(),
+            email: "locked-out@example.com".into(),
+            password: TEST_PASSWORD.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    give_totp(&db, tenant_id, target.id).await;
+
+    let auth = test_auth_config();
+    let token = mint_token(&auth, admin_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/users/{}/reset-mfa", target.id))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        204,
+        "`users:admin` is unaffected by the enforcement flag"
+    );
+}

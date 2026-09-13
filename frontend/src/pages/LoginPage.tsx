@@ -20,7 +20,7 @@ import {
 } from "@/lib/fetchCurrentUser";
 import { KeyRound, ChevronRight, Loader2, AlertCircle, Fingerprint } from "lucide-react";
 import { getApiErrorCode, getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
-import { sanitizeReturnTo } from "@/lib/returnTo";
+import { resumeLoginHop, sanitizeReturnTo } from "@/lib/returnTo";
 import {
   ACR_MULTI_FACTOR,
   clearReauthAttempts,
@@ -301,25 +301,10 @@ export function LoginPage() {
     setTenantContext(orgTenantData.tenantSlug, orgTenantData.orgSlug);
 
     // W3 — resume the authorization request this sign-in was for, if there was
-    // one. `location.assign` rather than `navigate`, because the destination is
-    // a server endpoint and not a route in this application: the browser has to
-    // make a real request to `/oauth2/authorize`, carrying the
-    // `axiam_op_session` cookie the login response just set.
-    //
-    // Re-validated here rather than trusted from the state above. It is one
-    // call and it means the value cannot have been anything else at any point
-    // between the two.
-    const resume = sanitizeReturnTo(returnTo);
-    if (resume) {
-      // W4 — this hop is over. Forgetting its attempts here is what keeps a
-      // user who signs in slowly from looking like a loop; the counter exists
-      // for a destination that keeps *coming back*, not for one that took a
-      // while.
-      clearReauthAttempts(resume);
-      window.location.assign(resume);
-      return;
-    }
-    navigate("/dashboard");
+    // one, the dashboard otherwise. `resumeLoginHop` re-validates `returnTo`
+    // itself rather than trusting the state above — see its own doc comment —
+    // and is shared with `MfaSetupPage`'s equivalent tail (M-4).
+    resumeLoginHop(returnTo, navigate);
   };
 
   /**
@@ -588,7 +573,18 @@ export function LoginPage() {
       // happens when the user's account requires MFA but they haven't
       // enrolled yet (mfa_setup_required returned from backend).
       if (data.mfa_setup_required) {
-        navigate(`/auth/mfa-setup?setup_token=${encodeURIComponent(data.setup_token ?? "")}`);
+        let setupUrl = `/auth/mfa-setup?setup_token=${encodeURIComponent(data.setup_token ?? "")}`;
+        // M-4 (R-D): carry the pending `/oauth2/authorize` request through
+        // forced setup, so a new user of an enforcing tenant who arrived via
+        // a `browser_sso` client's login hop lands back in the relying
+        // party once enrolment finishes, rather than in the admin UI.
+        // Re-validated here rather than trusted from the state above, for
+        // the same reason `resumeLoginHop` re-validates before it navigates.
+        const pendingReturnTo = sanitizeReturnTo(returnTo);
+        if (pendingReturnTo) {
+          setupUrl += `&return_to=${encodeURIComponent(pendingReturnTo)}`;
+        }
+        navigate(setupUrl);
         return;
       }
 

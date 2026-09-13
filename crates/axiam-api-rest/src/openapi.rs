@@ -66,6 +66,8 @@ use crate::handlers;
         // WebAuthn
         handlers::webauthn::start_registration,
         handlers::webauthn::finish_registration,
+        handlers::webauthn::setup_start_registration,
+        handlers::webauthn::setup_finish_registration,
         handlers::webauthn::start_authentication,
         handlers::webauthn::finish_authentication,
         handlers::webauthn::start_discoverable_authentication,
@@ -157,6 +159,7 @@ use crate::handlers;
         handlers::ca_certificates::list_intermediates,
         // Certificates
         handlers::certificates::generate,
+        handlers::certificates::sign_csr,
         handlers::certificates::list,
         handlers::certificates::get,
         handlers::certificates::revoke,
@@ -341,6 +344,8 @@ use crate::handlers;
         // WebAuthn
         handlers::webauthn::StartRegistrationResponse,
         handlers::webauthn::FinishRegistrationRequest,
+        handlers::webauthn::SetupRegisterStartRequest,
+        handlers::webauthn::SetupRegisterFinishRequest,
         handlers::webauthn::CredentialResponse,
         handlers::webauthn::StartAuthenticationRequest,
         handlers::webauthn::StartDiscoverableAuthenticationRequest,
@@ -433,6 +438,8 @@ use crate::handlers;
         // Certificates
         axiam_core::models::certificate::Certificate,
         axiam_core::models::certificate::CreateCertificate,
+        axiam_core::models::certificate::SignCertificateCsr,
+        handlers::certificates::SignCertificateCsrRequest,
         axiam_core::models::certificate::GeneratedCertificate,
         axiam_core::models::certificate::CertificateType,
         axiam_core::models::certificate::BindCertificate,

@@ -172,6 +172,18 @@ export function SigningCaPanel({
     setCsrError("");
   }
 
+  // Reads the chosen file and drops its text straight into the textarea, so
+  // the operator sees exactly what will be submitted whichever way they got
+  // it there — the same reason `CertificatesPage`'s leaf-CSR dialog does this.
+  // The input's own value is cleared afterwards so picking the same file again
+  // still fires a change event.
+  async function handleCsrFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setCsrPem(await file.text());
+  }
+
   function openCsr() {
     resetCsr();
     setParentCaId(parentOptions[0]?.id ?? "");
@@ -480,10 +492,23 @@ export function SigningCaPanel({
             }
             className="font-mono text-xs"
           />
+          <input
+            type="file"
+            // A CSR has no fixed MIME type in the wild — most tooling emits
+            // `.csr` or `.pem` with no registered type at all — so the accept
+            // list leans on extensions, with the registered PKCS#10 type
+            // (`application/pkcs10`) alongside for whatever does send it.
+            accept=".csr,.pem,.txt,application/pkcs10"
+            onChange={(e) => void handleCsrFileChange(e)}
+            aria-label="Upload certificate signing request file"
+            className="block w-full text-xs text-muted-foreground file:mr-3 file:rounded-md file:border file:border-input file:bg-background file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-foreground hover:file:bg-white/5"
+          />
           <p className="text-xs text-muted-foreground">
-            The subject is taken from the request. Its requested extensions are
-            not: AXIAM decides that this is a CA and constrains it to a path
-            length of zero, so it signs leaves and cannot mint a further tier.
+            Paste the request or choose a file — either way it lands in the box
+            above. The subject is taken from the request. Its requested
+            extensions are not: AXIAM decides that this is a CA and constrains
+            it to a path length of zero, so it signs leaves and cannot mint a
+            further tier.
           </p>
         </div>
 

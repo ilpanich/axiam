@@ -50,9 +50,9 @@ impl actix_web::ResponseError for AxiamApiError {
             AxiamError::AuthenticationFailed { .. } | AxiamError::ReplayDetected => {
                 StatusCode::UNAUTHORIZED
             }
-            AxiamError::AuthorizationDenied { .. } | AxiamError::OpaqueRequired => {
-                StatusCode::FORBIDDEN
-            }
+            AxiamError::AuthorizationDenied { .. }
+            | AxiamError::OpaqueRequired
+            | AxiamError::MfaEnforced => StatusCode::FORBIDDEN,
             AxiamError::Validation { .. } | AxiamError::TenantContext => StatusCode::BAD_REQUEST,
             AxiamError::PasswordPolicy { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AxiamError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -84,6 +84,13 @@ impl actix_web::ResponseError for AxiamApiError {
             // this to switch to `/auth/opaque/*` rather than to tell the user
             // their password was wrong.
             AxiamError::OpaqueRequired => "opaque_required",
+            // Distinct from `authorization_denied` on purpose, and for the
+            // same reason `opaque_required` is: the caller holds every
+            // permission the action needs — it is their own account — and the
+            // refusal is a tenant policy only an administrator can act
+            // against. A client switches on this to name the administrator
+            // rather than to say "forbidden" (T-267).
+            AxiamError::MfaEnforced => "mfa_enforced",
             AxiamError::Validation { .. } => "validation_error",
             AxiamError::PasswordPolicy { .. } => "password_policy_violation",
             AxiamError::TenantContext => "tenant_context",
@@ -110,6 +117,7 @@ impl actix_web::ResponseError for AxiamApiError {
             | AxiamError::ReplayDetected
             | AxiamError::AuthorizationDenied { .. }
             | AxiamError::OpaqueRequired
+            | AxiamError::MfaEnforced
             | AxiamError::Validation { .. }
             | AxiamError::PasswordPolicy { .. }
             | AxiamError::TenantContext

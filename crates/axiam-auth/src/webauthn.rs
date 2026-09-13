@@ -1245,6 +1245,8 @@ mod tests {
         async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unreachable!("storage must not be reached") }
         #[rustfmt::skip]
         async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unreachable!("storage must not be reached") }
+        #[rustfmt::skip]
+        async fn delete_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unreachable!("storage must not be reached") }
     }
 
     /// Like [`UnusedRepo`], but answers the one query the *registration*
@@ -1266,6 +1268,8 @@ mod tests {
         async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unreachable!("storage must not be reached") }
         #[rustfmt::skip]
         async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { Ok(0) }
+        #[rustfmt::skip]
+        async fn delete_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unreachable!("storage must not be reached") }
     }
 
     fn config() -> AuthConfig {

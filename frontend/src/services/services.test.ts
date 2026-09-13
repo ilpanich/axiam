@@ -484,6 +484,26 @@ describe("certificateService", () => {
     expect(await certificateService.listSigningCas(undefined)).toEqual([]);
     expect(apiMock.get).not.toHaveBeenCalled();
   });
+
+  it("signs a CSR against the leaf endpoint and returns a plain certificate", async () => {
+    // No `private_key_pem` in the response — there is nothing to reveal, since
+    // the key never crossed the wire.
+    apiMock.post.mockResolvedValue(res({ id: "c1", subject: "CN=device-1" }));
+    const cert = await certificateService.signCsr({
+      issuer_ca_id: "ca1",
+      csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\nreq\n-----END CERTIFICATE REQUEST-----",
+      cert_type: "Device",
+      validity_days: 90,
+    });
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/certificates/sign-csr", {
+      issuer_ca_id: "ca1",
+      csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\nreq\n-----END CERTIFICATE REQUEST-----",
+      cert_type: "Device",
+      validity_days: 90,
+    });
+    expect(cert).toEqual({ id: "c1", subject: "CN=device-1" });
+    expect(cert).not.toHaveProperty("private_key_pem");
+  });
 });
 
 // ─── federation ───────────────────────────────────────────────────────────────

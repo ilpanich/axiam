@@ -68,6 +68,18 @@ const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
     // cookie, and an exemption there would let any site silently enrol its own
     // authenticator onto a logged-in victim's account — account takeover by
     // exactly the request forgery this middleware exists to stop.
+    //
+    // The **setup-token** registration pair (M-3) is the opposite case, and is
+    // exempt on the same grounds as `/mfa/setup/enroll` and `/setup/confirm`
+    // above. Its caller is mid-forced-enrolment: they have no session, no
+    // `axiam_csrf` cookie to echo, and the only credential the endpoint accepts
+    // is a setup token carried **in the request body**. That is precisely the
+    // condition this middleware's own exemption test names — there is no
+    // ambient credential for a cross-site request to ride. A site that could
+    // forge one of these would already have to hold the token, and a caller
+    // holding the token needs no forgery.
+    "/api/v1/auth/webauthn/setup/register/start",
+    "/api/v1/auth/webauthn/setup/register/finish",
     "/api/v1/auth/webauthn/authenticate/start",
     "/api/v1/auth/webauthn/authenticate/finish",
     "/api/v1/auth/webauthn/authenticate/discoverable/start",

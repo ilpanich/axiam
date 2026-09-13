@@ -319,6 +319,14 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/auth/webauthn/register/finish",
     "/api/v1/auth/webauthn/authenticate/start",
     "/api/v1/auth/webauthn/authenticate/finish",
+    // M-3: the setup-token registration pair, public for the same reason
+    // `/mfa/setup/enroll` and `/setup/confirm` are — the caller is in the
+    // middle of a forced first-login enrolment and has no session yet, so
+    // requiring one to reach them would be circular. The setup token is the
+    // credential, checked by the handler; `AuthzMiddleware` would otherwise
+    // 401 the request before the handler could look at it.
+    "/api/v1/auth/webauthn/setup/register/start",
+    "/api/v1/auth/webauthn/setup/register/finish",
     // Usernameless sign-in: public for the same reason as the pair above —
     // these ARE the authentication, so requiring a credential to reach them
     // would be circular.
@@ -742,6 +750,16 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     // Certificates
     ("GET", "/api/v1/certificates", "certificates:list"),
     ("POST", "/api/v1/certificates", "certificates:generate"),
+    // The same permission as generation, deliberately: a caller allowed to mint
+    // a certificate under a CA is allowed to mint one for a key they already
+    // hold, and this path is the less powerful of the two — no key material is
+    // produced and none is returned. `signing-cas/sign-csr` reuses
+    // `ca_certificates:generate` for the same reason.
+    (
+        "POST",
+        "/api/v1/certificates/sign-csr",
+        "certificates:generate",
+    ),
     ("GET", "/api/v1/certificates/{id}", "certificates:get"),
     (
         "POST",

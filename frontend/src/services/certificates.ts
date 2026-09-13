@@ -77,6 +77,26 @@ export interface GenerateCertificatePayload {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Matches `SignCertificateCsrRequest`
+ * (crates/axiam-api-rest/src/handlers/certificates.rs). No `subject` and no
+ * `key_algorithm`: both are read out of the CSR server-side, which is the only
+ * place they can be stated without the row and the certificate being able to
+ * disagree. `tenant_id` is taken from the authenticated session and must NOT
+ * be sent, exactly as for `GenerateCertificatePayload`.
+ */
+export interface SignCsrPayload {
+  issuer_ca_id: string;
+  /**
+   * PEM-encoded PKCS#10 request — a `BEGIN CERTIFICATE REQUEST` block. The
+   * legacy OpenSSL `BEGIN NEW CERTIFICATE REQUEST` header is not accepted.
+   */
+  csr_pem: string;
+  cert_type: CertificateType;
+  validity_days: number;
+  metadata?: Record<string, unknown>;
+}
+
 // ─── Response types ───────────────────────────────────────────────────────────
 
 /** Matches `GeneratedCertificate` (flattened certificate + private key PEM). */
@@ -95,6 +115,17 @@ export const certificateService = {
   ): Promise<GenerateCertificateResponse> =>
     api
       .post<GenerateCertificateResponse>("/api/v1/certificates", payload)
+      .then((r) => r.data),
+
+  /**
+   * Issue an end-entity certificate for a key AXIAM never sees. The response
+   * is a plain [`Certificate`] — never `GenerateCertificateResponse` — because
+   * there is no key to return and no field to leave empty; a type with a
+   * mandatory key field that is always absent is a type that lies.
+   */
+  signCsr: (payload: SignCsrPayload): Promise<Certificate> =>
+    api
+      .post<Certificate>("/api/v1/certificates/sign-csr", payload)
       .then((r) => r.data),
 
   get: (id: string): Promise<Certificate> =>

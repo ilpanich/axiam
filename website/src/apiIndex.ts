@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-beta14";
-export const API_OPERATION_COUNT = 219;
-export const API_PATH_COUNT = 153;
+export const API_OPERATION_COUNT = 222;
+export const API_PATH_COUNT = 156;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -175,6 +175,18 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/api/v1/auth/webauthn/register/start",
     "summary": "Begin a WebAuthn passkey registration ceremony for the authenticated user."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/auth/webauthn/setup/register/finish",
+    "summary": "Complete the registration and, with it, the login the forced enrolment interrupted — the setup-token twin of `POST /auth/mfa/setup/confirm`.",
+    "public": true
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/auth/webauthn/setup/register/start",
+    "summary": "Begin registering a passkey or security key as the **first** factor, during a forced first-login enrolment.",
+    "public": true
    },
    {
     "method": "POST",
@@ -541,7 +553,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "POST",
     "path": "/api/v1/users/{user_id}/reset-mfa",
-    "summary": "Reset MFA for a user — disables MFA, clears the secret, and revokes all existing sessions."
+    "summary": "Reset MFA for a user — evicts **every** factor: the WebAuthn credentials as well as the TOTP secret, clears `mfa_enabled`, and revokes all existing sessions (T-34)."
    },
    {
     "method": "GET",
@@ -1008,6 +1020,11 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/api/v1/certificates/{id}/revoke",
     "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/certificates/sign-csr",
+    "summary": "Issue an end-entity certificate for a key AXIAM never sees."
    },
    {
     "method": "GET",

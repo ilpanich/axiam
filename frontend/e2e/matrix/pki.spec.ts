@@ -241,6 +241,62 @@ test.describe("PKI — chain, trust anchor, bindings and revocation", () => {
       await context.close();
     }
   });
+
+  test("sign-csr is reachable under certificates:generate and refuses a request that is not one", async () => {
+    // C-1's permission row, asserted the one way this suite honestly can.
+    //
+    // A *valid* CSR would need a PKCS#10 built in Node, and nothing in this
+    // suite's dependencies builds one — hand-rolling DER here would be a lot of
+    // fragile code to prove something about encoding rather than about
+    // permissions. A malformed CSR is enough, and is arguably the better probe:
+    // the caller who holds `certificates:generate` reaches the handler and is
+    // answered `400` by the CSR parser, while a caller who does not is stopped
+    // at `403` before the parser ever runs. The two statuses are exactly the
+    // permission row, isolated from everything else the endpoint does.
+    const signingCa = fx.caCertificates["signing-ca-a"];
+    if (!signingCa) {
+      test.skip(
+        true,
+        `unverified — blocked: ${fx.problems.join("; ") || "no signing CA in the fixture"}`,
+      );
+      return;
+    }
+
+    const api = await signedInApi();
+    if (!api) {
+      test.skip(true, "unverified — blocked: organization-level sign-in failed");
+      return;
+    }
+    try {
+      api.actingTenant(fx.tenantA);
+      const res = await api.post("/api/v1/certificates/sign-csr", {
+        issuer_ca_id: signingCa,
+        csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\nnot a CSR\n-----END CERTIFICATE REQUEST-----",
+        cert_type: "Device",
+        validity_days: 30,
+      });
+      expect
+        .soft(
+          res.status,
+          `the organization super-admin holds certificates:generate, so sign-csr must ` +
+            `reach the handler and be refused by the CSR parser (400), not by authorization ` +
+            `(403). HTTP ${res.status}: ${JSON.stringify(res.body).slice(0, 200)}`,
+        )
+        .toBe(400);
+      // And no certificate was created by a request that failed.
+      const listed = await api.get("/api/v1/certificates");
+      expect
+        .soft(
+          items(listed.body).every(
+            (c: Record<string, unknown>) => c["subject"] !== "not a CSR",
+          ),
+          "a refused sign-csr must leave no row behind",
+        )
+        .toBe(true);
+    } finally {
+      await api.dispose();
+    }
+  });
 });
 
 /** An organization-level API session, or `null` if signing in failed. */

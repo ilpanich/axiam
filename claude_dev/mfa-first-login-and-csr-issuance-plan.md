@@ -214,6 +214,58 @@ per `CLAUDE.md` after any `target/` wipe.
 
 ### M-1 — `reset_mfa` evicts WebAuthn credentials (Sonnet 5)
 
+> **EXECUTED — M-1, 2026-09-13.** `WebauthnCredentialRepository::delete_by_user`
+> is the new eviction, and it is a **required** trait method rather than one
+> with a provided default. The plan did not say which, and `list_by_tenant`
+> right above it is the precedent for a default — but a default returning `0`
+> compiles everywhere and makes every test double silently *not* evict, so
+> `reset_mfa_removes_passkeys_as_well_as_totp` would have asserted an empty
+> method list against a double that was never asked to delete anything, and
+> passed. For a listing that is a harmless hole; for the eviction that closes
+> T-34 it is the whole assertion. Five doubles grew four lines each. The
+> SurrealDB implementation deletes with `RETURN BEFORE` and counts the returned
+> rows, so the number reported is of rows that existed and went rather than of
+> a `SELECT` a concurrent registration could have raced.
+>
+> The reset itself **moved** from `AuthService::reset_mfa` to
+> `MfaMethodService::reset_mfa`, which the plan named as the fallback and which
+> turned out to be the only honest option: `AuthService` holds no credential
+> repository, and splitting the reset into "clear the flag here, evict there"
+> would have left two calls a handler could half-perform. `MfaMethodService`
+> gained a third type parameter, the session repository, so the eviction, the
+> flag and the session revocation are one call in the order
+> credentials → user row → sessions — each step narrowing what the old state
+> is worth, so a failure part-way leaves the account *more* locked down. It
+> returns the eviction count. Four construction sites changed; the handler's
+> `state.auth_service` became `state.mfa_method_service` and nothing else in
+> `axiam-api-rest` moved, as the plan asked.
+>
+> Tests, all green: three in `crates/axiam-db/tests/webauthn_credential_test.rs`
+> (every credential goes and the count is right; another user's and another
+> tenant's survive — the `user_id`-only filter that T-98 would have caught; a
+> user with no credentials reports zero rather than erroring); four in
+> `crates/axiam-auth/tests/mfa_methods_test.rs`, of which
+> `reset_mfa_then_totp_setup_does_not_resurrect_the_old_passkey` is R-A end to
+> end — reset, re-enrol TOTP, and assert `available_method_types` is `["totp"]`
+> and not `["totp", "webauthn"]`; and one at the HTTP layer in
+> `crates/axiam-api-rest/tests/mfa_methods_test.rs` asserting
+> `GET /users/{id}/mfa-methods` returns an empty array after the reset, which
+> is the sentence the admin UI shows the operator.
+>
+> T-34's mitigation carries the amendment in both
+> `claude_dev/threat-model-stride.md` and `ThreatDragonModels/Axiam/Axiam.json`;
+> status stays Mitigated and no count moves. `website/src/docs/authentication.ts`
+> does not describe the reset, so nothing there changed (plan step 4's
+> "otherwise none").
+>
+> One thing the plan did not anticipate: the sandbox had no `protoc`, so
+> `cargo build --workspace` failed in `axiam-api-grpc`'s build script before any
+> of this could be checked workspace-wide. `apt-get update` then
+> `apt-get install protobuf-compiler libxml2-dev libxmlsec1-dev` fixes it and is
+> worth doing at the start of a session rather than at the first workspace
+> build — `CLAUDE.md`'s hygiene section mentions the swagger-ui zip and the
+> libxml2 workaround but not this one.
+
 **Closes** R-A. **Threat:** T-34's mitigation text gains the sentence.
 
 1. `axiam-core/src/repository.rs` — `WebauthnCredentialRepository::delete_by_user(tenant_id, user_id) -> u64`.
@@ -237,6 +289,52 @@ per `CLAUDE.md` after any `target/` wipe.
    `website/src/docs/authentication.ts` if it describes the reset; otherwise none.
 
 ### M-2 — self-service reset refused where MFA is enforced (Sonnet 5)
+
+> **EXECUTED — M-2, 2026-09-13.** `AxiamError::MfaEnforced` is a new variant
+> beside `OpaqueRequired`, for the reason that one is its own: the caller holds
+> every permission the call needs — it is their own account — and the refusal
+> is a policy only an administrator can act against, so `authorization_denied`
+> would say the wrong thing and its `action`/`resource_id` pair would be
+> meaningless. It maps to `403` and the slug `mfa_enforced`, and its `Display`
+> is the sentence a user should read ("your tenant requires multi-factor
+> authentication; an administrator must reset it for you"), which the error
+> layer already echoes verbatim for client errors.
+>
+> The handler's own-resource branch reads the caller's **own** tenant's
+> effective settings — `principal_tenant_id`, the rule `start_registration`
+> explains and for the same reason — and refuses when `mfa.mfa_enforced`. The
+> settings read is propagated, never defaulted to not-enforced: a datastore
+> failure must not be the way the floor is escaped. The `users:admin` branch is
+> untouched.
+>
+> Tests, all green: `self_reset_is_refused_under_an_enforcing_tenant` (403, the
+> code, **and** the factor still listed afterwards — a refusal that had already
+> removed something would be the hole with a message on it),
+> `self_reset_still_works_where_mfa_is_optional`,
+> `admin_reset_ignores_the_enforcement_flag`, all in
+> `crates/axiam-api-rest/tests/mfa_methods_test.rs`.
+>
+> **Plan step 3 (the profile UI) found nothing to hide, and one thing to fix.**
+> There is no self-reset control anywhere in the profile UI:
+> `MfaManagementPage.tsx` and `ProfilePage.tsx` offer per-method delete and
+> nothing else, and `userService.resetMfa` has exactly one caller, the admin
+> `UserDetailPage`. So nothing was hidden, as the plan allows. But that one
+> caller *can* reach the new refusal — an administrator resetting **their own**
+> account under an enforcing tenant takes the self-service branch — and its
+> `ConfirmDialog` rendered no error at all, so the request failed silently and
+> the button read as dead. `ConfirmDialog` gained an optional `error` prop
+> (omitted by every other call site, so no churn) and the reset mutation feeds
+> `getApiErrorMessage` into it; the dialog stays open so the sentence is
+> readable. Test: `shows the server's sentence when a self-reset is refused
+> under an enforcing tenant`.
+>
+> OpenAPI: the `403` annotation names the code; spec regenerated with
+> `--dump-openapi` (built `--no-default-features`) and re-stamped. Contract
+> §5.2 rule 4 gained the paragraph, written now and versioned at 1.45 in C-3.
+> T-267 is in the STRIDE document and the Threat Dragon model at
+> `threatTop` 267, Mitigated, with the D-1 residual — no fresh-authentication
+> requirement for the self-service changes that remain allowed — recorded in
+> its entry rather than absorbed.
 
 **Closes** R-B. **Decision** D-1. **Threat:** new **T-267** (§7).
 
@@ -265,6 +363,116 @@ per `CLAUDE.md` after any `target/` wipe.
    contract text and rides the 1.45 bump of C-3; write it now, version it there.
 
 ### M-3 — a passkey or security key as the first factor (Opus 5)
+
+> **EXECUTED — M-3, 2026-09-13.**
+>
+> **Server.** Two endpoints under the `webauthn_per_min` buckets, with their own
+> bucket names so a burst against the session-less pair is distinguishable in
+> the counters from one against the profile page's. Both share
+> `setup_token_registration_context`, which establishes the three things every
+> rule depends on: the token is a *setup* token (the purpose-checked decoder
+> the TOTP twins use — a challenge token, an expired one and a session bearer
+> are all `401`), the account has **no** factor yet, and which tenant's policy
+> governs.
+>
+> Rule 2's check is asked of `MfaMethodService`, not `AuthService`, and that is
+> the whole of it: the question spans the TOTP secret *and* the WebAuthn
+> credential rows, and a check that read only the TOTP half — which is all
+> `AuthService` can see — would let a captured token add a second passkey to an
+> account that already had one. Rule 3 needed no new code: the attestation and
+> user-verification policies are read from the same places and handed to the
+> same `start_registration_for_policy` / `finish_registration_for_policy`, so
+> T-229/T-230 hold by construction rather than by a second implementation
+> agreeing.
+>
+> Rule 5's shared tail is `AuthService::complete_setup_token_login`, which both
+> completions call. It takes the **token** rather than three `Uuid`s: one decode
+> per entry point would be enough for correctness, but a signature taking
+> `(user_id, tenant_id, org_id)` accepts values from anywhere, and this function
+> issues a session. No new choke point — everything still funnels through
+> `create_session_and_tokens`, which is what `basic-op-gap-plan.md` §4's list
+> makes checkable.
+>
+> **Rule 4, and where the plan's parenthetical was overtaken by the code.** The
+> plan asked for the evidence the authentication path records for the same
+> credential kind, and separately for "`Amr::User` when user verification
+> happened". Those two are not the same instruction, and the first wins:
+> `finish_authentication` deliberately does **not** claim `user`, because the
+> tenant's policy is `preferred` by default and a PIN-less key proves presence
+> only. Nothing at registration reports whether the `UV` bit was actually set,
+> so "when user verification happened" is not a question this code can answer
+> truthfully — except under `Required`, the one policy value that *rejects* a
+> ceremony with the bit clear. So `user` is claimed under `Required` and under
+> nothing else, which is strictly more truthful than either reading and never
+> overstates. `hwk`/`swk` follow the credential type the registration recorded.
+> The session lands in `urn:axiam:acr:mfa` through `mfa` in every combination.
+>
+> One deliberate asymmetry with the profile-page `finish`, which the plan called
+> for and which is worth restating: there, a failure of
+> `enable_after_enrollment` is logged and swallowed; here it **fails the
+> request**. There is no profile page to correct it from, and a session issued
+> while the account still reads "no second factor" would send the user through
+> forced enrolment again at the next sign-in — with a credential already
+> registered that `setup/register/start` would then refuse as a second factor.
+>
+> **Two registries the plan did not mention, and the tests found.** The new
+> routes 403'd before the handler ran until they were added to
+> `middleware::csrf::CSRF_EXEMPT_SUFFIXES` and `permissions::PUBLIC_PATHS` —
+> both, as the CSRF module's own comment warns. The exemption is safe here for
+> the opposite reason the profile-page registration pair is *not* exempt: that
+> caller is signed in and carries the cookie an attacker would ride, this one
+> has no session and the only credential is a body token.
+>
+> **Statuses.** `MfaAlreadyConfigured` maps to `Validation` → **400**, not the
+> 409 the draft annotation said. 400 is right and the annotation was corrected:
+> rule 2 says "the same answer `setup/enroll` gives", and this is it.
+>
+> **Tests.** Five at the HTTP layer in `webauthn_test.rs` — the happy `start`,
+> an empty and a garbage token, a *session bearer* presented as a setup token
+> (the case that matters: an access token is a perfectly valid JWT signed by the
+> same key, and only the `purpose` claim separates them), the already-has-a-factor
+> refusal with its message, and `finish` refusing what `start` refuses. Four
+> unit tests on the evidence function in the handler module.
+>
+> **What could not be tested, and why it is a unit test instead.** The ceremony
+> cannot be completed in-process — it needs a real authenticator, which is why
+> every pre-existing WebAuthn handler test covers the refusal paths and stops at
+> `finish`. So rule 4's assertion could not be made "through `/oauth2/authorize`'s
+> honour lane" as the plan asked. It is made instead on
+> `setup_registration_amr` composed with `acr_for` — the same two functions the
+> honour lane would have exercised, asserted directly: every credential kind
+> under every user-verification policy yields `Acr::MultiFactor`, `user` appears
+> only under `Required`, and the list equals `finish_authentication`'s for the
+> default policy. Recorded here rather than quietly substituted.
+>
+> **Admin UI** (Sonnet 5 subagent). `MfaSetupPage.tsx` gained the chooser;
+> `services/webauthn.ts` gained `registerWithSetupToken` beside `register`,
+> mirroring its shape and its `classifyWebauthnError` handling. The TOTP branch's
+> post-success tail was factored into a shared `completeSetup()` so the WebAuthn
+> branch runs M-4's `resumeLoginHop` too rather than a second copy of it. The
+> `enrolledRef` guard stays on the TOTP branch only; the WebAuthn branch is
+> click-started and uses pending state instead. One deviation, reported and
+> accepted: TOTP still auto-enrols on mount, so "Authenticator app" renders as an
+> already-active pill rather than a third button — the pre-existing tests assert
+> that auto-enrolment and the plan did not ask to change it. Seven tests in
+> `MfaSetupPage.test.tsx`, four in `webauthn.test.ts`, the chooser assertion in
+> the e2e spec. Full frontend suite: 101 files, 1574 tests, green.
+>
+> **Contract text** written now, versioned at 1.45 in C-3: §24.1 gains the two
+> rows and the paragraph explaining why they take no session (and why an SDK
+> MUST NOT attach one); §24.5 cross-references §25.3 for the `setup_token`
+> rather than restating it; §24.7 gains the per-language rows; §24.8 gains the
+> adoption test and a second one asserting no session credential is sent; §25.1
+> gains the two rows and its count sentence; §25.2 gains the paragraph and rule 2
+> becomes "either completion". **The plan was wrong about one thing here:** it
+> says `state_token` "is already unwrapped in §24.5". §24.5 in fact requires it
+> to be **wrapped**, along with `challenge_token`. Nothing needed changing —
+> the existing text is right — but the note is recorded so the next reader does
+> not "fix" it.
+>
+> Spec regenerated and re-stamped (156 paths). The management registry is
+> unmoved at 160: the `webauthn` tag is excluded from §27, exactly as the plan
+> predicted. T-269 added at `threatTop` 269; T-201, T-229 and T-230 amended.
 
 **Closes** R-C. **Decision** D-2. **Threats:** T-201 and T-229/T-230 texts gain
 a sentence; new **T-269** (§7).
@@ -345,6 +553,38 @@ rule 2 says "either completion". §25.3's `Sensitive<T>` table already covers
 
 ### M-4 — forced setup keeps the login-hop `return_to` (Sonnet 5)
 
+> **EXECUTED — M-4, 2026-09-13** (Sonnet 5 subagent). `LoginPage.tsx`'s
+> `mfa_setup_required` branch appends `&return_to=<encoded>`, re-validating
+> with `sanitizeReturnTo` at the point of use rather than trusting the value
+> held in state since the URL was read. `MfaSetupPage.tsx` reads `return_to`
+> alongside `setup_token` and, after the `fetchCurrentUser()` tail, resumes
+> instead of navigating to `/dashboard`. The existing `replaceState` call
+> already strips the whole query string, so both parameters go together and no
+> second strip was needed.
+>
+> The plan's "factor that tail into a shared helper if the two copies would
+> otherwise diverge" was taken: `lib/returnTo.ts` gained `resumeLoginHop`,
+> which sanitizes, clears the re-auth loop counter and hands the browser to the
+> server, or navigates home. It re-validates its argument itself, so the
+> module's "both sides check" rule holds for the third side without the third
+> side having to remember. `LoginPage`'s `completeSignIn` now calls it too, so
+> there is one open-redirect check rather than two that can drift.
+>
+> Tests: `LoginPage.test.tsx` — the setup redirect carries a valid `return_to`
+> and drops a hostile one; `MfaSetupPage.test.tsx` — a new `return_to (M-4 /
+> R-D)` block covering resume, an off-origin and a malformed value both landing
+> on `/dashboard`, and no parameter at all; `e2e/mfa-setup.spec.ts` — the mocked
+> `403` route now starts at `/login?return_to=…` and asserts both parameters on
+> the resulting URL. Frontend suite: 101 files, 1555 tests, all passing; oxlint
+> and `tsc -b --noEmit` clean, including the e2e tsconfig.
+>
+> One thing the plan did not anticipate: the sandbox disk filled to 0 bytes
+> mid-task, from a 29 GB `target/` left by the Rust items running alongside.
+> `CLAUDE.md`'s hygiene section prescribes the recovery, and it cost a full
+> workspace rebuild. `cargo clean` between items is not optional advice at this
+> repository's size — a full `cargo test` across the workspace leaves roughly
+> 30 GB against a ~38 GB quota, so two items' worth of artifacts do not fit.
+
 **Closes** R-D. No server change.
 
 1. `LoginPage.tsx:590-592` — append `&return_to=<encoded>` when `returnTo`
@@ -365,6 +605,41 @@ rule 2 says "either completion". §25.3's `Sensitive<T>` table already covers
 
 ### M-5 — setup token single-use (Sonnet 5, optional)
 
+> **EXECUTED — M-5, 2026-09-13: assessed and NOT taken. R-E stays open, and
+> T-32 now says so.**
+>
+> The plan's own condition was "do this only if it costs less than a day". It
+> does not, and the reason is the thing the plan told me to check first.
+>
+> **There is no consumption store to reuse.** T-32's mitigation said the
+> challenge token is "consumed on use", and reading `verify_mfa` shows that what
+> is consumed is the **TOTP step**: `totp_last_used_step` under a
+> compare-and-swap. The token itself carries no `jti` and nothing records that
+> it was presented. So M-5 would not be wiring into an existing mechanism; it
+> would be building the first one — a repository trait method, a SurrealDB
+> implementation, a **fifth** repository on `AuthService` (already generic over
+> four, with every construction site and test harness to follow), and the
+> enrol→confirm `jti` binding on *both* the TOTP pair and the WebAuthn pair M-3
+> just added, with their tests. Comfortably more than a day, for a window of
+> 300 seconds under TLS against a token delivered in a `403` body to the caller
+> who just authenticated, and inert once the legitimate completion has run.
+> Spending it here would have come out of C-3 or the SDK wave.
+>
+> What was done instead, because a wrong sentence in the threat model is worse
+> than a missing feature:
+> * **T-32's mitigation is corrected.** "Consumed on use" described a step store
+>   as if it were a token store. It now says precisely what holds — a captured
+>   challenge token cannot be replayed *with the same code*, and re-presenting
+>   it needs the authenticator — and records R-E as a known residual with its
+>   severity and its reasoning, in both `threat-model-stride.md` and the Threat
+>   Dragon model.
+> * **`MfaSetupPage.tsx`'s comment is corrected**, the opposite way round from
+>   what the plan expected. The plan said M-5 would make "a single-use
+>   `setup_token`" true; since M-5 did not happen, the comment was false and now
+>   says what is actually true and why the once-guard still matters: a second
+>   `enroll` under the same token *replaces* the pending secret, so the user
+>   would be shown a QR code for a secret the server has discarded.
+
 **Closes** R-E. Do this only if it costs less than a day; otherwise leave R-E
 recorded as a known residual in T-32's text and say so.
 
@@ -382,6 +657,105 @@ was not the one that enrolled → `401`; the happy path unchanged. Update
 `MfaSetupPage.tsx:44-47`'s comment, which will then be true.
 
 ### C-1 — `POST /api/v1/certificates/sign-csr` (Opus 5)
+
+> **EXECUTED — C-1, 2026-09-13. One decision in rule 6 had to be revisited;
+> everything else landed as written.**
+>
+> **The finding that changed the design.** Rule 6 says to establish parity under
+> `vault_pki` by "stating `key_usage`/`ext_key_usage` explicitly in the request
+> body (empty, for parity with the DB path)". That does not work, and reading
+> Vault's API documentation before writing the branch — which rule 6 told me to
+> do — is what caught it. `sign-verbatim` **discards** both parameters whenever
+> the CSR itself carries the matching extensions, and issues the `keyUsage` and
+> `extendedKeyUsage` the CSR asked for. So a caller's `keyCertSign` would have
+> reached the certificate on a Vault deployment no matter what AXIAM put in the
+> request body, while the in-process path dropped it — the same CSR, two
+> different certificates, and the promise in §2 ("a CSR's requested extensions
+> never reach the certificate") true on one custodian and false on the other.
+>
+> Rule 6's fallback is to refuse CSR signing under `vault_pki` entirely. That
+> was not necessary, and it would have made the feature unavailable to exactly
+> the deployments with the best key custody. The rule was generalised instead:
+> **a CSR requesting `subjectAltName`, `keyUsage` or `extendedKeyUsage` is
+> refused**, in the shared inspection, before any custodian is chosen. Those
+> three are precisely the extensions Vault would honour, and D-3's reasoning
+> covers all three identically — a caller who put a key usage in a leaf CSR
+> meant it, and a certificate issued without it and with nothing said fails
+> where it is deployed. `basicConstraints` needs no rule: the in-process path
+> overwrites it and Vault ignores it outright (warning that it did), so a CSR
+> asking to be a CA comes back a leaf on both. Having refused the three, the
+> Vault request body *also* states the two usages as empty, so the shape is
+> AXIAM's decision rather than whichever default the Vault version carries —
+> neither half is sufficient alone, and the code says so at both places.
+>
+> **Two smaller deviations.**
+> * Rule 3 says the leaf parameters get
+>   `use_authority_key_identifier_extension`. Setting it put an
+>   `authorityKeyIdentifier` on a CSR-signed leaf that a *generated* leaf does
+>   not carry — caught by `a_csr_signed_leaf_is_the_same_shape_as_a_generated_one`,
+>   which compares the two extension sets. That is exactly the divergence D-5
+>   forbids, so it was dropped. An AKI on leaves is worth having and belongs
+>   with the KU/EKU profiles in §8: decided once, for both paths.
+> * The plan says to make `csr_common_name` `pub(crate)` and reuse it. The leaf
+>   path needs three facts, not one, and three readers would have verified
+>   possession up to three times. Instead `ca::inspect_csr` does one parse and
+>   one signature check and returns all of them as `CsrFacts`;
+>   `csr_common_name` is now a two-line reading of it, so the intermediate path
+>   is unchanged and the possession check exists once.
+>
+> **What shipped.** `SignCertificateCsr` in `axiam-core` with the length-eliding
+> `Debug`, and no `subject` or `key_algorithm` field — both are read from the
+> CSR, which is the only way the row and the certificate cannot disagree.
+> `CertService::sign_csr` beside `generate`; `prepare_leaf_issuance` factored
+> out of `generate` and shared, so the validity bounds, the CA status and window
+> check, the organization scope and the issuer-expiry refusal are one
+> implementation; `leaf_params` likewise, so "the same shape" is true because
+> one function says what the shape is. `LeafSigningRequest` gained
+> `csr_is_caller_supplied`, `false` on the generation path — whose issued
+> certificates are therefore byte-identical to before.
+> `POST /api/v1/certificates/sign-csr` registered **before** `/certificates/{id}`
+> (a literal segment after a matching path parameter is a route actix never
+> reaches), `certificates:generate` in the permission table, and
+> `CertificateIssued` as its notification event — the same event as generation,
+> because what an operator watching it wants to know is that a certificate now
+> exists under their CA, and a second event would silently stop telling anyone
+> subscribed to the first.
+>
+> **Tests, 38 in all and every one green.** Twenty in
+> `crates/axiam-pki/tests/sign_csr_test.rs`, one per rule — including the
+> RSA-2048 refusal (T-96: the modulus is measured, never taken from the
+> `Rsa4096` label), the P-256 refusal, the CA-asking CSR coming back a leaf, the
+> three extension refusals, the cross-organization CA being *not found* rather
+> than refused, revoked and expired issuers, an `External`-custody CA with no
+> key, and the validity caps. Three in `vault_pki_test.rs`, of which
+> `signing_a_caller_csr_sends_the_csr_verbatim_and_states_the_usages` asserts
+> the exact body AXIAM sends and
+> `a_caller_csr_asking_for_a_key_usage_never_reaches_vault` mounts no
+> `sign-verbatim` at all, so reaching Vault is itself the failure. Four at the
+> HTTP layer in `certificate_test.rs`, including one asserting the response has
+> no `private_key_pem` **key** rather than a null one. And
+> `a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one` in
+> `mtls_test.rs` — the property the feature exists for, and the test of the
+> plan's claim that binding needed "nothing to change".
+>
+> The plan also asked for an HTTP test for `signing-cas/sign-csr`, which had
+> none: `signing_a_tenant_ca_csr_over_http_yields_an_intermediate_with_external_custody`.
+> No `CaCertificateIssued` event exists, so no mapping was added — recorded in
+> §8 as the follow-up it already was.
+>
+> Spec regenerated with `--dump-openapi` (built `--no-default-features`) and
+> re-stamped; `gen-management-registry.py` run after adding the entry, and
+> `--check` agrees: **159 → 160 operations across 24 namespaces**, exactly as
+> predicted, which is what every SDK's surface test will fail on until F-1
+> lands. T-268 is in the STRIDE document and the model at `threatTop` 268, with
+> the Vault finding written into its mitigation and the one residual stated: the
+> tests run against a mock, so what Vault does with the body is documented
+> rather than observed. T-96 and T-194 carry their cross-references.
+>
+> One thing the plan did not anticipate: a full `cargo test -p axiam-pki`
+> filled the disk twice. The workspace's `target/` reaches ~30 GB against a
+> ~38 GB quota, so `cargo clean` belongs *between every pair* of Rust items,
+> not between plan steps.
 
 **Builds** feature 2. **Decisions** D-3…D-6. **Threat:** new **T-268** (§7).
 
@@ -498,6 +872,51 @@ one wave.
 
 ### C-2 — "Sign a CSR" on the Certificates page (Sonnet 5)
 
+> **EXECUTED — C-2, 2026-09-13** (Sonnet 5 subagent, briefed on the merged C-1
+> code rather than on the plan's draft of it).
+>
+> `certificateService.signCsr` posts to `/api/v1/certificates/sign-csr` and
+> returns a plain `Certificate`. `CertificatesPage.tsx` gained a second primary
+> action with the `Upload` icon; the plan's "reuse `GenerateFields`' CA select
+> and its `maxValidityDays` derivation rather than duplicating them" was taken
+> literally — `useIssuerValidityCap`, `IssuingCaSelect` and `ValidityDaysField`
+> were extracted out of `GenerateFields` and both dialogs now use them. The CSR
+> is both a textarea and a file input reading through `File.text()` into the
+> same textarea, so the user sees what will be sent. No key-algorithm field: the
+> key is the caller's. Success goes straight to `CertificateViewDialog` and never
+> `SecretRevealModal`, which the test asserts by the absence of that modal's own
+> labels from the DOM.
+>
+> **One thing the brief had to correct in the plan.** C-1 refuses a CSR
+> requesting `subjectAltName`, `keyUsage` **or** `extendedKeyUsage`, not SANs
+> alone — see C-1's block for why. The helper text names all three, and the
+> legacy OpenSSL `BEGIN NEW CERTIFICATE REQUEST` header as unaccepted. Had the
+> agent been briefed on the plan's draft it would have shipped copy that was
+> wrong about two thirds of the rule.
+>
+> `SigningCaPanel.tsx` got the same file input beside its existing textarea, and
+> its "rejects a paste that is not a certificate signing request" test gained a
+> file twin. Five tests in `CertificatesPage.test.tsx`, two in
+> `SigningCaPanel.test.tsx`, one in `services.test.ts`: 94 passing across the
+> three files, lint and `tsc -b` clean.
+>
+> **Not done, and why.** `frontend/e2e/certificates.spec.ts` has no signing-CA
+> fixture — it is a live-backend suite that probes with `isVisible()` — so the
+> plan's own "otherwise the matrix case in C-1 covers it" applies. The agent also
+> noticed that spec already expects labels ("Common Name *", "Key Type") the page
+> has not used for some time, so it has drifted independently of this work; that
+> is recorded here as a finding, not fixed, because fixing it is not this plan's
+> scope. The C-1 permission-matrix fixture case (`frontend/e2e/matrix/pki.spec.ts`)
+> was **not** added by this agent; the orchestrator added it afterwards, as a
+> permission-row probe rather than a full issuance: nothing in the e2e suite's
+> dependencies builds a PKCS#10 request, and hand-rolling DER there would be a
+> lot of fragile code proving something about encoding rather than about
+> permissions. A *malformed* CSR separates the two statuses exactly — the caller
+> holding `certificates:generate` reaches the handler and is answered `400` by
+> the parser, a caller without it is stopped at `403` before the parser runs —
+> which is the row the matrix exists to prove, isolated from everything else the
+> endpoint does. It also asserts no row is left behind by the refusal.
+
 1. `services/certificates.ts`: `SignCsrPayload { issuer_ca_id, csr_pem, cert_type, validity_days, metadata? }`,
    `certificateService.signCsr(payload): Promise<Certificate>`; unit test in
    `services.test.ts` asserting the path.
@@ -534,6 +953,61 @@ one wave.
 ## 6. Contract, docs and website
 
 ### C-3 — contract 1.45, PKI guide, website, threat model (Sonnet 5)
+
+> **EXECUTED — C-3, 2026-09-13** (Sonnet 5 subagent, briefed on the committed
+> code and on the EXECUTED blocks above rather than on the plan's draft — so its
+> PKI-guide copy names all three refused extension requests and the Vault
+> reasoning behind them, not the SANs-only rule the plan drafted).
+>
+> **Contract 1.45.** §27.1's `certificates` row 4 → 5 ops with `sign_csr` in
+> place, and the preamble's "the server mints key material" sentence gained its
+> counterpart; §27.5 states that `sign_csr`'s response carries no sensitive
+> field and that an SDK MUST NOT reuse a `GeneratedCertificate`-shaped model for
+> it; one Breaking Changes Log entry, **non-breaking / additive**, listing the
+> three additions and stating that no existing name changes meaning. The §5.2,
+> §24 and §25 text written during M-2 and M-3 was left untouched, as briefed.
+>
+> **One thing the agent got half-right, and the orchestrator finished.** The
+> version line gained its dated clause in the established style — correctly —
+> but its *opening* still read `Contract version: 1.44`. Every prior bump moved
+> both: the opening number tracks the latest clause, and at 1.44 the two agreed.
+> An SDK reading the version to decide what it may implement would have been
+> told 1.44 by a document whose body specifies 1.45. Bumped to **1.45**; the
+> lesson is that "append a clause in the existing style" and "bump the version"
+> are two edits, and the file makes them look like one.
+>
+> **`docs/pki/README.md`** gained "Or bring a CSR" under "Issue a leaf
+> certificate" — possession proved, subject kept, the three refused extension
+> requests with the Vault `sign-verbatim` reason, the key policy, no key in the
+> response, the custody note — and a `curl` twin of the walkthrough. The "What
+> `vault_pki` does not remove" paragraph now says leaf keys are AXIAM's *unless
+> the caller brings a CSR*.
+>
+> **Website.** `operate.ts` gained the leaf-CSR paragraph and endpoint row;
+> `authentication.ts`'s three-outcome sentence gained the passkey clause and the
+> MFA page describes the chooser. `apiIndex.ts` was **regenerated** rather than
+> hand-edited, which turned up staleness M-3 and C-1 had left in it
+> (219 operations / 153 paths → 222 / 156) — worth recording, because nothing
+> in this plan said to run that generator and nothing would have caught it.
+> `docSectionsAreComplete()` is unaffected: no slug or section moved.
+>
+> **Threat model 2.15.0.** Every count reconciled by counting the model
+> programmatically, and each figure independently recomputed by the orchestrator
+> before the commit — all nine agree: header 266 → **269** threats, mitigated
+> 253 → **256**, open **13** unchanged; §6's sentence follows; Elevation of
+> privilege 48 → **51** (all three new threats are E); High 122 → **125** total
+> with open unchanged at 8 (all three are High); Authentication & session
+> management 33 → **35** (T-267, T-269) and PKI, certificates & IoT device
+> identity 25 → **26** (T-268). `gen-threat-model.mjs` printed
+> `9 diagrams, 269 threats (256 mitigated, 13 open)` — matching — and its
+> generated output was reverted, as §7 prescribes and as the 2026-09-12 pass
+> did.
+>
+> **`check-website-links.py` reports 23 of 55 external links failing.** All are
+> pre-existing SDK-repo fetches (coveralls.io, javadoc.io, docs.rs,
+> `ilpanich.github.io/*-sdk`) that this sandbox's egress proxy refuses; no
+> relative link and no on-repo link fails, and none of them is a file this plan
+> touched. Recorded rather than chased.
 
 Runs after M-3 and C-1 have merged; F-1 re-vendors what this produces.
 
@@ -625,6 +1099,49 @@ only if a residual is recorded as Open; the intent is that none is.
 
 ## 9. SDK fan-out — F-1 (Sonnet 5, one wave, eleven repositories)
 
+> **EXECUTED — F-1, 2026-09-13** (eleven Sonnet 5 subagents, one per
+> repository; rust, kotlin and cplusplus finished under direct supervision).
+> All eleven branches are pushed and all eleven PRs are open — see §9.1 for
+> the table, which is filled. One wave, contract 1.45 everywhere, **no SDK
+> tagged or published** and no publish-path workflow touched.
+>
+> **One finding is cross-cutting and worth recording, because it was not
+> anticipated anywhere in §9.** §24.1's "an SDK MUST NOT attach its session
+> credential to these two" is free in no SDK whose HTTP client owns a cookie
+> jar or an auth interceptor, and nine of the eleven needed a mechanism
+> invented for the purpose:
+>
+> | SDK | what attaches unconditionally | what was done |
+> |---|---|---|
+> | rust | `reqwest`'s cookie store | explicit empty `Cookie` header — the jar populates one only when absent — plus skipping `maybe_csrf_header` |
+> | kotlin | OkHttp's `BridgeInterceptor`, *after* every application interceptor | a second, **network** interceptor stripping `Cookie` downstream of the jar and upstream of the wire |
+> | java | same OkHttp shape | same two-interceptor split |
+> | cplusplus | libcurl's cookie engine on the pooled `CURLSH` | `perform_isolated()` — an unpooled handle with no engine and no share, plus an explicit `merge_into_shared_jar()` for the response half |
+> | c | the same libcurl shape | the same isolated-handle split |
+> | go | `net/http`'s `Jar` | a throwaway `*http.Client` sharing Transport/Timeout/CheckRedirect, wrapping the jar in `noOutboundCookieJar` |
+> | python | `httpx`'s cookie jar | per-request cookie suppression |
+> | csharp | `HttpClientHandler`'s `CookieContainer` | a second handler for the isolated pair |
+> | php | Guzzle's cookie middleware | per-request middleware bypass |
+>
+> The shape is the same in every case and is the thing to review: the
+> **outbound** half is withheld, the **inbound** half is preserved. Only the
+> outbound suppression is obvious from §24.1; the inbound preservation is
+> what makes `finish` able to complete a login at all (§24.3's five adoption
+> rules), and an SDK that suppressed both would leave the caller
+> unauthenticated after a successful enrolment. Every one of the nine was
+> checked for both halves before its PR opened, and the rust one was checked
+> by mutation — removing the suppression makes its transport test fail with
+> the signed-in client's real `axiam_access` cookie on the wire.
+>
+> **Two other things worth the reader's time.** (a) The Java subagent refused
+> an instruction of mine — I had told it `sign_csr` needed `*Async`
+> companions per §24.7, and §24.7 is the WebAuthn naming table with no
+> `sign_csr` row; that SDK deliberately gives management operations no async
+> twins, and it followed its generator and said why. The brief was wrong, not
+> the SDK. (b) Several READMEs carried a stale operation count or contract
+> version from an earlier fan-out that never bumped them; each was corrected
+> in the PR that touches the same fact, and each is noted in its PR body.
+
 The rules of [`remediation-plan-2026-09-12.md`](remediation-plan-2026-09-12.md)
 §13 bind here verbatim; the toolchain notes in its §13.1 (`dotnet-sdk-8.0`
 from apt; PHP `--no-dev --prefer-source` plus apt `phpunit`; no Swift
@@ -662,17 +1179,17 @@ Per repository, one branch named for this plan, one PR:
 
 | SDK | C-1 `sign_csr` | M-3 setup helpers | PR | CI at session end |
 |---|---|---|---|---|
-| rust | | | | |
-| typescript | | | | |
-| python | | | | |
-| java | | | | |
-| kotlin | | | | |
-| csharp | | | | |
-| php | | | | |
-| go | | | | |
-| swift | | | | |
-| c | | | | |
-| cplusplus | | | | |
+| rust | yes | yes | [#105](https://github.com/ilpanich/axiam-rust-sdk/pull/105) | fmt, clippy `-D warnings`, drift (160), `cargo test --all-features` **62 binaries / 679 tests** — all green locally |
+| typescript | yes | yes | [#104](https://github.com/ilpanich/axiam-typescript-sdk/pull/104) | tsc, tsup, drift (160), **1268 tests**, bundle/token/TLS greps, audit, docs, publish --dry-run — all green locally |
+| python | yes | yes | [#81](https://github.com/ilpanich/axiam-python-sdk/pull/81) | drift (160), mypy --strict, ruff, interrogate 100%, **1578 tests**, coverage 98.54%, build+twine — all green locally |
+| java | yes | yes | [#93](https://github.com/ilpanich/axiam-java-sdk/pull/93) | drift (160), TLS gate, javadoc with `-Xdoclint:all failOnWarnings`, **1111 tests**, jacoco — all green locally |
+| kotlin | yes | yes | [#63](https://github.com/ilpanich/axiam-kotlin-sdk/pull/63) | drift (160), TLS gate, both matrix legs (2.1.0/JDK17 + 2.4.10/JDK25) **991 tests, 0 failed**, koverVerify floor held, dokka — all green locally |
+| csharp | yes | yes | [#88](https://github.com/ilpanich/axiam-csharp-sdk/pull/88) | dotnet-sdk 8.0+10.0 from apt (§13.1 correction holds); drift (160), build 0 errors, **2370 tests** across both frameworks, vuln scan, pack — all green |
+| php | yes | yes | [#68](https://github.com/ilpanich/axiam-php-sdk/pull/68) | drift (160), WebauthnTest 28/28, Management 427/427, unit suite 1408 with the **unchanged** 65-failure require-dev baseline; phpstan/php-cs-fixer/integration CI-verified |
+| go | yes | yes | [#78](https://github.com/ilpanich/axiam-go-sdk/pull/78) | build, vet, gofmt, drift (160) and `go test ./...` 1032/1032 green locally; `buf generate` and `govulncheck` blocked by the sandbox proxy, CI-verified |
+| swift | yes | yes | [#61](https://github.com/ilpanich/axiam-swift-sdk/pull/61) | drift + §6 TLS gate green locally; compile/tests CI-verified only (no Swift toolchain) — **CI came back 7 jobs, 0 failed** |
+| c | yes | yes | [#60](https://github.com/ilpanich/axiam-c-sdk/pull/60) | 54/54 on gcc+clang × C11+C23 and under ASan/UBSan; valgrind clean but for a pre-existing TLS-timeout test unrelated to this change; conan recipe job CI-verified |
+| cplusplus | yes | yes | [#61](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/61) | drift (7 files), TLS + secret gates, plain Debug `ctest`, ASan+UBSan and valgrind both clean over **1191 cases / 3750 checks** — all green locally |
 
 ---
 

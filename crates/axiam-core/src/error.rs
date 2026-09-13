@@ -84,6 +84,27 @@ pub enum AxiamError {
     #[error("this tenant requires OPAQUE authentication")]
     OpaqueRequired,
 
+    /// A self-service action would take the caller's own account below the MFA
+    /// floor their tenant enforces (`MfaPolicy::mfa_enforced`, T-267).
+    ///
+    /// Its own variant rather than an [`Self::AuthorizationDenied`] for the
+    /// reason [`Self::OpaqueRequired`] above is its own: nothing about the
+    /// caller's permissions is wrong. They hold every permission the action
+    /// needs — it is their own account — and the refusal is a *policy* their
+    /// administrator set, which only their administrator can act against. A
+    /// client that could not tell the two apart would show "forbidden" where
+    /// the true sentence is "your organization requires MFA; ask an
+    /// administrator to reset it", and `authorization_denied` carries an
+    /// `action`/`resource_id` pair that would be meaningless here.
+    ///
+    /// It reveals only a tenant-level policy the caller is already subject to
+    /// and can observe from their own login flow, and nothing about any other
+    /// account.
+    #[error(
+        "your tenant requires multi-factor authentication; an administrator must reset it for you"
+    )]
+    MfaEnforced,
+
     /// A write that lost an optimistic-concurrency race in the datastore and
     /// stayed lost after every retry `retry_on_write_conflict` was willing to
     /// spend on it (T-262).

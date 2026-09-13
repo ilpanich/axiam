@@ -339,4 +339,146 @@ describe("CertificatesPage", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+
+  describe("Sign a CSR", () => {
+    const csrPem =
+      "-----BEGIN CERTIFICATE REQUEST-----\nreq\n-----END CERTIFICATE REQUEST-----";
+
+    it("opens with the issuing CA, certificate type, validity and CSR fields — and no key algorithm", async () => {
+      mockGetRoutes();
+      renderWithProviders(<CertificatesPage />);
+      await userEvent.click(await screen.findByRole("button", { name: /Sign a CSR/ }));
+      const dialog = await screen.findByRole("dialog", {
+        name: /Sign a Certificate Signing Request/,
+      });
+      expect(within(dialog).getByLabelText("Issuing CA *")).toBeInTheDocument();
+      expect(within(dialog).getByLabelText("Certificate Type")).toBeInTheDocument();
+      expect(within(dialog).getByLabelText("Validity Days")).toBeInTheDocument();
+      expect(
+        within(dialog).getByLabelText(/Certificate signing request/)
+      ).toBeInTheDocument();
+      // The key is the caller's — nothing here lets an operator pick one.
+      expect(
+        within(dialog).queryByLabelText("Key Algorithm")
+      ).not.toBeInTheDocument();
+    });
+
+    it("rejects a paste that is not a certificate signing request", async () => {
+      mockGetRoutes();
+      renderWithProviders(<CertificatesPage />);
+      await userEvent.click(await screen.findByRole("button", { name: /Sign a CSR/ }));
+      const dialog = screen.getByRole("dialog");
+      await userEvent.type(
+        within(dialog).getByLabelText(/Certificate signing request/),
+        "just some text"
+      );
+      await userEvent.click(within(dialog).getByRole("button", { name: "Sign" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        /PEM-encoded certificate signing request/
+      );
+      expect(apiMock.post).not.toHaveBeenCalled();
+    });
+
+    it("submits the same body whether the CSR was pasted or uploaded as a file", async () => {
+      mockGetRoutes();
+      apiMock.post.mockResolvedValue(
+        res({ ...certs[0], id: "c50", subject: "CN=csr-issued" })
+      );
+      renderWithProviders(<CertificatesPage />);
+
+      // Paste.
+      await userEvent.click(await screen.findByRole("button", { name: /Sign a CSR/ }));
+      let dialog = screen.getByRole("dialog");
+      await userEvent.type(
+        within(dialog).getByLabelText(/Certificate signing request/),
+        csrPem
+      );
+      await userEvent.click(within(dialog).getByRole("button", { name: "Sign" }));
+      await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+      const pastedBody = apiMock.post.mock.calls[0][1];
+
+      // Success opened the certificate view dialog — close it before
+      // reopening Sign a CSR, so only one dialog is on screen at a time.
+      await userEvent.click(
+        await screen.findByRole("button", { name: "Close" })
+      );
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+      // Upload — the file's contents fill the same textarea, so what is
+      // submitted is exactly what was shown.
+      await userEvent.click(await screen.findByRole("button", { name: /Sign a CSR/ }));
+      dialog = screen.getByRole("dialog");
+      const file = new File([csrPem], "request.csr", {
+        type: "application/pkcs10",
+      });
+      await userEvent.upload(
+        within(dialog).getByLabelText("Upload certificate signing request file"),
+        file
+      );
+      expect(
+        await within(dialog).findByLabelText(/Certificate signing request/)
+      ).toHaveValue(csrPem);
+      await userEvent.click(within(dialog).getByRole("button", { name: "Sign" }));
+      await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(2));
+      const uploadedBody = apiMock.post.mock.calls[1][1];
+
+      expect(uploadedBody).toEqual(pastedBody);
+      expect(pastedBody).toEqual({
+        issuer_ca_id: "ca1",
+        csr_pem: csrPem,
+        cert_type: "User",
+        validity_days: 365,
+      });
+      expect(apiMock.post.mock.calls[0][0]).toBe("/api/v1/certificates/sign-csr");
+    });
+
+    it("shows the server's 400 verbatim", async () => {
+      mockGetRoutes();
+      apiMock.post.mockRejectedValue(
+        new Error(
+          "AXIAM signs Ed25519 and RSA-4096 keys; this request carries Rsa2048"
+        )
+      );
+      renderWithProviders(<CertificatesPage />);
+      await userEvent.click(await screen.findByRole("button", { name: /Sign a CSR/ }));
+      const dialog = screen.getByRole("dialog");
+      await userEvent.type(
+        within(dialog).getByLabelText(/Certificate signing request/),
+        csrPem
+      );
+      await userEvent.click(within(dialog).getByRole("button", { name: "Sign" }));
+      expect(
+        await screen.findByText(
+          "AXIAM signs Ed25519 and RSA-4096 keys; this request carries Rsa2048"
+        )
+      ).toBeInTheDocument();
+    });
+
+    it("goes straight to the certificate view on success, never the private-key reveal", async () => {
+      mockGetRoutes();
+      apiMock.post.mockResolvedValue(
+        res({ ...certs[0], id: "c60", subject: "CN=csr-issued" })
+      );
+      renderWithProviders(<CertificatesPage />);
+      await userEvent.click(await screen.findByRole("button", { name: /Sign a CSR/ }));
+      const dialog = screen.getByRole("dialog");
+      await userEvent.type(
+        within(dialog).getByLabelText(/Certificate signing request/),
+        csrPem
+      );
+      await userEvent.click(within(dialog).getByRole("button", { name: "Sign" }));
+
+      const viewDialog = await screen.findByRole("dialog");
+      expect(within(viewDialog).getAllByText("CN=csr-issued").length).toBeGreaterThan(0);
+      expect(
+        within(viewDialog).getByRole("button", { name: /Certificate \(\.crt\)/ })
+      ).toBeInTheDocument();
+      // There is no key to reveal — this endpoint never generated one — so the
+      // secret modal must never have been reachable on this path.
+      expect(screen.queryByText("Certificate Generated")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("I've saved this information")
+      ).not.toBeInTheDocument();
+    });
+  });
 });

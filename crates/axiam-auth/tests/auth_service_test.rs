@@ -2,6 +2,7 @@
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::error::AuthError;
+use axiam_auth::mfa_methods::MfaMethodService;
 use axiam_auth::service::{AuthService, LoginInput, LoginResult, RefreshInput, VerifyMfaInput};
 use axiam_auth::token;
 use axiam_core::error::AxiamError;
@@ -19,7 +20,7 @@ use axiam_core::repository::{
 use axiam_db::repository::{
     SurrealFederationConfigRepository, SurrealFederationLinkRepository,
     SurrealOrganizationRepository, SurrealRefreshTokenRepository, SurrealSessionRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use axiam_test_support::{other_password, test_password};
 use chrono::{Duration, Utc};
@@ -194,6 +195,25 @@ async fn login_alice(
 // -----------------------------------------------------------------------
 // T2.1 — Login / logout tests
 // -----------------------------------------------------------------------
+
+/// The MFA reset moved off `AuthService` to
+/// [`MfaMethodService`], which holds the WebAuthn credential repository the
+/// reset must evict from (T-34). These tests still drive it through the same
+/// database the service under test uses, so what they assert about the user
+/// row and the sessions is unchanged.
+fn mfa_methods(
+    db: &Surreal<surrealdb::engine::local::Db>,
+) -> MfaMethodService<
+    SurrealUserRepository<surrealdb::engine::local::Db>,
+    SurrealWebauthnCredentialRepository<surrealdb::engine::local::Db>,
+    SurrealSessionRepository<surrealdb::engine::local::Db>,
+> {
+    MfaMethodService::new(
+        SurrealUserRepository::new(db.clone()),
+        SurrealWebauthnCredentialRepository::new(db.clone()),
+        SurrealSessionRepository::new(db.clone()),
+    )
+}
 
 #[tokio::test]
 async fn login_happy_path() {
@@ -1663,7 +1683,10 @@ async fn reset_mfa_clears_state_and_revokes_sessions() {
         .unwrap();
 
     // Now reset MFA.
-    svc.reset_mfa(tenant_id, user_id).await.unwrap();
+    mfa_methods(&db)
+        .reset_mfa(tenant_id, user_id)
+        .await
+        .unwrap();
 
     // Verify: user no longer has MFA enabled.
     let user_after = check_repo.get_by_id(tenant_id, user_id).await.unwrap();
@@ -1695,7 +1718,7 @@ async fn reset_mfa_clears_state_and_revokes_sessions() {
 
 #[tokio::test]
 async fn login_after_reset_requires_setup_again() {
-    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
         setup().await;
     let svc = AuthService::new(
         user_repo,
@@ -1708,7 +1731,10 @@ async fn login_after_reset_requires_setup_again() {
 
     // Enable MFA, then reset it.
     enable_mfa_for_alice(&svc, tenant_id, user_id).await;
-    svc.reset_mfa(tenant_id, user_id).await.unwrap();
+    mfa_methods(&db)
+        .reset_mfa(tenant_id, user_id)
+        .await
+        .unwrap();
 
     // Login with MFA enforced — should require setup again.
     let result = svc

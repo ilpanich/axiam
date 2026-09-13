@@ -281,6 +281,7 @@ NAMESPACES: dict[str, dict[str, Any]] = {
         "operations": [
             ("list", "GET", "/api/v1/certificates"),
             ("generate", "POST", "/api/v1/certificates"),
+            ("sign_csr", "POST", "/api/v1/certificates/sign-csr"),
             ("get", "GET", "/api/v1/certificates/{id}"),
             ("revoke", "POST", "/api/v1/certificates/{id}/revoke"),
         ],

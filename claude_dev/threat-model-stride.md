@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 266 |
-| **Mitigated / Open** | 253 / 13 |
+| **Threats identified** | 269 |
+| **Mitigated / Open** | 256 / 13 |
 | **Owner** | ilpanich |
 
 ---
@@ -415,6 +415,8 @@ Password and OPAQUE (RFC 9807) login, MFA (TOTP and WebAuthn, including username
 | T-229 | MFA verification TOTP / WebAuthn <br/>*Process* | S | A possession-only security key is accepted where possession alone must not be a complete login | High | Mitigated |
 | T-230 | MFA verification TOTP / WebAuthn <br/>*Process* | T | A relaxed user-verification policy silently weakens credentials enrolled under a stricter one | Medium | Mitigated |
 | T-260 | Login endpoints /auth/login + /auth/opaque/* <br/>*Process* | I | A bearer credential reaches stderr or the CI log through a derived `Debug` or a failing test's panic message | Medium | Mitigated |
+| T-267 | MFA verification TOTP / WebAuthn <br/>*Process* | E | A user lowers their own account below the tenant's MFA floor through self-service reset | High | Mitigated |
+| T-269 | MFA verification TOTP / WebAuthn <br/>*Process* | E | A setup token enrols a passkey on an account that already has a factor, or one the tenant's authenticator policy forbids | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -459,7 +461,11 @@ If any code path verifies a password without incrementing the failed-attempt cou
 
 If the intermediate MFA challenge token is accepted as a full session, or can be exchanged more than once, the second factor is bypassed.
 
-> The challenge token is a distinct, short-lived, single-use credential that only authorises the MFA verification call; it carries no API authority and is consumed on use.
+> The challenge token is a distinct, short-lived credential that only authorises the MFA verification call and carries no API authority. **Corrected and extended 2026-09-13 (M-5, not taken).** "Consumed on use" was the wrong word for what the code does and is worth stating precisely, because the imprecision is what a reader would rely on. What is consumed is the **TOTP step**: `verify_mfa` records `totp_last_used_step` under a compare-and-swap and refuses a code from a step already spent, so a captured challenge token cannot be replayed *with the same code*. The token itself carries no `jti` and nothing records that it was presented, so within its window it could be re-presented with a fresh code — which requires the authenticator, and therefore adds nothing an attacker holding the authenticator does not already have. The property T-32 is about holds; the mechanism is a step store, not a token store.
+>
+> **R-E, recorded as a known residual rather than closed.** The *setup* token (`purpose: "mfa_setup"`) is stateless in the same way and has no second factor behind it, because there is not one yet. Within its 300-second window a captured token lets a second party call `setup/enroll` — which replaces the pending secret — and then `confirm`, completing the login as the user; the WebAuthn twins added by M-3 have the same shape. The window is short, the token travels only under TLS and is delivered in a `403` body to the caller who authenticated, and after the legitimate completion the token is inert (`enroll` refuses a configured account, `confirm` needs the stored secret, and `setup/register/start` refuses an account with a factor). Severity is therefore low.
+>
+> M-5 would have added a `jti` and consumed it on the call that *chooses* the factor. It was assessed and **not taken**: there is no existing consumption store to reuse — T-32's is a step store, not a token store — so it needs a repository trait method, a SurrealDB implementation, a fifth repository on `AuthService` (already generic over four), and the enrol→confirm binding on both the TOTP and the WebAuthn pairs with their tests. That is more than the day the plan budgeted for it, for a low-severity window, and spending it here would have come out of C-3 or the SDK wave. It stays open as a follow-up, and the admin UI's comment describing the token as single-use has been corrected to say what is actually true.
 
 **T-33 — TOTP code replay inside its validity window**  
 `MFA verification TOTP / WebAuthn` (Process) · Spoofing · Medium · Mitigated
@@ -473,7 +479,33 @@ A code observed by a proxy or shoulder-surfer stays valid for the remainder of i
 
 MFA enrolment reset must exist for lost devices, but an attacker who reaches an admin account can use it to strip the second factor from any user.
 
-> Only org/tenant admins can reset MFA state; the reset is audited and raises an admin notification. Enrolment must be redone on next login before any resource is reachable.
+> Only org/tenant admins can reset MFA state; the reset is audited and raises an admin notification. Enrolment must be redone on next login before any resource is reachable. **Amended 2026-09-13 (M-1):** the reset now evicts **every** factor — the WebAuthn credentials as well as the TOTP secret — in the same call that clears `mfa_enabled` and revokes the sessions (`MfaMethodService::reset_mfa`, which is where it moved to so that it could). Until then it cleared the challenge and not the factor: the credential rows survived, the forced TOTP setup at the next login turned `mfa_enabled` back on, and `available_method_types` offered `webauthn` again off a count that had never reached zero — so an authenticator an administrator reset the account *because of* became a live second factor once more, with nobody having re-registered it. Covered by `reset_mfa_then_totp_setup_does_not_resurrect_the_old_passkey`.
+
+**T-267 — A user lowers their own account below the tenant's MFA floor through self-service reset**  
+`MFA verification TOTP / WebAuthn` (Process) · Elevation of privilege · High · Mitigated
+
+`POST /api/v1/users/{id}/reset-mfa` is self-service as well as administrative: a signed-in user could reset their own MFA with no fresh authentication, no password and no policy check. Under a tenant that enforces MFA this was the one path by which a user took their own account below the floor their administrator set — sessions are revoked, but the next password login hands out a setup token and whoever holds the password enrols a factor of their choosing. The per-method delete already refused to remove the last factor (`MfaCannotRemoveLastMethod`); the reset, which removes all of them at once, did not.
+
+> **M-2 (2026-09-13).** The self-service branch reads the caller's **own** tenant's effective settings — the tenant they live in, never the one they are acting on, the same rule `start_registration` applies for the same reason — and refuses with `403` and the error code `mfa_enforced` where `MfaPolicy::mfa_enforced` is true. Its own code rather than `authorization_denied`, because the caller holds every permission the action needs and only an administrator can act against the policy; the message names the administrator, and the admin UI renders it verbatim. The `users:admin` branch is unaffected — unlocking a user who lost their only factor is what the endpoint exists for, and an enforcing tenant is where it matters most. Where the tenant does not enforce MFA the self-service reset stays allowed: such a user was free to run at one factor anyway, so refusing them protects nothing (D-1). The settings read is propagated rather than defaulted to not-enforced, so a datastore failure is not the way the floor is escaped. Tests: `self_reset_is_refused_under_an_enforcing_tenant` (403, the code, and the factor still listed afterwards), `self_reset_still_works_where_mfa_is_optional`, `admin_reset_ignores_the_enforcement_flag`.
+>
+> **Residual, recorded rather than absorbed:** this refuses the reset, it does not require a *fresh* authentication for the self-service MFA changes that remain allowed (the per-method delete, and the reset itself under a non-enforcing tenant). That is D-1's rejected alternative and it is a separate piece of work — OPAQUE tenants have no password AXIAM can re-verify, and a recency requirement is the `max_age` machinery. It is listed as a follow-up in the plan's §8, not as an open entry here, because the property this threat is about — the tenant's floor cannot be lowered by the user it binds — now holds.
+
+**T-269 — A setup token enrols a passkey on an account that already has a factor, or one the tenant's authenticator policy forbids**  
+`MFA verification TOTP / WebAuthn` (Process) · Elevation of privilege · High · Mitigated
+
+Forced first-login enrolment offered **TOTP only**, so a tenant whose authenticator policy is built around security keys still had to hand every new user a TOTP app for their first login — the gap roadmap T14.1 and design §8c.1 both describe as "choose TOTP, passkey, or hardware key". Opening the WebAuthn registration ceremony to a setup token creates two ways to get it wrong. The token could add a factor to an account that already has one, so a captured token becomes a way to register an attacker's own authenticator onto an account whose owner has just finished enrolling. And the session-less ceremony could skip the attestation and user-verification policies the profile-page ceremony applies — the one path that runs before the user has a session would be the one path the policy does not reach.
+
+> **M-3 (2026-09-13).** `POST /auth/webauthn/setup/register/start` and `/finish` both decode the token with the same purpose-checked decoder the TOTP twins use: a `mfa_challenge`-purpose token, an expired one, and a session bearer are all `401`. Both then ask whether the account already has **any** factor and refuse with `400` — the same answer `setup/enroll` gives, because it is the same rule. The question is asked of `MfaMethodService`, not `AuthService`: it spans the TOTP secret *and* the WebAuthn credential rows, and a check that read only the TOTP half would let a captured token add a second passkey.
+>
+> Nothing about *what may register* differs from the profile-page ceremony. The attestation policy and the user-verification policy are read from the token's `tenant_id` — which for a setup token is the principal tenant, there being no session and so no selected tenant to confuse it with — and handed to the same `start_registration_for_policy`; `finish` runs the same `enforce_mds_freshness` and `finish_registration_for_policy`. T-229/T-230 hold here unchanged, and by construction rather than by a second implementation agreeing.
+>
+> The completion shares **one** session-issuance tail with the TOTP path, `complete_setup_token_login`, rather than a second copy: `basic-op-gap-plan.md` §4 lists every path that funnels through `create_session_and_tokens`, and that list is what makes "the OP session cookie is minted on every browser login" checkable. The evidence recorded matches what the WebAuthn *authentication* path records for the same credential kind — `pwd` for the password that earned the token, `hwk` or `swk` for the credential, `mfa` for the two distinct factors, and `user` **only** under a `Required` user-verification policy, the one setting that rejects a ceremony whose `UV` bit is clear. Under the default `Preferred` a PIN-less security key enrols perfectly well and proves presence only, and claiming verification for it would overstate the session to a relying party asking for it; `finish_authentication` declines it for exactly this reason. The session lands in `urn:axiam:acr:mfa` either way, through `mfa`, which `acr_for` accepts alone.
+>
+> One deliberate asymmetry with the profile-page `finish`: there, a failure to mark MFA required is logged and swallowed, because the credential exists and the page's own refresh corrects it. Here it **fails the request**. There is no profile page to correct it from — the user is mid-login — and handing them a session while the account still reads "no second factor" would send them through forced enrolment again at the next sign-in, with a credential already registered that `setup/register/start` would then refuse as a second factor.
+>
+> Both routes are CSRF-exempt and public, on the same grounds as `/mfa/setup/enroll` and `/setup/confirm` and for the opposite reason the profile-page registration pair is neither: their caller has no session and no `axiam_csrf` cookie to echo, and the only credential the endpoints accept travels in the request body. A site that could forge one of these would already have to hold the token, and a caller holding the token needs no forgery.
+>
+> **Residual, stated because it is a gap in the evidence and not in the control:** the ceremony cannot be completed in-process — it needs a real authenticator, which is why every pre-existing WebAuthn handler test stops at `finish` — so the AMR and ACR claims above are pinned by unit tests on the evidence function together with `acr_for`, and the refusals by HTTP tests, rather than by an end-to-end sign-in. The e2e suite mocks the ceremony, as it did before.
 
 **T-35 — Lockout weaponised to deny service to a known user**  
 `Lockout & rate limiting` (Process) · Denial of service · Medium · Mitigated
@@ -645,21 +677,21 @@ A removal is a Set-Cookie in its own right: the browser parses it and keeps the 
 
 Adding a TOTP authenticator made the next sign-in demand a second factor; adding a passkey or security key did not (W5-01). The mfa_enabled flag began life meaning “a confirmed TOTP secret exists” and was reused to mean “challenge this account” — two readings that agree only while TOTP is the sole factor. A WebAuthn-only account listed its credential on the profile page while a password alone still let the account straight in, and the disable-on-last-removal branch was unreachable because nothing had ever turned the flag on for such an account.
 
-> Fixed in 1.0.0-beta05: MfaMethodService::enable_after_enrollment runs when a WebAuthn registration completes, so a passkey is a factor from the moment it exists. The trap the fix had to avoid is pinned: every downstream reader tests mfa_enabled together with a stored TOTP secret, so setting the flag could have promoted an abandoned, unconfirmed TOTP enrollment into a live second factor — the pending secret is dropped rather than adopted, and an unconfirmed TOTP secret is never offered at sign-in. Removing the last passkey turns the requirement back off. Stated residual: if the flag write fails, the handler logs and continues, because the credential is already persisted and reporting the registration as failed would invite the user to register a second one. The user-verification policy those ceremonies run under became a tightening-only security setting in 1.0.0-beta09 (T-229, T-230).
+> Fixed in 1.0.0-beta05: MfaMethodService::enable_after_enrollment runs when a WebAuthn registration completes, so a passkey is a factor from the moment it exists. The trap the fix had to avoid is pinned: every downstream reader tests mfa_enabled together with a stored TOTP secret, so setting the flag could have promoted an abandoned, unconfirmed TOTP enrollment into a live second factor — the pending secret is dropped rather than adopted, and an unconfirmed TOTP secret is never offered at sign-in. Removing the last passkey turns the requirement back off. Stated residual: if the flag write fails, the handler logs and continues, because the credential is already persisted and reporting the registration as failed would invite the user to register a second one. The user-verification policy those ceremonies run under became a tightening-only security setting in 1.0.0-beta09 (T-229, T-230). **Amended 2026-09-13 (M-3):** `enable_after_enrollment` now also runs on the setup-token registration path, where the stated residual above is deliberately *not* taken — a failure there fails the request, because the user is mid-login and there is no profile page to correct the flag from. See T-269.
 
 **T-229 — A possession-only security key is accepted where possession alone must not be a complete login**  
 `MFA verification TOTP / WebAuthn` (Process) · Spoofing · High · Mitigated
 
 `webauthn-rs` hard-codes `UserVerificationPolicy::Required` on both passkey ceremonies, so a security key with no PIN — which can prove user *presence* but never user *verification* — was refused at the finish step against a policy that existed nowhere an operator could see or change, and the refusal read as a hardware fault because a PIN-protected key on the same account worked. Making user verification configurable is the right answer, and it opens the hazard this threat records: a relaxed policy applied indiscriminately would let a PIN-less key satisfy the usernameless sign-in path, where the credential is the only factor and mere possession of the token would then be a complete login; and a policy the browser is not told about leaves a browser that does not prompt facing a server that rejects the answer, or the reverse.
 
-> Fixed in 1.0.0-beta09. `webauthn_user_verification` is a security setting in the same hierarchical model as the OPAQUE and privacy settings: an organization baseline every tenant inherits and may only make stricter, ordered `required > preferred > discouraged` — it can join that model, unlike the attestation policy, because it is totally ordered, which is exactly what the tighten-only override check needs. The default is `preferred`, not `required`, because nobody chose `required`: it was a library constant, and backfilling it would have preserved the bug rather than an intent; `preferred` accepts a security key whether or not it has a PIN and records which happened, so tightening later is a policy change rather than a re-enrolment. Two ceremonies deliberately do not follow the setting: **usernameless sign-in keeps `required`**, so a PIN-less key is a working second factor and never a passwordless one, and attested registration keeps the `required` that `webauthn-rs` imposes, on a path that already excludes synchronised authenticators and hybrid flows. The policy is applied in both places it has to be — the challenge, which decides whether the browser prompts for a PIN, and the ceremony state, which decides what the server accepts — and because the state's policy field is private with no builder, it is re-stamped in the serialization this crate already performs on the way into the state-token JWT, failing loudly rather than silently if upstream's shape changes, with a test that pins that shape against the real library so a patch release cannot turn the re-stamp into a no-op. The organization and tenant settings requests carry the field in `openapi.json` and in the eleven SDKs' §27 management surfaces (T-235).
+> Fixed in 1.0.0-beta09. `webauthn_user_verification` is a security setting in the same hierarchical model as the OPAQUE and privacy settings: an organization baseline every tenant inherits and may only make stricter, ordered `required > preferred > discouraged` — it can join that model, unlike the attestation policy, because it is totally ordered, which is exactly what the tighten-only override check needs. The default is `preferred`, not `required`, because nobody chose `required`: it was a library constant, and backfilling it would have preserved the bug rather than an intent; `preferred` accepts a security key whether or not it has a PIN and records which happened, so tightening later is a policy change rather than a re-enrolment. Two ceremonies deliberately do not follow the setting: **usernameless sign-in keeps `required`**, so a PIN-less key is a working second factor and never a passwordless one, and attested registration keeps the `required` that `webauthn-rs` imposes, on a path that already excludes synchronised authenticators and hybrid flows. The policy is applied in both places it has to be — the challenge, which decides whether the browser prompts for a PIN, and the ceremony state, which decides what the server accepts — and because the state's policy field is private with no builder, it is re-stamped in the serialization this crate already performs on the way into the state-token JWT, failing loudly rather than silently if upstream's shape changes, with a test that pins that shape against the real library so a patch release cannot turn the re-stamp into a no-op. The organization and tenant settings requests carry the field in `openapi.json` and in the eleven SDKs' §27 management surfaces (T-235). **Amended 2026-09-13 (M-3):** forced first-login enrolment can now register a passkey or a security key, and it reads both this policy and the attestation policy from the same places the profile-page ceremony does and hands them to the same functions — so the session-less path is governed by exactly the same settings rather than by a second implementation that agrees with them. See T-269.
 
 **T-230 — A relaxed user-verification policy silently weakens credentials enrolled under a stricter one**  
 `MFA verification TOTP / WebAuthn` (Process) · Tampering · Medium · Mitigated
 
 A policy that governed how a credential is *used* rather than how it was *enrolled* would let an administrator downgrade every existing passkey at a stroke. The settings write that could do it is a `PUT` that replaces the whole row, so a client that simply omitted the new field would relax an organization that had set `required` without anyone choosing to — the quiet path by which a stricter posture is lost.
 
-> Fixed in 1.0.0-beta09. No existing credential is weakened: `webauthn-rs` records the policy a credential was registered under and demands user verification at authentication whenever *either* that or the current policy says `required`, so every credential enrolled before this change carries the old hard-coded `required` for the rest of its life and the setting governs new enrolments only. Schema v53 adds the column with `DEFAULT 'preferred'` and backfills rows that predate it. The admin UI sends the field explicitly on the organization settings `PUT`, and it is a required field in the request type on purpose — a test fixture that has to be updated is exactly the friction that buys. `docs/admin/authenticator-policies.md` states the ordering, the two ceremonies that ignore the setting, and the per-credential rule.
+> Fixed in 1.0.0-beta09. No existing credential is weakened: `webauthn-rs` records the policy a credential was registered under and demands user verification at authentication whenever *either* that or the current policy says `required`, so every credential enrolled before this change carries the old hard-coded `required` for the rest of its life and the setting governs new enrolments only. Schema v53 adds the column with `DEFAULT 'preferred'` and backfills rows that predate it. The admin UI sends the field explicitly on the organization settings `PUT`, and it is a required field in the request type on purpose — a test fixture that has to be updated is exactly the friction that buys. `docs/admin/authenticator-policies.md` states the ordering, the two ceremonies that ignore the setting, and the per-credential rule. **Amended 2026-09-13 (M-3):** the forced first-login ceremony follows the setting, like the profile-page one and unlike those two; it is also the one place AXIAM reads the setting to decide what to *claim* rather than what to accept — `user` is recorded in the session's `amr` only under `required`, the one value that guarantees verification happened (T-269).
 
 **T-260 — A bearer credential reaches stderr or the CI log through a derived `Debug` or a failing test's panic message**  
 `Login endpoints /auth/login + /auth/opaque/*` (Process) · Information disclosure · Medium · Mitigated
@@ -1586,6 +1618,7 @@ Organization and tenant CA lifecycle with per-CA key custody (sealed database ro
 | T-198 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | S | Revoked or unflagged CA lingers in the mTLS trust-anchor bundle | Medium | Mitigated |
 | T-206 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | S | Certificate chaining to a CA never enabled as a trust anchor authenticates on the proxy path | High | Mitigated |
 | T-263 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | E | Accepting an unchained certificate for RFC 8705 §2.2 lets a self-minted certificate authenticate as a device or as a `tls_client_auth` client | Critical | Mitigated |
+| T-268 | Certificate issuance (rcgen, policy enforcement) <br/>*Process* | E | Leaf CSR signed with the requester's extensions, a weak key, or onto a key the requester does not hold | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1616,7 +1649,7 @@ The signing CA key allows forging any tenant, user, service or device identity i
 
 A CA or leaf key generated from a weak source is factorable or predictable, silently invalidating the whole hierarchy.
 
-> Key generation uses the platform CSPRNG — Ed25519 through rcgen/ring, RSA-4096 through the rsa crate's OS-seeded generator handed to rcgen as PKCS#8, since ring deliberately implements no RSA key generation (1.0.0-beta01). No custom or seeded RNG is used anywhere in the PKI path.
+> Key generation uses the platform CSPRNG — Ed25519 through rcgen/ring, RSA-4096 through the rsa crate's OS-seeded generator handed to rcgen as PKCS#8, since ring deliberately implements no RSA key generation (1.0.0-beta01). No custom or seeded RNG is used anywhere in the PKI path. **Extended 2026-09-13 (C-1):** a key AXIAM did not generate now reaches the PKI path, through `POST /api/v1/certificates/sign-csr`, where entropy is the caller's problem and *size* is AXIAM's. The CSR's modulus is measured and an RSA key below 4096 bits is refused, rather than mapped onto `KeyAlgorithm::Rsa4096` by the any-RSA-OID rule `parse_ca_certificate` applies to imported CAs — which would have signed a 2048-bit key and written 4096 on the row. See T-268.
 
 **T-97 — Certificate issued beyond the tenant's validity policy**  
 `Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · Medium · Mitigated
@@ -1744,7 +1777,7 @@ Flipping a stored entry's status reports directly in the datastore would let an 
 
 The tenant signing-CA endpoint signs a PKCS#10 request whose key was generated elsewhere. Honouring the request's own extensions would let a caller mint an unconstrained CA; skipping verification of the request's self-signature would mint a CA certificate for somebody else's public key.
 
-> The CSR's subject is honoured; its requested extensions are not — AXIAM states CA:TRUE, path length zero and keyCertSign/cRLSign itself, so a request that asked to be an unconstrained CA does not become one (1.0.0-alpha44). from_pem verifies the request's self-signature as proof of possession. The parent must be unexpired, unrevoked, key-holding and not itself tenant-scoped — refused up front rather than downstream — the intermediate's validity is capped to the parent's expiry, and the row records custody External because AXIAM never held the key.
+> The CSR's subject is honoured; its requested extensions are not — AXIAM states CA:TRUE, path length zero and keyCertSign/cRLSign itself, so a request that asked to be an unconstrained CA does not become one (1.0.0-alpha44). from_pem verifies the request's self-signature as proof of possession. **T-268 is the leaf twin of this entry** (2026-09-13), and the two now share one parse and one possession check in `ca::inspect_csr`; the leaf path refuses the extensions it cannot guarantee are dropped on every custodian, rather than stripping them as this one does — a CA has no SANs and a caller cannot have meant them here, while a leaf caller can and did. The parent must be unexpired, unrevoked, key-holding and not itself tenant-scoped — refused up front rather than downstream — the intermediate's validity is capped to the parent's expiry, and the row records custody External because AXIAM never held the key.
 
 **T-195 — One tenant's compromised issuance burns the organization trust anchor**  
 `Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · High · Mitigated
@@ -1752,6 +1785,25 @@ The tenant signing-CA endpoint signs a PKCS#10 request whose key was generated e
 When every tenant's user, service and device certificates issue straight from the organization CA, a compromised issuance path in one tenant is the whole estate's problem: the anchor is long-lived, widely distributed and painful to replace, and rotating it is a coordinated change at every relying party.
 
 > Tenant signing CAs (1.0.0-alpha44): an intermediate created beneath the organization CA, constrained to a path length of zero, named as issuer_ca_id when issuing for that tenant, its key held by the configured custodian — Vault where configured, even when the parent's key predates Vault adoption. Revoking it revokes exactly one tenant's issuance. Under vault_pki the signing chain deliberately reaches past the path-length-zero issuing intermediate to the root, because signing from the issuing intermediate would produce certificates Vault accepts and every chain validator rejects.
+
+**T-268 — Leaf CSR signed with the requester's extensions, a weak key, or onto a key the requester does not hold**  
+`Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · High · Mitigated
+
+`POST /api/v1/certificates/sign-csr` issues an end-entity certificate over a public key supplied by the caller — the point being a private key AXIAM never sees. Three things a naive implementation gets wrong. It signs a request whose signature it never checked, minting a certificate over somebody else's public key. It honours the extensions the request asks for, so a CSR saying `CA:TRUE` and `keyCertSign` becomes a CA that can sign anything under the tenant's trust anchor — the leaf twin of T-194. And it records the key algorithm the caller states rather than the one the key is, so an RSA-2048 key is signed and written down as `Rsa4096` (T-96, on the leaf path).
+
+> **C-1 (2026-09-13).** `ca::inspect_csr` parses the request **once**, verifies its self-signature before anything else — the only proof the sender holds the matching private key — and reports the subject, the key and the requested extensions from that single parse. Three functions each doing their own parse would have verified possession up to three times on the way to three answers, and would have let a future caller reach one fact without having verified anything.
+>
+> The key must be Ed25519, or RSA with a **measured** modulus of at least 4096 bits. `KeyAlgorithm::Rsa4096` is a label and not a measurement — `parse_ca_certificate` maps any RSA OID onto it deliberately, so an imported root of another size stays usable — and reusing that mapping here is exactly how T-96 would reappear.
+>
+> A CSR requesting `subjectAltName`, `keyUsage` or `extendedKeyUsage` is refused **by name** rather than silently stripped; every other requested extension is discarded when rcgen's parameter set is overwritten with the shared `leaf_params`, the same function `CertService::generate` builds a generated leaf from — so "a CSR-signed leaf is the same shape as a generated one" is true because one function says what the shape is, not because two agree. `basicConstraints` needs no rule: the in-process path overwrites it and Vault ignores it outright, so a CSR asking to be a CA comes back a leaf on both.
+>
+> **The `keyUsage` refusal is load-bearing under `vault_pki`, and this is the finding that shaped the design.** The plan expected to state `key_usage`/`ext_key_usage` in the Vault request body and get parity that way. Vault's own API documentation is explicit that `sign-verbatim` **discards** those parameters whenever the CSR carries the matching extensions, and issues what the CSR asked for. So the parameters alone guarantee nothing, and a silent strip would have been a promise AXIAM keeps on a database-custody deployment and breaks on a Vault one, for the same CSR. Refusing in the shared inspection makes one rule that holds on every custodian. Having refused them, the Vault body *also* states both as empty, so the shape is AXIAM's decision rather than whichever default the Vault version in front of it carries (`DigitalSignature`, `KeyAgreement`, `KeyEncipherment`) — neither half is sufficient alone.
+>
+> The issuer, the tenant scope and the validity come from the same `prepare_leaf_issuance` the generate path uses, so a revoked CA, an expired one, one in another organization (T-98) and a certificate that would outlive its issuer are refused identically on both. The permission is `certificates:generate`, following `signing-cas/sign-csr`'s reuse of `ca_certificates:generate`: a caller allowed to mint a certificate under a CA is allowed to mint one for a key they already hold, and this path is the less powerful of the two. No private key exists here, so the response type has no field for one (T-99, T-105 hold by construction).
+>
+> Tests: twenty in `crates/axiam-pki/tests/sign_csr_test.rs`, one per rule; three against the Vault mock in `vault_pki_test.rs`, including one asserting the exact request body AXIAM sends and one proving a `keyUsage`-requesting CSR never reaches Vault at all; four at the HTTP layer in `certificate_test.rs`; and `a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one` in `mtls_test.rs`, which is the property the feature exists for.
+>
+> **Residual.** What Vault does with the body is documented rather than observed: the tests here run against a mock, and a real Vault was not available. The security property does not rest on that — it rests on the refusal, which is enforced before any custodian is chosen — but the cosmetic parity of the key-usage extension under `vault_pki` is the part taken on the documentation's word.
 
 **T-196 — Vault configured, CA keys silently sealed into database rows**  
 `ca_certificate (sealed row or Vault custody)` (Store) · Information disclosure · High · Mitigated
@@ -2563,7 +2615,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-13 of 266 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. The one entry that did sit on the request path, T-254's refresh-rotation grace window, was closed by the maintainer's decision of 2026-09-12 and is no longer listed here; the two that sat on the token service and on the SDK guard since the first version of this model, T-39 and T-143, closed together on 2026-09-13 when the revocation feed gained a poller in every SDK, and are recorded under *Closed at 1.0.0-beta14* below. They are listed most severe first.
+13 of 269 threats remain open. None of them is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. The one entry that did sit on the request path, T-254's refresh-rotation grace window, was closed by the maintainer's decision of 2026-09-12 and is no longer listed here; the two that sat on the token service and on the SDK guard since the first version of this model, T-39 and T-143, closed together on 2026-09-13 when the revocation feed gained a poller in every SDK, and are recorded under *Closed at 1.0.0-beta14* below. They are listed most severe first.
 
 | # | Severity | Threat | Element | Why it is open |
 |---|---|---|---|---|
@@ -2638,14 +2690,14 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Repudiation | 6 |
 | Information disclosure | 65 |
 | Denial of service | 24 |
-| Elevation of privilege | 48 |
+| Elevation of privilege | 51 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 30 | 1 |
-| High | 122 | 8 |
+| High | 125 | 8 |
 | Medium | 106 | 3 |
 | Low | 8 | 1 |
 
@@ -2654,11 +2706,11 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Diagram | Threats | Open |
 |---|---|---|
 | System diagram | 31 | 2 |
-| Authentication & session management | 33 | 0 |
+| Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 47 | 0 |
 | Federation — SAML SP & OIDC relying party | 31 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 26 | 0 |
-| PKI, certificates & IoT device identity | 25 | 1 |
+| PKI, certificates & IoT device identity | 26 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
 | Deployment & platform (Kubernetes) | 27 | 5 |
 | Client SDKs & admin UI integration surface | 28 | 3 |

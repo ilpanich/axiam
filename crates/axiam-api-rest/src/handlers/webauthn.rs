@@ -41,6 +41,30 @@ pub struct FinishRegistrationRequest {
     pub response: RegisterPublicKeyCredential,
 }
 
+/// Body of `POST /api/v1/auth/webauthn/setup/register/start`.
+///
+/// The setup token is the **only** credential: this endpoint takes no session,
+/// exactly as `POST /auth/mfa/setup/enroll` takes none (contract §25.2 rule 1).
+/// A caller in the middle of a forced first-login enrolment has no session to
+/// present — that is the situation the token exists for.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SetupRegisterStartRequest {
+    pub setup_token: String,
+}
+
+/// Body of `POST /api/v1/auth/webauthn/setup/register/finish`.
+///
+/// [`FinishRegistrationRequest`] plus the setup token, for the same reason:
+/// there is no session to identify the account with.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SetupRegisterFinishRequest {
+    pub setup_token: String,
+    pub state_token: String,
+    pub credential_name: String,
+    #[schema(value_type = Object)]
+    pub response: RegisterPublicKeyCredential,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CredentialResponse {
     pub id: Uuid,
@@ -461,6 +485,270 @@ pub async fn finish_registration<C: Connection + Clone>(
     }))
 }
 
+// -------------------------------------------------------------------
+// Forced first-login enrolment: a passkey or security key as the FIRST factor
+// (M-3, T-269)
+// -------------------------------------------------------------------
+
+/// Everything both setup-token registration endpoints must establish before
+/// touching a ceremony.
+///
+/// Three things, and each is a rule the endpoint states:
+///
+/// 1. **The token is a setup token**, not an MFA challenge token and not a
+///    session bearer. `decode_setup_token` checks the `purpose` claim and the
+///    expiry; anything else is a `401`. The token is the only credential here,
+///    as §25.2 says it is for the TOTP twins.
+/// 2. **The account has no factor yet.** A setup token adds a *first* factor,
+///    never a second — the same answer `setup/enroll` gives
+///    (`MfaAlreadyConfigured`). Asked of `MfaMethodService`, which sees the
+///    TOTP secret and the WebAuthn credential rows; `AuthService` holds only
+///    the first, and a check that read only the TOTP half would let a captured
+///    token add a second passkey to an account that already had one.
+/// 3. **Which tenant's policy governs.** For a setup token the token's own
+///    `tenant_id` *is* the principal tenant — there is no session and so no
+///    selected tenant to confuse it with — but the reason it is the right one
+///    is the same reason `start_registration` gives: the policy that governs a
+///    credential is the policy of the tenant the credential is stored in.
+async fn setup_token_registration_context<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    setup_token: &str,
+) -> Result<(Uuid, Uuid, Uuid), AxiamApiError> {
+    let (user_id, tenant_id, org_id) = state
+        .auth_service
+        .decode_setup_token(setup_token)
+        .map_err(AxiamApiError)?;
+
+    let existing = state
+        .mfa_method_service
+        .available_method_types(tenant_id, user_id)
+        .await?;
+    if !existing.is_empty() {
+        return Err(AxiamApiError(
+            axiam_auth::error::AuthError::MfaAlreadyConfigured.into(),
+        ));
+    }
+
+    Ok((user_id, tenant_id, org_id))
+}
+
+/// `POST /api/v1/auth/webauthn/setup/register/start`
+///
+/// Begin registering a passkey or security key as the **first** factor, during
+/// a forced first-login enrolment. The setup-token twin of
+/// `POST /auth/webauthn/register/start`, which needs a session this caller does
+/// not have.
+///
+/// Nothing about *what may register* differs from the profile-page ceremony:
+/// the tenant's attestation policy and its user-verification policy are read
+/// from the same places and passed to the same function. A tenant that excludes
+/// synced passkeys excludes them here too, and a tenant that requires user
+/// verification requires it here too (T-229/T-230).
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/webauthn/setup/register/start",
+    tag = "webauthn",
+    request_body = SetupRegisterStartRequest,
+    responses(
+        (status = 200, description = "Registration ceremony started",
+         body = StartRegistrationResponse),
+        (status = 401, description = "The setup token is missing, expired, or \
+                                      not a setup token"),
+        (status = 403, description = "Denied by the tenant's attestation policy"),
+        (status = 400, description = "This account already has an MFA factor — a \
+                                      setup token adds the first one, never a second. \
+                                      The same answer POST /auth/mfa/setup/enroll gives \
+                                      for the same reason."),
+    )
+)]
+pub async fn setup_start_registration<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
+    body: web::Json<SetupRegisterStartRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let b = body.into_inner();
+    let (user_id, tenant_id, org_id) =
+        setup_token_registration_context(&state, &b.setup_token).await?;
+
+    let policy = state
+        .webauthn
+        .webauthn_attestation_policy_repo
+        .get_by_tenant(tenant_id)
+        .await?
+        .unwrap_or_default();
+
+    let user_verification = state
+        .settings_repo
+        .get_effective_settings(org_id, tenant_id)
+        .await?
+        .webauthn
+        .webauthn_user_verification;
+
+    let (challenge, state_token) = state
+        .webauthn
+        .webauthn_service
+        .start_registration_for_policy(
+            tenant_id,
+            org_id,
+            user_id,
+            &user_id.to_string(),
+            &policy,
+            user_verification,
+            &state.webauthn.attestation_metadata_source,
+            &state.webauthn.attestation_ca_cache,
+        )
+        .await?;
+
+    Ok(HttpResponse::Ok().json(StartRegistrationResponse {
+        challenge,
+        state_token,
+    }))
+}
+
+/// `POST /api/v1/auth/webauthn/setup/register/finish`
+///
+/// Complete the registration and, with it, the login the forced enrolment
+/// interrupted — the setup-token twin of `POST /auth/mfa/setup/confirm`. Sets
+/// the same three cookies and returns the same `LoginSuccessResponse` body,
+/// because it is the same event: a first factor was enrolled and the sign-in
+/// that demanded it now completes.
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/webauthn/setup/register/finish",
+    tag = "webauthn",
+    request_body = SetupRegisterFinishRequest,
+    responses(
+        (status = 200,
+         description = "Credential registered and login complete. Sets the \
+                        axiam_access, axiam_refresh and axiam_csrf cookies and \
+                        echoes the CSRF token in X-CSRF-Token, exactly as POST \
+                        /api/v1/auth/mfa/setup/confirm does.",
+         body = crate::handlers::auth::LoginSuccessResponse),
+        (status = 401, description = "The setup token is missing, expired, or \
+                                      not a setup token; or the ceremony failed"),
+        (status = 403, description = "Denied by the tenant's attestation policy"),
+        (status = 400, description = "This account already has an MFA factor"),
+    )
+)]
+pub async fn setup_finish_registration<C: Connection + Clone>(
+    req: HttpRequest,
+    state: web::Data<AppState<C>>,
+    body: web::Json<SetupRegisterFinishRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let b = body.into_inner();
+    let (user_id, tenant_id, _org_id) =
+        setup_token_registration_context(&state, &b.setup_token).await?;
+
+    let policy = state
+        .webauthn
+        .webauthn_attestation_policy_repo
+        .get_by_tenant(tenant_id)
+        .await?
+        .unwrap_or_default();
+
+    enforce_mds_freshness(&state, &policy, tenant_id, user_id).await?;
+
+    let cred = state
+        .webauthn
+        .webauthn_service
+        .finish_registration_for_policy(
+            tenant_id,
+            user_id,
+            &b.state_token,
+            &b.credential_name,
+            &b.response,
+            &policy,
+            &state.webauthn.attestation_metadata_source,
+            &state.webauthn.attestation_ca_cache,
+        )
+        .await?;
+
+    // Unlike `finish_registration`, a failure here **is** the request's
+    // failure. There, the credential is registered from a profile page the user
+    // is already signed in to, so leaving `mfa_enabled` off is a state the next
+    // enrolment or the page's own refresh corrects. Here there is no profile
+    // page to correct it from: the user is mid-login, and handing them a
+    // session while the account still reads "no second factor" would send them
+    // through forced enrolment again at the next sign-in, with a credential
+    // already registered that `setup/register/start` would then refuse as a
+    // second factor. Better to fail the request and let them retry the
+    // ceremony.
+    state
+        .mfa_method_service
+        .enable_after_enrollment(tenant_id, user_id)
+        .await?;
+
+    // The tenant's user-verification policy decides whether `user` is
+    // truthful, and it is read again rather than carried from `start`: the
+    // claim is about what this ceremony proved, and the policy in force when it
+    // finished is what `finish_registration_for_policy` just enforced.
+    let user_verification = state
+        .settings_repo
+        .get_effective_settings(_org_id, tenant_id)
+        .await?
+        .webauthn
+        .webauthn_user_verification;
+
+    let out = state
+        .auth_service
+        .complete_setup_token_login(
+            &b.setup_token,
+            AuthenticationEvidence::now(setup_registration_amr(
+                cred.credential_type,
+                user_verification,
+            )),
+            client_ip(&req),
+            user_agent(&req),
+        )
+        .await?;
+
+    crate::handlers::auth::cookie_response_from_output(
+        &out,
+        &state.auth_config,
+        &state.user_repo,
+        &state.tenant_repo,
+        &state.org_repo,
+    )
+    .await
+}
+
+/// What a forced-enrolment WebAuthn sign-in actually proved (RFC 8176).
+///
+/// Deliberately the same shape as `finish_authentication`'s list, and
+/// deliberately *not* more generous than it:
+///
+/// - **`pwd`** — a setup token is minted only by a login that verified a
+///   password (or an OPAQUE `KE3`, which is the same proof), so the password
+///   factor is as real here as it is on the challenge-token path.
+/// - **`hwk` / `swk`** — possession of the authenticator just registered.
+///   Which one follows the credential type the registration recorded rather
+///   than anything the client claimed.
+/// - **`mfa`** — two distinct factors in one authentication, which is what
+///   RFC 8176 §2 reserves this value for, and what puts the resulting session
+///   in `urn:axiam:acr:mfa` (`acr_for`: `mfa` alone is sufficient).
+/// - **`user`** — claimed **only** under [`WebauthnUserVerification::Required`],
+///   which is the one setting that rejects a ceremony whose `UV` bit is clear.
+///   Under the default `Preferred` a PIN-less security key enrols perfectly
+///   well and proves presence only; claiming verification for it would overstate
+///   the session's assurance, and `acr_for` reads `hwk` + `user` as
+///   multi-factor on its own. `finish_authentication` declines it for exactly
+///   this reason and says so.
+fn setup_registration_amr(
+    credential_type: WebauthnCredentialType,
+    user_verification: axiam_core::models::webauthn_policy::WebauthnUserVerification,
+) -> Vec<Amr> {
+    use axiam_core::models::webauthn_policy::WebauthnUserVerification;
+
+    let possession = match credential_type {
+        WebauthnCredentialType::Passkey => Amr::Swk,
+        WebauthnCredentialType::SecurityKey => Amr::Hwk,
+    };
+    let mut amr = vec![Amr::Pwd, possession, Amr::Mfa];
+    if user_verification == WebauthnUserVerification::Required {
+        amr.push(Amr::User);
+    }
+    amr
+}
+
 /// `POST /api/v1/auth/webauthn/authenticate/start`
 ///
 /// Begin a WebAuthn passkey authentication ceremony.  Requires a
@@ -792,6 +1080,115 @@ pub async fn finish_authentication<C: Connection + Clone>(
 // -------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------
+
+#[cfg(test)]
+mod setup_registration_evidence_tests {
+    use super::*;
+    use axiam_core::models::webauthn_policy::WebauthnUserVerification;
+    use axiam_oauth2::acr::{Acr, acr_for};
+
+    // M-3 rule 4. The ceremony itself cannot be driven in-process — it needs a
+    // real authenticator, which is why every existing WebAuthn handler test
+    // covers the refusal paths and stops at `finish`. What *can* be pinned, and
+    // is the part a mistake would be silent in, is the evidence the completion
+    // records and the assurance class that evidence lands in.
+
+    #[test]
+    fn a_forced_enrolment_session_is_multi_factor_for_every_policy_and_kind() {
+        // The property the plan states: whatever was enrolled and whatever the
+        // tenant's user-verification policy, the session this completes must be
+        // `urn:axiam:acr:mfa`. It is — through `mfa`, which RFC 8176 §2
+        // reserves for exactly this and which `acr_for` accepts on its own —
+        // and not through the `hwk`+`user` route, which a `preferred` tenant
+        // would not reach.
+        for kind in [
+            WebauthnCredentialType::Passkey,
+            WebauthnCredentialType::SecurityKey,
+        ] {
+            for uv in [
+                WebauthnUserVerification::Discouraged,
+                WebauthnUserVerification::Preferred,
+                WebauthnUserVerification::Required,
+            ] {
+                let amr = setup_registration_amr(kind.clone(), uv);
+                assert_eq!(
+                    acr_for(&amr),
+                    Acr::MultiFactor,
+                    "a password plus a freshly registered {kind:?} under {uv:?} \
+                     is two distinct factors",
+                    kind = kind.clone()
+                );
+                assert!(
+                    amr.contains(&Amr::Pwd),
+                    "the setup token descends from a password"
+                );
+                assert!(amr.contains(&Amr::Mfa));
+            }
+        }
+    }
+
+    #[test]
+    fn the_possession_factor_follows_the_credential_kind() {
+        assert!(
+            setup_registration_amr(
+                WebauthnCredentialType::SecurityKey,
+                WebauthnUserVerification::Preferred
+            )
+            .contains(&Amr::Hwk),
+            "a security key is hardware-secured: RFC 8176 `hwk`"
+        );
+        assert!(
+            setup_registration_amr(
+                WebauthnCredentialType::Passkey,
+                WebauthnUserVerification::Preferred
+            )
+            .contains(&Amr::Swk),
+            "a platform passkey is software-secured: RFC 8176 `swk`"
+        );
+    }
+
+    #[test]
+    fn user_verification_is_claimed_only_where_the_policy_guarantees_it() {
+        // The one setting that rejects a ceremony with the UV bit clear is
+        // `Required`. Under `Preferred` — the default — a PIN-less security key
+        // enrols perfectly well and proves presence only, so claiming `user`
+        // would overstate what the session is worth to a relying party asking
+        // for it. `finish_authentication` declines it for the same reason.
+        assert!(
+            setup_registration_amr(
+                WebauthnCredentialType::SecurityKey,
+                WebauthnUserVerification::Required
+            )
+            .contains(&Amr::User)
+        );
+        for uv in [
+            WebauthnUserVerification::Preferred,
+            WebauthnUserVerification::Discouraged,
+        ] {
+            assert!(
+                !setup_registration_amr(WebauthnCredentialType::SecurityKey, uv)
+                    .contains(&Amr::User),
+                "{uv:?} does not guarantee user verification happened"
+            );
+        }
+    }
+
+    #[test]
+    fn the_evidence_matches_what_the_authentication_path_records() {
+        // `finish_authentication` records `[pwd, hwk, mfa]` for a security key
+        // under the default policy. A forced first-login enrolment proves the
+        // same two factors in the same order, so it records the same thing —
+        // a session issued by one path and a session issued by the other are
+        // worth the same to every reader of `amr`.
+        assert_eq!(
+            setup_registration_amr(
+                WebauthnCredentialType::SecurityKey,
+                WebauthnUserVerification::Preferred
+            ),
+            vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

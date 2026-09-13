@@ -156,8 +156,11 @@ pub type AuthServiceT<C> = AuthService<
 
 pub type WebauthnServiceT<C> = WebauthnService<axiam_db::SurrealWebauthnCredentialRepository<C>>;
 
-pub type MfaMethodServiceT<C> =
-    MfaMethodService<SurrealUserRepository<C>, axiam_db::SurrealWebauthnCredentialRepository<C>>;
+pub type MfaMethodServiceT<C> = MfaMethodService<
+    SurrealUserRepository<C>,
+    axiam_db::SurrealWebauthnCredentialRepository<C>,
+    SurrealSessionRepository<C>,
+>;
 
 pub type CaServiceT<C> = CaService<axiam_db::SurrealCaCertificateRepository<C>>;
 
@@ -562,8 +565,11 @@ impl<C: Connection + Clone> AppState<C> {
         let webauthn_service =
             WebauthnService::new(webauthn_cred_repo.clone(), auth_config.clone())
                 .expect("test WebauthnService construction");
-        let mfa_method_service =
-            MfaMethodService::new(user_repo.clone(), webauthn_cred_repo.clone());
+        let mfa_method_service = MfaMethodService::new(
+            user_repo.clone(),
+            webauthn_cred_repo.clone(),
+            session_repo.clone(),
+        );
         // Same resolution the composition root performs, from the same
         // function: two copies of "which custodian is the default" is how a
         // test suite ends up agreeing with itself and not with production.

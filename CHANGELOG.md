@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- An administrative MFA reset now removes a user's passkeys and security keys,
+  not only their TOTP secret (M-1, T-34). The reset previously cleared
+  `mfa_enabled` and the secret and left every registered WebAuthn credential in
+  place, so the authenticator an administrator reset the account over came back
+  as a live second factor at the next login — the forced TOTP setup turned the
+  flag on again and the credential count had never been zero. Operators who
+  reset an account because a key was lost or suspected compromised should know
+  that, before this release, the key still worked.
+
+- A user can no longer take their own account below their tenant's MFA floor
+  (M-2, T-267). `POST /users/{own id}/reset-mfa` is refused with `403` and the
+  error code `mfa_enforced` where the caller's tenant enforces MFA; an
+  administrator resets it for them. `users:admin` is unaffected, and where the
+  tenant does not enforce MFA the self-service reset still works — such a user
+  was free to run at one factor anyway. Contract §5.2 rule 4 carries the rule
+  for SDKs.
+
+### Added
+
+- **A certificate for a key AXIAM never sees.** `POST /api/v1/certificates/sign-csr`
+  issues an end-entity certificate from an uploaded PKCS#10 request, so a key
+  can be born in an HSM, an offline ceremony or a device's own secure element
+  and never cross the wire in either direction (C-1, T-268). The response is a
+  `Certificate` and carries no key field, because there is no key to carry.
+  Permission `certificates:generate`, the same as generation — a caller allowed
+  to mint a certificate under a CA is allowed to mint one for a key they
+  already hold, and this path is the less powerful of the two.
+
+  What AXIAM decides rather than the request: possession is proved by the
+  request's own signature; the key must be Ed25519 or RSA with a measured
+  modulus of at least 4096 bits; a request asking for a `subjectAltName`,
+  `keyUsage` or `extendedKeyUsage` is refused by name rather than silently
+  stripped, and every other requested extension is discarded. A CSR asking to
+  be a CA comes back a leaf. A CSR-signed certificate is byte-for-byte the same
+  shape as a generated one, and binds and authenticates over mTLS identically.
+
+  Contract 1.45 adds `certificates.sign_csr` to the §27 management surface,
+  taking it from 159 operations to 160. The admin UI's Certificates page gains
+  a **Sign a CSR** action that takes the request as a paste or a file upload
+  (C-2).
+
+- **A passkey or a security key can be the first factor.** Forced first-login
+  enrolment under a tenant that requires MFA offered TOTP only, so a tenant
+  whose authenticator policy is built around security keys still had to hand
+  every new user a TOTP app to get in (M-3, T-269). `POST
+  /api/v1/auth/webauthn/setup/register/start` and `/finish` run the same
+  registration ceremony from the same setup token, under the same attestation
+  and user-verification policies as the profile page's, and `finish` completes
+  the interrupted login exactly as `POST /auth/mfa/setup/confirm` does. The
+  setup page now offers the choice. A setup token still adds an account's
+  **first** factor and never a second: an account that already has one is
+  refused, as it is on the TOTP path.
+
+  Contract 1.45 adds `webauthn_setup_register_start` and
+  `webauthn_setup_register_finish` to §24 and §25; the §27 management surface is
+  unchanged, since the `webauthn` tag is not part of it.
+
+### Changed
+
+- Forced first-login MFA enrolment now returns the user to the application
+  they were signing in to (M-4). A new user of an enforcing tenant who arrived
+  through an OAuth2 client's `/oauth2/authorize` hop finished enrolment in the
+  admin UI's dashboard instead of back at the relying party; the login hop's
+  `return_to` is now carried through the setup page and resumed, re-validated
+  at each hand-off.
+
+- `sdks/CONTRACT.md` moves to **1.45** (C-3), additive throughout: the §27
+  management surface's `certificates` namespace documents `sign_csr` and
+  states plainly that its response is not `GeneratedCertificate` — a type
+  whose key field is mandatory and would always be absent is a type that
+  lies about every value it holds; §24 and §25 document the two WebAuthn
+  setup-registration operations; and §5.2 rule 4 documents the self-service
+  `mfa_enforced` refusal. The Breaking Changes Log records the whole revision
+  as non-breaking: no existing operation, field, or error code changes
+  meaning, and a client built against 1.44 keeps working unchanged against a
+  1.45 server. `docs/pki/README.md` gains a "bring a CSR" walkthrough for
+  operators, and the website's PKI and MFA pages reflect the same additions.
+
+- The STRIDE threat model moves to **2.15.0** (C-3), reconciling the counts
+  T-267 (M-2), T-268 (C-1) and T-269 (M-3) moved: 269 threats identified, 256
+  mitigated and 13 open — the open count is unchanged, since all three land
+  Mitigated on arrival. `claude_dev/threat-model-stride.md`'s by-STRIDE,
+  by-severity and by-diagram tables are updated to match; the website's
+  generated threat-model views are regenerated at publish time from the same
+  model rather than carried here.
+
 ## [1.0.0-beta14] - 2026-09-13
 
 ### Added

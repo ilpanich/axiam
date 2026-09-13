@@ -1387,7 +1387,7 @@ Filled in as PRs are opened; `—` means not reached this session.
 | kotlin | — | — | — | — | — |
 | csharp | — | — | — | — | — |
 | php | — | — | — | — | — |
-| go | — | — | — | — | — |
+| go | yes | yes | yes | [#77](https://github.com/ilpanich/axiam-go-sdk/pull/77) | opened |
 | swift | — | — | — | — | — |
 | c | — | — | — | — | — |
 | cplusplus | — | — | — | — | — |

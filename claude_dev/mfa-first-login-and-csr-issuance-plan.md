@@ -1138,13 +1138,13 @@ Per repository, one branch named for this plan, one PR:
 |---|---|---|---|---|
 | rust | | | | |
 | typescript | | | | |
-| python | | | | |
+| python | yes | yes | [#81](https://github.com/ilpanich/axiam-python-sdk/pull/81) | drift (160), mypy --strict, ruff, interrogate 100%, **1578 tests**, coverage 98.54%, build+twine — all green locally |
 | java | | | | |
 | kotlin | | | | |
-| csharp | | | | |
-| php | | | | |
+| csharp | yes | yes | [#88](https://github.com/ilpanich/axiam-csharp-sdk/pull/88) | dotnet-sdk 8.0+10.0 from apt (§13.1 correction holds); drift (160), build 0 errors, **2370 tests** across both frameworks, vuln scan, pack — all green |
+| php | yes | yes | [#68](https://github.com/ilpanich/axiam-php-sdk/pull/68) | drift (160), WebauthnTest 28/28, Management 427/427, unit suite 1408 with the **unchanged** 65-failure require-dev baseline; phpstan/php-cs-fixer/integration CI-verified |
 | go | yes | yes | [#78](https://github.com/ilpanich/axiam-go-sdk/pull/78) | build, vet, gofmt, drift (160) and `go test ./...` 1032/1032 green locally; `buf generate` and `govulncheck` blocked by the sandbox proxy, CI-verified |
-| swift | yes | yes | [#61](https://github.com/ilpanich/axiam-swift-sdk/pull/61) | drift check + §6 TLS gate green locally; **compile and tests CI-verified only** — no Swift toolchain in the sandbox, re-tested and confirmed |
+| swift | yes | yes | [#61](https://github.com/ilpanich/axiam-swift-sdk/pull/61) | drift + §6 TLS gate green locally; compile/tests CI-verified only (no Swift toolchain) — **CI came back 7 jobs, 0 failed** |
 | c | yes | yes | [#60](https://github.com/ilpanich/axiam-c-sdk/pull/60) | 54/54 on gcc+clang × C11+C23 and under ASan/UBSan; valgrind clean but for a pre-existing TLS-timeout test unrelated to this change; conan recipe job CI-verified |
 | cplusplus | | | | |
 

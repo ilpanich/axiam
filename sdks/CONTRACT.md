@@ -1366,7 +1366,7 @@ As §21.9 and §21.10: an unrecorded row is not a supported answer, and
 | csharp | — |
 | php | — |
 | swift | — |
-| c | — |
+| c | yes — `axiam_client_enable_revocation_feed`, off by default |
 | cplusplus | — |
 
 ### §10.3 Sender-constrained tokens over gRPC (contract 1.17, normative)
@@ -4280,7 +4280,7 @@ the §21 client role has a call to prefer with; check §21.9 before reading a
 | csharp | — | — |
 | php | — | — |
 | swift | — | — |
-| c | — | — |
+| c | yes | yes |
 | cplusplus | — | — |
 
 A `—` means the row has not been filled in for that SDK yet and is **not** a

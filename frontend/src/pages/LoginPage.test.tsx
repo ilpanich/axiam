@@ -485,6 +485,47 @@ describe("LoginPage — credentials step", () => {
     );
   });
 
+  /**
+   * M-4 (R-D) — a new user of an enforcing tenant who arrived through a
+   * `browser_sso` client's `/oauth2/authorize` hop must not be dropped in the
+   * admin UI once enrolment finishes. The setup redirect has to carry the
+   * same `return_to` the credentials step already resumes on an ordinary
+   * sign-in (see the "OIDC login hop" describe block below).
+   */
+  it("carries return_to into the mfa-setup redirect when the login hop named one", async () => {
+    const returnTo =
+      "/oauth2/authorize?response_type=code&client_id=oa_1&axiam_login_hop=1";
+    apiMock.post.mockImplementation(
+      postWithOpaqueDisabled(
+        res({ mfa_setup_required: true, setup_token: "setup-abc" }),
+      ),
+    );
+    await goToCredentials(`/login?return_to=${encodeURIComponent(returnTo)}`);
+    await submitCredentials();
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith(
+        `/auth/mfa-setup?setup_token=setup-abc&return_to=${encodeURIComponent(returnTo)}`,
+      ),
+    );
+  });
+
+  /** The same open-redirect refusal the sign-in resume applies, applied here. */
+  it("drops a hostile return_to from the mfa-setup redirect", async () => {
+    const hostile = "https://evil.example/oauth2/authorize?x=1";
+    apiMock.post.mockImplementation(
+      postWithOpaqueDisabled(
+        res({ mfa_setup_required: true, setup_token: "setup-abc" }),
+      ),
+    );
+    await goToCredentials(`/login?return_to=${encodeURIComponent(hostile)}`);
+    await submitCredentials();
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith(
+        "/auth/mfa-setup?setup_token=setup-abc",
+      ),
+    );
+  });
+
   it("shows a generic auth error and redirects to /login when no user or mfa flags come back", async () => {
     apiMock.post.mockImplementation(postWithOpaqueDisabled(res({})));
     await goToCredentials();

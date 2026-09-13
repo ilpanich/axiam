@@ -188,4 +188,88 @@ describe("MfaSetupPage", () => {
       "/login"
     );
   });
+
+  /**
+   * M-4 (R-D) — this page is the second half of the OAuth2 login-hop resume:
+   * LoginPage's mfa_setup_required branch carries `return_to` here as a query
+   * param, and once enrolment completes the user must land back at the
+   * pending `/oauth2/authorize` request rather than in the admin UI.
+   *
+   * `window.location.assign` and not the router — the destination is a server
+   * route, exactly as it is for LoginPage's own resume (see that file's
+   * `completeSignIn`). jsdom's `location.assign` is not implemented, so it is
+   * replaced the same way `LoginPage.test.tsx` replaces it.
+   */
+  describe("return_to (M-4 / R-D)", () => {
+    let assign: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+      assign = vi.fn();
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: { ...window.location, assign },
+      });
+    });
+
+    it("resumes the pending authorization request after confirming", async () => {
+      const returnTo =
+        "/oauth2/authorize?response_type=code&client_id=oa_1&axiam_login_hop=1";
+      searchParamsString = `setup_token=setup-tok-1&return_to=${encodeURIComponent(returnTo)}`;
+      await getToReadyState();
+      apiMock.post.mockResolvedValueOnce(res(undefined)); // setup/confirm
+      apiMock.get.mockResolvedValueOnce(
+        res({
+          user: { id: "u1", username: "alice", email: "alice@x.io", tenant_id: "ten-1" },
+          permissions: ["*"],
+          tenant_slug: "main",
+          org_slug: "acme",
+        })
+      );
+
+      await userEvent.type(screen.getByLabelText("Verification Code"), "123456");
+      await userEvent.click(screen.getByRole("button", { name: "Confirm & Continue" }));
+
+      await waitFor(() => expect(assign).toHaveBeenCalledWith(returnTo));
+      expect(navigate).not.toHaveBeenCalledWith("/dashboard");
+    });
+
+    it.each([
+      ["an off-origin return_to", "https://evil.example/oauth2/authorize?x=1"],
+      ["a malformed return_to", "/not-the-authorize-path?x=1"],
+    ])("drops %s and lands on /dashboard instead", async (_label, hostile) => {
+      searchParamsString = `setup_token=setup-tok-1&return_to=${encodeURIComponent(hostile)}`;
+      await getToReadyState();
+      apiMock.post.mockResolvedValueOnce(res(undefined)); // setup/confirm
+      apiMock.get.mockResolvedValueOnce(
+        res({
+          user: { id: "u1", username: "alice", email: "alice@x.io", tenant_id: "ten-1" },
+          permissions: ["*"],
+          tenant_slug: "main",
+          org_slug: "acme",
+        })
+      );
+
+      await userEvent.type(screen.getByLabelText("Verification Code"), "123456");
+      await userEvent.click(screen.getByRole("button", { name: "Confirm & Continue" }));
+
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("lands on /dashboard when no return_to was carried at all", async () => {
+      await getToReadyState();
+      apiMock.post.mockResolvedValueOnce(res(undefined)); // setup/confirm
+      apiMock.get.mockResolvedValueOnce(
+        res({
+          user: { id: "u1", username: "alice", email: "alice@x.io", tenant_id: "ten-1" },
+          permissions: ["*"],
+        })
+      );
+
+      await userEvent.type(screen.getByLabelText("Verification Code"), "123456");
+      await userEvent.click(screen.getByRole("button", { name: "Confirm & Continue" }));
+
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
+      expect(assign).not.toHaveBeenCalled();
+    });
+  });
 });

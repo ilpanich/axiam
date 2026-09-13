@@ -1,3 +1,5 @@
+import { clearReauthAttempts } from "@/lib/reauth";
+
 /**
  * The `return_to` a login hop comes back to (W3, `claude_dev/basic-op-gap-plan.md` §4.0).
  *
@@ -63,4 +65,43 @@ export function sanitizeReturnTo(raw: string | null | undefined): string | null 
   if (query.length === 0) return null;
 
   return raw;
+}
+
+/**
+ * The shared tail of every page that can be the last stop before a pending
+ * login hop resumes (M-4, `claude_dev/mfa-first-login-and-csr-issuance-plan.md`
+ * §M-4 / R-D): go back to `/oauth2/authorize` if `rawReturnTo` still names it,
+ * the dashboard otherwise.
+ *
+ * Sign-in (`LoginPage`) and forced first-login MFA enrolment (`MfaSetupPage`)
+ * both reach this fork, and both had grown the identical four lines —
+ * sanitize, clear the loop guard's counter and hand the browser to the
+ * server, or navigate home. Two copies of an open-redirect check are two
+ * places for the check to drift, so this is the one.
+ *
+ * Re-validates `rawReturnTo` itself rather than trusting a value the caller
+ * has been holding onto since the URL was first read, for the reason this
+ * module's header comment gives: the check that matters is the one made right
+ * before the browser is sent there.
+ *
+ * `window.location.assign` and not `navigate` — the destination is the
+ * server's `/oauth2/authorize` route, not one this application defines, so
+ * the browser has to make a real request carrying the session cookie the
+ * caller's own request just set.
+ */
+export function resumeLoginHop(
+  rawReturnTo: string | null | undefined,
+  navigate: (path: string) => void,
+): void {
+  const resume = sanitizeReturnTo(rawReturnTo);
+  if (resume) {
+    // The hop is over — forgetting its attempts here is what keeps a user who
+    // takes a while (typing a password slowly, or working through forced MFA
+    // enrolment) from looking like a loop; the counter exists for a
+    // destination that keeps *coming back*, not for one that took a while.
+    clearReauthAttempts(resume);
+    window.location.assign(resume);
+    return;
+  }
+  navigate("/dashboard");
 }

@@ -31,6 +31,14 @@ test.describe("MFA-setup no-dead-end (CORR-05b / D-16)", () => {
     const orgSlug = process.env["E2E_ORG_SLUG"] ?? "test-org";
     const tenantSlug = process.env["E2E_TENANT_SLUG"] ?? "default";
     const mockSetupToken = "e2e-mock-setup-token";
+    // M-4 (R-D): the login hop's `return_to`, carried through the mocked
+    // `403 mfa_setup_required` login response so it reaches the mfa-setup
+    // redirect exactly as LoginPage.tsx's mfa_setup_required branch produces
+    // it — this is what stops a new user of an enforcing tenant from being
+    // dropped in the admin UI after enrolling instead of back in the relying
+    // party they arrived from.
+    const returnTo =
+      "/oauth2/authorize?response_type=code&client_id=oa_1&axiam_login_hop=1";
 
     await page.route("**/api/v1/auth/login", async (route) => {
       await route.fulfill({
@@ -55,7 +63,7 @@ test.describe("MFA-setup no-dead-end (CORR-05b / D-16)", () => {
       });
     });
 
-    await page.goto("/login");
+    await page.goto(`/login?return_to=${encodeURIComponent(returnTo)}`);
     await page.getByLabel("Organization slug").fill(orgSlug);
     await page.getByLabel("Tenant slug").fill(tenantSlug);
     await page.getByRole("button", { name: "Continue" }).click();
@@ -64,9 +72,17 @@ test.describe("MFA-setup no-dead-end (CORR-05b / D-16)", () => {
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
 
     // No dead end: bookmark/refresh-safe query-param carrier, not router
-    // state — reaches /auth/mfa-setup, never stranded back on /login.
+    // state — reaches /auth/mfa-setup, never stranded back on /login. The
+    // pending login hop's return_to rides along too (M-4): confirming
+    // enrolment from here would resume it rather than land in the admin UI,
+    // though that leg is not exercised by this test (see the skipped
+    // enroll -> confirm -> dashboard test below for why).
     await expect(page).toHaveURL(
-      new RegExp(`/auth/mfa-setup\\?setup_token=${mockSetupToken}`)
+      new RegExp(
+        `/auth/mfa-setup\\?setup_token=${mockSetupToken}&return_to=${encodeURIComponent(
+          returnTo
+        ).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`
+      )
     );
 
     // Enroll UI (QR + manual secret + code input) rendered from the real

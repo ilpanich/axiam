@@ -290,6 +290,52 @@ per `CLAUDE.md` after any `target/` wipe.
 
 ### M-2 — self-service reset refused where MFA is enforced (Sonnet 5)
 
+> **EXECUTED — M-2, 2026-09-13.** `AxiamError::MfaEnforced` is a new variant
+> beside `OpaqueRequired`, for the reason that one is its own: the caller holds
+> every permission the call needs — it is their own account — and the refusal
+> is a policy only an administrator can act against, so `authorization_denied`
+> would say the wrong thing and its `action`/`resource_id` pair would be
+> meaningless. It maps to `403` and the slug `mfa_enforced`, and its `Display`
+> is the sentence a user should read ("your tenant requires multi-factor
+> authentication; an administrator must reset it for you"), which the error
+> layer already echoes verbatim for client errors.
+>
+> The handler's own-resource branch reads the caller's **own** tenant's
+> effective settings — `principal_tenant_id`, the rule `start_registration`
+> explains and for the same reason — and refuses when `mfa.mfa_enforced`. The
+> settings read is propagated, never defaulted to not-enforced: a datastore
+> failure must not be the way the floor is escaped. The `users:admin` branch is
+> untouched.
+>
+> Tests, all green: `self_reset_is_refused_under_an_enforcing_tenant` (403, the
+> code, **and** the factor still listed afterwards — a refusal that had already
+> removed something would be the hole with a message on it),
+> `self_reset_still_works_where_mfa_is_optional`,
+> `admin_reset_ignores_the_enforcement_flag`, all in
+> `crates/axiam-api-rest/tests/mfa_methods_test.rs`.
+>
+> **Plan step 3 (the profile UI) found nothing to hide, and one thing to fix.**
+> There is no self-reset control anywhere in the profile UI:
+> `MfaManagementPage.tsx` and `ProfilePage.tsx` offer per-method delete and
+> nothing else, and `userService.resetMfa` has exactly one caller, the admin
+> `UserDetailPage`. So nothing was hidden, as the plan allows. But that one
+> caller *can* reach the new refusal — an administrator resetting **their own**
+> account under an enforcing tenant takes the self-service branch — and its
+> `ConfirmDialog` rendered no error at all, so the request failed silently and
+> the button read as dead. `ConfirmDialog` gained an optional `error` prop
+> (omitted by every other call site, so no churn) and the reset mutation feeds
+> `getApiErrorMessage` into it; the dialog stays open so the sentence is
+> readable. Test: `shows the server's sentence when a self-reset is refused
+> under an enforcing tenant`.
+>
+> OpenAPI: the `403` annotation names the code; spec regenerated with
+> `--dump-openapi` (built `--no-default-features`) and re-stamped. Contract
+> §5.2 rule 4 gained the paragraph, written now and versioned at 1.45 in C-3.
+> T-267 is in the STRIDE document and the Threat Dragon model at
+> `threatTop` 267, Mitigated, with the D-1 residual — no fresh-authentication
+> requirement for the self-service changes that remain allowed — recorded in
+> its entry rather than absorbed.
+
 **Closes** R-B. **Decision** D-1. **Threat:** new **T-267** (§7).
 
 1. `handlers/auth.rs::reset_mfa` — in the `is_own_resource` branch, read the
@@ -396,6 +442,38 @@ rule 2 says "either completion". §25.3's `Sensitive<T>` table already covers
 §24.5 — check and keep it consistent).
 
 ### M-4 — forced setup keeps the login-hop `return_to` (Sonnet 5)
+
+> **EXECUTED — M-4, 2026-09-13** (Sonnet 5 subagent). `LoginPage.tsx`'s
+> `mfa_setup_required` branch appends `&return_to=<encoded>`, re-validating
+> with `sanitizeReturnTo` at the point of use rather than trusting the value
+> held in state since the URL was read. `MfaSetupPage.tsx` reads `return_to`
+> alongside `setup_token` and, after the `fetchCurrentUser()` tail, resumes
+> instead of navigating to `/dashboard`. The existing `replaceState` call
+> already strips the whole query string, so both parameters go together and no
+> second strip was needed.
+>
+> The plan's "factor that tail into a shared helper if the two copies would
+> otherwise diverge" was taken: `lib/returnTo.ts` gained `resumeLoginHop`,
+> which sanitizes, clears the re-auth loop counter and hands the browser to the
+> server, or navigates home. It re-validates its argument itself, so the
+> module's "both sides check" rule holds for the third side without the third
+> side having to remember. `LoginPage`'s `completeSignIn` now calls it too, so
+> there is one open-redirect check rather than two that can drift.
+>
+> Tests: `LoginPage.test.tsx` — the setup redirect carries a valid `return_to`
+> and drops a hostile one; `MfaSetupPage.test.tsx` — a new `return_to (M-4 /
+> R-D)` block covering resume, an off-origin and a malformed value both landing
+> on `/dashboard`, and no parameter at all; `e2e/mfa-setup.spec.ts` — the mocked
+> `403` route now starts at `/login?return_to=…` and asserts both parameters on
+> the resulting URL. Frontend suite: 101 files, 1555 tests, all passing; oxlint
+> and `tsc -b --noEmit` clean, including the e2e tsconfig.
+>
+> One thing the plan did not anticipate: the sandbox disk filled to 0 bytes
+> mid-task, from a 29 GB `target/` left by the Rust items running alongside.
+> `CLAUDE.md`'s hygiene section prescribes the recovery, and it cost a full
+> workspace rebuild. `cargo clean` between items is not optional advice at this
+> repository's size — a full `cargo test` across the workspace leaves roughly
+> 30 GB against a ~38 GB quota, so two items' worth of artifacts do not fit.
 
 **Closes** R-D. No server change.
 

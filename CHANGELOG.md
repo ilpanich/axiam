@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reset an account because a key was lost or suspected compromised should know
   that, before this release, the key still worked.
 
+- A user can no longer take their own account below their tenant's MFA floor
+  (M-2, T-267). `POST /users/{own id}/reset-mfa` is refused with `403` and the
+  error code `mfa_enforced` where the caller's tenant enforces MFA; an
+  administrator resets it for them. `users:admin` is unaffected, and where the
+  tenant does not enforce MFA the self-service reset still works — such a user
+  was free to run at one factor anyway. Contract §5.2 rule 4 carries the rule
+  for SDKs.
+
+### Changed
+
+- Forced first-login MFA enrolment now returns the user to the application
+  they were signing in to (M-4). A new user of an enforcing tenant who arrived
+  through an OAuth2 client's `/oauth2/authorize` hop finished enrolment in the
+  admin UI's dashboard instead of back at the relying party; the login hop's
+  `return_to` is now carried through the setup page and resumed, re-validated
+  at each hand-off.
+
 ## [1.0.0-beta14] - 2026-09-13
 
 ### Added

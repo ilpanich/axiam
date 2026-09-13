@@ -8,6 +8,7 @@ import { PublicLayout } from "@/components/layout/PublicLayout";
 import { Button } from "@/components/ui/button";
 import { TotpSetupPanel, type TotpSetupPanelData } from "@/components/auth/TotpSetupPanel";
 import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
+import { resumeLoginHop } from "@/lib/returnTo";
 
 // ---------------------------------------------------------------------------
 // API error response type
@@ -35,6 +36,13 @@ export function MfaSetupPage() {
   const { setUser, setTenantContext } = useAuthStore();
   const [searchParams] = useSearchParams();
   const setupToken = searchParams.get("setup_token");
+  // M-4 (R-D): the OAuth2 login-hop `return_to` LoginPage's mfa_setup_required
+  // branch carried through here. Read once, alongside `setupToken`, from the
+  // URL this page was loaded with — `resumeLoginHop` (below) re-validates it
+  // with `sanitizeReturnTo` before it is ever navigated to, because this page
+  // is a third side of that check and gets no exemption (see `@/lib/returnTo`'s
+  // header comment for why both of the other two check independently).
+  const returnTo = searchParams.get("return_to");
 
   const [state, setState] = useState<PageState>(setupToken ? "loading" : "no-token");
   const [setupData, setSetupData] = useState<TotpSetupPanelData | null>(null);
@@ -76,6 +84,8 @@ export function MfaSetupPage() {
     setIsConfirming(true);
     try {
       await authService.setupConfirmMfa(setupToken, totpCode);
+      // Strips setup_token *and* return_to together — both live in the query
+      // string this component read, and `pathname` alone drops it entirely.
       window.history.replaceState({}, document.title, window.location.pathname);
       // Hydrate tenant context via fetchCurrentUser() (relying on the
       // 26-05 /auth/me tenant_slug/org_slug), not ambient login-form
@@ -87,7 +97,9 @@ export function MfaSetupPage() {
           setTenantContext(hydrated.tenantSlug, hydrated.orgSlug);
         }
       }
-      navigate("/dashboard");
+      // M-4 (R-D): resume the login hop this forced setup interrupted, the
+      // same tail LoginPage's completeSignIn runs on an ordinary sign-in.
+      resumeLoginHop(returnTo, navigate);
     } catch (err) {
       const status = getApiErrorStatus(err);
       if (status === 401 || status === 410) {

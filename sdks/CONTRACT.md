@@ -1361,7 +1361,7 @@ As §21.9 and §21.10: an unrecorded row is not a supported answer, and
 | typescript | yes — `RevocationFeed`, set as `VerifiableSession.revocationFeed` |
 | python | yes — `RevocationFeed`, passed as `JwksVerifier(revocation_feed=…)` |
 | go | yes — `RevocationFeed`, attached with `JWKSVerifier.WithRevocationFeed` |
-| java | — |
+| java | yes — `RevocationFeed`, passed to the three-argument `JwksVerifier` |
 | kotlin | — |
 | csharp | — |
 | php | — |
@@ -4275,7 +4275,7 @@ the §21 client role has a call to prefer with; check §21.9 before reading a
 | typescript | yes | yes |
 | python | yes | yes |
 | go | yes | yes |
-| java | — | — |
+| java | yes | yes |
 | kotlin | — | — |
 | csharp | — | — |
 | php | — | — |

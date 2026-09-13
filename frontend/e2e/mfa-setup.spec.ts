@@ -98,11 +98,25 @@ test.describe("MFA-setup no-dead-end (CORR-05b / D-16)", () => {
     // answer a WebAuthn prompt) — this only asserts the chooser rendered,
     // offering a passkey/security key alongside the authenticator app that
     // has already started enrolling.
-    await expect(page.getByText("Authenticator app")).toBeVisible();
+    //
+    // Scoped to the chooser's own group rather than searched for on the page.
+    // "Authenticator app" appears three times on this screen — in the QR
+    // helper text, in the QR image's `<title>`, and as the chooser's active
+    // pill — so an unscoped `getByText` is a strict-mode violation rather
+    // than a passing assertion. Scoping also makes the assertion say what it
+    // means: these three controls are *in the chooser*, not merely somewhere
+    // on the page, which is what would still be true if the pill were moved.
+    const chooser = page.getByRole("group", {
+      name: "Choose how to secure your account",
+    });
+    await expect(chooser).toBeVisible();
+    await expect(chooser.getByText("Authenticator app", { exact: true })).toBeVisible();
     await expect(
-      page.getByRole("button", { name: /passkey on this device/i })
+      chooser.getByRole("button", { name: /passkey on this device/i })
     ).toBeVisible();
-    await expect(page.getByRole("button", { name: /security key/i })).toBeVisible();
+    await expect(
+      chooser.getByRole("button", { name: /security key/i })
+    ).toBeVisible();
   });
 
   test.skip(

@@ -1390,7 +1390,7 @@ Filled in as PRs are opened; `—` means not reached this session.
 | go | yes | yes | yes | [#77](https://github.com/ilpanich/axiam-go-sdk/pull/77) | opened |
 | swift | — | — | — | — | — |
 | c | yes | yes | yes | [#59](https://github.com/ilpanich/axiam-c-sdk/pull/59) | opened |
-| cplusplus | — | — | — | — | — |
+| cplusplus | yes | yes | yes | [#60](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/60) | opened |
 
 **One ordering consequence, recorded so it is not discovered as a surprise.**
 §10.4.1 and §21.10 are tables *inside* `CONTRACT.md`, which every SDK vendors

@@ -1099,6 +1099,49 @@ only if a residual is recorded as Open; the intent is that none is.
 
 ## 9. SDK fan-out — F-1 (Sonnet 5, one wave, eleven repositories)
 
+> **EXECUTED — F-1, 2026-09-13** (eleven Sonnet 5 subagents, one per
+> repository; rust, kotlin and cplusplus finished under direct supervision).
+> All eleven branches are pushed and all eleven PRs are open — see §9.1 for
+> the table, which is filled. One wave, contract 1.45 everywhere, **no SDK
+> tagged or published** and no publish-path workflow touched.
+>
+> **One finding is cross-cutting and worth recording, because it was not
+> anticipated anywhere in §9.** §24.1's "an SDK MUST NOT attach its session
+> credential to these two" is free in no SDK whose HTTP client owns a cookie
+> jar or an auth interceptor, and nine of the eleven needed a mechanism
+> invented for the purpose:
+>
+> | SDK | what attaches unconditionally | what was done |
+> |---|---|---|
+> | rust | `reqwest`'s cookie store | explicit empty `Cookie` header — the jar populates one only when absent — plus skipping `maybe_csrf_header` |
+> | kotlin | OkHttp's `BridgeInterceptor`, *after* every application interceptor | a second, **network** interceptor stripping `Cookie` downstream of the jar and upstream of the wire |
+> | java | same OkHttp shape | same two-interceptor split |
+> | cplusplus | libcurl's cookie engine on the pooled `CURLSH` | `perform_isolated()` — an unpooled handle with no engine and no share, plus an explicit `merge_into_shared_jar()` for the response half |
+> | c | the same libcurl shape | the same isolated-handle split |
+> | go | `net/http`'s `Jar` | a throwaway `*http.Client` sharing Transport/Timeout/CheckRedirect, wrapping the jar in `noOutboundCookieJar` |
+> | python | `httpx`'s cookie jar | per-request cookie suppression |
+> | csharp | `HttpClientHandler`'s `CookieContainer` | a second handler for the isolated pair |
+> | php | Guzzle's cookie middleware | per-request middleware bypass |
+>
+> The shape is the same in every case and is the thing to review: the
+> **outbound** half is withheld, the **inbound** half is preserved. Only the
+> outbound suppression is obvious from §24.1; the inbound preservation is
+> what makes `finish` able to complete a login at all (§24.3's five adoption
+> rules), and an SDK that suppressed both would leave the caller
+> unauthenticated after a successful enrolment. Every one of the nine was
+> checked for both halves before its PR opened, and the rust one was checked
+> by mutation — removing the suppression makes its transport test fail with
+> the signed-in client's real `axiam_access` cookie on the wire.
+>
+> **Two other things worth the reader's time.** (a) The Java subagent refused
+> an instruction of mine — I had told it `sign_csr` needed `*Async`
+> companions per §24.7, and §24.7 is the WebAuthn naming table with no
+> `sign_csr` row; that SDK deliberately gives management operations no async
+> twins, and it followed its generator and said why. The brief was wrong, not
+> the SDK. (b) Several READMEs carried a stale operation count or contract
+> version from an earlier fan-out that never bumped them; each was corrected
+> in the PR that touches the same fact, and each is noted in its PR body.
+
 The rules of [`remediation-plan-2026-09-12.md`](remediation-plan-2026-09-12.md)
 §13 bind here verbatim; the toolchain notes in its §13.1 (`dotnet-sdk-8.0`
 from apt; PHP `--no-dev --prefer-source` plus apt `phpunit`; no Swift
@@ -1136,17 +1179,17 @@ Per repository, one branch named for this plan, one PR:
 
 | SDK | C-1 `sign_csr` | M-3 setup helpers | PR | CI at session end |
 |---|---|---|---|---|
-| rust | | | | |
+| rust | yes | yes | [#105](https://github.com/ilpanich/axiam-rust-sdk/pull/105) | fmt, clippy `-D warnings`, drift (160), `cargo test --all-features` **62 binaries / 679 tests** — all green locally |
 | typescript | yes | yes | [#104](https://github.com/ilpanich/axiam-typescript-sdk/pull/104) | tsc, tsup, drift (160), **1268 tests**, bundle/token/TLS greps, audit, docs, publish --dry-run — all green locally |
 | python | yes | yes | [#81](https://github.com/ilpanich/axiam-python-sdk/pull/81) | drift (160), mypy --strict, ruff, interrogate 100%, **1578 tests**, coverage 98.54%, build+twine — all green locally |
 | java | yes | yes | [#93](https://github.com/ilpanich/axiam-java-sdk/pull/93) | drift (160), TLS gate, javadoc with `-Xdoclint:all failOnWarnings`, **1111 tests**, jacoco — all green locally |
-| kotlin | | | | |
+| kotlin | yes | yes | [#63](https://github.com/ilpanich/axiam-kotlin-sdk/pull/63) | drift (160), TLS gate, both matrix legs (2.1.0/JDK17 + 2.4.10/JDK25) **991 tests, 0 failed**, koverVerify floor held, dokka — all green locally |
 | csharp | yes | yes | [#88](https://github.com/ilpanich/axiam-csharp-sdk/pull/88) | dotnet-sdk 8.0+10.0 from apt (§13.1 correction holds); drift (160), build 0 errors, **2370 tests** across both frameworks, vuln scan, pack — all green |
 | php | yes | yes | [#68](https://github.com/ilpanich/axiam-php-sdk/pull/68) | drift (160), WebauthnTest 28/28, Management 427/427, unit suite 1408 with the **unchanged** 65-failure require-dev baseline; phpstan/php-cs-fixer/integration CI-verified |
 | go | yes | yes | [#78](https://github.com/ilpanich/axiam-go-sdk/pull/78) | build, vet, gofmt, drift (160) and `go test ./...` 1032/1032 green locally; `buf generate` and `govulncheck` blocked by the sandbox proxy, CI-verified |
 | swift | yes | yes | [#61](https://github.com/ilpanich/axiam-swift-sdk/pull/61) | drift + §6 TLS gate green locally; compile/tests CI-verified only (no Swift toolchain) — **CI came back 7 jobs, 0 failed** |
 | c | yes | yes | [#60](https://github.com/ilpanich/axiam-c-sdk/pull/60) | 54/54 on gcc+clang × C11+C23 and under ASan/UBSan; valgrind clean but for a pre-existing TLS-timeout test unrelated to this change; conan recipe job CI-verified |
-| cplusplus | | | | |
+| cplusplus | yes | yes | [#61](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/61) | drift (7 files), TLS + secret gates, plain Debug `ctest`, ASan+UBSan and valgrind both clean over **1191 cases / 3750 checks** — all green locally |
 
 ---
 

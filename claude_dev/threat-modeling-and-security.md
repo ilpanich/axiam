@@ -14,12 +14,41 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-09-12 (`1.0.0-beta13`, model 2.13.0 —
-> the T-254 decision, then the residual pass of
-> [`remediation-plan-2026-09-12.md`](remediation-plan-2026-09-12.md)). The
-> website section is at `1.0.0-beta11` and is brought up by
-> [`website-security-beta13-update-plan.md`](website-security-beta13-update-plan.md),
-> which is the entry point for that pass.**
+> **Status: source current as of 2026-09-13 (`1.0.0-beta14`, model 2.14.0 —
+> the SDK half of the 2026-09-12 residual pass, closing T-39 and T-143). The
+> website section is still at `1.0.0-beta11` and is brought up by
+> [`website-security-beta14-update-plan.md`](website-security-beta14-update-plan.md),
+> which is the entry point for that pass and supersedes the never-executed
+> [`website-security-beta13-update-plan.md`](website-security-beta13-update-plan.md).**
+>
+> **The 1.0.0-beta14 wave (model 2.14.0).** No new threats; two close. The
+> residual pass below left T-39 and T-143 — the fifteen-minute revocation
+> window, seen from the token service and from the SDK guard — Open on
+> purpose after the server began publishing the optional revocation feed,
+> because a feed nobody polls narrows nothing. On 2026-09-13 the client half
+> landed in all eleven SDK repositories (rust #104, typescript #103, python
+> #80, java #92, kotlin #62, csharp #87, php #67, go #77, swift #60, c #59,
+> cplusplus #60, each merged and released at that SDK's 1.0.0-beta14): a
+> poller attached to the JWKS verifier, opt-in, never on the request path,
+> never fail-closed and reject-only, with contract §10.4.1 recording the
+> attachment point per SDK and no row that `declines`. The same PRs carried
+> the alias handling contract 1.43 had made normative — §21.3 rule 2 with the
+> §21.3.1 vectors, a malformed alias refused rather than fallen back from —
+> so §21.10 reads `yes` in both columns for every SDK, and the residual T-266
+> recorded (a rule implemented by nobody) is retired without a status change.
+> Both entries flip to Mitigated with the poll interval stated as the
+> residual, and the accepted-trade-off bullet keeps the window because the
+> trade is narrowed rather than removed. That takes the model to **266
+> threats, 253 mitigated / 13 open**, the authentication diagram to **no open
+> item**, the SDK diagram to 3, Medium-severity open to 3 and
+> elevation-of-privilege open to 1. One hygiene fix rides along under T-260:
+> the two redaction tests R-5 added minted a literal fake password a secret
+> scanner cannot tell from a real one; they now draw it from the workspace's
+> test-password helper, and no scanner exemption was added. The release
+> itself, `1.0.0-beta14`, carries the residual pass and this SDK fan-out and
+> nothing else security-relevant. **The website was not touched**:
+> `gen:threat-model` was run only to confirm the model parses and yields
+> these numbers, and reverted.
 >
 > **The 2026-09-12 residual pass (model 2.13.0).** No new threats. Eight items
 > from [`remediation-plan-2026-09-12.md`](remediation-plan-2026-09-12.md), six of
@@ -434,7 +463,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
 | Threats identified | 266 |
-| Mitigated / Open | 251 / 15 |
+| Mitigated / Open | 253 / 13 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -448,14 +477,14 @@ optimistic closed one.
 | Area | Threats | Open |
 |---|---|---|
 | System context | 31 | 2 |
-| Authentication & session management | 33 | 1 |
+| Authentication & session management | 33 | 0 |
 | OAuth2 / OIDC authorization server | 47 | 0 |
 | Federation (SAML SP & OIDC RP) | 31 | 1 |
 | Authorization engine (RBAC, hierarchy, scopes) | 26 | 0 |
 | PKI, certificates & IoT device identity | 25 | 1 |
 | Audit, webhooks, email & notifications | 18 | 2 |
 | Deployment & platform (Kubernetes) | 27 | 5 |
-| Client SDKs & admin-UI integration surface | 28 | 4 |
+| Client SDKs & admin-UI integration surface | 28 | 3 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
@@ -465,7 +494,11 @@ finding at all**. The one it briefly carried, the 60-second grace a rotated
 refresh token keeps, was recorded open at 1.0.0-beta13 rather than absorbed and
 then closed by a decision: the grace now applies only to the FAPI 2.0 profile
 that requires it and sender-constrains every token, and a rotated token presented
-again is marked and audited whichever way it is answered (T-254).
+again is marked and audited whichever way it is answered (T-254). And the two
+Medium items that had sat on the token service and on the SDK route guard since
+the first version of the model — the fifteen-minute revocation window, seen from
+each side — closed together at 1.0.0-beta14, when the optional revocation feed
+the server publishes gained a poller in all eleven SDKs (T-39, T-143).
 
 ### Coverage by STRIDE category
 
@@ -477,12 +510,12 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 66 | 4 |
+| Spoofing | 66 | 3 |
 | Tampering | 57 | 1 |
 | Repudiation | 6 | 0 |
-| Information disclosure | 65 | 7 |
+| Information disclosure | 65 | 6 |
 | Denial of service | 24 | 2 |
-| Elevation of privilege | 48 | 3 |
+| Elevation of privilege | 48 | 1 |
 
 ### Coverage by severity
 
@@ -490,12 +523,12 @@ the category recorded against it in the model.
 |---|---|---|
 | Critical | 30 | 1 |
 | High | 122 | 8 |
-| Medium | 106 | 7 |
+| Medium | 106 | 3 |
 | Low | 8 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 17 still-open items are listed one by one in
+the weight the control carries. The 13 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -603,6 +636,20 @@ have to be re-established — nothing is assumed across a boundary.
   `SameSite=Strict` cookies — never in `localStorage`, never in a URL — and
   logout's removal cookies are built from the same setters they clear, so the
   protective attributes are mirrored by construction rather than restated.
+- **Sign-out can reach a token before it expires, without a round trip per
+  request.** An access token is self-contained, so a logout, a role removal or
+  an account disable does not reach a token already in a caller's hands until
+  it expires — up to fifteen minutes, and the documented answer has been gRPC
+  introspection, at a network round trip per request. Since 1.0.0-beta14 a
+  deployment can instead publish an optional revocation feed
+  (`GET /oauth2/revocations`, off by default): the base64url SHA-256 of each
+  session id revoked within the last token lifetime — never an id, a subject, a
+  tenant or a timestamp — bounded by the revocation rate over fifteen minutes
+  rather than by history, and cacheable like the JWKS beside it. Every SDK
+  route guard can poll it and refuse a revoked session within one poll interval.
+  It narrows the window and is deliberately not a control: a guard that cannot
+  fetch the feed behaves exactly as it does without it, the feed can only ever
+  turn an accept into a reject, and local verification still decides.
 - **Password reset** uses CSPRNG-generated, single-use, short-lived tokens
   (never time-ordered UUIDs), delivered over an authenticated POST, and consuming a
   reset invalidates every existing session. An optional **Have I Been Pwned**
@@ -625,7 +672,11 @@ have to be re-established — nothing is assumed across a boundary.
   `/scim/v2/*` and nowhere else, carries no permissions of its own (the resolved
   tenant user's RBAC still decides), is stored hashed with the plaintext returned
   exactly once, and is expiring, revocable and audited. Deprovisioning a user
-  through SCIM also revokes their live sessions and refresh tokens.
+  through SCIM also revokes their live sessions and refresh tokens. A
+  provisioning write that loses a datastore race is retried, and one that stays
+  lost answers `503` with `Retry-After: 1` rather than `500` — which an
+  identity provider reads as a failed sync and answers by re-sending the whole
+  record.
 
 ### Authorization & tenant isolation
 
@@ -980,6 +1031,18 @@ against the classic federation attacks:
   never reachable from any HTTP handler, so "prune old records" cannot become
   "delete the evidence". Set the window to match your lawful basis, or `0` to
   disable; either state is logged at startup.
+- **Collection is bounded too, where a lawful basis needs it.**
+  `AXIAM__AUDIT__MINIMISE` (off by default) truncates a client address to its
+  `/24` or `/48` prefix and reduces a user-agent to a coarse family immediately
+  before the append — the only moment that can happen in an append-only table —
+  and drops an address that does not parse rather than writing it through,
+  since a value that cannot be parsed cannot be shown to have been minimised.
+  The structured metadata producers write for accountability — the client and
+  disposition on a refresh-token replay, the names of released claims, a
+  federated subject — is never touched, because dropping it would weaken the
+  controls that depend on it. The switch is deployment-wide and deliberately
+  not per tenant: audit is the evidence a deployment relies on including
+  against a tenant administrator. Both states are logged at startup.
 
 ### Webhooks, email & messaging
 
@@ -1044,9 +1107,11 @@ against the classic federation attacks:
   Argon2id-hashed and client secrets are hashed under a **server-held key**, so a
   database disclosure alone does not yield an offline-crackable corpus.
   Secret-bearing types carry redacting `Debug`/`toString` implementations so a
-  credential never reaches a log line — including the three types this wave
-  added, and the test assertions static analysis caught formatting a credential
-  into a panic message, because a CI log outlives the run. A **missing
+  credential never reaches a log line — including the three types the beta13
+  wave added, the datastore and broker configuration (whose derived `Debug`
+  would have printed a password in every log line that renders a
+  configuration), and the test assertions static analysis caught formatting a
+  credential into a panic message, because a CI log outlives the run. A **missing
   encryption key or pepper fails startup**; no code path substitutes an
   all-zero, constant or unkeyed fallback, and a Vault CA bundle that parses to
   no certificates fails startup naming the file rather than silently falling
@@ -1060,7 +1125,15 @@ against the classic federation attacks:
   CSPRNG and **never regenerates a secret that already exists** (regenerating the
   OPAQUE setup key would mean a password reset for every user; regenerating the
   pepper would invalidate every stored hash), and the status tooling reports
-  presence only, never values.
+  presence only, never values. Since 1.0.0-beta14 the datastore username and
+  password and the broker URL come through the same provider, in the same round
+  trip, so the Vault token — or the `file` provider's mount — is the only
+  credential a container spec has to carry. The environment variables stay as a
+  permanent, supported fallback (`env` is a provider kind, not a legacy path),
+  and a deployment that configured a different provider and still supplies one
+  of the three through the environment is told so at boot. The seeder carries
+  them forward and never invents them: an invented datastore password gives a
+  Vault that looks configured and a server that cannot connect.
 - **The eleven client SDKs conform to one cross-language contract.** Strict TLS
   verification is unconditional and TLS-bypass APIs are prohibited (CI greps for
   them); a plaintext `http://` base URL is refused at construction, with a
@@ -1071,7 +1144,11 @@ against the classic federation attacks:
   gate fails the build if an SDK's vendored OpenAPI/protobuf copy diverges. An
   SDK calling over mTLS prefers the discovery document's RFC 8705 §5 alias for
   that endpoint, reads an absent alias as "no separate host" rather than
-  "unsupported", and never synthesises one for the front channel; and no SDK
+  "unsupported", never synthesises one for the front channel, preserves the
+  alias's query component rather than appending to it, and refuses a malformed
+  alias outright rather than falling back to the front-channel host — since
+  1.0.0-beta14 in all eleven SDKs, against three test vectors the contract
+  itself publishes so that eleven repositories pin the same bytes; and no SDK
   sends a client secret in the `Authorization` header, whatever the client is
   registered for, because that is the channel intermediaries log.
 - **The admin UI redacts what a gateway echoes.** An error body is not always
@@ -1099,6 +1176,17 @@ against the classic federation attacks:
   fall back to the application's own session, which would admit the caller under a
   service account's identity. Where an SDK offers a refresh-on-failure helper for its
   own outbound calls, that helper is a separate method that guards do not use.
+- **Every SDK route guard can poll the revocation feed** (contract §10.4).
+  Attached to the JWKS verifier and off unless the caller attaches it, the
+  poller never runs on the request path — a verification reads a cached set —
+  and never fails closed: an unreachable feed, a non-`200`, an unparseable body
+  or an unknown `alg` verifies exactly as with no feed at all, and specifically
+  not as an empty list, which would be a guard silently honouring no
+  revocations while appearing to honour them. It only ever rejects, every
+  local rule still runs first, and a token that names no session is never
+  matched. All eleven SDKs implement it, each with tests pinning those cases;
+  the contract records the attachment point per SDK, and an unrecorded row is
+  not a supported answer.
 - **Every SDK ships a webhook-signature verifier** (contract §13). Receivers no longer
   hand-roll the check: `verify_webhook(...)` implements one canonical spec across all
   eleven languages — HMAC-SHA256 over `<timestamp>.<raw_body>`, constant-time
@@ -1159,7 +1247,7 @@ Resilience Act conformity assessment, and it says so plainly.
 | **OWASP ASVS v4.0.3 Level 2** | 103 controls across authentication, session, access control, cryptography, error handling, data protection, communications, malicious code, configuration | 94 Pass, 4 N/A, 5 Deferred — **no Deferred item is High or Critical** | [ASVS L2 checklist](../docs/compliance/asvs-l2-checklist.md) |
 | **ISO/IEC 27001:2022 Annex A** | Access control, secure authentication, cryptography, logging, network security, secure development | Interpretive control-family mapping; code-level themes Pass | [Annex A mapping](security-audit.md#3-iso-27001-annex-a--control-family-mapping) |
 | **EU Cyber Resilience Act (Annex I)** | Secure-by-design, no known exploitable vulnerabilities, confidentiality, data minimisation, access control, vulnerability handling, security updates | Themes Pass; SBOM deferred | [Essential-requirement mapping](security-audit.md#4-cybersecurity-act--essential-requirement-theme-mapping) |
-| **GDPR** | Data-subject export (Art. 15), erasure (Art. 17), consent (Art. 7), pseudonymisation, data minimisation | Export excludes secrets; erasure is durable and re-selectable on failure; audit actor identities are pseudonymised; OIDC scope-release consent is per client, withdrawable in one call and re-checked on every release; erasure and export name every personal-data column explicitly, with a recorded warning that a new column is covered by none of them until it is named | [GDPR compliance](../docs/compliance/gdpr-compliance.md) |
+| **GDPR** | Data-subject export (Art. 15), erasure (Art. 17), consent (Art. 7), pseudonymisation, data minimisation | Export excludes secrets; erasure is durable and re-selectable on failure; audit actor identities are pseudonymised; OIDC scope-release consent is per client, withdrawable in one call and re-checked on every release; every personal-data column of the user record is classified in one declared inventory that both erasure statements and the export render from, and a test introspects the live schema after migrations and fails on any column the inventory does not classify | [GDPR compliance](../docs/compliance/gdpr-compliance.md) |
 | **OAuth2 / OIDC** | RFC 6749 / 7636 / 7009 / 7662 + OIDC Core/Discovery MUST matrices; the OpenID Foundation conformance suite (OIDC Core Basic OP; FAPI 2.0 Security Profile Final — mTLS, self-signed, `private_key_jwt`) | All tracked MUSTs pass; 165 suite modules, zero `FAILED` on 2026-09-11 — a self-run against a working-tree build, not a certification; `REVIEW` and `WARNING` verdicts are published, not counted as passes | [OAuth2 RFC matrix](../docs/compliance/oauth2-rfc-compliance.md) · [OIDC conformance](../docs/compliance/oidc-conformance.md) · [conformance receipts](../docs/conformance/README.md) · [latest run](../docs/conformance/index.md) |
 
 Each matrix is checked in per control, with the test or source location that
@@ -1183,7 +1271,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 17 of
+Every threat the model does not record as mitigated, most severe first — 13 of
 266. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
@@ -1202,11 +1290,8 @@ each.
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
-| T-39 — Access token still valid after entitlement revocation | Medium | Token service EdDSA JWT + refresh rotation · *Authentication & session management* |
-| T-110 — Personal data over-collected into an immutable log | Medium | Audit middleware & service · *Audit, webhooks, email & notifications* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
-| T-143 — Local JWT verification misses a revoked entitlement | Medium | SDK token verification (JWKS cache, iss/aud) · *Client SDKs & admin UI integration surface* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are
@@ -1241,9 +1326,12 @@ list read as a checklist — what to do about each, grouped by who does it.
   deployments without Vault, the manifests' `file` provider mounts every
   cryptographic secret as a file — prefer it over `AXIAM_*` environment variables,
   since a signing key in a ConfigMap or plain env var is effectively public within
-  the namespace. The datastore and broker credentials are still env-supplied
-  (read before any secret provider exists), so enable etcd encryption at rest
-  either way.
+  the namespace. Since 1.0.0-beta14 the datastore and broker credentials come
+  through the same provider, so the Vault token — or the `file` mount — is the
+  only credential the manifest has to carry: on such a deployment leave
+  `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` blank (the
+  server warns at boot when a non-`env` provider is configured and a value still
+  arrives from the environment), and enable etcd encryption at rest either way.
 - **Encrypt backups and volume snapshots** with a key separate from the cluster,
   restrict snapshot IAM, and include backup media in the same access review as the
   live data tier — a snapshot carries the same data under weaker controls.
@@ -1309,6 +1397,12 @@ list read as a checklist — what to do about each, grouped by who does it.
 - **Configure the tenant on any SDK route guard.** The guards bind each token to your
   configured tenant, which means they need to know it — a guard given no tenant to
   compare against fails closed and rejects every token, by design.
+- **Attach the revocation-feed poller where sign-out has to take effect faster
+  than a token lifetime**, and turn the feed on server-side
+  (`AXIAM__AUTH__REVOCATION_FEED_ENABLED`): both halves are opt-in, and a feed
+  nobody polls narrows nothing. Attaching it cannot admit anything local
+  verification would have refused — it only ever rejects — and a guard that
+  cannot reach it behaves exactly as one without it.
 - Prefer **mTLS or short-lived workload identity** over static client secrets;
   rotate secrets through the rotation endpoint and enable secret scanning on your
   own repositories.
@@ -1324,13 +1418,20 @@ list read as a checklist — what to do about each, grouped by who does it.
 
 **Accepted, documented trade-offs**
 
-- **Access tokens survive revocation for up to 15 minutes** — the price of stateless
-  verification. Where immediate revocation matters, verify through the gRPC
-  introspection path instead of locally.
+- **Access tokens survive revocation for up to 15 minutes — or one poll
+  interval.** The price of stateless verification. The revocation feed and the
+  SDK pollers narrow the window to one poll interval for one cacheable fetch
+  per interval; they do not remove it, and both sides are opt-in. Where
+  immediate revocation matters, verify through the gRPC introspection path
+  instead of locally.
 - **Audit records cannot be erased on demand, only aged out** — append-only by
   design, which is in tension with GDPR Art. 17; erasure anonymises the subject
   instead. Retention defaults to a 730-day pruning window applied by the
-  background sweep; tune it (or disable with `0`) to match your lawful basis.
+  background sweep, and collection can be minimised deployment-wide with
+  `AXIAM__AUDIT__MINIMISE` (off by default — a client address truncated to its
+  network prefix, a user-agent reduced to its family, before the append). Tune
+  both to match your lawful basis; a deployment that leaves minimisation off
+  collects what it collected before.
 - **A rotated refresh token stays redeemable for 60 seconds — but only for a
   FAPI 2.0 client.** FAPI 2.0 §5.3.2.1-9 requires it: it is the only recovery
   for a client whose rotation response was lost in transit. The profile that
@@ -1382,7 +1483,7 @@ list read as a checklist — what to do about each, grouped by who does it.
   rather than as a conformance detail.
 
 Everything in this document was last re-derived from source at
-**`1.0.0-beta13`** on 2026-09-12; the handoff block at the top of this file says
+**`1.0.0-beta14`** on 2026-09-13; the handoff block at the top of this file says
 what that pass covered and what it changed. The website carries its own stamp,
 from a single constant in `website/src/version.ts`, recording the release *its*
 Security section was last re-derived against; it moves when that section does.

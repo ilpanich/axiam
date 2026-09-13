@@ -1,6 +1,9 @@
 # Remediation plan — the residuals the 2026-09-12 threat review left open
 
-> **Status: NOT YET EXECUTED.** Each section gains an `EXECUTED` block at its
+> **Status: EXECUTED — R-1…R-8 in this repository on 2026-09-12, the SDK
+> fan-out of R-4, R-6 and R-8 in all eleven SDK repositories on 2026-09-13
+> (§13.1), T-39 and T-143 flipped to Mitigated the same day (model 2.14.0,
+> 266 threats, 253 mitigated / 13 open).** Each section carries an `EXECUTED` block at its
 > head as it lands, in the form
 > [`remediation-plan-2026-09-04.md`](remediation-plan-2026-09-04.md) uses: what
 > actually shipped, which tests went in, what the plan did not anticipate, and
@@ -765,9 +768,12 @@ moves.
 ## 7. R-6 — revocation reach: a revocation feed (decision C)
 
 > **EXECUTED (server and contract) — R-6, 2026-09-12. Contract 1.44.**
-> **T-39 and T-143 stay Open**, per §11: the feed exists and nothing polls it,
-> and a feed nobody reads narrows nothing. They flip when an SDK guard
-> implements §10.4; §13.1 tracks that.
+> **T-39 and T-143 stayed Open for one day**, per §11: the feed existed and
+> nothing polled it, and a feed nobody reads narrows nothing. **They flipped
+> to Mitigated on 2026-09-13**, when the §10.4 poller had merged in all eleven
+> SDK repositories and each had been released at its `1.0.0-beta14` (§13.1);
+> the model is 2.14.0 and both entries state the residual — one poll interval,
+> both sides opt-in — in their own words.
 >
 > Schema **v62** — one new table, `revoked_session`, holding a `sid_hash` and
 > an `expires_at` and asserted by its own test to hold *nothing else*: a user
@@ -1377,21 +1383,24 @@ These bind R-4's check, R-6 and R-8.
 ### 13.1 Fan-out record
 
 Filled in as PRs are opened. The first eight landed on 2026-09-12; csharp, php and
-swift followed once the toolchain claims in §13.1 were re-tested.
+swift followed once the toolchain claims in §13.1 were re-tested. **All eleven
+merged on 2026-09-13, each re-vendoring the final `CONTRACT.md` (1.44), and each
+SDK was released at `1.0.0-beta14` the same day.** The threat model recorded
+the closure of T-39 and T-143 in the same pass (model 2.14.0).
 
 | SDK | R-4 test | R-6 guard | R-8 alias | PR | CI at session end |
 |---|---|---|---|---|---|
-| rust | yes | yes | yes | [#104](https://github.com/ilpanich/axiam-rust-sdk/pull/104) | opened |
-| typescript | yes | yes | yes | [#103](https://github.com/ilpanich/axiam-typescript-sdk/pull/103) | opened |
-| python | yes | yes | yes | [#80](https://github.com/ilpanich/axiam-python-sdk/pull/80) | opened |
-| java | yes | yes | yes | [#92](https://github.com/ilpanich/axiam-java-sdk/pull/92) | opened |
-| kotlin | yes | yes | yes | [#62](https://github.com/ilpanich/axiam-kotlin-sdk/pull/62) | opened |
-| csharp | yes | yes | yes | [#87](https://github.com/ilpanich/axiam-csharp-sdk/pull/87) | opened |
-| php | yes | yes | yes | [#67](https://github.com/ilpanich/axiam-php-sdk/pull/67) | opened |
-| go | yes | yes | yes | [#77](https://github.com/ilpanich/axiam-go-sdk/pull/77) | opened |
-| swift | yes | yes | yes | [#60](https://github.com/ilpanich/axiam-swift-sdk/pull/60) | opened — **CI-verified only**, no Swift toolchain available locally |
-| c | yes | yes | yes | [#59](https://github.com/ilpanich/axiam-c-sdk/pull/59) | opened |
-| cplusplus | yes | yes | yes | [#60](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/60) | opened |
+| rust | yes | yes | yes | [#104](https://github.com/ilpanich/axiam-rust-sdk/pull/104) | merged 2026-09-13, released at 1.0.0-beta14 |
+| typescript | yes | yes | yes | [#103](https://github.com/ilpanich/axiam-typescript-sdk/pull/103) | merged 2026-09-13, released at 1.0.0-beta14 |
+| python | yes | yes | yes | [#80](https://github.com/ilpanich/axiam-python-sdk/pull/80) | merged 2026-09-13, released at 1.0.0-beta14 |
+| java | yes | yes | yes | [#92](https://github.com/ilpanich/axiam-java-sdk/pull/92) | merged 2026-09-13, released at 1.0.0-beta14 |
+| kotlin | yes | yes | yes | [#62](https://github.com/ilpanich/axiam-kotlin-sdk/pull/62) | merged 2026-09-13, released at 1.0.0-beta14 |
+| csharp | yes | yes | yes | [#87](https://github.com/ilpanich/axiam-csharp-sdk/pull/87) | merged 2026-09-13, released at 1.0.0-beta14 |
+| php | yes | yes | yes | [#67](https://github.com/ilpanich/axiam-php-sdk/pull/67) | merged 2026-09-13, released at 1.0.0-beta14 |
+| go | yes | yes | yes | [#77](https://github.com/ilpanich/axiam-go-sdk/pull/77) | merged 2026-09-13, released at 1.0.0-beta14 |
+| swift | yes | yes | yes | [#60](https://github.com/ilpanich/axiam-swift-sdk/pull/60) | merged 2026-09-13 (CI-verified only — no Swift toolchain locally), released at 1.0.0-beta14 |
+| c | yes | yes | yes | [#59](https://github.com/ilpanich/axiam-c-sdk/pull/59) | merged 2026-09-13, released at 1.0.0-beta14 |
+| cplusplus | yes | yes | yes | [#60](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/60) | merged 2026-09-13, released at 1.0.0-beta14 |
 
 **Three SDKs were not reached in the first pass, and have since been
 completed.** The original record is kept below, corrected, because two of the

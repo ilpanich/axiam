@@ -1,5 +1,14 @@
 # Website — the 1.0.0-beta13 security and docs catch-up pass
 
+> **SUPERSEDED on 2026-09-13 — never executed.** The website is still at
+> `1.0.0-beta11`. The entry point for the pass is now
+> [`website-security-beta14-update-plan.md`](website-security-beta14-update-plan.md),
+> which folds this plan in: §5 and §6 below are still the text to execute, under
+> the overrides that plan lists (the model is at **2.14.0 — 266 threats, 253
+> mitigated / 13 open**, not 250 / 16; T-39 and T-143 closed on 2026-09-13 when
+> the revocation-feed poller landed in all eleven SDKs; the contract is at
+> **1.44**; the API index is 219 / 153). Do not execute this file on its own.
+
 > **Who this is for.** A fresh Claude session (Opus 5) tasked with bringing the
 > website's **Security** section, and the **Docs**, **News** and **Roadmap**
 > content the same releases touched, up to `1.0.0-beta13`. It is the entry point:

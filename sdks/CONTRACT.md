@@ -1367,7 +1367,7 @@ As §21.9 and §21.10: an unrecorded row is not a supported answer, and
 | php | — |
 | swift | — |
 | c | yes — `axiam_client_enable_revocation_feed`, off by default |
-| cplusplus | — |
+| cplusplus | yes — `RevocationFeed`, set as `AuthenticatorOptions::revocation_feed` |
 
 ### §10.3 Sender-constrained tokens over gRPC (contract 1.17, normative)
 
@@ -4281,7 +4281,7 @@ the §21 client role has a call to prefer with; check §21.9 before reading a
 | php | — | — |
 | swift | — | — |
 | c | yes | yes |
-| cplusplus | — | — |
+| cplusplus | yes | yes |
 
 A `—` means the row has not been filled in for that SDK yet and is **not** a
 claim either way. `declines`, with a reason and a pointer to that SDK's README,

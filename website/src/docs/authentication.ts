@@ -201,6 +201,49 @@ await client.confirmPasswordReset({
         type: "p",
         text: "The removal cookies logout sends back are built from the same setters they clear, so their protective attributes — `Secure`, `HttpOnly`, `SameSite`, path and domain — are mirrored by construction rather than restated in a second place. A browser only replaces a cookie when the attributes match; a hand-written removal that drifted from the setter would leave the session cookie sitting in the jar while the response claimed to have cleared it.",
       },
+      { type: "h", id: "op-cookie", text: "A fourth cookie, for the authorization endpoint only" },
+      {
+        type: "p",
+        text: "Since `1.0.0-beta13` a browser sign-in also sets `axiam_op_session`, scoped to `Path=/oauth2/authorize` and read only for an OAuth2 client registered with `browser_sso`. The three API cookies — `axiam_access`, `axiam_refresh`, `axiam_csrf` — are unchanged and stay `SameSite=Strict`; that is the reason there is a fourth one rather than a relaxed existing one.",
+      },
+      {
+        type: "list",
+        items: [
+          "**`SameSite=Lax` by necessity.** A relying party's redirect is a cross-site top-level navigation, on which a `Strict` cookie does not travel. `Lax` travels there and **not** inside a frame, so cross-site hidden-iframe login-status probing fails closed.",
+          "**`Secure` unconditionally.** Unlike the other three it does not follow `AXIAM__AUTH__COOKIE_SECURE`: it is the only cookie AXIAM sends on a cross-site navigation, and the endpoint it is scoped to must be TLS-protected anyway. Loopback development is unaffected.",
+          "**`HttpOnly`, and stored only as a SHA-256**, the way a refresh token is. Its `Max-Age` is the session's lifetime, because the value names the session row.",
+          "**A browser that sends it cross-site can obtain exactly one thing**: an authorization code, for a registered client, at an exactly-matched `redirect_uri`, bound to the relying party's own PKCE and `state`. It reaches no API endpoint.",
+        ],
+      },
+      { type: "h", id: "evidence", text: "Authentication evidence" },
+      {
+        type: "p",
+        text: "A session records **when** it was authenticated (`authenticated_at`) and **how** (`amr`, from the closed RFC 8176 enum), at sign-in, and both are copied — never restamped — across a refresh. For a federated login the instant is the upstream provider's own `auth_time` or `AuthnInstant`, so a provider replaying a session it established hours ago is not recorded as a fresh login. That evidence is what the `acr` and `max_age` answers on the [authentication-request honour lane](#/docs/oauth2) are computed from, through a function no request parameter can reach.",
+      },
+      {
+        type: "note",
+        text: "Sessions created before schema v55 carry no recorded `amr` and are dated by their creation row. They satisfy the `1fa` floor and nothing above it, and never present as fresher than the row is. There is no backfill; they age out.",
+      },
+      { type: "h", id: "replay", text: "The Sessions view — refresh-token replay counters" },
+      {
+        type: "p",
+        text: "`GET /api/v1/users/{user_id}/sessions` reads each session's replay counters, and the admin UI surfaces it as a **Sessions** action on every row of *Users*, with an amber “FAPI grace retry” badge or a red “Replay refused” one.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Field", "Means"],
+        rows: [
+          ["`refresh_replay_verdict`", "`none`, `fapi_grace_retry` or `refused` — derived, and a refusal outranks any number of accepted retries."],
+          ["`refresh_replay_grace_accepted`", "Replays served under the FAPI window. Only ever non-zero for a `fapi2` client."],
+          ["`refresh_replay_refused`", "Replays refused."],
+          ["`refresh_replay_at`", "When the last one arrived."],
+        ],
+      },
+      {
+        type: "warn",
+        text: "**Alert on `refused`** — nothing a conformant client does produces one: either a client is reusing a token it should have replaced, or a token has leaked. Check the `oauth2.refresh_token_replayed` audit rows for the client id, then revoke the family with a password reset or `POST /api/v1/auth/logout-all`. A `fapi_grace_retry` on a `fapi2` client is the mechanism working — a rate to watch, not a page.",
+      },
       { type: "h", id: "rate", text: "Rate limiting" },
       {
         type: "p",
@@ -1000,6 +1043,10 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
         ],
       },
       { type: "h", id: "handoff", text: "Cross-site returns and the handoff code" },
+      {
+        type: "p",
+        text: "A federated login's `auth_time` is the provider's own instant — the OIDC `auth_time` claim, or SAML's `AuthnInstant` — carried across the handoff and never AXIAM's clock, so a provider replaying an assertion for a session it established hours ago is not recorded here as a fresh login.",
+      },
       {
         type: "p",
         text: "The session cookies are `SameSite=Strict`, and that is not being weakened. SAML and Apple both have the provider perform a cross-site form POST straight to an AXIAM endpoint, and the browser will not send `Strict` cookies on the navigation that follows — the user would land back in the SPA holding a session it cannot use. So those two endpoints mint a **handoff code** instead and answer `303` to the SPA, which posts the code back same-origin and gets the cookies on a same-site response.",

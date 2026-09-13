@@ -1,6 +1,6 @@
 import type { Sdk } from "../types";
 import { SDKS } from "../data";
-import { contractLink } from "../contractAnchors";
+import { CONTRACT_VERSION, contractLink } from "../contractAnchors";
 import type { DocCodeTab, DocPage } from "./types";
 import { DOCS_VERIFIED_RELEASE } from "../version";
 
@@ -160,6 +160,29 @@ export const REFERENCE_PAGES: DocPage[] = [
           ],
         ],
       },
+      { type: "h", id: "oidf", text: "The OpenID Foundation conformance suite" },
+      {
+        type: "p",
+        text: "Since `1.0.0-beta13` AXIAM is run against the OpenID Foundation's own conformance suite, not only against the MUST matrices maintained here. Four plans: the OIDC Core **Basic OP** plan, and the three **FAPI 2.0 Security Profile (Final)** variants — mTLS, self-signed and `private_key_jwt`.",
+      },
+      {
+        type: "table",
+        headers: ["Plan (2026-09-11)", "Modules", "PASSED", "REVIEW", "SKIPPED", "WARNING", "FAILED"],
+        rows: [
+          ["`oidcc-basic-static`", "35", "30", "4", "1", "0", "0"],
+          ["`fapi2-security-profile-final-mtls`", "37", "26", "10", "0", "1", "0"],
+          ["`fapi2-security-profile-final-self-signed`", "37", "26", "10", "0", "1", "0"],
+          ["`fapi2-security-profile-final-private-key-jwt`", "56", "44", "10", "1", "1", "0"],
+        ],
+      },
+      {
+        type: "warn",
+        text: "**165 modules, zero `FAILED` — and that is not a certification.** It is a self-run against a working-tree build. The `REVIEW` and `WARNING` verdicts are published rather than counted as passes: a `REVIEW` is a screenshot-evidence module the suite cannot decide automatically and a human must judge, and the one `WARNING` per FAPI plan is a module that now runs where it used to be skipped. `conformance-run` itself exits non-zero on them. No submission has been made.",
+      },
+      {
+        type: "p",
+        text: `Every report is committed in full, green and red alike — including the first run of 2026-09-08, whose 66 non-passing modules and one real assertion failure are still there to read. That failure was the identity cache letting a certificate-bound token pass as a bearer one: no internal review had found it, and the model records it as the Critical it was. [Read the receipts](${GH_BLOB}/docs/conformance/README.md) for the method and the hedges, and [the latest run](${GH_BLOB}/docs/conformance/index.md) for the reports themselves.`,
+      },
       { type: "h", id: "security", text: "Security standards" },
       {
         type: "table",
@@ -173,7 +196,7 @@ export const REFERENCE_PAGES: DocPage[] = [
           ],
           [
             "GDPR",
-            "Data export (Art. 15) and erasure (Art. 17) endpoints, with audit-actor pseudonymisation so an append-only trail can coexist with a right to erasure. Exports can be PGP-encrypted.",
+            "Data export (Art. 15), erasure (Art. 17) and consent (Art. 7) endpoints, with audit-actor pseudonymisation so an append-only trail can coexist with a right to erasure. Exports can be PGP-encrypted. OIDC scope-release consent is per client and per exact scope set, withdrawable in one call with no confirmation step (Art. 7(3)), and re-checked on **every** release rather than once at issuance. Every personal-data column of the user record is classified in one declared inventory that both erasure statements and the export render from, and a test introspects the live schema after migrations and fails on any column the inventory does not classify — so adding a column is a failing build rather than a subject who keeps a telephone number after erasure.",
             `[GDPR compliance record](${COMPLIANCE}/gdpr-compliance.md) — export completeness, erasure durability and consent, article by article.`,
           ],
           [
@@ -290,6 +313,83 @@ export const REFERENCE_PAGES: DocPage[] = [
       {
         type: "p",
         text: "A release ships the surface it derives from the spec it vendors: tagging an SDK re-vendors the contract, the OpenAPI document and the management registry, then regenerates that SDK's §27 management surface from them and stages exactly what the generator wrote. A missing generator stops the release rather than tagging a tree the SDK's own drift-check would reject.",
+      },
+      { type: "h", id: "recent", text: "What moved in contract 1.40–1.44" },
+      {
+        type: "p",
+        text: `The vendored contract is at **${CONTRACT_VERSION}**. Five amendments since 1.39, and — unlike the first three — the last two changed SDK code in all eleven repositories, each released at that SDK's \`1.0.0-beta14\`.`,
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Version", "What changed", "SDK code?"],
+        rows: [
+          [
+            "1.40",
+            `[§21.3 rule 2](${contractLink("21.3")}) — an SDK making a call **over mTLS** must prefer the discovery document's RFC 8705 §5 alias for that endpoint. An **absent** member means *no separate host*, not *unsupported*; only the six back-channel endpoints are ever aliased and an SDK must not synthesise one for the front channel; and \`issuer\` is never aliased, so \`iss\` is still compared against the document's own value and not against the host that was called.`,
+            "no, at 1.40",
+          ],
+          [
+            "1.41",
+            "§5 rule 3's rationale: no SDK sends a client secret in the `Authorization` header, whatever the client is registered for, because that is the channel intermediaries log.",
+            "no",
+          ],
+          [
+            "1.42",
+            "§21.5's two informative discovery members.",
+            "no",
+          ],
+          [
+            "1.43",
+            `[§21.3 rule 2 clause 4](${contractLink("21.3")}) — an alias's **query component is preserved**, neither appended to nor stripped. AXIAM's aliases carry the tenant as a query component, so an SDK that appends its own \`?tenant_id=\` produces a pair the server cannot deserialise, and one that rebuilds the URL from host and path drops whatever else the deployment put there. *Displacing* the existing \`tenant_id\` with the one the caller authenticated against is correct and expected. §21.3.1 publishes three test vectors **inside the contract** — A a two-listener deployment, B a single-listener one with the member absent, C a malformed alias, which an SDK must **refuse** at the point of use rather than fall back from.`,
+            "**yes**",
+          ],
+          [
+            "1.44",
+            `[§10.4](${contractLink("10.4")}) — the optional revocation-feed poller. **SHOULD**, disabled by default.`,
+            "**yes**",
+          ],
+        ],
+      },
+      { type: "h", id: "revocation-feed", text: "The revocation-feed poller (§10.4)" },
+      {
+        type: "p",
+        text: `A deployment may publish \`GET /oauth2/revocations\` — the hashed ids of sessions revoked within the last access-token lifetime — and an SDK route guard **SHOULD** poll it, which narrows the revocation window from one token lifetime to one poll interval. An entry is the base64url-unpadded SHA-256 of the \`sid\` claim's exact string, hashed as read: an SDK that parses it to a UUID and re-renders it makes the guard's answer depend on its own UUID parser. Four rules are normative wherever an SDK implements it at all.`,
+      },
+      {
+        type: "list",
+        items: [
+          "**Default off.** The caller opts in. An SDK that polled by default would change what every existing integration does on upgrade, for a feature the deployment may not even serve.",
+          "**Never on the request path.** Poll on a bounded interval (recommended 30–60 s, never shorter than 15 s) and serve the guard from a bounded cached set.",
+          "**Never fail closed on the feed.** An unreachable feed, a non-`200`, an unparseable body or an `alg` other than `SHA-256` must behave **exactly** as with the feature off — and specifically **not** as an empty list, which asserts that nothing has been revoked and is a guard silently honouring no revocations while appearing to honour them.",
+          "**It only ever rejects.** Every §10.1 local rule still runs first and still decides; a token with no `sid` — client credentials, an RPT, a token exchange — is never matched against the feed at all.",
+        ],
+      },
+      {
+        type: "note",
+        text: `All eleven SDKs implement it, each with tests pinning those cases, and [§10.4.1](${contractLink("10.4.1")}) records the attachment point per SDK. [§21.10](${contractLink("21.10")}) does the same for the alias handling, and reads \`yes\` in both columns for every SDK. As in §21.9, **an unrecorded row is not a supported answer** — \`declines\`, with a reason, is; silence is not.`,
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["SDK", "Attach the poller with"],
+        rows: [
+          ["Rust", "`JwksVerifier::with_revocation_feed`"],
+          ["TypeScript", "`VerifiableSession.revocationFeed`"],
+          ["Python", "`JwksVerifier(revocation_feed=…)`"],
+          ["Go", "`JWKSVerifier.WithRevocationFeed`"],
+          ["Java", "the three-argument `JwksVerifier`"],
+          ["Kotlin", "`Builder.revocationFeed`"],
+          ["C#", "`JwksVerifier(revocationFeed:)`"],
+          ["PHP", "the sixth `JwksVerifier` argument"],
+          ["Swift", "`AxiamConfig.revocationFeedEnabled`"],
+          ["C", "`axiam_client_enable_revocation_feed`"],
+          ["C++", "`AuthenticatorOptions::revocation_feed`"],
+        ],
+      },
+      {
+        type: "warn",
+        text: "Both halves are opt-in, and neither alone does anything: the server has to publish the feed (`AXIAM__AUTH__REVOCATION_FEED_ENABLED`) and your guard has to attach the poller. Attaching it cannot admit anything local verification would have refused — it only ever rejects — and a guard that cannot reach the feed behaves exactly as one without it.",
       },
       { type: "h", id: "packages", text: "Canonical package names" },
       {

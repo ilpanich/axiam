@@ -214,7 +214,7 @@ export const OPERATE_PAGES: DocPage[] = [
     intro:
       "AXIAM holds ten long-lived secrets. Two of them are the difference between \"an attacker read your database\" and \"an attacker owns your identity provider\".",
     blocks: [
-      { type: "h", id: "what", text: "The ten secrets" },
+      { type: "h", id: "what", text: "The secrets" },
       {
         type: "table",
         headers: ["Field", "Shape", "What losing it costs"],
@@ -253,6 +253,11 @@ export const OPERATE_PAGES: DocPage[] = [
             "Existing audit pseudonyms stop linking to new ones; the audit trail breaks.",
           ],
           [
+            "amqp_signing_key",
+            "32-byte hex",
+            "AMQP message signing is mandatory and has no unsigned path, so a release build **refuses to start** without it. Rotating it needs producers and consumers moved together.",
+          ],
+          [
             "jwt_public_key_pem",
             "Ed25519 PEM",
             "Not secret, but a mismatched pair is a confusing outage.",
@@ -289,6 +294,39 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "note",
         text: "AXIAM's actual requirement is small: a KV v2 secret whose fields carry those names. It does not care who runs Vault, whether it is HA, or how it is unsealed. If your organization already runs one, point `AXIAM__AUTH__VAULT_ADDR` at it, apply the shipped policy, and skip the rest.",
+      },
+      { type: "h", id: "credentials", text: "The datastore and broker credentials" },
+      {
+        type: "p",
+        text: "Three more fields, and they behave differently enough to be worth their own table. Until `1.0.0-beta13` these were the one class of secret that **had** to be in the container spec whatever provider you configured: they were read by the configuration loader before any provider existed, so a deployment that put every key in Vault still had its datastore password in the pod spec. Since `1.0.0-beta14` they come through the provider, in the same round trip as everything above — and the Vault token, or the `file` provider's mount, becomes the only credential your manifest has to carry.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Field", "Shape", "Environment fallback"],
+        rows: [
+          ["`db_username`", "text", "`AXIAM__DB__USERNAME`"],
+          ["`db_password`", "text", "`AXIAM__DB__PASSWORD`"],
+          ["`amqp_url`", "`amqps://user:pass@host:5671/vhost`", "`AXIAM__AMQP__URL`"],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**The environment variables stay, permanently.** `env` is a supported provider kind — a single-node deployment, the dev Compose file and the E2E stack all use it deliberately — so deprecating the variables would deprecate the provider that reads them.",
+          "**One `WARN`, in one case only.** Configure a *non-`env`* provider and have a value still arrive from the environment, and the server logs one `WARN` at boot naming the variable. That is the case where you believe something untrue; under `env` there is nothing to warn about.",
+          "**They are never minted.** `just vault-seed` mints every *key* above that is missing, and these three it only carries forward from your environment when you supply them. A 256-bit key is meaningful only to AXIAM, so inventing one for an empty slot is what seeding is for; a datastore password has to match what SurrealDB was configured with, and inventing one gives you a Vault that looks configured and a server that cannot connect. An existing value in Vault always wins over one in your shell, so re-running the seeder with a stale variable cannot silently undo a rotation.",
+          "**The Vault policy needed no change.** `docker/vault/axiam-policy.hcl` already grants `read` on the KV path, and the three fields live in that same entry — the policy is path-based, not field-based. Worth stating, because *add the new secrets to the policy* is the reasonable first assumption and following it means editing a file that did not need editing.",
+        ],
+      },
+      {
+        type: "note",
+        text: "`just vault-status` reports their presence too, and an absence is not the failure an absent `jwt_private_key_pem` is — the server falls back to the environment and says so.",
+      },
+      { type: "h", id: "vault-ca", text: "The Vault CA bundle is validated, not assumed" },
+      {
+        type: "p",
+        text: "A `AXIAM__AUTH__VAULT_CA_CERT_PATH` bundle that is empty, truncated, or DER where PEM was expected parses to **no certificates**. AXIAM refuses to start and names the file, rather than silently falling back to the public trust store — which would leave the deployment verifying its Vault against a set of roots it never chose, and looking configured while being less protected than before the file was added.",
       },
       { type: "h", id: "honesty", text: "What Vault does and does not defend against" },
       {
@@ -458,6 +496,14 @@ export const OPERATE_PAGES: DocPage[] = [
           ["opaque_mode", "`disabled` | `optional` | `required` — see [OPAQUE](#/docs/opaque)."],
           ["opaque_suite", "RFC 9807 ciphersuite. Default `ristretto255_sha512`."],
           ["opaque_ksf", "Client key-stretching function. Default `argon2id`; `scrypt` is the alternative."],
+          [
+            "sensitive_scopes_enabled",
+            "Whether the OIDC `address` and `phone` scopes may be released at all. An **organization** field, and the one field a tenant may only *disable* — the only such field in the settings surface, because the release of contact data is an organization-level lawful-basis decision a tenant can decline but not grant itself. See [the `address` and `phone` scopes](#/docs/oauth2).",
+          ],
+          [
+            "default_locale",
+            "The language the sign-in and consent pages are served in when the request expresses no preference. Refused for a tag the build does not ship — five locales are bundled, and a setting naming a sixth would render as a silent fall back to English rather than as the error it is.",
+          ],
         ],
       },
       {
@@ -563,6 +609,10 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "p",
         text: "That last requirement is a walk, not a test of the immediate issuer: a tenant signing CA is deliberately an unflagged intermediate, so requiring the direct issuer to carry the flag would refuse every legitimately intermediate-issued certificate. The walk climbs `parent_ca_id` until it reaches a flagged anchor, requires every CA on the way to be Active and in date — an anchor reached through a revoked intermediate is not reached — and is depth-bounded, because `parent_ca_id` is data and data can describe a cycle.",
+      },
+      {
+        type: "p",
+        text: "**A self-asserted certificate is never a device identity, whatever policy the listener runs.** Setting `AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed` lets the handshake admit a certificate that chains to nothing, because the OAuth2 `self_signed_tls_client_auth` client method needs it — and the trust level the certificate earned travels with it to every consumer, so device authentication refuses such a certificate outright. Device identity is chaining to a flagged anchor, and nothing else.",
       },
       {
         type: "warn",
@@ -744,6 +794,33 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "note",
         text: "The sweep deletes through the audit table's **only** deletion path, which is deployment-wide and reachable from no HTTP handler. That is what keeps \"prune old records\" from becoming \"delete the evidence\": there is no request an administrator — or an attacker holding an administrator's credential — can make that removes audit rows.",
       },
+      { type: "h", id: "minimisation", text: "Collection minimisation" },
+      {
+        type: "p",
+        text: "Retention bounds **how long** records are kept. `AXIAM__AUDIT__MINIMISE` (default `false`) bounds **what is collected** in the first place — the side that was previously not configurable at all, and the only side an append-only table lets you decide. With it on, two fields are reduced immediately before the append, because after it there is no second chance by construction:",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Field", "Becomes", "Kept for"],
+        rows: [
+          ["`ip_address`", "the `/24` (IPv4) or `/48` (IPv6) prefix — `203.0.113.42` becomes `203.0.113.0/24`", "seeing a pattern, correlating a burst, answering *was this the office*"],
+          ["`metadata.user_agent`, where a producer sets one", "a coarse family — `Firefox`, `Chrome`, `curl`, `other`", "the part an investigation reads"],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**An address that does not parse is dropped**, not written through: a value that cannot be parsed cannot be shown to have been minimised, and passing it would be a silent hole in the control. A `host:port` string is handled, so the common `realip_remote_addr` shape does not lose a field for no reason, and a v4-mapped v6 address is minimised as the v4 address it is.",
+          "**The structured metadata producers write is deliberately untouched** — the client and disposition on a refresh-token replay, the names of released claims, the provider and external subject on a JIT provision. Dropping it would weaken three controls to narrow one, and none of it is request metadata. The request-audit middleware itself records only `http_status` and `authenticated`, pinned by a test rather than left to habit.",
+          "**Erasure and export are unaffected.** The Art. 17 scrub clears `ip_address` outright, so a truncated value is erased by exactly the same statement as a whole one, and the Art. 15 export never reads the address — a data subject's inventory is identical either way.",
+          "**Deployment-wide, and deliberately not per tenant.** Audit is an accountability control the deployment relies on *including against a tenant administrator*; a per-tenant switch would let a tenant weaken the evidence used to investigate that tenant.",
+        ],
+      },
+      {
+        type: "note",
+        text: "Off by default, because turning it on reduces forensic precision and that is a lawful-basis judgement to make deliberately rather than inherit. **Both states are logged at startup**, exactly as retention is: an operator opening an incident needs to know, before they start reading rows, whether the addresses in them are whole.",
+      },
     ],
   },
 
@@ -920,6 +997,11 @@ export const OPERATE_PAGES: DocPage[] = [
             "`env` is a development default. Key material ends up in a process listing, a compose file and a CI log.",
           ],
           [
+            "The datastore and broker credentials come from the provider too",
+            "Put `db_username`, `db_password` and `amqp_url` in the provider; leave `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL` blank",
+            "Since `1.0.0-beta14` these are the last credentials that needed to be in the container spec — leaving them there keeps a datastore password in a pod spec, a crash dump and an orchestrator API, for a deployment that believed Vault held everything. A non-`env` provider that still receives one from the environment warns at boot.",
+          ],
+          [
             "OPAQUE setup key is backed up",
             "Back up `opaque_setup_key`",
             "Losing it is a forced password reset for every user in every tenant. There is no recovery path.",
@@ -993,6 +1075,19 @@ export const OPERATE_PAGES: DocPage[] = [
             "Every client shares one apparent address, per-IP limits become meaningless, and one abusive caller throttles everybody. It is the number of proxies in front of the server **minus one** — a proxy appends the address it received from, so the nearest one is the socket peer and never appears in the header. One proxy means `0`, the default.",
           ],
         ],
+      },
+      { type: "h", id: "mtls-topology", text: "The mTLS listener, and a two-listener topology" },
+      {
+        type: "list",
+        items: [
+          "**`AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed` exists, and is opt-in.** Under the other three values — `off`, `optional`, `required` — every byte of listener behaviour is unchanged. It admits a certificate that chains to nothing, which the OAuth2 `self_signed_tls_client_auth` client method needs, and the trust level a certificate earned travels with it: device authentication and `tls_client_auth` both refuse a self-asserted one.",
+          "**A separate mTLS host is the documented shape**, not a workaround. A TLS listener decides whether to request a client certificate during the handshake, before it has seen any HTTP, so *ask on `/oauth2/token` but not on `/oauth2/authorize`* is not something one listener can do. Run the front channel on the issuer and the back channel on an mTLS listener, and publish the second with `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` — it appears as RFC 8705 §5 `mtls_endpoint_aliases`, which every AXIAM SDK prefers on an mTLS call and never synthesises for the front channel.",
+          "**Audit what your ingress logs before registering a client for `client_secret_basic`.** AXIAM keeps the `Authorization` header out of its own logs and its SDKs never send one, but a proxy in front of it may log headers by default. See [FAPI 2.0 & mTLS](#/docs/fapi2).",
+        ],
+      },
+      {
+        type: "note",
+        text: "A single-listener deployment running `client_auth = optional` serves both populations on the conventional endpoints and correctly publishes **no** aliases. Leave `OAUTH2_MTLS_BASE_URL` unset there: an absent member means *no separate host*, not *unsupported*.",
       },
       { type: "h", id: "grpc", text: "Publishing gRPC outside the mesh" },
       {
@@ -1095,6 +1190,28 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "warn",
         text: "**The server cannot verify this for you.** SurrealDB exposes no datastore identity over the wire, so `axiam-server` logs a startup `WARN` that the engine could not be attested and the requirement lands on you. The shipped compose files and the Kubernetes StatefulSet already pin `surrealkv:`. A per-attempt redemption nonce, read back after the transaction commits, is a second layer that catches a missed conflict — so this is defence in depth rather than a single point of failure, but do not spend the second layer to save the first.",
+      },
+      { type: "h", id: "optins", text: "Two opt-ins to consider before go-live" },
+      {
+        type: "p",
+        text: "Neither of these is a default, and neither is a check you pass or fail — each is a decision with a cost on both sides, worth taking deliberately rather than inheriting.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Opt-in", "Turn it on when", "What it costs"],
+        rows: [
+          [
+            "The session revocation feed (`AXIAM__AUTH__REVOCATION_FEED_ENABLED`)",
+            "Sign-out has to take effect faster than fifteen minutes, and routing every authorization decision through gRPC introspection is too expensive.",
+            "One more public endpoint. Off means one fewer, and byte-identical behaviour. **Pair it with the SDK poller** — a feed nobody polls narrows nothing — and remember it is a narrowing and not a control. See [the feed](#/docs/oauth2) and [Client SDKs](#/docs/sdks).",
+          ],
+          [
+            "Audit collection minimisation (`AXIAM__AUDIT__MINIMISE`)",
+            "Your lawful basis does not support holding whole client addresses for the retention window.",
+            "Forensic precision — a `/24` prefix and a user-agent family answer fewer questions than the whole values. It is a lawful-basis judgement, not a security improvement. See [Audit](#/docs/audit).",
+          ],
+        ],
       },
       { type: "h", id: "ops", text: "Operations" },
       {
@@ -1211,6 +1328,61 @@ export const OPERATE_PAGES: DocPage[] = [
             "Vault is sealed after a restart",
             "No auto-unseal is configured.",
             "Configure auto-unseal. Until then, unseal manually with the key threshold.",
+          ],
+        ],
+      },
+      { type: "h", id: "oauth2-symptoms", text: "OAuth2 and OIDC" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Symptom", "Cause", "Fix"],
+        rows: [
+          [
+            "`401 \"session revoked or expired\"` at `/oauth2/userinfo`, seconds after issuance",
+            "A token minted before `1.0.0-beta13`, when OAuth2 access tokens did not carry `sid`. UserInfo now resolves the session the token names, and a token that names none cannot be resolved.",
+            "Re-issue the token. Tokens minted by a beta13-or-later server carry it.",
+          ],
+          [
+            "`400 Query deserialize error: missing field tenant_id`",
+            "Calling an endpoint at the URL a pre-beta13 discovery document published. The client-authenticating endpoints have always required `tenant_id`; the document did not carry it.",
+            "Set `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`, or fetch the document as `?tenant_id=<uuid>`, or add the parameter at the client.",
+          ],
+          [
+            "A self-signed mTLS client's handshake dies with no HTTP status",
+            "The listener is not admitting chainless certificates, so the connection never becomes a request there is a status to answer with.",
+            "Set `AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed`. It admits only that, and changes nothing under the other three values.",
+          ],
+        ],
+      },
+      { type: "h", id: "boot-lines", text: "Reading the posture out of the startup log" },
+      {
+        type: "p",
+        text: "Four lines at boot say what is in force, so an operator does not have to infer it from a manifest. Two are warnings that something was configured and did not take; two are informational and printed either way, precisely so that *off* is as visible as *on*.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Line", "What it means", "What to do"],
+        rows: [
+          [
+            "`WARN` naming `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`",
+            "The value is not a UUID and is being ignored; discovery serves the tenant-less document. The line describes the value's *shape* and never the value, because a variable that is not proven to hold a tenant id is not proven to hold something safe to print.",
+            "Fix the value, or unset it if you meant to serve many tenants from one issuer.",
+          ],
+          [
+            "`WARN` — a credential \"was read from the environment; the configured secret provider has no entry for it\"",
+            "A non-`env` provider is configured and `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` or `AXIAM__AMQP__URL` still arrived from the environment. The server used it: this is a warning, not a refusal.",
+            "Move it into the provider, or leave it — but know that the pod spec still carries a credential you believed was in Vault.",
+          ],
+          [
+            "`audit collection minimisation is ON` / `is OFF`",
+            "Whether the client addresses in the rows you are about to read are whole.",
+            "Nothing — read it before an investigation, not during one.",
+          ],
+          [
+            "`session revocation feed is ON` / `is OFF`",
+            "Whether `GET /oauth2/revocations` is mounted and revocation rows are being written.",
+            "Nothing — but `ON` with no SDK polling the feed narrows nothing.",
           ],
         ],
       },

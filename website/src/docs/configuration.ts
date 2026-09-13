@@ -228,7 +228,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTH__VAULT_CA_CERT_PATH",
-            "Trust anchor for a Vault fronted by a private CA. rustls compiles its roots in, so a Vault certificate issued by an internal PKI — cert-manager, or the repository's own dev certificates — is otherwise unverifiable and the server fails at startup with a bare transport error.",
+            "Trust anchor for a Vault fronted by a private CA. rustls compiles its roots in, so a Vault certificate issued by an internal PKI — cert-manager, or the repository's own dev certificates — is otherwise unverifiable and the server fails at startup with a bare transport error. A bundle that parses to **no certificates** — empty, truncated, or DER where PEM was expected — fails startup naming the file, rather than silently falling back to the public trust store, which would leave the deployment trusting a set of roots it never chose.",
             "/etc/axiam/vault/ca.pem",
           ],
         ],
@@ -266,12 +266,12 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTH__OAUTH2_MTLS_BASE_URL",
-            "Base URL of the listener that performs the mutual-TLS handshake, when that is a different host from the issuer. Publishes RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document. Leave unset on a single-listener deployment — including one running `client_auth = optional`, where the conventional endpoints already serve both populations.",
+            "Base URL of the listener that performs the mutual-TLS handshake, when that is a different host from the issuer. Publishes RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document. Leave unset on a single-listener deployment — including one running `client_auth = optional`, where the conventional endpoints already serve both populations. Six aliases are published and the front channel is never among them. A value that cannot be parsed **fails discovery with a `500`** — deliberately unlike the default-tenant row below: an unusable alias would send a client's certificate to a host that authenticates nothing, so the document is refused rather than served without it.",
             "https://mtls.iam.acme.dev",
           ],
           [
             "AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID",
-            "Tenant that the bare discovery document describes when the caller names none. Every client-authenticating OAuth2 endpoint takes a required `tenant_id`, so a relying party that reads the document and uses the URLs verbatim is otherwise refused. Set it on a single-tenant deployment — the shape an OP is certified as. Leave unset when one issuer serves many tenants: it only changes what the document publishes, never how an endpoint behaves, and a request arriving without `tenant_id` is still refused.",
+            "Tenant that the bare discovery document describes when the caller names none. Every client-authenticating OAuth2 endpoint takes a required `tenant_id`, so a relying party that reads the document and uses the URLs verbatim is otherwise refused. Set it on a single-tenant deployment — the shape an OP is certified as. Leave unset when one issuer serves many tenants: it only changes what the document publishes, never how an endpoint behaves, and a request arriving without `tenant_id` is still refused. A value that does not parse as a UUID is **ignored and reported once at boot**, naming the variable and describing the value's shape but never the value — a fat-fingered UUID must not `500` for every relying party, and a setting that quietly does nothing is worse than one that says so.",
             "0b5f4d2e-6c31-4a8e-9f77-2d1c8a4b6e90",
           ],
           [
@@ -736,7 +736,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__SERVER__TLS__CLIENT_AUTH",
-            "Native client-certificate policy: `off` (default), `optional` or `required`. `optional` is what a listener serving both browser traffic and mTLS devices wants.",
+            "Native client-certificate policy: `off` (default), `optional`, `required`, or `optional_self_signed`. `optional` is what a listener serving both browser traffic and mTLS devices wants. `optional_self_signed` additionally admits a certificate that chains to nothing — what the OAuth2 `self_signed_tls_client_auth` method needs — and admits **only** that: the trust level a certificate earned travels with it, so a self-asserted certificate can authenticate an OAuth2 client whose thumbprint an administrator registered, and is refused outright for device identity and for `tls_client_auth`. Under the other three values every byte of behaviour is unchanged.",
             "optional",
           ],
           [

@@ -1137,9 +1137,9 @@ Per repository, one branch named for this plan, one PR:
 | SDK | C-1 `sign_csr` | M-3 setup helpers | PR | CI at session end |
 |---|---|---|---|---|
 | rust | | | | |
-| typescript | | | | |
+| typescript | yes | yes | [#104](https://github.com/ilpanich/axiam-typescript-sdk/pull/104) | tsc, tsup, drift (160), **1268 tests**, bundle/token/TLS greps, audit, docs, publish --dry-run — all green locally |
 | python | yes | yes | [#81](https://github.com/ilpanich/axiam-python-sdk/pull/81) | drift (160), mypy --strict, ruff, interrogate 100%, **1578 tests**, coverage 98.54%, build+twine — all green locally |
-| java | | | | |
+| java | yes | yes | [#93](https://github.com/ilpanich/axiam-java-sdk/pull/93) | drift (160), TLS gate, javadoc with `-Xdoclint:all failOnWarnings`, **1111 tests**, jacoco — all green locally |
 | kotlin | | | | |
 | csharp | yes | yes | [#88](https://github.com/ilpanich/axiam-csharp-sdk/pull/88) | dotnet-sdk 8.0+10.0 from apt (§13.1 correction holds); drift (160), build 0 errors, **2370 tests** across both frameworks, vuln scan, pack — all green |
 | php | yes | yes | [#68](https://github.com/ilpanich/axiam-php-sdk/pull/68) | drift (160), WebauthnTest 28/28, Management 427/427, unit suite 1408 with the **unchanged** 65-failure require-dev baseline; phpstan/php-cs-fixer/integration CI-verified |

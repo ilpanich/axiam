@@ -1384,7 +1384,7 @@ Filled in as PRs are opened; `—` means not reached this session.
 | typescript | yes | yes | yes | [#103](https://github.com/ilpanich/axiam-typescript-sdk/pull/103) | opened |
 | python | yes | yes | yes | [#80](https://github.com/ilpanich/axiam-python-sdk/pull/80) | opened |
 | java | yes | yes | yes | [#92](https://github.com/ilpanich/axiam-java-sdk/pull/92) | opened |
-| kotlin | — | — | — | — | — |
+| kotlin | yes | yes | yes | [#62](https://github.com/ilpanich/axiam-kotlin-sdk/pull/62) | opened |
 | csharp | — | — | — | — | — |
 | php | — | — | — | — | — |
 | go | yes | yes | yes | [#77](https://github.com/ilpanich/axiam-go-sdk/pull/77) | opened |

@@ -653,6 +653,64 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         )));
     }
 
+    // The handle, before a person is asked to sign in for it.
+    //
+    // `/oauth2/authorize` cannot consume a `request_uri` here: it is single-use
+    // and is spent inside the handler, after a principal exists — which is what
+    // the `prompt=none` comment above means by "a pushed request's parameters
+    // cannot be seen at this point". The consequence was that a browser
+    // presenting an already-used, expired or wrong-client handle was sent to
+    // `/login` without the handle being looked at at all, the user typed a
+    // password, and the request was refused on the return leg. The OIDF module
+    // `fapi2-security-profile-final-par-attempt-reuse-request_uri` reports that
+    // as a screenshot of a sign-in page against a condition asking for an error
+    // page about an invalid `request_uri`.
+    //
+    // `peek` is a READ. It does not consume, does not authorize, and carries
+    // nothing forward: the authoritative single-use decision stays in
+    // `ParService::consume`, in the handler, in one statement (see
+    // `par.rs`'s §2 rule 1). A handle that passes here may still lose the race
+    // to a concurrent authorize request, and must.
+    //
+    // It therefore refuses exactly what was already dead and nothing that is
+    // merely unfinished — which is the property
+    // `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds`
+    // depends on: a `request_uri` re-presented BEFORE the first authorization
+    // completed is still unconsumed and unexpired, so the login page is shown,
+    // as that module requires.
+    //
+    // Only a genuine PAR handle is asked about. A `request` object by value, or
+    // a `request_uri` that is not a PAR handle, is a different refusal with its
+    // own OIDC Core §3.1.2.6 code, owned by `classify_request_object` in the
+    // handler; turning either into `invalid_request` here would lose the code a
+    // conformance suite matches on.
+    if classify_request_object(q.request.as_deref(), q.request_uri.as_deref()).is_none()
+        && let Some(request_uri) = q.request_uri.as_deref()
+        && let Err(refusal) = state
+            .oauth2
+            .par_service
+            .peek(tenant_id, &q.client_id, request_uri)
+            .await
+    {
+        // RFC 6749 §4.1.2.1, answered exactly as the `prompt=none` arm above
+        // does: redirected only to a `redirect_uri` this client registered,
+        // compared exactly, and answered directly otherwise. The pushed copy's
+        // `redirect_uri` is not available and must not be — resolving it is the
+        // thing that just failed.
+        let reported = request_uri_error_for_client(&refusal);
+        let reported = reported.as_ref().unwrap_or(&refusal);
+        return Err(Box::new(match q.redirect_uri.as_deref() {
+            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
+                build_error_redirect(uri, reported, q.state.as_deref(), &state.auth_config)
+            }
+            // Rendered for the person, with the wording `ParService` produced.
+            // The OIDC code above is what a *relying party* can act on; a page
+            // saying `invalid_request_uri` to somebody who did not send the
+            // parameter tells them nothing they can use.
+            _ => authorize_error_response(http_req, &refusal),
+        }));
+    }
+
     let Some(return_to) = axiam_oauth2::login_hop::build_return_to(http_req.query_string()) else {
         // Nothing safe to come back to. Answer as if the request had been
         // anonymous with no `browser_sso` at all rather than send a browser
@@ -999,7 +1057,48 @@ pub async fn authorize<C: Connection + Clone>(
                         ),
                     );
                 }
-                Err(e) => return authorize_error_response(&http_req, &e),
+                // Every other `request_uri` refusal — unknown, expired,
+                // already used, or issued to a different client — on a request
+                // that is NOT a return leg.
+                //
+                // Reported to the relying party when the request names a
+                // `redirect_uri` this client registered, and only then. RFC
+                // 6749 §4.1.2.1 permits exactly that and nothing wider: the
+                // target is compared against the registration before anything
+                // is sent to it, so a browser cannot nominate where a refusal
+                // goes. It is the same test the `prompt=none` and
+                // `user_declined` arms of `resolve_authorize_principal` make,
+                // and the same one the peek makes before the login hop.
+                //
+                // The pushed copy's own `redirect_uri` is not available and is
+                // not what is used: resolving the handle is the thing that just
+                // failed. This target comes from the query string and survives
+                // only because the registration vouched for it.
+                //
+                // Why redirect at all, when this endpoint deliberately renders
+                // a page for a refusal it cannot attribute: a relying party
+                // that is told `invalid_request` can push again and restart,
+                // while a person looking at a page can only be asked to go back
+                // to the application and try — which is the worse of the two
+                // outcomes whenever the better one is available. The page is
+                // still what an unregistered or absent `redirect_uri` gets,
+                // which is the case `authorize_error_response` was written for.
+                //
+                // A request with no registered target is answered exactly as
+                // before this change, so the three PAR refusal modules that
+                // already render a readable page keep doing so.
+                Err(e) => {
+                    return refuse_request_uri_to_client(
+                        &state,
+                        &http_req,
+                        user.tenant_id,
+                        &q.client_id,
+                        q.redirect_uri.as_deref(),
+                        q.state.as_deref(),
+                        &e,
+                    )
+                    .await;
+                }
             };
 
             // X7.1 — parsed from the *pushed* copy, never from the query
@@ -3812,6 +3911,83 @@ fn escape_html(raw: &str) -> String {
 /// `state`, no `redirect_uri` and no `request_uri` — the rule
 /// [`logged_out_page`] states and for the same reason, since those are
 /// attacker-supplied strings and this page is served from AXIAM's own origin.
+/// The code a `request_uri` refusal carries **when it is reported to the relying
+/// party**, as opposed to rendered for the person in front of the browser.
+///
+/// OIDC Core §3.1.2.6 defines `invalid_request_uri` for exactly this state, and
+/// the OIDF suite asserts it by name: `EnsureInvalidRequestUriError` accepts
+/// that code and no other, so `invalid_request` — which is what RFC 6749 leaves
+/// you with and what [`ParService::consume`](axiam_oauth2::par) produces —
+/// fails two FAPI 2.0 modules the moment the refusal starts reaching the client
+/// at all. It is also the more useful of the two: a relying party told
+/// `invalid_request` has been handed a description of a client bug that did not
+/// happen, while `invalid_request_uri` says the recoverable thing — push again
+/// and restart.
+///
+/// **Narrow on purpose**, and narrow in the same place `is_request_uri_gone` is
+/// narrow: `request_uri was not issued to this client` is a different failure
+/// and keeps its own answer, exactly as it does on the login-hop return leg.
+///
+/// Returns `None` when the refusal is not about a spent handle, meaning "report
+/// it as it is". Nothing here changes what a request with no registered
+/// `redirect_uri` is answered — that is still
+/// [`authorize_error_response`] rendering the original error.
+fn request_uri_error_for_client(e: &OAuth2Error) -> Option<OAuth2Error> {
+    axiam_oauth2::par::is_request_uri_gone(e).then(|| {
+        OAuth2Error::InvalidRequestUri(
+            "the pushed authorization request is unknown, expired, or has already been \
+             used (a request_uri lives 60 seconds and may be spent once); push it again \
+             and restart the authorization request"
+                .into(),
+        )
+    })
+}
+
+/// Report a `request_uri` refusal to the relying party when the request named a
+/// `redirect_uri` that client registered, and to the person otherwise.
+///
+/// The client is looked up *here* rather than passed in because the caller is
+/// past [`resolve_authorize_principal`] and holds no registration: this path is
+/// reached with a principal already resolved, and the pushed request that would
+/// have carried the client's parameters is precisely what could not be read.
+/// One repository read, on a refusal path only.
+///
+/// A lookup that fails is not a licence to redirect. Anything other than a
+/// client whose registration lists the exact `redirect_uri` asked for falls
+/// through to [`authorize_error_response`], which is the answer this endpoint
+/// gave before the redirect existed.
+async fn refuse_request_uri_to_client<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &HttpRequest,
+    tenant_id: Uuid,
+    client_id: &str,
+    redirect_uri: Option<&str>,
+    state_param: Option<&str>,
+    e: &OAuth2Error,
+) -> HttpResponse {
+    let Some(uri) = redirect_uri else {
+        return authorize_error_response(http_req, e);
+    };
+    let Ok(client) = state
+        .oauth2_client_repo
+        .get_by_client_id(tenant_id, client_id)
+        .await
+    else {
+        return authorize_error_response(http_req, e);
+    };
+    if client.redirect_uris.iter().any(|r| r == uri) {
+        let mapped = request_uri_error_for_client(e);
+        build_error_redirect(
+            uri,
+            mapped.as_ref().unwrap_or(e),
+            state_param,
+            &state.auth_config,
+        )
+    } else {
+        authorize_error_response(http_req, e)
+    }
+}
+
 fn authorize_error_response(req: &HttpRequest, e: &OAuth2Error) -> HttpResponse {
     if !prefers_html(req) {
         return build_oauth2_error_response(e);

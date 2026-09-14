@@ -255,6 +255,65 @@ where
 
         Ok(stored.params)
     }
+
+    /// Ask whether a `request_uri` is still spendable, **without** spending it.
+    ///
+    /// Answers the three questions [`consume`](Self::consume) answers — is this
+    /// a pushed-request handle at all, does an unexpired and unconsumed row
+    /// exist for it, and does that row belong to this client — with the same
+    /// refusals, in the same order, and nothing else.
+    ///
+    /// # Why this exists, and why it returns nothing
+    ///
+    /// `/oauth2/authorize` sends an anonymous browser to a sign-in page before
+    /// it can consume anything: the handle is single-use and is spent in the
+    /// handler, after a principal exists. So a request presenting a
+    /// `request_uri` that was already used, expired, or issued to a different
+    /// client took a person through a full sign-in for a request that was dead
+    /// before they started, and refused it afterwards. This lets the endpoint
+    /// refuse first.
+    ///
+    /// It returns `()` rather than the pushed parameters **deliberately**. A
+    /// caller holding them could authorize from a handle it never consumed, and
+    /// the single-use guarantee is exactly the property that would lose. The
+    /// authoritative decision stays in `consume`, inside the handler: a
+    /// `request_uri` that passes here has not been authorized, has not been
+    /// spent, and may still lose the race to a concurrent authorize request —
+    /// which is the correct outcome, and the reason nothing here is cached,
+    /// marked or carried forward.
+    ///
+    /// **This is an early refusal, never an authorization.**
+    pub async fn peek(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        request_uri: &str,
+    ) -> Result<(), OAuth2Error> {
+        if !request_uri.starts_with(REQUEST_URI_PREFIX) {
+            return Err(OAuth2Error::InvalidRequest(
+                "request_uri is not a pushed authorization request URI".into(),
+            ));
+        }
+
+        let stored = self
+            .par_repo
+            .find_unconsumed(tenant_id, &hash_request_uri(request_uri))
+            .await
+            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
+            // Unknown, expired and already-consumed answer identically here for
+            // the same reason they do in `consume`, and the wording is the same
+            // constant so the two cannot come to describe the same state
+            // differently depending on how far the request got.
+            .ok_or_else(|| OAuth2Error::InvalidRequest(REQUEST_URI_GONE.into()))?;
+
+        if stored.client_id != client_id {
+            return Err(OAuth2Error::InvalidRequest(
+                "request_uri was not issued to this client".into(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// The single answer given for a `request_uri` that is unknown, expired or
@@ -296,6 +355,233 @@ pub fn is_request_uri_gone(e: &OAuth2Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Doubles for `peek`
+    // -----------------------------------------------------------------------
+    //
+    // `peek` asks the pushed-request repository one question and the CLIENT
+    // repository none at all, and the doubles are shaped to prove it: every
+    // method of `NoClients` panics, so a `peek` that grew a registration lookup
+    // would fail these tests loudly rather than quietly doing a second read on
+    // a refusal path.
+    //
+    // `OneRow` answers `find_unconsumed` from a single optional row and records
+    // that `consume` was never called. That second half is the whole point —
+    // the refusal this method exists for must not spend the handle it is
+    // refusing, or the "present it again before the first authorization
+    // completes" case stops working.
+    mod doubles {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use axiam_core::error::{AxiamError, AxiamResult};
+        use axiam_core::models::oauth2_client::{
+            CreateOAuth2Client, CreatePushedAuthRequest, OAuth2Client, PushedAuthParams,
+            PushedAuthRequest, UpdateOAuth2Client,
+        };
+        use axiam_core::repository::{
+            OAuth2ClientRepository, PaginatedResult, Pagination, PushedAuthRequestRepository,
+        };
+        use chrono::{Duration, Utc};
+        use uuid::Uuid;
+
+        pub struct NoClients;
+
+        impl OAuth2ClientRepository for NoClients {
+            async fn create(&self, _: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
+                unreachable!("peek must not touch the client registration")
+            }
+            async fn get_by_id(&self, _: Uuid, _: Uuid) -> AxiamResult<OAuth2Client> {
+                unreachable!("peek must not touch the client registration")
+            }
+            async fn get_by_client_id(&self, _: Uuid, _: &str) -> AxiamResult<OAuth2Client> {
+                unreachable!("peek must not touch the client registration")
+            }
+            async fn update(
+                &self,
+                _: Uuid,
+                _: Uuid,
+                _: UpdateOAuth2Client,
+            ) -> AxiamResult<OAuth2Client> {
+                unreachable!("peek must not touch the client registration")
+            }
+            async fn delete(&self, _: Uuid, _: Uuid) -> AxiamResult<()> {
+                unreachable!("peek must not touch the client registration")
+            }
+            async fn list(
+                &self,
+                _: Uuid,
+                _: Pagination,
+            ) -> AxiamResult<PaginatedResult<OAuth2Client>> {
+                unreachable!("peek must not touch the client registration")
+            }
+            async fn upgrade_client_secret_hash(
+                &self,
+                _: Uuid,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> AxiamResult<bool> {
+                unreachable!("peek must not touch the client registration")
+            }
+        }
+
+        #[derive(Default)]
+        pub struct OneRow {
+            pub row: Option<PushedAuthRequest>,
+            pub consumes: AtomicUsize,
+            pub reads: AtomicUsize,
+        }
+
+        impl OneRow {
+            /// A live, unconsumed, unexpired row for `client_id`.
+            pub fn live(tenant_id: Uuid, client_id: &str) -> Self {
+                Self {
+                    row: Some(PushedAuthRequest {
+                        id: Uuid::now_v7(),
+                        tenant_id,
+                        client_id: client_id.to_owned(),
+                        request_uri_hash: String::new(),
+                        params: PushedAuthParams {
+                            response_type: "code".into(),
+                            redirect_uri: "https://rp.example.test/cb".into(),
+                            ..Default::default()
+                        },
+                        consumed: false,
+                        expires_at: Utc::now() + Duration::seconds(60),
+                        created_at: Utc::now(),
+                    }),
+                    ..Default::default()
+                }
+            }
+
+            /// Nothing matched: unknown, expired, or already consumed. The
+            /// repository cannot tell them apart and neither may the caller.
+            pub fn gone() -> Self {
+                Self::default()
+            }
+        }
+
+        impl PushedAuthRequestRepository for OneRow {
+            async fn create(&self, _: CreatePushedAuthRequest) -> AxiamResult<PushedAuthRequest> {
+                unreachable!("peek does not create")
+            }
+            async fn consume(&self, _: Uuid, _: &str) -> AxiamResult<Option<PushedAuthRequest>> {
+                self.consumes.fetch_add(1, Ordering::SeqCst);
+                Err(AxiamError::Internal(
+                    "peek must never consume the handle it is asked about".into(),
+                ))
+            }
+            async fn find_unconsumed(
+                &self,
+                _: Uuid,
+                _: &str,
+            ) -> AxiamResult<Option<PushedAuthRequest>> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                Ok(self.row.clone())
+            }
+            async fn cleanup_expired(&self, _: Uuid) -> AxiamResult<u64> {
+                unreachable!("peek does not clean up")
+            }
+        }
+    }
+
+    use std::sync::atomic::Ordering;
+
+    use doubles::{NoClients, OneRow};
+
+    fn service(repo: OneRow) -> ParService<NoClients, OneRow> {
+        ParService::new(NoClients, repo)
+    }
+
+    /// A live handle is spendable, and **stays** spendable.
+    ///
+    /// The second assertion is the one that matters. `peek` exists so that a
+    /// dead `request_uri` can be refused before a person is asked to sign in
+    /// for it; if it spent the handle on the way past, it would break the
+    /// opposite case — the OIDF module
+    /// `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds`
+    /// presents one `request_uri` twice before any authorization completes and
+    /// requires the login page both times.
+    #[tokio::test]
+    async fn a_live_handle_passes_and_is_not_spent() {
+        let tenant = Uuid::now_v7();
+        let svc = service(OneRow::live(tenant, "client-a"));
+        let uri = generate_request_uri();
+
+        assert!(svc.peek(tenant, "client-a", &uri).await.is_ok());
+        assert_eq!(
+            svc.par_repo.consumes.load(Ordering::SeqCst),
+            0,
+            "peek must never call consume — the single-use decision belongs in \
+             the handler, after a principal exists"
+        );
+        assert_eq!(svc.par_repo.reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// Unknown, expired and already-used are one answer, and it is the same
+    /// sentence `consume` produces — so a refusal does not change its wording
+    /// depending on how far the request got.
+    #[tokio::test]
+    async fn a_gone_handle_is_refused_with_the_shared_sentence() {
+        let tenant = Uuid::now_v7();
+        let svc = service(OneRow::gone());
+        let err = svc
+            .peek(tenant, "client-a", &generate_request_uri())
+            .await
+            .expect_err("a handle that matched nothing must be refused");
+        assert!(
+            is_request_uri_gone(&err),
+            "the recogniser the authorization endpoint matches on must accept \
+             this refusal: {err}"
+        );
+        assert_eq!(svc.par_repo.consumes.load(Ordering::SeqCst), 0);
+    }
+
+    /// A handle belongs to the client that pushed it, and this is a **different**
+    /// refusal from "gone" — deliberately, and the recogniser says so.
+    #[tokio::test]
+    async fn another_clients_handle_is_refused_by_name() {
+        let tenant = Uuid::now_v7();
+        let svc = service(OneRow::live(tenant, "client-a"));
+        let err = svc
+            .peek(tenant, "client-b", &generate_request_uri())
+            .await
+            .expect_err("a handle issued to another client must be refused");
+        assert!(
+            !is_request_uri_gone(&err),
+            "a wrong-client refusal must keep its own answer: {err}"
+        );
+        assert!(
+            err.to_string().contains("not issued to this client"),
+            "{err}"
+        );
+        assert_eq!(svc.par_repo.consumes.load(Ordering::SeqCst), 0);
+    }
+
+    /// A value that is not a PAR handle is refused before the datastore is
+    /// asked, exactly as `consume` refuses it — the authorization endpoint
+    /// classifies a request object by reference separately and must keep the
+    /// OIDC code that goes with it.
+    #[tokio::test]
+    async fn a_value_without_the_urn_prefix_never_reaches_the_datastore() {
+        let tenant = Uuid::now_v7();
+        let svc = service(OneRow::live(tenant, "client-a"));
+        let err = svc
+            .peek(tenant, "client-a", "https://attacker.example/request.jwt")
+            .await
+            .expect_err("a non-PAR request_uri is not a handle");
+        assert!(
+            err.to_string()
+                .contains("not a pushed authorization request URI"),
+            "{err}"
+        );
+        assert_eq!(
+            svc.par_repo.reads.load(Ordering::SeqCst),
+            0,
+            "the prefix check must come first, as it does in consume"
+        );
+    }
 
     #[test]
     fn generated_request_uri_carries_the_rfc_prefix() {

@@ -653,6 +653,46 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         )));
     }
 
+    // Do not send a user to sign in for a request that cannot succeed.
+    //
+    // `response_type` is the one parameter whose validity is decidable here,
+    // with no principal and without touching the pushed request: RFC 6749
+    // §3.1.1 makes it REQUIRED, AXIAM supports exactly `code`, and neither
+    // fact depends on who is signing in. Everything else the authorization
+    // endpoint refuses needs either the client's registration read against a
+    // resolved tenant or the pushed parameters, and the `request_uri` those
+    // live behind is single-use — consumed once, in the handler, after a
+    // principal exists. That constraint is why this check is narrow rather
+    // than a second copy of `AuthorizeService::authorize`'s validation.
+    //
+    // Skipped entirely when a `request_uri` is present: with PAR the real
+    // `response_type` is the pushed one, `ParService::push` already refused
+    // anything but `code` at push time, and the query string's copy is not
+    // authoritative — RFC 9126 §4 says the pushed parameters are used and the
+    // query's are ignored, so rejecting on the query's absence here would
+    // refuse a perfectly good pushed request.
+    //
+    // The refusal follows RFC 6749 §4.1.2.1 exactly as the `prompt=none` arm
+    // above does, and for the same reason: an error goes back to a
+    // `redirect_uri` only when the client registered that exact URI, because
+    // an unvalidated one is an open redirect. Anything else is answered in
+    // place, which is also the error page a certification reviewer is asked to
+    // see for `oidcc-response-type-missing`.
+    if q.request_uri.is_none() && q.response_type.as_deref() != Some("code") {
+        let refusal = match q.response_type.as_deref() {
+            None | Some("") => {
+                OAuth2Error::InvalidRequest("response_type is required (RFC 6749 §3.1.1)".into())
+            }
+            Some(_) => OAuth2Error::UnsupportedResponseType,
+        };
+        return Err(Box::new(match q.redirect_uri.as_deref() {
+            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
+                build_error_redirect(uri, &refusal, q.state.as_deref(), &state.auth_config)
+            }
+            _ => authorize_error_response(http_req, &refusal),
+        }));
+    }
+
     let Some(return_to) = axiam_oauth2::login_hop::build_return_to(http_req.query_string()) else {
         // Nothing safe to come back to. Answer as if the request had been
         // anonymous with no `browser_sso` at all rather than send a browser

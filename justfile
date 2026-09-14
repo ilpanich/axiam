@@ -716,6 +716,29 @@ conformance-up:
       exit 1
     }
     docker compose -f conformance/docker-compose.yml up -d
+    # The suite VERIFIES AXIAM's TLS certificate, like any HTTPS client — that
+    # half of the wire is under test and is not skipped. `gen-certs.sh` mints
+    # that certificate from a throwaway CA no JVM truststore has heard of, so
+    # the CA has to be put into the suite's.
+    #
+    # suite.env has claimed this recipe did so since W9 and it did not, which is
+    # a documented promise that a reader has no way to check: the symptom is
+    # every module failing at discovery with a PKIX error that looks like a
+    # deployment problem. Idempotent — `-noprompt` over an existing alias is an
+    # error, so an existing one is removed first — and the container is
+    # restarted because the JVM reads its truststore once, at boot.
+    if ! docker compose -f conformance/docker-compose.yml exec -T suite \
+         sh -c 'keytool -list -alias axiam-conformance-ca -cacerts -storepass changeit' \
+         >/dev/null 2>&1; then
+      echo "[conformance] trusting conformance/certs/ca.crt in the suite's JVM truststore"
+      docker compose -f conformance/docker-compose.yml cp \
+        conformance/certs/ca.crt suite:/tmp/axiam-conformance-ca.crt
+      docker compose -f conformance/docker-compose.yml exec -T suite sh -c '
+        keytool -delete -alias axiam-conformance-ca -cacerts -storepass changeit >/dev/null 2>&1
+        keytool -importcert -noprompt -alias axiam-conformance-ca \
+          -file /tmp/axiam-conformance-ca.crt -cacerts -storepass changeit' >/dev/null
+      docker compose -f conformance/docker-compose.yml restart suite >/dev/null
+    fi
     echo "[conformance] waiting for the suite to become ready (up to 3 min)…"
     for _ in $(seq 1 90); do
       if curl -sSk --max-time 5 "${SUITE_BASE_URL}/api/runner/available" >/dev/null 2>&1; then

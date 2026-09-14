@@ -97,10 +97,26 @@ export function doOp(built, params) {
   // vanishing.
   if (res.proto) m.httpProto.add(protoCode(res.proto));
 
+  // `built.expect` is a status, or a LIST of statuses when the operation's
+  // contract admits more than one correct answer. The list form exists for
+  // T-262 / R-4: a contended write answers 503 + `Retry-After` by design, so a
+  // scenario that deliberately contends (scim_provisioning.js) has two correct
+  // outcomes and one wrong one. Anything outside the list is still a failure —
+  // this widens no scenario that passes a bare number.
   const expected = built.expect || 200;
-  const passed = check(res, {
-    [`status is ${expected}`]: (r) => r.status === expected,
-  });
+  const accepted = Array.isArray(expected) ? expected : [expected];
+
+  // `built.require` adds named predicates to the same check batch, for a
+  // contract a status alone cannot state ("...and if it IS the transient one,
+  // it must carry the header that makes it actionable"). k6's check() is an
+  // AND over its map, so a failing predicate fails the operation exactly as a
+  // wrong status does.
+  const checks = {
+    [`status is ${accepted.join(' or ')}`]: (r) => accepted.indexOf(r.status) !== -1,
+  };
+  const require = built.require || {};
+  for (const name in require) checks[name] = require[name];
+  const passed = check(res, checks);
 
   m.latency.add(res.timings.duration);
   m.errorRate.add(!passed);
@@ -109,12 +125,13 @@ export function doOp(built, params) {
   } else {
     m.failed.add(1);
     // G9/item-3: classify rate-limit rejections distinctly (see m.throttled
-    // above). res.status === 429 can only be true here because `passed` is
-    // already false, i.e. `expected` (200/201) didn't match — so a scenario
-    // whose `built.expect` was itself 429 could never reach this branch as a
-    // "throttled" success; no scenario in this repo sets expect: 429 (grep
-    // confirms every adapter/scenario expects 200/201), so a 429 can only
-    // ever land in the failed/throttled branch, never in bench_ok.
+    // above). A 429 reaching here is a genuine throttle: `passed` is already
+    // false, so 429 was not in `accepted` — no scenario in this repo accepts
+    // it (grep confirms every adapter/scenario expects 200/201, and
+    // scim_provisioning.js's list is 200/503), so a 429 can only ever land in
+    // the failed/throttled branch, never in bench_ok. A scenario that did
+    // accept 429 would count it as a success and never reach this line, which
+    // is the right reading of "the throttle was the expected answer".
     if (res.status === 429) m.throttled.add(1);
   }
 

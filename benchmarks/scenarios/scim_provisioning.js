@@ -12,6 +12,12 @@
 // this cell then ran clean at 470/470 checks with zero SCIM 500s in the
 // server log, and was removed from PENDING_SCENARIOS in that same commit.
 //
+// 2026-09-13: the retry budget is deliberately finite (MAX_WRITE_ATTEMPTS=4,
+// 2/4/8ms backoff), so a storm this shape still surfaces contention to the
+// caller — and it must surface it as `503` + `Retry-After`, per R-4 / T-262.
+// The `expect` below was widened to {200, 503} accordingly: a bare `expect:
+// 200` was an assertion this scenario could not satisfy by design.
+//
 // Keep the flood shape below as it is. A single-user PATCH storm is precisely
 // what found that defect, and it is also what Okta/Entra actually send.
 // ============================================================================
@@ -117,6 +123,21 @@ export default function (data) {
       Operations: [{ op: 'replace', path: 'active', value: true }],
     }),
     params: { headers: { 'Content-Type': 'application/scim+json', Authorization: `Bearer ${data.access_token}` } },
-    expect: 200,
+    // 200 is the happy path; 503 is the OTHER correct answer, and this
+    // scenario is built to provoke it. The flood is a single-row PATCH storm,
+    // so some fraction of iterations must lose the optimistic-concurrency race
+    // past `retry_on_write_conflict`'s four attempts — post-R-4 (T-262) the
+    // server answers those `503` + `Retry-After` rather than 500. Asserting a
+    // bare 200 here could therefore never pass; asserting {200, 503} grades
+    // the contract this cell actually exists to check. Every other status —
+    // 500 above all — is still a failure, which is what keeps the original
+    // defect this scenario found from regressing silently.
+    expect: [200, 503],
+    require: {
+      // The status alone is only half the contract. A 503 without
+      // `Retry-After` leaves a provisioning IdP no better off than a 500 did:
+      // it knows the write did not land, but not that repeating it is safe.
+      'a 503 carries Retry-After': (r) => r.status !== 503 || !!r.headers['Retry-After'],
+    },
   });
 }

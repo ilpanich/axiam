@@ -211,6 +211,33 @@ The relying party pushes again and restarts. Two operational consequences:
 - An **already signed-in** user never sees it: the cookie resolves on the first
   leg and there is no hop to outlive the window.
 
+### A handle that is already dead never reaches the sign-in page
+
+The window above is about a handle that dies *during* the hop. The other case is
+a handle that was dead *before* it — already spent by a completed authorization,
+expired, or issued to a different client — and until this release the difference
+was not visible to anybody: the authorization endpoint could not read a
+`request_uri` before sending an anonymous browser to `/login`, because the handle
+is single-use and is spent later, in the handler, once there is somebody to spend
+it for. So the person signed in, and the request was refused on the way back.
+
+The endpoint now **reads** the handle before building that redirect — a read, not
+a redemption: the single-use decision stays where it was, and a handle that is
+merely *unfinished* is still sent to the sign-in page, which is what lets the
+same `request_uri` be presented twice before the first authorization completes.
+Only a handle that is already unusable is refused, and the refusal goes:
+
+- to the relying party, as `error=invalid_request_uri` on the client's
+  registered `redirect_uri` with the request's own `state`, when the
+  authorization request named one (RFC 6749 §4.1.2.1); or
+- to the person, as the authorization endpoint's own error page, when it did
+  not — a refusal is still not a licence to send a browser somewhere the client
+  never registered.
+
+A `request_uri` issued to a **different** client keeps its own answer,
+`invalid_request`: that is a client spending someone else's handle, not a handle
+that is gone, and an audit trail that cannot tell the two apart is worth less.
+
 ---
 
 ## The loop guard

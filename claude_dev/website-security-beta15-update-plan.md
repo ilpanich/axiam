@@ -1,5 +1,130 @@
 # Website — the post-beta14 security and docs catch-up pass (model 2.16.0)
 
+> **EXECUTED 2026-09-15, at `1.0.0-beta15`.** Waves 0–4 were worked in order,
+> on `claude/adoring-johnson-kjck0g`, in five commits. The website now renders
+> the model it is generated from: **271 threats, 258 mitigated / 13 open**,
+> model 2.16.0. `SECURITY_VERIFIED_RELEASE` is `1.0.0-beta15` / 2026-09-15 and
+> moved in the same commit as the Security prose and the generated files;
+> `DOCS_VERIFIED_RELEASE` is `1.0.0-beta15`, earned by the Wave 4 sweep.
+>
+> **The stamp decision went to (a).** `v1.0.0-beta15` is tagged on `origin` at
+> `96ae43483` and contains every commit of both waves — the MFA-and-CSR wave
+> (#447), the SCIM correction (#449), the rustls bump (#450) and the
+> early-refusal pass (#455) are all ancestors of the tag — so it is a release
+> that carries the change rather than one that predates it, and `main@<sha>`
+> was not needed. Two consequences the plan anticipates:
+> `apiIndex.ts`'s `API_VERSION` moved `1.0.0-beta14` → `1.0.0-beta15` (the plan
+> predicted "no diff" for that generator, written before the release-prep
+> commit bumped `openapi.json`), and the News post was added, which the plan
+> made conditional on exactly this. A GitHub *Release* for the tag was not
+> published at the time of writing; only the tag and the `axiam-opaque`
+> release exist. The plan's criterion is "tagged", which is satisfied.
+>
+> What landed:
+>
+> - **Wave 0.** All three generators printed exactly the predicted lines:
+>   `threatModel.ts: 9 diagrams, 271 threats (258 mitigated, 13 open)`,
+>   `apiIndex.ts: 222 operations across 156 paths, 11 domains`,
+>   `contractAnchors.ts: 167 sections at contract 1.46`. The generated summary
+>   matches Appendix A row for row — the nine areas (31/2, 35/0, 49/0, 31/1,
+>   26/0, 26/1, 18/1, 27/5, 28/3), the six STRIDE categories, the four
+>   severities, and the thirteen open items in that order. Five threats were
+>   added across three existing nodes and six mitigations extended; **no node,
+>   flow or coordinate changed**, exactly as §2 said it must not, and the open
+>   register is byte-identical. Re-running all three at the end produced an
+>   empty diff. No generated file was hand-edited.
+> - **Wave 1.** `security.ts` mirrored section by section against
+>   [`threat-modeling-and-security.md`](threat-modeling-and-security.md): the
+>   MFA bullet's four new sentences, the SCIM correction, one new OAuth2 bullet
+>   copied whole, the PKI leaf-CSR sentences, the SDK contract 1.45/1.46
+>   sentence, the compliance row's eight-module clause and the dependency
+>   paragraph's RUSTSEC sentences. The hedges are untouched: the conformance
+>   result is still "165 suite modules, zero `FAILED` on 2026-09-11 — a
+>   self-run against a working-tree build, not a certification"; the eight
+>   modules are "measured per module … eight modules moved from `REVIEW` to
+>   `PASSED`; the published receipts remain the 2026-09-11 full runs", never a
+>   sweep and never a plan result; the `standard`-profile residual is stated
+>   rather than resolved either way; the revocation feed is still a narrowing.
+>   The register stays generated, shared responsibility is intact, and the four
+>   deliberately-differing bold markers were left alone. **One sentence was
+>   deliberately not copied verbatim.** The source says the rustls fix "ships
+>   with the next release"; written before the tag, that is now false, so the
+>   page says it "ships in `1.0.0-beta15`". The load-bearing half is unchanged
+>   and verified at the tags: beta14's `Cargo.lock` carries rustls 0.23.43 and
+>   beta15's carries 0.23.45.
+> - **Wave 2.** Every row of §6. Extended: `mfa` (a new *Resetting a user's
+>   factors* section with the eviction of every factor, the operator warning
+>   that a key reset over before beta15 still worked, and the `mfa_enforced`
+>   self-service rule), `passkeys` (the setup-token pair — the heading moved
+>   from "Six endpoints, three ceremonies" to eight and four, since describing
+>   a fourth ceremony beside a heading that counts three is its own defect),
+>   `pki` (possession, the subject and algorithm read off the CSR, the
+>   discarded remainder, the CA-asking CSR, the permission), `par` (§26.2 rule
+>   3 in both forms, and the dead handle refused before the sign-in page while
+>   an unfinished one still reaches it), `oauth2`, `fapi2` (the 256-character
+>   cap and the per-module hedge), `rest`, `sdks` (rows for 1.45 and 1.46; no
+>   SDK release version is claimed, per the §6 warning) and `hardening`.
+>   Verified and left alone: `scim`, `errors`, `configuration`.
+> - **Wave 3.** One new post, dated 15 September 2026, tag `Release`, covering
+>   both waves, the two corrections and the advisory, with the model at
+>   271/258/13. Every threat anchor was checked against the regenerated model
+>   rather than guessed. The 13 September post is untouched, including its
+>   "266 threats, 253 mitigated and 13 open" — historical and correct at its
+>   date, which is what §9's first grep expects to find. Phase 20 stays
+>   `ongoing` and gained the two items to its `focus`.
+> - **Wave 4.** Every stamped page re-read against `main` at the tag before the
+>   constant moved. **The set is 29 pages, not the 30 §8 states** — `uma`,
+>   `overview`, `installation`, `secrets`, `webhooks`, `reactors`, `errors`,
+>   `device-flow`, `token-exchange`, `logout`, `fapi2` and `par` carry no
+>   stamp, which reads as "not checked recently" and was left that way; `par`
+>   and `fapi2` were re-derived in Wave 2 but adding them to the stamped set is
+>   an editorial change this plan does not ask for. Each §8 stale-claim class
+>   was checked and none survived. **One real error, found by the re-read**:
+>   `rest` and `sdks` both put the §27 management surface at 155 operations
+>   where `sdks/management-registry.json` generates 160; fixed in Wave 2.
+>
+> **Verification (§9).** `npm ci`, the three generators (idempotent — empty
+> diff on re-run), `npm run build` (which runs `docSectionsAreComplete()`) and
+> `npm run lint` all clean; `git diff --stat main..HEAD` touches only the
+> twelve files this plan names. `scripts/check-doc-links.sh` resolves 232
+> relative links across 51 files. `scripts/check-config-key-coverage.py` passes,
+> which is what backs the `configuration` page. §9's first grep returns only
+> the historical news text it predicts, plus two `1.44` references in the
+> `sdks` amendment table that name the 1.44 row and which amendments changed
+> SDK code — history, not a current-state claim. §9's second grep returns
+> **one** hit, and it is an artifact of the grep rather than a finding: the
+> `security.ts` SDK bullet is a single string, its "since 1.0.0-beta14"
+> attaches to the contract-1.43 alias handling, and the CSR and `request_uri`
+> material later in the same string carries its own 2026-09-13 / 2026-09-14
+> dates. Verified by reading. The five §3 anchors each select their node and
+> render Mitigated — T-267 and T-269 on *MFA verification* (diagram 1), T-268
+> on *Certificate issuance* (diagram 5), T-270 on `/oauth2/authorize (+
+> consent)` (diagram 2, now nine threats) and T-271 on *single-use credentials*
+> — and the open-only filter on diagrams 1 and 2 is empty.
+>
+> **Left deliberately.** No server work, no conformance submission, no new
+> full-plan sweep, no tag, and nothing in the eleven SDK repositories. The
+> `compliance` page was re-read and is correct — it states the 2026-09-11 run
+> and does not claim the eight per-module passes — and was not extended,
+> because §6 excludes it from Wave 2 and Wave 4 asks only that it be re-read.
+>
+> **One drift worth a maintainer's eye, outside this plan's scope.** Two
+> commits landed on `main` after the plan was written (`710a70e21`) and the
+> plan's sources do not reflect them. `fa15769a5` commits a **2026-09-15 full
+> sweep** — 150 PASSED of 165, zero FAILED, with `evidence/2026-09-15/` — so
+> the receipts under `docs/conformance/` are no longer only the 2026-09-11
+> runs. `threat-modeling-and-security.md`, which is the Security section's
+> source of truth, still says the published receipts remain the 2026-09-11
+> ones, and this pass mirrored the source rather than overriding it: the site
+> now carries a hedge that is conservative rather than wrong. Updating the
+> source document, and then the site, is a follow-up. Separately, CONTRACT
+> §26.2 rule 2 says the server "**refuses** a request that carries both a
+> `request_uri` and any inline authorization parameter", while
+> `axiam-oauth2::par`'s own tombstone for `has_inline_params` records that the
+> rule is *ignore, not refuse* (RFC 9101 §5 and §6.3) and the `par` page says
+> so. The contract sentence is the stale one; correcting it is a contract
+> change, which §10 puts out of scope.
+
 > **Who this is for.** A fresh Claude session (Opus 5) tasked with bringing the
 > website's **Security** section, and the **Docs**, **News** and **Roadmap**
 > content the same changes touched, up to the state of `main` on 2026-09-15 —

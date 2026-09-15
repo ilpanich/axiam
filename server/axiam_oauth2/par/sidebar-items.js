@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["REQUEST_URI_GONE","REQUEST_URI_LIFETIME_SECS","REQUEST_URI_PREFIX"],"fn":["generate_request_uri","hash_request_uri","is_request_uri_gone"],"struct":["ParService","PushedAuthResponse","PushedRequest"]};
+window.SIDEBAR_ITEMS = {"constant":["MAX_FAPI_OPAQUE_PARAM_CHARS","REQUEST_URI_GONE","REQUEST_URI_LIFETIME_SECS","REQUEST_URI_PREFIX"],"fn":["generate_request_uri","hash_request_uri","is_request_uri_gone"],"struct":["ParService","PushedAuthResponse","PushedRequest"]};

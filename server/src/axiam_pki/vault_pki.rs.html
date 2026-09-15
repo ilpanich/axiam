@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-pki/src/vault_pki.rs`."><title>vault_pki.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_pki" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_pki/</div>vault_pki.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! CA keys that are born inside HashiCorp Vault and never leave it.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-pki/src/vault_pki.rs`."><title>vault_pki.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_pki" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_pki/</div>vault_pki.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! CA keys that are born inside HashiCorp Vault and never leave it.
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! [`VaultCaKeyStore`](crate::ca_key_store::VaultCaKeyStore) puts a key AXIAM
 <a href=#4 id=4 data-nosnippet>4</a>//! generated into Vault's KV engine. This is the other arrangement, and the
@@ -639,353 +639,373 @@
 <a href=#639 id=639 data-nosnippet>639</a>    /// a compromised AXIAM and a certificate for any name at all. An operator
 <a href=#640 id=640 data-nosnippet>640</a>    /// who wants Vault to enforce names as well can point the mount's role at
 <a href=#641 id=641 data-nosnippet>641</a>    /// the same issuer; what they cannot do is have neither.
-<a href=#642 id=642 data-nosnippet>642</a>    </span><span class="kw">fn </span>sign_csr&lt;<span class="lifetime">'a</span>&gt;(
-<a href=#643 id=643 data-nosnippet>643</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
-<a href=#644 id=644 data-nosnippet>644</a>        key_ref: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CaKeyRef,
-<a href=#645 id=645 data-nosnippet>645</a>        request: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>LeafSigningRequest,
-<a href=#646 id=646 data-nosnippet>646</a>    ) -&gt; Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = AxiamResult&lt;SignedLeaf&gt;&gt; + Send + <span class="lifetime">'a</span>&gt;&gt; {
-<a href=#647 id=647 data-nosnippet>647</a>        Box::pin(<span class="kw">async move </span>{
-<a href=#648 id=648 data-nosnippet>648</a>            <span class="kw">let </span>locator = VaultPkiLocator::parse(<span class="kw-2">&amp;</span>key_ref.locator)<span class="question-mark">?</span>;
-<a href=#649 id=649 data-nosnippet>649</a>            <span class="kw">let </span>url = <span class="self">self</span>.url(
-<a href=#650 id=650 data-nosnippet>650</a>                <span class="kw-2">&amp;</span>locator.issuing.mount,
-<a href=#651 id=651 data-nosnippet>651</a>                <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"issuer/{}/sign-verbatim"</span>, locator.issuing.issuer),
-<a href=#652 id=652 data-nosnippet>652</a>            );
-<a href=#653 id=653 data-nosnippet>653</a>            <span class="kw">let </span>data = <span class="self">self
-<a href=#654 id=654 data-nosnippet>654</a>                </span>.post(
-<a href=#655 id=655 data-nosnippet>655</a>                    <span class="kw-2">&amp;</span>url,
-<a href=#656 id=656 data-nosnippet>656</a>                    <span class="macro">serde_json::json!</span>({
-<a href=#657 id=657 data-nosnippet>657</a>                        <span class="string">"csr"</span>: request.csr_pem,
-<a href=#658 id=658 data-nosnippet>658</a>                        <span class="string">"ttl"</span>: <span class="macro">format!</span>(<span class="string">"{}s"</span>, request.ttl_seconds.max(<span class="number">1</span>)),
-<a href=#659 id=659 data-nosnippet>659</a>                        <span class="string">"format"</span>: <span class="string">"pem"</span>,
-<a href=#660 id=660 data-nosnippet>660</a>                    }),
-<a href=#661 id=661 data-nosnippet>661</a>                )
-<a href=#662 id=662 data-nosnippet>662</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#663 id=663 data-nosnippet>663</a>
-<a href=#664 id=664 data-nosnippet>664</a>            <span class="kw">let </span>certificate_pem = string_field(<span class="kw-2">&amp;</span>data, <span class="string">"certificate"</span>, <span class="kw-2">&amp;</span>url)<span class="question-mark">?</span>;
-<a href=#665 id=665 data-nosnippet>665</a>            <span class="comment">// `ca_chain` means different things at different Vault versions —
-<a href=#666 id=666 data-nosnippet>666</a>            // sometimes including the leaf. Drop anything equal to the
-<a href=#667 id=667 data-nosnippet>667</a>            // certificate itself rather than trusting the shape.
-<a href=#668 id=668 data-nosnippet>668</a>            </span><span class="kw">let </span>chain_pem = data
-<a href=#669 id=669 data-nosnippet>669</a>                .get(<span class="string">"ca_chain"</span>)
-<a href=#670 id=670 data-nosnippet>670</a>                .and_then(|c| c.as_array())
-<a href=#671 id=671 data-nosnippet>671</a>                .map(|entries| {
-<a href=#672 id=672 data-nosnippet>672</a>                    entries
-<a href=#673 id=673 data-nosnippet>673</a>                        .iter()
-<a href=#674 id=674 data-nosnippet>674</a>                        .filter_map(|v| v.as_str())
-<a href=#675 id=675 data-nosnippet>675</a>                        .filter(|pem| pem.trim() != certificate_pem.trim())
-<a href=#676 id=676 data-nosnippet>676</a>                        .map(str::to_string)
-<a href=#677 id=677 data-nosnippet>677</a>                        .collect()
-<a href=#678 id=678 data-nosnippet>678</a>                })
-<a href=#679 id=679 data-nosnippet>679</a>                .unwrap_or_default();
-<a href=#680 id=680 data-nosnippet>680</a>
-<a href=#681 id=681 data-nosnippet>681</a>            <span class="prelude-val">Ok</span>(SignedLeaf {
-<a href=#682 id=682 data-nosnippet>682</a>                certificate_pem,
-<a href=#683 id=683 data-nosnippet>683</a>                chain_pem,
-<a href=#684 id=684 data-nosnippet>684</a>            })
-<a href=#685 id=685 data-nosnippet>685</a>        })
-<a href=#686 id=686 data-nosnippet>686</a>    }
-<a href=#687 id=687 data-nosnippet>687</a>
-<a href=#688 id=688 data-nosnippet>688</a>    <span class="doccomment">/// Create a tenant signing CA whose key is born in — and stays in — Vault.
-<a href=#689 id=689 data-nosnippet>689</a>    ///
-<a href=#690 id=690 data-nosnippet>690</a>    /// The same three calls as [`Self::generate_intermediate`], pointed at an
-<a href=#691 id=691 data-nosnippet>691</a>    /// issuer that already exists rather than one this call just made: Vault
-<a href=#692 id=692 data-nosnippet>692</a>    /// generates the key and a CSR in the issuing mount, the parent's signing
-<a href=#693 id=693 data-nosnippet>693</a>    /// issuer signs it, and `intermediate/set-signed` hands the certificate
-<a href=#694 id=694 data-nosnippet>694</a>    /// back to the mount that holds the key. Vault can then issue this tenant's
-<a href=#695 id=695 data-nosnippet>695</a>    /// leaves itself, which is the whole point — the key never exists here, so
-<a href=#696 id=696 data-nosnippet>696</a>    /// there is nothing for AXIAM to lose.
-<a href=#697 id=697 data-nosnippet>697</a>    </span><span class="kw">fn </span>generate_intermediate_ca&lt;<span class="lifetime">'a</span>&gt;(
-<a href=#698 id=698 data-nosnippet>698</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
-<a href=#699 id=699 data-nosnippet>699</a>        parent: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CaKeyRef,
-<a href=#700 id=700 data-nosnippet>700</a>        request: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>IntermediateCaRequest,
-<a href=#701 id=701 data-nosnippet>701</a>    ) -&gt; Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = AxiamResult&lt;CustodiedIntermediate&gt;&gt; + Send + <span class="lifetime">'a</span>&gt;&gt; {
-<a href=#702 id=702 data-nosnippet>702</a>        Box::pin(<span class="kw">async move </span>{
-<a href=#703 id=703 data-nosnippet>703</a>            <span class="kw">let </span>parent_locator = VaultPkiLocator::parse(<span class="kw-2">&amp;</span>parent.locator)<span class="question-mark">?</span>;
-<a href=#704 id=704 data-nosnippet>704</a>            <span class="kw">let </span>signer = parent_locator.signing_issuer();
-<a href=#705 id=705 data-nosnippet>705</a>            <span class="kw">let </span>(key_type, key_bits) = key_params(<span class="kw-2">&amp;</span>request.key_algorithm);
-<a href=#706 id=706 data-nosnippet>706</a>
-<a href=#707 id=707 data-nosnippet>707</a>            <span class="kw">let </span>generate_url = <span class="self">self</span>.url(<span class="kw-2">&amp;</span><span class="self">self</span>.config.int_mount, <span class="string">"intermediate/generate/internal"</span>);
-<a href=#708 id=708 data-nosnippet>708</a>            <span class="kw">let </span>generated = <span class="self">self
-<a href=#709 id=709 data-nosnippet>709</a>                </span>.post(
-<a href=#710 id=710 data-nosnippet>710</a>                    <span class="kw-2">&amp;</span>generate_url,
-<a href=#711 id=711 data-nosnippet>711</a>                    <span class="macro">serde_json::json!</span>({
-<a href=#712 id=712 data-nosnippet>712</a>                        <span class="string">"common_name"</span>: request.subject,
-<a href=#713 id=713 data-nosnippet>713</a>                        <span class="string">"key_type"</span>: key_type,
-<a href=#714 id=714 data-nosnippet>714</a>                        <span class="string">"key_bits"</span>: key_bits,
-<a href=#715 id=715 data-nosnippet>715</a>                        <span class="string">"key_name"</span>: <span class="macro">format!</span>(<span class="string">"axiam-tenant-int-{}"</span>, request.ca_id),
-<a href=#716 id=716 data-nosnippet>716</a>                        <span class="string">"format"</span>: <span class="string">"pem"</span>,
-<a href=#717 id=717 data-nosnippet>717</a>                    }),
-<a href=#718 id=718 data-nosnippet>718</a>                )
-<a href=#719 id=719 data-nosnippet>719</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#720 id=720 data-nosnippet>720</a>            <span class="kw">let </span>csr = string_field(<span class="kw-2">&amp;</span>generated, <span class="string">"csr"</span>, <span class="kw-2">&amp;</span>generate_url)<span class="question-mark">?</span>;
-<a href=#721 id=721 data-nosnippet>721</a>
-<a href=#722 id=722 data-nosnippet>722</a>            <span class="kw">let </span>(certificate, issuing_ca) = <span class="self">self
-<a href=#723 id=723 data-nosnippet>723</a>                </span>.sign_as_intermediate(
-<a href=#724 id=724 data-nosnippet>724</a>                    signer,
-<a href=#725 id=725 data-nosnippet>725</a>                    <span class="kw-2">&amp;</span>csr,
-<a href=#726 id=726 data-nosnippet>726</a>                    <span class="kw-2">&amp;</span>request.subject,
-<a href=#727 id=727 data-nosnippet>727</a>                    ttl_days(request.validity_days),
-<a href=#728 id=728 data-nosnippet>728</a>                )
-<a href=#729 id=729 data-nosnippet>729</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#730 id=730 data-nosnippet>730</a>
-<a href=#731 id=731 data-nosnippet>731</a>            <span class="kw">let </span>set_url = <span class="self">self</span>.url(<span class="kw-2">&amp;</span><span class="self">self</span>.config.int_mount, <span class="string">"intermediate/set-signed"</span>);
-<a href=#732 id=732 data-nosnippet>732</a>            <span class="kw">let </span>imported = <span class="self">self
-<a href=#733 id=733 data-nosnippet>733</a>                </span>.post(<span class="kw-2">&amp;</span>set_url, <span class="macro">serde_json::json!</span>({ <span class="string">"certificate"</span>: certificate }))
-<a href=#734 id=734 data-nosnippet>734</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#735 id=735 data-nosnippet>735</a>            <span class="kw">let </span>issuer = first_imported_issuer(<span class="kw-2">&amp;</span>imported, <span class="kw-2">&amp;</span>set_url)<span class="question-mark">?</span>;
-<a href=#736 id=736 data-nosnippet>736</a>            <span class="comment">// The key came from `intermediate/generate/internal`, so
-<a href=#737 id=737 data-nosnippet>737</a>            // `set-signed` imports no key and `imported_keys` is empty; the id
-<a href=#738 id=738 data-nosnippet>738</a>            // wanted here is the one that call already returned.
-<a href=#739 id=739 data-nosnippet>739</a>            </span><span class="kw">let </span>key = string_field(<span class="kw-2">&amp;</span>generated, <span class="string">"key_id"</span>, <span class="kw-2">&amp;</span>generate_url)<span class="question-mark">?</span>;
-<a href=#740 id=740 data-nosnippet>740</a>
-<a href=#741 id=741 data-nosnippet>741</a>            <span class="prelude-val">Ok</span>(CustodiedIntermediate {
-<a href=#742 id=742 data-nosnippet>742</a>                certificate_pem: certificate,
-<a href=#743 id=743 data-nosnippet>743</a>                chain_pem: issuing_ca.into_iter().collect(),
-<a href=#744 id=744 data-nosnippet>744</a>                locator: VaultPkiLocator {
-<a href=#745 id=745 data-nosnippet>745</a>                    issuing: VaultPkiIssuer {
-<a href=#746 id=746 data-nosnippet>746</a>                        mount: <span class="self">self</span>.config.int_mount.trim_matches(<span class="string">'/'</span>).to_string(),
-<a href=#747 id=747 data-nosnippet>747</a>                        issuer,
-<a href=#748 id=748 data-nosnippet>748</a>                        key,
-<a href=#749 id=749 data-nosnippet>749</a>                    },
-<a href=#750 id=750 data-nosnippet>750</a>                    <span class="comment">// No root to clean up on revocation: the root above this one
-<a href=#751 id=751 data-nosnippet>751</a>                    // belongs to the organization CA and outlives it.
-<a href=#752 id=752 data-nosnippet>752</a>                    </span>root: <span class="prelude-val">None</span>,
-<a href=#753 id=753 data-nosnippet>753</a>                }
-<a href=#754 id=754 data-nosnippet>754</a>                .encode()<span class="question-mark">?</span>,
-<a href=#755 id=755 data-nosnippet>755</a>            })
-<a href=#756 id=756 data-nosnippet>756</a>        })
-<a href=#757 id=757 data-nosnippet>757</a>    }
-<a href=#758 id=758 data-nosnippet>758</a>
-<a href=#759 id=759 data-nosnippet>759</a>    <span class="doccomment">/// Sign somebody else's CSR as a CA, with `sign-intermediate`.
-<a href=#760 id=760 data-nosnippet>760</a>    ///
-<a href=#761 id=761 data-nosnippet>761</a>    /// Not `sign-verbatim`, which is what leaves use: verbatim takes the CSR's
-<a href=#762 id=762 data-nosnippet>762</a>    /// own extensions, and a request that asked to be an unconstrained CA would
-<a href=#763 id=763 data-nosnippet>763</a>    /// get to be one. `sign-intermediate` with `use_csr_values: false` means
-<a href=#764 id=764 data-nosnippet>764</a>    /// AXIAM states what the certificate is and Vault ignores what the request
-<a href=#765 id=765 data-nosnippet>765</a>    /// wanted.
-<a href=#766 id=766 data-nosnippet>766</a>    </span><span class="kw">fn </span>sign_intermediate_csr&lt;<span class="lifetime">'a</span>&gt;(
-<a href=#767 id=767 data-nosnippet>767</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
-<a href=#768 id=768 data-nosnippet>768</a>        parent: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CaKeyRef,
-<a href=#769 id=769 data-nosnippet>769</a>        request: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>IntermediateSigningRequest,
-<a href=#770 id=770 data-nosnippet>770</a>    ) -&gt; Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = AxiamResult&lt;SignedLeaf&gt;&gt; + Send + <span class="lifetime">'a</span>&gt;&gt; {
-<a href=#771 id=771 data-nosnippet>771</a>        Box::pin(<span class="kw">async move </span>{
-<a href=#772 id=772 data-nosnippet>772</a>            <span class="kw">let </span>parent_locator = VaultPkiLocator::parse(<span class="kw-2">&amp;</span>parent.locator)<span class="question-mark">?</span>;
-<a href=#773 id=773 data-nosnippet>773</a>            <span class="kw">let </span>(certificate_pem, issuing_ca) = <span class="self">self
-<a href=#774 id=774 data-nosnippet>774</a>                </span>.sign_as_intermediate(
-<a href=#775 id=775 data-nosnippet>775</a>                    parent_locator.signing_issuer(),
-<a href=#776 id=776 data-nosnippet>776</a>                    <span class="kw-2">&amp;</span>request.csr_pem,
-<a href=#777 id=777 data-nosnippet>777</a>                    <span class="kw-2">&amp;</span>request.subject,
-<a href=#778 id=778 data-nosnippet>778</a>                    <span class="macro">format!</span>(<span class="string">"{}s"</span>, request.ttl_seconds.max(<span class="number">1</span>)),
-<a href=#779 id=779 data-nosnippet>779</a>                )
-<a href=#780 id=780 data-nosnippet>780</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#781 id=781 data-nosnippet>781</a>            <span class="prelude-val">Ok</span>(SignedLeaf {
-<a href=#782 id=782 data-nosnippet>782</a>                certificate_pem,
-<a href=#783 id=783 data-nosnippet>783</a>                chain_pem: issuing_ca.into_iter().collect(),
-<a href=#784 id=784 data-nosnippet>784</a>            })
-<a href=#785 id=785 data-nosnippet>785</a>        })
-<a href=#786 id=786 data-nosnippet>786</a>    }
-<a href=#787 id=787 data-nosnippet>787</a>
-<a href=#788 id=788 data-nosnippet>788</a>    <span class="kw">fn </span>custody(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; CaKeyCustody {
-<a href=#789 id=789 data-nosnippet>789</a>        CaKeyCustody::VaultPki
-<a href=#790 id=790 data-nosnippet>790</a>    }
-<a href=#791 id=791 data-nosnippet>791</a>
-<a href=#792 id=792 data-nosnippet>792</a>    <span class="kw">fn </span>describe(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
-<a href=#793 id=793 data-nosnippet>793</a>        <span class="string">"vault_pki"
-<a href=#794 id=794 data-nosnippet>794</a>    </span>}
-<a href=#795 id=795 data-nosnippet>795</a>}
-<a href=#796 id=796 data-nosnippet>796</a>
-<a href=#797 id=797 data-nosnippet>797</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#798 id=798 data-nosnippet>798</a>// helpers
-<a href=#799 id=799 data-nosnippet>799</a>// ---------------------------------------------------------------------------
-<a href=#800 id=800 data-nosnippet>800</a>
-<a href=#801 id=801 data-nosnippet>801</a></span><span class="doccomment">/// Vault's `key_type` and `key_bits` for one of AXIAM's algorithms.
-<a href=#802 id=802 data-nosnippet>802</a>///
-<a href=#803 id=803 data-nosnippet>803</a>/// Note what this makes possible: Vault generates RSA keys, and rcgen's `ring`
-<a href=#804 id=804 data-nosnippet>804</a>/// backend does not. `Rsa4096` is refused by `POST .../ca-certificates` under
-<a href=#805 id=805 data-nosnippet>805</a>/// every other custodian and works under this one.
-<a href=#806 id=806 data-nosnippet>806</a></span><span class="kw">fn </span>key_params(algorithm: <span class="kw-2">&amp;</span>KeyAlgorithm) -&gt; (<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, u32) {
-<a href=#807 id=807 data-nosnippet>807</a>    <span class="kw">match </span>algorithm {
-<a href=#808 id=808 data-nosnippet>808</a>        KeyAlgorithm::Ed25519 =&gt; (<span class="string">"ed25519"</span>, <span class="number">0</span>),
-<a href=#809 id=809 data-nosnippet>809</a>        KeyAlgorithm::Rsa4096 =&gt; (<span class="string">"rsa"</span>, <span class="number">4096</span>),
+<a href=#642 id=642 data-nosnippet>642</a>    ///
+<a href=#643 id=643 data-nosnippet>643</a>    /// # A caller's CSR is not AXIAM's CSR
+<a href=#644 id=644 data-nosnippet>644</a>    ///
+<a href=#645 id=645 data-nosnippet>645</a>    /// When [`LeafSigningRequest::csr_is_caller_supplied`] is set, the request
+<a href=#646 id=646 data-nosnippet>646</a>    /// body states `key_usage` and `ext_key_usage` as empty rather than letting
+<a href=#647 id=647 data-nosnippet>647</a>    /// Vault apply its own defaults (`DigitalSignature`, `KeyAgreement`,
+<a href=#648 id=648 data-nosnippet>648</a>    /// `KeyEncipherment`). What a certificate says about its key usage should be
+<a href=#649 id=649 data-nosnippet>649</a>    /// AXIAM's decision, not a default of whichever Vault version answers, and
+<a href=#650 id=650 data-nosnippet>650</a>    /// empty is what the in-process path produces for the same request.
+<a href=#651 id=651 data-nosnippet>651</a>    ///
+<a href=#652 id=652 data-nosnippet>652</a>    /// This is a *second* statement of an intent already enforced upstream, and
+<a href=#653 id=653 data-nosnippet>653</a>    /// it has to be, because it is not sufficient on its own: `sign-verbatim`
+<a href=#654 id=654 data-nosnippet>654</a>    /// **discards** these two parameters when the CSR itself carries the
+<a href=#655 id=655 data-nosnippet>655</a>    /// matching extensions and issues what the CSR asked for. So
+<a href=#656 id=656 data-nosnippet>656</a>    /// `CertService::sign_csr` refuses a CSR requesting `keyUsage` or
+<a href=#657 id=657 data-nosnippet>657</a>    /// `extendedKeyUsage` before anything reaches here, and this says what the
+<a href=#658 id=658 data-nosnippet>658</a>    /// certificate should carry once that is true. Neither half alone would do:
+<a href=#659 id=659 data-nosnippet>659</a>    /// the refusal without this leaves the shape to a Vault default, and this
+<a href=#660 id=660 data-nosnippet>660</a>    /// without the refusal is a parameter Vault would throw away.
+<a href=#661 id=661 data-nosnippet>661</a>    </span><span class="kw">fn </span>sign_csr&lt;<span class="lifetime">'a</span>&gt;(
+<a href=#662 id=662 data-nosnippet>662</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
+<a href=#663 id=663 data-nosnippet>663</a>        key_ref: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CaKeyRef,
+<a href=#664 id=664 data-nosnippet>664</a>        request: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>LeafSigningRequest,
+<a href=#665 id=665 data-nosnippet>665</a>    ) -&gt; Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = AxiamResult&lt;SignedLeaf&gt;&gt; + Send + <span class="lifetime">'a</span>&gt;&gt; {
+<a href=#666 id=666 data-nosnippet>666</a>        Box::pin(<span class="kw">async move </span>{
+<a href=#667 id=667 data-nosnippet>667</a>            <span class="kw">let </span>locator = VaultPkiLocator::parse(<span class="kw-2">&amp;</span>key_ref.locator)<span class="question-mark">?</span>;
+<a href=#668 id=668 data-nosnippet>668</a>            <span class="kw">let </span>url = <span class="self">self</span>.url(
+<a href=#669 id=669 data-nosnippet>669</a>                <span class="kw-2">&amp;</span>locator.issuing.mount,
+<a href=#670 id=670 data-nosnippet>670</a>                <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"issuer/{}/sign-verbatim"</span>, locator.issuing.issuer),
+<a href=#671 id=671 data-nosnippet>671</a>            );
+<a href=#672 id=672 data-nosnippet>672</a>            <span class="kw">let </span><span class="kw-2">mut </span>body = <span class="macro">serde_json::json!</span>({
+<a href=#673 id=673 data-nosnippet>673</a>                <span class="string">"csr"</span>: request.csr_pem,
+<a href=#674 id=674 data-nosnippet>674</a>                <span class="string">"ttl"</span>: <span class="macro">format!</span>(<span class="string">"{}s"</span>, request.ttl_seconds.max(<span class="number">1</span>)),
+<a href=#675 id=675 data-nosnippet>675</a>                <span class="string">"format"</span>: <span class="string">"pem"</span>,
+<a href=#676 id=676 data-nosnippet>676</a>            });
+<a href=#677 id=677 data-nosnippet>677</a>            <span class="kw">if </span>request.csr_is_caller_supplied {
+<a href=#678 id=678 data-nosnippet>678</a>                <span class="kw">let </span>map = body.as_object_mut().expect(<span class="string">"a JSON object was just built"</span>);
+<a href=#679 id=679 data-nosnippet>679</a>                map.insert(<span class="string">"key_usage"</span>.into(), <span class="macro">serde_json::json!</span>([]));
+<a href=#680 id=680 data-nosnippet>680</a>                map.insert(<span class="string">"ext_key_usage"</span>.into(), <span class="macro">serde_json::json!</span>([]));
+<a href=#681 id=681 data-nosnippet>681</a>            }
+<a href=#682 id=682 data-nosnippet>682</a>            <span class="kw">let </span>data = <span class="self">self</span>.post(<span class="kw-2">&amp;</span>url, body).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#683 id=683 data-nosnippet>683</a>
+<a href=#684 id=684 data-nosnippet>684</a>            <span class="kw">let </span>certificate_pem = string_field(<span class="kw-2">&amp;</span>data, <span class="string">"certificate"</span>, <span class="kw-2">&amp;</span>url)<span class="question-mark">?</span>;
+<a href=#685 id=685 data-nosnippet>685</a>            <span class="comment">// `ca_chain` means different things at different Vault versions —
+<a href=#686 id=686 data-nosnippet>686</a>            // sometimes including the leaf. Drop anything equal to the
+<a href=#687 id=687 data-nosnippet>687</a>            // certificate itself rather than trusting the shape.
+<a href=#688 id=688 data-nosnippet>688</a>            </span><span class="kw">let </span>chain_pem = data
+<a href=#689 id=689 data-nosnippet>689</a>                .get(<span class="string">"ca_chain"</span>)
+<a href=#690 id=690 data-nosnippet>690</a>                .and_then(|c| c.as_array())
+<a href=#691 id=691 data-nosnippet>691</a>                .map(|entries| {
+<a href=#692 id=692 data-nosnippet>692</a>                    entries
+<a href=#693 id=693 data-nosnippet>693</a>                        .iter()
+<a href=#694 id=694 data-nosnippet>694</a>                        .filter_map(|v| v.as_str())
+<a href=#695 id=695 data-nosnippet>695</a>                        .filter(|pem| pem.trim() != certificate_pem.trim())
+<a href=#696 id=696 data-nosnippet>696</a>                        .map(str::to_string)
+<a href=#697 id=697 data-nosnippet>697</a>                        .collect()
+<a href=#698 id=698 data-nosnippet>698</a>                })
+<a href=#699 id=699 data-nosnippet>699</a>                .unwrap_or_default();
+<a href=#700 id=700 data-nosnippet>700</a>
+<a href=#701 id=701 data-nosnippet>701</a>            <span class="prelude-val">Ok</span>(SignedLeaf {
+<a href=#702 id=702 data-nosnippet>702</a>                certificate_pem,
+<a href=#703 id=703 data-nosnippet>703</a>                chain_pem,
+<a href=#704 id=704 data-nosnippet>704</a>            })
+<a href=#705 id=705 data-nosnippet>705</a>        })
+<a href=#706 id=706 data-nosnippet>706</a>    }
+<a href=#707 id=707 data-nosnippet>707</a>
+<a href=#708 id=708 data-nosnippet>708</a>    <span class="doccomment">/// Create a tenant signing CA whose key is born in — and stays in — Vault.
+<a href=#709 id=709 data-nosnippet>709</a>    ///
+<a href=#710 id=710 data-nosnippet>710</a>    /// The same three calls as [`Self::generate_intermediate`], pointed at an
+<a href=#711 id=711 data-nosnippet>711</a>    /// issuer that already exists rather than one this call just made: Vault
+<a href=#712 id=712 data-nosnippet>712</a>    /// generates the key and a CSR in the issuing mount, the parent's signing
+<a href=#713 id=713 data-nosnippet>713</a>    /// issuer signs it, and `intermediate/set-signed` hands the certificate
+<a href=#714 id=714 data-nosnippet>714</a>    /// back to the mount that holds the key. Vault can then issue this tenant's
+<a href=#715 id=715 data-nosnippet>715</a>    /// leaves itself, which is the whole point — the key never exists here, so
+<a href=#716 id=716 data-nosnippet>716</a>    /// there is nothing for AXIAM to lose.
+<a href=#717 id=717 data-nosnippet>717</a>    </span><span class="kw">fn </span>generate_intermediate_ca&lt;<span class="lifetime">'a</span>&gt;(
+<a href=#718 id=718 data-nosnippet>718</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
+<a href=#719 id=719 data-nosnippet>719</a>        parent: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CaKeyRef,
+<a href=#720 id=720 data-nosnippet>720</a>        request: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>IntermediateCaRequest,
+<a href=#721 id=721 data-nosnippet>721</a>    ) -&gt; Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = AxiamResult&lt;CustodiedIntermediate&gt;&gt; + Send + <span class="lifetime">'a</span>&gt;&gt; {
+<a href=#722 id=722 data-nosnippet>722</a>        Box::pin(<span class="kw">async move </span>{
+<a href=#723 id=723 data-nosnippet>723</a>            <span class="kw">let </span>parent_locator = VaultPkiLocator::parse(<span class="kw-2">&amp;</span>parent.locator)<span class="question-mark">?</span>;
+<a href=#724 id=724 data-nosnippet>724</a>            <span class="kw">let </span>signer = parent_locator.signing_issuer();
+<a href=#725 id=725 data-nosnippet>725</a>            <span class="kw">let </span>(key_type, key_bits) = key_params(<span class="kw-2">&amp;</span>request.key_algorithm);
+<a href=#726 id=726 data-nosnippet>726</a>
+<a href=#727 id=727 data-nosnippet>727</a>            <span class="kw">let </span>generate_url = <span class="self">self</span>.url(<span class="kw-2">&amp;</span><span class="self">self</span>.config.int_mount, <span class="string">"intermediate/generate/internal"</span>);
+<a href=#728 id=728 data-nosnippet>728</a>            <span class="kw">let </span>generated = <span class="self">self
+<a href=#729 id=729 data-nosnippet>729</a>                </span>.post(
+<a href=#730 id=730 data-nosnippet>730</a>                    <span class="kw-2">&amp;</span>generate_url,
+<a href=#731 id=731 data-nosnippet>731</a>                    <span class="macro">serde_json::json!</span>({
+<a href=#732 id=732 data-nosnippet>732</a>                        <span class="string">"common_name"</span>: request.subject,
+<a href=#733 id=733 data-nosnippet>733</a>                        <span class="string">"key_type"</span>: key_type,
+<a href=#734 id=734 data-nosnippet>734</a>                        <span class="string">"key_bits"</span>: key_bits,
+<a href=#735 id=735 data-nosnippet>735</a>                        <span class="string">"key_name"</span>: <span class="macro">format!</span>(<span class="string">"axiam-tenant-int-{}"</span>, request.ca_id),
+<a href=#736 id=736 data-nosnippet>736</a>                        <span class="string">"format"</span>: <span class="string">"pem"</span>,
+<a href=#737 id=737 data-nosnippet>737</a>                    }),
+<a href=#738 id=738 data-nosnippet>738</a>                )
+<a href=#739 id=739 data-nosnippet>739</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#740 id=740 data-nosnippet>740</a>            <span class="kw">let </span>csr = string_field(<span class="kw-2">&amp;</span>generated, <span class="string">"csr"</span>, <span class="kw-2">&amp;</span>generate_url)<span class="question-mark">?</span>;
+<a href=#741 id=741 data-nosnippet>741</a>
+<a href=#742 id=742 data-nosnippet>742</a>            <span class="kw">let </span>(certificate, issuing_ca) = <span class="self">self
+<a href=#743 id=743 data-nosnippet>743</a>                </span>.sign_as_intermediate(
+<a href=#744 id=744 data-nosnippet>744</a>                    signer,
+<a href=#745 id=745 data-nosnippet>745</a>                    <span class="kw-2">&amp;</span>csr,
+<a href=#746 id=746 data-nosnippet>746</a>                    <span class="kw-2">&amp;</span>request.subject,
+<a href=#747 id=747 data-nosnippet>747</a>                    ttl_days(request.validity_days),
+<a href=#748 id=748 data-nosnippet>748</a>                )
+<a href=#749 id=749 data-nosnippet>749</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#750 id=750 data-nosnippet>750</a>
+<a href=#751 id=751 data-nosnippet>751</a>            <span class="kw">let </span>set_url = <span class="self">self</span>.url(<span class="kw-2">&amp;</span><span class="self">self</span>.config.int_mount, <span class="string">"intermediate/set-signed"</span>);
+<a href=#752 id=752 data-nosnippet>752</a>            <span class="kw">let </span>imported = <span class="self">self
+<a href=#753 id=753 data-nosnippet>753</a>                </span>.post(<span class="kw-2">&amp;</span>set_url, <span class="macro">serde_json::json!</span>({ <span class="string">"certificate"</span>: certificate }))
+<a href=#754 id=754 data-nosnippet>754</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#755 id=755 data-nosnippet>755</a>            <span class="kw">let </span>issuer = first_imported_issuer(<span class="kw-2">&amp;</span>imported, <span class="kw-2">&amp;</span>set_url)<span class="question-mark">?</span>;
+<a href=#756 id=756 data-nosnippet>756</a>            <span class="comment">// The key came from `intermediate/generate/internal`, so
+<a href=#757 id=757 data-nosnippet>757</a>            // `set-signed` imports no key and `imported_keys` is empty; the id
+<a href=#758 id=758 data-nosnippet>758</a>            // wanted here is the one that call already returned.
+<a href=#759 id=759 data-nosnippet>759</a>            </span><span class="kw">let </span>key = string_field(<span class="kw-2">&amp;</span>generated, <span class="string">"key_id"</span>, <span class="kw-2">&amp;</span>generate_url)<span class="question-mark">?</span>;
+<a href=#760 id=760 data-nosnippet>760</a>
+<a href=#761 id=761 data-nosnippet>761</a>            <span class="prelude-val">Ok</span>(CustodiedIntermediate {
+<a href=#762 id=762 data-nosnippet>762</a>                certificate_pem: certificate,
+<a href=#763 id=763 data-nosnippet>763</a>                chain_pem: issuing_ca.into_iter().collect(),
+<a href=#764 id=764 data-nosnippet>764</a>                locator: VaultPkiLocator {
+<a href=#765 id=765 data-nosnippet>765</a>                    issuing: VaultPkiIssuer {
+<a href=#766 id=766 data-nosnippet>766</a>                        mount: <span class="self">self</span>.config.int_mount.trim_matches(<span class="string">'/'</span>).to_string(),
+<a href=#767 id=767 data-nosnippet>767</a>                        issuer,
+<a href=#768 id=768 data-nosnippet>768</a>                        key,
+<a href=#769 id=769 data-nosnippet>769</a>                    },
+<a href=#770 id=770 data-nosnippet>770</a>                    <span class="comment">// No root to clean up on revocation: the root above this one
+<a href=#771 id=771 data-nosnippet>771</a>                    // belongs to the organization CA and outlives it.
+<a href=#772 id=772 data-nosnippet>772</a>                    </span>root: <span class="prelude-val">None</span>,
+<a href=#773 id=773 data-nosnippet>773</a>                }
+<a href=#774 id=774 data-nosnippet>774</a>                .encode()<span class="question-mark">?</span>,
+<a href=#775 id=775 data-nosnippet>775</a>            })
+<a href=#776 id=776 data-nosnippet>776</a>        })
+<a href=#777 id=777 data-nosnippet>777</a>    }
+<a href=#778 id=778 data-nosnippet>778</a>
+<a href=#779 id=779 data-nosnippet>779</a>    <span class="doccomment">/// Sign somebody else's CSR as a CA, with `sign-intermediate`.
+<a href=#780 id=780 data-nosnippet>780</a>    ///
+<a href=#781 id=781 data-nosnippet>781</a>    /// Not `sign-verbatim`, which is what leaves use: verbatim takes the CSR's
+<a href=#782 id=782 data-nosnippet>782</a>    /// own extensions, and a request that asked to be an unconstrained CA would
+<a href=#783 id=783 data-nosnippet>783</a>    /// get to be one. `sign-intermediate` with `use_csr_values: false` means
+<a href=#784 id=784 data-nosnippet>784</a>    /// AXIAM states what the certificate is and Vault ignores what the request
+<a href=#785 id=785 data-nosnippet>785</a>    /// wanted.
+<a href=#786 id=786 data-nosnippet>786</a>    </span><span class="kw">fn </span>sign_intermediate_csr&lt;<span class="lifetime">'a</span>&gt;(
+<a href=#787 id=787 data-nosnippet>787</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
+<a href=#788 id=788 data-nosnippet>788</a>        parent: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>CaKeyRef,
+<a href=#789 id=789 data-nosnippet>789</a>        request: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>IntermediateSigningRequest,
+<a href=#790 id=790 data-nosnippet>790</a>    ) -&gt; Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = AxiamResult&lt;SignedLeaf&gt;&gt; + Send + <span class="lifetime">'a</span>&gt;&gt; {
+<a href=#791 id=791 data-nosnippet>791</a>        Box::pin(<span class="kw">async move </span>{
+<a href=#792 id=792 data-nosnippet>792</a>            <span class="kw">let </span>parent_locator = VaultPkiLocator::parse(<span class="kw-2">&amp;</span>parent.locator)<span class="question-mark">?</span>;
+<a href=#793 id=793 data-nosnippet>793</a>            <span class="kw">let </span>(certificate_pem, issuing_ca) = <span class="self">self
+<a href=#794 id=794 data-nosnippet>794</a>                </span>.sign_as_intermediate(
+<a href=#795 id=795 data-nosnippet>795</a>                    parent_locator.signing_issuer(),
+<a href=#796 id=796 data-nosnippet>796</a>                    <span class="kw-2">&amp;</span>request.csr_pem,
+<a href=#797 id=797 data-nosnippet>797</a>                    <span class="kw-2">&amp;</span>request.subject,
+<a href=#798 id=798 data-nosnippet>798</a>                    <span class="macro">format!</span>(<span class="string">"{}s"</span>, request.ttl_seconds.max(<span class="number">1</span>)),
+<a href=#799 id=799 data-nosnippet>799</a>                )
+<a href=#800 id=800 data-nosnippet>800</a>                .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#801 id=801 data-nosnippet>801</a>            <span class="prelude-val">Ok</span>(SignedLeaf {
+<a href=#802 id=802 data-nosnippet>802</a>                certificate_pem,
+<a href=#803 id=803 data-nosnippet>803</a>                chain_pem: issuing_ca.into_iter().collect(),
+<a href=#804 id=804 data-nosnippet>804</a>            })
+<a href=#805 id=805 data-nosnippet>805</a>        })
+<a href=#806 id=806 data-nosnippet>806</a>    }
+<a href=#807 id=807 data-nosnippet>807</a>
+<a href=#808 id=808 data-nosnippet>808</a>    <span class="kw">fn </span>custody(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; CaKeyCustody {
+<a href=#809 id=809 data-nosnippet>809</a>        CaKeyCustody::VaultPki
 <a href=#810 id=810 data-nosnippet>810</a>    }
-<a href=#811 id=811 data-nosnippet>811</a>}
-<a href=#812 id=812 data-nosnippet>812</a>
-<a href=#813 id=813 data-nosnippet>813</a><span class="doccomment">/// Days as a Vault duration string.
-<a href=#814 id=814 data-nosnippet>814</a></span><span class="kw">fn </span>ttl_days(days: u32) -&gt; String {
-<a href=#815 id=815 data-nosnippet>815</a>    <span class="macro">format!</span>(<span class="string">"{}h"</span>, u64::from(days) * <span class="number">24</span>)
-<a href=#816 id=816 data-nosnippet>816</a>}
-<a href=#817 id=817 data-nosnippet>817</a>
-<a href=#818 id=818 data-nosnippet>818</a><span class="doccomment">/// Pull a non-empty string field out of a Vault `data` object.
-<a href=#819 id=819 data-nosnippet>819</a></span><span class="kw">fn </span>string_field(data: <span class="kw-2">&amp;</span>serde_json::Value, field: <span class="kw-2">&amp;</span>str, url: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;String&gt; {
-<a href=#820 id=820 data-nosnippet>820</a>    data.get(field)
-<a href=#821 id=821 data-nosnippet>821</a>        .and_then(|v| v.as_str())
-<a href=#822 id=822 data-nosnippet>822</a>        .filter(|s| !s.is_empty())
-<a href=#823 id=823 data-nosnippet>823</a>        .map(str::to_string)
-<a href=#824 id=824 data-nosnippet>824</a>        .ok_or_else(|| {
-<a href=#825 id=825 data-nosnippet>825</a>            AxiamError::Internal(<span class="macro">format!</span>(
-<a href=#826 id=826 data-nosnippet>826</a>                <span class="string">"vault pki: {url} returned no `{field}` — check the mount is a PKI engine"
-<a href=#827 id=827 data-nosnippet>827</a>            </span>))
-<a href=#828 id=828 data-nosnippet>828</a>        })
-<a href=#829 id=829 data-nosnippet>829</a>}
-<a href=#830 id=830 data-nosnippet>830</a>
-<a href=#831 id=831 data-nosnippet>831</a><span class="doccomment">/// The one issuer a `set-signed` or `import/bundle` call created.
-<a href=#832 id=832 data-nosnippet>832</a>///
-<a href=#833 id=833 data-nosnippet>833</a>/// More than one means the bundle carried a chain, which AXIAM does not send:
-<a href=#834 id=834 data-nosnippet>834</a>/// taking the first would pick an issuer arbitrarily and record a locator that
-<a href=#835 id=835 data-nosnippet>835</a>/// signs with something other than the certificate in the row.
-<a href=#836 id=836 data-nosnippet>836</a></span><span class="kw">fn </span>first_imported_issuer(data: <span class="kw-2">&amp;</span>serde_json::Value, url: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;String&gt; {
-<a href=#837 id=837 data-nosnippet>837</a>    <span class="kw">let </span>imported: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = data
-<a href=#838 id=838 data-nosnippet>838</a>        .get(<span class="string">"imported_issuers"</span>)
-<a href=#839 id=839 data-nosnippet>839</a>        .and_then(|v| v.as_array())
-<a href=#840 id=840 data-nosnippet>840</a>        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-<a href=#841 id=841 data-nosnippet>841</a>        .unwrap_or_default();
-<a href=#842 id=842 data-nosnippet>842</a>
-<a href=#843 id=843 data-nosnippet>843</a>    <span class="kw">match </span>imported.as_slice() {
-<a href=#844 id=844 data-nosnippet>844</a>        [one] =&gt; <span class="prelude-val">Ok</span>((<span class="kw-2">*</span>one).to_string()),
-<a href=#845 id=845 data-nosnippet>845</a>        [] =&gt; <span class="prelude-val">Err</span>(AxiamError::Validation {
-<a href=#846 id=846 data-nosnippet>846</a>            message: <span class="macro">format!</span>(
-<a href=#847 id=847 data-nosnippet>847</a>                <span class="string">"vault pki: {url} imported no issuer — Vault already holds this \
-<a href=#848 id=848 data-nosnippet>848</a>                 certificate, so it belongs to a CA that exists"
-<a href=#849 id=849 data-nosnippet>849</a>            </span>),
-<a href=#850 id=850 data-nosnippet>850</a>        }),
-<a href=#851 id=851 data-nosnippet>851</a>        many =&gt; <span class="prelude-val">Err</span>(AxiamError::Validation {
-<a href=#852 id=852 data-nosnippet>852</a>            message: <span class="macro">format!</span>(
-<a href=#853 id=853 data-nosnippet>853</a>                <span class="string">"vault pki: {url} imported {} issuers — send one certificate, not a chain"</span>,
-<a href=#854 id=854 data-nosnippet>854</a>                many.len()
-<a href=#855 id=855 data-nosnippet>855</a>            ),
-<a href=#856 id=856 data-nosnippet>856</a>        }),
-<a href=#857 id=857 data-nosnippet>857</a>    }
-<a href=#858 id=858 data-nosnippet>858</a>}
-<a href=#859 id=859 data-nosnippet>859</a>
-<a href=#860 id=860 data-nosnippet>860</a><span class="doccomment">/// Vault's `errors` array, flattened for a message.
-<a href=#861 id=861 data-nosnippet>861</a></span><span class="kw">fn </span>vault_errors(payload: <span class="kw-2">&amp;</span>serde_json::Value) -&gt; String {
-<a href=#862 id=862 data-nosnippet>862</a>    <span class="kw">let </span>errors: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = payload
-<a href=#863 id=863 data-nosnippet>863</a>        .get(<span class="string">"errors"</span>)
-<a href=#864 id=864 data-nosnippet>864</a>        .and_then(|v| v.as_array())
-<a href=#865 id=865 data-nosnippet>865</a>        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-<a href=#866 id=866 data-nosnippet>866</a>        .unwrap_or_default();
-<a href=#867 id=867 data-nosnippet>867</a>    <span class="kw">if </span>errors.is_empty() {
-<a href=#868 id=868 data-nosnippet>868</a>        <span class="string">"no error detail"</span>.to_string()
-<a href=#869 id=869 data-nosnippet>869</a>    } <span class="kw">else </span>{
-<a href=#870 id=870 data-nosnippet>870</a>        errors.join(<span class="string">"; "</span>)
-<a href=#871 id=871 data-nosnippet>871</a>    }
-<a href=#872 id=872 data-nosnippet>872</a>}
-<a href=#873 id=873 data-nosnippet>873</a>
-<a href=#874 id=874 data-nosnippet>874</a><span class="doccomment">/// Surface Vault's warnings, which are how a capped TTL is reported.
-<a href=#875 id=875 data-nosnippet>875</a></span><span class="kw">fn </span>log_warnings(url: <span class="kw-2">&amp;</span>str, payload: <span class="kw-2">&amp;</span>serde_json::Value) {
-<a href=#876 id=876 data-nosnippet>876</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(warnings) = payload.get(<span class="string">"warnings"</span>).and_then(|v| v.as_array()) {
-<a href=#877 id=877 data-nosnippet>877</a>        <span class="kw">for </span>warning <span class="kw">in </span>warnings.iter().filter_map(|v| v.as_str()) {
-<a href=#878 id=878 data-nosnippet>878</a>            <span class="macro">tracing::warn!</span>(%url, warning, <span class="string">"vault pki returned a warning"</span>);
-<a href=#879 id=879 data-nosnippet>879</a>        }
-<a href=#880 id=880 data-nosnippet>880</a>    }
-<a href=#881 id=881 data-nosnippet>881</a>}
-<a href=#882 id=882 data-nosnippet>882</a>
-<a href=#883 id=883 data-nosnippet>883</a><span class="attr">#[cfg(test)]
-<a href=#884 id=884 data-nosnippet>884</a></span><span class="kw">mod </span>tests {
-<a href=#885 id=885 data-nosnippet>885</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#886 id=886 data-nosnippet>886</a>
-<a href=#887 id=887 data-nosnippet>887</a>    <span class="kw">fn </span>config() -&gt; VaultPkiConfig {
-<a href=#888 id=888 data-nosnippet>888</a>        VaultPkiConfig {
-<a href=#889 id=889 data-nosnippet>889</a>            address: <span class="string">"https://vault.internal:8200/"</span>.into(),
-<a href=#890 id=890 data-nosnippet>890</a>            token: <span class="string">"s.token"</span>.into(),
-<a href=#891 id=891 data-nosnippet>891</a>            root_mount: <span class="string">"/pki/"</span>.into(),
-<a href=#892 id=892 data-nosnippet>892</a>            int_mount: <span class="string">"/pki_int/"</span>.into(),
-<a href=#893 id=893 data-nosnippet>893</a>            ca_cert_path: <span class="prelude-val">None</span>,
-<a href=#894 id=894 data-nosnippet>894</a>        }
-<a href=#895 id=895 data-nosnippet>895</a>    }
-<a href=#896 id=896 data-nosnippet>896</a>
-<a href=#897 id=897 data-nosnippet>897</a>    <span class="kw">fn </span>store() -&gt; VaultPkiCaKeyStore {
-<a href=#898 id=898 data-nosnippet>898</a>        VaultPkiCaKeyStore::new(config()).unwrap()
-<a href=#899 id=899 data-nosnippet>899</a>    }
-<a href=#900 id=900 data-nosnippet>900</a>
-<a href=#901 id=901 data-nosnippet>901</a>    <span class="attr">#[test]
-<a href=#902 id=902 data-nosnippet>902</a>    </span><span class="kw">fn </span>urls_survive_slashes_on_either_side() {
-<a href=#903 id=903 data-nosnippet>903</a>        <span class="comment">// The address ends with one and both mounts are wrapped in them; a
-<a href=#904 id=904 data-nosnippet>904</a>        // naive `format!` produces `//v1//pki//root/...`, which Vault answers
-<a href=#905 id=905 data-nosnippet>905</a>        // with a 404 that says nothing about why.
-<a href=#906 id=906 data-nosnippet>906</a>        </span><span class="macro">assert_eq!</span>(
-<a href=#907 id=907 data-nosnippet>907</a>            store().url(<span class="string">"/pki/"</span>, <span class="string">"root/generate/internal"</span>),
-<a href=#908 id=908 data-nosnippet>908</a>            <span class="string">"https://vault.internal:8200/v1/pki/root/generate/internal"
-<a href=#909 id=909 data-nosnippet>909</a>        </span>);
-<a href=#910 id=910 data-nosnippet>910</a>    }
-<a href=#911 id=911 data-nosnippet>911</a>
-<a href=#912 id=912 data-nosnippet>912</a>    <span class="attr">#[test]
-<a href=#913 id=913 data-nosnippet>913</a>    </span><span class="kw">fn </span>the_token_is_not_in_the_debug_output() {
-<a href=#914 id=914 data-nosnippet>914</a>        <span class="kw">let </span>rendered = <span class="macro">format!</span>(<span class="string">"{:?}"</span>, store());
-<a href=#915 id=915 data-nosnippet>915</a>        <span class="macro">assert!</span>(!rendered.contains(<span class="string">"s.token"</span>), <span class="string">"{rendered}"</span>);
-<a href=#916 id=916 data-nosnippet>916</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"&lt;redacted&gt;"</span>), <span class="string">"{rendered}"</span>);
-<a href=#917 id=917 data-nosnippet>917</a>    }
-<a href=#918 id=918 data-nosnippet>918</a>
-<a href=#919 id=919 data-nosnippet>919</a>    <span class="attr">#[test]
-<a href=#920 id=920 data-nosnippet>920</a>    </span><span class="kw">fn </span>a_locator_round_trips_through_the_single_column_it_lives_in() {
-<a href=#921 id=921 data-nosnippet>921</a>        <span class="kw">let </span>locator = VaultPkiLocator {
-<a href=#922 id=922 data-nosnippet>922</a>            issuing: VaultPkiIssuer {
-<a href=#923 id=923 data-nosnippet>923</a>                mount: <span class="string">"pki_int"</span>.into(),
-<a href=#924 id=924 data-nosnippet>924</a>                issuer: <span class="string">"issuer-1"</span>.into(),
-<a href=#925 id=925 data-nosnippet>925</a>                key: <span class="string">"key-1"</span>.into(),
-<a href=#926 id=926 data-nosnippet>926</a>            },
-<a href=#927 id=927 data-nosnippet>927</a>            root: <span class="prelude-val">Some</span>(VaultPkiIssuer {
-<a href=#928 id=928 data-nosnippet>928</a>                mount: <span class="string">"pki"</span>.into(),
-<a href=#929 id=929 data-nosnippet>929</a>                issuer: <span class="string">"issuer-0"</span>.into(),
-<a href=#930 id=930 data-nosnippet>930</a>                key: <span class="string">"key-0"</span>.into(),
-<a href=#931 id=931 data-nosnippet>931</a>            }),
-<a href=#932 id=932 data-nosnippet>932</a>        };
-<a href=#933 id=933 data-nosnippet>933</a>        <span class="kw">let </span>encoded = locator.encode().unwrap();
-<a href=#934 id=934 data-nosnippet>934</a>        <span class="macro">assert_eq!</span>(VaultPkiLocator::parse(<span class="kw-2">&amp;</span>encoded).unwrap(), locator);
-<a href=#935 id=935 data-nosnippet>935</a>    }
-<a href=#936 id=936 data-nosnippet>936</a>
-<a href=#937 id=937 data-nosnippet>937</a>    <span class="attr">#[test]
-<a href=#938 id=938 data-nosnippet>938</a>    </span><span class="kw">fn </span>a_locator_from_another_custodian_is_refused_rather_than_guessed_at() {
-<a href=#939 id=939 data-nosnippet>939</a>        <span class="comment">// A `vault` (KV) row's locator is a bare path. Reading it as this
-<a href=#940 id=940 data-nosnippet>940</a>        // custodian's would otherwise produce a mount named after nothing.
-<a href=#941 id=941 data-nosnippet>941</a>        </span><span class="kw">let </span>err = VaultPkiLocator::parse(<span class="string">"axiam/ca-keys/org/ca"</span>).unwrap_err();
-<a href=#942 id=942 data-nosnippet>942</a>        <span class="macro">assert!</span>(
-<a href=#943 id=943 data-nosnippet>943</a>            err.to_string().contains(<span class="string">"not one this custodian wrote"</span>),
-<a href=#944 id=944 data-nosnippet>944</a>            <span class="string">"{err}"
-<a href=#945 id=945 data-nosnippet>945</a>        </span>);
-<a href=#946 id=946 data-nosnippet>946</a>    }
-<a href=#947 id=947 data-nosnippet>947</a>
-<a href=#948 id=948 data-nosnippet>948</a>    <span class="attr">#[test]
-<a href=#949 id=949 data-nosnippet>949</a>    </span><span class="kw">fn </span>ttl_is_expressed_in_hours_because_vault_has_no_day_unit() {
-<a href=#950 id=950 data-nosnippet>950</a>        <span class="macro">assert_eq!</span>(ttl_days(<span class="number">3650</span>), <span class="string">"87600h"</span>);
-<a href=#951 id=951 data-nosnippet>951</a>        <span class="macro">assert_eq!</span>(ttl_days(<span class="number">1</span>), <span class="string">"24h"</span>);
-<a href=#952 id=952 data-nosnippet>952</a>    }
-<a href=#953 id=953 data-nosnippet>953</a>
-<a href=#954 id=954 data-nosnippet>954</a>    <span class="attr">#[test]
-<a href=#955 id=955 data-nosnippet>955</a>    </span><span class="kw">fn </span>key_params_ask_vault_for_the_algorithm_the_row_will_record() {
-<a href=#956 id=956 data-nosnippet>956</a>        <span class="macro">assert_eq!</span>(key_params(<span class="kw-2">&amp;</span>KeyAlgorithm::Ed25519), (<span class="string">"ed25519"</span>, <span class="number">0</span>));
-<a href=#957 id=957 data-nosnippet>957</a>        <span class="macro">assert_eq!</span>(key_params(<span class="kw-2">&amp;</span>KeyAlgorithm::Rsa4096), (<span class="string">"rsa"</span>, <span class="number">4096</span>));
-<a href=#958 id=958 data-nosnippet>958</a>    }
-<a href=#959 id=959 data-nosnippet>959</a>
-<a href=#960 id=960 data-nosnippet>960</a>    <span class="attr">#[test]
-<a href=#961 id=961 data-nosnippet>961</a>    </span><span class="kw">fn </span>one_imported_issuer_is_the_only_answer_that_is_usable() {
-<a href=#962 id=962 data-nosnippet>962</a>        <span class="kw">let </span>one = <span class="macro">serde_json::json!</span>({ <span class="string">"imported_issuers"</span>: [<span class="string">"a"</span>] });
-<a href=#963 id=963 data-nosnippet>963</a>        <span class="macro">assert_eq!</span>(first_imported_issuer(<span class="kw-2">&amp;</span>one, <span class="string">"u"</span>).unwrap(), <span class="string">"a"</span>);
-<a href=#964 id=964 data-nosnippet>964</a>
-<a href=#965 id=965 data-nosnippet>965</a>        <span class="comment">// Nothing imported means Vault already had it — a different CA row
-<a href=#966 id=966 data-nosnippet>966</a>        // already signs with this issuer, and two rows sharing one would both
-<a href=#967 id=967 data-nosnippet>967</a>        // claim to be able to revoke it.
-<a href=#968 id=968 data-nosnippet>968</a>        </span><span class="kw">let </span>none = <span class="macro">serde_json::json!</span>({ <span class="string">"imported_issuers"</span>: [] });
-<a href=#969 id=969 data-nosnippet>969</a>        <span class="kw">let </span>err = first_imported_issuer(<span class="kw-2">&amp;</span>none, <span class="string">"u"</span>).unwrap_err();
-<a href=#970 id=970 data-nosnippet>970</a>        <span class="macro">assert!</span>(err.to_string().contains(<span class="string">"already holds"</span>), <span class="string">"{err}"</span>);
-<a href=#971 id=971 data-nosnippet>971</a>
-<a href=#972 id=972 data-nosnippet>972</a>        <span class="kw">let </span>many = <span class="macro">serde_json::json!</span>({ <span class="string">"imported_issuers"</span>: [<span class="string">"a"</span>, <span class="string">"b"</span>] });
-<a href=#973 id=973 data-nosnippet>973</a>        <span class="kw">let </span>err = first_imported_issuer(<span class="kw-2">&amp;</span>many, <span class="string">"u"</span>).unwrap_err();
-<a href=#974 id=974 data-nosnippet>974</a>        <span class="macro">assert!</span>(err.to_string().contains(<span class="string">"not a chain"</span>), <span class="string">"{err}"</span>);
-<a href=#975 id=975 data-nosnippet>975</a>    }
-<a href=#976 id=976 data-nosnippet>976</a>
-<a href=#977 id=977 data-nosnippet>977</a>    <span class="attr">#[test]
-<a href=#978 id=978 data-nosnippet>978</a>    </span><span class="kw">fn </span>vault_errors_are_repeated_verbatim_because_they_name_the_policy() {
-<a href=#979 id=979 data-nosnippet>979</a>        <span class="kw">let </span>payload = <span class="macro">serde_json::json!</span>({ <span class="string">"errors"</span>: [<span class="string">"permission denied"</span>] });
-<a href=#980 id=980 data-nosnippet>980</a>        <span class="macro">assert_eq!</span>(vault_errors(<span class="kw-2">&amp;</span>payload), <span class="string">"permission denied"</span>);
-<a href=#981 id=981 data-nosnippet>981</a>        <span class="macro">assert_eq!</span>(vault_errors(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({})), <span class="string">"no error detail"</span>);
-<a href=#982 id=982 data-nosnippet>982</a>    }
-<a href=#983 id=983 data-nosnippet>983</a>
-<a href=#984 id=984 data-nosnippet>984</a>    <span class="attr">#[test]
-<a href=#985 id=985 data-nosnippet>985</a>    </span><span class="kw">fn </span>a_missing_field_names_the_field_and_the_likely_cause() {
-<a href=#986 id=986 data-nosnippet>986</a>        <span class="kw">let </span>err = string_field(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({}), <span class="string">"certificate"</span>, <span class="string">"u"</span>).unwrap_err();
-<a href=#987 id=987 data-nosnippet>987</a>        <span class="macro">assert!</span>(err.to_string().contains(<span class="string">"certificate"</span>), <span class="string">"{err}"</span>);
-<a href=#988 id=988 data-nosnippet>988</a>        <span class="macro">assert!</span>(err.to_string().contains(<span class="string">"PKI engine"</span>), <span class="string">"{err}"</span>);
-<a href=#989 id=989 data-nosnippet>989</a>    }
-<a href=#990 id=990 data-nosnippet>990</a>}
+<a href=#811 id=811 data-nosnippet>811</a>
+<a href=#812 id=812 data-nosnippet>812</a>    <span class="kw">fn </span>describe(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#813 id=813 data-nosnippet>813</a>        <span class="string">"vault_pki"
+<a href=#814 id=814 data-nosnippet>814</a>    </span>}
+<a href=#815 id=815 data-nosnippet>815</a>}
+<a href=#816 id=816 data-nosnippet>816</a>
+<a href=#817 id=817 data-nosnippet>817</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#818 id=818 data-nosnippet>818</a>// helpers
+<a href=#819 id=819 data-nosnippet>819</a>// ---------------------------------------------------------------------------
+<a href=#820 id=820 data-nosnippet>820</a>
+<a href=#821 id=821 data-nosnippet>821</a></span><span class="doccomment">/// Vault's `key_type` and `key_bits` for one of AXIAM's algorithms.
+<a href=#822 id=822 data-nosnippet>822</a>///
+<a href=#823 id=823 data-nosnippet>823</a>/// Note what this makes possible: Vault generates RSA keys, and rcgen's `ring`
+<a href=#824 id=824 data-nosnippet>824</a>/// backend does not. `Rsa4096` is refused by `POST .../ca-certificates` under
+<a href=#825 id=825 data-nosnippet>825</a>/// every other custodian and works under this one.
+<a href=#826 id=826 data-nosnippet>826</a></span><span class="kw">fn </span>key_params(algorithm: <span class="kw-2">&amp;</span>KeyAlgorithm) -&gt; (<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, u32) {
+<a href=#827 id=827 data-nosnippet>827</a>    <span class="kw">match </span>algorithm {
+<a href=#828 id=828 data-nosnippet>828</a>        KeyAlgorithm::Ed25519 =&gt; (<span class="string">"ed25519"</span>, <span class="number">0</span>),
+<a href=#829 id=829 data-nosnippet>829</a>        KeyAlgorithm::Rsa4096 =&gt; (<span class="string">"rsa"</span>, <span class="number">4096</span>),
+<a href=#830 id=830 data-nosnippet>830</a>    }
+<a href=#831 id=831 data-nosnippet>831</a>}
+<a href=#832 id=832 data-nosnippet>832</a>
+<a href=#833 id=833 data-nosnippet>833</a><span class="doccomment">/// Days as a Vault duration string.
+<a href=#834 id=834 data-nosnippet>834</a></span><span class="kw">fn </span>ttl_days(days: u32) -&gt; String {
+<a href=#835 id=835 data-nosnippet>835</a>    <span class="macro">format!</span>(<span class="string">"{}h"</span>, u64::from(days) * <span class="number">24</span>)
+<a href=#836 id=836 data-nosnippet>836</a>}
+<a href=#837 id=837 data-nosnippet>837</a>
+<a href=#838 id=838 data-nosnippet>838</a><span class="doccomment">/// Pull a non-empty string field out of a Vault `data` object.
+<a href=#839 id=839 data-nosnippet>839</a></span><span class="kw">fn </span>string_field(data: <span class="kw-2">&amp;</span>serde_json::Value, field: <span class="kw-2">&amp;</span>str, url: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;String&gt; {
+<a href=#840 id=840 data-nosnippet>840</a>    data.get(field)
+<a href=#841 id=841 data-nosnippet>841</a>        .and_then(|v| v.as_str())
+<a href=#842 id=842 data-nosnippet>842</a>        .filter(|s| !s.is_empty())
+<a href=#843 id=843 data-nosnippet>843</a>        .map(str::to_string)
+<a href=#844 id=844 data-nosnippet>844</a>        .ok_or_else(|| {
+<a href=#845 id=845 data-nosnippet>845</a>            AxiamError::Internal(<span class="macro">format!</span>(
+<a href=#846 id=846 data-nosnippet>846</a>                <span class="string">"vault pki: {url} returned no `{field}` — check the mount is a PKI engine"
+<a href=#847 id=847 data-nosnippet>847</a>            </span>))
+<a href=#848 id=848 data-nosnippet>848</a>        })
+<a href=#849 id=849 data-nosnippet>849</a>}
+<a href=#850 id=850 data-nosnippet>850</a>
+<a href=#851 id=851 data-nosnippet>851</a><span class="doccomment">/// The one issuer a `set-signed` or `import/bundle` call created.
+<a href=#852 id=852 data-nosnippet>852</a>///
+<a href=#853 id=853 data-nosnippet>853</a>/// More than one means the bundle carried a chain, which AXIAM does not send:
+<a href=#854 id=854 data-nosnippet>854</a>/// taking the first would pick an issuer arbitrarily and record a locator that
+<a href=#855 id=855 data-nosnippet>855</a>/// signs with something other than the certificate in the row.
+<a href=#856 id=856 data-nosnippet>856</a></span><span class="kw">fn </span>first_imported_issuer(data: <span class="kw-2">&amp;</span>serde_json::Value, url: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;String&gt; {
+<a href=#857 id=857 data-nosnippet>857</a>    <span class="kw">let </span>imported: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = data
+<a href=#858 id=858 data-nosnippet>858</a>        .get(<span class="string">"imported_issuers"</span>)
+<a href=#859 id=859 data-nosnippet>859</a>        .and_then(|v| v.as_array())
+<a href=#860 id=860 data-nosnippet>860</a>        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+<a href=#861 id=861 data-nosnippet>861</a>        .unwrap_or_default();
+<a href=#862 id=862 data-nosnippet>862</a>
+<a href=#863 id=863 data-nosnippet>863</a>    <span class="kw">match </span>imported.as_slice() {
+<a href=#864 id=864 data-nosnippet>864</a>        [one] =&gt; <span class="prelude-val">Ok</span>((<span class="kw-2">*</span>one).to_string()),
+<a href=#865 id=865 data-nosnippet>865</a>        [] =&gt; <span class="prelude-val">Err</span>(AxiamError::Validation {
+<a href=#866 id=866 data-nosnippet>866</a>            message: <span class="macro">format!</span>(
+<a href=#867 id=867 data-nosnippet>867</a>                <span class="string">"vault pki: {url} imported no issuer — Vault already holds this \
+<a href=#868 id=868 data-nosnippet>868</a>                 certificate, so it belongs to a CA that exists"
+<a href=#869 id=869 data-nosnippet>869</a>            </span>),
+<a href=#870 id=870 data-nosnippet>870</a>        }),
+<a href=#871 id=871 data-nosnippet>871</a>        many =&gt; <span class="prelude-val">Err</span>(AxiamError::Validation {
+<a href=#872 id=872 data-nosnippet>872</a>            message: <span class="macro">format!</span>(
+<a href=#873 id=873 data-nosnippet>873</a>                <span class="string">"vault pki: {url} imported {} issuers — send one certificate, not a chain"</span>,
+<a href=#874 id=874 data-nosnippet>874</a>                many.len()
+<a href=#875 id=875 data-nosnippet>875</a>            ),
+<a href=#876 id=876 data-nosnippet>876</a>        }),
+<a href=#877 id=877 data-nosnippet>877</a>    }
+<a href=#878 id=878 data-nosnippet>878</a>}
+<a href=#879 id=879 data-nosnippet>879</a>
+<a href=#880 id=880 data-nosnippet>880</a><span class="doccomment">/// Vault's `errors` array, flattened for a message.
+<a href=#881 id=881 data-nosnippet>881</a></span><span class="kw">fn </span>vault_errors(payload: <span class="kw-2">&amp;</span>serde_json::Value) -&gt; String {
+<a href=#882 id=882 data-nosnippet>882</a>    <span class="kw">let </span>errors: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = payload
+<a href=#883 id=883 data-nosnippet>883</a>        .get(<span class="string">"errors"</span>)
+<a href=#884 id=884 data-nosnippet>884</a>        .and_then(|v| v.as_array())
+<a href=#885 id=885 data-nosnippet>885</a>        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+<a href=#886 id=886 data-nosnippet>886</a>        .unwrap_or_default();
+<a href=#887 id=887 data-nosnippet>887</a>    <span class="kw">if </span>errors.is_empty() {
+<a href=#888 id=888 data-nosnippet>888</a>        <span class="string">"no error detail"</span>.to_string()
+<a href=#889 id=889 data-nosnippet>889</a>    } <span class="kw">else </span>{
+<a href=#890 id=890 data-nosnippet>890</a>        errors.join(<span class="string">"; "</span>)
+<a href=#891 id=891 data-nosnippet>891</a>    }
+<a href=#892 id=892 data-nosnippet>892</a>}
+<a href=#893 id=893 data-nosnippet>893</a>
+<a href=#894 id=894 data-nosnippet>894</a><span class="doccomment">/// Surface Vault's warnings, which are how a capped TTL is reported.
+<a href=#895 id=895 data-nosnippet>895</a></span><span class="kw">fn </span>log_warnings(url: <span class="kw-2">&amp;</span>str, payload: <span class="kw-2">&amp;</span>serde_json::Value) {
+<a href=#896 id=896 data-nosnippet>896</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(warnings) = payload.get(<span class="string">"warnings"</span>).and_then(|v| v.as_array()) {
+<a href=#897 id=897 data-nosnippet>897</a>        <span class="kw">for </span>warning <span class="kw">in </span>warnings.iter().filter_map(|v| v.as_str()) {
+<a href=#898 id=898 data-nosnippet>898</a>            <span class="macro">tracing::warn!</span>(%url, warning, <span class="string">"vault pki returned a warning"</span>);
+<a href=#899 id=899 data-nosnippet>899</a>        }
+<a href=#900 id=900 data-nosnippet>900</a>    }
+<a href=#901 id=901 data-nosnippet>901</a>}
+<a href=#902 id=902 data-nosnippet>902</a>
+<a href=#903 id=903 data-nosnippet>903</a><span class="attr">#[cfg(test)]
+<a href=#904 id=904 data-nosnippet>904</a></span><span class="kw">mod </span>tests {
+<a href=#905 id=905 data-nosnippet>905</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#906 id=906 data-nosnippet>906</a>
+<a href=#907 id=907 data-nosnippet>907</a>    <span class="kw">fn </span>config() -&gt; VaultPkiConfig {
+<a href=#908 id=908 data-nosnippet>908</a>        VaultPkiConfig {
+<a href=#909 id=909 data-nosnippet>909</a>            address: <span class="string">"https://vault.internal:8200/"</span>.into(),
+<a href=#910 id=910 data-nosnippet>910</a>            token: <span class="string">"s.token"</span>.into(),
+<a href=#911 id=911 data-nosnippet>911</a>            root_mount: <span class="string">"/pki/"</span>.into(),
+<a href=#912 id=912 data-nosnippet>912</a>            int_mount: <span class="string">"/pki_int/"</span>.into(),
+<a href=#913 id=913 data-nosnippet>913</a>            ca_cert_path: <span class="prelude-val">None</span>,
+<a href=#914 id=914 data-nosnippet>914</a>        }
+<a href=#915 id=915 data-nosnippet>915</a>    }
+<a href=#916 id=916 data-nosnippet>916</a>
+<a href=#917 id=917 data-nosnippet>917</a>    <span class="kw">fn </span>store() -&gt; VaultPkiCaKeyStore {
+<a href=#918 id=918 data-nosnippet>918</a>        VaultPkiCaKeyStore::new(config()).unwrap()
+<a href=#919 id=919 data-nosnippet>919</a>    }
+<a href=#920 id=920 data-nosnippet>920</a>
+<a href=#921 id=921 data-nosnippet>921</a>    <span class="attr">#[test]
+<a href=#922 id=922 data-nosnippet>922</a>    </span><span class="kw">fn </span>urls_survive_slashes_on_either_side() {
+<a href=#923 id=923 data-nosnippet>923</a>        <span class="comment">// The address ends with one and both mounts are wrapped in them; a
+<a href=#924 id=924 data-nosnippet>924</a>        // naive `format!` produces `//v1//pki//root/...`, which Vault answers
+<a href=#925 id=925 data-nosnippet>925</a>        // with a 404 that says nothing about why.
+<a href=#926 id=926 data-nosnippet>926</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#927 id=927 data-nosnippet>927</a>            store().url(<span class="string">"/pki/"</span>, <span class="string">"root/generate/internal"</span>),
+<a href=#928 id=928 data-nosnippet>928</a>            <span class="string">"https://vault.internal:8200/v1/pki/root/generate/internal"
+<a href=#929 id=929 data-nosnippet>929</a>        </span>);
+<a href=#930 id=930 data-nosnippet>930</a>    }
+<a href=#931 id=931 data-nosnippet>931</a>
+<a href=#932 id=932 data-nosnippet>932</a>    <span class="attr">#[test]
+<a href=#933 id=933 data-nosnippet>933</a>    </span><span class="kw">fn </span>the_token_is_not_in_the_debug_output() {
+<a href=#934 id=934 data-nosnippet>934</a>        <span class="kw">let </span>rendered = <span class="macro">format!</span>(<span class="string">"{:?}"</span>, store());
+<a href=#935 id=935 data-nosnippet>935</a>        <span class="macro">assert!</span>(!rendered.contains(<span class="string">"s.token"</span>), <span class="string">"{rendered}"</span>);
+<a href=#936 id=936 data-nosnippet>936</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"&lt;redacted&gt;"</span>), <span class="string">"{rendered}"</span>);
+<a href=#937 id=937 data-nosnippet>937</a>    }
+<a href=#938 id=938 data-nosnippet>938</a>
+<a href=#939 id=939 data-nosnippet>939</a>    <span class="attr">#[test]
+<a href=#940 id=940 data-nosnippet>940</a>    </span><span class="kw">fn </span>a_locator_round_trips_through_the_single_column_it_lives_in() {
+<a href=#941 id=941 data-nosnippet>941</a>        <span class="kw">let </span>locator = VaultPkiLocator {
+<a href=#942 id=942 data-nosnippet>942</a>            issuing: VaultPkiIssuer {
+<a href=#943 id=943 data-nosnippet>943</a>                mount: <span class="string">"pki_int"</span>.into(),
+<a href=#944 id=944 data-nosnippet>944</a>                issuer: <span class="string">"issuer-1"</span>.into(),
+<a href=#945 id=945 data-nosnippet>945</a>                key: <span class="string">"key-1"</span>.into(),
+<a href=#946 id=946 data-nosnippet>946</a>            },
+<a href=#947 id=947 data-nosnippet>947</a>            root: <span class="prelude-val">Some</span>(VaultPkiIssuer {
+<a href=#948 id=948 data-nosnippet>948</a>                mount: <span class="string">"pki"</span>.into(),
+<a href=#949 id=949 data-nosnippet>949</a>                issuer: <span class="string">"issuer-0"</span>.into(),
+<a href=#950 id=950 data-nosnippet>950</a>                key: <span class="string">"key-0"</span>.into(),
+<a href=#951 id=951 data-nosnippet>951</a>            }),
+<a href=#952 id=952 data-nosnippet>952</a>        };
+<a href=#953 id=953 data-nosnippet>953</a>        <span class="kw">let </span>encoded = locator.encode().unwrap();
+<a href=#954 id=954 data-nosnippet>954</a>        <span class="macro">assert_eq!</span>(VaultPkiLocator::parse(<span class="kw-2">&amp;</span>encoded).unwrap(), locator);
+<a href=#955 id=955 data-nosnippet>955</a>    }
+<a href=#956 id=956 data-nosnippet>956</a>
+<a href=#957 id=957 data-nosnippet>957</a>    <span class="attr">#[test]
+<a href=#958 id=958 data-nosnippet>958</a>    </span><span class="kw">fn </span>a_locator_from_another_custodian_is_refused_rather_than_guessed_at() {
+<a href=#959 id=959 data-nosnippet>959</a>        <span class="comment">// A `vault` (KV) row's locator is a bare path. Reading it as this
+<a href=#960 id=960 data-nosnippet>960</a>        // custodian's would otherwise produce a mount named after nothing.
+<a href=#961 id=961 data-nosnippet>961</a>        </span><span class="kw">let </span>err = VaultPkiLocator::parse(<span class="string">"axiam/ca-keys/org/ca"</span>).unwrap_err();
+<a href=#962 id=962 data-nosnippet>962</a>        <span class="macro">assert!</span>(
+<a href=#963 id=963 data-nosnippet>963</a>            err.to_string().contains(<span class="string">"not one this custodian wrote"</span>),
+<a href=#964 id=964 data-nosnippet>964</a>            <span class="string">"{err}"
+<a href=#965 id=965 data-nosnippet>965</a>        </span>);
+<a href=#966 id=966 data-nosnippet>966</a>    }
+<a href=#967 id=967 data-nosnippet>967</a>
+<a href=#968 id=968 data-nosnippet>968</a>    <span class="attr">#[test]
+<a href=#969 id=969 data-nosnippet>969</a>    </span><span class="kw">fn </span>ttl_is_expressed_in_hours_because_vault_has_no_day_unit() {
+<a href=#970 id=970 data-nosnippet>970</a>        <span class="macro">assert_eq!</span>(ttl_days(<span class="number">3650</span>), <span class="string">"87600h"</span>);
+<a href=#971 id=971 data-nosnippet>971</a>        <span class="macro">assert_eq!</span>(ttl_days(<span class="number">1</span>), <span class="string">"24h"</span>);
+<a href=#972 id=972 data-nosnippet>972</a>    }
+<a href=#973 id=973 data-nosnippet>973</a>
+<a href=#974 id=974 data-nosnippet>974</a>    <span class="attr">#[test]
+<a href=#975 id=975 data-nosnippet>975</a>    </span><span class="kw">fn </span>key_params_ask_vault_for_the_algorithm_the_row_will_record() {
+<a href=#976 id=976 data-nosnippet>976</a>        <span class="macro">assert_eq!</span>(key_params(<span class="kw-2">&amp;</span>KeyAlgorithm::Ed25519), (<span class="string">"ed25519"</span>, <span class="number">0</span>));
+<a href=#977 id=977 data-nosnippet>977</a>        <span class="macro">assert_eq!</span>(key_params(<span class="kw-2">&amp;</span>KeyAlgorithm::Rsa4096), (<span class="string">"rsa"</span>, <span class="number">4096</span>));
+<a href=#978 id=978 data-nosnippet>978</a>    }
+<a href=#979 id=979 data-nosnippet>979</a>
+<a href=#980 id=980 data-nosnippet>980</a>    <span class="attr">#[test]
+<a href=#981 id=981 data-nosnippet>981</a>    </span><span class="kw">fn </span>one_imported_issuer_is_the_only_answer_that_is_usable() {
+<a href=#982 id=982 data-nosnippet>982</a>        <span class="kw">let </span>one = <span class="macro">serde_json::json!</span>({ <span class="string">"imported_issuers"</span>: [<span class="string">"a"</span>] });
+<a href=#983 id=983 data-nosnippet>983</a>        <span class="macro">assert_eq!</span>(first_imported_issuer(<span class="kw-2">&amp;</span>one, <span class="string">"u"</span>).unwrap(), <span class="string">"a"</span>);
+<a href=#984 id=984 data-nosnippet>984</a>
+<a href=#985 id=985 data-nosnippet>985</a>        <span class="comment">// Nothing imported means Vault already had it — a different CA row
+<a href=#986 id=986 data-nosnippet>986</a>        // already signs with this issuer, and two rows sharing one would both
+<a href=#987 id=987 data-nosnippet>987</a>        // claim to be able to revoke it.
+<a href=#988 id=988 data-nosnippet>988</a>        </span><span class="kw">let </span>none = <span class="macro">serde_json::json!</span>({ <span class="string">"imported_issuers"</span>: [] });
+<a href=#989 id=989 data-nosnippet>989</a>        <span class="kw">let </span>err = first_imported_issuer(<span class="kw-2">&amp;</span>none, <span class="string">"u"</span>).unwrap_err();
+<a href=#990 id=990 data-nosnippet>990</a>        <span class="macro">assert!</span>(err.to_string().contains(<span class="string">"already holds"</span>), <span class="string">"{err}"</span>);
+<a href=#991 id=991 data-nosnippet>991</a>
+<a href=#992 id=992 data-nosnippet>992</a>        <span class="kw">let </span>many = <span class="macro">serde_json::json!</span>({ <span class="string">"imported_issuers"</span>: [<span class="string">"a"</span>, <span class="string">"b"</span>] });
+<a href=#993 id=993 data-nosnippet>993</a>        <span class="kw">let </span>err = first_imported_issuer(<span class="kw-2">&amp;</span>many, <span class="string">"u"</span>).unwrap_err();
+<a href=#994 id=994 data-nosnippet>994</a>        <span class="macro">assert!</span>(err.to_string().contains(<span class="string">"not a chain"</span>), <span class="string">"{err}"</span>);
+<a href=#995 id=995 data-nosnippet>995</a>    }
+<a href=#996 id=996 data-nosnippet>996</a>
+<a href=#997 id=997 data-nosnippet>997</a>    <span class="attr">#[test]
+<a href=#998 id=998 data-nosnippet>998</a>    </span><span class="kw">fn </span>vault_errors_are_repeated_verbatim_because_they_name_the_policy() {
+<a href=#999 id=999 data-nosnippet>999</a>        <span class="kw">let </span>payload = <span class="macro">serde_json::json!</span>({ <span class="string">"errors"</span>: [<span class="string">"permission denied"</span>] });
+<a href=#1000 id=1000 data-nosnippet>1000</a>        <span class="macro">assert_eq!</span>(vault_errors(<span class="kw-2">&amp;</span>payload), <span class="string">"permission denied"</span>);
+<a href=#1001 id=1001 data-nosnippet>1001</a>        <span class="macro">assert_eq!</span>(vault_errors(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({})), <span class="string">"no error detail"</span>);
+<a href=#1002 id=1002 data-nosnippet>1002</a>    }
+<a href=#1003 id=1003 data-nosnippet>1003</a>
+<a href=#1004 id=1004 data-nosnippet>1004</a>    <span class="attr">#[test]
+<a href=#1005 id=1005 data-nosnippet>1005</a>    </span><span class="kw">fn </span>a_missing_field_names_the_field_and_the_likely_cause() {
+<a href=#1006 id=1006 data-nosnippet>1006</a>        <span class="kw">let </span>err = string_field(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({}), <span class="string">"certificate"</span>, <span class="string">"u"</span>).unwrap_err();
+<a href=#1007 id=1007 data-nosnippet>1007</a>        <span class="macro">assert!</span>(err.to_string().contains(<span class="string">"certificate"</span>), <span class="string">"{err}"</span>);
+<a href=#1008 id=1008 data-nosnippet>1008</a>        <span class="macro">assert!</span>(err.to_string().contains(<span class="string">"PKI engine"</span>), <span class="string">"{err}"</span>);
+<a href=#1009 id=1009 data-nosnippet>1009</a>    }
+<a href=#1010 id=1010 data-nosnippet>1010</a>}
 </code></pre></div></section></main></body></html>

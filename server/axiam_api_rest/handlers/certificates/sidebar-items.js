@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["bind","generate","get","list","revoke"],"struct":["CertificateWithBinding","CreateCertificateRequest"]};
+window.SIDEBAR_ITEMS = {"fn":["bind","generate","get","list","revoke","sign_csr"],"struct":["CertificateWithBinding","CreateCertificateRequest","SignCertificateCsrRequest"]};

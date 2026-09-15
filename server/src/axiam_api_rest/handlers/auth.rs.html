@@ -1166,182 +1166,222 @@
 <a href=#1166 id=1166 data-nosnippet>1166</a>
 <a href=#1167 id=1167 data-nosnippet>1167</a><span class="doccomment">/// `POST /api/v1/users/{user_id}/reset-mfa`
 <a href=#1168 id=1168 data-nosnippet>1168</a>///
-<a href=#1169 id=1169 data-nosnippet>1169</a>/// Reset MFA for a user — disables MFA, clears the secret, and
-<a href=#1170 id=1170 data-nosnippet>1170</a>/// revokes all existing sessions. Requires admin access (caller must
-<a href=#1171 id=1171 data-nosnippet>1171</a>/// be in the same tenant).
-<a href=#1172 id=1172 data-nosnippet>1172</a></span><span class="attr">#[utoipa::path(
-<a href=#1173 id=1173 data-nosnippet>1173</a>    post,
-<a href=#1174 id=1174 data-nosnippet>1174</a>    path = <span class="string">"/api/v1/users/{user_id}/reset-mfa"</span>,
-<a href=#1175 id=1175 data-nosnippet>1175</a>    tag = <span class="string">"users"</span>,
-<a href=#1176 id=1176 data-nosnippet>1176</a>    params(
-<a href=#1177 id=1177 data-nosnippet>1177</a>        (<span class="string">"user_id" </span>= Uuid, Path, description = <span class="string">"Target user ID"</span>),
-<a href=#1178 id=1178 data-nosnippet>1178</a>    ),
-<a href=#1179 id=1179 data-nosnippet>1179</a>    responses(
-<a href=#1180 id=1180 data-nosnippet>1180</a>        (status = <span class="number">204</span>, description = <span class="string">"MFA reset successful"</span>),
-<a href=#1181 id=1181 data-nosnippet>1181</a>        (status = <span class="number">401</span>, description = <span class="string">"Unauthorized"</span>),
-<a href=#1182 id=1182 data-nosnippet>1182</a>        (status = <span class="number">403</span>, description = <span class="string">"Forbidden — cross-tenant access"</span>),
-<a href=#1183 id=1183 data-nosnippet>1183</a>        (status = <span class="number">404</span>, description = <span class="string">"User not found"</span>),
-<a href=#1184 id=1184 data-nosnippet>1184</a>    ),
-<a href=#1185 id=1185 data-nosnippet>1185</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#1186 id=1186 data-nosnippet>1186</a>)]
-<a href=#1187 id=1187 data-nosnippet>1187</a><span class="kw">pub async fn </span>reset_mfa&lt;C: Connection + Clone&gt;(
-<a href=#1188 id=1188 data-nosnippet>1188</a>    caller: AuthenticatedUser,
-<a href=#1189 id=1189 data-nosnippet>1189</a>    authz: AuthzData,
-<a href=#1190 id=1190 data-nosnippet>1190</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#1191 id=1191 data-nosnippet>1191</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#1192 id=1192 data-nosnippet>1192</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#1193 id=1193 data-nosnippet>1193</a>    <span class="kw">let </span>target_user_id = path.into_inner();
-<a href=#1194 id=1194 data-nosnippet>1194</a>    <span class="kw">if </span>!is_own_resource(<span class="kw-2">&amp;</span>caller, target_user_id) {
-<a href=#1195 id=1195 data-nosnippet>1195</a>        RequirePermission::new(<span class="string">"users:admin"</span>, Uuid::nil())
-<a href=#1196 id=1196 data-nosnippet>1196</a>            .check(<span class="kw-2">&amp;</span>caller, authz.get_ref().as_ref())
-<a href=#1197 id=1197 data-nosnippet>1197</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1198 id=1198 data-nosnippet>1198</a>    }
-<a href=#1199 id=1199 data-nosnippet>1199</a>    state
-<a href=#1200 id=1200 data-nosnippet>1200</a>        .auth_service
-<a href=#1201 id=1201 data-nosnippet>1201</a>        .reset_mfa(user_scope_tenant(<span class="kw-2">&amp;</span>caller, target_user_id), target_user_id)
-<a href=#1202 id=1202 data-nosnippet>1202</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1203 id=1203 data-nosnippet>1203</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#1204 id=1204 data-nosnippet>1204</a>}
-<a href=#1205 id=1205 data-nosnippet>1205</a>
-<a href=#1206 id=1206 data-nosnippet>1206</a><span class="doccomment">/// `POST /api/v1/auth/password/change`
-<a href=#1207 id=1207 data-nosnippet>1207</a>///
-<a href=#1208 id=1208 data-nosnippet>1208</a>/// Change the authenticated user's password. Requires the current password for
-<a href=#1209 id=1209 data-nosnippet>1209</a>/// re-verification (T-04-21: guards against session-hijack pivot). On success,
-<a href=#1210 id=1210 data-nosnippet>1210</a>/// all other sessions and OAuth2 refresh tokens are revoked; the caller's
-<a href=#1211 id=1211 data-nosnippet>1211</a>/// current session is preserved (D-14, D-15).
-<a href=#1212 id=1212 data-nosnippet>1212</a>///
-<a href=#1213 id=1213 data-nosnippet>1213</a>/// Returns 204 on success, 401 on wrong current password, 422 on policy
-<a href=#1214 id=1214 data-nosnippet>1214</a>/// violation.
-<a href=#1215 id=1215 data-nosnippet>1215</a></span><span class="attr">#[utoipa::path(
-<a href=#1216 id=1216 data-nosnippet>1216</a>    post,
-<a href=#1217 id=1217 data-nosnippet>1217</a>    path = <span class="string">"/api/v1/auth/password/change"</span>,
-<a href=#1218 id=1218 data-nosnippet>1218</a>    tag = <span class="string">"auth"</span>,
-<a href=#1219 id=1219 data-nosnippet>1219</a>    request_body = ChangePasswordRequest,
-<a href=#1220 id=1220 data-nosnippet>1220</a>    responses(
-<a href=#1221 id=1221 data-nosnippet>1221</a>        (status = <span class="number">204</span>, description = <span class="string">"Password changed; other sessions revoked"</span>),
-<a href=#1222 id=1222 data-nosnippet>1222</a>        (status = <span class="number">401</span>, description = <span class="string">"Wrong current password or unauthenticated"</span>),
-<a href=#1223 id=1223 data-nosnippet>1223</a>        (status = <span class="number">422</span>, description = <span class="string">"New password violates policy"</span>),
-<a href=#1224 id=1224 data-nosnippet>1224</a>    ),
-<a href=#1225 id=1225 data-nosnippet>1225</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#1226 id=1226 data-nosnippet>1226</a>)]
-<a href=#1227 id=1227 data-nosnippet>1227</a><span class="attr">#[allow(clippy::too_many_arguments)] </span><span class="comment">// Actix DI extractors
-<a href=#1228 id=1228 data-nosnippet>1228</a></span><span class="kw">pub async fn </span>change_password&lt;C: Connection + Clone&gt;(
-<a href=#1229 id=1229 data-nosnippet>1229</a>    user: AuthenticatedUser,
-<a href=#1230 id=1230 data-nosnippet>1230</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#1231 id=1231 data-nosnippet>1231</a>    body: web::Json&lt;ChangePasswordRequest&gt;,
-<a href=#1232 id=1232 data-nosnippet>1232</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#1233 id=1233 data-nosnippet>1233</a>    <span class="kw">use </span>axiam_core::repository::{SettingsRepository, TenantRepository};
-<a href=#1234 id=1234 data-nosnippet>1234</a>
-<a href=#1235 id=1235 data-nosnippet>1235</a>    <span class="comment">// DoS guard: reject oversized new-password before any crypto work.
-<a href=#1236 id=1236 data-nosnippet>1236</a>    </span><span class="kw">if </span>body.new_password.len() &gt; <span class="number">1024 </span>{
-<a href=#1237 id=1237 data-nosnippet>1237</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(axiam_core::error::AxiamError::Validation {
-<a href=#1238 id=1238 data-nosnippet>1238</a>            message: <span class="string">"new_password exceeds maximum length of 1024 bytes"</span>.into(),
-<a href=#1239 id=1239 data-nosnippet>1239</a>        }
-<a href=#1240 id=1240 data-nosnippet>1240</a>        .into());
-<a href=#1241 id=1241 data-nosnippet>1241</a>    }
-<a href=#1242 id=1242 data-nosnippet>1242</a>
-<a href=#1243 id=1243 data-nosnippet>1243</a>    <span class="comment">// The caller's OWN account, so every tenant below is the one the caller
-<a href=#1244 id=1244 data-nosnippet>1244</a>    // lives in — never the one it is acting on.
-<a href=#1245 id=1245 data-nosnippet>1245</a>    //
-<a href=#1246 id=1246 data-nosnippet>1246</a>    // They are the same value for every ordinary principal and differ only for
-<a href=#1247 id=1247 data-nosnippet>1247</a>    // an organization-level one that has selected a child tenant in the admin
-<a href=#1248 id=1248 data-nosnippet>1248</a>    // UI, which sends `X-Axiam-Tenant` on every subsequent request. Reading the
-<a href=#1249 id=1249 data-nosnippet>1249</a>    // acting tenant here looked the account up in the selected tenant, found
-<a href=#1250 id=1250 data-nosnippet>1250</a>    // nothing, and failed the password change — with no visible cause, because
-<a href=#1251 id=1251 data-nosnippet>1251</a>    // the only thing that had changed was which row of the tenant switcher was
-<a href=#1252 id=1252 data-nosnippet>1252</a>    // highlighted. It would also have written the OPAQUE record into the wrong
-<a href=#1253 id=1253 data-nosnippet>1253</a>    // tenant had the lookup succeeded, which is the same defect the record's own
-<a href=#1254 id=1254 data-nosnippet>1254</a>    // tenant check catches at user creation.
-<a href=#1255 id=1255 data-nosnippet>1255</a>    </span><span class="kw">let </span>tenant_id = user.principal_tenant_id;
-<a href=#1256 id=1256 data-nosnippet>1256</a>    <span class="kw">let </span>tenant = state.tenant_repo.get_by_id(tenant_id).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1257 id=1257 data-nosnippet>1257</a>    <span class="kw">let </span>settings = state
-<a href=#1258 id=1258 data-nosnippet>1258</a>        .settings_repo
-<a href=#1259 id=1259 data-nosnippet>1259</a>        .get_effective_settings(tenant.organization_id, tenant_id)
-<a href=#1260 id=1260 data-nosnippet>1260</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1261 id=1261 data-nosnippet>1261</a>
-<a href=#1262 id=1262 data-nosnippet>1262</a>    <span class="comment">// Validate the record BEFORE the password is changed. Doing it after would
-<a href=#1263 id=1263 data-nosnippet>1263</a>    // leave a window where the Argon2id hash has moved on but the OPAQUE
-<a href=#1264 id=1264 data-nosnippet>1264</a>    // record still answers to the old password — a user who is mid-migration
-<a href=#1265 id=1265 data-nosnippet>1265</a>    // would then be able to log in with two different passwords depending on
-<a href=#1266 id=1266 data-nosnippet>1266</a>    // which endpoint they used.
-<a href=#1267 id=1267 data-nosnippet>1267</a>    </span><span class="kw">let </span>enrolled = <span class="kw">crate</span>::handlers::opaque_enrollment::validate_enrollment(
-<a href=#1268 id=1268 data-nosnippet>1268</a>        <span class="kw-2">&amp;</span>state,
-<a href=#1269 id=1269 data-nosnippet>1269</a>        <span class="kw-2">&amp;</span>settings.opaque,
-<a href=#1270 id=1270 data-nosnippet>1270</a>        tenant_id,
-<a href=#1271 id=1271 data-nosnippet>1271</a>        body.opaque.as_ref(),
-<a href=#1272 id=1272 data-nosnippet>1272</a>    )<span class="question-mark">?</span>;
-<a href=#1273 id=1273 data-nosnippet>1273</a>
-<a href=#1274 id=1274 data-nosnippet>1274</a>    state
-<a href=#1275 id=1275 data-nosnippet>1275</a>        .auth_service
-<a href=#1276 id=1276 data-nosnippet>1276</a>        .change_password(
-<a href=#1277 id=1277 data-nosnippet>1277</a>            tenant_id,
-<a href=#1278 id=1278 data-nosnippet>1278</a>            user.user_id,
-<a href=#1279 id=1279 data-nosnippet>1279</a>            user.session_id,
-<a href=#1280 id=1280 data-nosnippet>1280</a>            <span class="kw-2">&amp;</span>body.current_password,
-<a href=#1281 id=1281 data-nosnippet>1281</a>            <span class="kw-2">&amp;</span>body.new_password,
-<a href=#1282 id=1282 data-nosnippet>1282</a>            <span class="kw-2">&amp;</span>settings.password,
-<a href=#1283 id=1283 data-nosnippet>1283</a>            <span class="kw-2">&amp;</span>state.password_history_repo,
-<a href=#1284 id=1284 data-nosnippet>1284</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>state.http_client),
-<a href=#1285 id=1285 data-nosnippet>1285</a>        )
-<a href=#1286 id=1286 data-nosnippet>1286</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1287 id=1287 data-nosnippet>1287</a>
-<a href=#1288 id=1288 data-nosnippet>1288</a>    <span class="kw">crate</span>::handlers::opaque_enrollment::store_credential(<span class="kw-2">&amp;</span>state, tenant_id, user.user_id, enrolled)
-<a href=#1289 id=1289 data-nosnippet>1289</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#1290 id=1290 data-nosnippet>1290</a>
-<a href=#1291 id=1291 data-nosnippet>1291</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#1292 id=1292 data-nosnippet>1292</a>}
-<a href=#1293 id=1293 data-nosnippet>1293</a>
-<a href=#1294 id=1294 data-nosnippet>1294</a><span class="attr">#[cfg(test)]
-<a href=#1295 id=1295 data-nosnippet>1295</a></span><span class="kw">mod </span>tests {
-<a href=#1296 id=1296 data-nosnippet>1296</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#1297 id=1297 data-nosnippet>1297</a>
-<a href=#1298 id=1298 data-nosnippet>1298</a>    <span class="kw">fn </span>sample_user_info(tenant_slug: <span class="prelude-ty">Option</span>&lt;String&gt;, org_slug: <span class="prelude-ty">Option</span>&lt;String&gt;) -&gt; LoginUserInfo {
-<a href=#1299 id=1299 data-nosnippet>1299</a>        LoginUserInfo {
-<a href=#1300 id=1300 data-nosnippet>1300</a>            id: Uuid::nil(),
-<a href=#1301 id=1301 data-nosnippet>1301</a>            username: <span class="string">"alice"</span>.into(),
-<a href=#1302 id=1302 data-nosnippet>1302</a>            email: <span class="string">"alice@example.com"</span>.into(),
-<a href=#1303 id=1303 data-nosnippet>1303</a>            tenant_id: Uuid::nil(),
-<a href=#1304 id=1304 data-nosnippet>1304</a>            tenant_slug: tenant_slug.clone(),
-<a href=#1305 id=1305 data-nosnippet>1305</a>            org_slug,
-<a href=#1306 id=1306 data-nosnippet>1306</a>            organization_level: <span class="bool-val">false</span>,
-<a href=#1307 id=1307 data-nosnippet>1307</a>            principal_tenant_id: Uuid::nil(),
-<a href=#1308 id=1308 data-nosnippet>1308</a>            principal_tenant_slug: tenant_slug,
-<a href=#1309 id=1309 data-nosnippet>1309</a>            org_id: <span class="prelude-val">Some</span>(Uuid::nil()),
-<a href=#1310 id=1310 data-nosnippet>1310</a>            reachable_tenant_ids: <span class="prelude-val">None</span>,
-<a href=#1311 id=1311 data-nosnippet>1311</a>        }
-<a href=#1312 id=1312 data-nosnippet>1312</a>    }
+<a href=#1169 id=1169 data-nosnippet>1169</a>/// Reset MFA for a user — evicts **every** factor: the WebAuthn credentials
+<a href=#1170 id=1170 data-nosnippet>1170</a>/// as well as the TOTP secret, clears `mfa_enabled`, and revokes all existing
+<a href=#1171 id=1171 data-nosnippet>1171</a>/// sessions (T-34). Requires `users:admin` (caller must be in the same
+<a href=#1172 id=1172 data-nosnippet>1172</a>/// tenant), or that the caller is the target.
+<a href=#1173 id=1173 data-nosnippet>1173</a>///
+<a href=#1174 id=1174 data-nosnippet>1174</a>/// A caller resetting their **own** account is refused with `403
+<a href=#1175 id=1175 data-nosnippet>1175</a>/// mfa_enforced` where their tenant's effective policy enforces MFA (D-1,
+<a href=#1176 id=1176 data-nosnippet>1176</a>/// T-267): the reset is otherwise the one self-service path below the floor
+<a href=#1177 id=1177 data-nosnippet>1177</a>/// an administrator set. `users:admin` is unaffected — an administrator
+<a href=#1178 id=1178 data-nosnippet>1178</a>/// resetting a locked-out user is what the endpoint exists for.
+<a href=#1179 id=1179 data-nosnippet>1179</a></span><span class="attr">#[utoipa::path(
+<a href=#1180 id=1180 data-nosnippet>1180</a>    post,
+<a href=#1181 id=1181 data-nosnippet>1181</a>    path = <span class="string">"/api/v1/users/{user_id}/reset-mfa"</span>,
+<a href=#1182 id=1182 data-nosnippet>1182</a>    tag = <span class="string">"users"</span>,
+<a href=#1183 id=1183 data-nosnippet>1183</a>    params(
+<a href=#1184 id=1184 data-nosnippet>1184</a>        (<span class="string">"user_id" </span>= Uuid, Path, description = <span class="string">"Target user ID"</span>),
+<a href=#1185 id=1185 data-nosnippet>1185</a>    ),
+<a href=#1186 id=1186 data-nosnippet>1186</a>    responses(
+<a href=#1187 id=1187 data-nosnippet>1187</a>        (status = <span class="number">204</span>, description = <span class="string">"MFA reset successful"</span>),
+<a href=#1188 id=1188 data-nosnippet>1188</a>        (status = <span class="number">401</span>, description = <span class="string">"Unauthorized"</span>),
+<a href=#1189 id=1189 data-nosnippet>1189</a>        (
+<a href=#1190 id=1190 data-nosnippet>1190</a>            status = <span class="number">403</span>,
+<a href=#1191 id=1191 data-nosnippet>1191</a>            description = <span class="string">"Forbidden — cross-tenant access, or `mfa_enforced`: \
+<a href=#1192 id=1192 data-nosnippet>1192</a>                           the caller is resetting their own account and their \
+<a href=#1193 id=1193 data-nosnippet>1193</a>                           tenant enforces MFA, so only an administrator may \
+<a href=#1194 id=1194 data-nosnippet>1194</a>                           reset it"
+<a href=#1195 id=1195 data-nosnippet>1195</a>        </span>),
+<a href=#1196 id=1196 data-nosnippet>1196</a>        (status = <span class="number">404</span>, description = <span class="string">"User not found"</span>),
+<a href=#1197 id=1197 data-nosnippet>1197</a>    ),
+<a href=#1198 id=1198 data-nosnippet>1198</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#1199 id=1199 data-nosnippet>1199</a>)]
+<a href=#1200 id=1200 data-nosnippet>1200</a><span class="kw">pub async fn </span>reset_mfa&lt;C: Connection + Clone&gt;(
+<a href=#1201 id=1201 data-nosnippet>1201</a>    caller: AuthenticatedUser,
+<a href=#1202 id=1202 data-nosnippet>1202</a>    authz: AuthzData,
+<a href=#1203 id=1203 data-nosnippet>1203</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#1204 id=1204 data-nosnippet>1204</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#1205 id=1205 data-nosnippet>1205</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#1206 id=1206 data-nosnippet>1206</a>    <span class="kw">let </span>target_user_id = path.into_inner();
+<a href=#1207 id=1207 data-nosnippet>1207</a>    <span class="kw">if </span>is_own_resource(<span class="kw-2">&amp;</span>caller, target_user_id) {
+<a href=#1208 id=1208 data-nosnippet>1208</a>        <span class="comment">// D-1 / T-267. The reset is the one self-service path that takes an
+<a href=#1209 id=1209 data-nosnippet>1209</a>        // account *below* the floor its tenant sets: sessions are revoked, but
+<a href=#1210 id=1210 data-nosnippet>1210</a>        // the next password login hands out a setup token and whoever holds
+<a href=#1211 id=1211 data-nosnippet>1211</a>        // the password enrols a factor of their choosing. The per-method
+<a href=#1212 id=1212 data-nosnippet>1212</a>        // delete already refuses to remove the last factor
+<a href=#1213 id=1213 data-nosnippet>1213</a>        // (`MfaCannotRemoveLastMethod`); this is the same rule, stated for the
+<a href=#1214 id=1214 data-nosnippet>1214</a>        // operation that removes all of them at once.
+<a href=#1215 id=1215 data-nosnippet>1215</a>        //
+<a href=#1216 id=1216 data-nosnippet>1216</a>        // From the tenant the caller *lives in*, never the one they are acting
+<a href=#1217 id=1217 data-nosnippet>1217</a>        // on — the same rule `start_registration` explains at
+<a href=#1218 id=1218 data-nosnippet>1218</a>        // `handlers/webauthn.rs`, and for the same reason: this is a fact
+<a href=#1219 id=1219 data-nosnippet>1219</a>        // about the caller's own account, and an organization-level principal
+<a href=#1220 id=1220 data-nosnippet>1220</a>        // with a child tenant selected in the admin UI would otherwise be
+<a href=#1221 id=1221 data-nosnippet>1221</a>        // measured against a policy that does not bind them.
+<a href=#1222 id=1222 data-nosnippet>1222</a>        //
+<a href=#1223 id=1223 data-nosnippet>1223</a>        // The error is propagated rather than defaulted to "not enforced": a
+<a href=#1224 id=1224 data-nosnippet>1224</a>        // settings read that fails must not be the way the floor is escaped.
+<a href=#1225 id=1225 data-nosnippet>1225</a>        </span><span class="kw">let </span>scope = caller.principal_tenant_id;
+<a href=#1226 id=1226 data-nosnippet>1226</a>        <span class="kw">let </span>tenant = state.tenant_repo.get_by_id(scope).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1227 id=1227 data-nosnippet>1227</a>        <span class="kw">let </span>settings = state
+<a href=#1228 id=1228 data-nosnippet>1228</a>            .settings_repo
+<a href=#1229 id=1229 data-nosnippet>1229</a>            .get_effective_settings(tenant.organization_id, scope)
+<a href=#1230 id=1230 data-nosnippet>1230</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1231 id=1231 data-nosnippet>1231</a>        <span class="kw">if </span>settings.mfa.mfa_enforced {
+<a href=#1232 id=1232 data-nosnippet>1232</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::MfaEnforced.into());
+<a href=#1233 id=1233 data-nosnippet>1233</a>        }
+<a href=#1234 id=1234 data-nosnippet>1234</a>    } <span class="kw">else </span>{
+<a href=#1235 id=1235 data-nosnippet>1235</a>        RequirePermission::new(<span class="string">"users:admin"</span>, Uuid::nil())
+<a href=#1236 id=1236 data-nosnippet>1236</a>            .check(<span class="kw-2">&amp;</span>caller, authz.get_ref().as_ref())
+<a href=#1237 id=1237 data-nosnippet>1237</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1238 id=1238 data-nosnippet>1238</a>    }
+<a href=#1239 id=1239 data-nosnippet>1239</a>    state
+<a href=#1240 id=1240 data-nosnippet>1240</a>        .mfa_method_service
+<a href=#1241 id=1241 data-nosnippet>1241</a>        .reset_mfa(user_scope_tenant(<span class="kw-2">&amp;</span>caller, target_user_id), target_user_id)
+<a href=#1242 id=1242 data-nosnippet>1242</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1243 id=1243 data-nosnippet>1243</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#1244 id=1244 data-nosnippet>1244</a>}
+<a href=#1245 id=1245 data-nosnippet>1245</a>
+<a href=#1246 id=1246 data-nosnippet>1246</a><span class="doccomment">/// `POST /api/v1/auth/password/change`
+<a href=#1247 id=1247 data-nosnippet>1247</a>///
+<a href=#1248 id=1248 data-nosnippet>1248</a>/// Change the authenticated user's password. Requires the current password for
+<a href=#1249 id=1249 data-nosnippet>1249</a>/// re-verification (T-04-21: guards against session-hijack pivot). On success,
+<a href=#1250 id=1250 data-nosnippet>1250</a>/// all other sessions and OAuth2 refresh tokens are revoked; the caller's
+<a href=#1251 id=1251 data-nosnippet>1251</a>/// current session is preserved (D-14, D-15).
+<a href=#1252 id=1252 data-nosnippet>1252</a>///
+<a href=#1253 id=1253 data-nosnippet>1253</a>/// Returns 204 on success, 401 on wrong current password, 422 on policy
+<a href=#1254 id=1254 data-nosnippet>1254</a>/// violation.
+<a href=#1255 id=1255 data-nosnippet>1255</a></span><span class="attr">#[utoipa::path(
+<a href=#1256 id=1256 data-nosnippet>1256</a>    post,
+<a href=#1257 id=1257 data-nosnippet>1257</a>    path = <span class="string">"/api/v1/auth/password/change"</span>,
+<a href=#1258 id=1258 data-nosnippet>1258</a>    tag = <span class="string">"auth"</span>,
+<a href=#1259 id=1259 data-nosnippet>1259</a>    request_body = ChangePasswordRequest,
+<a href=#1260 id=1260 data-nosnippet>1260</a>    responses(
+<a href=#1261 id=1261 data-nosnippet>1261</a>        (status = <span class="number">204</span>, description = <span class="string">"Password changed; other sessions revoked"</span>),
+<a href=#1262 id=1262 data-nosnippet>1262</a>        (status = <span class="number">401</span>, description = <span class="string">"Wrong current password or unauthenticated"</span>),
+<a href=#1263 id=1263 data-nosnippet>1263</a>        (status = <span class="number">422</span>, description = <span class="string">"New password violates policy"</span>),
+<a href=#1264 id=1264 data-nosnippet>1264</a>    ),
+<a href=#1265 id=1265 data-nosnippet>1265</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#1266 id=1266 data-nosnippet>1266</a>)]
+<a href=#1267 id=1267 data-nosnippet>1267</a><span class="attr">#[allow(clippy::too_many_arguments)] </span><span class="comment">// Actix DI extractors
+<a href=#1268 id=1268 data-nosnippet>1268</a></span><span class="kw">pub async fn </span>change_password&lt;C: Connection + Clone&gt;(
+<a href=#1269 id=1269 data-nosnippet>1269</a>    user: AuthenticatedUser,
+<a href=#1270 id=1270 data-nosnippet>1270</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#1271 id=1271 data-nosnippet>1271</a>    body: web::Json&lt;ChangePasswordRequest&gt;,
+<a href=#1272 id=1272 data-nosnippet>1272</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#1273 id=1273 data-nosnippet>1273</a>    <span class="kw">use </span>axiam_core::repository::{SettingsRepository, TenantRepository};
+<a href=#1274 id=1274 data-nosnippet>1274</a>
+<a href=#1275 id=1275 data-nosnippet>1275</a>    <span class="comment">// DoS guard: reject oversized new-password before any crypto work.
+<a href=#1276 id=1276 data-nosnippet>1276</a>    </span><span class="kw">if </span>body.new_password.len() &gt; <span class="number">1024 </span>{
+<a href=#1277 id=1277 data-nosnippet>1277</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(axiam_core::error::AxiamError::Validation {
+<a href=#1278 id=1278 data-nosnippet>1278</a>            message: <span class="string">"new_password exceeds maximum length of 1024 bytes"</span>.into(),
+<a href=#1279 id=1279 data-nosnippet>1279</a>        }
+<a href=#1280 id=1280 data-nosnippet>1280</a>        .into());
+<a href=#1281 id=1281 data-nosnippet>1281</a>    }
+<a href=#1282 id=1282 data-nosnippet>1282</a>
+<a href=#1283 id=1283 data-nosnippet>1283</a>    <span class="comment">// The caller's OWN account, so every tenant below is the one the caller
+<a href=#1284 id=1284 data-nosnippet>1284</a>    // lives in — never the one it is acting on.
+<a href=#1285 id=1285 data-nosnippet>1285</a>    //
+<a href=#1286 id=1286 data-nosnippet>1286</a>    // They are the same value for every ordinary principal and differ only for
+<a href=#1287 id=1287 data-nosnippet>1287</a>    // an organization-level one that has selected a child tenant in the admin
+<a href=#1288 id=1288 data-nosnippet>1288</a>    // UI, which sends `X-Axiam-Tenant` on every subsequent request. Reading the
+<a href=#1289 id=1289 data-nosnippet>1289</a>    // acting tenant here looked the account up in the selected tenant, found
+<a href=#1290 id=1290 data-nosnippet>1290</a>    // nothing, and failed the password change — with no visible cause, because
+<a href=#1291 id=1291 data-nosnippet>1291</a>    // the only thing that had changed was which row of the tenant switcher was
+<a href=#1292 id=1292 data-nosnippet>1292</a>    // highlighted. It would also have written the OPAQUE record into the wrong
+<a href=#1293 id=1293 data-nosnippet>1293</a>    // tenant had the lookup succeeded, which is the same defect the record's own
+<a href=#1294 id=1294 data-nosnippet>1294</a>    // tenant check catches at user creation.
+<a href=#1295 id=1295 data-nosnippet>1295</a>    </span><span class="kw">let </span>tenant_id = user.principal_tenant_id;
+<a href=#1296 id=1296 data-nosnippet>1296</a>    <span class="kw">let </span>tenant = state.tenant_repo.get_by_id(tenant_id).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1297 id=1297 data-nosnippet>1297</a>    <span class="kw">let </span>settings = state
+<a href=#1298 id=1298 data-nosnippet>1298</a>        .settings_repo
+<a href=#1299 id=1299 data-nosnippet>1299</a>        .get_effective_settings(tenant.organization_id, tenant_id)
+<a href=#1300 id=1300 data-nosnippet>1300</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1301 id=1301 data-nosnippet>1301</a>
+<a href=#1302 id=1302 data-nosnippet>1302</a>    <span class="comment">// Validate the record BEFORE the password is changed. Doing it after would
+<a href=#1303 id=1303 data-nosnippet>1303</a>    // leave a window where the Argon2id hash has moved on but the OPAQUE
+<a href=#1304 id=1304 data-nosnippet>1304</a>    // record still answers to the old password — a user who is mid-migration
+<a href=#1305 id=1305 data-nosnippet>1305</a>    // would then be able to log in with two different passwords depending on
+<a href=#1306 id=1306 data-nosnippet>1306</a>    // which endpoint they used.
+<a href=#1307 id=1307 data-nosnippet>1307</a>    </span><span class="kw">let </span>enrolled = <span class="kw">crate</span>::handlers::opaque_enrollment::validate_enrollment(
+<a href=#1308 id=1308 data-nosnippet>1308</a>        <span class="kw-2">&amp;</span>state,
+<a href=#1309 id=1309 data-nosnippet>1309</a>        <span class="kw-2">&amp;</span>settings.opaque,
+<a href=#1310 id=1310 data-nosnippet>1310</a>        tenant_id,
+<a href=#1311 id=1311 data-nosnippet>1311</a>        body.opaque.as_ref(),
+<a href=#1312 id=1312 data-nosnippet>1312</a>    )<span class="question-mark">?</span>;
 <a href=#1313 id=1313 data-nosnippet>1313</a>
-<a href=#1314 id=1314 data-nosnippet>1314</a>    <span class="doccomment">/// 26-05 (D-14): when slug resolution succeeds, both fields serialize
-<a href=#1315 id=1315 data-nosnippet>1315</a>    /// into the JSON body so the frontend can restore tenant context after
-<a href=#1316 id=1316 data-nosnippet>1316</a>    /// a hard reload.
-<a href=#1317 id=1317 data-nosnippet>1317</a>    </span><span class="attr">#[test]
-<a href=#1318 id=1318 data-nosnippet>1318</a>    </span><span class="kw">fn </span>login_user_info_serializes_slugs_when_present() {
-<a href=#1319 id=1319 data-nosnippet>1319</a>        <span class="kw">let </span>info = sample_user_info(<span class="prelude-val">Some</span>(<span class="string">"acme-tenant"</span>.into()), <span class="prelude-val">Some</span>(<span class="string">"acme-org"</span>.into()));
-<a href=#1320 id=1320 data-nosnippet>1320</a>        <span class="kw">let </span>value = serde_json::to_value(<span class="kw-2">&amp;</span>info).expect(<span class="string">"serializable"</span>);
-<a href=#1321 id=1321 data-nosnippet>1321</a>
-<a href=#1322 id=1322 data-nosnippet>1322</a>        <span class="macro">assert_eq!</span>(value[<span class="string">"tenant_slug"</span>], <span class="string">"acme-tenant"</span>);
-<a href=#1323 id=1323 data-nosnippet>1323</a>        <span class="macro">assert_eq!</span>(value[<span class="string">"org_slug"</span>], <span class="string">"acme-org"</span>);
-<a href=#1324 id=1324 data-nosnippet>1324</a>    }
-<a href=#1325 id=1325 data-nosnippet>1325</a>
-<a href=#1326 id=1326 data-nosnippet>1326</a>    <span class="doccomment">/// 26-05 (D-15): when slug resolution degrades to `None` (lookup
-<a href=#1327 id=1327 data-nosnippet>1327</a>    /// failure), the keys are omitted entirely rather than serialized as
-<a href=#1328 id=1328 data-nosnippet>1328</a>    /// `null` — this is what lets `/auth/me` and the fresh-login response
-<a href=#1329 id=1329 data-nosnippet>1329</a>    /// stay valid and be read defensively by the frontend without ever
-<a href=#1330 id=1330 data-nosnippet>1330</a>    /// failing the call.
-<a href=#1331 id=1331 data-nosnippet>1331</a>    </span><span class="attr">#[test]
-<a href=#1332 id=1332 data-nosnippet>1332</a>    </span><span class="kw">fn </span>login_user_info_omits_slugs_when_absent() {
-<a href=#1333 id=1333 data-nosnippet>1333</a>        <span class="kw">let </span>info = sample_user_info(<span class="prelude-val">None</span>, <span class="prelude-val">None</span>);
-<a href=#1334 id=1334 data-nosnippet>1334</a>        <span class="kw">let </span>value = serde_json::to_value(<span class="kw-2">&amp;</span>info).expect(<span class="string">"serializable"</span>);
-<a href=#1335 id=1335 data-nosnippet>1335</a>        <span class="kw">let </span>obj = value.as_object().expect(<span class="string">"object"</span>);
-<a href=#1336 id=1336 data-nosnippet>1336</a>
-<a href=#1337 id=1337 data-nosnippet>1337</a>        <span class="macro">assert!</span>(
-<a href=#1338 id=1338 data-nosnippet>1338</a>            !obj.contains_key(<span class="string">"tenant_slug"</span>),
-<a href=#1339 id=1339 data-nosnippet>1339</a>            <span class="string">"tenant_slug should be omitted, not null"
-<a href=#1340 id=1340 data-nosnippet>1340</a>        </span>);
-<a href=#1341 id=1341 data-nosnippet>1341</a>        <span class="macro">assert!</span>(
-<a href=#1342 id=1342 data-nosnippet>1342</a>            !obj.contains_key(<span class="string">"org_slug"</span>),
-<a href=#1343 id=1343 data-nosnippet>1343</a>            <span class="string">"org_slug should be omitted, not null"
-<a href=#1344 id=1344 data-nosnippet>1344</a>        </span>);
-<a href=#1345 id=1345 data-nosnippet>1345</a>    }
-<a href=#1346 id=1346 data-nosnippet>1346</a>}
+<a href=#1314 id=1314 data-nosnippet>1314</a>    state
+<a href=#1315 id=1315 data-nosnippet>1315</a>        .auth_service
+<a href=#1316 id=1316 data-nosnippet>1316</a>        .change_password(
+<a href=#1317 id=1317 data-nosnippet>1317</a>            tenant_id,
+<a href=#1318 id=1318 data-nosnippet>1318</a>            user.user_id,
+<a href=#1319 id=1319 data-nosnippet>1319</a>            user.session_id,
+<a href=#1320 id=1320 data-nosnippet>1320</a>            <span class="kw-2">&amp;</span>body.current_password,
+<a href=#1321 id=1321 data-nosnippet>1321</a>            <span class="kw-2">&amp;</span>body.new_password,
+<a href=#1322 id=1322 data-nosnippet>1322</a>            <span class="kw-2">&amp;</span>settings.password,
+<a href=#1323 id=1323 data-nosnippet>1323</a>            <span class="kw-2">&amp;</span>state.password_history_repo,
+<a href=#1324 id=1324 data-nosnippet>1324</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>state.http_client),
+<a href=#1325 id=1325 data-nosnippet>1325</a>        )
+<a href=#1326 id=1326 data-nosnippet>1326</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1327 id=1327 data-nosnippet>1327</a>
+<a href=#1328 id=1328 data-nosnippet>1328</a>    <span class="kw">crate</span>::handlers::opaque_enrollment::store_credential(<span class="kw-2">&amp;</span>state, tenant_id, user.user_id, enrolled)
+<a href=#1329 id=1329 data-nosnippet>1329</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1330 id=1330 data-nosnippet>1330</a>
+<a href=#1331 id=1331 data-nosnippet>1331</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#1332 id=1332 data-nosnippet>1332</a>}
+<a href=#1333 id=1333 data-nosnippet>1333</a>
+<a href=#1334 id=1334 data-nosnippet>1334</a><span class="attr">#[cfg(test)]
+<a href=#1335 id=1335 data-nosnippet>1335</a></span><span class="kw">mod </span>tests {
+<a href=#1336 id=1336 data-nosnippet>1336</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#1337 id=1337 data-nosnippet>1337</a>
+<a href=#1338 id=1338 data-nosnippet>1338</a>    <span class="kw">fn </span>sample_user_info(tenant_slug: <span class="prelude-ty">Option</span>&lt;String&gt;, org_slug: <span class="prelude-ty">Option</span>&lt;String&gt;) -&gt; LoginUserInfo {
+<a href=#1339 id=1339 data-nosnippet>1339</a>        LoginUserInfo {
+<a href=#1340 id=1340 data-nosnippet>1340</a>            id: Uuid::nil(),
+<a href=#1341 id=1341 data-nosnippet>1341</a>            username: <span class="string">"alice"</span>.into(),
+<a href=#1342 id=1342 data-nosnippet>1342</a>            email: <span class="string">"alice@example.com"</span>.into(),
+<a href=#1343 id=1343 data-nosnippet>1343</a>            tenant_id: Uuid::nil(),
+<a href=#1344 id=1344 data-nosnippet>1344</a>            tenant_slug: tenant_slug.clone(),
+<a href=#1345 id=1345 data-nosnippet>1345</a>            org_slug,
+<a href=#1346 id=1346 data-nosnippet>1346</a>            organization_level: <span class="bool-val">false</span>,
+<a href=#1347 id=1347 data-nosnippet>1347</a>            principal_tenant_id: Uuid::nil(),
+<a href=#1348 id=1348 data-nosnippet>1348</a>            principal_tenant_slug: tenant_slug,
+<a href=#1349 id=1349 data-nosnippet>1349</a>            org_id: <span class="prelude-val">Some</span>(Uuid::nil()),
+<a href=#1350 id=1350 data-nosnippet>1350</a>            reachable_tenant_ids: <span class="prelude-val">None</span>,
+<a href=#1351 id=1351 data-nosnippet>1351</a>        }
+<a href=#1352 id=1352 data-nosnippet>1352</a>    }
+<a href=#1353 id=1353 data-nosnippet>1353</a>
+<a href=#1354 id=1354 data-nosnippet>1354</a>    <span class="doccomment">/// 26-05 (D-14): when slug resolution succeeds, both fields serialize
+<a href=#1355 id=1355 data-nosnippet>1355</a>    /// into the JSON body so the frontend can restore tenant context after
+<a href=#1356 id=1356 data-nosnippet>1356</a>    /// a hard reload.
+<a href=#1357 id=1357 data-nosnippet>1357</a>    </span><span class="attr">#[test]
+<a href=#1358 id=1358 data-nosnippet>1358</a>    </span><span class="kw">fn </span>login_user_info_serializes_slugs_when_present() {
+<a href=#1359 id=1359 data-nosnippet>1359</a>        <span class="kw">let </span>info = sample_user_info(<span class="prelude-val">Some</span>(<span class="string">"acme-tenant"</span>.into()), <span class="prelude-val">Some</span>(<span class="string">"acme-org"</span>.into()));
+<a href=#1360 id=1360 data-nosnippet>1360</a>        <span class="kw">let </span>value = serde_json::to_value(<span class="kw-2">&amp;</span>info).expect(<span class="string">"serializable"</span>);
+<a href=#1361 id=1361 data-nosnippet>1361</a>
+<a href=#1362 id=1362 data-nosnippet>1362</a>        <span class="macro">assert_eq!</span>(value[<span class="string">"tenant_slug"</span>], <span class="string">"acme-tenant"</span>);
+<a href=#1363 id=1363 data-nosnippet>1363</a>        <span class="macro">assert_eq!</span>(value[<span class="string">"org_slug"</span>], <span class="string">"acme-org"</span>);
+<a href=#1364 id=1364 data-nosnippet>1364</a>    }
+<a href=#1365 id=1365 data-nosnippet>1365</a>
+<a href=#1366 id=1366 data-nosnippet>1366</a>    <span class="doccomment">/// 26-05 (D-15): when slug resolution degrades to `None` (lookup
+<a href=#1367 id=1367 data-nosnippet>1367</a>    /// failure), the keys are omitted entirely rather than serialized as
+<a href=#1368 id=1368 data-nosnippet>1368</a>    /// `null` — this is what lets `/auth/me` and the fresh-login response
+<a href=#1369 id=1369 data-nosnippet>1369</a>    /// stay valid and be read defensively by the frontend without ever
+<a href=#1370 id=1370 data-nosnippet>1370</a>    /// failing the call.
+<a href=#1371 id=1371 data-nosnippet>1371</a>    </span><span class="attr">#[test]
+<a href=#1372 id=1372 data-nosnippet>1372</a>    </span><span class="kw">fn </span>login_user_info_omits_slugs_when_absent() {
+<a href=#1373 id=1373 data-nosnippet>1373</a>        <span class="kw">let </span>info = sample_user_info(<span class="prelude-val">None</span>, <span class="prelude-val">None</span>);
+<a href=#1374 id=1374 data-nosnippet>1374</a>        <span class="kw">let </span>value = serde_json::to_value(<span class="kw-2">&amp;</span>info).expect(<span class="string">"serializable"</span>);
+<a href=#1375 id=1375 data-nosnippet>1375</a>        <span class="kw">let </span>obj = value.as_object().expect(<span class="string">"object"</span>);
+<a href=#1376 id=1376 data-nosnippet>1376</a>
+<a href=#1377 id=1377 data-nosnippet>1377</a>        <span class="macro">assert!</span>(
+<a href=#1378 id=1378 data-nosnippet>1378</a>            !obj.contains_key(<span class="string">"tenant_slug"</span>),
+<a href=#1379 id=1379 data-nosnippet>1379</a>            <span class="string">"tenant_slug should be omitted, not null"
+<a href=#1380 id=1380 data-nosnippet>1380</a>        </span>);
+<a href=#1381 id=1381 data-nosnippet>1381</a>        <span class="macro">assert!</span>(
+<a href=#1382 id=1382 data-nosnippet>1382</a>            !obj.contains_key(<span class="string">"org_slug"</span>),
+<a href=#1383 id=1383 data-nosnippet>1383</a>            <span class="string">"org_slug should be omitted, not null"
+<a href=#1384 id=1384 data-nosnippet>1384</a>        </span>);
+<a href=#1385 id=1385 data-nosnippet>1385</a>    }
+<a href=#1386 id=1386 data-nosnippet>1386</a>}
 </code></pre></div></section></main></body></html>

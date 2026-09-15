@@ -871,6 +871,82 @@ async fn a_browser_gets_a_readable_page_when_a_request_uri_cannot_be_resolved() 
     );
 }
 
+/// The refusal reaches the RELYING PARTY when the request named a
+/// `redirect_uri` this client registered.
+///
+/// This is the path a certification run actually takes. The browser that
+/// re-presents a spent `request_uri` is the one that completed the first
+/// authorization, so it carries a session and never reaches the login hop's
+/// early refusal — the handler's own `consume` is what fails. RFC 6749
+/// §4.1.2.1 permits reporting that by redirect, and OIDC Core §3.1.2.6 names
+/// the code: `EnsureInvalidRequestUriError` in the OIDF suite accepts
+/// `invalid_request_uri` and nothing else, so the `invalid_request` that
+/// `ParService::consume` produces fails two FAPI 2.0 modules the moment the
+/// refusal starts reaching the client at all.
+#[actix_web::test]
+async fn a_dead_request_uri_is_reported_to_the_client_when_it_named_a_registered_uri() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let bogus = format!("{REQUEST_URI_PREFIX}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?client_id={}&request_uri={}&redirect_uri={}&state=rp-state",
+            f.client_id,
+            enc(&bogus),
+            enc(REDIRECT_URI)
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", user_token(&f))))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status().as_u16(), 302, "the refusal is redirected");
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(location.starts_with(REDIRECT_URI), "{location}");
+    assert!(
+        location.contains("error=invalid_request_uri"),
+        "OIDC Core §3.1.2.6 defines this code for exactly this state: {location}"
+    );
+    assert!(location.contains("state=rp-state"), "{location}");
+}
+
+/// And it does **not** reach a `redirect_uri` the client never registered.
+///
+/// The target is compared against the registration before anything is sent to
+/// it, so a browser cannot nominate where a refusal goes — the same rule the
+/// `prompt=none` and `user_declined` arms apply, and the reason this endpoint
+/// still has a page to render at all.
+#[actix_web::test]
+async fn a_dead_request_uri_is_never_reported_to_an_unregistered_uri() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let bogus = format!("{REQUEST_URI_PREFIX}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?client_id={}&request_uri={}&redirect_uri={}",
+            f.client_id,
+            enc(&bogus),
+            enc("https://attacker.example/steal")
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", user_token(&f))))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(
+        resp.headers().get("location").is_none(),
+        "an unregistered redirect_uri must not be redirected to"
+    );
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_request");
+}
+
 /// The same refusal, to an API client, is byte-for-byte what it was before the
 /// page existed. This is the non-regression half: content negotiation is only
 /// safe if the un-negotiated answer is untouched.

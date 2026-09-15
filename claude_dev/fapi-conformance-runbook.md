@@ -161,6 +161,41 @@ Read from the **bottom**. The suite logs each condition it evaluated; the last
 red entry is the assertion that actually failed, and everything above it is
 context that succeeded.
 
+### Running a handful of modules
+
+`conformance/scripts/run-some.sh` creates one plan and starts only the modules
+you name in it. A whole-plan sweep is the wrong tool while iterating on two
+modules — it is dozens of authorizations, several of which deliberately sleep
+out a 60-second window.
+
+```bash
+just conformance-drive &          # the browser driver, as for a full sweep
+conformance/scripts/run-some.sh \
+  conformance/plans/fapi2-security-profile-final-mtls.json \
+  fapi2-security-profile-final-test-plan \
+  fapi2-security-profile-final-happy-flow \
+  fapi2-security-profile-final-par-attempt-reuse-request_uri
+```
+
+It prints `status / result` per module and writes each module's **full** log to
+`conformance/.run/some/`. Read the file rather than the UI: the UI truncates a
+condition's text, and for a `REVIEW` the truncated part is usually the half that
+says what evidence it wants.
+
+**Reading the evidence, and the one way to get it backwards.** On a log entry a
+filled screenshot slot appears as `img`, and the suite sets `upload` to **null**
+once it is filled. So `img` present means evidence exists; `upload` present means
+it is still missing. Reading it the other way round makes a run with complete
+evidence look like one with none.
+
+### One browser driver, ever
+
+Two deliver two callbacks for one URL and the suite throws
+`runInBackground called after runFinalisationTaskInBackground()`. Check with
+`pgrep -a -f drive-browser.mjs` and **read the rows** — `pgrep -c` matches its
+own command line and always over-counts. Kill by PID; a `pkill -f` whose pattern
+appears in your own command line kills the shell that ran it (exit 144).
+
 ### Re-running one module
 
 Re-running a whole plan to retest one module wastes twenty minutes. From the
@@ -190,6 +225,9 @@ These are configuration, not conformance. Recognising them saves the evening.
 | The suite cannot reach the issuer | `AXIAM_ISSUER` names `localhost`, which inside the suite's container is the suite. Use `host.docker.internal` (the compose file maps it on Linux too). |
 | Discovery fails | AXIAM's discovery document is tenant-scoped; `AXIAM_TENANT_ID` must be set in `suite.env`. |
 | `COULD_NOT_START` on everything | The plan name changed upstream. Override with `CONFORMANCE_PLAN_NAME=…`, and update `justfile`'s default. |
+| `POST /api/v1/admin/bootstrap` answers `403` on a fresh deployment | The bootstrap gate is not open. It is satisfied either by starting the server with `AXIAM_BOOTSTRAP_ADMIN_EMAIL` set to the administrator you are about to create, or by the one-time setup token the server mints and logs on its first boot. It is a property of the **server process**, not of the request, so no amount of re-sending the body will change the answer. |
+| `register-clients.sh basic` exits with `sensitive_scopes_enabled did not stick` | Fixed 2026-09-14; this row is kept because the symptom named the wrong field for a month. `GET /organizations/{id}/settings` answers a **grouped** document and `PUT` is a **flat full replacement**, so echoing the GET back fails with `missing field min_length` — and the script sent that response to `/dev/null`. The registrar now flattens every object-valued group before the PUT, the way `benchmarks/runner/seed.sh` has since 2026-08-30. |
+| Every module fails at discovery with a PKIX / "unable to find valid certification path" error | The suite's JVM truststore does not carry `conformance/certs/ca.crt`. `conformance-up` imports it and restarts the suite container; before 2026-09-14 `suite.env` said it did and it did not. The JVM reads its truststore at boot, so importing without the restart changes nothing. |
 
 ---
 

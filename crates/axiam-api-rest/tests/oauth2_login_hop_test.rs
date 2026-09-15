@@ -38,8 +38,8 @@ use axiam_core::repository::{
     OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealOrganizationRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealPushedAuthRequestRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -700,6 +700,300 @@ async fn a_pushed_request_that_expired_during_the_hop_fails_with_invalid_request
     assert_eq!(
         body["error"], "invalid_request",
         "an ordinary request with a dead handle keeps today's answer"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A dead `request_uri` is refused BEFORE the sign-in page
+// ---------------------------------------------------------------------------
+//
+// `/oauth2/authorize` cannot consume a pushed request while answering an
+// anonymous browser: the handle is single-use and is spent in the handler,
+// after a principal exists. So a request presenting a handle that was already
+// used, expired, or issued to a different client used to be sent to `/login`
+// without the handle being looked at at all — the person signed in for a
+// request that had been dead before they started, and the refusal arrived on
+// the way back.
+//
+// `ParService::peek` is the non-consuming read that closes that. These tests
+// pin both directions: what it refuses, and — the one that is easy to break —
+// what it must NOT refuse.
+
+/// Store a pushed request directly, so a test can choose its exact state.
+///
+/// Through the repository rather than through `POST /oauth2/par` because the
+/// endpoint authenticates the client, and what is under test here is the
+/// authorization endpoint's behaviour for a handle in a given state, not the
+/// push that produced it.
+async fn push_handle(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    client_id: &str,
+    lifetime_secs: i64,
+) -> String {
+    use axiam_core::models::oauth2_client::{CreatePushedAuthRequest, PushedAuthParams};
+    use axiam_core::repository::PushedAuthRequestRepository;
+
+    let request_uri = axiam_oauth2::par::generate_request_uri();
+    SurrealPushedAuthRequestRepository::new(db.clone())
+        .create(CreatePushedAuthRequest {
+            tenant_id,
+            client_id: client_id.to_owned(),
+            request_uri_hash: axiam_oauth2::par::hash_request_uri(&request_uri),
+            params: PushedAuthParams {
+                response_type: "code".into(),
+                redirect_uri: REDIRECT_URI.into(),
+                scope: Some("openid".into()),
+                ..Default::default()
+            },
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(lifetime_secs),
+        })
+        .await
+        .expect("the pushed request must store");
+    request_uri
+}
+
+fn location(resp: &actix_web::dev::ServiceResponse) -> String {
+    resp.headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// **The module this exists for.**
+/// `fapi2-security-profile-final-par-attempt-reuse-request_uri` re-sends the
+/// browser to `/oauth2/authorize` with a `request_uri` that has already been
+/// spent, and its condition asks for the error to come back to the client or
+/// for an error page. Before this refusal the browser was sent to `/login`, so
+/// the evidence the run produced was a screenshot of a sign-in form.
+///
+/// Redirected rather than rendered because the request names a `redirect_uri`
+/// this client registered (RFC 6749 §4.1.2.1), and the code is OIDC Core
+/// §3.1.2.6's `invalid_request_uri`: the relying party can act on that — push
+/// again and restart — where `invalid_request` describes a client bug that did
+/// not happen.
+#[actix_rt::test]
+async fn a_spent_request_uri_is_refused_before_the_login_hop() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, plain_client(true)).await;
+
+    let handle = push_handle(&db, tenant_id, &client_id, 60).await;
+    // Spend it, exactly as a completed authorization would.
+    {
+        use axiam_core::repository::PushedAuthRequestRepository;
+        SurrealPushedAuthRequestRepository::new(db.clone())
+            .consume(tenant_id, &axiam_oauth2::par::hash_request_uri(&handle))
+            .await
+            .unwrap()
+            .expect("the handle must have been spendable once");
+    }
+
+    let resp = anonymous_authorize(
+        &app,
+        &format!(
+            "client_id={client_id}&request_uri={}&redirect_uri={REDIRECT_URI}\
+             &response_type=code&scope=openid&state=reuse-state&tenant_id={tenant_id}",
+            urlencoding_encode(&handle)
+        ),
+        None,
+    )
+    .await;
+
+    assert_eq!(resp.status().as_u16(), 302, "the refusal is redirected");
+    let location = location(&resp);
+    assert!(
+        location.starts_with(REDIRECT_URI),
+        "the error must go to the registered redirect_uri, not to /login: {location}"
+    );
+    assert!(
+        location.contains("error=invalid_request_uri"),
+        "OIDF's EnsureInvalidRequestUriError accepts this code and no other: {location}"
+    );
+    assert!(
+        location.contains("state=reuse-state"),
+        "an error response carries the request's own state: {location}"
+    );
+    assert!(
+        !location.contains("/login"),
+        "nobody may be asked to sign in for a request that is already dead: {location}"
+    );
+}
+
+/// The same refusal with nowhere to send it is rendered for the person.
+///
+/// A refusal is not a licence to send a browser somewhere the client never
+/// registered, so an absent or unregistered `redirect_uri` keeps the answer
+/// this endpoint gave before the redirect existed — and keeps
+/// `invalid_request`'s wording, because `invalid_request_uri` says nothing
+/// useful to somebody who did not send the parameter.
+#[actix_rt::test]
+async fn a_spent_request_uri_with_nowhere_to_report_is_answered_directly() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, plain_client(true)).await;
+
+    let dead = "urn:ietf:params:oauth:request_uri:0000000000000000000000000000dead";
+    for query in [
+        // No redirect_uri at all.
+        format!(
+            "client_id={client_id}&request_uri={}&tenant_id={tenant_id}",
+            urlencoding_encode(dead)
+        ),
+        // One this client never registered.
+        format!(
+            "client_id={client_id}&request_uri={}&redirect_uri=https://attacker.example/steal\
+             &tenant_id={tenant_id}",
+            urlencoding_encode(dead)
+        ),
+    ] {
+        let resp = anonymous_authorize(&app, &query, None).await;
+        assert_eq!(resp.status().as_u16(), 400, "query: {query}");
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"], "invalid_request", "query: {query}");
+        assert!(
+            body["error_description"]
+                .as_str()
+                .unwrap()
+                .contains("unknown, expired, or used"),
+            "the refusal keeps ParService's wording: {body}"
+        );
+    }
+}
+
+/// A handle issued to another client is refused too, and keeps its **own**
+/// answer rather than collapsing into the "gone" one.
+///
+/// The distinction is deliberate in `axiam_oauth2::par` and is preserved here:
+/// a client spending someone else's handle is a different failure from a
+/// handle that no longer exists, and telling the two apart is what makes the
+/// audit trail worth reading.
+#[actix_rt::test]
+async fn another_clients_request_uri_is_refused_before_the_login_hop() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let first = create_client(&app, &jwt, plain_client(true)).await;
+    let second = create_client(&app, &jwt, plain_client(true)).await;
+
+    let handle = push_handle(&db, tenant_id, &first, 60).await;
+
+    let resp = anonymous_authorize(
+        &app,
+        &format!(
+            "client_id={second}&request_uri={}&redirect_uri={REDIRECT_URI}\
+             &response_type=code&scope=openid&tenant_id={tenant_id}",
+            urlencoding_encode(&handle)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let location = location(&resp);
+    assert!(
+        location.contains("error=invalid_request"),
+        "a wrong-client refusal keeps invalid_request: {location}"
+    );
+    assert!(
+        !location.contains("invalid_request_uri"),
+        "and must NOT be remapped to the gone-handle code: {location}"
+    );
+    assert!(!location.contains("/login"), "{location}");
+}
+
+/// **The regression this refusal is most likely to cause.**
+///
+/// `fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-\
+/// completion-succeeds` presents ONE `request_uri` twice, before any
+/// authorization has completed, and requires the login page both times — its
+/// condition says so in as many words. A peek that refused an unconsumed handle,
+/// or that spent it on the way past, would break that module while fixing the
+/// other one.
+///
+/// So: two anonymous requests with the same live handle, both hopping to
+/// `/login`, and the handle still spendable afterwards.
+#[actix_rt::test]
+async fn an_unconsumed_request_uri_still_reaches_the_login_page_twice() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, plain_client(true)).await;
+
+    let handle = push_handle(&db, tenant_id, &client_id, 60).await;
+    let query = format!(
+        "client_id={client_id}&request_uri={}&redirect_uri={REDIRECT_URI}\
+         &response_type=code&scope=openid&tenant_id={tenant_id}",
+        urlencoding_encode(&handle)
+    );
+
+    for attempt in 1..=2 {
+        let resp = anonymous_authorize(&app, &query, None).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            302,
+            "visit {attempt} must hop to the sign-in page"
+        );
+        let location = location(&resp);
+        assert!(
+            location.starts_with("/login?return_to="),
+            "visit {attempt} must reach the login page, not a refusal: {location}"
+        );
+    }
+
+    // The peek is a read. Spending must still be possible, and must still be
+    // the handler's decision.
+    use axiam_core::repository::PushedAuthRequestRepository;
+    assert!(
+        SurrealPushedAuthRequestRepository::new(db.clone())
+            .consume(tenant_id, &axiam_oauth2::par::hash_request_uri(&handle))
+            .await
+            .unwrap()
+            .is_some(),
+        "two login hops must leave the handle spendable"
+    );
+}
+
+/// A `request_uri` that is not a PAR handle is a request object by reference,
+/// and keeps the OIDC Core §3.1.2.6 code that goes with it.
+///
+/// The peek deliberately does not answer for this shape: `request_uri_not_\
+/// supported` is more specific than `invalid_request`, a conformance suite
+/// matches on it, and `classify_request_object` in the handler already owns it.
+#[actix_rt::test]
+async fn a_request_object_by_reference_keeps_its_own_refusal() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, plain_client(true)).await;
+    let op_cookie = sign_in(&app, org_id, tenant_id).await;
+
+    let resp = anonymous_authorize(
+        &app,
+        &format!(
+            "client_id={client_id}&request_uri={}&redirect_uri={REDIRECT_URI}\
+             &response_type=code&scope=openid&tenant_id={tenant_id}",
+            urlencoding_encode("https://attacker.example/request.jwt")
+        ),
+        Some(&format!("axiam_op_session={op_cookie}")),
+    )
+    .await;
+    let status = resp.status().as_u16();
+    let location = location(&resp);
+    assert!(
+        location.contains("request_uri_not_supported") || status == 400,
+        "status {status}, location {location}"
+    );
+    assert!(
+        !location.contains("error=invalid_request&"),
+        "the peek must not have swallowed the by-reference refusal: {location}"
     );
 }
 

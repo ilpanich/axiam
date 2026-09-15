@@ -1464,6 +1464,32 @@ pub trait PushedAuthRequestRepository: Send + Sync {
         request_uri_hash: &str,
     ) -> impl Future<Output = AxiamResult<Option<PushedAuthRequest>>> + Send;
 
+    /// Resolve an unexpired, unconsumed request **without** consuming it.
+    ///
+    /// The same `WHERE` clause as [`consume`](Self::consume) with the write
+    /// removed, so the two answer "is this handle still spendable?"
+    /// identically — and nothing else about it is decided here.
+    ///
+    /// # Why a repository method and not a `consume` the caller ignores
+    ///
+    /// The authorization endpoint sends an anonymous browser to a sign-in page
+    /// *before* it can consume anything: the handle is spent inside the
+    /// handler, after a principal exists. So a request presenting a handle that
+    /// is already gone took a person through a full sign-in for a request that
+    /// was dead before they started. This is what lets that be refused first.
+    ///
+    /// It is a **read**, and every caller must treat it as one. The
+    /// authoritative single-use decision stays in `consume`: a request that
+    /// passes this check has not been authorized, has not been spent, and may
+    /// still lose the race to a concurrent authorize request — which is the
+    /// correct outcome and the reason this returns the row rather than a
+    /// permission.
+    fn find_unconsumed(
+        &self,
+        tenant_id: Uuid,
+        request_uri_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<PushedAuthRequest>>> + Send;
+
     /// Remove expired requests. Returns the number deleted.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
 }

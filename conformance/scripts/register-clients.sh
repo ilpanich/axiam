@@ -155,12 +155,30 @@ if [ "$PROFILE" = "basic" ]; then
   #
   # Read-modify-write, because the endpoint takes the whole settings document
   # and a hand-built one would silently reset every other policy in it.
+  #
+  # And the endpoint is ASYMMETRIC, which is the part that cost an evening. GET
+  # answers the GROUPED `SecuritySettings` shape (lockout/password/mfa/token/
+  # email/certificate/notification/opaque/privacy/oidc), while PUT is a FULL
+  # replacement taking the FLAT `SetOrgSettings` body with every field required.
+  # Echoing the grouped document back therefore fails with
+  # `missing field min_length` — and this script sent the response to /dev/null,
+  # so the only symptom was the check below reporting
+  # `sensitive_scopes_enabled did not stick`, which names a field that was never
+  # the problem.
+  #
+  # So flatten every object-valued group into one body, exactly as
+  # `benchmarks/runner/seed.sh` has done since 2026-08-30. Flattening rather
+  # than hand-writing the body preserves every policy already set on the
+  # organization and keeps working when a new settings group appears upstream.
   echo "[register] enabling sensitive scopes at the organization level"
   ORG_ID=$(api GET "/api/v1/organizations" | jq -r --arg s "$AXIAM_ADMIN_ORG_SLUG" \
     '.items[] | select(.slug == $s) | .id')
   [ -n "$ORG_ID" ] || { echo "[register] no organization with slug $AXIAM_ADMIN_ORG_SLUG" >&2; exit 1; }
   ORG_SETTINGS=$(api GET "/api/v1/organizations/$ORG_ID/settings")
-  UPDATED=$(jq '.oidc = ((.oidc // {}) + {sensitive_scopes_enabled: true})' <<<"$ORG_SETTINGS")
+  UPDATED=$(jq -c '([to_entries[] | select(.value | type == "object") | .value] | add)
+                   | .sensitive_scopes_enabled = true' <<<"$ORG_SETTINGS")
+  [ -n "$UPDATED" ] && [ "$UPDATED" != "null" ] || {
+    echo "[register] could not read the organization settings: $ORG_SETTINGS" >&2; exit 1; }
   api PUT "/api/v1/organizations/$ORG_ID/settings" "$UPDATED" >/dev/null
   CHECK=$(api GET "/api/v1/organizations/$ORG_ID/settings" | jq -r '.oidc.sensitive_scopes_enabled')
   [ "$CHECK" = "true" ] || {

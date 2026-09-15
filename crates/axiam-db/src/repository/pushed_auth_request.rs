@@ -324,6 +324,42 @@ impl<C: Connection> PushedAuthRequestRepository for SurrealPushedAuthRequestRepo
             .map_err(Into::into)
     }
 
+    async fn find_unconsumed(
+        &self,
+        tenant_id: Uuid,
+        request_uri_hash: &str,
+    ) -> AxiamResult<Option<PushedAuthRequest>> {
+        // `consume`'s guard clause with the write removed, spelled out rather
+        // than shared with it: the two statements must stay identical in what
+        // they consider spendable, and the one that matters carries a
+        // transaction and a nonce this one deliberately has neither of.
+        //
+        // No transaction, because there is nothing to serialize — this writes
+        // nothing, and a read that raced a concurrent `consume` is answered by
+        // that `consume` failing, not by this one having been careful. No
+        // `LIMIT`, because `(tenant_id, request_uri_hash)` names at most one
+        // row and a second would be a defect worth seeing rather than hiding.
+        let mut result = self
+            .db
+            .current()
+            .query(format!(
+                "SELECT {SELECT_FIELDS} FROM pushed_auth_request \
+                 WHERE tenant_id = $tenant_id AND request_uri_hash = $hash \
+                 AND consumed = false AND expires_at > time::now()"
+            ))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("hash", request_uri_hash.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<PushedAuthRequestRow> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .next()
+            .map(PushedAuthRequestRow::try_into_request)
+            .transpose()
+            .map_err(Into::into)
+    }
+
     async fn cleanup_expired(&self, tenant_id: Uuid) -> AxiamResult<u64> {
         let mut result = self
             .db

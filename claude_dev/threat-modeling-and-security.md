@@ -14,12 +14,76 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-09-13 (`1.0.0-beta14`, model 2.14.0 —
-> the SDK half of the 2026-09-12 residual pass, closing T-39 and T-143). The
-> website section is still at `1.0.0-beta11` and is brought up by
-> [`website-security-beta14-update-plan.md`](website-security-beta14-update-plan.md),
-> which is the entry point for that pass and supersedes the never-executed
-> [`website-security-beta13-update-plan.md`](website-security-beta13-update-plan.md).**
+> **Status: source current as of 2026-09-15 (`main` after `1.0.0-beta14`, model
+> 2.16.0 — the 2026-09-13 MFA-and-CSR wave and the 2026-09-14 early-refusal
+> pass). The website's Security section is at `1.0.0-beta14` / model 2.14.0 and
+> is brought up by
+> [`website-security-beta15-update-plan.md`](website-security-beta15-update-plan.md),
+> the entry point for that pass; the beta14 plan was executed on 2026-09-13 and
+> records what it landed.**
+>
+> **The 2026-09-14 early-refusal pass (model 2.16.0).** Two threats enter, both
+> Mitigated on arrival, and six entries gain a clause, taking the model to **271
+> threats, 258 mitigated / 13 open**; nothing on the open register moves.
+> `/oauth2/authorize` could not read a pushed request while answering an
+> anonymous browser, because the handle is single-use and is spent in the
+> handler after a principal exists — so a `request_uri` that was already spent,
+> expired or another client's sent a person through a sign-in for a request that
+> was dead before they started. It is now refused first, by a read that spends
+> nothing (`ParService::peek`, returning `()` on purpose), and the refusal
+> reaches the relying party as `invalid_request_uri` on a registered
+> `redirect_uri` with the request's own `state` — RFC 6749 §4.1.2.1's rule, the
+> same one the `prompt=none` arm applies — and is rendered in place otherwise; a
+> wrong-client handle keeps `invalid_request`, distinguishable by design (T-270,
+> with T-163, T-238, T-255 and T-256 amended). A missing or unsupported
+> `response_type` is refused the same way, before the hop. And a `fapi2`
+> client's `state` and `nonce` are bounded at push — 256 characters, the cap
+> pinned by a `const` block against the OpenID Foundation suite's own probes,
+> and deliberately not applied to the `standard` profile, where the residual is
+> stated: an authenticated client reflecting text into its own registered
+> redirect, under a 16 KiB body cap and a 60-second handle (T-271). Eight suite
+> modules moved from `REVIEW` to `PASSED` when run individually; no plan was
+> re-swept and the 2026-09-11 receipts stay the published ones. Contract 1.46
+> records both forms of the refusal (§26.2 rule 3), documentation only, and
+> every SDK re-vendored it. Two corrections ride along, recorded rather than
+> absorbed: T-262 had said a contended write answers `503` *over REST* while
+> `axiam-scim`'s own error type still answered `500` — the one surface the
+> defect was found on — until f7d5ab8 on 2026-09-13; and T-127 records
+> RUSTSEC-2026-0285 (rustls 0.23.43, CVSS 5.3) published and pinned to 0.23.45
+> the same day, with the plain statement that the `1.0.0-beta14` artefacts carry
+> the vulnerable version until the next release. **The website was not
+> touched**: `gen:threat-model` was run to confirm the model yields these
+> numbers, and reverted.
+>
+> **The 2026-09-13 MFA-and-CSR wave (model 2.15.0).** Three threats enter, all
+> Mitigated on arrival, taking the model to **269 threats, 256 mitigated / 13
+> open**. This document was not updated for it at the time; the paragraph is
+> written now, from the same sources. The wave is
+> [`mfa-first-login-and-csr-issuance-plan.md`](mfa-first-login-and-csr-issuance-plan.md):
+> an administrative MFA reset that cleared the TOTP secret and left every
+> WebAuthn credential in place, so the authenticator an account was reset
+> *because of* came back as a live factor at the next login (M-1, T-34 amended);
+> a self-service reset that let a user take their own account below a tenant's
+> MFA floor, now refused with `mfa_enforced` where the tenant enforces MFA, with
+> `users:admin` untouched (M-2, T-267); a passkey or a security key as the
+> *first* factor at forced enrolment, from the same setup token and under the
+> same attestation and user-verification policies as the profile-page ceremony,
+> refused on an account that already has a factor (M-3, T-269); the login-hop
+> `return_to` carried through forced setup so a new user lands back at the
+> relying party (M-4, no server change); a single-use setup token assessed and
+> not taken, with T-32's mitigation corrected to say what is consumed — the TOTP
+> step, not the token (M-5); and `POST /api/v1/certificates/sign-csr`, an
+> end-entity certificate for a key AXIAM never sees — possession proved by the
+> request's own signature, the key measured rather than labelled,
+> `subjectAltName`, `keyUsage` and `extendedKeyUsage` refused by name because
+> Vault's `sign-verbatim` would otherwise honour them, every other requested
+> extension discarded (C-1, T-268). Contract 1.45 added `certificates.sign_csr`
+> and the two setup-registration operations, and the F-1 fan-out landed in all
+> eleven SDK repositories the same day (rust #105, typescript #104, python #81,
+> java #93, kotlin #63, csharp #88, php #68, go #78, swift #61, c #60, cplusplus
+> #61). The release `1.0.0-beta14` predates this wave. The website's Docs pages
+> for MFA and PKI were updated in the same PR (#447); the Security section was
+> not.
 >
 > **The 1.0.0-beta14 wave (model 2.14.0).** No new threats; two close. The
 > residual pass below left T-39 and T-143 — the fifteen-minute revocation
@@ -439,7 +503,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 266 threats** and a
+The system is verified against a **STRIDE threat model of 271 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -462,8 +526,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 266 |
-| Mitigated / Open | 253 / 13 |
+| Threats identified | 271 |
+| Mitigated / Open | 258 / 13 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -477,12 +541,12 @@ optimistic closed one.
 | Area | Threats | Open |
 |---|---|---|
 | System context | 31 | 2 |
-| Authentication & session management | 33 | 0 |
-| OAuth2 / OIDC authorization server | 47 | 0 |
+| Authentication & session management | 35 | 0 |
+| OAuth2 / OIDC authorization server | 49 | 0 |
 | Federation (SAML SP & OIDC RP) | 31 | 1 |
 | Authorization engine (RBAC, hierarchy, scopes) | 26 | 0 |
-| PKI, certificates & IoT device identity | 25 | 1 |
-| Audit, webhooks, email & notifications | 18 | 2 |
+| PKI, certificates & IoT device identity | 26 | 1 |
+| Audit, webhooks, email & notifications | 18 | 1 |
 | Deployment & platform (Kubernetes) | 27 | 5 |
 | Client SDKs & admin-UI integration surface | 28 | 3 |
 
@@ -511,20 +575,20 @@ the category recorded against it in the model.
 | Category | Threats | Open |
 |---|---|---|
 | Spoofing | 66 | 3 |
-| Tampering | 57 | 1 |
+| Tampering | 59 | 1 |
 | Repudiation | 6 | 0 |
 | Information disclosure | 65 | 6 |
 | Denial of service | 24 | 2 |
-| Elevation of privilege | 48 | 1 |
+| Elevation of privilege | 51 | 1 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
 | Critical | 30 | 1 |
-| High | 122 | 8 |
+| High | 126 | 8 |
 | Medium | 106 | 3 |
-| Low | 8 | 1 |
+| Low | 9 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
@@ -591,8 +655,8 @@ have to be re-established — nothing is assumed across a boundary.
   infrastructure endpoints like health and reflection — there is no unmetered route.
 - **MFA** is built in — TOTP today, WebAuthn/passkeys for phishing-resistant,
   origin-bound second factors. TOTP codes are single-use within their window
-  (replay is rejected with an atomic compare-and-set), and the MFA challenge is a
-  distinct, single-use, no-authority token so the second factor can never be
+  (replay is rejected with an atomic compare-and-set), and the MFA challenge is
+  a distinct, single-use, no-authority token so the second factor can never be
   skipped by replaying it. Passkeys also work as a **usernameless, one-step
   sign-in** (discoverable credentials), and that path re-establishes every gate
   the password step would have run: account status and lockout are checked, the
@@ -605,7 +669,17 @@ have to be re-established — nothing is assumed across a boundary.
   enrolling a *factor*: from the moment a WebAuthn credential exists, the next
   sign-in demands a second factor — an abandoned, unconfirmed TOTP enrollment is
   dropped rather than silently promoted alongside it — and removing the last
-  credential turns the requirement back off.
+  credential turns the requirement back off. A passkey or a security key can
+  also be the *first* factor: forced first-login enrolment under a tenant that
+  requires MFA runs the same WebAuthn registration ceremony from the same setup
+  token as the TOTP path, under the attestation and user-verification policies
+  the tenant already applies, and a setup token adds an account's first factor
+  and never a second — an account that already has one is refused, on both
+  paths. Resetting MFA evicts every factor, the WebAuthn credentials as well as
+  the TOTP secret, in the same call that revokes the sessions; and a user cannot
+  reset their own account below a tenant's MFA floor — where the tenant enforces
+  MFA, the self-service reset is refused with its own error code,
+  `mfa_enforced`, and an administrator does it for them.
 - **User verification on a WebAuthn ceremony is a policy, not a library
   constant.** `webauthn_user_verification` is an organization baseline every
   tenant inherits and may only tighten — `required` > `preferred` >
@@ -670,13 +744,15 @@ have to be re-established — nothing is assumed across a boundary.
 - **SCIM provisioning uses purpose-bound long-lived tokens.** Okta and Entra can
   only present one static bearer string, so AXIAM mints one that is accepted on
   `/scim/v2/*` and nowhere else, carries no permissions of its own (the resolved
-  tenant user's RBAC still decides), is stored hashed with the plaintext returned
-  exactly once, and is expiring, revocable and audited. Deprovisioning a user
-  through SCIM also revokes their live sessions and refresh tokens. A
+  tenant user's RBAC still decides), is stored hashed with the plaintext
+  returned exactly once, and is expiring, revocable and audited. Deprovisioning
+  a user through SCIM also revokes their live sessions and refresh tokens. A
   provisioning write that loses a datastore race is retried, and one that stays
-  lost answers `503` with `Retry-After: 1` rather than `500` — which an
-  identity provider reads as a failed sync and answers by re-sending the whole
-  record.
+  lost answers `503` with `Retry-After: 1` rather than `500` — which an identity
+  provider reads as a failed sync and answers by re-sending the whole record.
+  That answer is rendered by the SCIM endpoint's own error type, which for a day
+  after the rest of the change still fell through to `500`; it has carried the
+  `503` since 2026-09-13, with a test over the wire.
 
 ### Authorization & tenant isolation
 
@@ -884,6 +960,31 @@ rather than counted as passes.
   echoes. Errors reach the relying party by redirect when the target is
   registered, are rendered as a page for a person only on an explicit
   `Accept: text/html`, and that page echoes nothing the request carried.
+- **A request that cannot succeed is refused before anyone is asked to sign in
+  for it.** The authorization endpoint could not look at a pushed request while
+  answering an anonymous browser — a `request_uri` is single-use and is spent
+  only once there is a principal to spend it for — so a handle that was already
+  used, expired, or issued to a different client sent a person through a sign-in
+  and was refused on the way back. It is now read first, by a read that spends
+  nothing: a handle that is merely unfinished still reaches the sign-in page, so
+  a `request_uri` may still be presented twice before the first authorization
+  completes, and the single-use decision stays exactly where it was. A missing
+  or unsupported `response_type` is decided the same way, before the hop, and
+  only when no `request_uri` is present, because with PAR the pushed value is
+  the authoritative one. Both refusals reach the relying party — as
+  `invalid_request_uri`, the code it can act on by pushing again — only on a
+  `redirect_uri` that client registered, compared exactly, with the request's
+  own `state`; anything else is answered in place, and a handle issued to a
+  different client keeps `invalid_request`, so the two failures stay
+  distinguishable. On the FAPI 2.0 profile a pushed `state` or `nonce` is
+  bounded at 256 characters, six times what a 32-byte value needs, because an
+  unbounded opaque value is a payload channel; the `standard` profile is
+  deliberately left alone, since a cap is a breaking change for a client that
+  packs data into `state`, and there the exposure is an authenticated client
+  reflecting text into its own registered redirect under a 16 KiB body cap.
+  Measured per module against the OpenID Foundation suite, eight modules moved
+  from `REVIEW` to `PASSED`; the published receipts remain the 2026-09-11 full
+  runs.
 - **Basic client authentication is accepted, and not recommended.** The OpenID
   Foundation's Basic OP plan runs 37 of its 38 modules with
   `client_secret_basic`, so AXIAM accepts it — decoded as RFC 6749 §2.3.1
@@ -962,17 +1063,27 @@ against the classic federation attacks:
 
 ### PKI, certificates & device identity
 
-- Certificates are **per-tenant, issued beneath the organization CA** — optionally
-  through a **tenant signing CA**, a path-length-zero intermediate signed by the
-  organization CA whose revocation is scoped to exactly that tenant, so one
-  tenant's compromised issuance no longer burns the estate-wide trust anchor.
-  Keys are RSA-4096 or Ed25519 from the platform CSPRNG. **Private keys are never
-  stored server-side** — returned exactly once at issuance, delivered only over
-  TLS 1.3 — and issuance **refuses a certificate that would outlive its issuer**,
-  quoting the achievable validity instead of silently truncating. A tenant CA
-  minted from a customer's own CSR keeps only the CSR's subject: the constraints
-  (CA:TRUE, path length zero, certificate-signing key usage) are stated by AXIAM,
-  and the request's self-signature is verified as proof of possession.
+- Certificates are **per-tenant, issued beneath the organization CA** —
+  optionally through a **tenant signing CA**, a path-length-zero intermediate
+  signed by the organization CA whose revocation is scoped to exactly that
+  tenant, so one tenant's compromised issuance no longer burns the estate-wide
+  trust anchor. Keys are RSA-4096 or Ed25519 from the platform CSPRNG. **Private
+  keys are never stored server-side** — returned exactly once at issuance,
+  delivered only over TLS 1.3 — and issuance **refuses a certificate that would
+  outlive its issuer**, quoting the achievable validity instead of silently
+  truncating. A tenant CA minted from a customer's own CSR keeps only the CSR's
+  subject: the constraints (CA:TRUE, path length zero, certificate-signing key
+  usage) are stated by AXIAM, and the request's self-signature is verified as
+  proof of possession. A leaf certificate can be issued from a CSR too — for a
+  key born in an HSM, an offline ceremony or a device's own secure element and
+  never seen by AXIAM: the request's signature is verified as proof of
+  possession, the key must be Ed25519 or RSA with a *measured* modulus of at
+  least 4096 bits rather than the algorithm the caller states, a request asking
+  for `subjectAltName`, `keyUsage` or `extendedKeyUsage` is refused by name
+  rather than silently rewritten (Vault's `sign-verbatim` would otherwise honour
+  them, so a silent strip would hold on one custodian and not the other), every
+  other requested extension is discarded, and a CSR asking to be a CA comes back
+  a leaf. The response carries no key field, because there is no key to carry.
 - **CA signing keys live where you choose, and the choice is recorded per CA**:
   sealed AES-256-GCM into a separate, access-controlled table with the key held
   outside the datastore, held in HashiCorp Vault, or generated inside Vault's PKI
@@ -1138,19 +1249,25 @@ against the classic federation attacks:
   verification is unconditional and TLS-bypass APIs are prohibited (CI greps for
   them); a plaintext `http://` base URL is refused at construction, with a
   loopback-only development exception matched on literal hostnames rather than
-  resolved DNS; secrets are wrapped in redacting types; the browser flow keeps tokens
-  in cookies with single-flight refresh; JWKS relying-party helpers pin the key set to
-  the configured issuer's origin. The server is the single source of truth: a CI drift
-  gate fails the build if an SDK's vendored OpenAPI/protobuf copy diverges. An
-  SDK calling over mTLS prefers the discovery document's RFC 8705 §5 alias for
-  that endpoint, reads an absent alias as "no separate host" rather than
-  "unsupported", never synthesises one for the front channel, preserves the
-  alias's query component rather than appending to it, and refuses a malformed
-  alias outright rather than falling back to the front-channel host — since
-  1.0.0-beta14 in all eleven SDKs, against three test vectors the contract
-  itself publishes so that eleven repositories pin the same bytes; and no SDK
-  sends a client secret in the `Authorization` header, whatever the client is
-  registered for, because that is the channel intermediaries log.
+  resolved DNS; secrets are wrapped in redacting types; the browser flow keeps
+  tokens in cookies with single-flight refresh; JWKS relying-party helpers pin
+  the key set to the configured issuer's origin. The server is the single source
+  of truth: a CI drift gate fails the build if an SDK's vendored
+  OpenAPI/protobuf copy diverges. An SDK calling over mTLS prefers the discovery
+  document's RFC 8705 §5 alias for that endpoint, reads an absent alias as "no
+  separate host" rather than "unsupported", never synthesises one for the front
+  channel, preserves the alias's query component rather than appending to it,
+  and refuses a malformed alias outright rather than falling back to the
+  front-channel host — since 1.0.0-beta14 in all eleven SDKs, against three test
+  vectors the contract itself publishes so that eleven repositories pin the same
+  bytes; and no SDK sends a client secret in the `Authorization` header,
+  whatever the client is registered for, because that is the channel
+  intermediaries log. The SDK surface follows the server within the day:
+  contract 1.45 — the CSR-signed certificate and the two setup-token WebAuthn
+  operations — landed in all eleven repositories on 2026-09-13, and contract
+  1.46, documentation only, recording both forms a spent-`request_uri` refusal
+  can take and why a conformant SDK reaches only the direct one, is vendored by
+  all eleven.
 - **The admin UI redacts what a gateway echoes.** An error body is not always
   written by AXIAM — a proxy or gateway can answer instead, and those echo the
   request — so the UI redacts credential-shaped keys before rendering, including
@@ -1248,7 +1365,7 @@ Resilience Act conformity assessment, and it says so plainly.
 | **ISO/IEC 27001:2022 Annex A** | Access control, secure authentication, cryptography, logging, network security, secure development | Interpretive control-family mapping; code-level themes Pass | [Annex A mapping](security-audit.md#3-iso-27001-annex-a--control-family-mapping) |
 | **EU Cyber Resilience Act (Annex I)** | Secure-by-design, no known exploitable vulnerabilities, confidentiality, data minimisation, access control, vulnerability handling, security updates | Themes Pass; SBOM deferred | [Essential-requirement mapping](security-audit.md#4-cybersecurity-act--essential-requirement-theme-mapping) |
 | **GDPR** | Data-subject export (Art. 15), erasure (Art. 17), consent (Art. 7), pseudonymisation, data minimisation | Export excludes secrets; erasure is durable and re-selectable on failure; audit actor identities are pseudonymised; OIDC scope-release consent is per client, withdrawable in one call and re-checked on every release; every personal-data column of the user record is classified in one declared inventory that both erasure statements and the export render from, and a test introspects the live schema after migrations and fails on any column the inventory does not classify | [GDPR compliance](../docs/compliance/gdpr-compliance.md) |
-| **OAuth2 / OIDC** | RFC 6749 / 7636 / 7009 / 7662 + OIDC Core/Discovery MUST matrices; the OpenID Foundation conformance suite (OIDC Core Basic OP; FAPI 2.0 Security Profile Final — mTLS, self-signed, `private_key_jwt`) | All tracked MUSTs pass; 165 suite modules, zero `FAILED` on 2026-09-11 — a self-run against a working-tree build, not a certification; `REVIEW` and `WARNING` verdicts are published, not counted as passes | [OAuth2 RFC matrix](../docs/compliance/oauth2-rfc-compliance.md) · [OIDC conformance](../docs/compliance/oidc-conformance.md) · [conformance receipts](../docs/conformance/README.md) · [latest run](../docs/conformance/index.md) |
+| **OAuth2 / OIDC** | RFC 6749 / 7636 / 7009 / 7662 + OIDC Core/Discovery MUST matrices; the OpenID Foundation conformance suite (OIDC Core Basic OP; FAPI 2.0 Security Profile Final — mTLS, self-signed, `private_key_jwt`) | All tracked MUSTs pass; 165 suite modules, zero `FAILED` on 2026-09-11 — a self-run against a working-tree build, not a certification; `REVIEW` and `WARNING` verdicts are published, not counted as passes; since 2026-09-14 eight further modules pass when run individually (the three PAR `request_uri` refusals, `response-type-missing`, and the four long or mismatched `state` / `nonce` probes), not yet re-swept as a plan | [OAuth2 RFC matrix](../docs/compliance/oauth2-rfc-compliance.md) · [OIDC conformance](../docs/compliance/oidc-conformance.md) · [conformance receipts](../docs/conformance/README.md) · [latest run](../docs/conformance/index.md) |
 
 Each matrix is checked in per control, with the test or source location that
 satisfies it, so a status here can be read back to the line that earns it rather
@@ -1259,7 +1376,13 @@ Trivy filesystem/config scans and `npm audit` at a high threshold, with Dependab
 across the workspace's ecosystems and each SDK repository, SHA-pinned GitHub
 Actions, and signed release provenance — and the gate tells a registry outage
 apart from a clean audit and fails on a suppression that no longer matches
-anything, so it cannot quietly be told what to ignore.
+anything, so it cannot quietly be told what to ignore. The gate has been
+exercised for real: on 2026-09-14 RUSTSEC-2026-0285 — rustls 0.23.43 accepting
+TLS 1.3 handshake messages across encryption-level boundaries, CVSS 5.3 — was
+published, the scan went red the same day, and the fix was pinned to 0.23.45 and
+verified by re-running the FAPI 2.0 mTLS conformance plan against the rebuilt
+binary. The `1.0.0-beta14` release artefacts predate it and carry the
+vulnerable version; the fix ships with the next release.
 
 ---
 
@@ -1272,7 +1395,7 @@ checklist — most of the threat model's open items live here.
 **The open risk register**
 
 Every threat the model does not record as mitigated, most severe first — 13 of
-266. On the website this table is generated from the Threat Dragon model, so it
+271. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -1482,8 +1605,8 @@ list read as a checklist — what to do about each, grouped by who does it.
   no internal review had, and the model records it as the Critical it was
   rather than as a conformance detail.
 
-Everything in this document was last re-derived from source at
-**`1.0.0-beta14`** on 2026-09-13; the handoff block at the top of this file says
+Everything in this document was last re-derived from source at `main` after
+**`1.0.0-beta14`** (model 2.16.0) on 2026-09-15; the handoff block at the top of this file says
 what that pass covered and what it changed. The website carries its own stamp,
 from a single constant in `website/src/version.ts`, recording the release *its*
 Security section was last re-derived against; it moves when that section does.

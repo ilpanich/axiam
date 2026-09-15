@@ -26,6 +26,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was free to run at one factor anyway. Contract §5.2 rule 4 carries the rule
   for SDKs.
 
+- **rustls 0.23.45 for RUSTSEC-2026-0285** (T-127). The advisory — TLS 1.3
+  handshake messages accepted across encryption-level boundaries, CVSS 5.3,
+  against 0.23.43 — was published on 2026-09-14 and the lock was moved the same
+  day with `cargo update --precise`, taking `rustls-webpki`, `aws-lc-rs` and
+  `aws-lc-sys` with it; no manifest changed. Verified by re-running the OIDF
+  FAPI 2.0 mTLS plan against the rebuilt binary. The `1.0.0-beta14` release
+  artefacts carry 0.23.43; this is the first release that does not.
+
+- **A FAPI 2.0 client's `state` and `nonce` are bounded at push** (T-271).
+  `POST /oauth2/par` refuses either beyond 256 characters with
+  `invalid_request` when the client's profile is `fapi2` — six times what a
+  32-byte value needs, and below the 384- and 1000-character probes the OpenID
+  Foundation suite requires to be refused, pinned by a `const` block. A
+  `standard` client is deliberately not bounded: a cap is a breaking change
+  for a client that packs data into `state`, and there the exposure is an
+  authenticated client reflecting text into its own registered `redirect_uri`
+  under the 16 KiB form-body cap and a 60-second handle.
+
 ### Added
 
 - **`conformance/scripts/run-some.sh`** — create one OIDF plan and run only the
@@ -103,6 +121,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no SDK changes, because §26.2 rule 2's authorization URL carries no
   `redirect_uri` and so never reaches the redirected form.
 
+- **A missing or unsupported `response_type` is refused before the login hop.**
+  RFC 6749 §3.1.1 makes it REQUIRED and AXIAM supports exactly `code`; neither
+  fact depends on who is signing in, so the endpoint decides it before building
+  the login redirect, and only when no `request_uri` is present — with PAR the
+  pushed value is authoritative (RFC 9126 §4). Delivered under the same rule as
+  every other refusal: to a `redirect_uri` the client registered, with `state`,
+  or in place. `oidcc-response-type-missing` and the four FAPI `state` /
+  `nonce` modules moved from REVIEW to PASSED when run individually (T-270).
+
 - Forced first-login MFA enrolment now returns the user to the application
   they were signing in to (M-4). A new user of an enforcing tenant who arrived
   through an OAuth2 client's `/oauth2/authorize` hop finished enrolment in the
@@ -129,6 +156,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by-severity and by-diagram tables are updated to match; the website's
   generated threat-model views are regenerated at publish time from the same
   model rather than carried here.
+
+- The STRIDE threat model moves to **2.16.0**: T-270 (the dead `request_uri`
+  refused before the login hop, and what the early read must not do) and T-271
+  (the FAPI `state` / `nonce` bound) enter Mitigated, taking it to 271 threats,
+  258 mitigated and 13 open; T-163, T-238, T-255 and T-256 gain the clause that
+  says what moved; T-262 is corrected to record that the SCIM error type
+  answered `500` for a day after R-4; T-127 records RUSTSEC-2026-0285.
+  `claude_dev/threat-modeling-and-security.md` gains the 2.15.0 and 2.16.0
+  handoff paragraphs and `claude_dev/website-security-beta15-update-plan.md`
+  is the website's entry point.
 
 ## [1.0.0-beta14] - 2026-09-13
 

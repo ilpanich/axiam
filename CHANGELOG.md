@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`conformance/scripts/run-some.sh`** — create one OIDF plan and run only the
+  modules you name in it. A whole-plan sweep is the wrong tool while iterating
+  on two modules, and the alternative was re-running dozens of authorizations
+  for each attempt. `just conformance-up` now also imports
+  `conformance/certs/ca.crt` into the suite's JVM truststore and restarts the
+  suite, which `suite.env` has claimed it did since W9 and which it did not.
+
 - **A certificate for a key AXIAM never sees.** `POST /api/v1/certificates/sign-csr`
   issues an end-entity certificate from an uploaded PKCS#10 request, so a key
   can be born in an HSM, an offline ceremony or a device's own secure element
@@ -67,6 +74,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged, since the `webauthn` tag is not part of it.
 
 ### Changed
+
+- **A `request_uri` that is already dead is refused before anyone is asked to
+  sign in for it.** `/oauth2/authorize` could not read a pushed request while
+  answering an anonymous browser — the handle is single-use and is spent later,
+  in the handler, once there is a principal to spend it for — so a browser
+  presenting a `request_uri` that had already been used, had expired, or had
+  been issued to a different client was sent to `/login`, the person typed a
+  password, and the request was refused on the way back. The endpoint now reads
+  the handle first. It is a **read**: a handle that is merely unfinished still
+  reaches the sign-in page, so the same `request_uri` may still be presented
+  twice before the first authorization completes, and the single-use decision
+  stays exactly where it was.
+
+- **A `request_uri` refusal reaches the relying party when the request named a
+  `redirect_uri` that client registered**, as `error=invalid_request_uri` with
+  the request's own `state` (RFC 6749 §4.1.2.1, OIDC Core §3.1.2.6) — the code a
+  relying party can act on by pushing again and restarting. A request that named
+  no registered `redirect_uri` is answered exactly as before: the authorization
+  endpoint's own error page for a browser, the same JSON object for anything
+  else. A handle issued to a **different** client keeps `invalid_request`, which
+  is a different failure and stays distinguishable. Measured against the OpenID
+  Foundation suite, this closes
+  `fapi2-security-profile-final-par-attempt-reuse-request_uri`,
+  `-par-attempt-to-use-expired-request_uri` and
+  `-par-attempt-to-use-request_uri-for-different-client` — all three REVIEW
+  before, all three PASSED after. Contract 1.46 records it in §26.2 rule 3;
+  no SDK changes, because §26.2 rule 2's authorization URL carries no
+  `redirect_uri` and so never reaches the redirected form.
 
 - Forced first-login MFA enrolment now returns the user to the application
   they were signing in to (M-4). A new user of an enforcing tenant who arrived

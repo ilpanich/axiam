@@ -543,6 +543,115 @@ mod single_use_serialisation {
         );
     }
 
+    /// `find_unconsumed` answers the same question as `consume` and writes
+    /// nothing.
+    ///
+    /// The authorization endpoint reads it before sending an anonymous browser
+    /// to a sign-in page, so that a `request_uri` which is already spent is
+    /// refused before a person types a password for it. Two properties carry
+    /// that, and both are asserted here against the deployed engine rather than
+    /// against a double:
+    ///
+    ///   1. a live handle reads as live and is STILL spendable afterwards —
+    ///      otherwise the early refusal would break
+    ///      `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds`,
+    ///      which presents one handle twice before any authorization completes;
+    ///   2. a spent handle reads as gone, which is the refusal itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pushed_auth_request_find_unconsumed_reads_without_spending() {
+        // `_db` is bound rather than dropped: it owns the TempDir backing the
+        // surrealkv datastore, and dropping it would delete the files underneath.
+        let _db = db().await;
+        let repo = SurrealPushedAuthRequestRepository::new(_db.handle());
+        let tenant = Uuid::new_v4();
+        let other_tenant = Uuid::new_v4();
+
+        repo.create(CreatePushedAuthRequest {
+            tenant_id: tenant,
+            client_id: "web-app".into(),
+            request_uri_hash: "peek-hash".into(),
+            params: PushedAuthParams::default(),
+            expires_at: Utc::now() + Duration::seconds(60),
+        })
+        .await
+        .unwrap();
+
+        // Read it twice: neither read may spend it, and a method that spent it
+        // on the first call would still look correct if asked only once.
+        for attempt in 1..=2 {
+            let found = repo
+                .find_unconsumed(tenant, "peek-hash")
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("read {attempt} must still see the handle"));
+            assert_eq!(found.client_id, "web-app");
+            assert!(!found.consumed, "read {attempt} must not mark the row");
+        }
+
+        // Another tenant's read sees nothing, with the same hash.
+        assert!(
+            repo.find_unconsumed(other_tenant, "peek-hash")
+                .await
+                .unwrap()
+                .is_none(),
+            "the handle is scoped to its tenant"
+        );
+
+        // A handle nobody pushed reads as gone.
+        assert!(
+            repo.find_unconsumed(tenant, "never-pushed")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Still spendable, which is the property the early refusal must not
+        // have taken away.
+        assert!(
+            repo.consume(tenant, "peek-hash").await.unwrap().is_some(),
+            "the reads above must have left the handle spendable"
+        );
+
+        // And once spent it reads as gone — the refusal the endpoint reports.
+        assert!(
+            repo.find_unconsumed(tenant, "peek-hash")
+                .await
+                .unwrap()
+                .is_none(),
+            "a spent handle must read as gone"
+        );
+    }
+
+    /// An expired handle reads as gone, from the same `WHERE` clause `consume`
+    /// uses — so the endpoint cannot be talked into hopping to a login page for
+    /// a pushed request whose sixty seconds are up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pushed_auth_request_find_unconsumed_ignores_an_expired_row() {
+        // `_db` is bound rather than dropped: it owns the TempDir backing the
+        // surrealkv datastore, and dropping it would delete the files underneath.
+        let _db = db().await;
+        let repo = SurrealPushedAuthRequestRepository::new(_db.handle());
+        let tenant = Uuid::new_v4();
+
+        repo.create(CreatePushedAuthRequest {
+            tenant_id: tenant,
+            client_id: "web-app".into(),
+            request_uri_hash: "expired-hash".into(),
+            params: PushedAuthParams::default(),
+            expires_at: Utc::now() - Duration::seconds(1),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            repo.find_unconsumed(tenant, "expired-hash")
+                .await
+                .unwrap()
+                .is_none(),
+            "expiry is part of the clause, not a check the caller makes"
+        );
+    }
+
     /// The authorization code path was already safe — its consume is a single
     /// statement, which SurrealDB does execute atomically. Pinned so a later
     /// refactor to the `LET ...; SELECT ...` shape cannot silently reintroduce the

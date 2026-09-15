@@ -179,6 +179,34 @@ async function reportVisited(testId, url) {
  * The suite accepts jpeg or png up to 500KB and at most two images per test,
  * which is why each placeholder is filled once and only from a shot that
  * matches what the condition asked to see.
+ *
+ * # An `…ErrorPage` condition is answered by an error page or by nothing
+ *
+ * These conditions all have the shape "**if** the server does not return the
+ * error to the client, it must show an error page saying X — upload a
+ * screenshot". So there are two right answers: the error came back over the
+ * protocol and no screenshot is owed, or an error page was shown and its
+ * screenshot is the evidence. A screenshot of the SIGN-IN page is neither, and
+ * uploading one is worse than uploading nothing — it asserts to the reviewer
+ * who signs the certification off that AXIAM showed an error page, when what it
+ * showed was a login form or nothing at all.
+ *
+ * That is exactly what happened before this rule existed. The fall-back chain
+ * was `error ?? login` for every condition that was not about a login page, so
+ * two FAPI 2.0 modules handed a reviewer a sign-in page against a condition
+ * asking for an error page:
+ *
+ *   - `par-attempt-reuse-request_uri`, where the browser really was sent to
+ *     `/login` (a server-side defect, fixed separately), and
+ *   - `state-only-outside-request-object-not-used`, where the server did the
+ *     RIGHT thing — ignored the `state` that arrived beside the `request_uri`
+ *     and completed the authorization with no `state` in the response, which is
+ *     what that module's own summary calls the expected result. There was no
+ *     error page because there was no error, and the honest evidence is none.
+ *
+ * So an `ErrorPage` condition takes the error shot only. With no error shot the
+ * placeholder is left alone and the reason is printed, so a run that produces
+ * no evidence says so instead of producing the wrong evidence quietly.
  */
 async function fillPlaceholders(testId) {
   let log;
@@ -192,9 +220,23 @@ async function fillPlaceholders(testId) {
     const placeholder = entry.upload;
     if (!placeholder || filled.has(placeholder)) continue;
     const src = String(entry.src ?? '');
-    const png = /LoginPage|Login/i.test(src)
-      ? (forTest.login ?? forTest.error)
-      : (forTest.error ?? forTest.login);
+    let png;
+    if (/ErrorPage/i.test(src)) {
+      png = forTest.error;
+      if (!png) {
+        // Not marked `filled`: an error page may still be reached on a later
+        // visit within the same test, and this sweep runs every two seconds.
+        console.log(`[drive] no error page was shown, so ${src} gets no screenshot`);
+        continue;
+      }
+    } else if (/Login/i.test(src)) {
+      // A login-page condition is answered by the login page, and by an error
+      // page when one was shown instead — that IS what the browser was given,
+      // and it is the finding the condition exists to surface.
+      png = forTest.login ?? forTest.error;
+    } else {
+      png = forTest.error ?? forTest.login;
+    }
     if (!png) continue;
     const res = await fetch(`${SUITE}/api/log/${testId}/images/${placeholder}`, {
       method: 'POST',
@@ -295,10 +337,50 @@ async function visit(context, url, testId, testName = '') {
     // skipped, and the wait for `#username` then timed out on a page still
     // showing the workspace form. Twenty seconds and one indirection away from
     // the cause.
-    await page
-      .locator('#org-slug, #username')
-      .first()
-      .waitFor({ state: 'visible', timeout: 20_000 });
+    // Already back at the suite, with nothing asked of the person.
+    //
+    // This is what a refusal delivered OVER THE PROTOCOL looks like from here:
+    // the authorization endpoint answered `302` to the client's registered
+    // `redirect_uri` carrying `error=…` (RFC 6749 §4.1.2.1), so the browser
+    // never saw an AXIAM page at all and the module has its answer. It is the
+    // outcome every "if the server does not return an error back to the client"
+    // condition prefers, and the hop is COMPLETE rather than failed.
+    //
+    // Checked before the sign-in form is waited for, because that wait would
+    // otherwise spend twenty seconds on a page that will never grow one and
+    // then report the suite's own "Please wait…" callback page as though AXIAM
+    // had shown it. The visit is reported for the same reason the stop-at-login
+    // branch reports it: the suite handed this URL out with a placeholder
+    // attached, and a placeholder nobody accounts for leaves the module WAITING
+    // until the runner's timeout stops it.
+    if (atSuite(new URL(page.url()))) {
+      await reportVisited(testId, url);
+      console.log(`[drive] the server answered the client directly; no sign-in was asked for`);
+      return true;
+    }
+
+    //
+    // A failure here is not always a slow paint. When AXIAM refuses an
+    // authorization request outright it answers with its own error page, which
+    // has no sign-in form at all and never will — and that page is precisely
+    // the evidence an `…ErrorPage` condition is asking for. Capturing it before
+    // rethrowing is what lets `fillPlaceholders` answer such a condition with
+    // an error page rather than with a sign-in form (see its header).
+    try {
+      await page
+        .locator('#org-slug, #username')
+        .first()
+        .waitFor({ state: 'visible', timeout: 20_000 });
+    } catch (e) {
+      remember(testId, 'error', await shot());
+      const body = await page
+        .evaluate(() => document.body.innerText.slice(0, 300))
+        .catch(() => '<unreadable>');
+      throw new Error(
+        `no sign-in form at ${page.url().split('?')[0]} — the page said: ` +
+          `${body.replace(/\s+/g, ' ')}`,
+      );
+    }
 
     // Step 1, the workspace. Genuinely conditional: `/login` jumps straight to
     // the credentials step when the URL already carries `?org=` or `?tenant=`.
@@ -446,7 +528,23 @@ async function main() {
     }
     return contexts.get(testId);
   };
-  let seen = new Set();
+  // How many of each test's published URLs have been driven.
+  //
+  // A COUNT, not a set of URL strings, and the difference is the whole of
+  // `par-attempt-reuse-request_uri`. That module presents ONE `request_uri`
+  // twice — the second time to prove it is refused — so the two URLs the suite
+  // publishes are byte-identical. A `Set` keyed by the URL therefore skipped
+  // the second silently: the browser never made the request the module exists
+  // to make, the suite waited for a visit that never came, and the only
+  // evidence the run could offer was a screenshot of the sign-in page from the
+  // FIRST visit. `/api/runner/browser/{id}` returns `urls` as an ordered,
+  // append-only list of everything handed out for that test, so "how many have
+  // I driven" is the question with an unambiguous answer.
+  //
+  // Per test rather than global for the same reason the contexts are: two
+  // tests may legitimately be given the same URL, and one must not consume the
+  // other's.
+  const driven = new Map();
   try {
     for (;;) {
       let drove = 0;
@@ -484,6 +582,7 @@ async function main() {
             contexts.delete(testId);
             shots.delete(testId);
             visitCounts.delete(testId);
+            driven.delete(testId);
             await finished.close().catch(() => {});
           }
           continue;
@@ -495,13 +594,13 @@ async function main() {
         } catch {
           continue;
         }
-        for (const url of info.urls ?? []) {
-          if (seen.has(url)) continue;
-          seen.add(url);
+        const urls = info.urls ?? [];
+        for (let i = driven.get(testId) ?? 0; i < urls.length; i += 1) {
+          driven.set(testId, i + 1);
           // Reused across every authorization this test performs, and closed
           // only when the test leaves WAITING for good — see `contextFor`.
           const context = await contextFor(testId);
-          if (await visit(context, url, testId, testName)) drove += 1;
+          if (await visit(context, urls[i], testId, testName)) drove += 1;
         }
 
         // After the URLs, not instead of them: a placeholder is only created

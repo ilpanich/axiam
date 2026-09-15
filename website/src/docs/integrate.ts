@@ -101,6 +101,9 @@ export const INTEGRATE_PAGES: DocPage[] = [
           { method: "DELETE", path: "/api/v1/account/consents/oidc-scopes", summary: "Withdraw every OIDC scope consent." },
           { method: "DELETE", path: "/api/v1/account/consents/oidc-scopes/{client_id}", summary: "Withdraw it for one client." },
           { method: "GET", path: "/api/v1/users/{user_id}/sessions", summary: "A user's sessions with their refresh-replay counters." },
+          { method: "POST", path: "/api/v1/certificates/sign-csr", summary: "Issue an end-entity certificate from a CSR you bring; no key is generated and none is returned.", },
+          { method: "POST", path: "/api/v1/auth/webauthn/setup/register/start", summary: "Enrol a passkey or security key as the first factor during forced enrolment, from the login's setup token.", public: true },
+          { method: "POST", path: "/api/v1/auth/webauthn/setup/register/finish", summary: "Complete it, and the interrupted login with it.", public: true },
         ],
       },
       {
@@ -139,7 +142,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "management", text: "Managing AXIAM from an SDK" },
       {
         type: "p",
-        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **24 namespaces** and names the **155** that make up the surface, and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
+        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **24 namespaces** and names the **160** that make up the surface, and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
       },
       {
         type: "p",

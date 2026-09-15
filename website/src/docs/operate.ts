@@ -556,7 +556,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "A leaf certificate can be signed from a CSR too, for a key AXIAM never generates and never sees. The rule is stricter than the CA case: a leaf CSR asking for `subjectAltName`, `keyUsage`, or `extendedKeyUsage` is refused outright rather than silently overwritten, because Vault's `sign-verbatim` custody path honours those three extensions when a caller-supplied CSR carries them — a silent strip would keep the certificate identical to a generated one under in-process custody and different under Vault custody, for the same CSR. The key itself must be Ed25519 or RSA with a **measured** modulus of at least 4096 bits, and the response has no private-key field at all: there is no key to return.",
+        text: "A leaf certificate can be signed from a CSR too, for a key AXIAM never generates and never sees — one born in an HSM, an offline ceremony or a device's own secure element. Possession is proved rather than assumed: the request is accepted only if its own PKCS#10 self-signature verifies, and a malformed or unsigned CSR is refused with `400`. The subject and key algorithm are read off the CSR rather than taken as separate request fields, so there is no second place for those two facts to disagree. The extension rule is stricter than the CA case: a leaf CSR asking for `subjectAltName`, `keyUsage`, or `extendedKeyUsage` is refused outright rather than silently overwritten, because Vault's `sign-verbatim` custody path honours those three extensions when a caller-supplied CSR carries them — a silent strip would keep the certificate identical to a generated one under in-process custody and different under Vault custody, for the same CSR. The key itself must be Ed25519 or RSA with a **measured** modulus of at least 4096 bits, every other requested extension is discarded, and a CSR asking to be a CA comes back a leaf. The response has no private-key field at all — it is a plain `Certificate` — because there is no key to return; do not expect the field to be present-but-null.",
       },
       {
         type: "warn",
@@ -576,7 +576,7 @@ export const OPERATE_PAGES: DocPage[] = [
           { method: "POST", path: "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr", summary: "Mint one from a CSR you supply." },
           { method: "GET", path: "/api/v1/certificates", summary: "List issued leaf certificates in the tenant." },
           { method: "POST", path: "/api/v1/certificates", summary: "Issue one. The private key is returned once." },
-          { method: "POST", path: "/api/v1/certificates/sign-csr", summary: "Sign a CSR you bring; the response carries no private key." },
+          { method: "POST", path: "/api/v1/certificates/sign-csr", summary: "Sign a CSR you bring; the response carries no private key. Permission `certificates:generate`, the same as generating one." },
           { method: "GET", path: "/api/v1/certificates/{id}", summary: "Read one." },
           { method: "POST", path: "/api/v1/certificates/{id}/revoke", summary: "Revoke it." },
         ],
@@ -1253,6 +1253,11 @@ export const OPERATE_PAGES: DocPage[] = [
             "Reactor failure policy chosen explicitly",
             "Decide fail-open versus fail-closed per hook, and monitor it",
             "Fail-closed makes a reactor outage your outage; fail-open makes it a silently unenforced control. Not choosing picks one anyway.",
+          ],
+          [
+            "Running a release that carries the current dependency set",
+            "Track the published advisories against the release you deploy",
+            "A published advisory reaches you only when you move. `1.0.0-beta14` images carry rustls 0.23.43 — RUSTSEC-2026-0285, TLS 1.3 handshake messages accepted across encryption-level boundaries, CVSS 5.3 — and `1.0.0-beta15` is the first release that does not.",
           ],
         ],
       },

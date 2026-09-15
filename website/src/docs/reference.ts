@@ -277,7 +277,7 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: `The last of those is generated rather than written. \`management-registry.json\` classifies the spec's operations into 24 namespaces and names the 155 that make up the administrative surface, deliberately excluding the protocol endpoints that have their own hand-written sections; each SDK ships a generator over it and a CI job that regenerates and diffs, so a new endpoint reaches all eleven by regeneration rather than by eleven people remembering. See [CONTRACT §27](${contractLink("27")}) and [Managing AXIAM from an SDK](#/docs/rest).`,
+        text: `The last of those is generated rather than written. \`management-registry.json\` classifies the spec's operations into 24 namespaces and names the 160 that make up the administrative surface, deliberately excluding the protocol endpoints that have their own hand-written sections; each SDK ships a generator over it and a CI job that regenerates and diffs, so a new endpoint reaches all eleven by regeneration rather than by eleven people remembering. See [CONTRACT §27](${contractLink("27")}) and [Managing AXIAM from an SDK](#/docs/rest).`,
       },
       { type: "h", id: "matrix", text: "What each SDK ships" },
       {
@@ -314,10 +314,10 @@ export const REFERENCE_PAGES: DocPage[] = [
         type: "p",
         text: "A release ships the surface it derives from the spec it vendors: tagging an SDK re-vendors the contract, the OpenAPI document and the management registry, then regenerates that SDK's §27 management surface from them and stages exactly what the generator wrote. A missing generator stops the release rather than tagging a tree the SDK's own drift-check would reject.",
       },
-      { type: "h", id: "recent", text: "What moved in contract 1.40–1.44" },
+      { type: "h", id: "recent", text: "What moved in contract 1.40–1.46" },
       {
         type: "p",
-        text: `The vendored contract is at **${CONTRACT_VERSION}**. Five amendments since 1.39, and — unlike the first three — the last two changed SDK code in all eleven repositories, each released at that SDK's \`1.0.0-beta14\`.`,
+        text: `The vendored contract is at **${CONTRACT_VERSION}**. Seven amendments since 1.39, of which three changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`, and 1.45, whose fan-out merged in all eleven repositories on 2026-09-13. 1.46 is documentation only and was re-vendored by all eleven without a code change.`,
       },
       {
         type: "table",
@@ -348,6 +348,16 @@ export const REFERENCE_PAGES: DocPage[] = [
             "1.44",
             `[§10.4](${contractLink("10.4")}) — the optional revocation-feed poller. **SHOULD**, disabled by default.`,
             "**yes**",
+          ],
+          [
+            "1.45",
+            `Three additions, none of which changes what an existing name means. \`certificates.sign_csr\` joins the [§27](${contractLink("27")}) management surface — \`POST /api/v1/certificates/sign-csr\`, taking the \`certificates\` namespace from 4 operations to 5 and the surface from 159 to 160 — and §27.5 states that an SDK **must not** reuse \`GeneratedCertificate\` for its response, since that type's key field is mandatory and would always be absent here. \`webauthn_setup_register_start\` / \`_finish\` join [§24](${contractLink("24")}) and [§25](${contractLink("25")}): the WebAuthn twin of \`mfa_setup_enroll\` / \`mfa_setup_confirm\`, enrolling a passkey or a security key as a first factor from the same setup token. And [§5.2 rule 4](${contractLink("5.2")}) documents the \`403\` \`mfa_enforced\` refusal of a self-service \`reset-mfa\` where the caller's tenant enforces MFA.`,
+            "**yes** — merged in all eleven repositories on 2026-09-13",
+          ],
+          [
+            "1.46",
+            `[§26.2 rule 3](${contractLink("26.2")}) now states **both forms** a spent-\`request_uri\` refusal can take: delivered directly as \`invalid_request\` when the request named no registered \`redirect_uri\`, or redirected to the relying party as \`error=invalid_request_uri\` with the request's own \`state\` when it did. Rule 2 is unchanged and is what keeps this additive — an SDK's authorization URL carries exactly \`client_id\` and \`request_uri\`, so the direct form is the only one it can reach. An SDK written against 1.45 is conformant against 1.46 with no edit.`,
+            "no — vendored by all eleven",
           ],
         ],
       },

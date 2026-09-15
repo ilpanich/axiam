@@ -7,42 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
-
-- An administrative MFA reset now removes a user's passkeys and security keys,
-  not only their TOTP secret (M-1, T-34). The reset previously cleared
-  `mfa_enabled` and the secret and left every registered WebAuthn credential in
-  place, so the authenticator an administrator reset the account over came back
-  as a live second factor at the next login — the forced TOTP setup turned the
-  flag on again and the credential count had never been zero. Operators who
-  reset an account because a key was lost or suspected compromised should know
-  that, before this release, the key still worked.
-
-- A user can no longer take their own account below their tenant's MFA floor
-  (M-2, T-267). `POST /users/{own id}/reset-mfa` is refused with `403` and the
-  error code `mfa_enforced` where the caller's tenant enforces MFA; an
-  administrator resets it for them. `users:admin` is unaffected, and where the
-  tenant does not enforce MFA the self-service reset still works — such a user
-  was free to run at one factor anyway. Contract §5.2 rule 4 carries the rule
-  for SDKs.
-
-- **rustls 0.23.45 for RUSTSEC-2026-0285** (T-127). The advisory — TLS 1.3
-  handshake messages accepted across encryption-level boundaries, CVSS 5.3,
-  against 0.23.43 — was published on 2026-09-14 and the lock was moved the same
-  day with `cargo update --precise`, taking `rustls-webpki`, `aws-lc-rs` and
-  `aws-lc-sys` with it; no manifest changed. Verified by re-running the OIDF
-  FAPI 2.0 mTLS plan against the rebuilt binary. The `1.0.0-beta14` release
-  artefacts carry 0.23.43; this is the first release that does not.
-
-- **A FAPI 2.0 client's `state` and `nonce` are bounded at push** (T-271).
-  `POST /oauth2/par` refuses either beyond 256 characters with
-  `invalid_request` when the client's profile is `fapi2` — six times what a
-  32-byte value needs, and below the 384- and 1000-character probes the OpenID
-  Foundation suite requires to be refused, pinned by a `const` block. A
-  `standard` client is deliberately not bounded: a cap is a breaking change
-  for a client that packs data into `state`, and there the exposure is an
-  authenticated client reflecting text into its own registered `redirect_uri`
-  under the 16 KiB form-body cap and a 60-second handle.
+## [1.0.0-beta15] - 2026-09-15
 
 ### Added
 
@@ -92,6 +57,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged, since the `webauthn` tag is not part of it.
 
 ### Changed
+
+- 2026-09-15 sweep — 165 modules, 0 FAILED, with REVIEW evidence
+
+- The early-refusal pass and the MFA/CSR wave — model 2.16.0
+
+- Bump the minor-patch group across 1 directory with 3 updates
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump the minor-patch group in /frontend with 8 updates
+
+- Rustls 0.23.45 for RUSTSEC-2026-0285
+
+- Contract 1.46 — both forms a spent-request_uri refusal takes
+
+- First-login MFA enrolment residuals, and end-entity certificates from a CSR (#447)
+
+- First-login MFA enrolment residuals and end-entity CSR issuance
+
+- Record the beta14 website pass as EXECUTED
+
+- Sweep every stamped page and move DOCS_VERIFIED_RELEASE to beta14 (waves 3-4)
+
+- Bring the Docs pages up to 1.0.0-beta14 (wave 2)
+
+- Re-derive the Security section at 1.0.0-beta14 (waves 0–1)
+
+- Close T-39 and T-143 — every SDK polls the revocation feed; model 2.14.0
 
 - **A `request_uri` that is already dead is refused before anyone is asked to
   sign in for it.** `/oauth2/authorize` could not read a pushed request while
@@ -166,6 +159,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `claude_dev/threat-modeling-and-security.md` gains the 2.15.0 and 2.16.0
   handoff paragraphs and `claude_dev/website-security-beta15-update-plan.md`
   is the website's entry point.
+
+### Fixed
+
+- Pin the rig's ns/db and read the minted datastore credentials
+
+- The harness must not hand a reviewer the wrong evidence
+
+- Refuse a dead request_uri before the login hop, and report it to the client
+
+- Refuse an unusable authorization request before the login hop
+
+- A contended write answers 503 with Retry-After, not 500
+
+- Do not put an exempt config key on the docs site
+
+### Security
+
+- An administrative MFA reset now removes a user's passkeys and security keys,
+  not only their TOTP secret (M-1, T-34). The reset previously cleared
+  `mfa_enabled` and the secret and left every registered WebAuthn credential in
+  place, so the authenticator an administrator reset the account over came back
+  as a live second factor at the next login — the forced TOTP setup turned the
+  flag on again and the credential count had never been zero. Operators who
+  reset an account because a key was lost or suspected compromised should know
+  that, before this release, the key still worked.
+
+- A user can no longer take their own account below their tenant's MFA floor
+  (M-2, T-267). `POST /users/{own id}/reset-mfa` is refused with `403` and the
+  error code `mfa_enforced` where the caller's tenant enforces MFA; an
+  administrator resets it for them. `users:admin` is unaffected, and where the
+  tenant does not enforce MFA the self-service reset still works — such a user
+  was free to run at one factor anyway. Contract §5.2 rule 4 carries the rule
+  for SDKs.
+
+- **rustls 0.23.45 for RUSTSEC-2026-0285** (T-127). The advisory — TLS 1.3
+  handshake messages accepted across encryption-level boundaries, CVSS 5.3,
+  against 0.23.43 — was published on 2026-09-14 and the lock was moved the same
+  day with `cargo update --precise`, taking `rustls-webpki`, `aws-lc-rs` and
+  `aws-lc-sys` with it; no manifest changed. Verified by re-running the OIDF
+  FAPI 2.0 mTLS plan against the rebuilt binary. The `1.0.0-beta14` release
+  artefacts carry 0.23.43; this is the first release that does not.
+
+- **A FAPI 2.0 client's `state` and `nonce` are bounded at push** (T-271).
+  `POST /oauth2/par` refuses either beyond 256 characters with
+  `invalid_request` when the client's profile is `fapi2` — six times what a
+  32-byte value needs, and below the 384- and 1000-character probes the OpenID
+  Foundation suite requires to be refused, pinned by a `const` block. A
+  `standard` client is deliberately not bounded: a cap is a breaking change
+  for a client that packs data into `state`, and there the exposure is an
+  authenticated client reflecting text into its own registered `redirect_uri`
+  under the 16 KiB form-body cap and a 60-second handle.
 
 ## [1.0.0-beta14] - 2026-09-13
 

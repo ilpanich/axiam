@@ -81,6 +81,88 @@ export AXIAM__AUTH__MFA_ENCRYPTION_KEY AXIAM__FEDERATION_ENCRYPTION_KEY AXIAM__E
 export AXIAM__AMQP__URL="${AXIAM__AMQP__URL:-amqps://axiam:axiam@localhost:5671}"
 export AXIAM__AMQP__TLS__CA_CERT_PATH="${AXIAM__AMQP__TLS__CA_CERT_PATH:-$SECRETS_DIR/broker-tls/ca.pem}"
 
+# --- the datastore this rig lives in --------------------------------------
+# None of this used to be here, and the rig worked anyway — because the four
+# variables below happened to be exported in the operator's interactive shell.
+# That is not a reproducible rig: a fresh shell ran the server against
+# `DbConfig::default()` (ns=axiam, db=main, root/root, see
+# crates/axiam-db/src/connection.rs) and the server panicked at startup with
+# `Failed to connect to SurrealDB: NotAllowed(Auth(InvalidAuth))`, which names
+# neither the database it wanted nor the credential it used.
+#
+# The conformance fixtures — the organization, the `organization` tenant whose
+# id suite.local.env pins, conformance-user and the registered clients — live in
+# db=conformance, NOT in the default db=main. Pinning them here is what makes
+# `git clone && just conformance-*` reproduce the rig.
+export AXIAM__DB__NAMESPACE="${AXIAM__DB__NAMESPACE:-axiam}"
+export AXIAM__DB__DATABASE="${AXIAM__DB__DATABASE:-conformance}"
+
+# SurrealDB binds its root credentials into the datastore AT FIRST BOOT and
+# ignores `--user`/`--pass` on every later start. So once `just prod-up` has
+# minted credentials against the shared docker_surrealdb-data volume, the
+# `--user root --pass root` in docker/docker-compose.dev.yml is dead letter and
+# the minted pair in stack-credentials.env is the only one that authenticates —
+# for the dev stack and for this script alike. Read it when the caller has not
+# already chosen a credential, so an explicit AXIAM__DB__USERNAME still wins.
+STACK_CREDS="$SECRETS_DIR/stack-credentials.env"
+STACK_CREDS_USED=0
+if [ -z "${AXIAM__DB__USERNAME:-}" ] && [ -f "$STACK_CREDS" ]; then
+  echo "[serve] reading datastore credentials from docker/.secrets/stack-credentials.env"
+  set -a
+  # shellcheck disable=SC1090
+  . "$STACK_CREDS"
+  set +a
+  STACK_CREDS_USED=1
+fi
+export AXIAM__DB__USERNAME="${AXIAM__DB__USERNAME:-root}"
+export AXIAM__DB__PASSWORD="${AXIAM__DB__PASSWORD:-root}"
+export AXIAM__DB__URL="${AXIAM__DB__URL:-127.0.0.1:8000}"
+
+# Fail here, naming what is wrong, rather than in a panic twenty lines of
+# backtrace later. Two distinct failures are worth separating: the datastore is
+# not listening at all, and it is listening but rejecting this credential.
+#
+# NOTE SurrealDB answers HTTP 200 with a per-statement `"status":"ERR"` body for
+# a SQL-level error, so `curl -f` alone cannot tell "authenticated" from
+# "authenticated but the database does not exist". Authentication is the only
+# thing checked here, via the HTTP status, which IS 401 on a bad credential.
+# `x=$(curl ...) || x=000` rather than `$(curl ... || echo 000)`: on a connection
+# failure curl BOTH writes its `000` to stdout and exits non-zero, so the inline
+# `|| echo` form concatenates the two into `000000` and no case arm matches it.
+db_probe_status=$(
+  curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    -u "$AXIAM__DB__USERNAME:$AXIAM__DB__PASSWORD" \
+    -H 'Accept: application/json' \
+    -H "surreal-ns: $AXIAM__DB__NAMESPACE" -H "surreal-db: $AXIAM__DB__DATABASE" \
+    --data 'INFO FOR DB;' "http://$AXIAM__DB__URL/sql" 2>/dev/null
+) || db_probe_status=000
+[ -n "$db_probe_status" ] || db_probe_status=000
+case "$db_probe_status" in
+  200) : ;;  # reachable and the credential is accepted
+  000)
+    echo "[serve] no SurrealDB answering at http://$AXIAM__DB__URL" >&2
+    echo "[serve] start it: just dev-up   (it publishes 8000; the bench stack also claims that port, so run 'just target=axiam bench-down' first if a benchmark has been running)" >&2
+    exit 1 ;;
+  401|403)
+    echo "[serve] SurrealDB at $AXIAM__DB__URL REFUSED the credential '$AXIAM__DB__USERNAME' (HTTP $db_probe_status)." >&2
+    echo "[serve] SurrealDB binds root credentials into the datastore at FIRST BOOT and ignores --user/--pass afterwards," >&2
+    echo "[serve] so docker-compose.dev.yml's root/root does NOT apply to a volume that 'just prod-up' has already minted against." >&2
+    if [ "$STACK_CREDS_USED" = 1 ]; then
+      echo "[serve] this was the pair from $STACK_CREDS — if that file is stale, the datastore predates it." >&2
+    elif [ -f "$STACK_CREDS" ]; then
+      echo "[serve] AXIAM__DB__USERNAME was already set, so $STACK_CREDS was NOT read — unset it to use the minted pair." >&2
+    else
+      echo "[serve] no $STACK_CREDS on disk; if this volume was minted by 'just prod-up', that file is where its credentials belong." >&2
+    fi
+    echo "[serve] override explicitly: AXIAM__DB__USERNAME=... AXIAM__DB__PASSWORD=... $0" >&2
+    echo "[serve] or start from an empty datastore: just dev-down && docker volume rm docker_surrealdb-data && just dev-up" >&2
+    exit 1 ;;
+  *)
+    echo "[serve] SurrealDB at $AXIAM__DB__URL answered HTTP $db_probe_status to a probe query — expected 200." >&2
+    exit 1 ;;
+esac
+echo "[serve] datastore  $AXIAM__DB__URL ns=$AXIAM__DB__NAMESPACE db=$AXIAM__DB__DATABASE as '$AXIAM__DB__USERNAME'"
+
 # --- what makes this a conformance target ---------------------------------
 export AXIAM__SERVER__HOST="${AXIAM__SERVER__HOST:-0.0.0.0}"
 # The BACK channel's port, not the issuer's. AXIAM_TLS_PORT belongs to the

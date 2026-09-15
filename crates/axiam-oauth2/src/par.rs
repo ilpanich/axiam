@@ -31,7 +31,7 @@
 //!    whatever check reads the other copy.
 
 use axiam_core::error::AxiamError;
-use axiam_core::models::oauth2_client::{CreatePushedAuthRequest, PushedAuthParams};
+use axiam_core::models::oauth2_client::{ClientProfile, CreatePushedAuthRequest, PushedAuthParams};
 use axiam_core::repository::{OAuth2ClientRepository, PushedAuthRequestRepository};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -53,6 +53,20 @@ pub const REQUEST_URI_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
 /// or worse, and a tunable that only trends longer is a tunable that only
 /// widens a replay window.
 pub const REQUEST_URI_LIFETIME_SECS: i64 = 60;
+
+/// The longest `state` or `nonce` a **fapi2** client may push.
+///
+/// 256 characters, which is six times what a 32-byte random value needs once
+/// base64url-encoded (43) and comfortably above anything that carries entropy
+/// rather than payload. It is not a guess at what clients send: the OpenID
+/// Foundation's FAPI 2.0 suite probes this boundary directly with a
+/// 1000-character `state` and a 384-character `nonce`, and requires both to be
+/// refused, so any cap that admits either is not conformant.
+///
+/// Characters, not bytes — [`str::len`] would make the limit depend on how
+/// many non-ASCII code points the value happens to contain, and the value is
+/// opaque, so the count the client can reason about is the one to bound.
+pub const MAX_FAPI_OPAQUE_PARAM_CHARS: usize = 256;
 
 /// Generate a `request_uri`: 256 bits of CSPRNG behind the RFC's URN prefix.
 pub fn generate_request_uri() -> String {
@@ -171,6 +185,47 @@ where
 
         if req.response_type != "code" {
             return Err(OAuth2Error::UnsupportedResponseType);
+        }
+
+        // `state` and `nonce` are bounded, on the FAPI 2.0 profile only.
+        //
+        // Both are opaque values the client chooses and the server only ever
+        // echoes, so a client has no legitimate need for a long one: 32 bytes
+        // of entropy is 43 characters base64url, and the cap below is six
+        // times that. What an unbounded value buys instead is a way to push
+        // kilobytes of attacker-chosen text through the authorization request
+        // and back out of the `redirect_uri` — stored in the datastore in the
+        // meantime, and reflected into whatever the client does with `state`.
+        //
+        // Gated on [`ClientProfile::Fapi2`] deliberately, and not applied to
+        // `Standard`. A cap is a breaking change for any client that packs
+        // data into `state` — a bad practice, but a widespread one, and one a
+        // deployment upgrading AXIAM has not agreed to. The FAPI profile is
+        // the place where a client HAS agreed to the stricter bundle, and the
+        // OpenID Foundation's own conformance suite requires the refusal
+        // (`ensure-authorization-request-with-long-state` pushes 1000
+        // characters, `-with-long-nonce` pushes 384, and both expect
+        // `invalid_request`).
+        //
+        // Checked here rather than at `/oauth2/authorize` for the same reason
+        // the `redirect_uri` above is: the client is authenticated *now*, so
+        // the refusal is attributable and reaches the client as a protocol
+        // error — instead of surfacing in a browser after a sign-in the user
+        // should never have been asked for.
+        if client.profile == ClientProfile::Fapi2 {
+            for (name, value) in [
+                ("state", req.state.as_deref()),
+                ("nonce", req.nonce.as_deref()),
+            ] {
+                if let Some(v) = value
+                    && v.chars().count() > MAX_FAPI_OPAQUE_PARAM_CHARS
+                {
+                    return Err(OAuth2Error::InvalidRequest(format!(
+                        "{name} exceeds the {MAX_FAPI_OPAQUE_PARAM_CHARS}-character limit this \
+                         client's fapi2 profile imposes"
+                    )));
+                }
+            }
         }
 
         // RFC 9126 §2.1: `request_uri` is not a parameter a client may push.
@@ -611,6 +666,22 @@ mod tests {
         let h = hash_request_uri(&uri);
         assert!(!uri.contains(&h));
         assert_eq!(h.len(), 64, "hex-encoded SHA-256");
+    }
+
+    #[test]
+    fn the_fapi_opaque_cap_admits_entropy_and_refuses_the_suite_probes() {
+        // The boundary is not a taste question, so it is asserted rather than
+        // commented. Below: what a conformant client actually sends — 32 bytes
+        // base64url is 43 characters, and doubling the entropy is still 86.
+        // Above: the two values the OpenID Foundation's FAPI 2.0 suite pushes
+        // and requires to be refused. A future edit that "relaxes" the cap
+        // past either of them breaks certification, and this fails to compile
+        // rather than waiting for a 56-module plan to say so.
+        const {
+            assert!(MAX_FAPI_OPAQUE_PARAM_CHARS >= 86);
+            assert!(MAX_FAPI_OPAQUE_PARAM_CHARS < 384); // -with-long-nonce
+            assert!(MAX_FAPI_OPAQUE_PARAM_CHARS < 1000); // -with-long-state
+        }
     }
 
     #[test]

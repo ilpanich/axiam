@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.14.0",
+ "version": "2.16.0",
  "diagramCount": 9,
- "total": 266,
+ "total": 271,
  "open": 13,
- "mitigated": 253,
+ "mitigated": 258,
  "areas": [
   {
    "id": 0,
@@ -68,13 +68,13 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 1,
    "title": "Authentication & session management",
-   "total": 33,
+   "total": 35,
    "open": 0
   },
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 47,
+   "total": 49,
    "open": 0
   },
   {
@@ -92,7 +92,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "total": 25,
+   "total": 26,
    "open": 1
   },
   {
@@ -122,7 +122,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Tampering",
-   "total": 57,
+   "total": 59,
    "open": 1
   },
   {
@@ -142,7 +142,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Elevation of privilege",
-   "total": 48,
+   "total": 51,
    "open": 1
   }
  ],
@@ -154,7 +154,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 122,
+   "total": 126,
    "open": 8
   },
   {
@@ -164,7 +164,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Low",
-   "total": 8,
+   "total": 9,
    "open": 1
   }
  ],

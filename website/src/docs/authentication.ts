@@ -631,7 +631,7 @@ elif result.mfa_setup_required:
           { method: "POST", path: "/api/v1/auth/mfa/verify", summary: "Answer an MFA challenge during login.", public: true },
           { method: "GET", path: "/api/v1/users/{user_id}/mfa-methods", summary: "List a user's enrolled factors." },
           { method: "DELETE", path: "/api/v1/users/{user_id}/mfa-methods/{method_id}", summary: "Remove one factor." },
-          { method: "POST", path: "/api/v1/users/{user_id}/reset-mfa", summary: "Administratively clear every factor on an account." },
+          { method: "POST", path: "/api/v1/users/{user_id}/reset-mfa", summary: "Clear every factor on an account — the WebAuthn credentials as well as the TOTP secret. Refused with `mfa_enforced` when a user resets their **own** account under a tenant that enforces MFA." },
         ],
       },
       { type: "h", id: "stepup", text: "The step-up in a login" },
@@ -647,6 +647,23 @@ elif result.mfa_setup_required:
       {
         type: "warn",
         text: "Enforce MFA on administrative accounts before anything else. A super-admin holds every permission in the tenant, including the ones that would let an attacker remove the audit evidence of what they did with it.",
+      },
+      { type: "h", id: "reset", text: "Resetting a user's factors" },
+      {
+        type: "p",
+        text: "`POST /api/v1/users/{user_id}/reset-mfa` clears **every** factor on the account — the registered WebAuthn credentials as well as the TOTP secret — in the same call that clears `mfa_enabled` and revokes the user's sessions. The next login runs the forced-enrolment branch above.",
+      },
+      {
+        type: "warn",
+        text: "**If you reset an account before `1.0.0-beta15` because a key was lost or suspected compromised, the key still worked.** The reset cleared `mfa_enabled` and the TOTP secret and left every registered WebAuthn credential in place, so the forced TOTP setup turned the flag back on and the authenticator the account was reset over came back as a live second factor. Re-check any account you reset for that reason, and remove the credential explicitly if it is still listed.",
+      },
+      {
+        type: "p",
+        text: "A user can reset their own account, but not below their tenant's MFA floor: where the caller's own tenant enforces MFA, `POST /users/{own id}/reset-mfa` is refused with `403` and the error code `mfa_enforced`, and an administrator resets it for them. The administrative form of the same endpoint, under `users:admin`, is unaffected, and where the tenant does not enforce MFA the self-service reset still works — such a user was free to run at one factor anyway.",
+      },
+      {
+        type: "note",
+        text: "Contract §5.2 rule 4 carries the rule for SDKs, and is explicit about how to surface it: `mfa_enforced` is not an `authorization_denied` — the caller holds every permission the call needs — and a client that renders it as \"forbidden\" tells the user the wrong thing about their own account.",
       },
       {
         type: "note",
@@ -673,7 +690,7 @@ elif result.mfa_setup_required:
         type: "p",
         text: "A one-time code cannot make that promise. It can be typed into a fake page and forwarded to the real one inside its thirty-second window, which is precisely how modern credential-phishing kits work.",
       },
-      { type: "h", id: "endpoints", text: "Six endpoints, three ceremonies" },
+      { type: "h", id: "endpoints", text: "Eight endpoints, four ceremonies" },
       {
         type: "api",
         endpoints: [
@@ -683,7 +700,13 @@ elif result.mfa_setup_required:
           { method: "POST", path: "/api/v1/auth/webauthn/authenticate/finish", summary: "Submit the assertion; the session is established.", public: true },
           { method: "POST", path: "/api/v1/auth/webauthn/authenticate/discoverable/start", summary: "Request options for a usernameless sign-in — no prior step.", public: true },
           { method: "POST", path: "/api/v1/auth/webauthn/authenticate/discoverable/finish", summary: "Submit the assertion; the assertion itself identifies the user.", public: true },
+          { method: "POST", path: "/api/v1/auth/webauthn/setup/register/start", summary: "Creation options during forced first-login enrolment, authenticated by the login's setup token.", public: true },
+          { method: "POST", path: "/api/v1/auth/webauthn/setup/register/finish", summary: "Submit the attestation; the credential is stored and the interrupted login completes.", public: true },
         ],
+      },
+      {
+        type: "note",
+        text: "**A passkey or a security key can be the account's first factor.** `webauthn/setup/register/start` and `/finish` run the same registration ceremony as the profile-page pair, from the `setup_token` a login refused with `mfa_setup_required` handed back, and under the same attestation and user-verification policies the tenant already applies — the ceremony does not change, only what authenticates the caller. `finish` answers the normal login success, exactly as `mfa/setup/confirm` does. Both routes are public and CSRF-exempt because there is no session to protect yet: the setup token is the credential. And a setup token adds an account's **first** factor and never a second — an account that already has one is refused, as it is on the TOTP path. See [Multi-factor authentication](#/docs/mfa#forced).",
       },
       {
         type: "warn",

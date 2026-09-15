@@ -491,6 +491,76 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "first-factors-csrs-and-refusing-earlier",
+    date: "September 15, 2026",
+    dateShort: "Sep 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "First factors, certificates for keys we never see, and refusing earlier",
+    excerpt:
+      "`1.0.0-beta15` closes the first-login MFA residuals, issues end-entity certificates from a CSR, and stops sending people through a sign-in for an authorization request that was dead before they started.",
+    body: [
+      {
+        type: "p",
+        text: "Two waves landed after `1.0.0-beta14` and ship together in `1.0.0-beta15`. The first is the first-login enrolment residuals and end-entity certificates from a CSR; the second is the authorization endpoint learning to refuse a request that cannot succeed **before** anyone is asked to sign in for it. Both are in the threat model, which is now at **271 threats, 258 mitigated and 13 open** — the open register neither gains nor loses an item.",
+      },
+      { type: "h", text: "A reset that actually resets" },
+      {
+        type: "p",
+        text: "An administrative MFA reset cleared `mfa_enabled` and the TOTP secret and left every registered WebAuthn credential in place. The forced TOTP setup then turned the flag back on, the credential count had never been zero, and the authenticator an account was reset *because of* came back as a live second factor at the next login ([T-34](#/security/diagram/1/T-34)). A reset now evicts every factor, the credentials as well as the secret, in the same call that revokes the sessions.",
+      },
+      {
+        type: "p",
+        text: "**If you reset an account before this release because a key was lost or suspected compromised, the key still worked.** That is the operational consequence and it is worth acting on: re-check the accounts you reset for that reason, and remove the credential explicitly if it is still listed.",
+      },
+      {
+        type: "p",
+        text: "A second residual on the same path: a user could take their own account below their tenant\u2019s MFA floor by resetting it themselves. `POST /users/{own id}/reset-mfa` is now refused with `403` and the error code `mfa_enforced` where the caller\u2019s tenant enforces MFA, and an administrator does it for them ([T-267](#/security/diagram/1/T-267)). The administrative form under `users:admin` is unaffected, and where the tenant does not enforce MFA the self-service reset still works \u2014 such a user was free to run at one factor anyway.",
+      },
+      { type: "h", text: "A passkey as the first factor" },
+      {
+        type: "p",
+        text: "Forced first-login enrolment offered TOTP and nothing else, so a tenant whose authenticator policy is built around security keys still had to hand every new user a TOTP app to get in. `POST /api/v1/auth/webauthn/setup/register/start` and `/finish` now run the same WebAuthn registration ceremony from the same setup token, under the same attestation and user-verification policies as the profile page\u2019s, and `finish` completes the interrupted login exactly as the TOTP confirmation does ([T-269](#/security/diagram/1/T-269)). A setup token still adds an account\u2019s **first** factor and never a second, on both paths. A new user who arrived through a relying party\u2019s `/oauth2/authorize` hop now also lands back at that relying party rather than in the admin dashboard.",
+      },
+      { type: "h", text: "A certificate for a key we never see" },
+      {
+        type: "p",
+        text: "`POST /api/v1/certificates/sign-csr` issues an end-entity certificate from an uploaded PKCS#10 request, so a key can be born in an HSM, an offline ceremony or a device\u2019s own secure element and never cross the wire in either direction ([T-268](#/security/diagram/5/T-268)). What AXIAM decides rather than the request: possession is proved by the request\u2019s own signature; the key must be Ed25519 or RSA with a **measured** modulus of at least 4096 bits, read off the SPKI rather than taken from a label; a CSR asking for `subjectAltName`, `keyUsage` or `extendedKeyUsage` is refused by name rather than silently stripped, because Vault\u2019s `sign-verbatim` would otherwise honour exactly those three and a silent strip would hold on one custodian and not the other; every other requested extension is discarded; and a CSR asking to be a CA comes back a leaf. The response is a plain `Certificate` with no key field, because there is no key to carry.",
+      },
+      { type: "h", text: "Refusing before the sign-in page" },
+      {
+        type: "p",
+        text: "`/oauth2/authorize` could not look at a pushed request while answering an anonymous browser: a `request_uri` is single-use and is spent in the handler, once there is a principal to spend it for. So a browser presenting a handle that had already been used, had expired, or had been issued to a different client was sent to `/login`, the person typed a password, and the request was refused on the way back. The endpoint now reads the handle first, by a read that spends nothing ([T-270](#/security/diagram/2/T-270)). It is a **read**: a handle that is merely unfinished still reaches the sign-in page, so the same `request_uri` may still be presented twice before the first authorization completes, and the single-use decision stays exactly where it was.",
+      },
+      {
+        type: "p",
+        text: "The refusal now reaches the relying party when it can act on it: `error=invalid_request_uri` with the request\u2019s own `state`, on a `redirect_uri` that client registered and compared exactly (RFC 6749 \u00a74.1.2.1, OIDC Core \u00a73.1.2.6). Anything else is answered in place, and a handle issued to a *different* client keeps `invalid_request` \u2014 a different failure that stays distinguishable. A missing or unsupported `response_type` is decided the same way and before the same hop, and only when no `request_uri` is present, because with PAR the pushed value is the authoritative one. Contract **1.46** records both forms in \u00a726.2 rule 3; it is documentation only, and all eleven SDKs have re-vendored it. A conformant SDK\u2019s authorization URL carries no `redirect_uri`, so the redirected form is out of its reach by construction.",
+      },
+      {
+        type: "p",
+        text: "On the FAPI 2.0 profile a pushed `state` or `nonce` is now bounded at 256 characters, with `invalid_request` beyond it \u2014 six times what a 32-byte value needs, and below the 384- and 1000-character probes the OpenID Foundation suite requires to be refused, pinned by a `const` block ([T-271](#/security/diagram/2/T-271)). The `standard` profile is deliberately left alone: an opaque value carries no meaning past its entropy, but a cap is a breaking change for a client that packs data into `state`, and there the exposure is an authenticated client reflecting text into its own registered redirect under a 16 KiB body cap and a 60-second handle. That residual is stated rather than argued away.",
+      },
+      {
+        type: "p",
+        text: "Eight OpenID Foundation modules moved from `REVIEW` to `PASSED` **when run individually** \u2014 the three FAPI PAR `request_uri` refusals, `oidcc-response-type-missing`, and the four long or mismatched `state` / `nonce` probes. That is a per-module measurement and not a sweep: no plan was re-run as a plan, and the published receipts remain the 2026-09-11 full runs \u2014 165 modules, zero `FAILED`, a self-run against a working-tree build and not a certification.",
+      },
+      { type: "h", text: "Two corrections" },
+      {
+        type: "p",
+        text: "Both are recorded rather than absorbed. The first: the `503` with `Retry-After: 1` that a contended write answers with, shipped on 2026-09-12, was rendered by REST and gRPC but not by `axiam-scim`\u2019s own error type, which fell through its 5xx catch-all as `500` for a day \u2014 on the one surface the defect had been found on. It has carried the `503` since 2026-09-13, with a test over the wire ([T-262](#/security/diagram/0/T-262)).",
+      },
+      {
+        type: "p",
+        text: "The second is a dependency. RUSTSEC-2026-0285 \u2014 rustls 0.23.43 accepting TLS 1.3 handshake messages across encryption-level boundaries, CVSS 5.3 \u2014 was published on 2026-09-14, the scan went red the same day, and the lock moved to 0.23.45, verified by re-running the FAPI 2.0 mTLS conformance plan against the rebuilt binary ([T-127](#/security/diagram/7/T-127)). **The `1.0.0-beta14` release artefacts carry the vulnerable version**; this is the first release that does not. If you are running beta14 images, that is the reason to move.",
+      },
+      { type: "h", text: "The caution, unchanged" },
+      {
+        type: "p",
+        text: "AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit. Do not put it in front of production identity traffic yet.",
+      },
+    ],
+  },
+  {
     slug: "basic-op-and-the-residual-pass",
     date: "September 13, 2026",
     dateShort: "Sep 2026",
@@ -913,7 +983,7 @@ export const PHASES: Phase[] = [
     n: 20,
     title: "Beta line — stabilisation toward 1.0",
     focus:
-      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories",
+      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories, the first-login enrolment residuals and end-entity certificates from a CSR, and the authorization endpoint refusing a request that cannot succeed before anyone signs in for it",
     start: "Aug 26, 2026",
     end: "Ongoing",
     status: "ongoing",

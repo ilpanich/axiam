@@ -16,6 +16,10 @@ self-test, per-provider sender-domain requirements),
 [The browser login hop](browser-login-hop.md) (`browser_sso`: letting a
 third-party relying party's redirect reach a sign-in page, the
 `SameSite=Lax` OP cookie and what it costs, the 60-second PAR window),
+[Public clients and loopback redirects](public-clients.md)
+(`token_endpoint_auth_method: "none"`: when to register a client that holds no
+secret, what such a registration is refused, the RFC 8252 §7.3 ephemeral-port
+rule and why `localhost` and `127.0.0.1` are not interchangeable),
 [Standard-lane OIDC parameters](oidc-authn-parameters.md)
 (`authn_request_params`: making `prompt`, `max_age`, `acr_values` and
 `id_token_hint` mean what they say, the two ACR values, why `max_age=0`

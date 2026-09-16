@@ -438,7 +438,8 @@ pub fn authenticate_mtls_client(
         // "not authenticated", never "authenticated by default".
         ClientAuthMethod::ClientSecretPost
         | ClientAuthMethod::ClientSecretBasic
-        | ClientAuthMethod::PrivateKeyJwt => false,
+        | ClientAuthMethod::PrivateKeyJwt
+        | ClientAuthMethod::None => false,
     };
 
     if !matched {

@@ -307,8 +307,24 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         let tenant_id_str = input.tenant_id.to_string();
 
         let client_id = generate_client_id();
-        let raw_secret = generate_client_secret();
-        let secret_hash = client_secret::global()?.hash(&raw_secret);
+        // T21.2 — a public client is created with no secret at all.
+        //
+        // Not "a secret nobody tells the operator about": none. Minting one
+        // unconditionally is what SEC-093 found had given every `tls_client_auth`
+        // client a live password-equivalent credential its registration said it
+        // did not use, and a public client is the sharper case — its whole
+        // registration is the statement that it cannot keep one. An empty
+        // `client_secret_hash` is therefore the truth about the row rather than
+        // a placeholder, and the token endpoint never consults it: the public
+        // arm of `authenticate_client_credential` returns before any hash is
+        // read, so no comparison against the empty string can ever be reached.
+        let (raw_secret, secret_hash) = if input.token_endpoint_auth_method.is_public() {
+            (String::new(), String::new())
+        } else {
+            let raw = generate_client_secret();
+            let hash = client_secret::global()?.hash(&raw);
+            (raw, hash)
+        };
 
         let result = self
             .db

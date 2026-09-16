@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Public clients (`token_endpoint_auth_method: "none"`).** An OAuth2 client
+  can be registered with no credential at all (RFC 6749 §2.1) and completes the
+  authorization-code flow with PKCE instead — the shape a desktop or CLI
+  application (Claude Code, VS Code, the MCP Inspector), a single-page
+  application or a mobile app actually has. The registration mints no secret
+  and the creation response carries no `client_secret` member. Enabled per
+  client by that one field; a deployment that registers none is unaffected.
+  Public clients are refused the `client_credentials`, token-exchange and
+  uma-ticket grants, the `fapi2` profile, any mTLS or `private_key_jwt`
+  binding, and token introspection; a client registered for a credential that
+  omits it is still `invalid_client`, and the method cannot be changed across
+  the public/confidential line by an update. See
+  [`docs/admin/public-clients.md`](docs/admin/public-clients.md) (T21.2).
+
+- **Loopback redirect URIs accept any port (RFC 8252 §7.3).** A registered
+  redirect URI whose scheme is `http` and whose host is `127.0.0.1`, `[::1]` or
+  `localhost` now matches a request that presents a different port, so a
+  desktop client can listen on the ephemeral port its operating system hands
+  it. Scheme, host, path, query and fragment must still match exactly;
+  `localhost` and `127.0.0.1` remain distinct hosts; every `https` redirect URI
+  keeps byte-for-byte matching; and the token request's `redirect_uri` is still
+  compared exactly against the one the code was issued to (T21.2).
+
+- `none` is advertised last in `token_endpoint_auth_methods_supported` at
+  `/.well-known/openid-configuration` — a capability statement about the
+  deployment, not per-client posture (T21.2).
+
 ## [1.0.0-beta15] - 2026-09-15
 
 ### Added

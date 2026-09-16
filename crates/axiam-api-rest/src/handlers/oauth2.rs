@@ -1705,6 +1705,55 @@ async fn token_inner<C: Connection + Clone>(
         Err(response) => return *response,
     };
 
+    // T21.2 — the public-client bucket.
+    //
+    // Every request to this endpoint already passes the endpoint's own
+    // rate limit, keyed by `AXIAM__RATE_LIMIT__KEY` (`ip` by default,
+    // `client_id` or `ip_client_id` on a NAT'd fleet — see
+    // `config::rate_limit`). This is a second, narrower bucket for the one
+    // request shape T21.2 makes reachable: a token request carrying **no
+    // client credential at all**.
+    //
+    // Keyed on `client_id` AND the transport peer address, never on either
+    // alone. `client_id` alone would be a bucket an unauthenticated caller
+    // mints by rotating a value they choose (`KeyMintability::Full`); the peer
+    // address alone would put every public client behind one NAT gateway —
+    // every developer in an office, every desktop client on one residential
+    // connection — into a single allowance. The pair is what the
+    // `ip_client_id` mode was added for, applied here unconditionally because
+    // for a credential-less request it is the only defensible key.
+    //
+    // Decidable from the request alone, so it costs no lookup and creates no
+    // client-existence oracle: it applies equally to a real public client, an
+    // unknown `client_id`, and a confidential client whose caller forgot the
+    // secret. All three were refused `invalid_client` before T21.2 and two of
+    // them still are — the only thing that changes for them is that a caller
+    // hammering the endpoint with no credential now gets `slow_down` first.
+    // `token_per_min` is the limit, deliberately reusing the endpoint's own
+    // number rather than adding a knob: a public client's token request is a
+    // token request, and an operator who has retuned one has retuned both.
+    if ctx.carries_no_client_credential(form.client_secret.as_deref()) {
+        let bucket = format!(
+            "oauth2_token_public:{}:{}:{}",
+            tenant_id,
+            form.client_id.as_deref().unwrap_or("-"),
+            peer_ip(&req).unwrap_or_else(|| "-".into()),
+        );
+        if !state.shared_rate_limit.check_at(
+            &bucket,
+            chrono::Utc::now(),
+            state.rate_limit_cfg.token_per_min,
+        ) {
+            return HttpResponse::TooManyRequests()
+                .append_header(("Cache-Control", "no-store"))
+                .json(OAuth2ErrorResponse {
+                    error: "slow_down".into(),
+                    error_description: "token rate limit exceeded for this client and address"
+                        .into(),
+                });
+        }
+    }
+
     // B3 / RFC 8693. Like the device grant, its own service behind one match
     // arm. Unlike the device grant, the exchanging client DOES authenticate —
     // it is a confidential service, not a television, and an exchange is
@@ -3540,6 +3589,20 @@ async fn handle_uma_ticket<C: Connection + Clone>(
         Err(e) => return build_oauth2_error_response(&e),
     };
 
+    // T21.2 — a public client may not obtain an RPT. The uma-ticket grant
+    // mints a token naming a requesting party on the strength of the calling
+    // client's identity, and a public client's identity is a `client_id`
+    // anybody who has seen one of its authorization requests knows. The admin
+    // API cannot refuse this combination at registration — `uma-ticket` is not
+    // a registrable grant type — so the refusal has to be here.
+    if client.token_endpoint_auth_method.is_public() {
+        return build_oauth2_error_response(&OAuth2Error::UnauthorizedClient(
+            "a public client (token_endpoint_auth_method: none) cannot use the uma-ticket \
+             grant: it presents no credential, and an RPT must be attributable"
+                .into(),
+        ));
+    }
+
     // Counted after authentication, keyed by the authenticated client — the
     // same reasoning as the token-exchange bucket: an unauthenticated caller
     // must not be able to consume a real client's allowance, and per-IP would
@@ -3772,6 +3835,18 @@ async fn handle_token_exchange<C: Connection + Clone>(
         Ok(client) => client,
         Err(e) => return build_oauth2_error_response(&e),
     };
+
+    // T21.2 — and a public client may not exchange. The admin API refuses the
+    // grant at registration; this is the request-time half, so a row that
+    // acquired the combination another way is refused here too rather than
+    // minting a token for an audience on the strength of a `client_id`.
+    if client.token_endpoint_auth_method.is_public() {
+        return build_oauth2_error_response(&OAuth2Error::UnauthorizedClient(
+            "a public client (token_endpoint_auth_method: none) cannot use the token-exchange \
+             grant: it presents no credential, and an exchange must be attributable"
+                .into(),
+        ));
+    }
 
     // B3: the exchange's own bucket, applied here rather than as route
     // middleware because `/oauth2/token` serves every grant and actix

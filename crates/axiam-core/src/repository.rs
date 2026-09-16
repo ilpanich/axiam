@@ -1224,6 +1224,14 @@ pub trait AuditLogRepository: Send + Sync {
 // ---------------------------------------------------------------------------
 
 pub trait OAuth2ClientRepository: Send + Sync {
+    /// Create a client, returning it and the **plaintext secret** the caller
+    /// must show the operator once and never again.
+    ///
+    /// T21.2: that string is **empty** for a client registered with
+    /// `token_endpoint_auth_method: none`, because a public client is created
+    /// with no secret at all — not with one nobody is told about. A caller
+    /// that echoes the value back must omit it rather than return `""`, which
+    /// would read as "your secret is the empty string".
     fn create(
         &self,
         input: CreateOAuth2Client,

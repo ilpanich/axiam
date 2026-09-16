@@ -5,8 +5,9 @@
 **Audience:** first the maintainer, who asked how far AXIAM is from what
 [Keycloak's MCP guide](https://www.keycloak.org/securing-apps/mcp-authz-server)
 describes and gets the answer in §0; then the executing sessions, one per task
-in §4, each of which must read §1 (invariants) and §5 (the regression gate)
-before touching code.
+in §4, each of which must read §1 (invariants), §4.0 (definition of done) and
+§5 (the regression gate) before touching code; §8 is the prompt that starts the
+executing session.
 **Companion documents:**
 [`token-exchange-design.md`](token-exchange-design.md) (the only place the
 `resource` parameter is honoured today, and the SEC-089 note that this plan
@@ -51,7 +52,9 @@ The MCP server side — the RFC 9728 protected-resource metadata document, the
 on inbound tokens — is not AXIAM's to implement. It is documented in T7, and
 the SDKs' resource-server middleware already verifies a configured `aud`
 (`sdks/CONTRACT.md` §10.1 row 6), so an MCP server built on an AXIAM SDK gets
-the audience check by configuration once T3 mints the claim.
+the audience check by configuration once T3 mints the claim. What the SDKs do
+**not** have is the resource-server half of the MCP handshake — publishing the
+RFC 9728 document and emitting the challenge — and T9 adds it to all eleven.
 
 ---
 
@@ -134,8 +137,12 @@ cheaper model does the bounded part.
 | T4b admin UI, settings form, audit viewer filter | **Sonnet 5** | Bounded forms over the policy T4a defines |
 | T5 Client ID Metadata Document | **Opus 5** | Outbound fetch of attacker-chosen URLs, cache bounds, trust policy |
 | T6 per-tenant issuers | **Opus 5** | Cross-cutting: issuer validation, discovery, `iss` claims, route prefixes |
-| T7 documentation, contract, website | **Sonnet 5** | Writing against a finished implementation |
+| T7 documentation, example, website | **Sonnet 5** | Writing against a finished implementation; the example imitates `examples/b5-rp-logout-app` |
 | T8 end-to-end MCP harness and security review | **Opus 5** | Adversarial review of everything above |
+| T9a CONTRACT §28 — MCP resource-server helpers | **Opus 5** | Normative text every SDK port inherits |
+| T9b TypeScript reference implementation | **Opus 5** | Establishes the file, test and doc pattern the ten ports imitate |
+| T9c ten SDK ports (Rust, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++) | **Sonnet 5** | Well-specified ports with a reference to copy and a compiler to answer to |
+| T9d cross-SDK conformance review | **Opus 5** | Adversarial cross-repo review; catches semantic drift between ports |
 
 ---
 
@@ -192,6 +199,35 @@ need no backfill.
 
 ## 4. Tasks
 
+### 4.0 Definition of done — every task, no exceptions
+
+A task is done when all four of the following are in the same PR. The
+maintainer asked for docs, examples and tests explicitly; a task that ships
+code alone is not done.
+
+1. **Tests.** Unit tests in the crate that owns the logic; an integration test
+   under `crates/axiam-api-rest/tests/` for every new endpoint, parameter or
+   policy; every negative case the task's acceptance list names; the parity
+   test for every new public path (I9); frontend tests for T2b and T4b; the
+   regression gate of §5 green. A test that asserts the new behaviour is
+   *absent* when the flag or policy is off is mandatory (I1).
+2. **Docs.** The page or section named in the task's "Docs" line, in the voice
+   of the existing `docs/api/*.md` and `docs/admin/*.md`; utoipa annotations on
+   every new handler and field so `docs/api/openapi.json` and
+   `sdks/openapi.json` regenerate with the repository tooling; every new tenant
+   setting or environment variable in `docs/deployment/` where the others are
+   listed. Each client-visible parameter gets a curl snippet on its page.
+3. **Examples.** T7 owns the runnable example tree entry
+   (`examples/b7-mcp-server/`); every other task adds to it the request shape
+   it introduces, so the example's walkthrough script exercises the whole
+   feature by the time T8 runs it.
+4. **Release notes.** A `CHANGELOG.md` entry under the unreleased heading,
+   one line per user-visible change, naming the flag or policy that enables it.
+5. **SDK fan-out.** T9 owns SDK code. Every other task that changes
+   `sdks/CONTRACT.md`, `sdks/openapi.json` or `proto/` records the change in
+   the contract's version trailer and lists the eleven downstream repositories
+   that must re-sync (`CLAUDE.md` names them), so T9c's ports pick it up.
+
 Each task is one session. Each names its model, its files, its acceptance
 criteria and the invariants from §1 it must demonstrate. "Push" means the
 branch convention in `CLAUDE.md`: a feature branch, a signed commit, a PR
@@ -216,6 +252,9 @@ fallback.
   document so the parity check holds (I9); `docs/api/openapi.json` and
   `sdks/openapi.json` are regenerated with the repository's tooling, never by
   hand.
+
+**Docs.** A paragraph in `docs/api/README.md` beside the discovery entry, and
+the utoipa annotation on the route.
 
 **Acceptance.**
 - New integration test `crates/axiam-api-rest/tests/oauth2_discovery_alias_test.rs`:
@@ -260,6 +299,10 @@ fallback.
 7. Rate limiting: public-client token requests are keyed on
    `client_id + client IP` through the existing rate-limit configuration
    (`crates/axiam-api-rest/src/config/rate_limit.rs`).
+
+**Docs.** `docs/admin/public-clients.md`: when to register a public client,
+the refusals, the loopback rule with VS Code's and Claude Code's URIs as the
+worked example; the token-endpoint page's auth-method table gains `none`.
 
 **Acceptance.**
 - Unit tests for the matcher: random port accepted on each loopback host;
@@ -317,6 +360,11 @@ the secret reveal for it. Tests in the existing service test file.
 8. DPoP and mTLS binding are orthogonal and must keep working on
    resource-bound tokens (a bound token for an MCP server is the recommended
    posture; T7 says so).
+
+**Docs.** `docs/api/resource-indicators.md`: the parameter on each grant, the
+`allowed_resources` registration field, `invalid_target`, the refresh rule,
+the I3 consequence for AXIAM's own APIs; `docs/api/token-exchange.md#audience`
+redrafted for D2.
 
 **Acceptance.**
 - Integration tests per grant: `resource` echoed as `aud`; unregistered
@@ -377,6 +425,10 @@ the secret reveal for it. Tests in the existing service test file.
    `handlers/oauth2.rs:2543` is the pattern).
 7. D4: the consent gate is forced for `managed_by != admin` clients.
 
+**Docs.** `docs/admin/dynamic-client-registration.md`: the three modes, every
+policy field with its default, the D3 warning, the MCP Inspector values from
+Keycloak's guide translated to AXIAM settings, the sweeper.
+
 **Acceptance.**
 - Integration tests: disabled tenant → refused and not advertised; anonymous
   registration of an MCP-Inspector-shaped request succeeds and the client can
@@ -435,6 +487,10 @@ fragment, no userinfo, no query.
 6. Discovery: `client_id_metadata_document_supported: true` when the
    described tenant enables it (I7).
 
+**Docs.** `docs/admin/client-id-metadata-documents.md`: the draft revision
+implemented, every policy field, the URL validation list, and the VS Code and
+Claude Code profiles with `restrict_same_domain` off and why.
+
 **Acceptance.**
 - `wiremock`-based tests (as `crates/axiam-federation/src/oidc.rs` already
   uses): happy path for a VS-Code-shaped and a Claude-Code-shaped document;
@@ -473,6 +529,10 @@ the RFC 8414 §3 rule without any query string.
 3. With the flag off, nothing above is mounted and the existing `?tenant_id=`
    documents are byte-identical (T1's test is re-run in both modes).
 
+**Docs.** The issuer section of `docs/deployment/` gains the flag, the three
+discovery forms, the shared-JWKS statement, and what an MCP server puts in
+`authorization_servers` in each mode.
+
 **Acceptance.**
 - `oidc_conformance.rs` and `oauth2_conformance.rs` run in both modes in CI
   (a second job with the flag set), green in both.
@@ -481,26 +541,45 @@ the RFC 8414 §3 rule without any query string.
   request scoped to tenant `B` (tenant isolation is not weakened by the path).
 - I1, I3.
 
-### T7 — Documentation, contract, website — **Sonnet 5**
+### T7 — Documentation, example, website — **Sonnet 5**
 
 **What.**
 - `docs/api/mcp.md`: fronting an MCP server with AXIAM — the RFC 9728
   document the MCP server publishes (`authorization_servers`,
   `scopes_supported`, `bearer_methods_supported`), the
   `WWW-Authenticate: Bearer resource_metadata="…"` challenge, the SDK
-  middleware configuration (`expected audience` = the MCP server URL, DPoP or
-  mTLS recommended), the tenant settings from T4a/T5 with the exact values
-  Keycloak's guide gives for MCP Inspector, VS Code and Claude Code, and the
-  D3 warning. One worked example per mode: pre-registered, DCR, CIMD.
+  middleware configuration (`expected audience` = the MCP server URL, the
+  T9 `resource_metadata_url` option, DPoP or mTLS recommended), the tenant
+  settings from T4a/T5 with the exact values Keycloak's guide gives for MCP
+  Inspector, VS Code and Claude Code, and the D3 warning. One worked example
+  per mode: pre-registered, DCR, CIMD. Links to the per-task pages below
+  rather than repeating them.
+- Per-task pages the earlier tasks drafted and T7 finishes:
+  `docs/admin/public-clients.md` (T2), `docs/api/resource-indicators.md`
+  (T3), `docs/admin/dynamic-client-registration.md` (T4),
+  `docs/admin/client-id-metadata-documents.md` (T5), the issuer section in
+  `docs/deployment/` (T6), and `docs/api/token-exchange.md#audience`
+  rewritten for `allowed_resources` (T3 drafts it).
+- `examples/b7-mcp-server/`: a runnable MCP server, TypeScript on the
+  official `@modelcontextprotocol/sdk` streamable-HTTP transport, guarded by
+  the AXIAM TypeScript SDK middleware from T9b, publishing its RFC 9728
+  document with the T9 helper, fronted by a bootstrapped AXIAM. Ships with
+  `walkthrough.sh` (Bash + curl, protocol-level, in the style of
+  `examples/b1-deny-override`) driving 401 → discovery → DCR → PKCE +
+  `resource` → token → tool call, a `smoke-test.sh` as `b5-rp-logout-app`
+  has, and a README with the copy-paste configuration for MCP Inspector,
+  Claude Code and VS Code. A row in `examples/README.md`.
 - `sdks/CONTRACT.md` §10.1 row 6: the expected-audience sentence gains "or the
-  resource URL an MCP server fronts, once minted through RFC 8707"; no SDK code
-  changes, so no downstream re-sync beyond the contract text and
-  `sdks/openapi.json`.
-- `docs/api/token-exchange.md#audience`: rewritten for `allowed_resources`
-  (T3 drafts it; T7 finishes it).
+  resource URL an MCP server fronts, once minted through RFC 8707". The new
+  §28 is T9a's, not T7's.
 - `website/src/docs/oauth2.ts`: an "MCP servers" block linking to
   `docs/api/mcp.md`; `docSectionsAreComplete()` stays true.
 - `claude_dev/roadmap.md`: Phase 21 marked with the commits.
+
+**Acceptance.** `walkthrough.sh` and `smoke-test.sh` pass against
+`docker/docker-compose.e2e.yml` with `scripts/e2e-bootstrap.sh`; every link
+in `docs/api/mcp.md` resolves; the website build and its section-completeness
+assertion pass.
 
 ### T8 — End-to-end MCP harness and security review — **Opus 5**
 
@@ -520,6 +599,86 @@ the RFC 8414 §3 rule without any query string.
 3. `threat-model-stride.md` gains the new surfaces.
 
 ---
+
+### T9 — SDK fan-out: the resource-server half of the handshake
+
+The eleven SDKs live in their own repositories (`ilpanich/axiam-<lang>-sdk`)
+and vendor `sdks/CONTRACT.md`, `sdks/openapi.json` and `proto/`. Their
+middleware already verifies a configured audience; what an MCP server also
+needs from its SDK is to **publish** the RFC 9728 document and to **emit** the
+challenge that starts the MCP client's discovery. Same structure as
+[`sdk-oidc-sso-plan.md`](sdk-oidc-sso-plan.md): one normative amendment, one
+reference implementation, ten ports, one review.
+
+#### T9a — CONTRACT §28 "MCP resource-server helpers" (contract 1.47) — **Opus 5**
+
+**What.** A new §28 in `sdks/CONTRACT.md`, in the register of §12 and §20:
+1. **Canonical operation set** (per-language naming map, as §12.2 does):
+   - `protected_resource_metadata(resource, authorization_servers,
+     scopes_supported, bearer_methods_supported = ["header"],
+     resource_documentation?)` → the RFC 9728 §2 document, validated (every
+     `authorization_servers` entry an issuer without query or fragment,
+     `resource` equal to the URL the middleware is configured to expect);
+   - `serve_protected_resource_metadata(...)` → a framework-idiomatic route
+     at `/.well-known/oauth-protected-resource` and, for a resource with a
+     path, the RFC 9728 §3.1 path-suffixed form;
+   - `bearer_challenge(resource_metadata_url, error?, error_description?,
+     scope?)` → the `WWW-Authenticate` value, RFC 6750 §3 quoting rules;
+   - middleware option `resource_metadata_url`: when set, every 401 the
+     middleware emits carries the challenge, and a route guarded by §11
+     scope helpers that fails on scope emits 403 with
+     `error="insufficient_scope"` and the `scope` it needed.
+2. **Normative rules**: `expected_audience` MUST be set when
+   `resource_metadata_url` is (a resource that announces itself must check
+   `aud`); the document MUST be served without authentication; the challenge
+   MUST NOT leak the failure reason beyond the RFC 6750 error codes; DPoP
+   (§10.3) and the revocation posture (§10.2) apply unchanged.
+3. **Required tests, per SDK** (as §8b §"Required tests" does): document
+   shape and validation negatives; challenge quoting; 401 with challenge; 403
+   `insufficient_scope`; a token whose `aud` is not the resource refused.
+4. Version trailer bumped to 1.47 with the re-sync note for all eleven repos;
+   `sdks/openapi.json` regenerated from T1–T6.
+
+#### T9b — TypeScript reference implementation — **Opus 5**
+
+**What.** In `axiam-typescript-sdk`: the §28 operations on the Express and
+Fastify middleware surfaces, tests per §28.3, README section, `CHANGELOG.md`
+entry, vendored contract re-synced. This is the SDK `examples/b7-mcp-server`
+(T7) depends on, so it lands before T7's example is written.
+
+#### T9c — Ports — **Sonnet 5**, one session per repository, all in parallel
+
+| Repo | Surface (from §10) |
+| --- | --- |
+| `axiam-rust-sdk` | Actix-Web extractor + a `web::resource` for the document |
+| `axiam-python-sdk` | FastAPI dependency + router; Django middleware + view |
+| `axiam-java-sdk` | Spring Boot filter + `@RestController` for the document |
+| `axiam-kotlin-sdk` | Ktor plugin + route; Spring Boot reuses the Java port |
+| `axiam-csharp-sdk` | ASP.NET Core middleware + minimal-API endpoint |
+| `axiam-php-sdk` | Laravel middleware + route; Symfony subscriber + controller |
+| `axiam-go-sdk` | `net/http` handler wrapper + `http.HandlerFunc` |
+| `axiam-swift-sdk` | Vapor `AsyncMiddleware` + route |
+| `axiam-c-sdk` | `axiam_protected_resource_metadata_json()` and `axiam_bearer_challenge()` returning owned strings; CivetWeb adapter documented |
+| `axiam-cplusplus-sdk` | `AxiamGuard` gains the challenge; a `protectedResourceMetadata()` builder; Crow / Pistache adapters documented |
+
+Each port: the §28 operations under the language's §28 naming row, the five
+required tests, README section, `CHANGELOG.md` entry, vendored `CONTRACT.md`,
+`openapi.json` and `proto/` re-synced from `axiam` after T9a merges. The
+seven full-surface SDKs also expose `bearer_challenge` to their gRPC and
+AMQP guards' error mapping where a transport-appropriate equivalent exists;
+the four REST-surface SDKs (Kotlin, Swift, C, C++) implement REST only, per
+`CLAUDE.md`.
+
+#### T9d — Cross-SDK conformance review — **Opus 5**
+
+**What.** Read all eleven implementations against §28 and against T9b; record
+divergences in a conformance table appended to §28 (the §12 review's format);
+fix or file each; re-run every SDK's §28 tests. The review is what makes the
+eleven ports one product rather than eleven interpretations.
+
+**Acceptance for T9 as a whole.** `examples/b7-mcp-server` runs on T9b; each
+SDK repository has a green CI on its port; the conformance table has no open
+row.
 
 ## 5. Regression gate — run before every push, in every task
 
@@ -556,18 +715,23 @@ of §1, and stops to say which.
 Dependencies: T2a before T3 (public clients exercise the `resource` path);
 T3 before T4a and T5 (D3 needs `allowed_resources`); T4a before T5 (shared
 policy and `managed_by`); T6 independent of T4/T5 but after T3 (issuer in
-`aud`-bearing tokens); T7 and T8 last.
+`aud`-bearing tokens); T9a after T3 (the contract names the audience rule);
+T9b after T9a; T7's example after T9b; T9c after T9a, in parallel with T7;
+T8 and T9d last.
 
 | Wave | Tasks | Parallel? |
 | --- | --- | --- |
 | 1 | T1, T2a | yes — disjoint files |
 | 2 | T2b, T3 | yes |
 | 3 | T4a, T6 | yes — T6 touches server/handlers, T4a touches settings/registration |
-| 4 | T4b, T5 | yes |
-| 5 | T7, T8 | T8 starts once T7's `docs/api/mcp.md` exists, so the harness follows the documented flow |
+| 4 | T4b, T5, T9b | yes — T9b is in another repository |
+| 5 | T7, T9c (ten sessions) | yes — the ports need only T9a and T9b |
+| 6 | T8, T9d | T8 starts once T7's example exists, so the harness follows the documented flow; T9d once every port's CI is green |
 
 Each wave ends with `cargo clean`. Each task ends with a signed commit on its
-own branch and a PR referencing this plan and the roadmap task id (Phase 21).
+own branch and a PR referencing this plan and the roadmap task id (Phase 21);
+SDK tasks open their PR in the SDK repository and reference the contract
+version they implement.
 
 ---
 
@@ -584,5 +748,70 @@ own branch and a PR referencing this plan and the roadmap task id (Phase 21).
 - **Step-up via `WWW-Authenticate` `scope` / `insufficient_scope`** on the MCP
   server side — resource-server behaviour, documented in T7 as the SDK
   middleware's existing 403 shape, not implemented here.
-- **Changes to any SDK's code.** The contract text changes; the middleware
-  already verifies a configured audience.
+- **MCP *client* helpers in the SDKs** (discovering an authorization server
+  from a 401, running DCR or CIMD from the client side). The SDKs guard MCP
+  servers; MCP clients are Claude Code, VS Code, MCP Inspector and their
+  peers, which already implement the client side.
+
+---
+
+## 8. The kick-off prompt for the executing session
+
+Start a new session on `ilpanich/axiam`, on a fresh feature branch, and paste
+this as the first message. The session orchestrates the waves of §6 in this
+repository and starts one child session per SDK repository for T9b and T9c.
+
+```text
+Read CLAUDE.md and boot per its instructions before anything else.
+
+You are executing claude_dev/mcp-authorization-server-plan.md — Phase 21 of
+claude_dev/roadmap.md. Read the plan in full, then its companion documents
+(token-exchange-design.md, crate-layering.md, threat-model-stride.md), before
+writing a single file. The plan is the specification: its §1 invariants are
+non-negotiable; its §3 decisions hold unless you find on evidence that an
+assumption behind one is false, in which case record the evidence and the
+revised reasoning in the plan before acting; its §4.0 definition of done
+applies to every task (tests, docs, the example, the SDK fan-out record); its
+§5 regression gate runs before every push.
+
+Work the six waves of §6 in order. One task is one session: for each task in
+a wave, start a child session on this repository with the model the plan's
+§2 table assigns (Opus 5 or Sonnet 5, never another), a fresh branch named
+claude/t21-<n>-<slug>, and a prompt that names the task, quotes its "What",
+"Where" and "Acceptance" blocks verbatim, and repeats §1, §4.0 and §5. For
+T9b and T9c, start the child session on the SDK repository instead
+(ilpanich/axiam-<lang>-sdk), with the CONTRACT §28 text and the T9b reference
+as its brief. Run the tasks of a wave in parallel, wait for all of them, run
+cargo clean, then start the next wave.
+
+Every task pushes only when its gate is green, opens a PR that references this
+plan and its T21.x id, and subscribes to that PR; drive each PR to green and
+address review comments. Never merge. When a task cannot be completed under
+§1 without changing an existing test's expectation, stop that task and report
+which invariant conflicts, with the file and line — do not relax the test.
+
+Constraints: no push to main; no change to FAPI behaviour or the conformance
+runbook; no secrets or real identifiers in the tree; every new unauthenticated
+route in PUBLIC_PATHS and OpenAPI in the same commit; follow the disk-hygiene
+rules in CLAUDE.md (scoped cargo commands, cargo clean between waves, the
+swagger placeholder export). Write in the voice of the existing
+docs/api/*.md and claude_dev/*.md.
+
+When wave 6 is done, update the plan's status header to EXECUTED with the
+commit of each task, mark Phase 21 in the roadmap, and report: the PR list,
+the security-review findings and their state, the SDK conformance table, and
+anything the plan got wrong.
+```
+
+For a single SDK port started by hand rather than by the orchestrator, the
+child prompt is the same text with the first two paragraphs replaced by:
+
+```text
+Read CLAUDE.md. You are executing T9c of
+ilpanich/axiam:claude_dev/mcp-authorization-server-plan.md for this
+repository. Read sdks/CONTRACT.md §28 from the axiam main branch and the
+TypeScript reference implementation (T9b) before writing code; re-sync the
+vendored CONTRACT.md, openapi.json and proto/ first, then implement the §28
+operations under this language's naming row, the five required tests, the
+README section and the CHANGELOG entry. Model: Sonnet 5.
+```

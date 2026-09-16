@@ -712,6 +712,11 @@ Integration test driving the MCP client sequence in both issuer modes; security 
 
 **Commit** `test(oauth2): end-to-end MCP authorization harness and security review`
 
+### T21.9 — SDK fan-out: MCP resource-server helpers — Opus 5 (contract §28, TypeScript reference, review), Sonnet 5 (ten ports)
+CONTRACT §28 (RFC 9728 document builder and route, `WWW-Authenticate` challenge, `resource_metadata_url` middleware option); TypeScript reference; ports in the other ten SDK repositories; cross-SDK conformance review. Every task also ships docs, the `examples/b7-mcp-server` entry and tests per the plan's §4.0.
+
+**Commit** `feat(sdk): CONTRACT §28 MCP resource-server helpers (contract 1.47)`
+
 ---
 
 ## Summary
@@ -739,8 +744,8 @@ Integration test driving the MCP client sequence in both issuer modes; security 
 | Phase 18 | 4 | Security, compliance, performance, docs |
 | Phase 19 | 26 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
 | Phase 20 | 2 | Public website and documentation site |
-| Phase 21 | 8 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers) |
+| Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
 
-**Total: 111 tasks across 22 phases**
+**Total: 112 tasks across 22 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

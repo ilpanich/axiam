@@ -76,7 +76,14 @@ patches:
   # K8S-F7 / K8S-F10 — the six mandatory settings, the Vault CA path, and the
   # switch from the `file` secret provider to `vault`.
   - path: configmap-env.yml
+  # Same concern, but a JSON 6902 patch — it needs an explicit target, and the
+  # file itself says why the format is not strategic merge.
   - path: server-vault.yml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: axiam-server
   # K8S-F3 — k3s pod and service CIDRs, which are not the kubeadm defaults the
   # base ships.
   - path: network-policy-cidrs.yml

@@ -90,10 +90,12 @@ fi
 say "Installing host packages"
 sudo apt-get update -qq
 # curl/ca-certificates for every download; python3 for the AXIAM scripts this
-# tree reuses (vault-seed.sh drives vault_seed_payload.py); jq for reading API
-# responses in 03/05; openssl for inspecting certificates when something is
-# wrong. No Rust toolchain: this deployment pulls released images.
-sudo apt-get install -y -qq curl ca-certificates jq python3 openssl unzip git
+# tree reuses (vault-seed.sh drives vault_seed_payload.py, and 05-verify.sh pipes
+# into vault-status.py); python3-yaml because 03-axiam-bootstrap.sh --federation
+# reads its provider file with it and Raspberry Pi OS does not ship it; jq for
+# reading API responses in 03/05; openssl for inspecting certificates when
+# something is wrong. No Rust toolchain: this deployment pulls released images.
+sudo apt-get install -y -qq curl ca-certificates jq python3 python3-yaml openssl unzip git
 ok "Packages installed"
 
 # ---------------------------------------------------------------------------

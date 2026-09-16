@@ -36,6 +36,7 @@ of static checks, not of a deployment. Everything below was verified as stated:
 | Pinned versions exist | each release artifact fetched directly | k3s, kubectl, OpenTofu, cert-manager, ingress-nginx, six providers |
 | Pinned images are arm64 | manifest lists resolved from the real registries | all publish `linux/arm64` |
 | ingress-nginx annotations | read out of the chart's own docs and `nginx.tmpl` at the pinned version | confirmed, and one of them corrected this guide (§6.2) |
+| Trivy config scan | `trivy config --severity HIGH,CRITICAL` on `infra/` and `k8s/`, and on the tree as it was before this branch | `infra/` clean; `k8s/`'s one HIGH (KSV-0109 on the ConfigMap) is **pre-existing** — it reproduces identically at `d20293a` |
 | Doc links | `scripts/check-doc-links.sh` | clean |
 
 **And these were NOT run, because they cannot be without hardware. Run them on

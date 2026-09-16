@@ -108,7 +108,24 @@ Key manifests:
   Ingress — it is reachable only in-cluster via the `axiam-server` ClusterIP
   service.
 
+- [`k8s/certs/`](../../k8s/certs/) — **cert-manager `Certificate` and `Issuer`
+  examples, and a hard requirement rather than an extra.** Three Secrets are
+  consumed by the manifests above and produced by nothing in `k8s/`:
+  `vault-tls` (Vault's listener), `rabbitmq-broker-tls` (the broker's leaf, plus
+  the `ca.crt` the server projects to verify it) and `axiam-server-tls` (the
+  backend's own TLS 1.3 listener). Without them the Vault and RabbitMQ pods stay
+  `ContainerCreating` and the server cannot terminate TLS. This directory is
+  deliberately **not** in `kustomization.yml`, because applying a cert-manager
+  custom resource to a cluster without its CRDs fails; apply it as a second
+  step. See [`k8s/certs/README.md`](../../k8s/certs/README.md) — it also covers
+  bringing your own CA instead, and the renewal semantics, which are not the
+  same for all four consumers.
+- **On a single Raspberry Pi 5 with k3s**, all of this is scripted:
+  [`docs/deployment/rpi5-k3s.md`](rpi5-k3s.md) and `infra/rpi5-k3s/`.
+
 Before applying, an operator must:
+0. Install cert-manager and apply [`k8s/certs/`](../../k8s/certs/) (or create
+   the three TLS Secrets some other way). Nothing below works without them.
 1. Populate [`k8s/server/secret.yml`](../../k8s/server/secret.yml) with real
    secret values (see **Required secrets & environment** below) — via a
    CI/CD secret store, `sealed-secrets`, or the `external-secrets` operator.

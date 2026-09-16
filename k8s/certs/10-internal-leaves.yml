@@ -1,0 +1,138 @@
+# K8S-F4 / K8S-F5: the four internal leaves, all issued by `ClusterIssuer/axiam-ca`
+# (00-private-ca.yml). Three of them fill Secrets that `k8s/` already consumes
+# and nothing produced; the fourth is what lets the ingress verify the backend.
+#
+# NOT part of k8s/kustomization.yml — see README.md in this directory.
+#
+# `secretName` values are load-bearing: each one is the name a manifest in `k8s/`
+# already mounts. Renaming one here does not rename it there.
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: axiam
+spec:
+  secretName: vault-tls
+  # The listener in `k8s/vault/statefulset.yml` names /vault/tls/tls.crt and
+  # /vault/tls/tls.key, which are exactly the keys cert-manager writes into a
+  # kubernetes.io/tls Secret. Nothing to configure.
+  dnsNames:
+    # The in-cluster name AXIAM dials (AXIAM__AUTH__VAULT_ADDR) and the one
+    # vault.hcl advertises as api_addr/cluster_addr. All three forms, because a
+    # client that resolves `vault` and a client that resolves the FQDN present
+    # different SNI and rustls checks what was presented.
+    - vault
+    - vault.axiam.svc
+    - vault.axiam.svc.cluster.local
+  ipAddresses:
+    # 127.0.0.1 is not decoration. The pod sets VAULT_ADDR=https://127.0.0.1:8200,
+    # so every `kubectl exec ... vault operator {init,unseal,status}` — the whole
+    # unseal ceremony — verifies this certificate against that literal address.
+    # Without this entry the ceremony fails with
+    # `x509: cannot validate certificate for 127.0.0.1 because it doesn't contain
+    # any IP SANs`, and the only way past it would be -tls-skip-verify on the one
+    # command that hands you the unseal shares.
+    - 127.0.0.1
+  privateKey:
+    algorithm: Ed25519
+    rotationPolicy: Always
+  # One year, not the usual ninety days. Vault reads tls_cert_file once at
+  # listener start and has no reload path, so renewal here means a pod restart —
+  # and a Vault restart without auto-unseal means a human with three shares.
+  # Make it a scheduled annual event rather than a quarterly surprise.
+  duration: 8760h
+  renewBefore: 720h
+  issuerRef:
+    name: axiam-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: rabbitmq-broker-tls
+  namespace: axiam
+spec:
+  secretName: rabbitmq-broker-tls
+  # Three keys land in this Secret: tls.crt, tls.key and ca.crt. The broker
+  # mounts all three (ssl_options.cacertfile/certfile/keyfile); the server pod
+  # projects ONLY ca.crt, which is the whole point of the split — the server
+  # verifies the broker and must not hold the broker's key.
+  dnsNames:
+    - rabbitmq
+    - rabbitmq.axiam.svc
+    - rabbitmq.axiam.svc.cluster.local
+  privateKey:
+    algorithm: Ed25519
+    rotationPolicy: Always
+  # One year, for the same reason as Vault: RabbitMQ reads its TLS files at
+  # listener start. A broker certificate that expires under a running process
+  # takes the whole async plane down, and there is deliberately no
+  # verification-skip option in AXIAM's AMQP client to limp on.
+  duration: 8760h
+  renewBefore: 720h
+  issuerRef:
+    name: axiam-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: axiam-server-tls
+  namespace: axiam
+spec:
+  secretName: axiam-server-tls
+  # The backend's own TLS 1.3 listener (K8S-F5). The names here are the ones
+  # ingress-nginx verifies against via `proxy-ssl-name`, NOT the public hostname
+  # a browser types — the ingress terminates that and opens a second connection
+  # to the Service.
+  dnsNames:
+    - axiam-server
+    - axiam-server.axiam.svc
+    - axiam-server.axiam.svc.cluster.local
+  privateKey:
+    algorithm: Ed25519
+    rotationPolicy: Always
+  # Ninety days is fine here, unlike the two above: the server re-`stat`s its
+  # leaf every AXIAM__SERVER__TLS__RELOAD_INTERVAL_SECS (default 3600) and swaps
+  # it behind an ArcSwap rustls consults per handshake. Renewal costs no restart
+  # and drops no request — provided the volume is NOT mounted with `subPath`,
+  # which the kubelet does not refresh.
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: axiam-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: axiam-ingress-client
+  namespace: axiam
+spec:
+  secretName: axiam-ingress-client
+  # The ingress controller's own leaf, referenced by
+  # `nginx.ingress.kubernetes.io/proxy-ssl-secret: "axiam/axiam-ingress-client"`.
+  #
+  # Two things come out of this Secret and the annotation needs both: `ca.crt`,
+  # which is the anchor ingress-nginx verifies the backend against, and a client
+  # keypair, which nginx presents on the upstream connection. The server is
+  # configured with `client_auth: off`, so it never looks at the certificate —
+  # but ingress-nginx's proxy_ssl_certificate directives are written from this
+  # Secret unconditionally, so a Secret holding only `ca.crt` is a configuration
+  # the controller will not accept.
+  commonName: axiam-ingress
+  usages:
+    - client auth
+  privateKey:
+    algorithm: Ed25519
+    rotationPolicy: Always
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: axiam-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

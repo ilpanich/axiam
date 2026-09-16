@@ -664,6 +664,56 @@ Generate the website to be deployed on github.io for the documentation. Produce 
 
 ---
 
+## Phase 21: MCP authorization-server support
+
+Make AXIAM usable as the OAuth 2.0 authorization server for Model Context
+Protocol servers, at parity with or ahead of Keycloak's published support.
+Full specification, invariants, model assignment per task and the regression
+gate: [`mcp-authorization-server-plan.md`](mcp-authorization-server-plan.md).
+Every task is additive and opt-in; existing flows must stay byte-identical.
+
+### T21.1 — RFC 8414 well-known alias — Sonnet 5
+Serve `/.well-known/oauth-authorization-server` from the existing discovery handler; public-path and OpenAPI parity.
+
+**Commit** `feat(oauth2): serve RFC 8414 authorization-server metadata path`
+
+### T21.2 — Public clients and loopback redirects — Opus 5 (server), Sonnet 5 (admin UI)
+`token_endpoint_auth_method: none`, PKCE required at the token endpoint, RFC 8252 §7.3 port-agnostic loopback matching for registered loopback URIs only.
+
+**Commit** `feat(oauth2): public clients with PKCE and loopback redirect matching`
+
+### T21.3 — RFC 8707 resource indicators end to end — Opus 5
+`allowed_resources` on clients; `resource` honoured on authorize, PAR, device and token; `aud` minted from it; AXIAM's own APIs keep refusing foreign audiences.
+
+**Commit** `feat(oauth2): RFC 8707 resource indicators with audience-bound access tokens`
+
+### T21.4 — RFC 7591 dynamic client registration — Opus 5 (endpoint), Sonnet 5 (admin UI)
+Per-tenant policy (disabled by default), `POST /oauth2/register`, abuse controls, forced consent for externally registered clients.
+
+**Commit** `feat(oauth2): RFC 7591 dynamic client registration behind a tenant policy`
+
+### T21.5 — OAuth Client ID Metadata Document — Opus 5
+URL-shaped `client_id` resolved through an SSRF-guarded, cache-bounded fetch; per-tenant trust policy; VS Code and Claude Code flows.
+
+**Commit** `feat(oauth2): client ID metadata documents behind a tenant policy`
+
+### T21.6 — Per-tenant path-based issuers — Opus 5
+Opt-in `{root}/t/{tenant}` issuer with RFC 8414 and OIDC Discovery path forms; no `tenant_id` query in the advertised endpoints.
+
+**Commit** `feat(oauth2): opt-in per-tenant path-based issuers`
+
+### T21.7 — Documentation, contract, website — Sonnet 5
+`docs/api/mcp.md`, CONTRACT §10.1 audience note, token-exchange audience rewrite, website block.
+
+**Commit** `docs(mcp): fronting an MCP server with AXIAM`
+
+### T21.8 — End-to-end MCP harness and security review — Opus 5
+Integration test driving the MCP client sequence in both issuer modes; security review of the new surfaces; STRIDE model update.
+
+**Commit** `test(oauth2): end-to-end MCP authorization harness and security review`
+
+---
+
 ## Summary
 
 | Phase | Tasks | Focus |
@@ -688,7 +738,9 @@ Generate the website to be deployed on github.io for the documentation. Produce 
 | Phase 17 | 7 | SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go) |
 | Phase 18 | 4 | Security, compliance, performance, docs |
 | Phase 19 | 26 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
+| Phase 20 | 2 | Public website and documentation site |
+| Phase 21 | 8 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers) |
 
-**Total: 103 tasks across 21 phases**
+**Total: 111 tasks across 22 phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

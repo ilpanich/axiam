@@ -28,6 +28,27 @@ spec:
     spec:
       containers:
         - name: axiam-server
+          envFrom:
+            # The two the base already has, restated because a strategic-merge
+            # patch on this list replaces it: `envFrom` has no patch merge key.
+            - configMapRef:
+                name: axiam-config
+            - secretRef:
+                name: axiam-secrets
+            # The server's Vault token, created by stage 30 AFTER the human
+            # ceremony. A separate Secret from `axiam-secrets` on purpose: that
+            # one is stage 20's, this one is stage 30's, and one object with two
+            # owners across two stages is how a token gets blanked by a re-apply
+            # of the stage that does not have it.
+            #
+            # NOT `optional: true`. Between stage 20 and stage 30 this pod sits
+            # in CreateContainerConfigError saying `secret "axiam-vault-token"
+            # not found`, which is exactly right — it cannot serve a login
+            # before Vault has been initialised and seeded. `optional: true`
+            # would instead start a server that reaches its first secret fetch
+            # with no token and fails with something less specific.
+            - secretRef:
+                name: axiam-vault-token
           env:
             - name: AXIAM__AUTH__SECRET_PROVIDER
               value: "vault"

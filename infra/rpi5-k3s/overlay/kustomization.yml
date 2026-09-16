@@ -85,6 +85,11 @@ patches:
   # D4 — auto-unseal. Ships as a no-op patch; the whole point is that it is one
   # file to edit rather than a decision to rediscover.
   - path: vault-seal.yml
+  # K8S-F8 — the three blank credential Secrets leave the render; OpenTofu owns
+  # them. Read that file before applying this overlay by hand.
+  - path: secrets-owned-by-tofu-surrealdb.yml
+  - path: secrets-owned-by-tofu-rabbitmq.yml
+  - path: secrets-owned-by-tofu-axiam-secrets.yml
 
 # ingress-grpc.yml is NOT listed above: gRPC stays off the internet by default
 # (invariant 4). `infra/rpi5-k3s/tofu/20-axiam` appends it to `resources` when

@@ -230,7 +230,9 @@ use crate::handlers;
         handlers::oauth2::end_session,
         handlers::device::verify,
         handlers::device::decide,
-        // OIDC
+        // OIDC. `add_oauth_authorization_server_alias` (below) documents the
+        // RFC 8414 `/.well-known/oauth-authorization-server` alias of this
+        // same handler as its own path entry — it needs no listing here.
         handlers::oauth2::discovery,
         handlers::oauth2::jwks,
         handlers::oauth2::revocations,
@@ -671,7 +673,36 @@ pub fn api_doc() -> utoipa::openapi::OpenApi {
     let doc = ApiDoc::openapi();
     #[cfg(feature = "saml")]
     let doc = doc.merge_from(SamlApiDoc::openapi());
+    let mut doc = doc;
+    add_oauth_authorization_server_alias(&mut doc);
     stamp_spec_digest(doc)
+}
+
+/// Documents `GET /.well-known/oauth-authorization-server` (T21.1) by cloning
+/// the already-generated `PathItem` for `/.well-known/openid-configuration`
+/// rather than hand-writing a second `#[utoipa::path]` annotation on a second
+/// handler. `server.rs` routes both paths to the literal same
+/// `handlers::oauth2::discovery` function, so the two are one operation with
+/// two conventional entry points — a second annotation could drift from the
+/// first (a changed summary, an added parameter) in a way the compiler would
+/// never catch, where cloning the generated item cannot.
+///
+/// Missing the source entry is a bug in `ApiDoc::paths(..)`, not something
+/// this function can recover from, so it is deliberately silent rather than
+/// panicking: `docs-ci.yml`'s OpenAPI parse-check and the digest test in this
+/// module already fail loudly if `ApiDoc` stops documenting discovery at all.
+fn add_oauth_authorization_server_alias(doc: &mut utoipa::openapi::OpenApi) {
+    if let Some(discovery_item) = doc
+        .paths
+        .paths
+        .get("/.well-known/openid-configuration")
+        .cloned()
+    {
+        doc.paths.paths.insert(
+            "/.well-known/oauth-authorization-server".to_string(),
+            discovery_item,
+        );
+    }
 }
 
 /// The extension key carrying the specification's content digest.
@@ -868,5 +899,41 @@ mod spec_digest_tests {
             twice.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
             Some(&expected)
         );
+    }
+}
+
+#[cfg(test)]
+mod discovery_alias_tests {
+    use super::api_doc;
+
+    /// I9 — the RFC 8414 alias route (T21.1) is documented alongside the OIDC
+    /// discovery path it mirrors, not merely routed.
+    #[test]
+    fn rfc8414_alias_is_documented() {
+        let doc = api_doc();
+        assert!(
+            doc.paths
+                .paths
+                .contains_key("/.well-known/oauth-authorization-server"),
+            "the RFC 8414 alias must be a documented OpenAPI path"
+        );
+    }
+
+    /// The alias's documented operation is exactly the OIDC discovery one —
+    /// cloned, not independently authored, so the two can never drift (I1).
+    #[test]
+    fn rfc8414_alias_matches_oidc_discovery_operation() {
+        let doc = api_doc();
+        let oidc = doc
+            .paths
+            .paths
+            .get("/.well-known/openid-configuration")
+            .expect("OIDC discovery must be documented");
+        let alias = doc
+            .paths
+            .paths
+            .get("/.well-known/oauth-authorization-server")
+            .expect("the RFC 8414 alias must be documented");
+        assert_eq!(oidc, alias);
     }
 }

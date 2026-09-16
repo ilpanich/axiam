@@ -2464,6 +2464,14 @@ async fn introspect_inner<C: Connection + Clone>(
 
 /// `GET /.well-known/openid-configuration` -- OIDC Discovery document.
 ///
+/// Also served, byte-for-byte, at `/.well-known/oauth-authorization-server`
+/// (RFC 8414 §3) — `server.rs` routes both paths to this same function (T21.1).
+/// MCP clients probe the RFC 8414 path first, and several client libraries
+/// never implement the OIDC path as a fallback. The OpenAPI document lists the
+/// alias as its own entry (`openapi.rs::add_oauth_authorization_server_alias`)
+/// so the two stay documented without a second hand-written annotation that
+/// could drift from this one.
+///
 /// Returns the OpenID Provider metadata per OpenID Connect Discovery 1.0.
 /// The issuer URL is taken from `AuthConfig::oauth2_issuer_url` when set,
 /// falling back to `AuthConfig::jwt_issuer` otherwise.

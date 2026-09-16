@@ -1,0 +1,93 @@
+# AXIAM on one Raspberry Pi 5, on single-node k3s.
+#
+# Operator guide: docs/deployment/rpi5-k3s.md. Bring-up is scripted in
+# infra/rpi5-k3s/; this overlay is what stage `20-axiam` renders and applies.
+#
+# WHY IT LIVES HERE AND NOT UNDER `k8s/overlays/`. The base kustomization is
+# `k8s/kustomization.yml` — the root `k8s/` directory IS the base, which is what
+# makes `kubectl apply -k k8s/` work and what docs/deployment/README.md
+# promises. Kustomize refuses to build an overlay nested inside its own base
+# root:
+#
+#   cycle detected: candidate root '<repo>/k8s' contains visited root
+#   '<repo>/k8s/overlays/rpi5-k3s'
+#
+# The usual answer is to split the base into `k8s/base/`, which would change
+# the documented apply command for every existing deployment. Keeping the
+# overlay beside the scripts that apply it costs nothing and keeps everything
+# Pi-specific in one directory.
+#
+# Everything here is either a §4 finding from
+# claude_dev/rpi5-k3s-opentofu-plan.md that is specific to one Pi, or a §3
+# decision from it. Nothing here relaxes an invariant of that document's §1 —
+# TRUSTED_HOPS stays 0, the backend keeps its own TLS, the health endpoints stay
+# unrouted, gRPC stays off the internet by default, Pod Security `restricted`
+# and default-deny NetworkPolicy both still apply.
+#
+# HOSTNAME. `axiam-iam.duckdns.org` appears in ingress-host.yml and
+# configmap-env.yml. It is the name used throughout the Pi guide; change it in
+# both files together, or nothing signs in.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: axiam
+
+resources:
+  - ../../../k8s
+
+# K8S-F7 / K8S-F9: real image names, and a tag pin per image.
+#
+# The base carries `ghcr.io/OWNER/...` on purpose so a fork can publish its own
+# builds; this is the upstream project, so the real paths go here. Both images
+# publish linux/amd64 and linux/arm64 under one manifest list, which is what
+# makes an arm64 Pi a supported target rather than a hopeful one.
+#
+# AXIAM tags are immutable — the release workflow publishes `1.0.0-beta15` and
+# no moving `latest` or `1.0` — so a tag pin is a digest pin in everything but
+# spelling. Bump this and the base together when you upgrade, and read
+# CHANGELOG.md between the two tags first.
+images:
+  - name: ghcr.io/OWNER/server
+    newName: ghcr.io/ilpanich/axiam/server
+    newTag: 1.0.0-beta15
+  - name: ghcr.io/OWNER/frontend
+    newName: ghcr.io/ilpanich/axiam/frontend
+    newTag: 1.0.0-beta15
+  # K8S-F9: `v3` is a MOVING major tag, and it has already moved — on
+  # 2026-09-16 `surrealdb/surrealdb:v3` and `:v3.2` resolved to different
+  # digests. That matters more here than it would elsewhere:
+  # docs/deployment/README.md pins a behavioural claim to measurements taken on
+  # 3.2.3 — that `surrealkv` admits no double winner to a guarded single-use
+  # UPDATE, which AXIAM's permission tickets, device codes and PAR request_uris
+  # depend on. A major tag that rolls to 3.3 under a running Pi rolls that
+  # measurement out from under it too.
+  #
+  # `v3.2` rather than a digest: it still takes patch releases, which is what
+  # you want on a datastore, and the property above was measured across the
+  # 3.2.x line rather than on one build. Pin the digest instead if you would
+  # rather approve every change by hand — `scripts/surreal-engine-versions.sh`
+  # is the tool for checking what moved.
+  - name: surrealdb/surrealdb
+    newTag: v3.2
+
+patches:
+  # D7 / K8S-F6 — one replica each, and no HPA.
+  - path: replicas-and-hpa.yml
+  # K8S-F7 / K8S-F10 — the six mandatory settings, the Vault CA path, and the
+  # switch from the `file` secret provider to `vault`.
+  - path: configmap-env.yml
+  - path: server-vault.yml
+  # K8S-F3 — k3s pod and service CIDRs, which are not the kubeadm defaults the
+  # base ships.
+  - path: network-policy-cidrs.yml
+  # D3 — the public hostname, the ACME issuer, the TLS Secret name.
+  - path: ingress-host.yml
+  # D4 — auto-unseal. Ships as a no-op patch; the whole point is that it is one
+  # file to edit rather than a decision to rediscover.
+  - path: vault-seal.yml
+
+# ingress-grpc.yml is NOT listed above: gRPC stays off the internet by default
+# (invariant 4). `infra/rpi5-k3s/tofu/20-axiam` appends it to `resources` when
+# `grpc_public = true`, which is the one place the choice is recorded. Read
+# docs/deployment/rpi5-k3s.md §14 before setting it — the Ingress is the easy
+# part.

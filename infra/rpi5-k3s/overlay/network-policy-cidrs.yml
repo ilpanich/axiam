@@ -1,0 +1,96 @@
+# K8S-F3: the cluster CIDR exceptions, corrected for k3s.
+#
+# The base excludes `10.244.0.0/16` and `10.96.0.0/12` from its wide 443 egress
+# rule — the flannel/calico and kubeadm defaults, and its own comment says the
+# operator MUST replace them. k3s does not use either: its defaults are
+# `--cluster-cidr 10.42.0.0/16` and `--service-cidr 10.43.0.0/16`.
+#
+# Left as shipped, the exception list names two ranges nothing occupies while
+# the ranges that DO hold every in-cluster Service stay inside `0.0.0.0/0`. The
+# "external HTTPS" rule then lets a compromised server pod reach any in-cluster
+# service on 443 — which is the lateral-movement hole the exceptions exist to
+# close, open in exactly the deployment that thought it had closed it.
+#
+# Both k3s ranges fall inside `10.0.0.0/8`, which is already excluded, so on a
+# default k3s install this patch is belt and braces. It is here anyway because
+# the excluded-by-accident case stops being true the moment somebody installs
+# k3s with `--cluster-cidr` outside RFC1918, and because a policy that is
+# correct for a reason nobody wrote down is one that breaks silently.
+#
+# CONFIRM BEFORE TRUSTING IT — the Pi is where you find out, not here:
+#   kubectl get node -o jsonpath='{.items[0].spec.podCIDR}{"\n"}'
+#   kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}{"\n"}'
+# The second gives the service CIDR's /16 by its third octet.
+#
+# THE WHOLE `egress` LIST IS RESTATED, not merged into. `spec.egress` is a list
+# of complex objects with no patch merge key, so strategic-merge replaces it
+# outright — confirmed on the render, not assumed. That is what this patch wants
+# (a merge would append the two right CIDRs beside the two wrong ones), and it
+# is also why every other rule reappears below unchanged: leave one out and it
+# is gone.
+#
+# It is also why each podSelector names `app: axiam` explicitly. The base gets
+# that label from `commonLabels` in k8s/kustomization.yml, applied while the
+# base is accumulated — before this patch replaces the list. A selector of
+# `component: surrealdb` alone would still match, since the pods carry both
+# labels, but it would no longer say the same thing as the base and the next
+# person to diff the two renders would have to work out why.
+#
+# SMTP: the base's `192.0.2.0/24` is RFC 5737 TEST-NET-1 and mail will not send
+# until you replace it with your relay's real CIDR. It is deliberately left
+# fail-closed here too — a Pi deployment that does not send mail is a supported
+# configuration, and widening this to 0.0.0.0/0 is not.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: server-egress
+  namespace: axiam
+spec:
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: axiam
+              component: surrealdb
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - podSelector:
+            matchLabels:
+              app: axiam
+              component: rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5671
+    - to:
+        - podSelector:
+            matchLabels:
+              app: axiam
+              component: vault
+      ports:
+        - protocol: TCP
+          port: 8200
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 10.42.0.0/16     # k3s default pod CIDR (--cluster-cidr)
+              - 10.43.0.0/16     # k3s default service CIDR (--service-cidr)
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/24   # RFC 5737 TEST-NET-1 — replace with your SMTP relay, or leave mail off
+      ports:
+        - protocol: TCP
+          port: 25
+        - protocol: TCP
+          port: 465
+        - protocol: TCP
+          port: 587

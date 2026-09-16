@@ -155,7 +155,7 @@ data:
   #
   # They are commented rather than set because each one is a hostname you own;
   # a value here would be a wrong value on every cluster but one. Set them in an
-  # overlay. k8s/overlays/rpi5-k3s/configmap-env.yml is a worked example, and
+  # overlay. infra/rpi5-k3s/overlay/configmap-env.yml is a worked example, and
   # claude_dev/rpi5-prod-google-federation-guide.md §5.2 is the long form.
   #
   # NOTE THE UNDERSCORES. `load_config()` uses `.with_prefix("AXIAM")` with

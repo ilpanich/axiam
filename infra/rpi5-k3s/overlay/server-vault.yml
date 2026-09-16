@@ -1,0 +1,56 @@
+# K8S-F10: switch the server from the `file` secret provider to `vault`, and
+# give it the trust anchor to get there.
+#
+# The base Deployment pins `AXIAM__AUTH__SECRET_PROVIDER: "file"` as an INLINE
+# `env`, which wins over the `envFrom` ConfigMap value of `vault` — container
+# `env` always beats `envFrom`. So the base's ConfigMap documents the production
+# choice while the Deployment quietly takes the other one. On this Pi Vault is
+# real, initialised by a human ceremony and holding the OPAQUE setup key, so the
+# override has to be reversed here rather than in the ConfigMap.
+#
+# `AXIAM__AUTH__SECRET_DIR` goes away with it. An unknown provider name is
+# refused at startup rather than falling back to `env`, so this is a change that
+# fails loudly if it is wrong.
+#
+# The `axiam-key-material` Secret and its mount stay exactly as the base has
+# them. They are inert under the `vault` provider — nothing reads
+# /etc/axiam/secrets — and leaving them is what makes falling back to `file` a
+# one-line revert on a night when Vault will not unseal. They ship blank; do not
+# fill them in while the provider is `vault`, or the two sources disagree and
+# only one of them is audited.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: axiam-server
+  namespace: axiam
+spec:
+  template:
+    spec:
+      containers:
+        - name: axiam-server
+          env:
+            - name: AXIAM__AUTH__SECRET_PROVIDER
+              value: "vault"
+            # Removed rather than left pointing at an unused directory: a stale
+            # AXIAM__AUTH__SECRET_DIR is the kind of leftover that makes the
+            # next reader think the file provider is still in play.
+            - name: AXIAM__AUTH__SECRET_DIR
+              $patch: delete
+          volumeMounts:
+            - name: vault-tls-ca
+              mountPath: /etc/axiam/vault-tls
+              readOnly: true
+      volumes:
+        # The same shape the base already uses for the broker CA: project ONLY
+        # `ca.crt` out of a Secret that also holds a private key. cert-manager
+        # writes `ca.crt` into every leaf Secret it issues from a CA issuer, so
+        # this is the anchor for `vault-tls` without a second object to keep in
+        # sync. 0444 because a CA certificate is public data — contrast the 0440
+        # on the key material and the server's own leaf.
+        - name: vault-tls-ca
+          secret:
+            secretName: vault-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+            defaultMode: 0444

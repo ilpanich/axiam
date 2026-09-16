@@ -42,7 +42,7 @@ spec:
           # with the leading `v` stripped, and linux/amd64 + linux/arm64 ship
           # under one manifest list. There are no moving tags — no `latest`, no
           # `1.0` — so nothing drifts under you. Set both names in an overlay
-          # (`images:` in kustomization.yml); k8s/overlays/rpi5-k3s does.
+          # (`images:` in kustomization.yml); infra/rpi5-k3s/overlay does.
           image: ghcr.io/OWNER/server:1.0.0-beta15
           ports:
             - name: http

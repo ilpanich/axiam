@@ -1,0 +1,100 @@
+# K8S-F7: the five settings the base leaves commented, filled in for this Pi,
+# plus the Vault trust anchor and the CA-custody choice (K8S-F10).
+#
+# EVERY hostname below is `axiam-iam.duckdns.org`. Change it here and in
+# ingress-host.yml together — the DuckDNS name, the Ingress host, the WebAuthn
+# RP ID, the two issuer URLs and the certificate's SAN all have to be the same
+# string, and each one fails differently when it is not.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: axiam-config
+  namespace: axiam
+data:
+  # --- the five mandatory settings (Pi guide §5.2) ------------------------
+  #
+  # Bare registrable domain. Passkeys bind to it; changing it later invalidates
+  # every passkey already enrolled, with no migration.
+  AXIAM_WEBAUTHN_RP_ID: "axiam-iam.duckdns.org"
+  # Must match the browser's address bar exactly, scheme included.
+  AXIAM_WEBAUTHN_RP_ORIGIN: "https://axiam-iam.duckdns.org"
+  # The `iss` on AXIAM's own tokens.
+  AXIAM__AUTH__JWT_ISSUER: "https://axiam-iam.duckdns.org"
+  # What /.well-known/openid-configuration advertises, and the base URL AXIAM
+  # builds Apple's and the SAML IdPs' redirect URIs from.
+  AXIAM__AUTH__OAUTH2_ISSUER_URL: "https://axiam-iam.duckdns.org"
+  # PLACEHOLDER — set it to your own address before the first boot. Bootstrap is
+  # fail-closed: it refuses unless this matches the request's email, or the
+  # request carries the one-time setup token from the first-boot log.
+  # `infra/rpi5-k3s/tofu` sets this from the `admin_email` variable, so editing
+  # `20-axiam.auto.tfvars` is the supported way to change it.
+  AXIAM_BOOTSTRAP_ADMIN_EMAIL: "admin@example.com"
+
+  # --- Vault, and the trust anchor for reaching it ------------------------
+  #
+  # The base ConfigMap already names `vault` as the provider; what it could not
+  # do is point at a CA that exists. The in-cluster CA is not in the image's
+  # root store, and AXIAM's Vault client has no verification-skip option — the
+  # token it presents on every fetch is a bearer credential for the OPAQUE setup
+  # key, and over an unverified connection anything that can answer on 8200 can
+  # take it.
+  #
+  # `ca.crt` is projected out of the `vault-tls` Secret by server-vault.yml.
+  # Only that key: the server verifies Vault, it must never hold Vault's own
+  # private key.
+  AXIAM__AUTH__VAULT_CA_CERT_PATH: "/etc/axiam/vault-tls/ca.crt"
+
+  # --- CA signing key custody (K8S-F10) -----------------------------------
+  #
+  # `vault`, for parity with everything else this deployment keeps there. The
+  # alternative, `database`, seals each CA key into its own `ca_certificate` row
+  # under AXIAM__PKI__ENCRYPTION_KEY — and the difference between the two is
+  # whether one database dump plus one process's environment yields every CA
+  # private key in the deployment, with nothing recording the read.
+  #
+  # THERE ARE NO AXIAM__PKI__VAULT_* VARIABLES HERE, AND THAT IS CORRECT.
+  # `vault_endpoint_from` (crates/axiam-pki/src/ca_key_store.rs) inherits
+  # AXIAM__AUTH__VAULT_ADDR, _TOKEN and _CA_CERT_PATH whenever the PKI-specific
+  # pair is absent, because one Vault is the overwhelmingly common deployment
+  # and a beta shipped in which making the operator address it twice meant
+  # nobody did. Setting a PKI address without a PKI token — or the reverse — is
+  # refused at startup rather than ignored, so a half-filled pair here would be
+  # worse than none.
+  #
+  # Written out even though `vault` is ALSO what it would default to, because
+  # the explicit value fails loudly: `CaKeyCustodians::new` refuses to start
+  # when the named custodian is not actually configured, where the default
+  # silently falls back to `database`. The shipped policy
+  # (docker/vault/axiam-policy.hcl) already grants create/read/update on
+  # `secret/data/axiam/ca-keys/*` and delete on the metadata path, so nothing
+  # further is needed in Vault.
+  AXIAM__PKI__CA_KEY_STORE: "vault"
+
+  # --- TRUSTED_HOPS, re-derived for THIS topology -------------------------
+  #
+  # Still 0, and not by inheritance — the base's derivation assumes one
+  # appending proxy, and ingress-nginx does not append.
+  #
+  # At helm-chart-4.15.1 the controller's nginx.tmpl emits
+  #
+  #     proxy_set_header X-Forwarded-For $remote_addr;
+  #
+  # unless BOTH `use-forwarded-headers` and `compute-full-forwarded-for` are
+  # true. With `use-forwarded-headers: "false"` — which
+  # infra/rpi5-k3s/tofu/10-platform sets — it REPLACES the header rather than
+  # appending to it. So the server reads a single-entry `X-Forwarded-For`
+  # holding the socket peer, and 0 selects it. A client's own forged
+  # X-Forwarded-For is discarded outright, which is a stronger property than the
+  # append-and-read-from-the-right the Compose path relies on.
+  #
+  # That makes hostNetwork mode on the controller load-bearing: `$remote_addr`
+  # is the real client only because the controller binds the node's 80/443
+  # directly. Put k3s's ServiceLB, MetalLB or a NodePort in front and
+  # `$remote_addr` becomes a SNAT address — one bucket for the whole internet,
+  # `/auth/login` included, which is deliberately always keyed per-IP so an
+  # attacker cannot lock out a victim.
+  #
+  # Verify it rather than trusting this comment: docs/deployment/rpi5-k3s.md
+  # §6.3 has the two-address check, and it is an acceptance step, not a
+  # suggestion.
+  AXIAM__RATE_LIMIT__TRUSTED_HOPS: "0"

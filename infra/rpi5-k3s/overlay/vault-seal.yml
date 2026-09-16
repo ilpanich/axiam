@@ -1,0 +1,156 @@
+# D4: auto-unseal. A no-op as it ships, and that is the point — this is one file
+# to edit rather than a decision to rediscover at 3am.
+#
+# WHAT YOU HAVE WITHOUT IT. Every Vault restart — a power cut, an `apt upgrade`,
+# an OOM kill, a k3s upgrade — leaves Vault sealed. `axiam-server` then
+# crash-loops, because it reads every secret out of Vault before it can serve a
+# single login, and the pod will keep restarting for as long as it takes a human
+# with three of the five unseal shares to arrive. That is a legitimate choice
+# for a home lab. What is not legitimate is leaving the shares on the Pi and
+# calling the problem solved: a key beside the sealed data is not a seal.
+# `docs/deployment/vault.md` §5.3 calls this the single most important
+# production step and the one most often deferred, and
+# claude_dev/rpi5-prod-google-federation-guide.md §7.1 prices the options.
+#
+# Vault OSS's seal types all need something OUTSIDE the box. `pkcs11` (a TPM or
+# HSM) is Vault Enterprise only, whatever hardware the Pi has, so the realistic
+# choices are a cloud KMS or a second Vault that is already unsealed somewhere
+# else. GCP Cloud KMS is about $0.06/key/month, which is the cheapest by an
+# order of magnitude, and the whole cloud footprint is one key.
+#
+# ------------------------------------------------------------------------
+# TO TURN IT ON
+# ------------------------------------------------------------------------
+#
+# 1. Create the key, and a service account with
+#    `roles/cloudkms.cryptoKeyEncrypterDecrypter` on it — nothing wider.
+# 2. Put its JSON key in a Secret. Do NOT commit it, and do not put it in the
+#    OpenTofu state either:
+#      kubectl -n axiam create secret generic vault-gcpckms \
+#        --from-file=credentials.json=/path/to/sa-key.json
+# 3. Uncomment the `seal` stanza below and fill in the four names.
+# 4. Uncomment the volume, the mount and GOOGLE_APPLICATION_CREDENTIALS in the
+#    StatefulSet patch at the bottom of this file.
+# 5. Vault needs EGRESS to the KMS endpoint, which default-deny does not grant.
+#    Uncomment the NetworkPolicy at the end of this file too — without it Vault
+#    starts, cannot reach cloudkms.googleapis.com, and stays sealed with a
+#    timeout in its log that reads like a credentials problem.
+# 6. A Vault already initialised under Shamir does NOT migrate by restarting
+#    with a `seal` block. It needs `vault operator unseal -migrate` with three
+#    shares, once. `docs/deployment/vault.md` §5 has the procedure; on a Vault
+#    with no data yet, destroying the PVC and re-running the ceremony is
+#    simpler and honest.
+#
+# Whichever you choose, write down which one you chose. `just vault-status`
+# reports `SHAMIR` for a manually-unsealed Vault, which is the truth and is
+# meant to be read as one.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: axiam
+data:
+  vault.hcl: |
+    ui = false
+
+    # K8S-F2: mlock off — required to admit under Pod Security `restricted`,
+    # and recommended by HashiCorp for integrated storage anyway. The full
+    # reasoning is in k8s/vault/statefulset.yml; do not re-enable it without
+    # also confirming the node has no swap.
+    disable_mlock = true
+
+    storage "raft" {
+      path    = "/vault/data"
+      node_id = "vault-0"
+    }
+
+    listener "tcp" {
+      address       = "0.0.0.0:8200"
+      tls_cert_file = "/vault/tls/tls.crt"
+      tls_key_file  = "/vault/tls/tls.key"
+      tls_min_version = "tls13"
+    }
+
+    api_addr     = "https://vault.axiam.svc.cluster.local:8200"
+    cluster_addr = "https://vault.axiam.svc.cluster.local:8201"
+
+    # --- AUTO-UNSEAL: uncomment ONE, and read the header of this file first ---
+    #
+    # seal "gcpckms" {
+    #   credentials = "/vault/gcp/credentials.json"
+    #   project     = "your-project"
+    #   region      = "europe-west1"
+    #   key_ring    = "vault"
+    #   crypto_key  = "vault-unseal"
+    # }
+    #
+    # seal "awskms" {
+    #   region     = "eu-west-1"
+    #   kms_key_id = "arn:aws:kms:eu-west-1:...:key/..."
+    # }
+    #
+    # seal "transit" {
+    #   address    = "https://vault-elsewhere.example:8200"
+    #   key_name   = "autounseal"
+    #   mount_path = "transit/"
+    # }
+#
+# --- and the pod changes the gcpckms stanza needs ---------------------------
+#
+# ---
+# apiVersion: apps/v1
+# kind: StatefulSet
+# metadata:
+#   name: vault
+#   namespace: axiam
+# spec:
+#   template:
+#     spec:
+#       containers:
+#         - name: vault
+#           env:
+#             - name: GOOGLE_APPLICATION_CREDENTIALS
+#               value: /vault/gcp/credentials.json
+#           volumeMounts:
+#             - name: gcp-credentials
+#               mountPath: /vault/gcp
+#               readOnly: true
+#       volumes:
+#         - name: gcp-credentials
+#           secret:
+#             secretName: vault-gcpckms
+#             defaultMode: 0400
+#
+# --- and the egress rule, which default-deny otherwise refuses --------------
+#
+# ---
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: vault-egress-autounseal
+#   namespace: axiam
+# spec:
+#   podSelector:
+#     matchLabels:
+#       component: vault
+#   policyTypes:
+#     - Egress
+#   egress:
+#     - to:
+#         - ipBlock:
+#             cidr: 0.0.0.0/0
+#             except:
+#               - 10.0.0.0/8
+#               - 172.16.0.0/12
+#               - 192.168.0.0/16
+#               - 100.64.0.0/10
+#       ports:
+#         - protocol: TCP
+#           port: 443
+#
+# (Remember that `allow-dns-egress` already covers Vault's DNS — it selects
+# every pod in the namespace — so this rule is only about the KMS itself.
+# Narrow the CIDR to your provider's published ranges if you are willing to
+# track them; 0.0.0.0/0-minus-private is the honest default, and it is still a
+# smaller hole than the one a sealed Vault leaves in your availability.)

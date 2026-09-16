@@ -1,0 +1,123 @@
+# D6: gRPC on the public edge — OFF BY DEFAULT.
+#
+# This file is deliberately NOT in kustomization.yml's `resources`. It is added
+# only when `infra/rpi5-k3s/tofu/20-axiam` is applied with `grpc_public = true`,
+# so the choice is recorded in one place, in tfvars, where a `tofu plan` shows
+# it.
+#
+# Read claude_dev/rpi5-prod-google-federation-guide.md §14 before turning it on.
+# The Ingress is the easy part; §14.6's two settings are the rest of it.
+#
+# WHY THROUGH THE INGRESS AND NEVER A NODEPORT AT 50051. The obvious way to
+# publish gRPC is to forward a public port straight at the listener and let the
+# backend's own TLS terminate it. Do not.
+# `GrpcTrustedHopsKeyExtractor` reads X-Forwarded-For before falling back to the
+# verified connection peer, exactly as the REST extractor does. With nothing in
+# front, no proxy writes that header — so a client that sends one of its own is
+# rate-limited on a value IT chose, and a value it varies per call is a fresh
+# bucket per call. No TRUSTED_HOPS setting closes that: for any n, a client
+# sending n+1 entries selects the leftmost one it wrote, and one sending fewer
+# falls back to the peer. The header is trustworthy only because a proxy you run
+# overwrites it, and a NodePort has no such proxy.
+#
+# Routed through this controller it costs nothing you were keeping: nginx
+# already speaks HTTP/2 to the client, re-encrypts to the backend's own gRPC
+# listener, and rewrites X-Forwarded-For with the socket peer on this route
+# exactly as it does on /api. TRUSTED_HOPS stays 0 and stays correct for BOTH
+# protocols — which is fortunate, since `trusted_hops_from_env` (gRPC) and
+# `XForwardedForKeyExtractor` (REST) read the same single variable and there is
+# no way to give them different values.
+#
+# WHAT ELSE HAS TO BE TRUE, none of which this file does:
+#
+#   1. AXIAM__GRPC_TLS_CERT_PATH and AXIAM__GRPC_TLS_KEY_PATH must be set, to
+#      the SAME files the REST listener uses — /etc/axiam/server-tls/tls.crt
+#      and tls.key. One certificate, both listeners, one reloader. Note the
+#      spelling: these are FLAT names read straight out of the process
+#      environment, NOT AXIAM__GRPC__TLS__CERT_PATH, and the wrong name is
+#      silently ignored. Both or neither: the server panics at startup if
+#      either names a file it cannot read, which is deliberate — a typo is a
+#      failed boot, never a listener that quietly came up in cleartext.
+#   2. AXIAM__GRPC__STRICT_REVOCATION must be "true". By default the gRPC data
+#      plane validates a token's signature and expiry and stops there, so a
+#      session revoked by logout or admin sign-out keeps passing authorization
+#      until the access token expires — up to 15 minutes. On a listener the
+#      internet can reach, take REST's semantics.
+#   3. The server Service already publishes 50051 as a ClusterIP port, so
+#      nothing changes there. It stays ClusterIP.
+#
+# `infra/rpi5-k3s/tofu/20-axiam` sets 1 and 2 from the same `grpc_public`
+# variable that adds this file, so they cannot drift apart.
+#
+# THE PATH ALLOWLIST BELOW IS THE SECURITY CONTROL. Three services, named one at
+# a time — the read-side surface a mesh or SDK client actually calls. Anything
+# under /axiam.v1.* that is not listed falls through to the SPA route and gets
+# HTML back: a confusing refusal, but a safe one.
+#
+#   /axiam.v1.UserService/*          — add only if something remote needs
+#                                      GetUser or ValidateCredentials. The
+#                                      latter is a password check; publishing it
+#                                      puts an online guessing surface on the
+#                                      internet, held by a 10/s per-IP ceiling
+#                                      and the account lockout it accrues.
+#   /axiam.v1.ReactorAdminService/*  — add only if you administer reactors
+#                                      remotely. It is the one to think hardest
+#                                      about.
+#
+# Never publish a bare `/axiam.v1.` prefix. That is not an allowlist.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: axiam-ingress-grpc
+  namespace: axiam
+  labels:
+    app: axiam
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-http01"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # GRPCS, not GRPC: the backend's gRPC listener terminates its own TLS from
+    # the same leaf the REST listener serves. GRPC would send h2c to a socket
+    # that only speaks h2-over-TLS.
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPCS"
+    # The same verification as the /api route, against the same in-cluster CA.
+    nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"
+    nginx.ingress.kubernetes.io/proxy-ssl-secret: "axiam/axiam-ingress-client"
+    nginx.ingress.kubernetes.io/proxy-ssl-name: "axiam-server.axiam.svc"
+    nginx.ingress.kubernetes.io/proxy-ssl-server-name: "on"
+    nginx.ingress.kubernetes.io/proxy-ssl-protocols: "TLSv1.3"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - axiam-iam.duckdns.org
+      secretName: axiam-public-tls
+  rules:
+    - host: axiam-iam.duckdns.org
+      http:
+        paths:
+          # `Exact` on the service prefix would not match, and `Prefix` on
+          # `/axiam.v1.AuthorizationService` matches every method of that one
+          # service and nothing else — which is the granularity the gRPC wire
+          # format gives you. A method-level allowlist would need one path per
+          # method; say so out loud if you need it rather than widening these.
+          - path: /axiam.v1.AuthorizationService
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-server
+                port:
+                  number: 50051
+          - path: /axiam.v1.UserInfoService
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-server
+                port:
+                  number: 50051
+          - path: /axiam.v1.TokenService
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-server
+                port:
+                  number: 50051

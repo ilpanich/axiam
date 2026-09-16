@@ -16,7 +16,7 @@
 #
 # UPDATE BEFORE APPLYING: `axiam.example.com` in four places, and the
 # `secretName` if you do not use the name below. On a single-node k3s Pi this is
-# done for you by k8s/overlays/rpi5-k3s — see docs/deployment/rpi5-k3s.md.
+# done for you by infra/rpi5-k3s/overlay — see docs/deployment/rpi5-k3s.md.
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -129,7 +129,7 @@ spec:
 # `backend-protocol: "GRPCS"` and a per-service path allowlist — never as a
 # NodePort at 50051. claude_dev/rpi5-prod-google-federation-guide.md §14.2
 # explains why no TRUSTED_HOPS value can rescue a direct route, and
-# k8s/overlays/rpi5-k3s/ingress-grpc.yml is a worked example.
+# infra/rpi5-k3s/overlay/ingress-grpc.yml is a worked example.
 #
 # NOT ROUTED, deliberately: /health, /ready and /health/jobs. The last reports
 # per-job scheduler state — names, last-run times, consecutive failures — which

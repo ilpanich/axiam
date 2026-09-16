@@ -86,12 +86,27 @@ kind: Service
 metadata:
   name: vault
   namespace: axiam
+  labels:
+    app: axiam
+    component: vault
 spec:
   # ClusterIP: Vault is reached by AXIAM inside the cluster and by an operator
   # through `kubectl port-forward`. It is never published.
   type: ClusterIP
+  # K8S-F11: `app: axiam` AND `component: vault`, the same two-label shape every
+  # other component here uses — not the bare `app: vault` this carried.
+  #
+  # `k8s/kustomization.yml` applies `commonLabels: {app: axiam}`, and kustomize
+  # rewrites Service selectors and workload `spec.selector` along with the
+  # labels. A selector of `app: vault` therefore did not survive the render: it
+  # became `app: axiam`, which matches EVERY pod in the namespace. This Service
+  # was load-balancing `https://vault.axiam.svc.cluster.local:8200` across the
+  # server, the frontend, SurrealDB and RabbitMQ, so the first secret fetch hit
+  # whichever one round-robin picked. Two labels are immune: kustomize
+  # overwrites `app` with the value it already has and leaves `component` alone.
   selector:
-    app: vault
+    app: axiam
+    component: vault
   ports:
     - name: https
       port: 8200
@@ -102,16 +117,37 @@ kind: StatefulSet
 metadata:
   name: vault
   namespace: axiam
+  labels:
+    app: axiam
+    component: vault
 spec:
   serviceName: vault
   replicas: 1
+  # K8S-F11: see the Service above. `commonLabels` collapsed this selector to
+  # `app: axiam` too, which made the StatefulSet's selector overlap every other
+  # workload in the namespace — an overlap the API server does not reject and
+  # the controller is not defined over.
+  #
+  # UPGRADING AN EXISTING DEPLOYMENT: `spec.selector` is immutable, so
+  # `kubectl apply` against a StatefulSet created from the previous revision
+  # fails with `Forbidden: updates to statefulset spec for fields other than
+  # 'replicas', 'ordinals', ... are forbidden`. Recreate it without touching
+  # the data:
+  #
+  #     kubectl -n axiam delete statefulset vault --cascade=orphan
+  #     kubectl apply -k k8s/
+  #
+  # The PVC and the running pod both survive `--cascade=orphan`; the new
+  # StatefulSet adopts the pod once its labels match.
   selector:
     matchLabels:
-      app: vault
+      app: axiam
+      component: vault
   template:
     metadata:
       labels:
-        app: vault
+        app: axiam
+        component: vault
     spec:
       serviceAccountName: vault
       securityContext:

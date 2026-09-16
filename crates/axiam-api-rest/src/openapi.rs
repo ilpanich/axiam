@@ -921,6 +921,12 @@ mod discovery_alias_tests {
 
     /// The alias's documented operation is exactly the OIDC discovery one —
     /// cloned, not independently authored, so the two can never drift (I1).
+    ///
+    /// Compared via their JSON serialization rather than `assert_eq!` on the
+    /// `PathItem`s directly: `utoipa::openapi::PathItem` implements
+    /// `PartialEq` but not `Debug` in this build (`Debug` is behind utoipa's
+    /// own `debug` feature, which this workspace does not enable), so a
+    /// direct `assert_eq!` fails to compile.
     #[test]
     fn rfc8414_alias_matches_oidc_discovery_operation() {
         let doc = api_doc();
@@ -934,6 +940,9 @@ mod discovery_alias_tests {
             .paths
             .get("/.well-known/oauth-authorization-server")
             .expect("the RFC 8414 alias must be documented");
-        assert_eq!(oidc, alias);
+        assert_eq!(
+            serde_json::to_value(oidc).unwrap(),
+            serde_json::to_value(alias).unwrap()
+        );
     }
 }

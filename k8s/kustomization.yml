@@ -38,3 +38,5 @@ resources:
   # the server could reach neither its datastore nor its broker.
   - network-policy/allow-ingress-to-surrealdb.yml
   - network-policy/allow-ingress-to-rabbitmq.yml
+  # K8S-F1: and the same pairing for Vault, which was missing both halves.
+  - network-policy/allow-ingress-to-vault.yml

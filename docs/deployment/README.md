@@ -101,12 +101,15 @@ Key manifests:
 - [`k8s/surrealdb/statefulset.yml`](../../k8s/surrealdb/statefulset.yml),
   [`k8s/rabbitmq/statefulset.yml`](../../k8s/rabbitmq/statefulset.yml) — the
   stateful backing services.
-- [`k8s/ingress.yml`](../../k8s/ingress.yml) — routes `/api`, `/oauth2`, and
-  `/.well-known` to `axiam-server:8090`, and `/` to `axiam-frontend:80`.
-  Update the `host:` (`axiam.example.com`) and TLS `secretName` before
-  applying. gRPC (port 50051) is intentionally **not** exposed through
-  Ingress — it is reachable only in-cluster via the `axiam-server` ClusterIP
-  service.
+- [`k8s/ingress.yml`](../../k8s/ingress.yml) — **two** Ingress objects sharing
+  one host. `axiam-ingress-api` routes `/api`, `/oauth2` and `/.well-known` to
+  `axiam-server:8090` **over HTTPS, verified against the in-cluster CA**;
+  `axiam-ingress-app` routes `/` to `axiam-frontend:80` over HTTP. The split is
+  forced: `backend-protocol` and the `proxy-ssl-*` annotations are per-Ingress,
+  and the two upstreams do not speak the same protocol. Update the `host:`
+  (`axiam.example.com`, four occurrences) and the TLS `secretName` before
+  applying. gRPC (port 50051) is intentionally **not** exposed through Ingress —
+  it is reachable only in-cluster via the `axiam-server` ClusterIP service.
 
 - [`k8s/certs/`](../../k8s/certs/) — **cert-manager `Certificate` and `Issuer`
   examples, and a hard requirement rather than an extra.** Three Secrets are

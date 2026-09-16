@@ -1,13 +1,62 @@
+# K8S-F5: TWO Ingress objects, not one, and the split is forced rather than
+# stylistic.
+#
+# `nginx.ingress.kubernetes.io/backend-protocol` and the `proxy-ssl-*` family
+# are per-INGRESS annotations, not per-path. The backend now terminates its own
+# TLS (AXIAM__SERVER__TLS__ENABLED in k8s/server/configmap.yml) while the
+# frontend's nginx still serves plain HTTP on 8080, so one object cannot
+# describe both: marking it HTTPS makes every SPA request fail the upstream
+# handshake, and leaving it HTTP sends cleartext to a listener that only speaks
+# TLS. One Ingress per upstream protocol is the shape the annotation model
+# admits.
+#
+# Both carry the same host and the same `spec.tls`, which ingress-nginx merges
+# into one server block. Keeping the TLS stanza on both means either object
+# still serves HTTPS if the other is deleted.
+#
+# UPDATE BEFORE APPLYING: `axiam.example.com` in four places, and the
+# `secretName` if you do not use the name below. On a single-node k3s Pi this is
+# done for you by k8s/overlays/rpi5-k3s — see docs/deployment/rpi5-k3s.md.
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: axiam-ingress
+  name: axiam-ingress-api
   namespace: axiam
   labels:
     app: axiam
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # K8S-F5: speak TLS to the backend, and VERIFY it.
+    #
+    # `backend-protocol: HTTPS` alone would encrypt the hop and authenticate
+    # nothing — nginx's default is `proxy_ssl_verify off`, which accepts any
+    # certificate at all and therefore any process that manages to answer on
+    # 8090. That is confidentiality without authenticity, which on the hop that
+    # carries every password is the weaker half.
+    #
+    # `proxy-ssl-secret` names a Secret holding BOTH the CA to verify against
+    # (`ca.crt`) and a client keypair nginx presents upstream (`tls.crt`,
+    # `tls.key`). The client half is not optional in ingress-nginx even though
+    # the server ignores it under `client_auth: off` — the controller writes
+    # proxy_ssl_certificate unconditionally from this Secret. k8s/certs/ issues
+    # `axiam-ingress-client` for exactly this.
+    #
+    # `proxy-ssl-name` overrides the name verified, because nginx dials a
+    # ClusterIP and the leaf is issued for the Service DNS names.
+    # `proxy-ssl-server-name: on` is what actually puts that name in the SNI
+    # extension; without it the backend gets a handshake with no SNI.
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"
+    nginx.ingress.kubernetes.io/proxy-ssl-secret: "axiam/axiam-ingress-client"
+    nginx.ingress.kubernetes.io/proxy-ssl-name: "axiam-server.axiam.svc"
+    nginx.ingress.kubernetes.io/proxy-ssl-server-name: "on"
+    # TLS 1.3 only on the upstream leg, matching the project standard and what
+    # the backend's rustls listener offers. Pinned rather than inherited: the
+    # controller's default is TLSv1.2 TLSv1.3, and a default that widens later
+    # is one nobody re-reads.
+    nginx.ingress.kubernetes.io/proxy-ssl-protocols: "TLSv1.3"
 spec:
   ingressClassName: nginx
   tls:
@@ -41,6 +90,31 @@ spec:
                 name: axiam-server
                 port:
                   number: 8090
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: axiam-ingress-app
+  namespace: axiam
+  labels:
+    app: axiam
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # No backend-protocol: the frontend container is nginx-unprivileged serving
+    # a static SPA over plain HTTP on 8080. It holds no credential and proxies
+    # nothing — the API is routed past it by the object above, not through it —
+    # so this hop carries only files the client is about to be sent anyway.
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - axiam.example.com
+      secretName: axiam-tls
+  rules:
+    - host: axiam.example.com
+      http:
+        paths:
           - path: /
             pathType: Prefix
             backend:
@@ -51,3 +125,14 @@ spec:
 
 # SEC-003 (T-09-05): Public gRPC ingress removed — port 50051 is
 # reachable only in-cluster via the ClusterIP service in server/service.yml.
+# If you publish it, publish it THROUGH this ingress on 443 with
+# `backend-protocol: "GRPCS"` and a per-service path allowlist — never as a
+# NodePort at 50051. claude_dev/rpi5-prod-google-federation-guide.md §14.2
+# explains why no TRUSTED_HOPS value can rescue a direct route, and
+# k8s/overlays/rpi5-k3s/ingress-grpc.yml is a worked example.
+#
+# NOT ROUTED, deliberately: /health, /ready and /health/jobs. The last reports
+# per-job scheduler state — names, last-run times, consecutive failures — which
+# is a free map of what you run and what is currently broken in it. They land on
+# the SPA route above and return index.html. Probe them with
+# `kubectl port-forward` or `kubectl exec`.

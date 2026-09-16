@@ -113,7 +113,12 @@ async fn setup() -> Fixture {
             tenant_id: tenant.id,
             username: "admin".into(),
             email: "admin@example.com".into(),
-            password: "password12345".into(),
+            // Generated, not written down. Nothing in this file signs in with
+            // it — the admin token below is minted directly — so a literal
+            // would be a credential in the tree buying nothing, which is
+            // exactly what CodeQL's `hard-coded cryptographic value` rule is
+            // right to ask about even in a test.
+            password: format!("pw-{}", Uuid::new_v4()),
             metadata: None,
         })
         .await

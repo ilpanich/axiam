@@ -13,10 +13,38 @@ unable to start until a human unseals it. `statefulset.yml` carries the
 commented `seal` blocks and `docs/deployment/vault.md` §5.3 explains why this
 is the step most often deferred and most expensive to defer.
 
+## `disable_mlock = true`, and why only here
+
+The config in `statefulset.yml` sets `disable_mlock = true`; the Compose copy
+(`docker/vault/vault.hcl`) does not, and the difference is deliberate. Pod
+Security Admission `restricted` — enforced on the `axiam` namespace by
+`k8s/namespace.yml` — permits adding exactly one capability, `NET_BIND_SERVICE`,
+so a pod asking for `IPC_LOCK` is rejected at admission. Docker has no
+admission controller, so the Compose stack keeps mlock.
+
+HashiCorp recommends disabling mlock for integrated (Raft) storage anyway: the
+BoltDB file is mmap'd, so the pages mlock would pin are on disk regardless. The
+guarantee you give up is "decrypted secrets are never swapped out" — close that
+at the node, where Kubernetes already wants it closed: the kubelet refuses to
+start with swap enabled unless explicitly told otherwise.
+
 **Upgrading from an earlier revision of these manifests**, which used the `file`
 backend at `/vault/file`: the storage backend and the mount path have both
 changed, so the existing PVC is not readable by Raft. Migrate with
 `vault operator migrate` before applying — see `docs/deployment/vault.md` §5.
+
+**Upgrading across the label fix (K8S-F11):** the StatefulSet's `spec.selector`
+gained a `component: vault` label, and a selector is immutable. `kubectl apply`
+against a StatefulSet created from an earlier revision fails; recreate it
+without touching the data:
+
+```bash
+kubectl -n axiam delete statefulset vault --cascade=orphan
+kubectl apply -k k8s/
+```
+
+The PVC and the running pod both survive `--cascade=orphan`, and the new
+StatefulSet adopts the pod once its labels match.
 
 For a real deployment, prefer one of:
 

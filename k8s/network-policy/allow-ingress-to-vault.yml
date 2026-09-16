@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-vault
+  namespace: axiam
+spec:
+  # K8S-F1: the receiver-side half of the server -> Vault path, the same
+  # SEC-053 pairing the SurrealDB and RabbitMQ policies already have.
+  #
+  # NetworkPolicy is evaluated at BOTH ends. `server-egress` permitting
+  # server -> vault:8200 counts for nothing while `default-deny-all` is still
+  # denying ingress on the Vault pod, and the symptom is the one failure mode
+  # an operator is least likely to read as a network problem: the server boots,
+  # reaches its first secret fetch, and dies reporting that it cannot talk to
+  # Vault — on a Vault that is running, unsealed and healthy.
+  #
+  # This policy shipped missing entirely, which was harmless only because
+  # `k8s/server/deployment.yml` pins `AXIAM__AUTH__SECRET_PROVIDER: "file"`
+  # inline and so never dials Vault. `k8s/server/configmap.yml` documents
+  # `vault` as the production provider; the moment an operator follows it, this
+  # policy is what makes the deployment work.
+  podSelector:
+    matchLabels:
+      component: vault
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              component: server
+      ports:
+        # 8200 only. 8201 is Raft's cluster port, which a single node never
+        # dials over the pod network — it is listed here in neither direction
+        # rather than opened "just in case", so growing to three replicas is a
+        # deliberate policy change and not something that silently already works.
+        - protocol: TCP
+          port: 8200
+
+# `kubectl port-forward` is NOT subject to this policy: it tunnels through the
+# kubelet to the pod's network namespace rather than crossing the pod network,
+# so an operator (and the OpenTofu Vault provider, which uses a port-forward)
+# still reaches 8200 with this in place. That is why nothing here needs to name
+# an operator workstation.

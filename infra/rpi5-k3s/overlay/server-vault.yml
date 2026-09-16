@@ -1,0 +1,101 @@
+# K8S-F10: switch the server from the `file` secret provider to `vault`, give it
+# the trust anchor to get there, and add the Vault token Secret stage 30 creates.
+#
+# The base Deployment pins `AXIAM__AUTH__SECRET_PROVIDER: "file"` as an INLINE
+# `env`, which wins over the `envFrom` ConfigMap value of `vault` — container
+# `env` always beats `envFrom`. So the base's ConfigMap documents the production
+# choice while the Deployment quietly takes the other one. On this Pi Vault is
+# real, initialised by a human ceremony and holding the OPAQUE setup key, so the
+# override has to be reversed here rather than in the ConfigMap.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS A JSON 6902 PATCH AND NOT A STRATEGIC MERGE
+# ---------------------------------------------------------------------------
+#
+# Two reasons, and the second is the one that decided it.
+#
+# 1. `env` and `envFrom` are lists that this patch REPLACES rather than adds to.
+#    Strategic merge has no patch merge key for either, so it replaces them
+#    silently — the right outcome, reached by a rule nobody reading the file
+#    would know. `op: replace` says so.
+#
+# 2. A strategic-merge version of this file is, on disk, a Deployment with one
+#    container and no `securityContext`. Trivy's config scan reads it as a
+#    standalone manifest and reports KSV-0118 (default security context) and
+#    KSV-0014 (readOnlyRootFilesystem unset) at HIGH — on a container whose real
+#    context is `runAsNonRoot`, `runAsUser: 65532`, `drop: [ALL]`,
+#    `seccompProfile: RuntimeDefault` and `readOnlyRootFilesystem: true`, all of
+#    it in k8s/server/deployment.yml and all of it present in the render. Trivy's
+#    inline `#trivy:ignore:` comments do not apply to Kubernetes YAML (tested
+#    against 0.70.0, in all three ID spellings), so the choice was a global
+#    suppression or a patch format that is not mistakable for a workload.
+#    A JSON 6902 patch is not mistakable for a workload, and it is also the more
+#    honest description of what this is.
+#
+# `containers/0` is the only container in `k8s/server/deployment.yml`, and that
+# manifest is in this repository rather than a chart somebody else versions — so
+# the index is checkable, and `kubectl kustomize infra/rpi5-k3s/overlay/` fails
+# loudly rather than silently if it ever stops being 0.
+- op: replace
+  path: /spec/template/spec/containers/0/env
+  value:
+    # `AXIAM__AUTH__SECRET_DIR` goes away with the switch rather than being left
+    # pointing at an unused directory: a stale one is the kind of leftover that
+    # makes the next reader think the `file` provider is still in play.
+    #
+    # An unknown provider name is refused at startup rather than falling back to
+    # `env`, so this is a change that fails loudly if it is wrong.
+    - name: AXIAM__AUTH__SECRET_PROVIDER
+      value: "vault"
+
+- op: replace
+  path: /spec/template/spec/containers/0/envFrom
+  value:
+    - configMapRef:
+        name: axiam-config
+    - secretRef:
+        name: axiam-secrets
+    # The server's Vault token, created by stage 30 AFTER the human ceremony. A
+    # separate Secret from `axiam-secrets` on purpose: that one is stage 20's,
+    # this one is stage 30's, and one object with two owners across two stages is
+    # how a token gets blanked by a re-apply of the stage that does not have it.
+    #
+    # NOT `optional: true`. Between stage 20 and stage 30 this pod sits in
+    # CreateContainerConfigError saying `secret "axiam-vault-token" not found`,
+    # which is exactly right — it cannot serve a login before Vault has been
+    # initialised and seeded. `optional: true` would instead start a server that
+    # reaches its first secret fetch with no token and fails less specifically.
+    - secretRef:
+        name: axiam-vault-token
+
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: vault-tls-ca
+    mountPath: /etc/axiam/vault-tls
+    readOnly: true
+
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    # The same shape the base already uses for the broker CA: project ONLY
+    # `ca.crt` out of a Secret that also holds a private key. cert-manager writes
+    # `ca.crt` into every leaf Secret it issues from a CA issuer, so this is the
+    # anchor for `vault-tls` without a second object to keep in sync.
+    #
+    # 0444 because a CA certificate is public data — contrast the 0440 on the key
+    # material and on the server's own leaf, which are private keys.
+    #
+    # The `axiam-key-material` Secret and its mount are left exactly as the base
+    # has them. They are inert under the `vault` provider — nothing reads
+    # /etc/axiam/secrets — and leaving them is what makes falling back to `file`
+    # a one-line revert on a night when Vault will not unseal. They ship blank;
+    # do not fill them in while the provider is `vault`, or the two sources
+    # disagree and only one of them is audited.
+    name: vault-tls-ca
+    secret:
+      secretName: vault-tls
+      items:
+        - key: ca.crt
+          path: ca.crt
+      defaultMode: 0444

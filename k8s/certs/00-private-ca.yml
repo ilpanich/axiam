@@ -1,0 +1,63 @@
+# K8S-F4 / K8S-F5: the in-cluster private CA every internal TLS leg is issued
+# from. See README.md in this directory for why it is not the same CA as the
+# public one, and why neither is optional.
+#
+# NOT part of k8s/kustomization.yml: these are cert-manager custom resources and
+# applying them without its CRDs fails with `no matches for kind`.
+#
+# Three objects, in the order cert-manager needs them:
+#   selfSigned issuer  ->  a root Certificate signed by it  ->  a CA issuer
+#                          backed by that root's Secret
+#
+# Bootstrapping a CA needs a signer that trusts nothing, which is what
+# `selfSigned` is for. It signs exactly one thing: the root below.
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: axiam-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: axiam-ca
+  # The CA root lives in cert-manager's own namespace because a ClusterIssuer
+  # reads its `ca.secretName` from the controller's `--cluster-resource-namespace`,
+  # which defaults to the namespace cert-manager runs in. Putting it in `axiam`
+  # is the commonest reason a freshly created CA ClusterIssuer reports
+  # `Secret "axiam-ca-root" not found` while `kubectl -n axiam get secret` shows
+  # it plainly.
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: axiam-internal-ca
+  secretName: axiam-ca-root
+  # Ed25519. The project standard for its own certificates, it is what every
+  # consumer here supports, and the keys are 32 bytes rather than 512 — which is
+  # not nothing on a Raspberry Pi doing the signing.
+  #
+  # If you must interoperate with something that cannot do Ed25519, change this
+  # to `algorithm: RSA` / `size: 4096` HERE ONLY. Every leaf below inherits the
+  # signature from this issuer; their own `privateKey` blocks are independent.
+  privateKey:
+    algorithm: Ed25519
+    rotationPolicy: Always
+  # Ten years, renewed at nine. A private root that expires takes every internal
+  # leg down at once, and rotating it is a coordinated restart of Vault,
+  # RabbitMQ, the ingress and the server — an event to schedule, not to meet.
+  duration: 87600h
+  renewBefore: 8760h
+  issuerRef:
+    name: axiam-selfsigned
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: axiam-ca
+spec:
+  ca:
+    secretName: axiam-ca-root

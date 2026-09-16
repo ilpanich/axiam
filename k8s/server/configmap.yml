@@ -33,6 +33,43 @@ data:
   AXIAM__SERVER__HOST: "0.0.0.0"
   AXIAM__GRPC__HOST: "0.0.0.0"
   # ---------------------------------------------------------------------
+  # The backend's own TLS 1.3 listener (K8S-F5)
+  # ---------------------------------------------------------------------
+  #
+  # ON, and not negotiable on any cluster this project supports. With it off,
+  # every password on its way to /api/v1/auth/login, every session cookie and
+  # every OAuth2 client secret crosses the pod network in cleartext — readable
+  # by anything that can capture on the node or join the pod network. A pod
+  # network is the Docker bridge with a different name.
+  # claude_dev/public-backend-tls-design.md §1.2 and §1.3 are the argument; the
+  # Compose path has had this since 1.0.0-beta07 and only Kubernetes did not.
+  #
+  # The leaf comes from `k8s/certs/10-internal-leaves.yml` (Secret
+  # `axiam-server-tls`, issued by the in-cluster CA) and is mounted by
+  # `k8s/server/deployment.yml`. It is NOT the public leaf a browser sees: the
+  # ingress terminates that one and opens a second connection to this listener,
+  # verifying it against the same in-cluster CA. See k8s/certs/README.md.
+  AXIAM__SERVER__TLS__ENABLED: "true"
+  AXIAM__SERVER__TLS__CERT_PATH: "/etc/axiam/server-tls/tls.crt"
+  AXIAM__SERVER__TLS__KEY_PATH: "/etc/axiam/server-tls/tls.key"
+  # `off` unless you enrol IoT devices with mTLS. A client certificate presented
+  # to the ingress is verified by the ingress and never reaches rustls, so
+  # `optional`/`required` here authenticate only clients that bypass the
+  # ingress — which is a route you have to build on purpose. See
+  # claude_dev/public-backend-tls-design.md §11.
+  AXIAM__SERVER__TLS__CLIENT_AUTH: "off"
+  # How often the server re-`stat`s its leaf and swaps it behind the `ArcSwap`
+  # rustls consults per handshake. 3600 is the built-in default; it is set
+  # explicitly because `0` DISABLES polling and leaves SIGHUP as the only
+  # trigger — and nothing in this deployment sends SIGHUP. cert-manager rewrites
+  # the Secret, the kubelet refreshes the volume within its sync period, and
+  # this poll is the third step that turns that into a served certificate.
+  #
+  # It only works while the volume is a plain Secret mount. A `subPath` mount is
+  # not refreshed by the kubelet, so the poll would re-read a file that never
+  # changes and the certificate would expire under a running process.
+  AXIAM__SERVER__TLS__RELOAD_INTERVAL_SECS: "3600"
+  # ---------------------------------------------------------------------
   # Rate-limit keying
   # ---------------------------------------------------------------------
   #
@@ -99,3 +136,63 @@ data:
   AXIAM__AUTH__VAULT_ADDR: "https://vault.axiam.svc.cluster.local:8200"
   AXIAM__AUTH__VAULT_MOUNT: "secret"
   AXIAM__AUTH__VAULT_PATH: "axiam"
+  # The trust anchor for that listener. The in-cluster CA is not in the image's
+  # root store, and there is deliberately no verification-skip option: the token
+  # presented on every fetch is a bearer credential for the OPAQUE setup key.
+  # Mount `ca.crt` from the Secret k8s/certs/ writes — see that directory.
+  #
+  # It is also, without further configuration, the anchor used for CA SIGNING
+  # KEY custody: `custodians_from_env` inherits AXIAM__AUTH__VAULT_ADDR, _TOKEN
+  # and _CA_CERT_PATH whenever no AXIAM__PKI__VAULT_* pair is set, and then
+  # defaults the custodian to `vault` because an operator who wired up an
+  # address and a token did so in order to use it.
+  # (crates/axiam-pki/src/ca_key_store.rs, `vault_endpoint_from`.)
+  # AXIAM__AUTH__VAULT_CA_CERT_PATH: "/etc/axiam/vault-tls/ca.crt"
+  # ---------------------------------------------------------------------
+  # K8S-F7: the five settings every real deployment MUST supply, and which no
+  # cluster-independent default can be right about
+  # ---------------------------------------------------------------------
+  #
+  # They are commented rather than set because each one is a hostname you own;
+  # a value here would be a wrong value on every cluster but one. Set them in an
+  # overlay. infra/rpi5-k3s/overlay/configmap-env.yml is a worked example, and
+  # claude_dev/rpi5-prod-google-federation-guide.md §5.2 is the long form.
+  #
+  # NOTE THE UNDERSCORES. `load_config()` uses `.with_prefix("AXIAM")` with
+  # `__` as BOTH the prefix separator and the nesting separator, so
+  # `AXIAM_DB_URL` is silently ignored while `AXIAM__DB__URL` is not (SEC-052).
+  # Three names below break that pattern because they are read with
+  # `std::env::var` directly rather than through the config layer — they are
+  # spelled here exactly as the code reads them, and a misspelling is silence,
+  # not an error.
+  #
+  # The bare registrable domain passkeys bind to. Changing it later invalidates
+  # every passkey already enrolled — there is no migration.
+  # AXIAM_WEBAUTHN_RP_ID: "axiam.example.com"
+  #
+  # Must match the browser's address bar EXACTLY, scheme included. The built-in
+  # default is `https://localhost`; leaving it there makes every passkey
+  # registration fail with a 401 that reads like a session bug.
+  # AXIAM_WEBAUTHN_RP_ORIGIN: "https://axiam.example.com"
+  #
+  # The `iss` claim on AXIAM's own tokens. The default is the literal string
+  # `axiam`, which no relying party can resolve.
+  # AXIAM__AUTH__JWT_ISSUER: "https://axiam.example.com"
+  #
+  # Load-bearing, not cosmetic: it is what /.well-known/openid-configuration
+  # advertises AND the base URL from which AXIAM builds the redirect URIs it
+  # hands to Apple and to SAML IdPs. Wrong, and those two fail with a mismatch
+  # that points nowhere useful. Validated as a URL at startup.
+  # AXIAM__AUTH__OAUTH2_ISSUER_URL: "https://axiam.example.com"
+  #
+  # POST /api/v1/admin/bootstrap is fail-closed: it refuses unless this is set
+  # AND matches the request's email, or the request carries the one-time setup
+  # token printed in the first-boot log.
+  # AXIAM_BOOTSTRAP_ADMIN_EMAIL: "admin@example.com"
+  #
+  # The sixth of that set — TLS on the backend — is NOT commented out. It is
+  # AXIAM__SERVER__TLS__ENABLED above, and it is `true` on every cluster.
+  #
+  # AXIAM__SERVER__CORS_ALLOWED_ORIGINS stays EMPTY on the topology `k8s/`
+  # describes: the SPA and the API are the same scheme, host and port, so no
+  # browser ever issues a preflight. Origin is not about processes.

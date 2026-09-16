@@ -1,0 +1,97 @@
+# Identity providers for 03-axiam-bootstrap.sh --federation.
+#
+# COPY THIS FILE, do not edit it in place: the copy will hold real client
+# secrets and must never be committed. `providers.yml` is gitignored; so is
+# anything matching `providers.*.yml`.
+#
+#     cp providers.example.yml providers.yml && chmod 600 providers.yml
+#
+# Better still, add them in the admin UI instead. A secret typed into a browser
+# form is one that was never in a file, a shell history or a backup.
+# claude_dev/rpi5-prod-google-federation-guide.md §11 is the UI walkthrough and
+# §10 is how to register each app — read §10 first; the values below are the
+# output of that section, not a substitute for it.
+#
+# THE REDIRECT URI IS THE SAME FOR EVERY PROVIDER BUT APPLE:
+#
+#     https://axiam-iam.duckdns.org/auth/sso/callback
+#
+# Apple uses
+#     https://axiam-iam.duckdns.org/api/v1/auth/federation/oidc/callback/form
+#
+# It has to be byte-identical at the provider's end. Trailing slash, scheme and
+# path case all count, and `redirect_uri_mismatch` is what you get when one of
+# them does not.
+#
+# Every field is sent explicitly — the server never guesses — but per-kind
+# defaults fill in scopes, endpoints and algorithms when you omit them. Omit
+# what you do not need.
+
+federation_configs:
+  # --- Google (OIDC) ------------------------------------------------------
+  - provider: Google
+    provider_kind: google
+    protocol: OidcConnect
+    metadata_url: https://accounts.google.com/.well-known/openid-configuration
+    client_id: REPLACE-ME.apps.googleusercontent.com
+    client_secret: REPLACE-ME
+    # On, so tenants beneath the organization can use this config. Meaningful
+    # only on a config in the organization-scope tenant, which is where the
+    # bootstrap super-admin creates them.
+    allow_tenant_inheritance: true
+
+  # --- GitHub (OAuth2, not OIDC — GitHub publishes no discovery document) ---
+  # - provider: GitHub
+  #   provider_kind: github
+  #   protocol: OAuth2
+  #   client_id: REPLACE-ME
+  #   client_secret: REPLACE-ME
+  #   allow_tenant_inheritance: true
+  #   # Prefilled per kind; listed here because OAuth2 requires all three.
+  #   authorization_endpoint: https://github.com/login/oauth/authorize
+  #   token_endpoint: https://github.com/login/oauth/access_token
+  #   userinfo_endpoint: https://api.github.com/user
+
+  # --- Apple (OIDC, and the fiddly one) -----------------------------------
+  # `client_id` is the SERVICES ID, not the App ID. `client_secret` is the
+  # CONTENTS of the .p8 key — AXIAM mints a fresh five-minute client secret per
+  # token exchange from it, so there is no secret to rotate and no stale one to
+  # debug. Scopes are `name email`; adding `profile` makes Apple reject the
+  # request. Requires a PAID Apple Developer account.
+  #
+  # - provider: Apple
+  #   provider_kind: apple
+  #   protocol: OidcConnect
+  #   metadata_url: https://appleid.apple.com/.well-known/openid-configuration
+  #   client_id: com.example.axiam.signin
+  #   apple_team_id: REPLACE1234
+  #   apple_key_id: REPLACE5678
+  #   client_secret: |
+  #     -----BEGIN PRIVATE KEY-----
+  #     ...the .p8 contents...
+  #     -----END PRIVATE KEY-----
+  #   scopes: [name, email]
+  #   allow_tenant_inheritance: true
+
+  # --- Microsoft Entra ID (OIDC) ------------------------------------------
+  # With a `common` authority the issuer is templated (`{tenantid}`), so
+  # `allowed_issuer_tenants` must list the GUIDs you accept — an empty list
+  # with `common` is what makes saving fail on the issuer. A tenant-specific
+  # authority avoids the question entirely.
+  #
+  # - provider: Microsoft
+  #   provider_kind: microsoft
+  #   protocol: OidcConnect
+  #   metadata_url: https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration
+  #   client_id: REPLACE-ME
+  #   client_secret: REPLACE-ME
+  #   allowed_issuer_tenants: [00000000-0000-0000-0000-000000000000]
+  #   allow_tenant_inheritance: true
+
+  # --- Facebook (OAuth2) --------------------------------------------------
+  # - provider: Facebook
+  #   provider_kind: facebook
+  #   protocol: OAuth2
+  #   client_id: REPLACE-ME
+  #   client_secret: REPLACE-ME
+  #   allow_tenant_inheritance: true

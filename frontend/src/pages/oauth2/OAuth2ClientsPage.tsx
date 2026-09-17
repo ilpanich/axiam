@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus, Pencil, Trash2, KeyRound } from "lucide-react";
 import {
   oauth2ClientService,
   validateClientPosture,
@@ -9,13 +9,20 @@ import {
   OAUTH2_SCOPE_HINTS,
   CLIENT_PROFILES,
   CLIENT_AUTH_METHODS,
+  MANAGED_BY_VALUES,
   type OAuth2Client,
   type ClientProfile,
   type ClientAuthMethod,
   type ClientPosturePayload,
   type CreateOAuth2ClientPayload,
   type UpdateOAuth2ClientPayload,
+  type ManagedBy,
 } from "@/services/oauth2clients";
+import {
+  registrationTokenService,
+  type CreateRegistrationTokenPayload,
+} from "@/services/registrationTokens";
+import { settingsService } from "@/services/settings";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { PaginationControls, SearchBox } from "@/components/ListToolbar";
@@ -26,8 +33,10 @@ import { SecretRevealModal } from "@/components/SecretRevealModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
+import { useModalA11y } from "@/hooks/useModalA11y";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -135,6 +144,46 @@ function PostureBadges({ client }: { client: OAuth2Client }) {
         </span>
       ))}
     </div>
+  );
+}
+
+// ─── T21.4 / D5 — managed_by presentation ──────────────────────────────────
+
+const MANAGED_BY_LABELS: Record<ManagedBy, string> = {
+  admin: "Admin",
+  dcr: "Self-registered (DCR)",
+  cimd: "CIMD",
+};
+
+const MANAGED_BY_TITLES: Record<ManagedBy, string> = {
+  admin: "Created by an administrator through this page.",
+  dcr: "Created by RFC 7591 dynamic client registration — a party this deployment did not vet.",
+  cimd: "Materialised from a Client ID Metadata Document — a party this deployment did not vet.",
+};
+
+/** `client.managed_by ?? "admin"` — the same fallback the backend's own serde default applies. */
+function managedByOf(client: OAuth2Client): ManagedBy {
+  return client.managed_by ?? "admin";
+}
+
+function ManagedByBadge({ managedBy }: { managedBy: ManagedBy }) {
+  if (managedBy === "admin") {
+    return (
+      <span
+        className="text-xs text-muted-foreground"
+        title={MANAGED_BY_TITLES.admin}
+      >
+        {MANAGED_BY_LABELS.admin}
+      </span>
+    );
+  }
+  return (
+    <span
+      title={MANAGED_BY_TITLES[managedBy]}
+      className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-fuchsia-500/15 text-fuchsia-400 border border-fuchsia-500/30"
+    >
+      {MANAGED_BY_LABELS[managedBy]}
+    </span>
   );
 }
 
@@ -612,6 +661,303 @@ function ClientFormFields({
   );
 }
 
+// ─── T21.4 / D5 — read-only detail for a non-admin-managed client ─────────
+
+interface DetailRowProps {
+  label: string;
+  children: React.ReactNode;
+}
+
+function DetailRow({ label, children }: DetailRowProps) {
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-muted-foreground uppercase tracking-wide">
+        {label}
+      </p>
+      <div className="text-sm text-foreground/90 break-all">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Read-only detail for a `dcr`/`cimd` client, shown instead of the edit
+ * dialog.
+ *
+ * There is no server-side refusal to mirror here — `PUT /oauth2-clients/{id}`
+ * accepts a patch to a self-registered client exactly as it would for one an
+ * administrator created; nothing about `managed_by` changes what that
+ * endpoint accepts. This is a UI-only decision, because letting an
+ * administrator silently rewrite a party's self-registration is a state
+ * AXIAM does not model: nobody at this deployment decided this client's
+ * configuration, so nobody here should be able to change it out from under
+ * whoever registered it. Deleting it remains available — the server places
+ * no restriction on that either, and it is how an operator retires one.
+ */
+function ReadOnlyClientDialog({
+  client,
+  onClose,
+}: {
+  client: OAuth2Client | null;
+  onClose: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useModalA11y(client !== null);
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    },
+    [onClose]
+  );
+
+  useEffect(() => {
+    if (!client) return;
+    closeRef.current?.focus();
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [client, handleKeyDown]);
+
+  if (!client) return null;
+  const managedBy = managedByOf(client);
+
+  return (
+    <div
+      ref={dialogRef}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      aria-modal="true"
+      role="dialog"
+      aria-labelledby="client-detail-title"
+    >
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-xs"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div className="relative z-10 glass-card w-full max-w-md flex flex-col max-h-[90dvh] p-6">
+        <div className="flex items-center justify-between pb-4 border-b border-primary/10">
+          <h2
+            id="client-detail-title"
+            className="text-lg font-semibold text-foreground"
+          >
+            {client.name}
+          </h2>
+          <button
+            ref={closeRef}
+            onClick={onClose}
+            className="focus-ring text-muted-foreground hover:text-foreground transition-colors rounded p-1"
+            aria-label="Close dialog"
+          >
+            ✕
+          </button>
+        </div>
+        <p className="mt-3 text-sm text-muted-foreground">
+          {managedBy === "dcr"
+            ? "Registered through dynamic client registration (RFC 7591) by a party this " +
+              "deployment did not vet."
+            : "Materialised from a Client ID Metadata Document by a party this deployment did " +
+              "not vet."}{" "}
+          AXIAM does not model an administrator editing a self-registration, so this client is
+          read-only here. Delete it if it should no longer exist.
+        </p>
+        <div className="overflow-y-auto py-4 space-y-3 -mx-6 px-6">
+          <DetailRow label="Client ID">{client.client_id}</DetailRow>
+          <DetailRow label="Managed By">
+            <ManagedByBadge managedBy={managedBy} />
+          </DetailRow>
+          <DetailRow label="Grant Types">
+            {client.grant_types.join(", ") || "—"}
+          </DetailRow>
+          <DetailRow label="Redirect URIs">
+            {client.redirect_uris.length > 0
+              ? client.redirect_uris.join(", ")
+              : "—"}
+          </DetailRow>
+          <DetailRow label="Scopes">
+            {client.scopes.length > 0 ? client.scopes.join(", ") : "—"}
+          </DetailRow>
+          <DetailRow label="Token Endpoint Authentication">
+            {client.token_endpoint_auth_method ?? "client_secret_post"}
+          </DetailRow>
+          <DetailRow label="Last Authorized">
+            {client.last_authorized_at
+              ? formatDate(client.last_authorized_at)
+              : "Never"}
+          </DetailRow>
+          <DetailRow label="Created">{formatDate(client.created_at)}</DetailRow>
+        </div>
+        <div className="shrink-0 flex justify-end pt-4 border-t border-primary/10">
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── T21.4 — registration-token issuance ───────────────────────────────────
+
+/**
+ * Issuance for the `initial_access_token` mode's single-use credential.
+ *
+ * **I1** — the caller (`OAuth2ClientsPage`) renders this only when the
+ * tenant's `dynamic_registration` is `initial_access_token`: the mint
+ * endpoint itself refuses while the tenant is in any other mode (`disabled`
+ * or `anonymous`, see `crates/axiam-api-rest/src/handlers/dcr.rs`), so
+ * offering the form unconditionally would let an operator fill out a request
+ * that always fails.
+ */
+function RegistrationTokensPanel() {
+  const queryClient = useQueryClient();
+  const { data: tokens, isLoading } = useQuery({
+    queryKey: ["dcr-registration-tokens"],
+    queryFn: registrationTokenService.list,
+  });
+
+  const [issueOpen, setIssueOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [expiresInHours, setExpiresInHours] = useState(24);
+  const [error, setError] = useState("");
+
+  const [revealOpen, setRevealOpen] = useState(false);
+  const [revealedToken, setRevealedToken] = useState("");
+
+  const issueMutation = useMutation({
+    mutationFn: (payload: CreateRegistrationTokenPayload) =>
+      registrationTokenService.create(payload),
+    onSuccess: (resp) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["dcr-registration-tokens"],
+      });
+      setIssueOpen(false);
+      setName("");
+      setExpiresInHours(24);
+      // Reuses the same one-time-reveal pattern as a client secret: the
+      // handle exists in plaintext exactly once.
+      setRevealedToken(resp.initial_access_token);
+      setRevealOpen(true);
+    },
+    onError: (err: unknown) => {
+      setError(
+        err instanceof Error ? err.message : "Failed to issue registration token."
+      );
+    },
+  });
+
+  function handleIssueSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setError("");
+    if (!name.trim()) {
+      setError("Name is required.");
+      return;
+    }
+    issueMutation.mutate({ name: name.trim(), expires_in_hours: expiresInHours });
+  }
+
+  return (
+    <Card className="mb-6">
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <KeyRound size={18} className="text-primary" aria-hidden="true" />
+            <CardTitle className="text-base">
+              Dynamic Registration Tokens
+            </CardTitle>
+          </div>
+          <Button
+            size="sm"
+            onClick={() => {
+              setError("");
+              setIssueOpen(true);
+            }}
+          >
+            <Plus size={14} aria-hidden="true" />
+            Issue Registration Token
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground mb-4">
+          Single-use credentials for the <code>initial_access_token</code> self-registration
+          mode (RFC 7591 §1.2's protected profile). Each token authorises exactly one
+          registration and is shown once, like a client secret.
+        </p>
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : !tokens || tokens.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No registration tokens issued yet.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {tokens.map((t) => (
+              <li
+                key={t.id}
+                className="flex items-center justify-between gap-3 text-sm rounded-md border border-white/10 px-3 py-2"
+              >
+                <span className="font-medium">{t.name}</span>
+                <span className="text-xs text-muted-foreground">
+                  {t.used_at
+                    ? `Used ${formatDate(t.used_at)}`
+                    : `Expires ${formatDate(t.expires_at)}`}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+
+      <FormDialog
+        open={issueOpen}
+        onClose={() => setIssueOpen(false)}
+        title="Issue Registration Token"
+        onSubmit={handleIssueSubmit}
+        isLoading={issueMutation.isPending}
+        submitLabel="Issue"
+        error={error}
+        errorId="registration-token-create-error"
+      >
+        <div className="space-y-2">
+          <Label htmlFor="reg-token-name">Name *</Label>
+          <Input
+            id="reg-token-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="mcp-inspector-demo"
+            autoComplete="off"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="reg-token-ttl">Expires in (hours)</Label>
+          <Input
+            id="reg-token-ttl"
+            type="number"
+            min={1}
+            max={168}
+            value={expiresInHours}
+            onChange={(e) => setExpiresInHours(Number(e.target.value))}
+          />
+          <p className="text-xs text-muted-foreground">
+            Up to 168 hours (a week). Defaults to 24.
+          </p>
+        </div>
+      </FormDialog>
+
+      <SecretRevealModal
+        open={revealOpen}
+        onClose={() => {
+          setRevealOpen(false);
+          setRevealedToken("");
+        }}
+        title="Registration Token Issued"
+        description="Hand this to the registering client as an Authorization: Bearer header. It is single-use and will not be shown again."
+        secrets={[{ label: "Initial Access Token", value: revealedToken }]}
+      />
+    </Card>
+  );
+}
+
 // ─── Main page ─────────────────────────────────────────────────────────────────
 
 /**
@@ -750,6 +1096,24 @@ function parseUris(raw: string): string[] {
 export function OAuth2ClientsPage() {
   const queryClient = useQueryClient();
 
+  // T21.4 — gates the registration-token issuance panel (I1: absent unless
+  // this tenant's effective policy is `initial_access_token`).
+  const { data: settings } = useQuery({
+    queryKey: ["system-settings"],
+    queryFn: settingsService.getSettings,
+  });
+  const dynamicRegistrationMode = settings?.oidc?.dynamic_registration ?? "disabled";
+
+  // T21.4 / D5 — `managed_by` filter. The list endpoint
+  // (`crates/axiam-api-rest/src/handlers/oauth2_clients.rs::list`) takes only
+  // `Pagination` (offset/limit/search) and has no `managed_by` query
+  // parameter, so there is no server-side filter to ask for. This filters the
+  // page already fetched rather than the whole collection — complete for a
+  // tenant under `dcr_max_clients`'s default of 20, approximate above it.
+  // Widening the list endpoint's query shape is a Rust-side change and out of
+  // this task's scope.
+  const [managedByFilter, setManagedByFilter] = useState<"" | ManagedBy>("");
+
   // Server-paged and server-searched. This page used to fetch the tenant's
   // entire collection in one request and render all of it, which is fine at ten
   // rows and unusable at two hundred with no way to find one by name.
@@ -871,7 +1235,14 @@ export function OAuth2ClientsPage() {
     },
   });
 
+  // T21.4 / D5 — read-only detail for a self-registered client.
+  const [detailClient, setDetailClient] = useState<OAuth2Client | null>(null);
+
   function openEdit(client: OAuth2Client) {
+    if (managedByOf(client) !== "admin") {
+      setDetailClient(client);
+      return;
+    }
     setEditClient(client);
     editForm.load(client);
   }
@@ -969,6 +1340,11 @@ export function OAuth2ClientsPage() {
       render: (row) => <PostureBadges client={row} />,
     },
     {
+      key: "managed_by",
+      header: "Managed By",
+      render: (row) => <ManagedByBadge managedBy={managedByOf(row)} />,
+    },
+    {
       key: "redirect_uris",
       header: "Redirect URIs",
       render: (row) => (
@@ -994,7 +1370,11 @@ export function OAuth2ClientsPage() {
       render: (row) => (
         <div className="flex items-center gap-1">
           <button
-            aria-label={`Edit OAuth2 client ${row.name}`}
+            aria-label={
+              managedByOf(row) === "admin"
+                ? `Edit OAuth2 client ${row.name}`
+                : `View OAuth2 client ${row.name}`
+            }
             onClick={() => openEdit(row)}
             className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
           >
@@ -1030,19 +1410,57 @@ export function OAuth2ClientsPage() {
         }
       />
 
-      <SearchBox
-        value={search}
-        onChange={setSearch}
-        noun="clients"
-        className="mb-4 max-w-sm"
-        />
+      {/* T21.4 — only meaningful once initial_access_token mode is on; see
+          RegistrationTokensPanel's own I1 doc comment. */}
+      {dynamicRegistrationMode === "initial_access_token" && (
+        <RegistrationTokensPanel />
+      )}
+
+      <div className="flex flex-wrap items-center gap-3 mb-4">
+        <SearchBox
+          value={search}
+          onChange={setSearch}
+          noun="clients"
+          className="max-w-sm"
+          />
+        <div className="space-y-1">
+          <label
+            htmlFor="managed-by-filter"
+            className="sr-only"
+          >
+            Filter by managed by
+          </label>
+          <select
+            id="managed-by-filter"
+            aria-label="Filter by managed by"
+            value={managedByFilter}
+            onChange={(e) => setManagedByFilter(e.target.value as "" | ManagedBy)}
+            className="h-9 rounded-md border border-input bg-background/50 px-3 text-sm"
+          >
+            <option value="">All clients</option>
+            {MANAGED_BY_VALUES.map((m) => (
+              <option key={m} value={m}>
+                {MANAGED_BY_LABELS[m]}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
 
       <DataTable
         columns={columns}
-        data={clients}
+        data={
+          managedByFilter
+            ? clients.filter((c) => managedByOf(c) === managedByFilter)
+            : clients
+        }
         isLoading={isLoading}
         emptyMessage={
-          isFiltered ? "No clients match your search." : "No OAuth2 clients registered."
+          managedByFilter
+            ? "No clients on this page match that filter."
+            : isFiltered
+              ? "No clients match your search."
+              : "No OAuth2 clients registered."
         }
         />
 
@@ -1148,6 +1566,12 @@ export function OAuth2ClientsPage() {
         title="Delete OAuth2 Client"
         description={`Are you sure you want to delete "${deleteClient?.name}"? This will invalidate all tokens issued to this client.`}
         isLoading={deleteMutation.isPending}
+      />
+
+      {/* T21.4 / D5 — read-only detail for a dcr/cimd client */}
+      <ReadOnlyClientDialog
+        client={detailClient}
+        onClose={() => setDetailClient(null)}
       />
     </div>
   );

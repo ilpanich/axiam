@@ -1218,26 +1218,27 @@ async fn mcp06_an_initial_access_token_survives_concurrent_redemption() {
     );
 }
 
-/// **MCP-02.** `axiam:user` is a syntactically valid absolute URI, so it is a
-/// syntactically valid `resource` — and nothing refuses it.
-///
-/// This test asserts what the code does **today**, not what it should do. It
-/// exists so that the collision is visible in the suite rather than only in the
-/// review, and so that whoever closes it has a test that tells them they did.
+/// **MCP-02, fixed.** `axiam:user` is a syntactically valid absolute URI, so
+/// it was a syntactically valid `resource` — and nothing refused it.
 ///
 /// The consequence worth understanding is the `client_credentials` one. Without
 /// `resource`, that grant mints `axiam:m2m`, which AXIAM's user-facing
-/// extractors refuse. Naming `axiam:user` as the resource makes the same grant
+/// extractors refuse. Naming `axiam:user` as the resource made the same grant
 /// mint a token stamped with the *user* audience, which is the one claim those
-/// extractors gate on — so the resource parameter reaches past the audience
-/// boundary that I3 is built out of, instead of being confined by it.
+/// extractors gate on — so the resource parameter reached past the audience
+/// boundary that I3 is built out of instead of being confined by it.
+///
+/// `axiam_oauth2::resource::normalise` now reserves the whole `axiam` scheme.
+/// This asserts the refusal at the two doors an attacker can actually knock
+/// on: registration, and the token endpoint.
 #[actix_rt::test]
-async fn mcp02_a_builtin_audience_is_accepted_as_a_resource_today() {
+async fn mcp02_a_builtin_audience_is_refused_as_a_resource() {
     let mode = Mode::Query;
     let f = setup(mode).await;
     let app = test_app!(f, mode);
 
-    let (status, client) = post_as_user(
+    // Registration refuses the entry, so the collision cannot be stored.
+    let (status, body) = post_as_user(
         &app,
         "/api/v1/oauth2-clients",
         &f.a.token,
@@ -1251,13 +1252,28 @@ async fn mcp02_a_builtin_audience_is_accepted_as_a_resource_today() {
     )
     .await;
     assert_eq!(
-        status, 201,
-        "MCP-02: registering AXIAM's own audience as a resource is accepted today. If this \
-         line starts failing, the collision has been closed and this test should become the \
-         assertion that it is refused: {client}"
+        status, 400,
+        "MCP-02: AXIAM's own audience must not be registrable as a resource: {body}"
     );
 
-    let (status, tokens) = post_form(
+    // And a client that legitimately fronts an MCP server still cannot reach
+    // the reserved namespace through the token endpoint, whatever it registered.
+    let (status, client) = post_as_user(
+        &app,
+        "/api/v1/oauth2-clients",
+        &f.a.token,
+        json!({
+            "name": "m2m-client",
+            "redirect_uris": ["https://rp.example.com/cb"],
+            "grant_types": ["client_credentials"],
+            "scopes": ["openid"],
+            "allowed_resources": ["https://mcp.example.com/mcp"],
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{client}");
+
+    let (status, body) = post_form(
         &app,
         &mode.endpoint(f.a.id, "token", ""),
         &format!(
@@ -1268,12 +1284,11 @@ async fn mcp02_a_builtin_audience_is_accepted_as_a_resource_today() {
         ),
     )
     .await;
-    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(status, 400, "{body}");
     assert_eq!(
-        claims_of(tokens["access_token"].as_str().unwrap())["aud"],
-        axiam_auth::token::AUD_USER,
-        "a client_credentials grant that names axiam:user as its resource is stamped with the \
-         user audience rather than axiam:m2m: {tokens}"
+        body["error"], "invalid_target",
+        "a client_credentials grant may not name the user audience as its resource and be \
+         stamped with it: {body}"
     );
 }
 

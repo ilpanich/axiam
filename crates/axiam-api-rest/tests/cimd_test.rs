@@ -373,7 +373,10 @@ fn param(location: &str, key: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
-async fn stored_client(f: &Fixture, client_id: &str) -> Option<axiam_core::models::oauth2_client::OAuth2Client> {
+async fn stored_client(
+    f: &Fixture,
+    client_id: &str,
+) -> Option<axiam_core::models::oauth2_client::OAuth2Client> {
     SurrealOAuth2ClientRepository::new(f.db.clone())
         .get_by_client_id(f.tenant_id, client_id)
         .await
@@ -398,13 +401,17 @@ async fn i1_a_url_client_id_is_an_unknown_client_when_cimd_is_off() {
         app,
         f,
         "/oauth2/token",
-        format!("grant_type=authorization_code&code=nope&redirect_uri={ACTUAL_CALLBACK}&client_id={client_id}&code_verifier={VERIFIER}")
+        format!(
+            "grant_type=authorization_code&code=nope&redirect_uri={ACTUAL_CALLBACK}&client_id={client_id}&code_verifier={VERIFIER}"
+        )
     );
     let (opaque_status, opaque_body) = post_form!(
         app,
         f,
         "/oauth2/token",
-        format!("grant_type=authorization_code&code=nope&redirect_uri={ACTUAL_CALLBACK}&client_id=oa_never_registered&code_verifier={VERIFIER}")
+        format!(
+            "grant_type=authorization_code&code=nope&redirect_uri={ACTUAL_CALLBACK}&client_id=oa_never_registered&code_verifier={VERIFIER}"
+        )
     );
 
     assert_eq!(
@@ -414,7 +421,11 @@ async fn i1_a_url_client_id_is_an_unknown_client_when_cimd_is_off() {
          unknown client is"
     );
     assert!(
-        server.received_requests().await.expect("recorded").is_empty(),
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty(),
         "nothing may be fetched for a tenant that has not enabled the mechanism"
     );
     assert!(
@@ -652,8 +663,7 @@ async fn a_document_cannot_rewrite_an_administrators_client() {
             jwks_uri: None,
             dpop_bound_access_tokens: false,
             dpop_require_nonce: false,
-            authn_request_params:
-                axiam_core::models::oauth2_client::AuthnRequestParamsMode::Ignore,
+            authn_request_params: axiam_core::models::oauth2_client::AuthnRequestParamsMode::Ignore,
             browser_sso: false,
             allowed_resources: Vec::new(),
             managed_by: ManagedBy::Cimd,
@@ -724,7 +734,11 @@ async fn an_untrusted_publisher_is_never_contacted() {
     );
 
     assert!(
-        server.received_requests().await.expect("recorded").is_empty(),
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty(),
         "a publisher outside cimd.trusted_client_id_domains must not be contacted"
     );
     assert!(stored_client(&f, &client_id).await.is_none());

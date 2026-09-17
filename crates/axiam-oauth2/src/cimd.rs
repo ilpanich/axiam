@@ -151,7 +151,10 @@ impl std::fmt::Display for CimdError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disabled => {
-                write!(f, "client ID metadata documents are disabled for this tenant")
+                write!(
+                    f,
+                    "client ID metadata documents are disabled for this tenant"
+                )
             }
             Self::UnusableClientId(d) => write!(f, "unusable client_id URL: {d}"),
             Self::UntrustedPublisher { host } => write!(
@@ -160,7 +163,10 @@ impl std::fmt::Display for CimdError {
             ),
             Self::Fetch(d) => write!(f, "the metadata document could not be fetched: {d}"),
             Self::Malformed(d) => write!(f, "the metadata document is not usable: {d}"),
-            Self::Refused(d) => write!(f, "the metadata document names a client this tenant will not admit: {d}"),
+            Self::Refused(d) => write!(
+                f,
+                "the metadata document names a client this tenant will not admit: {d}"
+            ),
         }
     }
 }
@@ -260,7 +266,9 @@ pub fn validate_client_id_url(client_id: &str, policy: &CimdPolicy) -> Result<Ur
         ));
     }
     if path.split('/').any(|seg| seg == "." || seg == "..") {
-        return Err(refuse("a client_id URL must contain no . or .. path segment"));
+        return Err(refuse(
+            "a client_id URL must contain no . or .. path segment",
+        ));
     }
 
     if url.as_str() != client_id {
@@ -502,7 +510,8 @@ pub fn validate(
     };
 
     // --- client authentication ---------------------------------------------
-    let token_endpoint_auth_method = resolve_auth_method(doc.token_endpoint_auth_method.as_deref())?;
+    let token_endpoint_auth_method =
+        resolve_auth_method(doc.token_endpoint_auth_method.as_deref())?;
     if cimd.confidential_only && token_endpoint_auth_method.is_public() {
         return Err(CimdError::Refused(
             "this tenant admits only confidential CIMD clients (cimd.confidential_only), and \
@@ -779,17 +788,16 @@ async fn fetch_document(
     // `CimdPolicy::allow_http` and in the operator documentation: a deployment
     // that allows http has also stopped refusing 169.254.169.254 on the first
     // hop. Redirect hops are validated strictly regardless.
-    let response = axiam_federation::ssrf::guarded_fetch(client_id.as_str(), policy.allow_http, |c, u| {
-        c.get(u).header(reqwest::header::ACCEPT, "application/json")
-    })
-    .await
-    .map_err(|e| CimdError::Fetch(e.to_string()))?;
+    let response =
+        axiam_federation::ssrf::guarded_fetch(client_id.as_str(), policy.allow_http, |c, u| {
+            c.get(u).header(reqwest::header::ACCEPT, "application/json")
+        })
+        .await
+        .map_err(|e| CimdError::Fetch(e.to_string()))?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(CimdError::Fetch(format!(
-            "the publisher answered {status}"
-        )));
+        return Err(CimdError::Fetch(format!("the publisher answered {status}")));
     }
 
     // A document served as `text/html` is a login page, an error page or a
@@ -820,9 +828,10 @@ async fn fetch_document(
     // response with no `Content-Length` bypasses the guard's coarse header
     // check entirely, and buffering it first is precisely the memory
     // exhaustion this bound exists to prevent.
-    let body = axiam_federation::ssrf::read_capped_body(response, policy.effective_max_metadata_bytes())
-        .await
-        .map_err(|e| CimdError::Fetch(e.to_string()))?;
+    let body =
+        axiam_federation::ssrf::read_capped_body(response, policy.effective_max_metadata_bytes())
+            .await
+            .map_err(|e| CimdError::Fetch(e.to_string()))?;
 
     let document = serde_json::from_slice::<ClientMetadataDocument>(&body)
         .map_err(|e| CimdError::Malformed(e.to_string()))?;
@@ -996,7 +1005,10 @@ mod tests {
             ("https://example.com/mcp.json#f", "fragment"),
             ("https://u:p@example.com/mcp.json", "userinfo"),
             ("https://EXAMPLE.com/mcp.json", "non-canonical host case"),
-            ("https://example.com:443/mcp.json", "non-canonical default port"),
+            (
+                "https://example.com:443/mcp.json",
+                "non-canonical default port",
+            ),
             ("not a url at all", "not a URL"),
         ] {
             let result = validate_client_id_url(candidate, &policy);
@@ -1077,8 +1089,13 @@ mod tests {
         let id = "https://example.com/vscode.json";
         let url = Url::parse(id).unwrap();
         let policy = oidc_policy(cimd_policy());
-        let validated = validate(Uuid::new_v4(), &url, &parse_doc(&vscode_document(id)), &policy)
-            .expect("admitted");
+        let validated = validate(
+            Uuid::new_v4(),
+            &url,
+            &parse_doc(&vscode_document(id)),
+            &policy,
+        )
+        .expect("admitted");
         assert_eq!(validated.create.managed_by, ManagedBy::Cimd);
         assert_eq!(validated.create.profile, ClientProfile::Standard);
         assert_eq!(
@@ -1112,8 +1129,8 @@ mod tests {
     fn a_document_describing_another_url_is_refused() {
         let url = Url::parse("https://example.com/mine.json").unwrap();
         let doc = parse_doc(&vscode_document("https://example.com/theirs.json"));
-        let err = validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy()))
-            .expect_err("refused");
+        let err =
+            validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy())).expect_err("refused");
         assert!(matches!(err, CimdError::Refused(_)), "got {err:?}");
     }
 
@@ -1124,8 +1141,8 @@ mod tests {
             "redirect_uris": ["http://127.0.0.1/cb"],
         }))
         .unwrap();
-        let err = validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy()))
-            .expect_err("refused");
+        let err =
+            validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy())).expect_err("refused");
         assert!(matches!(err, CimdError::Refused(_)), "got {err:?}");
     }
 
@@ -1135,8 +1152,8 @@ mod tests {
         let url = Url::parse(id).unwrap();
         let mut doc = parse_doc(&vscode_document(id));
         doc.redirect_uris = vec!["http://mcp.example.com/cb".into()];
-        let err = validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy()))
-            .expect_err("refused");
+        let err =
+            validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy())).expect_err("refused");
         assert!(matches!(err, CimdError::Refused(_)), "got {err:?}");
     }
 
@@ -1211,7 +1228,11 @@ mod tests {
     fn a_shared_secret_method_is_refused() {
         let id = "https://example.com/a.json";
         let url = Url::parse(id).unwrap();
-        for method in ["client_secret_post", "client_secret_basic", "tls_client_auth"] {
+        for method in [
+            "client_secret_post",
+            "client_secret_basic",
+            "tls_client_auth",
+        ] {
             let mut doc = parse_doc(&vscode_document(id));
             doc.token_endpoint_auth_method = Some(method.to_owned());
             let err = validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy()))
@@ -1262,8 +1283,8 @@ mod tests {
         let url = Url::parse(id).unwrap();
         let mut doc = parse_doc(&vscode_document(id));
         doc.jwks_uri = Some("https://example.com/jwks.json".into());
-        let err = validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy()))
-            .expect_err("refused");
+        let err =
+            validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy())).expect_err("refused");
         assert!(matches!(err, CimdError::Refused(_)), "got {err:?}");
     }
 
@@ -1273,8 +1294,8 @@ mod tests {
         let url = Url::parse(id).unwrap();
         let mut doc = parse_doc(&vscode_document(id));
         doc.scope = Some("openid email".into());
-        let err = validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy()))
-            .expect_err("refused");
+        let err =
+            validate(Uuid::new_v4(), &url, &doc, &oidc_policy(cimd_policy())).expect_err("refused");
         assert!(matches!(err, CimdError::Refused(_)), "got {err:?}");
     }
 
@@ -1547,7 +1568,13 @@ mod tests {
             .expect_err("refused");
         assert_eq!(err, CimdError::Disabled);
         // I1: nothing was fetched.
-        assert!(server.received_requests().await.expect("recorded").is_empty());
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("recorded")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1563,13 +1590,19 @@ mod tests {
             .expect("admitted");
         assert_eq!(validated.create.tenant_id, tenant);
         assert_eq!(validated.create.managed_by, ManagedBy::Cimd);
-        assert_eq!(validated.create.redirect_uris, vec!["http://127.0.0.1/callback"]);
+        assert_eq!(
+            validated.create.redirect_uris,
+            vec!["http://127.0.0.1/callback"]
+        );
     }
 
     #[test]
     fn max_age_is_read_and_nothing_else_is() {
         assert_eq!(max_age_secs(Some("max-age=600")), Some(600));
-        assert_eq!(max_age_secs(Some("public, max-age=42, immutable")), Some(42));
+        assert_eq!(
+            max_age_secs(Some("public, max-age=42, immutable")),
+            Some(42)
+        );
         assert_eq!(max_age_secs(Some("no-store")), None);
         assert_eq!(max_age_secs(Some("s-maxage=99")), None);
         assert_eq!(max_age_secs(None), None);

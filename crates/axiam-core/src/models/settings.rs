@@ -772,8 +772,14 @@ pub fn validate_cimd_policy(oidc: &OidcPolicy) -> Vec<String> {
     // have a trusted list that silently matches nothing — fail-closed, but
     // indistinguishable from a working list until somebody tries to sign in.
     for (field, entries) in [
-        ("cimd.trusted_client_id_domains", &cimd.trusted_client_id_domains),
-        ("cimd.trusted_redirect_domains", &cimd.trusted_redirect_domains),
+        (
+            "cimd.trusted_client_id_domains",
+            &cimd.trusted_client_id_domains,
+        ),
+        (
+            "cimd.trusted_redirect_domains",
+            &cimd.trusted_redirect_domains,
+        ),
     ] {
         for entry in entries {
             let e = entry.trim();
@@ -3880,7 +3886,10 @@ mod tests {
             let err = validate_org_settings(&enabled(cimd))
                 .expect_err("out-of-range bound must be refused")
                 .to_string();
-            assert!(err.contains(needle), "the refusal must name {needle}: {err}");
+            assert!(
+                err.contains(needle),
+                "the refusal must name {needle}: {err}"
+            );
         }
     }
 
@@ -4076,5 +4085,4 @@ mod tests {
         assert!(!decoded.enabled);
         assert!(decoded.restrict_same_domain);
     }
-
 }

@@ -112,35 +112,9 @@ pub struct CleanupTask<C: Connection> {
 }
 
 // ---------------------------------------------------------------------------
-// Erasure pipeline (test-seam extraction — RESEARCH.md Pattern 3, SECHRD-06)
+// Dynamic client registration sweep (T21.4)
 // ---------------------------------------------------------------------------
 
-/// Run the GDPR erasure pipeline for a single user: pseudonymize audit actor
-/// references, anonymize the user row, then write the erasure proof
-/// STRICTLY LAST.
-///
-/// Extracted as a free function generic over the three repo traits it needs
-/// (rather than a `CleanupTask` method) so a unit test can inject a
-/// synthetic failing `AuditLogRepository` double without depending on
-/// `CleanupTask`'s concrete `Arc<SurrealXxxRepository<C>>` fields — `pub` so
-/// `axiam-server`'s integration tests (which link this crate's library
-/// target) can call it directly.
-///
-/// Ordering is a hard security invariant (D-03a, SECHRD-06 / T-25-13):
-/// - `pseudonymize_actor` is now FATAL (`?`, no swallow-and-continue). A
-///   failed audit-actor scrub must abort the erasure — no PII-bearing step
-///   may ever be silently skipped (RESEARCH Pitfall 2).
-/// - `anonymize_user` runs BEFORE the proof (not after). It is the ONLY
-///   step that clears the user's `deletion_pending` flag that
-///   `find_due_for_purge` selects on, so if it never runs (an earlier step
-///   failed and aborted via `?`), the user remains re-selectable for a
-///   retry (RESEARCH Assumption A3).
-/// - `erasure_proof_repo.create` is the LITERAL LAST statement. It only
-///   fires once every PII-bearing step above has succeeded — a proof must
-///   never certify an erasure that did not fully happen (Pitfall 3). The DB
-///   UNIQUE index on `(tenant_id, user_id)` (plan 25-04) makes a retried
-///   erasure's duplicate proof insert an idempotent rejection (D-03b), not
-///   a silent overwrite.
 /// Whether a self-registered client is due to be swept (T21.4).
 ///
 /// A free function, and public, for the reason [`run_erasure_pipeline`] is
@@ -270,6 +244,36 @@ where
     Ok(removed)
 }
 
+// ---------------------------------------------------------------------------
+// Erasure pipeline (test-seam extraction — RESEARCH.md Pattern 3, SECHRD-06)
+// ---------------------------------------------------------------------------
+
+/// Run the GDPR erasure pipeline for a single user: pseudonymize audit actor
+/// references, anonymize the user row, then write the erasure proof
+/// STRICTLY LAST.
+///
+/// Extracted as a free function generic over the three repo traits it needs
+/// (rather than a `CleanupTask` method) so a unit test can inject a
+/// synthetic failing `AuditLogRepository` double without depending on
+/// `CleanupTask`'s concrete `Arc<SurrealXxxRepository<C>>` fields — `pub` so
+/// `axiam-server`'s integration tests (which link this crate's library
+/// target) can call it directly.
+///
+/// Ordering is a hard security invariant (D-03a, SECHRD-06 / T-25-13):
+/// - `pseudonymize_actor` is now FATAL (`?`, no swallow-and-continue). A
+///   failed audit-actor scrub must abort the erasure — no PII-bearing step
+///   may ever be silently skipped (RESEARCH Pitfall 2).
+/// - `anonymize_user` runs BEFORE the proof (not after). It is the ONLY
+///   step that clears the user's `deletion_pending` flag that
+///   `find_due_for_purge` selects on, so if it never runs (an earlier step
+///   failed and aborted via `?`), the user remains re-selectable for a
+///   retry (RESEARCH Assumption A3).
+/// - `erasure_proof_repo.create` is the LITERAL LAST statement. It only
+///   fires once every PII-bearing step above has succeeded — a proof must
+///   never certify an erasure that did not fully happen (Pitfall 3). The DB
+///   UNIQUE index on `(tenant_id, user_id)` (plan 25-04) makes a retried
+///   erasure's duplicate proof insert an idempotent rejection (D-03b), not
+///   a silent overwrite.
 pub async fn run_erasure_pipeline<A, EP, U>(
     audit_repo: &A,
     erasure_proof_repo: &EP,

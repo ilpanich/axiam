@@ -3542,6 +3542,50 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-09 (contract version pending, T21.6)** — **non-breaking / additive.**
+  Per-tenant path issuers reach `openapi.json`. **No version number is taken
+  here on purpose.** 1.47 is T21.2's and 1.48 is T21.9a's — published below
+  while this task was in flight, carrying §28 and folding in T21.3's own
+  unnumbered entry. An SDK written against 1.48 is conformant with this change
+  unedited (nothing here alters an operation), so rather than take a number for
+  a change no SDK has to act on, this is recorded unnumbered for the next
+  version to fold in — the same discipline T21.3 followed, and the reason its
+  fan-out was not lost. T21.4's entry below is pending on the same terms;
+  whichever version publishes next carries both.
+
+  - `openapi.json` gains three paths, all `GET` and all unauthenticated:
+    `/.well-known/oauth-authorization-server/t/{tenant_id}`,
+    `/.well-known/openid-configuration/t/{tenant_id}` and
+    `/t/{tenant_id}/.well-known/openid-configuration`. All three return the
+    same `OidcDiscoveryDocument` schema the existing discovery path returns; no
+    schema changes. `management-registry.json` regenerates with it, but its
+    operation count does not move — discovery is outside the §27 management
+    vocabulary — so only the recorded spec digest changes.
+  - **The eleven OAuth2 endpoints the `/t/{tenant_id}` scope re-bases are
+    deliberately not in the document.** They are the documented endpoints with
+    a prefix, served by the same handlers; documenting them would have meant a
+    second copy of every path item for no new operation. A client does not need
+    them from the specification, because the discovery document it fetches
+    names every endpoint in full.
+  - **No SDK operation changes signature or behaviour**, and an SDK written
+    against 1.47 is conformant with no edit. The three paths are served only
+    where the deployment sets `AXIAM__AUTH__TENANT_ISSUER_PATHS`; they are
+    documented unconditionally for the same reason `/oauth2/revocations` is,
+    because a capability statement that changed shape per deployment would be
+    one no SDK could vendor.
+  - **What an SDK's resource-server middleware must know.** On such a
+    deployment, the `iss` of a token minted through a tenant path is
+    `{root}/t/{tenant_id}` rather than `{root}`. An SDK that pins one issuer
+    string must be configured with the issuer of the tenant it guards — which
+    is the value the discovery document it read reports as `issuer`, so an SDK
+    that takes its issuer from discovery is already correct. The **JWKS is
+    shared**: one key set verifies every issuer of a deployment, so the
+    `jwks_uri` of either form resolves to the same keys. `aud` rules are
+    unchanged; §10.1 row 6's expectation holds as written.
+
+  The server change behind it is AXIAM Phase 21 T21.6 (the issuer section of
+  `docs/deployment/README.md`).
+
 - **2026-09 (contract version pending, T21.4)** — **non-breaking / additive.**
   RFC 7591 dynamic client registration reaches `openapi.json`. **No version
   number is taken here on purpose.** 1.47 is taken by T21.2, and 1.48 — below —

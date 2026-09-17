@@ -222,11 +222,42 @@ where
     /// bound to none — is `invalid_target`. See
     /// [`crate::resource::resolve_bound`] for why a grant's audience is
     /// decided when the grant is made and never at redemption.
+    /// The config the device grant's access token is signed under (T21.6).
+    ///
+    /// See `TokenService::minting_config`.
+    fn minting_config<'a>(&'a self, issuer: Option<&str>) -> std::borrow::Cow<'a, AuthConfig> {
+        match issuer {
+            None => std::borrow::Cow::Borrowed(&self.auth_config),
+            Some(issuer) => std::borrow::Cow::Owned(AuthConfig {
+                request_issuer: Some(issuer.to_owned()),
+                ..self.auth_config.clone()
+            }),
+        }
+    }
+
+    /// [`Self::poll_at`] for a device polling the deployment-wide token
+    /// endpoint.
     pub async fn poll(
         &self,
         tenant_id: Uuid,
         device_code: &str,
         resource: Option<&str>,
+    ) -> Result<TokenResponse, OAuth2Error> {
+        self.poll_at(tenant_id, device_code, resource, None).await
+    }
+
+    /// [`Self::poll`], told which issuer the request arrived under (T21.6).
+    ///
+    /// `issuer` is `None` for `/oauth2/token` and `Some("{root}/t/{tenant}")`
+    /// for the per-tenant path. It decides the `iss` of the minted access
+    /// token and nothing else — the device code is still the only credential,
+    /// and it is still looked up in the tenant the path or the query named.
+    pub async fn poll_at(
+        &self,
+        tenant_id: Uuid,
+        device_code: &str,
+        resource: Option<&str>,
+        issuer: Option<&str>,
     ) -> Result<TokenResponse, OAuth2Error> {
         let hash = hash_device_code(device_code);
 
@@ -339,7 +370,7 @@ where
             tenant_id,
             tenant.organization_id,
             &redeemed.scopes,
-            &self.auth_config,
+            &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
             audience,
         )

@@ -241,6 +241,30 @@ use crate::handlers;
         // RFC 8414 `/.well-known/oauth-authorization-server` alias of this
         // same handler as its own path entry — it needs no listing here.
         handlers::oauth2::discovery,
+        // T21.6 — the three per-tenant issuer discovery forms. Documented
+        // unconditionally, exactly as `oauth2::revocations` is: whether a
+        // deployment mounts them is `AXIAM__AUTH__TENANT_ISSUER_PATHS`, and a
+        // capability statement that changed shape per deployment would be one
+        // no SDK could vendor.
+        //
+        // Three annotated functions rather than one plus two cloned `PathItem`s
+        // (the T21.1 alias trick below): these paths take a tenant PATH
+        // parameter and no `tenant_id` query, so the discovery item is not the
+        // item to clone. All three delegate to one body, which is what keeps
+        // the documents identical — `tenant_path_discovery` in
+        // `handlers::oauth2`.
+        //
+        // The eleven OAuth2 endpoints the `/t/{tenant_id}` scope re-bases are
+        // deliberately NOT duplicated here. Documenting them would mean eleven
+        // more `#[utoipa::path]`-annotated wrapper functions — a second copy of
+        // every handler, which is the one thing T21.6 was specified not to do —
+        // for paths whose only difference from the documented ones is a prefix
+        // the issuer already states. `docs/deployment/README.md` says what that
+        // prefix is; the discovery document a client actually reads names every
+        // endpoint in full.
+        handlers::oauth2::discovery_rfc8414_tenant_path,
+        handlers::oauth2::discovery_oidc_tenant_path,
+        handlers::oauth2::discovery_oidc_tenant_appended,
         handlers::oauth2::jwks,
         handlers::oauth2::revocations,
         handlers::oauth2::userinfo,

@@ -142,6 +142,14 @@ number of distinct trusted URLs a caller can name — and the same fix.
 
 ## 2. Issue #469 — the trusted-publisher interlock admits `*` (MCP-03, T-276)
 
+> **Landed** as `0a273ec`, first commit of PR A. The section is accurate as
+> written and every bullet of its fix is in the commit, including the
+> single-label wildcard floor it flags as deletable in one line. The one
+> correction is in its cost table, already applied above: the regeneration was
+> not the no-op fact 5 predicted, because `CimdPolicy`'s fields *do* carry spec
+> descriptions, so this commit carries a regenerated `sdks/openapi.json` and
+> `sdks/management-registry.json`.
+
 ### The leave-it case
 
 CIMD is off by default, the list ships empty, and an operator has to write `*`
@@ -224,6 +232,17 @@ all — this is a settings-write refusal. Additive and opt-in by construction.
 ---
 
 ## 3. Issue #470 — `cimd` rows have no quota and no sweep (MCP-04, T-275)
+
+> **Landed** as `0b216c6`, second commit of PR A, in all three parts and with
+> no migration — fact 1 held exactly as written and `updated_at` needed no
+> column beside it. Two notes for a reader following the section. The quota's
+> row lookup replaces the one `materialise_if_cimd` already made further down
+> to decide whether to audit, rather than adding a query, which is why moving
+> it ahead of the resolve costs nothing. And `sweep_unused_dcr_clients` is kept
+> as a named wrapper over the generalised `sweep_unused_external_clients`, so
+> the three T21.4 sweep tests are untouched: the section's "generalise over the
+> provenance it lists and the clock it reads" is done without changing any
+> existing call.
 
 ### Severity after #469
 

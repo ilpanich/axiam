@@ -17,17 +17,18 @@ not reproduce, and says so.
 
 ## 0. Summary
 
-One finding was fixed in this session. Four are filed. Three areas the plan
-flagged as likely holes were attacked and did not yield, and are recorded as
-verifications rather than left as silence — a reviewer who reads "nothing found
-in tenant isolation" deserves to know what was tried.
+One finding was fixed in this session. Four were filed and are now closed —
+see the remediation note below. Three areas the plan flagged as likely holes
+were attacked and did not yield, and are recorded as verifications rather than
+left as silence — a reviewer who reads "nothing found in tenant isolation"
+deserves to know what was tried.
 
 | ID | Finding | Severity | State |
 |---|---|---|---|
 | **MCP-02** | The `axiam` URI scheme is a valid absolute URI, so AXIAM's own token audiences were registrable and requestable as RFC 8707 resources. `client_credentials` could thereby mint a token carrying the **user** audience. | **Medium** | **Fixed** — `013903d` |
-| **MCP-03** | `cimd.trusted_client_id_domains` refuses the empty list and accepts `*`, which means the same thing. The interlock T21.5 added to remove the "stranger chooses the fetch target" class is defeated by one character. | Medium | **Filed** — [#469](https://github.com/ilpanich/axiam/issues/469) |
-| **MCP-04** | `managed_by: cimd` shadow rows are bounded by no quota and swept by nothing. A tenant whose trusted publisher list names shared hosting grows client rows without limit. | Medium | **Filed** — [#470](https://github.com/ilpanich/axiam/issues/470) |
-| **MCP-05** | In `anonymous` mode a stranger can fill `dcr_max_clients` (default 20) in about four minutes and deny registration to legitimate clients for `dcr_unused_client_ttl_days` (default 30). | Medium | **Filed** — [#471](https://github.com/ilpanich/axiam/issues/471) |
+| **MCP-03** | `cimd.trusted_client_id_domains` refuses the empty list and accepts `*`, which means the same thing. The interlock T21.5 added to remove the "stranger chooses the fetch target" class is defeated by one character. | Medium | **Closed** — `0a273ec` ([#469](https://github.com/ilpanich/axiam/issues/469)) |
+| **MCP-04** | `managed_by: cimd` shadow rows are bounded by no quota and swept by nothing. A tenant whose trusted publisher list names shared hosting grows client rows without limit. | Medium | **Closed** — `0b216c6` ([#470](https://github.com/ilpanich/axiam/issues/470)) |
+| **MCP-05** | In `anonymous` mode a stranger can fill `dcr_max_clients` (default 20) in about four minutes and deny registration to legitimate clients for `dcr_unused_client_ttl_days` (default 30). | Medium | **Closed** — `c4d9ea2` ([#471](https://github.com/ilpanich/axiam/issues/471)) |
 | **MCP-01** | A refusal raised *before* the redirect matcher runs is answered directly rather than redirected, so a desktop client on an ephemeral loopback port never learns its authorization failed. Fail-closed; an interoperability defect, not a vulnerability. | Low | **Filed** — [#472](https://github.com/ilpanich/axiam/issues/472) |
 | **MCP-06** | The "no `tenant_id` on a tenant path" check matches the raw query string, where the extractor that consumes it matches the percent-decoded one. | Informational | **Accepted** |
 
@@ -39,6 +40,17 @@ in tenant isolation" deserves to know what was tried.
 
 **Nothing here blocks the phase.** MCP-02 was the only finding that reached
 past an invariant, and it is closed.
+
+**Remediation, 2026-09-17.** All four filed findings were decided and costed in
+[`issues-469-472-fix-plan.md`](issues-469-472-fix-plan.md) and fixed, across
+two pull requests split by generated-artifact exposure: MCP-03, MCP-04 and
+MCP-05 on one branch (they share `settings.rs`, `cleanup.rs` and both operator
+pages, and their decisions cascade), MCP-01 and the IPv6 loopback gap found
+with it on another. The state column above carries each commit. Two things
+this document had slightly wrong were found in the course of it and are
+recorded where they belong: §7's account of what MCP-06's acceptance rests on,
+and — in the fix plan's own §1 and §4 — two cost claims about what reaches the
+OpenAPI spec and where `OidcPolicy`'s scalars are stored.
 
 ---
 

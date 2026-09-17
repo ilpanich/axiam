@@ -1,7 +1,33 @@
 # AXIAM as an MCP authorization server — implementation plan
 
-**Status:** planning document, written 2026-09-16 against `1.0.0-beta15`
-(`main` at `d20293a`). Nothing described here exists yet.
+**Status: EXECUTED**, 2026-09-17. Written 2026-09-16 against `1.0.0-beta15`
+(`main` at `d20293a`), when nothing described here existed. All nine tasks are
+implemented; the commits are below. What the plan itself got wrong is recorded
+in §9, which is the one section the executing sessions wrote rather than read.
+
+| Task | Commit(s) | Where it is |
+| --- | --- | --- |
+| T1 — RFC 8414 well-known alias | `573373a` | `main` (#457) |
+| T2a — public clients, loopback redirects | `0534af6` | `main` (#459) |
+| T2b — admin UI for public clients | `ed9e9f0` | accumulation branch (#460) |
+| T3 — RFC 8707 resource indicators | `ffec785` | accumulation branch (#461) |
+| T4a — RFC 7591 dynamic client registration | `ff1919b` | accumulation branch (#463) |
+| T4b — admin UI for DCR | `e1540b5` | accumulation branch (#465) |
+| T5 — Client ID Metadata Document | `0213087`, `ddc1d2a` | accumulation branch (#466) |
+| T6 — per-tenant path issuers | `41aa36f` | accumulation branch (#464) |
+| T7 — docs, example, website | `abdb3b6` | PR #467, open |
+| T8 — harness, security review, STRIDE | `f154d24`, `1ab4e7a`, `013903d`, `0233742`, `2350ae2` | PR #473, open |
+| T9a — CONTRACT §28, contract 1.48 | `63a19af` | accumulation branch (#462) |
+| T9b — TypeScript reference | `axiam-typescript-sdk` #110 | merged |
+| T9c — ten ports | #109, #83, #98, #65, #91, #70, #81, #63, #62, #63 | all merged |
+| T9d — cross-SDK conformance review, contract 1.49 | `8bdd062`, `b1aedc8` | PR #468, open |
+
+Open by design, and neither is an execution defect: the four security findings
+filed as #469–#472 (one, MCP-02, was fixed in T8 rather than filed), and
+**F-28-01**, the one re-sync of the eleven vendored contract copies, which must
+run from `main` after this phase merges — see §28.11 of `sdks/CONTRACT.md` for
+why doing it from a phase branch is what left the eleven holding five distinct
+files.
 **Audience:** first the maintainer, who asked how far AXIAM is from what
 [Keycloak's MCP guide](https://www.keycloak.org/securing-apps/mcp-authz-server)
 describes and gets the answer in §0; then the executing sessions, one per task
@@ -1308,3 +1334,75 @@ vendored CONTRACT.md, openapi.json and proto/ first, then implement the §28
 operations under this language's naming row, the five required tests, the
 README section and the CHANGELOG entry. Model: Sonnet 5.
 ```
+
+---
+
+## 9. What the plan got wrong
+
+Written at the close, 2026-09-17, from what the executing sessions found. It is
+here because a plan that is only ever read forward teaches nobody anything; the
+next phase's plan should be written against this list.
+
+**Defects in the plan's own instructions.**
+
+1. **§6's wave table omitted T9a entirely** and did not say which branch each
+   task cuts from. Both were amended during wave 1 (`2f5e602`). A fan-out plan
+   has to name the branch topology, because the sessions cannot see each other.
+2. **§5's gate never regenerated the OpenAPI artifacts**, although §4.0 item 2
+   requires them. `sdk-openapi-drift.yml` diffs a fresh export against the
+   committed `sdks/openapi.json`, so T1 through T6 could each pass §5 and push a
+   red CI. Found by T1, recorded as gate erratum 1 (`22233aa`).
+3. **§5 never compiled `axiam-api-rest`'s lib tests.** The gate is
+   `--no-default-features` throughout while CI's Coverage job builds
+   `--workspace --tests` with default features. Gate erratum 2 (`d8f36cb`).
+4. **The generated-artifact chain was longer than §4.0 described.**
+   `sdks/openapi.json` pins a digest that `sdks/management-registry.json`
+   re-derives, and a different CI job (Architecture Invariants) enforces it. A
+   task that regenerated one and not the other pushed a green §5 and a red CI.
+5. **§4.0 item 2 demands utoipa annotations on every new handler, and T6's item
+   1 forbids duplicating a handler.** For eleven re-based endpoints these
+   collide; T6 chose the second and the spec is short those paths, which
+   `docs/api/mcp.md` now records as a known gap rather than a surprise.
+6. **The contract version collided.** T9a was planned at 1.47, which was already
+   taken; it shipped at 1.48 and T9d at 1.49. A plan that changes
+   `sdks/CONTRACT.md` should read the trailer, not assume the next integer.
+7. **No task owned the moment the eleven SDKs re-sync.** T9c had each port
+   re-sync independently from whatever branch was current, so the eleven ended
+   up holding **five** byte-states of one file, all labelled 1.48, with no CI
+   anywhere that would notice. This is the plan's most expensive omission and
+   the reason F-28-01 exists. A phase that fans out to eleven repositories needs
+   one re-sync step at its end, from a merged `main`.
+
+**Environment facts the plan asserted and got wrong.**
+
+8. **"There is no Docker daemon."** Carried into three documents. `dockerd`
+   starts; what fails is the pull, because the registry's blob CDN is refused by
+   the egress policy. T8 established this. The half-truth cost at least one
+   session an hour.
+9. **`protoc` is absent**, so any command that builds `axiam-server` — including
+   regenerating the spec — dies partway. Not in the plan at all; added to
+   `CLAUDE.md` during wave 1.
+10. **`docs/api/openapi.json` is a symlink** to `sdks/openapi.json`. Sessions
+    treated it as a second file to keep in step.
+
+**Predictions the plan made that the evidence overturned.**
+
+11. **§1 argued the FAPI risk was irreducibly circumstantial** — that a
+    conformance check "may single out `none`". No check singles out anything:
+    the condition counts only the values it *requires*. The answer was available
+    by reading the suite's source all along, and T8 read it. The caution was
+    right; the claim that it could not be resolved without a run was not.
+12. **T8's brief predicted an open redirect in the loopback matcher.** The
+    matcher is sound. The defect (MCP-01, #472) is in six *error* paths that
+    never adopted it, and it is an interoperability defect, not a vulnerability.
+    Right area, wrong reason.
+13. **T9c's Go port predicted that seven other single-namespace languages would
+    hit its naming collision.** T9d checked all seven; none does. A plausible
+    generalisation from one data point, recorded as fact in a PR description,
+    and false.
+
+**One thing the plan got right that is worth naming.** §1's insistence that a
+task which cannot proceed without changing an existing test's expectation must
+stop and escalate was reached exactly once, by T2a, and the escalation produced
+the maintainer ruling that unblocked the phase. A weaker rule would have had the
+assertion quietly deleted in a 4,000-line diff.

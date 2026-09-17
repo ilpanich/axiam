@@ -787,7 +787,19 @@ async fn main() -> std::io::Result<()> {
         .then(|| chrono::Duration::seconds(config.auth.access_token_lifetime_secs as i64));
     let route_options = RouteOptions {
         revocation_feed_enabled: config.auth.revocation_feed_enabled,
+        tenant_issuer_paths: config.auth.tenant_issuer_paths,
     };
+    // T21.6 — one line at boot, because an operator who set the flag needs to
+    // see the issuer form their MCP servers must name, and one who did not
+    // needs to see that `?tenant_id=` is still the only selector.
+    if config.auth.tenant_issuer_paths {
+        tracing::info!(
+            root_issuer = %config.auth.root_issuer(),
+            "per-tenant path issuers are ON (AXIAM__AUTH__TENANT_ISSUER_PATHS=true) — \
+             the issuer of tenant T is {{root}}/t/{{T}}, discovery is served at all three \
+             RFC 8414 §3 and OIDC Discovery §4 forms, and one JWKS signs every tenant"
+        );
+    }
     if let Some(ttl) = revocation_feed_ttl {
         tracing::info!(
             ttl_secs = ttl.num_seconds(),
@@ -1228,6 +1240,10 @@ async fn main() -> std::io::Result<()> {
         .build()
         .expect("failed to build reqwest client");
     let oauth2_client_repo = SurrealOAuth2ClientRepository::new(pool.handle_for_repo());
+    // T21.4 — RFC 7591 initial access tokens. Read by the unauthenticated
+    // registration endpoint and swept by the cleanup task.
+    let oauth2_registration_token_repo =
+        axiam_db::SurrealOAuth2RegistrationTokenRepository::new(pool.handle_for_repo());
     let auth_code_repo = SurrealAuthorizationCodeRepository::new(pool.handle_for_repo());
     let refresh_token_repo = SurrealRefreshTokenRepository::new(pool.handle_for_repo());
     // Separate instance for password-reset/change handlers that need direct
@@ -2435,6 +2451,10 @@ async fn main() -> std::io::Result<()> {
         Duration::from_secs(config.cleanup_interval_secs),
         audit_retention,
         revoked_session_repo,
+        // T21.4 — the dynamic-registration sweeps.
+        Arc::new(oauth2_client_repo.clone()),
+        Arc::new(oauth2_registration_token_repo.clone()),
+        Arc::new(settings_repo.clone()),
         job_health.clone(),
         cleanup_shutdown_rx,
     );
@@ -2501,6 +2521,7 @@ async fn main() -> std::io::Result<()> {
         refresh_token_repo: handler_refresh_token_repo.clone(),
         password_history_repo: password_history_repo.clone(),
         oauth2_client_repo: oauth2_client_repo.clone(),
+        oauth2_registration_token_repo: oauth2_registration_token_repo.clone(),
         // The device endpoints size their own governors from this (see
         // `server.rs`), so the handlers need the same numbers the middleware
         // was built from — not a second default that could disagree.
@@ -2586,6 +2607,9 @@ async fn main() -> std::io::Result<()> {
             proof_replay_repo: proof_replay_repo.clone(),
             oauth2_jwks_cache: oauth2_jwks_cache.clone(),
             oauth2_jwks_cache_config: config.oauth2.clone(),
+            // T21.5 — built once here, cloned into every worker with the
+            // rest of `AppState`; see `OAuth2State::cimd_cache`.
+            cimd_cache: axiam_oauth2::cimd::ClientMetadataCache::new(),
         },
         federation: bundles::FederationState {
             federation_config_repo: federation_config_repo.clone(),
@@ -2818,17 +2842,26 @@ fn load_config() -> AppConfig {
             url.host().is_some(),
             "OIDC issuer URL must have a host: {issuer}",
         );
-        // AXIAM limitation: path-based issuers are not currently
-        // supported.  While OIDC allows path segments in issuers
-        // (e.g. for reverse-proxy or multi-tenant deployments),
-        // AXIAM serves discovery at a fixed `/.well-known/` route
-        // and builds endpoint URLs as `{issuer}/oauth2/...`, which
-        // would break with a non-root path.
+        // The CONFIGURED issuer must still be a root URL. T21.6 did not lift
+        // this assertion, it narrowed what it is about.
+        //
+        // Before T21.6 the reason was a limitation: discovery lived at a fixed
+        // `/.well-known/` route and endpoints were built as `{issuer}/oauth2/…`,
+        // so a configured path broke both. T21.6 built those routes — but it
+        // built them for an issuer AXIAM *derives*, `{root}/t/{tenant_id}`, and
+        // the derivation needs a root to derive from. A configured
+        // `https://host/base` would make the tenant issuer
+        // `https://host/base/t/{T}` while the routes stay at `/t/{T}/…`, so the
+        // document would name endpoints the server does not serve.
+        //
+        // The tenant path is derived, never configured. That is the rule this
+        // assertion now states.
         assert!(
             url.path() == "/" || url.path().is_empty(),
-            "AXIAM does not support path-based issuer URLs \
-             (path-based issuers require route changes not yet \
-             implemented): {issuer}",
+            "AXIAM issuer URLs must be a bare root URL; the per-tenant \
+             issuer path (AXIAM__AUTH__TENANT_ISSUER_PATHS) is derived \
+             from it as {{root}}/t/{{tenant_id}} and is never configured: \
+             {issuer}",
         );
         assert!(
             url.query().is_none(),
@@ -2846,6 +2879,20 @@ fn load_config() -> AppConfig {
              set oauth2_issuer_url for compliant discovery documents"
         );
     }
+
+    // T21.6 — the other half of "derived, never configured": there must be
+    // something to derive from. `jwt_issuer` is a bare identifier rather than a
+    // URL on most deployments, and `{axiam}/t/{T}` is not an issuer any client
+    // can turn into a discovery URL, so the flag is refused rather than
+    // silently producing one. A hard failure at boot, not a warning: a
+    // deployment that came up serving unusable issuers would be discovered by
+    // an MCP client, not by its operator.
+    assert!(
+        !(config.auth.tenant_issuer_paths && config.auth.oauth2_issuer_url.trim().is_empty()),
+        "AXIAM__AUTH__TENANT_ISSUER_PATHS requires \
+         AXIAM__AUTH__OAUTH2_ISSUER_URL to be set: the per-tenant issuer \
+         is derived from it as {{root}}/t/{{tenant_id}}",
+    );
 
     config
 }

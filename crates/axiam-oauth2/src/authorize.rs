@@ -121,6 +121,19 @@ pub struct AuthorizeRequest {
     /// than collapsed by the caller into one that could be wrong. See
     /// `crate::sensitive::decide`.
     pub sensitive_scopes_switch_is_off: bool,
+    /// T21.4 / D4 — what the handler resolved about this request's
+    /// external-client consent.
+    ///
+    /// Carried rather than looked up here for the reason
+    /// [`Self::sensitive_scopes`] is: deciding needs the user's consent
+    /// records and this service owns no such repository. What it owns is the
+    /// order — after the client and its `redirect_uri` are known good, before
+    /// a code exists.
+    ///
+    /// [`crate::external_consent::Requested::NotApplicable`] for every client
+    /// an administrator created, which is every client in every deployment
+    /// today (I1).
+    pub external_consent: crate::external_consent::Requested,
     /// W7 — whether this request carries
     /// [`crate::login_hop::CONSENT_HOP_MARKER`], i.e. has already been through
     /// the **consent** page once.
@@ -165,6 +178,20 @@ pub struct AuthorizeRequest {
     /// a later request that holds nothing but an access token, so anything it
     /// must honour has to survive the round trip rather than be re-derived.
     pub requested_userinfo_claims: Vec<String>,
+    /// T21.3 / RFC 8707 §2 — the target service this authorization is for.
+    ///
+    /// Read from the *pushed* copy when there is one, never from the query
+    /// string beside a `request_uri`, for the reason `state`, `nonce` and
+    /// `dpop_jkt` are: a target the client named under client authentication
+    /// must not be substitutable by the browser that merely carries the
+    /// handle.
+    ///
+    /// Validated below against the client's `allowed_resources` and
+    /// snapshotted onto the authorization code, which is what makes the token
+    /// minted at redemption carry it as `aud`. `None` for every request that
+    /// sends no `resource`, which is every request in every deployment today
+    /// — and such a request mints `axiam:user` exactly as it always did (I2).
+    pub resource: Option<String>,
 }
 
 /// What an authorization request earned (W4, plan §4.2).
@@ -505,6 +532,78 @@ where
             }
         }
 
+        // 6d. T21.3 / RFC 8707 §2 — the resource indicator.
+        //
+        // Placed with the other per-request validations and **after** the
+        // client and its `redirect_uri` are known good, so an `invalid_target`
+        // is reported by redirecting to a URI this client registered rather
+        // than rendered at AXIAM's own origin (T-255). Placed **before** the
+        // code exists, so a request naming a resource this client may not
+        // address never mints the credential it was going to be refused for.
+        //
+        // A request that sends no `resource` gets `Ok(None)` and nothing
+        // below it changes: the code stores no resource, the token endpoint
+        // mints `axiam:user`, and the whole of this block is invisible (I2).
+        let resource =
+            crate::resource::resolve_requested(&client.allowed_resources, req.resource.as_deref())?;
+
+        // 6e. T21.4 / D4 — the external-client consent gate.
+        //
+        // **Beside** 6c rather than folded into it, because the two ask
+        // different questions about different things: W7 asks whether the end
+        // user agreed to release a postal address, and this asks whether they
+        // agreed to this application acting as them at all. They share a
+        // consent record namespace (see `crate::external_consent`) and nothing
+        // else, and a request can only ever be in one of them — a
+        // self-registered client cannot hold `address` or `phone`, because the
+        // settings layer refuses those scopes in `dcr_allowed_scopes`.
+        //
+        // **After 6d**, the resource check, and that placement is the whole
+        // reason this block is here rather than beside 6c. Asking a person to
+        // approve a request that cannot succeed is the failure T-270 is about:
+        // a request naming a resource this client may not address is refused
+        // whatever the user says, so refusing it first means nobody is
+        // interrupted for nothing. Moving 6d in front of 6c instead would have
+        // been the same improvement for W7 — and would have changed the answer
+        // an existing client gets, which is what I1 forbids. This gate is new,
+        // so it can simply be placed correctly.
+        //
+        // **Before the code**, for the reason the whole 6b-6e run is ordered
+        // this way: an interaction that gates a credential must not be asked
+        // for after the credential exists.
+        //
+        // For a client an administrator created — every client in every
+        // deployment today — `req.external_consent` is `NotApplicable` and
+        // this block compiles down to one comparison and no branch taken (I1).
+        match crate::external_consent::decide(
+            req.external_consent,
+            req.consent_hop_return_leg,
+            prompt_none,
+        ) {
+            crate::external_consent::Decision::Proceed => {}
+            crate::external_consent::Decision::AskForConsent => {
+                return Ok(AuthorizeOutcome::Interact(crate::honour::Interaction {
+                    required_acr: None,
+                    reason: crate::honour::Reason::ConsentRequired,
+                }));
+            }
+            crate::external_consent::Decision::Refuse(refusal) => {
+                return Err(match refusal {
+                    crate::external_consent::Refusal::ConsentRequired => {
+                        OAuth2Error::ConsentRequired(
+                            "this client was not registered by an administrator of this tenant, \
+                             so the end user must be asked before it may act as them, and \
+                             prompt=none forbids asking"
+                                .into(),
+                        )
+                    }
+                    crate::external_consent::Refusal::Declined => OAuth2Error::AccessDenied(
+                        "the end user did not consent to this client acting as them".into(),
+                    ),
+                });
+            }
+        }
+
         // 7. Generate random authorization code
         let raw_code = generate_auth_code();
         let code_hash = hash_code(&raw_code);
@@ -552,10 +651,46 @@ where
                 // as it stood then, not against anything it sends now.
                 dpop_jkt: req.dpop_jkt,
                 requested_userinfo_claims: req.requested_userinfo_claims,
+                // RFC 8707 — snapshotted in its normalised form, for the
+                // reason `code_challenge` is: the client committed to this
+                // target here, and the token request that redeems the code is
+                // answered against the commitment as it stood now.
+                resource,
                 expires_at,
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+
+        // 9. T21.4 — stamp the sweeper's "last used" marker, for an externally
+        //    registered client and for nothing else.
+        //
+        // The `if` is invariant I1 kept exact rather than an optimisation: an
+        // administrator's client reaches the end of this function having made
+        // exactly the repository calls it made before this task, and a second
+        // write on the hot path of every authorization in every deployment
+        // would be a behaviour change even though no response would differ.
+        // The repository statement carries the same condition, so the
+        // restriction does not depend on this line staying written.
+        //
+        // Best effort, deliberately: the code has already been created and the
+        // user has already consented, so failing the authorization now would
+        // turn a bookkeeping error into a sign-in the end user has to repeat.
+        // The cost of a lost stamp is a client swept one cycle early, which is
+        // recoverable by registering again — the cost of a failed
+        // authorization is not.
+        if client.managed_by.is_external()
+            && let Err(e) = self
+                .client_repo
+                .touch_last_authorized(req.tenant_id, &client.client_id, Utc::now())
+                .await
+        {
+            tracing::warn!(
+                error = %e,
+                client_id = %client.client_id,
+                "could not stamp last_authorized_at on an externally registered client; it may \
+                 be swept as unused earlier than its tenant's TTL intends"
+            );
+        }
 
         Ok(AuthorizeOutcome::Code(AuthorizeResponse {
             code: raw_code,
@@ -622,6 +757,13 @@ mod tests {
         async fn create(&self, _input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
             unimplemented!()
         }
+        async fn upsert_cimd_client(
+            &self,
+            _client_id: &str,
+            _input: CreateOAuth2Client,
+        ) -> AxiamResult<OAuth2Client> {
+            unimplemented!()
+        }
         async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
             unimplemented!()
         }
@@ -659,6 +801,32 @@ mod tests {
         ) -> AxiamResult<bool> {
             unimplemented!()
         }
+        async fn count_by_managed_by(
+            &self,
+            _tid: Uuid,
+            _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+        ) -> AxiamResult<u64> {
+            unimplemented!()
+        }
+
+        async fn list_all_by_managed_by(
+            &self,
+            _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+        ) -> AxiamResult<Vec<OAuth2Client>> {
+            unimplemented!()
+        }
+
+        async fn touch_last_authorized(
+            &self,
+            _tid: Uuid,
+            _client_id: &str,
+            _at: chrono::DateTime<chrono::Utc>,
+        ) -> AxiamResult<()> {
+            // T21.4 — a no-op rather than `unimplemented!()`: the
+            // authorization path calls this for an external client, so a
+            // panic here would fail a test about something else entirely.
+            Ok(())
+        }
     }
 
     /// QUAL-03/D-11: a client-repo that always fails with a DB-outage-shaped
@@ -670,6 +838,13 @@ mod tests {
 
     impl OAuth2ClientRepository for MockClientRepoDbOutage {
         async fn create(&self, _input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
+            unimplemented!()
+        }
+        async fn upsert_cimd_client(
+            &self,
+            _client_id: &str,
+            _input: CreateOAuth2Client,
+        ) -> AxiamResult<OAuth2Client> {
             unimplemented!()
         }
         async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
@@ -709,6 +884,32 @@ mod tests {
         ) -> AxiamResult<bool> {
             unimplemented!()
         }
+        async fn count_by_managed_by(
+            &self,
+            _tid: Uuid,
+            _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+        ) -> AxiamResult<u64> {
+            unimplemented!()
+        }
+
+        async fn list_all_by_managed_by(
+            &self,
+            _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+        ) -> AxiamResult<Vec<OAuth2Client>> {
+            unimplemented!()
+        }
+
+        async fn touch_last_authorized(
+            &self,
+            _tid: Uuid,
+            _client_id: &str,
+            _at: chrono::DateTime<chrono::Utc>,
+        ) -> AxiamResult<()> {
+            // T21.4 — a no-op rather than `unimplemented!()`: the
+            // authorization path calls this for an external client, so a
+            // panic here would fail a test about something else entirely.
+            Ok(())
+        }
     }
 
     #[derive(Clone)]
@@ -733,6 +934,7 @@ mod tests {
                 amr: input.amr,
                 dpop_jkt: input.dpop_jkt,
                 requested_userinfo_claims: input.requested_userinfo_claims,
+                resource: input.resource,
                 expires_at: input.expires_at,
                 used: false,
                 created_at: Utc::now(),
@@ -782,6 +984,13 @@ mod tests {
         async fn create(&self, _input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
             unimplemented!()
         }
+        async fn upsert_cimd_client(
+            &self,
+            _client_id: &str,
+            _input: CreateOAuth2Client,
+        ) -> AxiamResult<OAuth2Client> {
+            unimplemented!()
+        }
         async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
             unimplemented!()
         }
@@ -821,6 +1030,32 @@ mod tests {
             _new_hash: &str,
         ) -> AxiamResult<bool> {
             unimplemented!()
+        }
+        async fn count_by_managed_by(
+            &self,
+            _tid: Uuid,
+            _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+        ) -> AxiamResult<u64> {
+            unimplemented!()
+        }
+
+        async fn list_all_by_managed_by(
+            &self,
+            _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+        ) -> AxiamResult<Vec<OAuth2Client>> {
+            unimplemented!()
+        }
+
+        async fn touch_last_authorized(
+            &self,
+            _tid: Uuid,
+            _client_id: &str,
+            _at: chrono::DateTime<chrono::Utc>,
+        ) -> AxiamResult<()> {
+            // T21.4 — a no-op rather than `unimplemented!()`: the
+            // authorization path calls this for an external client, so a
+            // panic here would fail a test about something else entirely.
+            Ok(())
         }
     }
 
@@ -910,6 +1145,9 @@ mod tests {
             browser_sso: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            allowed_resources: Vec::new(),
+            managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+            last_authorized_at: None,
         }
     }
 
@@ -936,12 +1174,14 @@ mod tests {
             session_evidence: SessionEvidence::default(),
             sensitive_scopes: crate::sensitive::Requested::None,
             sensitive_scopes_switch_is_off: false,
+            external_consent: crate::external_consent::Requested::NotApplicable,
             consent_hop_return_leg: false,
             id_token_hint: None,
             inline_authn_params_beside_request_uri: false,
             login_hop_return_leg: false,
             dpop_jkt: None,
             requested_userinfo_claims: Vec::new(),
+            resource: None,
         }
     }
 

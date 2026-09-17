@@ -124,19 +124,47 @@ narrowing, it is a mistake best diagnosed here.
 unconstrained `aud` would let a service mint tokens addressed at systems it has
 no relationship with. When both are supplied they must agree.
 
-**The allow-list is the client's `redirect_uris`** (SEC-089). There is no
-separate audience field in v1: a target is accepted if it appears in the
-client's registered redirect URIs, or is one of AXIAM's own audiences below.
+**The allow-list is the client's `allowed_resources`.** A target is accepted
+if it appears in that list, or is one of AXIAM's own audiences below — and, for
+one deprecation release, if it appears in the client's `redirect_uris`.
 
-> **Operators:** this means **adding a redirect URI also authorises it as a
-> token audience.** A redirect URI is normally reviewed as *"where may this
-> client send a user's browser"* — a routine, low-privilege edit. Here it also
-> answers *"for whom may this client mint tokens"*. The two lists also drift
-> for ordinary reasons: prune the redirect URIs of a client that stopped using
-> the browser flow and it silently loses exchange targets. Review redirect-URI
-> changes on clients holding the exchange grant with that second question in
-> mind. A dedicated `allowed_token_targets` registration field is the intended
-> fix and is not in v1.
+`allowed_resources` is the same registration field the
+[resource indicators](resource-indicators.md) page describes, and it means
+exactly one thing: the target services this client may mint tokens for. Entries
+are absolute URIs without a fragment, stored and compared in their RFC 3986
+§6.2.2 normalised form.
+
+```bash
+curl -X PATCH "https://id.example.com/api/v1/oauth2-clients/$CLIENT_UUID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"allowed_resources": ["https://orders.internal/v1"]}'
+```
+
+### The deprecated redirect-URI branch (SEC-089)
+
+Until this release the allow-list *was* `client.redirect_uris`: there was no
+audience field, so adding a redirect URI also authorised it as a token
+audience. That coupling is now deprecated.
+
+It still works, for one release, so that no deployment's working exchange
+breaks on the day it upgrades. Every exchange that matches only on that branch
+logs a warning naming the client and the target:
+
+```text
+WARN DEPRECATED (SEC-089 / T21.3): this token exchange named an audience that is
+     registered only as a redirect_uri. Redirect URIs will stop authorising token
+     audiences in the next release - add the target to this client's
+     allowed_resources now.  client_id=oa_… target=https://orders.internal
+```
+
+> **Operators:** that warning is your migration list. For every client holding
+> the exchange grant, copy the redirect URIs it actually uses as audiences into
+> `allowed_resources`. Doing so changes nothing today — the rule is the union —
+> and is what keeps the exchange working when the branch is removed. Until then
+> the old caution still applies: a redirect URI is normally reviewed as *"where
+> may this client send a user's browser"*, and on an exchange-capable client it
+> is still also answering *"for whom may this client mint tokens"*.
 
 AXIAM's own audiences (`axiam:user`, `axiam:m2m`) are always addressable.
 When neither parameter is supplied the issued token keeps the subject token's

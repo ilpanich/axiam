@@ -804,55 +804,96 @@ pub async fn grant_oidc_scope_consent<C: Connection + Clone>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let body = body.into_inner();
 
-    // Only the sensitive scopes, and in canonical order. `requested` filters
-    // and orders in one step, so a body naming `openid` yields an empty set
-    // and is refused below rather than silently recorded.
-    let wanted = axiam_oauth2::sensitive::requested(&body.scopes);
-    if wanted.is_empty() || wanted.len() != body.scopes.len() {
-        return Err(AxiamApiError::from(AxiamError::Validation {
-            message: format!(
-                "consent may be recorded only for the scopes {}, and for nothing else",
-                axiam_oauth2::sensitive::SENSITIVE_SCOPES.join(", ")
-            ),
-        }));
-    }
-
+    // The client must exist in the caller's tenant whichever gate this
+    // consent is for. Read first, because it is what decides which gate it is.
     let client = axiam_core::repository::OAuth2ClientRepository::get_by_client_id(
         &state.oauth2_client_repo,
         user.principal_tenant_id,
         &body.client_id,
     )
     .await?;
-    if let Some(missing) = wanted
-        .iter()
-        .find(|s| !client.scopes.iter().any(|r| r == *s))
-    {
-        return Err(AxiamApiError::from(AxiamError::Validation {
-            message: format!(
-                "this client has no {missing} scope registered, so consenting to release it \
-                 would authorise nothing"
-            ),
-        }));
-    }
 
-    let tenant = state
-        .tenant_repo
-        .get_by_id(user.principal_tenant_id)
+    // T21.4 / D4 — the external-client lane.
+    //
+    // For a client an administrator did not create, the consent being recorded
+    // is not "you may release my address", it is "this application may act as
+    // me". It therefore covers the **whole** requested scope set rather than
+    // the sensitive subset, and its version carries a prefix so the two kinds
+    // of record can share one `consent_type` — which is what makes
+    // `DELETE /account/consents/oidc-scopes/{client_id}` withdraw both with no
+    // new control. See `axiam_oauth2::external_consent`.
+    //
+    // The two lanes never overlap: the settings layer refuses `address` and
+    // `phone` in `dcr_allowed_scopes`, so a self-registered client cannot hold
+    // a scope the W7 lane governs.
+    let (consent_type, version) = if axiam_oauth2::external_consent::applies_to(client.managed_by) {
+        // Every scope must be registered on the client, for the reason the
+        // W7 lane checks the same thing: a consent recorded for a scope
+        // the client could never be authorised for authorises nothing and
+        // will never match at the authorization endpoint.
+        if let Some(missing) = body
+            .scopes
+            .iter()
+            .find(|s| !client.scopes.iter().any(|r| r == *s))
+        {
+            return Err(AxiamApiError::from(AxiamError::Validation {
+                message: format!(
+                    "this client has no {missing} scope registered, so consenting to it \
+                         would authorise nothing"
+                ),
+            }));
+        }
+        (
+            axiam_oauth2::external_consent::consent_type(&body.client_id),
+            axiam_oauth2::external_consent::version(&body.scopes),
+        )
+    } else {
+        // W7's lane, unchanged. Only the sensitive scopes, and in
+        // canonical order: `requested` filters and orders in one step, so
+        // a body naming `openid` yields an empty set and is refused here
+        // rather than silently recorded.
+        let wanted = axiam_oauth2::sensitive::requested(&body.scopes);
+        if wanted.is_empty() || wanted.len() != body.scopes.len() {
+            return Err(AxiamApiError::from(AxiamError::Validation {
+                message: format!(
+                    "consent may be recorded only for the scopes {}, and for nothing else",
+                    axiam_oauth2::sensitive::SENSITIVE_SCOPES.join(", ")
+                ),
+            }));
+        }
+        if let Some(missing) = wanted
+            .iter()
+            .find(|s| !client.scopes.iter().any(|r| r == *s))
+        {
+            return Err(AxiamApiError::from(AxiamError::Validation {
+                message: format!(
+                    "this client has no {missing} scope registered, so consenting to \
+                         release it would authorise nothing"
+                ),
+            }));
+        }
+
+        let tenant = state
+            .tenant_repo
+            .get_by_id(user.principal_tenant_id)
+            .await?;
+        let settings = axiam_core::repository::SettingsRepository::get_effective_settings(
+            &state.settings_repo,
+            tenant.organization_id,
+            user.principal_tenant_id,
+        )
         .await?;
-    let settings = axiam_core::repository::SettingsRepository::get_effective_settings(
-        &state.settings_repo,
-        tenant.organization_id,
-        user.principal_tenant_id,
-    )
-    .await?;
-    if !settings.oidc.sensitive_scopes_enabled {
-        return Err(AxiamApiError::from(AxiamError::Validation {
-            message: "the address and phone scopes are not enabled for this tenant".into(),
-        }));
-    }
+        if !settings.oidc.sensitive_scopes_enabled {
+            return Err(AxiamApiError::from(AxiamError::Validation {
+                message: "the address and phone scopes are not enabled for this tenant".into(),
+            }));
+        }
 
-    let consent_type = axiam_oauth2::sensitive::consent_type(&body.client_id);
-    let version = axiam_oauth2::sensitive::consent_version(&wanted);
+        (
+            axiam_oauth2::sensitive::consent_type(&body.client_id),
+            axiam_oauth2::sensitive::consent_version(&wanted),
+        )
+    };
 
     // Idempotence, checked rather than relying on the unique index's error:
     // a second grant is the same grant, and answering it with a conflict

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, fireEvent } from "@testing-library/react";
+import { screen, waitFor, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiMock, res } from "@/test/apiMock";
 
@@ -367,5 +367,166 @@ describe("SettingsPage", () => {
     // feedback immediately rather than waiting for the timeout.
     await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
     expect(screen.queryByText("Settings saved successfully.")).not.toBeInTheDocument();
+  });
+});
+
+// ─── T21.4 — Dynamic Client Registration ───────────────────────────────────
+
+describe("SettingsPage — T21.4 dynamic client registration", () => {
+  // I1 — mandatory: with the default (disabled) policy, the read view shows
+  // only that fact — no scope/host/audience detail, which would exist but be
+  // meaningless while nothing can reach the endpoint.
+  it("I1 — shows only 'Disabled' in view mode when dynamic_registration is at its default", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await screen.findByText("Dynamic Client Registration");
+
+    const selfRegistrationLabel = screen.getByText("Self-registration");
+    expect(
+      within(selfRegistrationLabel.parentElement!).getByText("Disabled")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Allowed scopes:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Allowed audiences/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Max self-registered clients")).not.toBeInTheDocument();
+  });
+
+  it("renders the effective policy in view mode once a mode is set", async () => {
+    apiMock.get.mockResolvedValue(
+      res({
+        ...settings,
+        oidc: {
+          dynamic_registration: "anonymous",
+          dcr_allowed_scopes: ["openid", "profile"],
+          dcr_allowed_redirect_hosts: ["*.example.com"],
+          external_client_allowed_resources: ["https://mcp.example.com/mcp"],
+          dcr_max_clients: 5,
+          dcr_unused_client_ttl_days: 7,
+        },
+      })
+    );
+    renderWithProviders(<SettingsPage />);
+    await screen.findByText("Dynamic Client Registration");
+
+    expect(screen.getByText(/Anonymous/)).toBeInTheDocument();
+    expect(screen.getByText("openid, profile")).toBeInTheDocument();
+    expect(screen.getByText("*.example.com")).toBeInTheDocument();
+    expect(screen.getByText("https://mcp.example.com/mcp")).toBeInTheDocument();
+    expect(screen.getByText("5")).toBeInTheDocument();
+  });
+
+  it("pre-fills the DCR edit fields from the loaded policy", async () => {
+    apiMock.get.mockResolvedValue(
+      res({
+        ...settings,
+        oidc: {
+          dynamic_registration: "initial_access_token",
+          dcr_allowed_scopes: ["openid"],
+          dcr_allowed_redirect_hosts: [],
+          external_client_allowed_resources: [],
+          dcr_max_clients: 10,
+          dcr_unused_client_ttl_days: 14,
+        },
+      })
+    );
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+
+    expect(screen.getByLabelText("Self-registration mode")).toHaveValue(
+      "initial_access_token"
+    );
+    expect(screen.getByLabelText("Allowed scopes (one per line)")).toHaveValue(
+      "openid"
+    );
+    expect(screen.getByLabelText("Max self-registered clients")).toHaveValue(10);
+    expect(screen.getByLabelText("Unused-client sweep (days)")).toHaveValue(14);
+  });
+
+  it("D3 — refuses saving anonymous mode with an empty allowed-audiences list", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+
+    await userEvent.selectOptions(
+      screen.getByLabelText("Self-registration mode"),
+      "anonymous"
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    expect(
+      await screen.findByText(/anonymous registration cannot be enabled while/)
+    ).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("D3 — allows saving anonymous mode once an audience is named", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+
+    await userEvent.selectOptions(
+      screen.getByLabelText("Self-registration mode"),
+      "anonymous"
+    );
+    fireEvent.change(screen.getByLabelText("Allowed audiences (one per line)"), {
+      target: { value: "https://mcp.example.com/mcp" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const [, body] = apiMock.put.mock.calls[0];
+    expect(body).toMatchObject({
+      dynamic_registration: "anonymous",
+      external_client_allowed_resources: ["https://mcp.example.com/mcp"],
+    });
+  });
+
+  it("amendment 1 — refuses saving dcr_allowed_scopes containing address or phone", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+
+    fireEvent.change(screen.getByLabelText("Allowed scopes (one per line)"), {
+      target: { value: "openid\naddress" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    expect(
+      await screen.findByText(/address releases personal data under W7's per-client/)
+    ).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("sends the full DCR policy as part of the tenant override", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+
+    await userEvent.selectOptions(
+      screen.getByLabelText("Self-registration mode"),
+      "initial_access_token"
+    );
+    fireEvent.change(screen.getByLabelText("Allowed scopes (one per line)"), {
+      target: { value: "openid\nprofile" },
+    });
+    fireEvent.change(
+      screen.getByLabelText("Allowed redirect hosts (one per line)"),
+      { target: { value: "*.example.com" } }
+    );
+    const maxClients = screen.getByLabelText("Max self-registered clients");
+    await userEvent.clear(maxClients);
+    await userEvent.type(maxClients, "3");
+
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const [, body] = apiMock.put.mock.calls[0];
+    expect(body).toMatchObject({
+      dynamic_registration: "initial_access_token",
+      dcr_allowed_scopes: ["openid", "profile"],
+      dcr_allowed_redirect_hosts: ["*.example.com"],
+      dcr_max_clients: 3,
+      dcr_unused_client_ttl_days: 30,
+    });
   });
 });

@@ -217,6 +217,9 @@ use crate::handlers;
         handlers::oauth2_clients::get,
         handlers::oauth2_clients::update,
         handlers::oauth2_clients::delete,
+        // T21.4 — RFC 7591 initial access tokens (the admin half).
+        handlers::dcr::create_registration_token,
+        handlers::dcr::list_registration_tokens,
         // OAuth2 Flow
         handlers::oauth2::authorize,
         handlers::oauth2::token,
@@ -227,6 +230,10 @@ use crate::handlers;
         // `grant_type` — so only the two extra paths appear here.
         handlers::oauth2::device_authorization,
         handlers::oauth2::pushed_authorization_request,
+        // T21.4 / RFC 7591 §3.1 — dynamic client registration. Unauthenticated,
+        // so I9 applies twice over: the path is in `PUBLIC_PATHS` and here, in
+        // the same commit.
+        handlers::dcr::register,
         handlers::oauth2::end_session,
         handlers::device::verify,
         handlers::device::decide,
@@ -234,6 +241,30 @@ use crate::handlers;
         // RFC 8414 `/.well-known/oauth-authorization-server` alias of this
         // same handler as its own path entry — it needs no listing here.
         handlers::oauth2::discovery,
+        // T21.6 — the three per-tenant issuer discovery forms. Documented
+        // unconditionally, exactly as `oauth2::revocations` is: whether a
+        // deployment mounts them is `AXIAM__AUTH__TENANT_ISSUER_PATHS`, and a
+        // capability statement that changed shape per deployment would be one
+        // no SDK could vendor.
+        //
+        // Three annotated functions rather than one plus two cloned `PathItem`s
+        // (the T21.1 alias trick below): these paths take a tenant PATH
+        // parameter and no `tenant_id` query, so the discovery item is not the
+        // item to clone. All three delegate to one body, which is what keeps
+        // the documents identical — `tenant_path_discovery` in
+        // `handlers::oauth2`.
+        //
+        // The eleven OAuth2 endpoints the `/t/{tenant_id}` scope re-bases are
+        // deliberately NOT duplicated here. Documenting them would mean eleven
+        // more `#[utoipa::path]`-annotated wrapper functions — a second copy of
+        // every handler, which is the one thing T21.6 was specified not to do —
+        // for paths whose only difference from the documented ones is a prefix
+        // the issuer already states. `docs/deployment/README.md` says what that
+        // prefix is; the discovery document a client actually reads names every
+        // endpoint in full.
+        handlers::oauth2::discovery_rfc8414_tenant_path,
+        handlers::oauth2::discovery_oidc_tenant_path,
+        handlers::oauth2::discovery_oidc_tenant_appended,
         handlers::oauth2::jwks,
         handlers::oauth2::revocations,
         handlers::oauth2::userinfo,
@@ -476,6 +507,21 @@ use crate::handlers;
         handlers::oauth2_clients::UpdateOAuth2ClientRequest,
         handlers::oauth2_clients::OAuth2ClientResponse,
         handlers::oauth2_clients::OAuth2ClientCreatedResponse,
+        // T21.4 / D5 — the provenance discriminator the client read API
+        // echoes, and the registration mode the settings API takes.
+        axiam_core::models::oauth2_client::ManagedBy,
+        axiam_core::models::settings::DynamicRegistrationMode,
+        // T21.5 — the nested CIMD posture, referenced by both settings DTOs.
+        axiam_core::models::settings::CimdPolicy,
+        // T21.4 — the RFC 7591 request, response and error shapes, plus the
+        // two initial-access-token DTOs. The first two live in `axiam-oauth2`
+        // beside the validation that produces them.
+        axiam_oauth2::dcr::RegistrationRequest,
+        axiam_oauth2::dcr::RegistrationResponse,
+        handlers::dcr::DcrErrorResponse,
+        handlers::dcr::CreateRegistrationTokenRequest,
+        handlers::dcr::RegistrationTokenResponse,
+        handlers::dcr::CreateRegistrationTokenResponse,
         // Federation
         handlers::federation::CreateFederationConfigRequest,
         handlers::federation::UpdateFederationConfigRequest,

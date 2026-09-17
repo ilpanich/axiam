@@ -52,6 +52,14 @@ pub const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:devic
 pub struct DeviceAuthorizationRequest {
     pub client_id: String,
     pub scope: Option<String>,
+    /// T21.3 / RFC 8707 §2 — the target service this device wants a token for.
+    ///
+    /// Named here, where the device makes its request, because the poll that
+    /// redeems the grant carries nothing but a `device_code`. Validated
+    /// against the client's `allowed_resources` and stored on the grant;
+    /// absent leaves the flow exactly as it was (I2).
+    #[serde(default)]
+    pub resource: Option<String>,
 }
 
 /// `POST /oauth2/device_authorization` response (RFC 8628 §3.2).
@@ -162,6 +170,12 @@ where
             .filter(|s| client.scopes.iter().any(|c| c == s))
             .collect();
 
+        // T21.3 / RFC 8707 §2 — validated before a grant exists, so a device
+        // naming a resource this client may not address never receives a
+        // user code to display or a device code to poll with.
+        let resource =
+            crate::resource::resolve_requested(&client.allowed_resources, req.resource.as_deref())?;
+
         let device_code = generate_device_code();
         let user_code_display = generate_user_code();
         // Stored normalised, because that is the form every lookup uses.
@@ -176,6 +190,7 @@ where
                 scopes,
                 expires_at: Utc::now() + Duration::seconds(DEFAULT_EXPIRES_IN_SECS as i64),
                 interval_secs: DEFAULT_INTERVAL_SECS,
+                resource,
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
@@ -199,10 +214,50 @@ where
     /// **before** the state is examined. A device hammering the endpoint gets
     /// `slow_down` whatever its grant's state, so the corrective signal is not
     /// something it can outrun by being in a lucky state.
+    ///
+    /// `resource` is RFC 8707's parameter on the token request (T21.3). The
+    /// device already named its target when it started the flow, so the only
+    /// thing a poll may do with the parameter is **repeat it**: a poll that
+    /// names a different resource — or names one at all when the grant is
+    /// bound to none — is `invalid_target`. See
+    /// [`crate::resource::resolve_bound`] for why a grant's audience is
+    /// decided when the grant is made and never at redemption.
+    /// The config the device grant's access token is signed under (T21.6).
+    ///
+    /// See `TokenService::minting_config`.
+    fn minting_config<'a>(&'a self, issuer: Option<&str>) -> std::borrow::Cow<'a, AuthConfig> {
+        match issuer {
+            None => std::borrow::Cow::Borrowed(&self.auth_config),
+            Some(issuer) => std::borrow::Cow::Owned(AuthConfig {
+                request_issuer: Some(issuer.to_owned()),
+                ..self.auth_config.clone()
+            }),
+        }
+    }
+
+    /// [`Self::poll_at`] for a device polling the deployment-wide token
+    /// endpoint.
     pub async fn poll(
         &self,
         tenant_id: Uuid,
         device_code: &str,
+        resource: Option<&str>,
+    ) -> Result<TokenResponse, OAuth2Error> {
+        self.poll_at(tenant_id, device_code, resource, None).await
+    }
+
+    /// [`Self::poll`], told which issuer the request arrived under (T21.6).
+    ///
+    /// `issuer` is `None` for `/oauth2/token` and `Some("{root}/t/{tenant}")`
+    /// for the per-tenant path. It decides the `iss` of the minted access
+    /// token and nothing else — the device code is still the only credential,
+    /// and it is still looked up in the tenant the path or the query named.
+    pub async fn poll_at(
+        &self,
+        tenant_id: Uuid,
+        device_code: &str,
+        resource: Option<&str>,
+        issuer: Option<&str>,
     ) -> Result<TokenResponse, OAuth2Error> {
         let hash = hash_device_code(device_code);
 
@@ -229,6 +284,16 @@ where
         if grant.expires_at <= Utc::now() {
             return Err(OAuth2Error::ExpiredToken);
         }
+
+        // RFC 8707 §2 — checked here, before the status is examined and long
+        // before the code is redeemed. A device that mis-sends the parameter
+        // gets the actionable answer on its first poll instead of an hour of
+        // `authorization_pending` followed by a refusal that has already spent
+        // the user's approval. There is no oracle in answering early: the
+        // caller holds the device code, so it is the device, and the value it
+        // is being told about is the one it sent itself at
+        // `/oauth2/device_authorization`.
+        let _ = crate::resource::resolve_bound(grant.resource.as_deref(), resource)?;
 
         match grant.status {
             DeviceGrantStatus::Pending => return Err(OAuth2Error::AuthorizationPending),
@@ -285,19 +350,29 @@ where
                 // session for a back-channel logout to name.
                 session_id: None,
                 requested_userinfo_claims: Vec::new(),
+                // RFC 8707 — the grant's target travels onto the refresh
+                // token, so a device that refreshes keeps the same audience
+                // and cannot acquire a different one (see
+                // `crate::resource::resolve_bound`).
+                resource: redeemed.resource.clone(),
                 expires_at: Utc::now() + Duration::seconds(self.refresh_token_lifetime_secs),
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
+        // RFC 8707 §2 — the audience is the resource the device named when it
+        // started the flow, or `axiam:user` when it named none. `AUD_USER` is
+        // what every device grant minted before T21.3 and what every grant
+        // that sends no `resource` still mints, byte for byte (I2).
+        let audience = redeemed.resource.as_deref().unwrap_or(AUD_USER);
         let access_token = issue_access_token(
             user.id,
             tenant_id,
             tenant.organization_id,
             &redeemed.scopes,
-            &self.auth_config,
+            &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
-            AUD_USER,
+            audience,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 

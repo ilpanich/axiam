@@ -124,6 +124,14 @@ pub struct PushedRequest {
     /// endpoint owes the client before anything is stored. What arrives here
     /// is the single key the authorization is bound to, or `None`.
     pub dpop_jkt: Option<String>,
+    /// T21.3 / RFC 8707 §2 — the target service this request is for.
+    ///
+    /// Validated here rather than deferred to `/oauth2/authorize`, for the
+    /// same reason the `redirect_uri` is: the client is authenticated *now*,
+    /// so an `invalid_target` is attributable and reaches the client as a
+    /// protocol error — instead of surfacing in a browser after a sign-in the
+    /// user should never have been asked for.
+    pub resource: Option<String>,
 }
 
 /// What `/oauth2/par` answers with (RFC 9126 §2.2).
@@ -234,6 +242,13 @@ where
             }
         }
 
+        // T21.3 / RFC 8707 §2 — the resource indicator, validated against the
+        // client's allow-list and stored in its normalised form so the
+        // authorization endpoint compares the same string this endpoint
+        // accepted. Absent is `Ok(None)` and changes nothing (I2).
+        let resource =
+            crate::resource::resolve_requested(&client.allowed_resources, req.resource.as_deref())?;
+
         // RFC 9126 §2.1: `request_uri` is not a parameter a client may push.
         // Accepting one would let a client chain pushed requests, and the
         // second would inherit the first's authentication.
@@ -263,6 +278,7 @@ where
                     ui_locales: req.ui_locales,
                     claims_locales: req.claims_locales,
                     dpop_jkt: req.dpop_jkt,
+                    resource,
                 },
                 expires_at,
             })
@@ -452,6 +468,13 @@ mod tests {
             async fn create(&self, _: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
                 unreachable!("peek must not touch the client registration")
             }
+            async fn upsert_cimd_client(
+                &self,
+                _: &str,
+                _: CreateOAuth2Client,
+            ) -> AxiamResult<OAuth2Client> {
+                unreachable!("peek must not touch the client registration")
+            }
             async fn get_by_id(&self, _: Uuid, _: Uuid) -> AxiamResult<OAuth2Client> {
                 unreachable!("peek must not touch the client registration")
             }
@@ -484,6 +507,32 @@ mod tests {
                 _: &str,
             ) -> AxiamResult<bool> {
                 unreachable!("peek must not touch the client registration")
+            }
+            async fn count_by_managed_by(
+                &self,
+                _tid: Uuid,
+                _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+            ) -> AxiamResult<u64> {
+                unimplemented!()
+            }
+
+            async fn list_all_by_managed_by(
+                &self,
+                _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+            ) -> AxiamResult<Vec<OAuth2Client>> {
+                unimplemented!()
+            }
+
+            async fn touch_last_authorized(
+                &self,
+                _tid: Uuid,
+                _client_id: &str,
+                _at: chrono::DateTime<chrono::Utc>,
+            ) -> AxiamResult<()> {
+                // T21.4 — a no-op rather than `unimplemented!()`: the
+                // authorization path calls this for an external client, so a
+                // panic here would fail a test about something else entirely.
+                Ok(())
             }
         }
 

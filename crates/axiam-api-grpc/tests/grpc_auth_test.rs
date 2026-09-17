@@ -110,6 +110,12 @@ fn test_auth_config() -> AuthConfig {
         max_concurrent_hashes: 0,
         hash_acquire_timeout_secs: 5,
         session_validation_cache_ttl_secs: 0,
+        // T21.5: the spread. T21.6 added `tenant_issuer_paths` and
+        // `request_issuer` to `AuthConfig` without updating this initializer,
+        // so this test has not compiled since; both take their `Default`
+        // value, which is the one that reproduces the behaviour this test was
+        // written against.
+        ..AuthConfig::default()
     }
 }
 
@@ -634,5 +640,93 @@ async fn grpc_validate_credentials_wrong_password_accrues_lockout() {
             .is_some_and(|locked_until| locked_until > chrono::Utc::now()),
         "account must be locked after {} consecutive wrong-password attempts",
         auth_config.max_failed_login_attempts
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T21.3 — invariant I3 on this transport
+// ---------------------------------------------------------------------------
+
+/// **I3.** A token minted for an RFC 8707 resource is refused here.
+///
+/// T21.3 lets a client obtain an access token whose `aud` names an MCP server
+/// rather than AXIAM. The whole safety of that feature is that such a token
+/// opens nothing of AXIAM's own, and this transport is half of "AXIAM's own":
+/// the mesh's low-latency authorization check. The REST half is
+/// `i3_a_resource_bound_token_is_refused_by_axiams_own_rest_api` in
+/// `axiam-api-rest/tests/resource_indicators_test.rs`.
+///
+/// The refusal is not new code. `validate_access_token` pins the audience set
+/// to the two built-in values, and T21.3 deliberately left it pinned — so this
+/// test exists to prove the pin held, not to describe something added.
+///
+/// Asserted alongside a token that differs *only* in its audience, so a pass
+/// cannot come from the request being malformed in some other way.
+#[tokio::test]
+async fn grpc_rejects_a_resource_bound_token() {
+    let (db, tenant_id, user_id) = setup().await;
+    let auth_config = test_auth_config();
+    let engine = make_engine(&db);
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config.clone()).await;
+
+    let bound = axiam_auth::token::AccessTokenSpec::user(
+        user_id,
+        tenant_id,
+        Uuid::nil(),
+        Uuid::new_v4().to_string(),
+    )
+    .aud("https://mcp.example.com/mcp")
+    .issue(&auth_config)
+    .expect("minting a resource-bound token must succeed");
+
+    let request = || CheckAccessRequest {
+        tenant_id: tenant_id.to_string(),
+        subject_id: user_id.to_string(),
+        action: "read".into(),
+        resource_id: Uuid::new_v4().to_string(),
+        scope: None,
+    };
+
+    let channel = Channel::from_shared(endpoint.clone())
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client =
+        AuthorizationServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+            req.metadata_mut()
+                .insert("authorization", format!("Bearer {bound}").parse().unwrap());
+            Ok(req)
+        });
+    let err = client
+        .check_access(request())
+        .await
+        .expect_err("a token addressed at an MCP server is not a token for AXIAM");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Unauthenticated,
+        "expected UNAUTHENTICATED, got {:?}",
+        err.code()
+    );
+
+    // The control: the same subject, the same call, an ordinary audience.
+    let ordinary = mint_test_token(tenant_id, user_id, &auth_config);
+    let channel = Channel::from_shared(endpoint)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client =
+        AuthorizationServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+            req.metadata_mut().insert(
+                "authorization",
+                format!("Bearer {ordinary}").parse().unwrap(),
+            );
+            Ok(req)
+        });
+    assert!(
+        client.check_access(request()).await.is_ok(),
+        "the 401 above must be about the audience, not about the route"
     );
 }

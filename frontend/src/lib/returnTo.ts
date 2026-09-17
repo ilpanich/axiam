@@ -21,15 +21,38 @@ import { clearReauthAttempts } from "@/lib/reauth";
  * 2. no control characters, whitespace, `#` or `\`;
  * 3. begins with a single `/` — not `//`, which reads as a path and resolves
  *    to a different host;
- * 4. the path is exactly `/oauth2/authorize` and there is a query.
+ * 4. the path is exactly `/oauth2/authorize`, or exactly
+ *    `/t/{uuid}/oauth2/authorize` (T21.6, per-tenant path issuers), and there
+ *    is a query.
  *
  * Rule 4 is what makes traversal a non-question: nothing is normalised and
- * then compared, because nothing but the exact path is accepted in the first
- * place.
+ * then compared, because nothing but one of two exact shapes is accepted in the
+ * first place — and the tenant form's middle segment must parse as a UUID, so
+ * `/t/../oauth2/authorize` is refused for being the wrong shape rather than
+ * resolved.
+ *
+ * The tenant form is accepted unconditionally here, where the server accepts it
+ * only on a deployment that serves tenant paths. That asymmetry is deliberate
+ * and costs nothing: this page has no way to read the server's flag, and the
+ * worst a hand-crafted tenant `return_to` achieves on a deployment without the
+ * flag is a navigation to a 404 **on this same origin**. An open redirect needs
+ * another origin, and rules 1-3 are what refuse those.
  */
 
 /** The only path a `return_to` may name. Mirrors `login_hop::AUTHORIZE_PATH`. */
 export const AUTHORIZE_PATH = "/oauth2/authorize";
+
+/**
+ * The per-tenant form (T21.6). Mirrors
+ * `login_hop::tenant_authorize_path`/`validate_return_to_at`.
+ */
+const TENANT_AUTHORIZE_PATH =
+  /^\/t\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\/oauth2\/authorize$/;
+
+/** Is `path` an authorization-endpoint path this deployment could serve? */
+function isAuthorizePath(path: string): boolean {
+  return path === AUTHORIZE_PATH || TENANT_AUTHORIZE_PATH.test(path);
+}
 
 /** Mirrors `login_hop::MAX_RETURN_TO_LEN`. */
 export const MAX_RETURN_TO_LENGTH = 4096;
@@ -61,7 +84,7 @@ export function sanitizeReturnTo(raw: string | null | undefined): string | null 
   if (queryStart < 0) return null;
   const path = raw.slice(0, queryStart);
   const query = raw.slice(queryStart + 1);
-  if (path !== AUTHORIZE_PATH) return null;
+  if (!isAuthorizePath(path)) return null;
   if (query.length === 0) return null;
 
   return raw;

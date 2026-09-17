@@ -109,6 +109,83 @@ impl AuthnRequestParamsMode {
     }
 }
 
+/// Who created a client registration (D5, T21.4).
+///
+/// The discriminator that separates a registration an administrator made from
+/// one that arrived over an open endpoint. Three things read it and each would
+/// otherwise have to infer provenance from something that is not provenance:
+///
+/// * `axiam_oauth2::fapi` refuses a FAPI profile on anything but
+///   [`Admin`](Self::Admin) (I5) — a client nobody vetted cannot be
+///   financial-grade;
+/// * the authorization endpoint forces a consent hop for every other value
+///   (D4) — an unrelated party gets a question put to the end user, whatever
+///   scopes it asked for;
+/// * the T21.4 sweeper deletes only [`Dcr`](Self::Dcr) rows, so an
+///   administrator's client is never swept however long it sits unused.
+///
+/// [`Admin`](Self::Admin) is the serde default and therefore what every row
+/// written before T21.4 decodes to, which is the truth: they were all created
+/// through `POST /oauth2-clients` by somebody holding
+/// `oauth2_clients:create`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagedBy {
+    /// Created through the authenticated admin API. Every client that existed
+    /// before T21.4.
+    #[default]
+    Admin,
+    /// Created through `POST /oauth2/register` (RFC 7591 dynamic client
+    /// registration).
+    Dcr,
+    /// Materialised from a Client ID Metadata Document (T5). Defined here
+    /// rather than added later so that the column, its `assert` and the
+    /// gates that read it land in one migration; nothing writes this value in
+    /// T21.4.
+    Cimd,
+}
+
+impl ManagedBy {
+    /// The stored/wire spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Dcr => "dcr",
+            Self::Cimd => "cimd",
+        }
+    }
+
+    /// Parse a stored/wire value. `None` for anything unrecognised — see
+    /// [`ClientProfile::from_wire`]. Failing closed matters more here than
+    /// anywhere else in this file: an unknown value degrading to `Admin` would
+    /// hand a self-registered client the consent exemption and the FAPI
+    /// eligibility of one an administrator created.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "admin" => Some(Self::Admin),
+            "dcr" => Some(Self::Dcr),
+            "cimd" => Some(Self::Cimd),
+            _ => None,
+        }
+    }
+
+    /// Whether this registration came from outside — a party AXIAM's operator
+    /// did not vet.
+    ///
+    /// Asked as one question rather than compared against two variants,
+    /// because every gate wants the same answer and a third external
+    /// mechanism must not need a third call site edited.
+    pub const fn is_external(self) -> bool {
+        !matches!(self, Self::Admin)
+    }
+}
+
+impl std::fmt::Display for ManagedBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// How a client proves its identity at the token endpoint (RFC 8705 §2,
 /// OIDC Core §9 naming).
 ///
@@ -435,6 +512,42 @@ pub struct OAuth2Client {
     /// modules manual forever for no security property.
     #[serde(default)]
     pub browser_sso: bool,
+    /// T21.3 / RFC 8707 §2 — the target services this client may name in a
+    /// `resource` parameter, and the only source of truth for what it may.
+    ///
+    /// Each entry is an absolute URI without a fragment, compared after
+    /// RFC 3986 §6.2.2 syntax-based normalisation and **never by prefix** — a
+    /// prefix match would let `https://mcp.example.com` authorise
+    /// `https://mcp.example.com.attacker.test`, which is the audience
+    /// equivalent of the open redirect exact `redirect_uri` matching exists to
+    /// prevent. See `axiam_oauth2::resource`.
+    ///
+    /// Empty for every client registered before T21.3, which is the honest
+    /// value and today's behaviour: such a client names no resource, so every
+    /// token it obtains carries `axiam:user` or `axiam:m2m` exactly as before
+    /// (I2). A `resource` naming anything not on this list is `invalid_target`.
+    #[serde(default)]
+    pub allowed_resources: Vec<String>,
+    /// T21.4 / D5 — who created this registration. See [`ManagedBy`].
+    ///
+    /// `serde(default)` resolves every row written before schema v64 to
+    /// `admin`, which is what they are.
+    #[serde(default)]
+    pub managed_by: ManagedBy,
+    /// T21.4 — when this client last had an authorization code issued to it,
+    /// for the sweeper that deletes self-registered clients nobody uses.
+    ///
+    /// Written **only** for a client whose [`Self::managed_by`] is not
+    /// `admin`. That is not an optimisation, it is invariant I1 kept exact: an
+    /// administrator's client takes byte-for-byte the path it took before this
+    /// task, one repository call and no more, because nothing here has any
+    /// business stamping a row on its behalf.
+    ///
+    /// `None` on a swept-eligible client means "never authorized", and the
+    /// sweeper falls back to `created_at` — a registration made and abandoned
+    /// is exactly what the TTL is for.
+    #[serde(default)]
+    pub last_authorized_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -688,6 +801,19 @@ pub struct CreateOAuth2Client {
     /// modules manual forever for no security property.
     #[serde(default)]
     pub browser_sso: bool,
+    /// T21.3 — see [`OAuth2Client::allowed_resources`]. Empty is the default
+    /// and reproduces every registration that predates RFC 8707 support.
+    #[serde(default)]
+    pub allowed_resources: Vec<String>,
+    /// T21.4 / D5 — see [`OAuth2Client::managed_by`].
+    ///
+    /// Set by the creating code path, never by a request body: the admin
+    /// handler leaves it at `admin` and `POST /oauth2/register` sets `dcr`. It
+    /// is deliberately absent from [`UpdateOAuth2Client`] — a registration's
+    /// provenance is a fact about how it came to exist, and a field that could
+    /// be edited to `admin` would be a field that launders one.
+    #[serde(default)]
+    pub managed_by: ManagedBy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -735,6 +861,13 @@ pub struct UpdateOAuth2Client {
     pub authn_request_params: Option<AuthnRequestParamsMode>,
     /// X7.3 — see [`OAuth2Client::browser_sso`].
     pub browser_sso: Option<bool>,
+    /// T21.3 — see [`OAuth2Client::allowed_resources`].
+    ///
+    /// A whole-list replacement rather than an add/remove pair, exactly as
+    /// [`Self::redirect_uris`] is: an allow-list edited by two operations is
+    /// an allow-list whose current contents nobody can state from one request,
+    /// and `Some(vec![])` is how an operator withdraws the last target.
+    pub allowed_resources: Option<Vec<String>>,
 }
 
 /// Represents a stored OAuth2 authorization code (short-lived, single-use).
@@ -802,6 +935,21 @@ pub struct AuthorizationCode {
     /// written before §5.5 support makes.
     #[serde(default)]
     pub requested_userinfo_claims: Vec<String>,
+    /// T21.3 / RFC 8707 — the target service this authorization named, and
+    /// therefore the `aud` the access token minted from this code must carry.
+    ///
+    /// Snapshotted here for the reason `code_challenge` and `dpop_jkt` are:
+    /// the client committed to it at the authorization endpoint, and the token
+    /// request that redeems this code has to be answered against the
+    /// commitment as it stood then rather than against anything it sends now.
+    /// A token request that names a *different* resource is `invalid_target`;
+    /// one that names none inherits this.
+    ///
+    /// `None` on every code issued before schema v63 and on every request that
+    /// sent no `resource`, which is the same thing said twice: such a code
+    /// mints `axiam:user` exactly as it always did (I2).
+    #[serde(default)]
+    pub resource: Option<String>,
     pub expires_at: DateTime<Utc>,
     pub used: bool,
     pub created_at: DateTime<Utc>,
@@ -832,6 +980,8 @@ pub struct CreateAuthorizationCode {
     pub dpop_jkt: Option<String>,
     /// OIDC Core §5.5 — see [`AuthorizationCode::requested_userinfo_claims`].
     pub requested_userinfo_claims: Vec<String>,
+    /// T21.3 / RFC 8707 — see [`AuthorizationCode::resource`].
+    pub resource: Option<String>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -892,6 +1042,21 @@ pub struct RefreshToken {
     /// value and today's behaviour: those grants named no claims.
     #[serde(default)]
     pub requested_userinfo_claims: Vec<String>,
+    /// T21.3 / RFC 8707 — the target service the grant behind this token was
+    /// issued for, carried so that a refresh re-mints the **same** audience.
+    ///
+    /// This is what stops a token being widened by refreshing it. A refresh
+    /// request may repeat this value or omit it; naming a different one is
+    /// `invalid_target`, and naming one at all when this is `None` is
+    /// `invalid_target` too — a grant that was never bound to a resource
+    /// cannot acquire one at rotation, because nothing at rotation time asked
+    /// the end user about it.
+    ///
+    /// Copied forward on every rotation, exactly as [`Self::session_id`] is.
+    /// `None` for every row written before schema v63, which is the honest
+    /// value and today's behaviour: those grants named no resource.
+    #[serde(default)]
+    pub resource: Option<String>,
 }
 
 /// Input for creating a new refresh token.
@@ -908,6 +1073,8 @@ pub struct CreateRefreshToken {
     /// every grant that named no claims, which is every grant that sent no
     /// `claims` parameter.
     pub requested_userinfo_claims: Vec<String>,
+    /// T21.3 / RFC 8707 — see [`RefreshToken::resource`].
+    pub resource: Option<String>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -985,6 +1152,16 @@ pub struct DeviceGrant {
     pub interval_secs: u64,
     /// When the device last polled, for interval enforcement.
     pub last_polled_at: Option<DateTime<Utc>>,
+    /// T21.3 / RFC 8707 — the target service this device authorization named,
+    /// validated at `/oauth2/device_authorization` where the request is made
+    /// and carried here because the poll that redeems it sends nothing but a
+    /// device code.
+    ///
+    /// `None` on every grant created before schema v63 and on every request
+    /// that sent no `resource`; such a grant mints `axiam:user` exactly as it
+    /// always did (I2).
+    #[serde(default)]
+    pub resource: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -998,6 +1175,8 @@ pub struct CreateDeviceGrant {
     pub scopes: Vec<String>,
     pub expires_at: DateTime<Utc>,
     pub interval_secs: u64,
+    /// T21.3 / RFC 8707 — see [`DeviceGrant::resource`].
+    pub resource: Option<String>,
 }
 
 /// A pushed authorization request (RFC 9126, B5).
@@ -1091,6 +1270,20 @@ pub struct PushedAuthParams {
     /// binding reads correctly as "this client pinned no key".
     #[serde(default)]
     pub dpop_jkt: Option<String>,
+    /// T21.3 / RFC 8707 — the target service pushed with this request.
+    ///
+    /// Pushed, stored and returned by `consume` exactly like the parameters
+    /// above it, and for the reason this struct's own documentation gives: PAR
+    /// and the query string are two carriers of one request, and for a
+    /// `require_par` client PAR is the only carrier there is. A `resource`
+    /// added to only one of them would be silently lost by exactly the clients
+    /// the FAPI profile insists on.
+    ///
+    /// `#[serde(default)]` because rows pushed before this field existed carry
+    /// none, and an absent parameter is indistinguishable from one the client
+    /// never sent — the correct reading in both cases.
+    #[serde(default)]
+    pub resource: Option<String>,
 }
 
 /// Input for creating a pushed authorization request.
@@ -1399,6 +1592,9 @@ mod tests {
             browser_sso: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            allowed_resources: Vec::new(),
+            managed_by: ManagedBy::Admin,
+            last_authorized_at: None,
         }
     }
 
@@ -1425,6 +1621,8 @@ mod tests {
             dpop_require_nonce: false,
             authn_request_params: AuthnRequestParamsMode::Ignore,
             browser_sso: false,
+            allowed_resources: Vec::new(),
+            managed_by: ManagedBy::Admin,
         }
     }
 

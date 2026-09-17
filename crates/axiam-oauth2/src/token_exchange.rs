@@ -86,16 +86,18 @@ pub struct TokenExchangeRequest {
     pub actor_token_type: Option<String>,
     /// Space-separated. Absent means "the subject's own scopes".
     pub scope: Option<String>,
-    /// Target audience for the issued token. **The allow-list is the
-    /// client's `redirect_uris`** (SEC-089): a target is accepted if it
-    /// appears in the client's registered redirect URIs, or is one of
-    /// AXIAM's own built-in audiences. There is no separate audience field
-    /// in v1 — adding a redirect URI to a client also authorises it as a
-    /// token audience for that client. This allow-list is checked at two
-    /// call sites in this file (same-domain exchange, and the X4 external
-    /// exchange) — both are tagged `SEC-089` and must be touched together
-    /// (and together with this comment) if a future dedicated
-    /// `allowed_token_targets` field replaces this reuse. Full write-up in
+    /// Target audience for the issued token. **The allow-list is the client's
+    /// `allowed_resources`** (T21.3 / D2), in union with the `redirect_uris`
+    /// SEC-089 documented — which is deprecated and lasts one release.
+    ///
+    /// A target is accepted if it is one of AXIAM's two built-in audiences, or
+    /// appears in `allowed_resources`, or (deprecated) appears in
+    /// `redirect_uris`. The last branch logs a warning naming the client and
+    /// the target when it is the one that matched, so an operator has the list
+    /// of registrations to migrate before it goes. Both call sites in this
+    /// file — the same-domain exchange and the X4 external one — go through
+    /// [`client_may_address`], which is one function precisely so the two
+    /// cannot come apart. Full write-up in
     /// `docs/api/token-exchange.md#audience`.
     pub audience: Option<String>,
     /// RFC 8707. Treated as a synonym of `audience`; if both are given they
@@ -340,6 +342,56 @@ fn is_builtin_audience(target: &str) -> bool {
     target == AUD_USER || target == AUD_M2M
 }
 
+/// Whether `target` is an audience this client may address, under D2's union
+/// (T21.3).
+///
+/// # What changed, and why the old rule is still here
+///
+/// SEC-089 recorded that this grant's allow-list *was*
+/// `client.redirect_uris` — there was no audience field, so adding a redirect
+/// URI also authorised it as a token audience. That is a surprising coupling
+/// between two lists that mean different things, and T21.3 replaces it with
+/// [`OAuth2Client::allowed_resources`], which means exactly this and nothing
+/// else.
+///
+/// The redirect-URI branch is kept for **one release** rather than removed in
+/// the same change, and that is a deliberate, dated decision rather than
+/// timidity. Removing it outright would break every deployment that has a
+/// working exchange today: their clients name an audience that is registered
+/// as a redirect URI, and the first they would learn of the change is
+/// `invalid_target` in production. So the rule is the union, the redirect-URI
+/// branch logs a deprecation warning naming the client and the target when it
+/// is the branch that matched, and an operator who reads their logs has the
+/// list of registrations to migrate before the branch goes.
+///
+/// The union widens nothing: every target that was accepted before is still
+/// accepted, and `allowed_resources` was empty on every client that existed
+/// before this change. It is `allowed_resources` that is new, and it is the
+/// only list the code grant has ever consulted — `redirect_uris` are read
+/// here and in the external-exchange path below, and nowhere else.
+fn client_may_address(client: &OAuth2Client, target: &str) -> bool {
+    if is_builtin_audience(target) || client.allowed_resources.iter().any(|r| r == target) {
+        return true;
+    }
+    // D2's deprecated half. Normalised comparison is deliberately NOT applied:
+    // this branch reproduces the exact `contains()` SEC-089 documented, so a
+    // target that matched before matches now and a target that did not, does
+    // not. Widening a deprecated rule on its way out would be the one change
+    // nobody asked for.
+    if client.redirect_uris.iter().any(|u| u == target) {
+        tracing::warn!(
+            client_id = %client.client_id,
+            target = %target,
+            "DEPRECATED (SEC-089 / T21.3): this token exchange named an audience that is \
+             registered only as a redirect_uri. Redirect URIs will stop authorising token \
+             audiences in the next release - add the target to this client's \
+             allowed_resources now. See docs/api/token-exchange.md#audience"
+        );
+        return true;
+    }
+    false
+}
+
 fn parse_scopes(raw: Option<&str>) -> Option<Vec<String>> {
     raw.map(|s| s.split_whitespace().map(str::to_owned).collect())
 }
@@ -409,12 +461,48 @@ where
     /// belongs to the HTTP layer and this service must not learn about it.
     /// `None` — every client that registered no binding — issues exactly the
     /// bytes this grant issued before SEC-096.
+    /// The config the exchanged token is signed under (T21.6).
+    ///
+    /// See `TokenService::minting_config`: `Borrowed`, and therefore exactly
+    /// today's behaviour, for every request that did not arrive on a
+    /// `/t/{tenant_id}` path.
+    fn minting_config<'a>(&'a self, issuer: Option<&str>) -> std::borrow::Cow<'a, AuthConfig> {
+        match issuer {
+            None => std::borrow::Cow::Borrowed(&self.auth_config),
+            Some(issuer) => std::borrow::Cow::Owned(AuthConfig {
+                request_issuer: Some(issuer.to_owned()),
+                ..self.auth_config.clone()
+            }),
+        }
+    }
+
+    /// [`Self::exchange_at`] for a request that arrived on the deployment-wide
+    /// token endpoint.
     pub async fn exchange(
         &self,
         tenant_id: Uuid,
         client: &OAuth2Client,
         req: TokenExchangeRequest,
         cnf: Option<axiam_auth::token::CnfClaim>,
+    ) -> Result<ExchangeOutcome, OAuth2Error> {
+        self.exchange_at(tenant_id, client, req, cnf, None).await
+    }
+
+    /// RFC 8693 token exchange, told which issuer the request arrived under.
+    ///
+    /// `issuer` is `None` for `/oauth2/token` and `Some("{root}/t/{tenant}")`
+    /// for the T21.6 per-tenant path. It decides the `iss` of the **minted**
+    /// token and nothing else: which subject tokens are accepted, which
+    /// audiences may be named and every other decision here reads the
+    /// deployment's own issuer set, so a caller cannot widen its rights by
+    /// choosing a path.
+    pub async fn exchange_at(
+        &self,
+        tenant_id: Uuid,
+        client: &OAuth2Client,
+        req: TokenExchangeRequest,
+        cnf: Option<axiam_auth::token::CnfClaim>,
+        issuer: Option<&str>,
     ) -> Result<ExchangeOutcome, OAuth2Error> {
         if !client
             .grant_types
@@ -481,12 +569,20 @@ where
         // rather than two that differ by which branch noticed.
         let claimed_issuer = unverified_issuer_of(&req.subject_token);
         let is_external = match claimed_issuer.as_deref() {
-            Some(iss) => iss != self.auth_config.effective_issuer(),
+            // T21.6 — "ours" is the deployment's issuer set, not one string.
+            // With tenant paths off that set is exactly `{root_issuer()}` and
+            // this is the comparison it has always been; with them on a token
+            // minted under `{root}/t/{uuid}` is ours too, and routing it to
+            // the *external* path would have meant verifying an AXIAM token
+            // against a partner's JWKS.
+            Some(iss) => !self.auth_config.accepts_issuer(iss),
             None => false,
         };
 
         if is_external {
-            return self.exchange_external(tenant_id, client, req, cnf).await;
+            return self
+                .exchange_external(tenant_id, client, req, cnf, issuer)
+                .await;
         }
 
         // From here down is B3, unchanged except for the transitivity check.
@@ -600,15 +696,14 @@ where
                 // equivalent of an open redirect. The client's registered URIs
                 // are its declared relationships.
                 //
-                // SEC-089: the allow-list *is* `client.redirect_uris` — there
-                // is no separate audience field in v1, so adding a redirect
-                // URI also authorises it as a token audience. Documented on
-                // `TokenExchangeRequest::audience` above and in
-                // `docs/api/token-exchange.md#audience`. The same check is
-                // repeated at the X4 external-exchange call site further
-                // down this file; a future `allowed_token_targets` field
-                // must replace both together.
-                if !is_builtin_audience(t) && !client.redirect_uris.iter().any(|u| u == t) {
+                // T21.3 / D2: the allow-list is `client.allowed_resources`,
+                // in union with the `client.redirect_uris` SEC-089 recorded,
+                // for one deprecation release. `client_may_address` carries
+                // the whole rule and the warning; the same call is made at
+                // the X4 external-exchange site further down this file, and
+                // the two must keep sharing one function rather than two
+                // copies of a condition.
+                if !client_may_address(client, t) {
                     return Err(OAuth2Error::InvalidTarget(format!(
                         "'{t}' is not a registered target for this client"
                     )));
@@ -670,7 +765,7 @@ where
             tenant_id,
             tenant.organization_id,
             &granted,
-            &self.auth_config,
+            &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
             &audience,
             expires_at,
@@ -723,6 +818,7 @@ where
         client: &OAuth2Client,
         req: TokenExchangeRequest,
         cnf: Option<axiam_auth::token::CnfClaim>,
+        issuer: Option<&str>,
     ) -> Result<ExchangeOutcome, OAuth2Error> {
         // Not configured ⇒ the external path does not exist. Deliberately the
         // same answer as "no provider trusts this issuer": whether a
@@ -847,15 +943,12 @@ where
         };
         let audience = match target {
             Some(t) => {
-                // SEC-089: same allow-list reuse as the same-domain exchange
-                // path above in this file — `client.redirect_uris` doubles
-                // as the audience allow-list, so adding a redirect URI also
-                // authorises it as a token audience. Documented on
-                // `TokenExchangeRequest::audience` and in
-                // `docs/api/token-exchange.md#audience`. Keep this check and
-                // the same-domain one in sync; a future
-                // `allowed_token_targets` field must replace both together.
-                if !is_builtin_audience(t) && !client.redirect_uris.iter().any(|u| u == t) {
+                // T21.3 / D2: the same rule as the same-domain exchange path
+                // above, through the same function, which is what stops the
+                // two coming apart — they did not share one before, and
+                // SEC-089's note had to ask a future author to keep them in
+                // step by hand.
+                if !client_may_address(client, t) {
                     return Err(OAuth2Error::InvalidTarget(format!(
                         "'{t}' is not a registered target for this client"
                     )));
@@ -898,7 +991,7 @@ where
             tenant_id,
             tenant.organization_id,
             &granted,
-            &self.auth_config,
+            &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
             &audience,
             now + lifetime,
@@ -1090,6 +1183,9 @@ mod tests {
             browser_sso: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            allowed_resources: Vec::new(),
+            managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+            last_authorized_at: None,
         };
         assert!(
             !client_may_impersonate(&client),
@@ -1282,6 +1378,9 @@ mod tests {
                 browser_sso: false,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                allowed_resources: Vec::new(),
+                managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+                last_authorized_at: None,
             }
         }
 

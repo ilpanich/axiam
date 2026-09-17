@@ -172,6 +172,26 @@ This applies to every orchestrator run and every spawned executor, on **every wa
   trusted that failed in `utoipa-swagger-ui`'s build script with
   `swagger ui download path should exists`. Run the script; it takes a second and is idempotent.
   This is a local-only build input substitution — it touches no tracked file, `Cargo.toml`, or CI config.
+- **`protoc` is absent and must be installed before building `axiam-server`.**
+  `axiam-server` depends on `axiam-api-grpc`, whose build script runs `prost-build`
+  and fails with `Could not find \`protoc\``. Nothing in a default sandbox provides it,
+  so **any** command that builds the server binary — notably regenerating the OpenAPI
+  spec — dies partway through:
+  ```bash
+  apt-get install -y protobuf-compiler   # no sudo needed; ~1 min build afterwards, ~6 GB target/
+  ```
+  CI never hits this because `.github/workflows/sdk-openapi-drift.yml` installs
+  `protobuf-compiler` as its first step. Regenerating the spec is therefore:
+  ```bash
+  export SWAGGER_UI_DOWNLOAD_URL="file://$(scripts/make-swagger-ui-placeholder.sh)"
+  cargo build -p axiam-server --no-default-features   # --no-default-features matches the drift workflow
+  ./target/debug/axiam-server --dump-openapi > sdks/openapi.json
+  python3 scripts/check-spec-digest.py                # the exporter already stamps the digest
+  ```
+  `docs/api/openapi.json` is a **symlink** to `sdks/openapi.json`; there is one file, not two.
+- **Capture cargo's own exit code, not a pipeline's.** `cargo build … | tail -25` reports
+  `tail`'s status, so a failed build reads as success. Redirect to a log and test `$?`.
+
 - **`--no-default-features` when libxml2 is unavailable.** `axiam-api-rest`'s default `saml`
   feature pulls `libxml`, whose build script needs system libxml2 headers. Where those are absent,
   build and test with `--no-default-features` — the same thing CI's "Build (SAML off)" job does.

@@ -2,8 +2,8 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::oauth2_client::{
-    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client,
-    UpdateOAuth2Client,
+    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
+    OAuth2Client, UpdateOAuth2Client,
 };
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -25,10 +25,14 @@ pub struct CreateOAuth2ClientRequest {
     /// Human-readable name for the client.
     pub name: String,
     /// Allowed redirect URIs (must be HTTPS, except localhost for dev).
-    /// SEC-089: this list doubles as the token-exchange audience allow-list
-    /// — adding a URI here also authorises it as a token audience for this
-    /// client, so review additions on exchange-capable clients with that in
-    /// mind (see `docs/api/token-exchange.md#audience`).
+    ///
+    /// SEC-089 / T21.3: this list **also** authorises token-exchange
+    /// audiences, and that coupling is now deprecated — `allowed_resources`
+    /// is the field that means "audiences this client may address". The
+    /// redirect-URI branch survives one release so that no deployment's
+    /// working exchange breaks on upgrade, and it logs a deprecation warning
+    /// when it is the branch that matched. Register exchange targets in
+    /// `allowed_resources` (see `docs/api/token-exchange.md#audience`).
     pub redirect_uris: Vec<String>,
     /// Grant types this client is authorized to use.
     pub grant_types: Vec<String>,
@@ -130,6 +134,21 @@ pub struct CreateOAuth2ClientRequest {
     /// anonymous browser is answered.
     #[serde(default)]
     pub browser_sso: bool,
+    /// T21.3 / RFC 8707 — the target services this client may name in a
+    /// `resource` parameter, at `/oauth2/authorize`, `/oauth2/par`,
+    /// `/oauth2/device_authorization` and `/oauth2/token`.
+    ///
+    /// Each entry must be an absolute URI without a fragment (RFC 8707 §2).
+    /// Entries are stored in their RFC 3986 §6.2.2 normalised form, which is
+    /// what the read-back shows and what every comparison uses; matching is by
+    /// equivalence and **never by prefix**.
+    ///
+    /// Empty (the default) means the client may name no resource, so every
+    /// token it obtains carries `axiam:user` or `axiam:m2m` exactly as before
+    /// RFC 8707 support existed. This is also the list the RFC 8693 token
+    /// exchange consults for its `audience`/`resource` target.
+    #[serde(default)]
+    pub allowed_resources: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -163,6 +182,9 @@ pub struct UpdateOAuth2ClientRequest {
     pub authn_request_params: Option<AuthnRequestParamsMode>,
     /// X7.3 — see [`CreateOAuth2ClientRequest::browser_sso`].
     pub browser_sso: Option<bool>,
+    /// T21.3 — see [`CreateOAuth2ClientRequest::allowed_resources`]. A
+    /// whole-list replacement; `[]` withdraws every target.
+    pub allowed_resources: Option<Vec<String>>,
 }
 
 /// OAuth2 client response -- omits client_secret_hash.
@@ -204,6 +226,33 @@ pub struct OAuth2ClientResponse {
     pub authn_request_params: AuthnRequestParamsMode,
     /// X7.3 — echoed for the same reason.
     pub browser_sso: bool,
+    /// T21.3 — echoed in its stored, normalised form, so an operator auditing
+    /// which audiences a client may mint tokens for reads the strings the
+    /// server actually compares rather than the ones they typed.
+    pub allowed_resources: Vec<String>,
+    /// T21.4 / D5 — who created this registration: `admin`, `dcr` or `cimd`.
+    ///
+    /// Echoed because an operator auditing a tenant needs to answer "which of
+    /// these did we create?" from this endpoint rather than from the database,
+    /// and because three behaviours hang off it: a non-`admin` client may
+    /// never carry the FAPI profile, is always consent-gated, and is the only
+    /// kind the unused-client sweeper touches.
+    ///
+    /// Read-only. There is no corresponding member on the update DTO: a
+    /// registration's provenance is a fact about how it came to exist, and a
+    /// field that could be edited to `admin` would be a field that launders
+    /// one.
+    pub managed_by: ManagedBy,
+    /// T21.4 — when this client was last issued an authorization code, for the
+    /// sweeper that deletes self-registered clients nobody uses.
+    ///
+    /// Always absent for an `admin` client: the stamp is written only for a
+    /// non-`admin` one, so that an administrator's client takes exactly the
+    /// path it took before T21.4 (I1). `null` on a self-registered client
+    /// means it has never been authorized, and the sweeper reads `created_at`
+    /// instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_authorized_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -232,6 +281,9 @@ impl From<OAuth2Client> for OAuth2ClientResponse {
             dpop_require_nonce: c.dpop_require_nonce,
             authn_request_params: c.authn_request_params,
             browser_sso: c.browser_sso,
+            allowed_resources: c.allowed_resources,
+            managed_by: c.managed_by,
+            last_authorized_at: c.last_authorized_at,
             require_par: c.require_par,
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -330,7 +382,15 @@ fn validation_err(msg: impl Into<String>) -> AxiamApiError {
     .into()
 }
 
-fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiError> {
+/// Structural rules for a redirect URI, shared by the admin registration API
+/// and by `POST /oauth2/register` (T21.4).
+///
+/// `pub(crate)` rather than private since T21.4: dynamic registration applies
+/// the same rules and must not grow a second copy of them. What the DCR path
+/// adds on top is the tenant's host allow-list, which has no admin-API
+/// equivalent because an administrator registering a URI has already decided
+/// it is acceptable.
+pub(crate) fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiError> {
     if uris.is_empty() {
         return Err(validation_err("redirect_uris must not be empty"));
     }
@@ -359,6 +419,28 @@ fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiError> {
         }
     }
     Ok(())
+}
+
+/// Validate and normalise `allowed_resources` (T21.3 / RFC 8707 §2).
+///
+/// Returns the list to store, which is the **normalised** form rather than
+/// what the operator typed. Two reasons, and the second is the one that
+/// matters: the read-back then shows the strings the server actually compares,
+/// so an operator auditing a client sees the allow-list as the request path
+/// sees it; and a duplicate that differs only in case or default port shows up
+/// as a duplicate rather than hiding as a second entry.
+///
+/// A malformed entry is a `400` naming that entry. The alternative — storing
+/// it and refusing it at request time — would give the operator a registration
+/// that looks complete and a client that gets `invalid_target` from a value
+/// the admin API accepted.
+fn validate_allowed_resources(entries: &[String]) -> Result<Vec<String>, AxiamApiError> {
+    axiam_oauth2::resource::normalise_registration(entries).map_err(|(entry, err)| {
+        validation_err(format!(
+            "invalid allowed_resources entry {entry:?}: {}",
+            err.message()
+        ))
+    })
 }
 
 fn validate_grant_types(grant_types: &[String]) -> Result<(), AxiamApiError> {
@@ -499,6 +581,7 @@ pub async fn create<C: Connection + Clone>(
     }
     validate_grant_types(&req.grant_types)?;
     reject_public_client_grants(req.token_endpoint_auth_method, &req.grant_types)?;
+    let allowed_resources = validate_allowed_resources(&req.allowed_resources)?;
     reject_unimplemented_dpop_nonce(Some(req.dpop_require_nonce))?;
     // redirect_uris are only required when the client uses
     // authorization_code (which involves user-agent redirects).
@@ -530,6 +613,12 @@ pub async fn create<C: Connection + Clone>(
         dpop_require_nonce: req.dpop_require_nonce,
         authn_request_params: req.authn_request_params,
         browser_sso: req.browser_sso,
+        allowed_resources,
+        // T21.4 / D5 — this endpoint is the definition of an administrator's
+        // client. Not read from the request body: `CreateOAuth2ClientRequest`
+        // has no such member, so an API caller cannot claim a provenance, and
+        // this is the one handler entitled to assert `admin`.
+        managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
     };
 
     // X5.1 — refuse a registration that could not satisfy the profile it
@@ -671,6 +760,11 @@ pub async fn update<C: Connection + Clone>(
         validate_grant_types(gts)?;
     }
     reject_unimplemented_dpop_nonce(req.dpop_require_nonce)?;
+    let allowed_resources = req
+        .allowed_resources
+        .as_deref()
+        .map(validate_allowed_resources)
+        .transpose()?;
 
     // T21.2 — `none` is a registration decision, and it stays one (I4).
     //
@@ -759,6 +853,7 @@ pub async fn update<C: Connection + Clone>(
         dpop_require_nonce: req.dpop_require_nonce,
         authn_request_params: req.authn_request_params,
         browser_sso: req.browser_sso,
+        allowed_resources,
     };
 
     // X5.1 — validate the MERGED result, not the patch. Flipping `profile` to

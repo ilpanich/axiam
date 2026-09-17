@@ -76,6 +76,8 @@ fn test_auth_config(lifetime: u64) -> AuthConfig {
         oauth2_issuer_url: String::new(),
         oauth2_mtls_base_url: String::new(),
         oauth2_default_tenant_id: String::new(),
+        tenant_issuer_paths: false,
+        request_issuer: None,
         revocation_feed_enabled: false,
         sso_spa_origins: Vec::new(),
         max_lockout_duration_secs: 3600,

@@ -6,6 +6,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 import {
   validateClientPosture,
   isStrongAuthMethod,
+  isPublicAuthMethod,
   CLIENT_AUTH_METHODS,
   OAUTH2_SCOPES,
   type ClientPosturePayload,
@@ -199,6 +200,131 @@ describe("validateClientPosture", () => {
       })
     ).toBeNull();
   });
+
+  // ─── T21.2 — public clients (token_endpoint_auth_method: none) ────────────
+
+  /** A bare public client — the shape a desktop MCP client registers. */
+  const PUBLIC: ClientPosturePayload = {
+    profile: "standard",
+    token_endpoint_auth_method: "none",
+  };
+
+  it("accepts a bare public client posture", () => {
+    expect(validateClientPosture(PUBLIC)).toBeNull();
+  });
+
+  it("I1 — accepts the pre-X5.1 shape untouched when no context is passed", () => {
+    // No existingMethod, no grantTypes — the create form's own call shape.
+    expect(validateClientPosture(STANDARD)).toBeNull();
+  });
+
+  const PUBLIC_WITH_CREDENTIAL: Array<
+    [string, Partial<ClientPosturePayload>, RegExp]
+  > = [
+    [
+      "tls_client_auth_subject_dn",
+      { tls_client_auth_subject_dn: "CN=rp" },
+      /a tls_client_auth subject DN or SAN/,
+    ],
+    [
+      "tls_client_auth_san_dns",
+      { tls_client_auth_san_dns: "rp.example" },
+      /a tls_client_auth subject DN or SAN/,
+    ],
+    [
+      "a self-signed thumbprint",
+      { self_signed_tls_client_auth_thumbprints: ["a".repeat(43)] },
+      /a self_signed_tls_client_auth thumbprint/,
+    ],
+    [
+      "jwks_uri",
+      { jwks_uri: "https://rp.example/jwks.json" },
+      /jwks or jwks_uri/,
+    ],
+    ["jwks", { jwks: '{"keys":[]}' }, /jwks or jwks_uri/],
+  ];
+
+  it.each(PUBLIC_WITH_CREDENTIAL)(
+    "rejects a public client that also registers %s",
+    (_label, extra, pattern) => {
+      expect(validateClientPosture({ ...PUBLIC, ...extra })).toMatch(pattern);
+    }
+  );
+
+  it("rejects a public client registered for client_credentials", () => {
+    expect(
+      validateClientPosture(PUBLIC, {
+        grantTypes: ["authorization_code", "client_credentials"],
+      })
+    ).toMatch(/may not be registered for the client_credentials grant/);
+  });
+
+  it("rejects a public client registered for the token-exchange grant", () => {
+    expect(
+      validateClientPosture(PUBLIC, {
+        grantTypes: [
+          "authorization_code",
+          "urn:ietf:params:oauth:grant-type:token-exchange",
+        ],
+      })
+    ).toMatch(/urn:ietf:params:oauth:grant-type:token-exchange grant/);
+  });
+
+  it("accepts a public client registered for authorization_code and refresh_token", () => {
+    expect(
+      validateClientPosture(PUBLIC, {
+        grantTypes: ["authorization_code", "refresh_token"],
+      })
+    ).toBeNull();
+  });
+
+  it("I5 — rejects a fapi2 profile combined with the public method", () => {
+    expect(
+      validateClientPosture({
+        profile: "fapi2",
+        token_endpoint_auth_method: "none",
+        require_par: true,
+        tls_client_certificate_bound_access_tokens: true,
+      })
+    ).toMatch(/cannot authenticate with none/);
+  });
+
+  // I4 — nothing may move a client across the public/confidential line.
+  it("refuses patching a confidential client to none", () => {
+    expect(
+      validateClientPosture(PUBLIC, { existingMethod: "client_secret_post" })
+    ).toMatch(/token_endpoint_auth_method cannot be changed from client_secret_post to none/);
+  });
+
+  it("refuses patching a public client to a confidential method", () => {
+    expect(
+      validateClientPosture(STANDARD, { existingMethod: "none" })
+    ).toMatch(/token_endpoint_auth_method cannot be changed from none to client_secret_post/);
+  });
+
+  it("accepts an unchanged public method on update", () => {
+    expect(validateClientPosture(PUBLIC, { existingMethod: "none" })).toBeNull();
+  });
+
+  it("accepts switching between two confidential methods on update", () => {
+    expect(
+      validateClientPosture(
+        {
+          token_endpoint_auth_method: "private_key_jwt",
+          jwks_uri: "https://rp.example/jwks.json",
+        },
+        { existingMethod: "client_secret_post" }
+      )
+    ).toBeNull();
+  });
+});
+
+describe("isPublicAuthMethod", () => {
+  it("is true only for none", () => {
+    for (const m of CLIENT_AUTH_METHODS) {
+      expect(isPublicAuthMethod(m)).toBe(m === "none");
+    }
+  });
 });
 
 describe("isStrongAuthMethod", () => {
@@ -210,6 +336,10 @@ describe("isStrongAuthMethod", () => {
     expect(isStrongAuthMethod("tls_client_auth")).toBe(true);
     expect(isStrongAuthMethod("self_signed_tls_client_auth")).toBe(true);
     expect(isStrongAuthMethod("private_key_jwt")).toBe(true);
+    // T21.2 — `none` authenticates with nothing, so it is not a "strong"
+    // method either; this is what makes I5 fall out of the existing FAPI
+    // bundle check without a dedicated public-client arm there.
+    expect(isStrongAuthMethod("none")).toBe(false);
   });
 
   it("classifies every method the backend enum can hold", () => {
@@ -222,6 +352,7 @@ describe("isStrongAuthMethod", () => {
       expect(typeof isStrongAuthMethod(m)).toBe("boolean");
     }
     expect(CLIENT_AUTH_METHODS).toContain("client_secret_basic");
+    expect(CLIENT_AUTH_METHODS).toContain("none");
   });
 });
 

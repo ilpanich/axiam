@@ -129,6 +129,17 @@ ephemeral-port rule for `http://127.0.0.1`, `http://[::1]` and
 `http://localhost` callbacks are in
 [`../admin/public-clients.md`](../admin/public-clients.md).
 
+## OAuth2 dynamic client registration
+
+An MCP client that was handed a URL and nothing else creates its own
+`client_id` at `POST /oauth2/register` (RFC 7591). **Off by default on every
+tenant**, in which case the endpoint answers `403` and the discovery document
+carries no `registration_endpoint`. The three modes, every policy field, the
+audience interlock that makes open registration safe to offer, the consent
+screen such a client always gets, and the ceiling, rate limit and sweeper that
+bound it are in
+[`../admin/dynamic-client-registration.md`](../admin/dynamic-client-registration.md).
+
 ## OAuth2 device flow
 
 Input-constrained clients (televisions, CLIs, headless commissioning) use the
@@ -136,12 +147,33 @@ Device Authorization Grant. Endpoints, the polling answer table, the
 verification page's API, and the rate-limit reasoning are in
 [`device-flow.md`](device-flow.md).
 
+## OAuth2 resource indicators
+
+A client that needs a token for something other than AXIAM — an MCP server, a
+partner API, one service in a mesh — sends `resource` and gets an access token
+whose `aud` names it. The registration field that bounds what a client may
+name, the parameter on each grant, why a refresh cannot re-address a token, and
+why such a token is refused by AXIAM's own endpoints are in
+[`resource-indicators.md`](resource-indicators.md).
+
 ## OAuth2 token exchange
 
 Services that hold a user's token and need a narrower one to call a second
 service use the Token Exchange grant (RFC 8693). Delegation vs impersonation,
 the scope-narrowing rule, the lifetime cap and the error table are in
 [`token-exchange.md`](token-exchange.md).
+
+## MCP servers
+
+Fronting a [Model Context Protocol](https://modelcontextprotocol.io) server
+with AXIAM as its OAuth 2.0 authorization server — the RFC 9728
+protected-resource document the MCP server publishes, the
+`WWW-Authenticate: Bearer resource_metadata="…"` challenge, SDK middleware
+configuration, tenant settings translated from Keycloak's MCP guide, and one
+worked example per registration mode (pre-registered, dynamic client
+registration, Client ID Metadata Documents) are in [`mcp.md`](mcp.md), with a
+runnable example at
+[`examples/b7-mcp-server/`](../../examples/b7-mcp-server/).
 
 ## UMA 2.0 — Protection API and ticket grant
 

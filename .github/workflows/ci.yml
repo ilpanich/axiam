@@ -198,6 +198,39 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo check -p axiam-federation -p axiam-api-rest -p axiam-server --no-default-features
 
+  conformance-tenant-issuer-paths:
+    name: Conformance (tenant issuer paths on)
+    runs-on: ubuntu-latest
+    # T21.6. The two conformance suites run in the `test` job with
+    # AXIAM__AUTH__TENANT_ISSUER_PATHS unset, which is the deployment shape
+    # everything else assumes. This job runs the same two suites with the flag
+    # SET, and they must assert the identical things and pass: that is T21.6's
+    # invariant I1 made executable — turning per-tenant path issuers on changes
+    # nothing an existing request does.
+    #
+    # Deliberately narrow. It is two test binaries, not a second full suite:
+    # the flag's own behaviour is covered by
+    # `crates/axiam-api-rest/tests/tenant_issuer_paths_test.rs` in the ordinary
+    # `test` job, and what is worth a second job is only the regression
+    # question.
+    env:
+      AXIAM__AUTH__TENANT_ISSUER_PATHS: "true"
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      # --no-default-features below, so libxmlsec1-dev / libxml2-dev are not
+      # needed — the same reasoning as the `build-no-saml` job above.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - run: |
+          cargo test -p axiam-api-rest --no-default-features \
+            --test oidc_conformance --test oauth2_conformance
+
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest

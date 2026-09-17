@@ -43,6 +43,8 @@ const REPO_ROOT = resolve(__dirname, "../../..");
  */
 const STANDALONE: Record<string, string> = {
   "audit-logs": "append-only log; no other view holds its rows",
+  "dcr-registration-tokens":
+    "shown only on the OAuth2 Clients page, invalidated by its own issuance mutation",
   "federation-configs":
     "shown only on the Federation page, and on the user detail page as a name lookup that a config change cannot invalidate meaningfully",
   "federation-effective-providers":

@@ -101,6 +101,12 @@ fn test_config() -> AuthConfig {
         max_concurrent_hashes: 0,
         hash_acquire_timeout_secs: 5,
         session_validation_cache_ttl_secs: 0,
+        // T21.5: the spread, for the reason `models_coverage.rs` states in
+        // full — T21.6 added `tenant_issuer_paths` and `request_issuer` to
+        // `AuthConfig` and left this initializer missing them, so this test
+        // has not compiled since. Both take their `Default` value, which is
+        // the one that reproduces the behaviour this test was written against.
+        ..AuthConfig::default()
     }
 }
 
@@ -208,6 +214,13 @@ impl OAuth2ClientRepository for MockClientRepo {
     async fn create(&self, _i: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
         unimplemented!()
     }
+    async fn upsert_cimd_client(
+        &self,
+        _client_id: &str,
+        _i: CreateOAuth2Client,
+    ) -> AxiamResult<OAuth2Client> {
+        unimplemented!()
+    }
     async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<OAuth2Client> {
         unimplemented!()
     }
@@ -245,6 +258,32 @@ impl OAuth2ClientRepository for MockClientRepo {
             new_hash.to_string(),
         ));
         Ok(true)
+    }
+    async fn count_by_managed_by(
+        &self,
+        _tid: Uuid,
+        _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+    ) -> AxiamResult<u64> {
+        unimplemented!()
+    }
+
+    async fn list_all_by_managed_by(
+        &self,
+        _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+    ) -> AxiamResult<Vec<OAuth2Client>> {
+        unimplemented!()
+    }
+
+    async fn touch_last_authorized(
+        &self,
+        _tid: Uuid,
+        _client_id: &str,
+        _at: chrono::DateTime<chrono::Utc>,
+    ) -> AxiamResult<()> {
+        // T21.4 — a no-op rather than `unimplemented!()`: the
+        // authorization path calls this for an external client, so a
+        // panic here would fail a test about something else entirely.
+        Ok(())
     }
 }
 
@@ -386,9 +425,13 @@ impl TenantRepository for MockTenantRepo {
 // Mock: RefreshTokenRepository
 // ---------------------------------------------------------------------------
 
+/// `Found` is boxed because `RefreshToken` grew past clippy's
+/// `large_enum_variant` threshold when T21.3 added its `resource` column, and a
+/// 224-byte payload beside a unit variant makes every `Get` that size. A `Box`
+/// here costs one allocation in a mock and nothing anywhere else.
 #[derive(Clone)]
 enum Get {
-    Found(RefreshToken),
+    Found(Box<RefreshToken>),
     NotFound,
 }
 
@@ -431,7 +474,7 @@ impl MockRefreshRepo {
         }
     }
     fn with_get(mut self, rt: RefreshToken) -> Self {
-        self.get = Get::Found(rt);
+        self.get = Get::Found(Box::new(rt));
         self
     }
     /// T-254 — stage a refused replay: the read path finds nothing live, and
@@ -464,6 +507,7 @@ impl RefreshTokenRepository for MockRefreshRepo {
                 revoked: false,
                 created_at: Utc::now(),
                 rotated_at: None,
+                resource: None,
             })
         } else {
             Err(AxiamError::Database("create failed".into()))
@@ -471,7 +515,7 @@ impl RefreshTokenRepository for MockRefreshRepo {
     }
     async fn get_by_token_hash(&self, _t: Uuid, _h: &str) -> AxiamResult<RefreshToken> {
         match &self.get {
-            Get::Found(rt) => Ok(rt.clone()),
+            Get::Found(rt) => Ok((**rt).clone()),
             Get::NotFound => Err(not_found()),
         }
     }
@@ -662,6 +706,9 @@ fn make_client(grants: &[&str], scopes: &[&str]) -> Box<OAuth2Client> {
         browser_sso: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        allowed_resources: Vec::new(),
+        managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+        last_authorized_at: None,
     })
 }
 
@@ -689,6 +736,7 @@ fn make_auth_code(scopes: &[&str], challenge: Option<&str>) -> AuthorizationCode
         expires_at: Utc::now() + chrono::Duration::minutes(10),
         used: false,
         created_at: Utc::now(),
+        resource: None,
     }
 }
 
@@ -706,6 +754,7 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
         revoked: false,
         created_at: Utc::now(),
         rotated_at: None,
+        resource: None,
     }
 }
 

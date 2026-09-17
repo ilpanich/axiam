@@ -1,7 +1,33 @@
 # AXIAM as an MCP authorization server — implementation plan
 
-**Status:** planning document, written 2026-09-16 against `1.0.0-beta15`
-(`main` at `d20293a`). Nothing described here exists yet.
+**Status: EXECUTED**, 2026-09-17. Written 2026-09-16 against `1.0.0-beta15`
+(`main` at `d20293a`), when nothing described here existed. All nine tasks are
+implemented; the commits are below. What the plan itself got wrong is recorded
+in §9, which is the one section the executing sessions wrote rather than read.
+
+| Task | Commit(s) | Where it is |
+| --- | --- | --- |
+| T1 — RFC 8414 well-known alias | `573373a` | `main` (#457) |
+| T2a — public clients, loopback redirects | `0534af6` | `main` (#459) |
+| T2b — admin UI for public clients | `ed9e9f0` | accumulation branch (#460) |
+| T3 — RFC 8707 resource indicators | `ffec785` | accumulation branch (#461) |
+| T4a — RFC 7591 dynamic client registration | `ff1919b` | accumulation branch (#463) |
+| T4b — admin UI for DCR | `e1540b5` | accumulation branch (#465) |
+| T5 — Client ID Metadata Document | `0213087`, `ddc1d2a` | accumulation branch (#466) |
+| T6 — per-tenant path issuers | `41aa36f` | accumulation branch (#464) |
+| T7 — docs, example, website | `abdb3b6` | PR #467, open |
+| T8 — harness, security review, STRIDE | `f154d24`, `1ab4e7a`, `013903d`, `0233742`, `2350ae2` | PR #473, open |
+| T9a — CONTRACT §28, contract 1.48 | `63a19af` | accumulation branch (#462) |
+| T9b — TypeScript reference | `axiam-typescript-sdk` #110 | merged |
+| T9c — ten ports | #109, #83, #98, #65, #91, #70, #81, #63, #62, #63 | all merged |
+| T9d — cross-SDK conformance review, contract 1.49 | `8bdd062`, `b1aedc8` | PR #468, open |
+
+Open by design, and neither is an execution defect: the four security findings
+filed as #469–#472 (one, MCP-02, was fixed in T8 rather than filed), and
+**F-28-01**, the one re-sync of the eleven vendored contract copies, which must
+run from `main` after this phase merges — see §28.11 of `sdks/CONTRACT.md` for
+why doing it from a phase branch is what left the eleven holding five distinct
+files.
 **Audience:** first the maintainer, who asked how far AXIAM is from what
 [Keycloak's MCP guide](https://www.keycloak.org/securing-apps/mcp-authz-server)
 describes and gets the answer in §0; then the executing sessions, one per task
@@ -69,6 +95,63 @@ it pushes:
   tenant setting enabled, no `resource` parameter sent and no client registered
   with a new auth method, every existing request produces the same response it
   produces today. The regression gate in §5 is how this is shown.
+
+  **Maintainer ruling, 2026-09-17 — I1 admits additive capability
+  advertisements.** T2a is the first task to collide with I1 as written, and
+  the collision is real: the plan's own T2a item 6 orders `none` into
+  `token_endpoint_auth_methods_supported`, which changes
+  `GET /.well-known/openid-configuration` for every deployment with no flag
+  set, so the response is not byte-identical. T2a changed the existing
+  assertion that pinned the old behaviour
+  (`crates/axiam-api-rest/tests/oidc_conformance.rs`,
+  `discovery_advertises_every_implemented_client_auth_method`, which asserted
+  `!methods.contains(&"none")`) rather than stopping, and the question went to
+  the maintainer. The ruling: **an addition is allowed where it does not
+  impact the OIDF conformance tests — Basic OP and FAPI 2.0.** I1 therefore
+  binds the *behaviour of existing flows*, not the exact bytes of a capability
+  statement. What is still forbidden is unchanged: no existing request may
+  take a different path, be refused where it succeeded, or succeed where it
+  was refused.
+
+  **The condition was discharged by T21.8 on 2026-09-17, on source-level
+  evidence.** The paragraph below states the risk as it stood before that; it
+  is kept rather than rewritten so the reasoning that led to the check stays
+  legible. The answer is in
+  [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) §13:
+  the suite could not be *run* here (the daemon starts, but the egress policy
+  refuses the registry's blob CDN), so the module's source was read at the
+  pinned `release-v5.2.4` instead — which turns out to be the stronger answer.
+  All three FAPI 2.0 plans are `plain_fapi`, so the check is
+  `CheckDiscEndpointTokenEndpointAuthMethodsSupportedContainsPrivateKeyOrTlsClient`,
+  which supplies an *accepted* list of `private_key_jwt` and `tls_client_auth`
+  and whose evaluator counts how many accepted values the server advertises,
+  failing only below a minimum of one. It never iterates the server's array
+  looking for values it does not accept, so an extra entry is not tolerated but
+  **structurally invisible**. AXIAM advertises both required methods, so the
+  count is 2 and `none` cannot move it. The RFC 8414 metadata schema puts no
+  enum on the field, and `CheckForUnexpectedParametersInServerMetadata` is a
+  `WARNING` about member names. No fallback is needed and I7 is not spent.
+
+  **The risk as it stood, before the above (retained):**
+  All three FAPI 2.0 plans run
+  `fapi2-security-profile-final-discovery-end-point-verification`
+  (`docs/conformance/2026-09-15-fapi2-*.md`). FAPI 2.0 §5.3.1.1 admits only
+  `private_key_jwt` and mTLS, and `none` is not a weak credential but the
+  absence of one, so a suite that tolerates a weak method may still object to
+  this. The evidence in hand is encouraging but circumstantial: AXIAM already
+  advertises `client_secret_post` **and** `client_secret_basic` (row 140 of
+  `docs/compliance/oidc-conformance.md`), and that module passed on every
+  plan in the 2026-09-15 sweep — so it plainly does not require the advertised
+  set to be FAPI-strong-only. It is not proof, because a check may single out
+  `none`. No repository asset asserts on this field, and the suite cannot be
+  run from the orchestrator sandbox (no Docker daemon), so the verification
+  belongs to the first environment that has one. **T8 must run that module
+  first, before the rest of its harness**, and report it explicitly rather
+  than folding it into "the same result as the 2026-09-15 sweep". If it
+  objects, the fallback is to advertise `none` only for a tenant that permits
+  public clients — which costs I7's "capability statement, never per-tenant
+  state" and is the maintainer's call, not the executing session's.
+
 - **I2 — Existing tokens keep their audience.** A request without `resource`
   still mints `aud: axiam:user` / `axiam:m2m`. The SDK contract's expectation
   (`CONTRACT.md` §10.1 row 6) holds unchanged.
@@ -426,6 +509,57 @@ redrafted for D2.
   redirect-URI branch still works and logs the deprecation.
 - `scripts/check-crate-layering.py` clean (I8).
 
+**Amendments, recorded by the executing session (2026-09-17).** Three, none of
+which changed an existing test's expectation.
+
+1. **RFC 3986 §6.2.2 is applied as far as the `url` crate applies it, and no
+   further.** Item 1 says entries are "compared after RFC 3986 syntax-based
+   normalisation". The `url` crate performs §6.2.2.1 (case normalisation of
+   scheme and host), §6.2.2.3 (dot segments) and §6.2.3 (default port), and
+   **does not** perform §6.2.2.2's decoding of a percent-encoded *unreserved*
+   character in the path: `https://h/%6Dcp` and `https://h/mcp` serialise
+   differently. Measured, not assumed — the first draft of
+   `crates/axiam-oauth2/src/resource.rs`'s own test asserted the collapse and
+   failed.
+
+   Hand-rolling the decoder was rejected. `redirect_uri.rs`'s standing argument
+   applies unchanged — a normalising comparison in front of a security check is
+   where the decoder bug becomes an authorisation bug — and the direction of
+   the error settles it: skipping §6.2.2.2 keeps two spellings **distinct**, so
+   a request is refused that would otherwise have been admitted. Under-matching
+   fails closed; over-matching widens an allow-list on the operator's behalf.
+   The module documents exactly what it normalises and what it does not, the
+   test asserts both halves, and `docs/api/resource-indicators.md` tells
+   operators to register the form their resource server publishes.
+
+2. **D1's refusal is structural; only its error code needed code.**
+   `serde_urlencoded` refuses a repeated key for a non-sequence field
+   (`duplicate field \`resource\``), so a second `resource` never reaches a
+   handler on any of the four endpoints — verified against 0.7.1, the version
+   in `Cargo.lock`. Two values are therefore refused by construction, with no
+   path on which they are silently narrowed to one. What the plan's
+   `invalid_target` needed was a `QueryConfig`/`FormConfig` error handler on
+   `/oauth2/authorize` and `/oauth2/token` that answers **only** that case and
+   delegates every other deserialization failure to `err.into()` — byte-identical
+   to today's response, which is what keeps I1 (`/oauth2/par` already had a JSON
+   error handler, so only one member of an existing shape changed). The string
+   match on serde's message is pinned by a test and is not load-bearing: if it
+   ever stops matching, the answer degrades to today's `400`, which is still a
+   refusal.
+
+   One consequence worth stating: at `/oauth2/authorize` a repeated `resource`
+   is answered **directly**, not by redirecting. The extractor fails before the
+   handler runs, so no client has been looked up and no `redirect_uri` has been
+   validated — and RFC 6749 §4.1.2.1 forbids redirecting an error to a URI that
+   has not been. A single unregistered `resource` *is* redirected, as the plan
+   requires, because by then both have been.
+
+3. **No contract version was taken.** §4.0 item 5 requires the `openapi.json`
+   change to be recorded in the contract's version trailer; the task's
+   constraints reserve 1.48 for T9a. The entry is therefore recorded
+   **unnumbered** ("contract version pending, T21.3") with the full fan-out
+   list, for T9a to fold into the version it publishes. Flagged on the PR.
+
 ### T4 — RFC 7591 dynamic client registration
 
 #### T4a — Endpoint, policy, abuse controls — **Opus 5**
@@ -484,6 +618,76 @@ Keycloak's guide translated to AXIAM settings, the sweeper.
   client and leaves an `admin` one.
 - `oauth2_client_test.rs` unchanged and green (admin creation path untouched).
 - I1, I5, I7, I9.
+
+**Amendments, recorded by the executing session (2026-09-17).** Four. None
+changed an existing test's expectation; each settles a question the task's
+text left open, and each is taken toward the answer that refuses more.
+
+1. **`dcr_allowed_scopes` may not name a GDPR-sensitive scope.** D4 forces a
+   consent hop for an external client, and W7 already forces one for `address`
+   and `phone`. Both record into the same namespace
+   (`oidc_scope_release:<client_id>`), and a DCR client holding `address`
+   would need *two* records with two different versions — so either the end
+   user answers two consent screens for one authorization, or one record is
+   made to stand for the other and the UserInfo gate
+   (`handlers/oauth2.rs::release_sensitive_claims`, which re-reads the
+   sensitive record on every call) silently releases nothing anyway. Neither
+   is a behaviour an operator could predict from the settings page.
+
+   The settings handler therefore refuses a `dcr_allowed_scopes` that contains
+   `address` or `phone`, naming W7. That is also the answer D3's reasoning
+   points at on its own: a party that registered itself, unauthenticated,
+   should not be able to *ask* for a postal address, whatever the tenant's
+   sensitive-scope switch says. The interlock is one line in the settings
+   validator and it removes a whole class of two-consent states from the
+   model.
+
+2. **"No authorization in N days" is a stamp, not an inference.**
+   `oauth2_client` gains `last_authorized_at: option<datetime>`, written by
+   `authorize.rs` when a code is issued **and only for a client whose
+   `managed_by` is not `admin`**. The alternatives were worse in both
+   directions: inferring from `updated_at` sweeps a client that was merely
+   edited, and inferring from live refresh tokens keeps a client alive for as
+   long as its longest-lived grant, which is the opposite of what a TTL is
+   for. Gating the write on `managed_by` is what keeps I1 exact — an
+   administrator's client takes byte-for-byte the path it took before this
+   task, one repository call and no more.
+
+3. **The D4 consent record shares W7's namespace and is distinguished by its
+   version.** `consent_type` stays `oidc_scope_release:<client_id>`, so
+   withdrawal through `DELETE /account/consents/oidc-scopes/{client_id}` — a
+   call that withdraws every version for a relying party — keeps working with
+   no change at all. The version is `client:` followed by the canonical,
+   space-joined scope set the user was shown. The prefix cannot collide with
+   W7's versions (`address`, `phone`, `address phone`), and putting the whole
+   scope set in it is what makes a DCR client that later asks for more
+   re-prompt rather than inherit — the same property W7's version already
+   buys, for the same reason.
+
+4. **One ordering change inside `grant_oidc_scope_consent`, recorded because
+   I1 is absolute and this is the one place the task touches it.** The handler
+   now reads the client **before** validating the body, because the client's
+   `managed_by` is what decides which of the two consent lanes the request is
+   in. For every request that names a client that exists — which is every
+   request any test makes, and every request the consent screen makes — the
+   response is unchanged, member for member. The single shape that differs is
+   an unknown `client_id` **together with** a body W7 would have rejected: that
+   used to be `400` (bad scopes) and is now `404` (no such client). Both are
+   refusals, no test covers it, and no caller can reach it without naming a
+   client that does not exist.
+
+   It is written down rather than worked around because the workaround does
+   not exist: the W7 body check and the D4 body check accept different scope
+   sets, so neither can run before the lane is known, and the lane is a column
+   on the client row. Flagged on the PR.
+
+5. **`registration_endpoint` is the only new discovery member, and it is
+   `Option`.** Item 6 says to advertise it per tenant. It is
+   `skip_serializing_if = "Option::is_none"` rather than an empty string, so a
+   tenant on the default policy receives a document with the member **absent**
+   — byte-identical to today's, which is what the maintainer's ruling of
+   2026-09-17 asks for and what `oidc_conformance.rs` asserts without
+   amendment.
 
 #### T4b — Admin surfaces — **Sonnet 5**
 
@@ -548,6 +752,96 @@ Claude Code profiles with `restrict_same_domain` off and why.
   callback on a random port.
 - I1, I5, I8.
 
+**Amendments, recorded by the executing session (2026-09-17).** Five. None
+changed an existing test's expectation. Three are refusals the task's text did
+not ask for, each taken toward the answer that refuses more; one is a shape the
+plan's own spelling implied; one is a promise this environment could not keep.
+
+1. **The draft revision could not be pinned, and is recorded as unpinned
+   rather than guessed.** The task's first sentence asks the executing session
+   to pin "the draft revision current at execution time" in the module header
+   and in the documentation. This environment's egress proxy refuses
+   `datatracker.ietf.org` and `ietf.org` — HTTP 403 on CONNECT, verified with
+   both the fetch tool and `curl` — so the revision could not be read, and a
+   number written from memory would be a claim the code cannot support. What is
+   implemented is the draft's stable core: the URL rules, the document shape,
+   and the RFC 7591 §2 members the draft reuses, cross-checked against
+   Keycloak's validation list, which the task names as the reference behaviour.
+   Both the module header and `docs/admin/client-id-metadata-documents.md` say
+   this in full, and state the rules exhaustively so that a reader with the
+   draft in front of them can diff the two. **T7 or T8, from an environment
+   with egress, should pin the revision and re-read the delta.**
+
+2. **`cimd.trusted_client_id_domains` may not be empty when the mechanism is
+   enabled, and the settings handler refuses it.** The task lists the field
+   without saying what an empty one means. The draft's premise is that any URL
+   is a valid client identifier, and Keycloak's equivalent list is a narrowing
+   of that premise rather than a precondition for it. AXIAM refuses the empty
+   list, and the reason is the sentence the task itself opens with: the fetch
+   is triggered by an **unauthenticated** request that names the URL. An
+   unrestricted list is therefore an outbound request whose target a stranger
+   chooses, bounded only by the SSRF guard's address rules — which stop
+   `169.254.169.254` and do not stop `anything-else.example`. The guard is what
+   keeps the fetch out of the private network; the trusted list is what keeps
+   it from being a general-purpose request-forgery primitive, and there is no
+   second control that does that job. It is one settings field, it is refused
+   in the same shape and the same place as D3's interlock, and it removes the
+   class. `cimd.trusted_redirect_domains` is **not** interlocked, because
+   empty there means "loopback only", which is a working posture — it is
+   exactly the desktop MCP profile.
+
+3. **The policy is one nested `CimdPolicy`, inherited and overridden whole.**
+   The task spells the fields `cimd.enabled`, `cimd.allow_http`, and so on, and
+   that spelling is the design: the nine are terms of a single decision and
+   none of them means anything without `enabled`. They are therefore one struct
+   on `OidcPolicy`, one `Option<CimdPolicy>` on the tenant override, and one
+   `option<string>` JSON column on `security_settings` (schema v65) rather than
+   nine columns — the `overrides_json` precedent on the same table, for the
+   same reason: nothing queries the parts. The consequence worth stating is
+   that a tenant states its whole CIMD posture or none of it. A per-field merge
+   could produce a combination neither the organization nor the tenant wrote —
+   this tenant's trusted publishers under the organization's `enabled` — and
+   that is a posture no operator could predict from either settings page. Two
+   of the nine are ordered against the baseline (`enabled` and `allow_http`,
+   the two that widen); the other seven name this tenant's own publishers,
+   callbacks and bounds and are unordered, exactly as T21.4's three lists are.
+
+4. **`dcr_allowed_scopes` governs both external mechanisms, and no second
+   scope list was added.** The task's policy list has no CIMD scope field, and
+   a document may carry `scope`. Registering nothing would make every CIMD
+   client unable to ask for `openid`; accepting anything would let a stranger's
+   file name the scopes it wants. The tenant's existing external-client scope
+   list is the answer, and it is the right one rather than a convenient one:
+   what the field means is "what an externally registered client may ask for",
+   and a CIMD client is an externally registered client. It also inherits
+   T21.4's amendment 1 for free — the settings layer already refuses `address`
+   and `phone` on that list, so the W7 double-consent state cannot arise in
+   this lane either, with no second rule. The field keeps its `dcr_` name
+   because DCR defined it; the documentation says plainly that it governs both.
+
+5. **`cimd.allow_http` also opens the SSRF guard's address rule on the first
+   hop, and this is documented rather than worked around.**
+   `axiam_pki::ssrf::guarded_fetch` couples the scheme rule to the address
+   rule: `allow_private` is the one flag that admits both, and it is the seam
+   the JWKS and OIDC discovery tests already use for a loopback mock server.
+   Splitting it would have meant a second parameter on a reviewed security API
+   for the benefit of a development-only setting. The coupling is stated on the
+   field, in the module, and in the operator page under its own heading; the
+   redirect hops are validated strictly whatever it says, which is what the
+   "redirect to a private address" test asserts.
+
+Two further notes for the reviewer, neither a divergence:
+
+- **No new crate edge (I8).** The fetch goes through
+  `axiam_federation::ssrf`, which re-exports `axiam_pki::ssrf`, over the
+  `axiam-oauth2 → axiam-federation` edge that already existed.
+  `scripts/check-crate-layering.py` is clean.
+- **`upsert_cimd_client` is a new repository method rather than a widened
+  `create`.** `create` mints the `client_id`; a CIMD client's `client_id` is
+  the URL, and the row is refreshed on every successful fetch. The method
+  never modifies a row whose `managed_by` is not `cimd` (the guard is in the
+  `WHERE`, so it cannot be bypassed by a caller) and never mints a secret.
+
 ### T6 — Per-tenant path-based issuers — **Opus 5**
 
 **What.** An opt-in issuer form that an MCP server can name in its
@@ -586,6 +880,98 @@ discovery forms, the shared-JWKS statement, and what an MCP server puts in
   access, ID and logout tokens; a token minted under `/t/{A}` is refused by a
   request scoped to tenant `B` (tenant isolation is not weakened by the path).
 - I1, I3.
+
+**Amendments, recorded by the executing session (2026-09-17).** Five. None
+changed an existing test's *expectation*; two added a parameter to a function
+whose existing callers now pass the value that reproduces today's behaviour,
+which the stop rule does not cover and which is noted here so a reviewer can
+check that reading.
+
+1. **The browser login hop had to learn the tenant path, and the plan's item 1
+   did not name it.** `/oauth2/authorize` answers an anonymous `browser_sso`
+   request by redirecting to the SPA's sign-in page with a `return_to`, and
+   that value was built as the literal `AUTHORIZE_PATH`
+   (`crates/axiam-oauth2/src/login_hop.rs`). Left alone, a request that arrived
+   at `/t/{T}/oauth2/authorize` would have come back to `/oauth2/authorize`
+   carrying `tenant_id={T}` — a flow that *works*, and whose RFC 9207 `iss` is
+   then the **root** issuer while the client is comparing against
+   `{root}/t/{T}`. The client would refuse the response in the one check
+   RFC 9207 exists for.
+
+   `validate_return_to`, `build_return_to` and `build_consent_return_to`
+   therefore gained `…_at` siblings taking the one path the candidate may name,
+   and the REST layer passes the path of the request it is answering. The
+   un-suffixed three delegate with `AUTHORIZE_PATH`, so the accepted set for a
+   root-path request is unchanged — the generalisation is "one expected path
+   per call", not "a set of paths", so there is still nothing to normalise and
+   traversal still has nothing to reach.
+
+   The SPA validates `return_to` a third time before navigating
+   (`frontend/src/lib/returnTo.ts`), so it had to accept the tenant form too or
+   the server would emit a value the page refuses. It accepts
+   `/t/{uuid}/oauth2/authorize` unconditionally, where the server accepts it
+   only with the flag on: the page cannot read the server's flag, and the worst
+   a hand-crafted tenant `return_to` achieves without it is a navigation to a
+   404 on the same origin. An open redirect needs another origin, and the three
+   rules before the path check are what refuse those.
+
+2. **`iss` and `tenant_id` are required to agree. The plan did not ask for
+   this; the shared JWKS makes it necessary.** Item 1 says the JWKS is shared —
+   one key set, many issuers — and it says the extractors must accept the root
+   issuer and any `{root}/t/{uuid}`. Those two sentences together mean the
+   signature no longer distinguishes tenant `A`'s token from tenant `B`'s: both
+   verify, and both carry an `iss` the extractor now admits. `iss` and
+   `tenant_id` would have been two answers to "which tenant is this?" that a
+   forged pairing could make disagree, with every consumer picking whichever
+   one it happened to read.
+
+   `axiam_auth::token::enforce_issuer` refuses the disagreement outright, so
+   there is only ever one answer. It runs only with the flag on; with it off
+   `jsonwebtoken`'s pinned-issuer check is kept verbatim and this function
+   returns immediately.
+
+   The path-level half is `enforce_tenant_path_binding` in
+   `axiam-api-rest`'s `AuthenticatedUser` funnel: a token whose tenant is not
+   the tenant the path named is refused with the same `401` a request with no
+   credential gets. It is placed at the funnel rather than in the scope
+   middleware because the middleware cannot decode a token, and because a route
+   mounted under the tenant scope later then inherits the check instead of
+   having to remember it.
+
+3. **I9's mid-path UUID: the prefix is stripped, and the remainder is matched
+   against the same allow-list.** The three discovery paths were easy — two are
+   segment-boundary prefixes (`/.well-known/…/t/*`) and the third is
+   `/t/{uuid}/.well-known/openid-configuration`. The eleven OAuth2 endpoints
+   the scope re-bases are the real question, because `AuthzMiddleware` sees
+   `/t/{uuid}/oauth2/token` and `PUBLIC_PATHS` can spell neither an exact match
+   nor a trailing prefix for it.
+
+   Rejected: a blanket `/t/*` entry (it would make an authenticated route
+   mounted under the scope later silently public), and a `{}`-placeholder
+   matching form (eleven endpoints written twice, in two files that must
+   agree). Taken: `is_public_path` strips a leading `/t/{uuid}/` — the UUID
+   parse is what keeps it from being a traversal primitive — and matches the
+   remainder against `PUBLIC_PATHS` unchanged. The rule that states is the one
+   that is actually true: **a route under `/t/{tenant_id}` is public exactly
+   when the same route at the deployment root is public, because it is the same
+   route.** The route↔OpenAPI parity test asks the middleware itself, with a
+   real UUID substituted for the `{tenant_id}` template, rather than carrying a
+   second implementation of an access-control decision.
+
+4. **The eleven re-based OAuth2 endpoints are not in `openapi.json`, and could
+   not be without violating item 1.** §4.0 asks for utoipa annotations on every
+   new route. utoipa attaches one `#[utoipa::path]` per function, so
+   documenting `/t/{tenant_id}/oauth2/token` and its ten siblings would have
+   required eleven wrapper handlers — "no handler is duplicated" is item 1's
+   own words. The three discovery forms *are* documented (three thin functions
+   over one shared body, which is the `userinfo`/`userinfo_post` pattern), and
+   the deployment page plus the discovery document a client actually reads name
+   the endpoints in full. Recorded in the contract trailer as well.
+
+5. **No contract version was taken**, for the reason T21.3 gives: 1.48 is
+   reserved for T9a (§28). The entry is recorded **unnumbered** ("contract
+   version pending, T21.6") with the full eleven-repository fan-out list, for
+   T9a to fold into the version it publishes. Flagged on the PR.
 
 ### T7 — Documentation, example, website — **Sonnet 5**
 
@@ -656,7 +1042,7 @@ challenge that starts the MCP client's discovery. Same structure as
 [`sdk-oidc-sso-plan.md`](sdk-oidc-sso-plan.md): one normative amendment, one
 reference implementation, ten ports, one review.
 
-#### T9a — CONTRACT §28 "MCP resource-server helpers" (contract 1.47) — **Opus 5**
+#### T9a — CONTRACT §28 "MCP resource-server helpers" (contract 1.48) — **Opus 5**
 
 **What.** A new §28 in `sdks/CONTRACT.md`, in the register of §12 and §20:
 1. **Canonical operation set** (per-language naming map, as §12.2 does):
@@ -682,8 +1068,15 @@ reference implementation, ten ports, one review.
 3. **Required tests, per SDK** (as §8b §"Required tests" does): document
    shape and validation negatives; challenge quoting; 401 with challenge; 403
    `insufficient_scope`; a token whose `aud` is not the resource refused.
-4. Version trailer bumped to 1.47 with the re-sync note for all eleven repos;
-   `sdks/openapi.json` regenerated from T1–T6.
+4. Version trailer bumped to **1.48** with the re-sync note for all eleven
+   repos, folding in every entry an earlier task recorded as "contract version
+   pending" (T21.3 did, deliberately, so that this task could carry it). The
+   number is 1.48 and not 1.47: T21.2 legitimately took 1.47 for its additive
+   `openapi.json` change, which this line predates.
+   `sdks/openapi.json` is regenerated only if the task's own change moves the
+   OpenAPI surface. §28 does not — it describes SDK behaviour, not a server
+   API — so T9a regenerates nothing, and "from T1–T6" is the later
+   regeneration T21.5 and T21.6 will each do for their own change.
 
 #### T9b — TypeScript reference implementation — **Opus 5**
 
@@ -745,6 +1138,67 @@ cargo test -p axiam-api-rest --no-default-features \
 python3 scripts/check-crate-layering.py
 ```
 
+**Gate erratum, 2026-09-16 (orchestrator), found by T1.** The block above is
+incomplete: it never regenerates the OpenAPI artifacts, although §4.0 item 2
+requires it. `.github/workflows/sdk-openapi-drift.yml` builds `axiam-server`
+with `--no-default-features` and `diff`s a fresh `--dump-openapi` export against
+the committed `sdks/openapi.json`, so **any** task that touches
+`crates/axiam-api-rest/src/openapi.rs` — T1 through T6 all do — pushes a red CI
+with a green §5. T1 pushed exactly that. Every task that changes the OpenAPI
+surface therefore appends to the gate:
+
+```bash
+apt-get install -y protobuf-compiler            # absent from the sandbox; see below
+export SWAGGER_UI_DOWNLOAD_URL="file://$(scripts/make-swagger-ui-placeholder.sh)"
+cargo build -p axiam-server --no-default-features
+./target/debug/axiam-server --dump-openapi > sdks/openapi.json
+python3 scripts/check-spec-digest.py            # the exporter already stamps the digest
+python3 scripts/gen-management-registry.py      # re-derive; it pins the spec digest
+python3 scripts/gen-management-registry.py --check
+diff <(./target/debug/axiam-server --dump-openapi) sdks/openapi.json
+```
+
+Three things this block learned the hard way, each of which cost T1 a CI cycle:
+
+- **`protoc` is not installed.** `axiam-server` depends on `axiam-api-grpc`,
+  whose build script dies with `Could not find \`protoc\``, so the build above
+  cannot complete as the sandbox ships. CI never notices because
+  `sdk-openapi-drift.yml` installs `protobuf-compiler` first. Now recorded in
+  `CLAUDE.md`'s build-hygiene section.
+- **`sdks/management-registry.json` pins the spec digest.** Regenerating the
+  spec leaves it stale and fails the **Architecture Invariants** job, which is a
+  different job from the drift gate and reports a different message. Re-derive
+  it in the same commit. For a route that is not a management operation the only
+  change is the digest pointer, and `operation_count` must not move.
+- **`docs/api/openapi.json` is a symlink** to `sdks/openapi.json`. There is one
+  file, not two; §4.0 item 2 and T1's "Where" line both read as if there were.
+
+The `--no-default-features` is load-bearing: the drift workflow builds with SAML
+off on purpose, so an export carrying SAML paths will not match whatever the
+local toolchain can build.
+
+**Second gate erratum, 2026-09-16 (orchestrator), also found by T1.** The gate
+never compiles `axiam-api-rest`'s own unit tests. Its `cargo test` lines cover
+`-p axiam-oauth2 --lib`, `-p axiam-auth --lib` and `-p axiam-api-rest --test
+<named>` — the integration binaries — but never `-p axiam-api-rest --lib`, and
+`cargo clippy` without `--all-targets` does not build `#[cfg(test)]` code
+either. §4.0 item 1 asks for "unit tests in the crate that owns the logic", so
+the gate is silent on precisely the tests it asks for. T1's two new unit tests
+in `crates/axiam-api-rest/src/openapi.rs` did not compile at all
+(`assert_eq!` on `utoipa::openapi::PathItem`, which implements neither `Debug`
+nor `PartialEq`); §5 was green and the Coverage job, which builds
+`--workspace --tests`, failed on the first push. Add to the gate:
+
+```bash
+cargo test -p axiam-api-rest --lib --no-default-features
+cargo clippy -p axiam-api-rest --all-targets --no-default-features -- -D warnings
+```
+
+Note also that the Coverage workflow builds with **default features on**
+(`--cfg feature="saml"`), while §5 builds `--no-default-features` throughout. A
+task whose code is feature-gated must satisfy both; the gate as written proves
+only one.
+
 Plus, per task, the tests the task adds, and for T2b / T4b the frontend suite.
 The end-of-phase gate (after T8) is the full `just check` and the FAPI
 conformance runbook, which must report the same result as the 2026-09-15 sweep
@@ -773,6 +1227,25 @@ T8 and T9d last.
 | 4 | T4b, T5, T9b | yes — T9b is in another repository |
 | 5 | T7, T9c (ten sessions) | yes — the ports need only T9a and T9b |
 | 6 | T8, T9d | T8 starts once T7's example exists, so the harness follows the documented flow; T9d once every port's CI is green |
+
+**Execution amendment, 2026-09-16 (orchestrator).** Two things the wave table
+above does not say, recorded here before any task starts:
+
+- **T9a is missing from the table.** §6's dependency list places it ("T9a after
+  T3; T9b after T9a") but no wave carries it, and T9b sits in wave 4. T9a is
+  therefore executed in **wave 3**, beside T4a and T6, which is the earliest
+  wave its stated dependency allows and the latest that leaves T9b where the
+  table puts it. Nothing else moves.
+- **Where each task branches from.** The plan says "a fresh branch" without
+  saying from what, and the waves are dependent, so the branches stack: T1 and
+  T2a from `main`; T2b and T3 from `claude/t21-2a-public-clients`; T4a, T6 and
+  T9a from `claude/t21-3-resource-indicators`; T4b and T5 from
+  `claude/t21-4a-dynamic-registration`. Each PR's base is the branch its task
+  was cut from, so each PR shows only its own task's diff and no PR is closed
+  by another's landing. T7 needs the union of T4b, T5, T6 and T9a, which no
+  single task branch carries, so the orchestrator joins those lines on
+  `claude/phase-21-mcp-auth-8te9sx` and T7 is cut from — and targets — that
+  branch; T8 stacks on T7. Nothing is merged through GitHub at any point.
 
 Each wave ends with `cargo clean`. Each task ends with a signed commit on its
 own branch and a PR referencing this plan and the roadmap task id (Phase 21);
@@ -861,3 +1334,75 @@ vendored CONTRACT.md, openapi.json and proto/ first, then implement the §28
 operations under this language's naming row, the five required tests, the
 README section and the CHANGELOG entry. Model: Sonnet 5.
 ```
+
+---
+
+## 9. What the plan got wrong
+
+Written at the close, 2026-09-17, from what the executing sessions found. It is
+here because a plan that is only ever read forward teaches nobody anything; the
+next phase's plan should be written against this list.
+
+**Defects in the plan's own instructions.**
+
+1. **§6's wave table omitted T9a entirely** and did not say which branch each
+   task cuts from. Both were amended during wave 1 (`2f5e602`). A fan-out plan
+   has to name the branch topology, because the sessions cannot see each other.
+2. **§5's gate never regenerated the OpenAPI artifacts**, although §4.0 item 2
+   requires them. `sdk-openapi-drift.yml` diffs a fresh export against the
+   committed `sdks/openapi.json`, so T1 through T6 could each pass §5 and push a
+   red CI. Found by T1, recorded as gate erratum 1 (`22233aa`).
+3. **§5 never compiled `axiam-api-rest`'s lib tests.** The gate is
+   `--no-default-features` throughout while CI's Coverage job builds
+   `--workspace --tests` with default features. Gate erratum 2 (`d8f36cb`).
+4. **The generated-artifact chain was longer than §4.0 described.**
+   `sdks/openapi.json` pins a digest that `sdks/management-registry.json`
+   re-derives, and a different CI job (Architecture Invariants) enforces it. A
+   task that regenerated one and not the other pushed a green §5 and a red CI.
+5. **§4.0 item 2 demands utoipa annotations on every new handler, and T6's item
+   1 forbids duplicating a handler.** For eleven re-based endpoints these
+   collide; T6 chose the second and the spec is short those paths, which
+   `docs/api/mcp.md` now records as a known gap rather than a surprise.
+6. **The contract version collided.** T9a was planned at 1.47, which was already
+   taken; it shipped at 1.48 and T9d at 1.49. A plan that changes
+   `sdks/CONTRACT.md` should read the trailer, not assume the next integer.
+7. **No task owned the moment the eleven SDKs re-sync.** T9c had each port
+   re-sync independently from whatever branch was current, so the eleven ended
+   up holding **five** byte-states of one file, all labelled 1.48, with no CI
+   anywhere that would notice. This is the plan's most expensive omission and
+   the reason F-28-01 exists. A phase that fans out to eleven repositories needs
+   one re-sync step at its end, from a merged `main`.
+
+**Environment facts the plan asserted and got wrong.**
+
+8. **"There is no Docker daemon."** Carried into three documents. `dockerd`
+   starts; what fails is the pull, because the registry's blob CDN is refused by
+   the egress policy. T8 established this. The half-truth cost at least one
+   session an hour.
+9. **`protoc` is absent**, so any command that builds `axiam-server` — including
+   regenerating the spec — dies partway. Not in the plan at all; added to
+   `CLAUDE.md` during wave 1.
+10. **`docs/api/openapi.json` is a symlink** to `sdks/openapi.json`. Sessions
+    treated it as a second file to keep in step.
+
+**Predictions the plan made that the evidence overturned.**
+
+11. **§1 argued the FAPI risk was irreducibly circumstantial** — that a
+    conformance check "may single out `none`". No check singles out anything:
+    the condition counts only the values it *requires*. The answer was available
+    by reading the suite's source all along, and T8 read it. The caution was
+    right; the claim that it could not be resolved without a run was not.
+12. **T8's brief predicted an open redirect in the loopback matcher.** The
+    matcher is sound. The defect (MCP-01, #472) is in six *error* paths that
+    never adopted it, and it is an interoperability defect, not a vulnerability.
+    Right area, wrong reason.
+13. **T9c's Go port predicted that seven other single-namespace languages would
+    hit its naming collision.** T9d checked all seven; none does. A plausible
+    generalisation from one data point, recorded as fact in a PR description,
+    and false.
+
+**One thing the plan got right that is worth naming.** §1's insistence that a
+task which cannot proceed without changing an existing test's expectation must
+stop and escalate was reached exactly once, by T2a, and the escalation produced
+the maintainer ruling that unblocked the phase. A weaker rule would have had the
+assertion quietly deleted in a 4,000-line diff.

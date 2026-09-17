@@ -9,6 +9,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Client ID metadata documents (CIMD).** A tenant can accept a `client_id`
+  that is an `https` URL and fetch the JSON document published there as the
+  client's registration — `draft-ietf-oauth-client-id-metadata-document`, the
+  mechanism that lets a desktop MCP client be the same client at every
+  deployment it talks to with nothing registered in advance. Enabled by the
+  new tenant policy `cimd.enabled` (default `false`): with it off, a
+  URL-shaped `client_id` is byte-for-byte today's unknown client and no
+  document is ever fetched. Enabling it is refused while
+  `external_client_allowed_resources` is empty (a client from a stranger's
+  document inherits that list as its audiences and must not be able to name
+  its own) or while `cimd.trusted_client_id_domains` is empty (the fetch is
+  reachable by an unauthenticated caller who chooses the URL). Eight further
+  policy fields bound it: `allow_http`, `trusted_redirect_domains`,
+  `restrict_same_domain`, `confidential_only`, `min_cache_secs`,
+  `max_cache_secs` and `max_metadata_bytes`. A materialised client is
+  `managed_by: cimd`, always faces the consent screen, can never carry a FAPI
+  profile, holds no secret, and never overwrites a registration an
+  administrator created. The document is fetched through AXIAM's shared SSRF
+  guard — resolve, canonicalise, validate, pin, no automatic redirects — with
+  a streaming size cap, a content-type check and a timeout. A tenant that
+  enables it advertises `client_id_metadata_document_supported` in its
+  discovery document; every other tenant's document is unchanged, member for
+  member. See
+  [`docs/admin/client-id-metadata-documents.md`](docs/admin/client-id-metadata-documents.md)
+  (T21.5).
+
+- **SDK contract §28 — MCP resource-server helpers (contract 1.48).** The
+  eleven SDKs gain a specified surface for the resource-server half of the MCP
+  authorization handshake: build and validate the RFC 9728 protected-resource
+  metadata document, serve it unauthenticated at the path RFC 9728 §3.1 derives
+  from the resource identifier, and build the RFC 6750 `WWW-Authenticate`
+  challenge. One new middleware option, `resource_metadata_url`, attaches that
+  challenge to the 401s the guard already emits and to the one class of 403
+  where a named scope was missing; with the option unset a guard is
+  byte-for-byte what it was, which §28.9 makes a required regression. Setting
+  it makes the §10.1 row 6 audience check mandatory — a resource server that
+  announces itself must check that a token was minted for it. No AXIAM
+  behaviour changes: AXIAM is the authorization server and implements none of
+  §28. Contract 1.48 also folds in the `openapi.json` entry T21.3 recorded
+  unnumbered, and all eleven SDK repositories must re-sync the vendored
+  `CONTRACT.md` (T21.9).
+
+- **SDK contract §28.11 — the cross-SDK conformance review (contract 1.49).**
+  All eleven ports of §28 were read against the section and against the
+  TypeScript reference, and their thirteen divergences are recorded in a new
+  §28.11 with no open row; the evidence is
+  [`claude_dev/sdk-mcp-helpers-conformance-review.md`](claude_dev/sdk-mcp-helpers-conformance-review.md).
+  Contract 1.49 is non-breaking and clarifying — an SDK written against 1.48 is
+  conformant unedited. It fixes six places where §28 was wrong or silent: §28.3
+  rule 1 now binds the `Content-Type` **media type** rather than the header
+  verbatim, because Fastify appends a charset and offers no supported way not
+  to; §28.4 and §28.9 test 2 state that how the `error` parameter is typed is
+  the SDK's own choice and how the `invalid_grant` vector is discharged where a
+  closed type makes it unwritable; §28.5 rule 4 provides for a §11 helper that
+  receives a resolved identity rather than a request and so cannot tell "no
+  credential" from "credential rejected"; §28.7's C row gains the
+  `metadata_url` accessor §28.1 always required, reserves `MCPResourceMetadata`
+  as Go's returned type while stating that no other language needs the
+  accommodation, and records that "raises the SDK's `ValidationError`" is a
+  per-language mapping; and §28.10's posture table is now maintained upstream by
+  the review rather than edited by each port in its own vendored copy — the
+  instruction that left the eleven holding five distinct byte-states of one
+  document. The 1.49 trailer also states the vendoring rule 1.48 lacked: a
+  vendored artefact is re-synced from a **merged** `main`, never a phase branch,
+  and the `openapi.json` re-sync is deferred to one named follow-up recorded in
+  all eleven repositories. No AXIAM behaviour changes and no server API surface
+  moves (T21.9).
+
+- **Documentation and a runnable example for fronting an MCP server with
+  AXIAM.** [`docs/api/mcp.md`](docs/api/mcp.md) ties together the pieces T21.1
+  through T21.6 and T21.9 shipped separately: the RFC 9728 protected-resource
+  document and `WWW-Authenticate` challenge an MCP server publishes (built
+  with the SDK's §28 helpers, not by AXIAM), the SDK middleware configuration
+  that checks it, tenant settings translated from Keycloak's MCP guide for
+  MCP Inspector, VS Code and Claude Code, the D3 audience warning, and one
+  worked example per registration mode. [`examples/b7-mcp-server/`](examples/b7-mcp-server)
+  is a runnable MCP server on the official `@modelcontextprotocol/sdk`
+  streamable-HTTP transport, with a `walkthrough.sh` driving 401 → discovery →
+  registration → PKCE + `resource` → token → tool call in each of
+  pre-registered, dynamic-registration and CIMD mode, and a `smoke-test.sh`
+  proving the server runs. No AXIAM behaviour changes (T21.7).
+
 - **`GET /.well-known/oauth-authorization-server`** (T21.1) — the RFC 8414
   authorization-server metadata path, serving the same document as
   `/.well-known/openid-configuration` with the same optional `?tenant_id=`.
@@ -42,6 +124,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `none` is advertised last in `token_endpoint_auth_methods_supported` at
   `/.well-known/openid-configuration` — a capability statement about the
   deployment, not per-client posture (T21.2).
+
+- **Admin UI for public clients.** The OAuth2 client form offers "Public
+  client (no secret)" as a Token Endpoint Authentication option, validates
+  the T21.2 refusals (credential-bearing grants, the `fapi2` profile, an
+  mTLS/`private_key_jwt` credential alongside `none`, and moving a client
+  across the public/confidential line by editing it) before the request is
+  sent, and skips the one-time secret dialog for a client that has no secret
+  to show (T21.2).
+
+- **RFC 8707 resource indicators.** A `resource` parameter on
+  `/oauth2/authorize`, `/oauth2/par`, `/oauth2/device_authorization` and
+  `/oauth2/token` names the service a token is for, and the access token minted
+  carries that URI as its `aud` instead of `axiam:user` / `axiam:m2m` — which
+  is what lets an MCP server, a partner API or one service in a mesh check that
+  a token was issued for *it*. Enabled per client by the new
+  `allowed_resources` registration field, which is empty on every existing
+  client; a request that sends no `resource` mints exactly the token it always
+  did. Entries are absolute URIs without a fragment, compared after RFC 3986
+  §6.2.2 normalisation and never by prefix; an unregistered or malformed value
+  is `invalid_target`, and a second value is too. See
+  [`docs/api/resource-indicators.md`](docs/api/resource-indicators.md) (T21.3).
+
+- **A grant's audience cannot be widened.** The resource travels with the grant
+  — onto the authorization code, the device grant and the refresh token, where
+  each rotation copies it forward — so a refresh re-mints the *same* audience.
+  A token request or refresh may repeat the resource or omit it; naming a
+  different one, or naming one at all on a grant that was issued without one,
+  is `invalid_target` (T21.3).
+
+- **`aud` in the introspection response (RFC 7662 §2.2).** Introspection now
+  reports the token's audience, and decodes resource-bound tokens rather than
+  reporting them inactive — an introspecting resource server's whole audience
+  check is "is this token for me", and it had no way to ask. AXIAM's own REST
+  and gRPC endpoints are **unchanged**: they still accept only `axiam:user` and
+  `axiam:m2m`, so a token minted for another resource server is refused with
+  `401` / `UNAUTHENTICATED` there (T21.3).
+
+- **RFC 7591 dynamic client registration.** `POST /oauth2/register?tenant_id=`
+  lets a client create itself, which is what MCP Inspector, Claude Code and
+  VS Code expect from an authorization server. **Off by default on every
+  tenant**: the new `dynamic_registration` tenant policy is `disabled` unless an
+  operator sets it, and the endpoint answers `403` until they do, so the path
+  exists and the feature does not. The two other modes are
+  `initial_access_token` (RFC 7591 §1.2's protected profile — a caller presents
+  a single-use token an administrator minted) and `anonymous` (the open
+  profile). A tenant on `disabled` also has no `registration_endpoint` in its
+  discovery document, which is therefore byte-identical to the one it served
+  before. See
+  [`docs/admin/dynamic-client-registration.md`](docs/admin/dynamic-client-registration.md)
+  (T21.4).
+
+- **A self-registered client cannot choose its own audiences (D3).** It
+  inherits the tenant's new `external_client_allowed_resources` list verbatim
+  as its `allowed_resources`, and AXIAM **refuses to store a policy** that
+  enables `anonymous` registration while that list is empty — an empty list
+  would leave a stranger's client able to obtain the `axiam:user` tokens
+  AXIAM's own APIs accept. The same list will be shared with Client ID Metadata
+  Documents (T21.4).
+
+- **A self-registered client always gets a consent screen (D4).** The first
+  authorization per end user for a client an administrator did not create goes
+  through the existing consent hop, whatever scopes it asked for, and the grant
+  is recorded through the ordinary OIDC-scope consent records — so the end user
+  withdraws it from the account page with no new control. The record covers the
+  scope set the user was shown, so a client that later asks for more re-prompts
+  (T21.4).
+
+- **`POST` / `GET /api/v1/oauth2-clients/registration-tokens`** — mint and list
+  the single-use, TTL-bounded initial access tokens `initial_access_token` mode
+  requires. The handle is shown once, carries no identity beyond its tenant,
+  and is refused for a tenant not in that mode. Gated on `oauth2_clients:create`
+  and `oauth2_clients:list` (T21.4).
+
+- **Abuse controls on the registration endpoint.** A per-IP rate limit
+  (`AXIAM__RATE_LIMIT__DCR_PER_MIN`, default **5/min** — the smallest in AXIAM,
+  because this is the only endpoint that writes for a caller holding no
+  credential), a per-tenant ceiling (`dcr_max_clients`, default 20), a
+  background sweep that deletes self-registered clients unused for
+  `dcr_unused_client_ttl_days` (default 30; `0` disables it) and reports itself
+  at `/health/jobs` as `dcr_unused_clients`, and an audit event for **every**
+  registration attempt, successful or not. The sweep never touches a client an
+  administrator created (T21.4).
+
+- **A `managed_by` discriminator on OAuth2 clients (D5).** `admin` for every
+  client that exists today and everything created through
+  `POST /api/v1/oauth2-clients`, `dcr` for a self-registered one. A client that
+  is not `admin` may never carry the `fapi2` profile, is always consent-gated,
+  and is the only kind the sweeper touches. It is set by the creating code path
+  and is absent from the update API — a registration's provenance is a fact
+  about how it came to exist (T21.4).
+
+- **Admin UI for dynamic client registration.** The tenant settings page gains
+  a Dynamic Client Registration card for every `T21.4` policy field
+  (`dynamic_registration`, `dcr_allowed_scopes`, `dcr_allowed_redirect_hosts`,
+  `external_client_allowed_resources`, `dcr_max_clients`,
+  `dcr_unused_client_ttl_days`), refusing to save `anonymous` mode with an
+  empty audience list (D3) or a `dcr_allowed_scopes` naming `address`/`phone`
+  client-side, with the same messages the server answers with. The OAuth2
+  Clients page gains registration-token issuance (single-use, shown once, like
+  a client secret; only shown once a tenant is in `initial_access_token`
+  mode), a `managed_by` badge and filter in the client list, and a read-only
+  detail view for a `dcr`/`cimd` client in place of the edit form — AXIAM does
+  not model an administrator editing a self-registration. The audit log viewer
+  badges the three new registration events. Default (`disabled`) tenants see
+  none of it (T21.4b).
+
+- **Per-tenant path issuers (`AXIAM__AUTH__TENANT_ISSUER_PATHS`, default
+  `false`).** With the flag set, each tenant gains a second issuer identifier,
+  `{root}/t/{tenant_id}` — one with no query string, so it is an issuer an MCP
+  server can name in the `authorization_servers` of its RFC 9728
+  protected-resource metadata and an MCP client can turn into a discovery URL.
+  Discovery is served at all three conventional forms (RFC 8414 §3.1 path
+  insertion at both well-known paths, and the OIDC Discovery §4 append), each
+  returning the identical document whose endpoints are
+  `{root}/t/{tenant_id}/oauth2/…` with no `tenant_id` query. An Actix scope
+  `/t/{tenant_id}` re-bases the existing OAuth2 endpoints — the same handlers,
+  no duplicates — and the `iss` of everything minted there is the tenant issuer:
+  the access token, the ID token, the RFC 9207 authorization-response parameter
+  and the Back-Channel Logout token. One JWKS signs every issuer. AXIAM's own
+  extractors accept the root issuer and any `{root}/t/{uuid}`; the audience
+  rules are untouched. With the flag unset nothing is mounted and the existing
+  `?tenant_id=` documents are byte-identical. See the issuer section of
+  [`docs/deployment/README.md`](docs/deployment/README.md) (T21.6).
+
+- **Tenant isolation under path issuers.** Because one key set signs every
+  tenant's tokens, two checks were added rather than assumed: a token whose
+  `iss` names a different tenant from its `tenant_id` claim is refused, and a
+  token presented under `/t/{tenant}` whose tenant is not that one is refused
+  with `401` — the same answer a request with no credential gets. A `tenant_id`
+  query parameter on a tenant path is `invalid_request`, agreeing or not
+  (T21.6).
+
+### Changed
+
+- **Token exchange reads `allowed_resources` for its `audience`/`resource`
+  target, and the redirect-URI allow-list is deprecated (SEC-089).** A target is
+  accepted if it is one of AXIAM's built-in audiences, appears in
+  `allowed_resources`, or — for one release — appears in the client's
+  `redirect_uris`. The last branch logs a deprecation warning naming the client
+  and the target when it is the one that matched; it will be removed in the next
+  release. Nothing that worked stops working today. Move exchange targets to
+  `allowed_resources` now:
+  [`docs/api/token-exchange.md#audience`](docs/api/token-exchange.md#audience)
+  (T21.3).
+
+- **The issuer boot check now says what it is about.** A configured
+  `AXIAM__AUTH__OAUTH2_ISSUER_URL` must still be a bare root URL, and the
+  message says why: the per-tenant issuer path is derived from it as
+  `{root}/t/{tenant_id}` and is never configured. Setting
+  `AXIAM__AUTH__TENANT_ISSUER_PATHS` without a root issuer is refused at boot
+  rather than producing issuers no client can resolve (T21.6).
+
+### Security
+
+- **The `axiam` URI scheme is reserved and can no longer be named as a
+  `resource` (MCP-02, T21.8).** AXIAM's own token audiences are spelled
+  `axiam:user` and `axiam:m2m`, which are well-formed absolute URIs and were
+  therefore well-formed RFC 8707 resource indicators. Registering one in
+  `allowed_resources` and naming it in `resource` let a grant mint a token
+  stamped with AXIAM's own audience — most sharply on `client_credentials`,
+  which mints `axiam:m2m` when no resource is named and would have minted
+  `axiam:user` when that one was, reaching past the audience boundary
+  invariant I3 is built out of instead of being confined by it. Registration
+  and every grant now answer `invalid_target` for any `axiam:` value. No
+  deployment can have relied on this: `allowed_resources` is new in this
+  release, and the refusal is fail-closed.
 
 ## [1.0.0-beta15] - 2026-09-15
 

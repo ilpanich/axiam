@@ -349,6 +349,25 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // RFC 8414 §3 authorization-server metadata (T21.1) — the same document as
     // the OIDC discovery entry above, at the path MCP clients probe first.
     "/.well-known/oauth-authorization-server",
+    // T21.6 — the RFC 8414 §3.1 path-insertion forms of the two entries above,
+    // `{well-known}/t/{tenant_id}`, served only where
+    // `AXIAM__AUTH__TENANT_ISSUER_PATHS` is set. Public for exactly the reason
+    // their root forms are: a client fetches discovery before it holds any
+    // credential.
+    //
+    // Prefix entries because the tenant is a UUID at the END of the path, which
+    // no exact entry can spell. The trailing-`*` rule is segment-boundary
+    // aware, so `/.well-known/openid-configuration/tenants` does NOT match; and
+    // everything reachable under a `/.well-known/` prefix is metadata this
+    // deployment publishes to anyone, so the prefix admits nothing an exact
+    // entry would have kept out. The THIRD form,
+    // `/t/{tenant_id}/.well-known/openid-configuration`, carries its UUID in
+    // the middle and is matched by `is_public_path`'s tenant-prefix strip
+    // against the `/.well-known/openid-configuration` entry above — see
+    // `middleware::authz::strip_tenant_path_prefix` for why that is the rule
+    // rather than a `/t/*` blanket.
+    "/.well-known/oauth-authorization-server/t/*",
+    "/.well-known/openid-configuration/t/*",
     // UMA 2.0 discovery (X2). Public for the same reason as OIDC discovery:
     // §2 makes it the document a resource server fetches *before* it holds any
     // credential, and it carries only endpoint URLs the deployment publishes.
@@ -378,6 +397,16 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // `authenticate_client` path the token endpoint uses. Unauthenticated by
     // the middleware's definition, not by the endpoint's.
     "/oauth2/par",
+    // T21.4 / RFC 7591 §3.1. Necessarily public in the strongest sense of any
+    // entry in this list: it is the endpoint a client that does not exist yet
+    // calls in order to exist, so there is by construction no credential it
+    // could present. The tenant's `dynamic_registration` policy is what
+    // decides whether it does anything — `disabled`, the default, answers
+    // `403` — and in `initial_access_token` mode the handler requires a bearer
+    // this middleware knows nothing about (a single-use RFC 7591 §1.2 handle,
+    // not an AXIAM access token). Unauthenticated by the middleware's
+    // definition, and rate-limited, quota-bounded and audited by the handler's.
+    "/oauth2/register",
     // B5 / RP-Initiated Logout 1.0 §2. Necessarily public: a user whose
     // session has ALREADY expired must still be able to complete a logout,
     // and requiring a live session to end a session is a contradiction. The
@@ -866,6 +895,23 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     // OAuth2 Clients
     ("GET", "/api/v1/oauth2-clients", "oauth2_clients:list"),
     ("POST", "/api/v1/oauth2-clients", "oauth2_clients:create"),
+    // T21.4 — RFC 7591 initial access tokens. Gated on the same two
+    // permissions as the clients themselves rather than a pair of its own: a
+    // token minted here authorises exactly one registration, which is strictly
+    // less than what `oauth2_clients:create` already confers (an administrator
+    // holding it can create any client directly, with any scopes and any
+    // audiences). A separate permission would suggest this is the more
+    // dangerous of the two, which it is not.
+    (
+        "POST",
+        "/api/v1/oauth2-clients/registration-tokens",
+        "oauth2_clients:create",
+    ),
+    (
+        "GET",
+        "/api/v1/oauth2-clients/registration-tokens",
+        "oauth2_clients:list",
+    ),
     ("GET", "/api/v1/oauth2-clients/{id}", "oauth2_clients:get"),
     (
         "PUT",

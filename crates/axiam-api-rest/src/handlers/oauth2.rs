@@ -115,6 +115,18 @@ pub struct AuthorizeQuery {
     /// `request_uri` the pushed copy wins, like every other parameter, so a
     /// browser cannot re-pin somebody's pushed request to a key of its own.
     pub dpop_jkt: Option<String>,
+    /// T21.3 / RFC 8707 §2 — the target service this authorization is for.
+    ///
+    /// Read only on the inline branch: beside a `request_uri` the pushed copy
+    /// wins, exactly as `state`, `nonce` and `dpop_jkt` do, so a browser
+    /// cannot re-address somebody's pushed request at a resource of its own.
+    ///
+    /// A single value. RFC 8707 §2 permits the parameter to repeat; AXIAM
+    /// issues a token for one target service, so a second value is
+    /// `invalid_target`. That refusal is answered before this struct is built
+    /// — see `duplicate_resource_response` below — because the deserializer
+    /// rejects a repeated key first.
+    pub resource: Option<String>,
     /// W3 — which tenant this authorization request is for, read **only** when
     /// the request carries no authenticated principal (plan §4.0).
     ///
@@ -379,17 +391,41 @@ struct AuthorizePrincipal {
 /// `//evil.example` into a different host and `/a/../../b` into `/b`, so it is
 /// an independent opinion on the two attacks that are about *resolution*
 /// rather than about spelling.
+/// The authorization endpoint path **this** request arrived at (T21.6).
+///
+/// `/oauth2/authorize` for every request on the deployment-wide endpoint, which
+/// is every request on a deployment with `AXIAM__AUTH__TENANT_ISSUER_PATHS`
+/// unset — so a login or consent hop builds and validates exactly the value it
+/// built and validated before tenant paths existed.
+///
+/// `/t/{tenant_id}/oauth2/authorize` on a per-tenant path, built from the
+/// *parsed* tenant id the scope middleware recorded rather than from the path
+/// string the request carried, so the result cannot be anything the UUID parse
+/// did not already accept.
+fn authorize_path_of(req: &HttpRequest) -> String {
+    match crate::middleware::tenant_path::binding_of(req) {
+        None => axiam_oauth2::login_hop::AUTHORIZE_PATH.to_owned(),
+        Some(binding) => axiam_oauth2::login_hop::tenant_authorize_path(binding.tenant_id),
+    }
+}
+
 fn return_to_is_on_this_deployment<C: Connection + Clone>(
     state: &AppState<C>,
     return_to: &str,
+    authorize_path: &str,
 ) -> bool {
-    let Ok(base) = url::Url::parse(state.auth_config.effective_issuer()) else {
+    // The deployment ROOT, never the tenant issuer: this resolves a path
+    // against an origin, and a tenant issuer carries a path of its own that
+    // `Url::join` would then treat as a base directory. `authorize_path` is
+    // where the tenant, if any, is expressed — and it is supplied by the caller
+    // from the request it is answering (T21.6), never read out of the candidate.
+    let Ok(base) = url::Url::parse(state.auth_config.root_issuer()) else {
         return false;
     };
     let Ok(resolved) = base.join(return_to) else {
         return false;
     };
-    if resolved.path() != axiam_oauth2::login_hop::AUTHORIZE_PATH {
+    if resolved.path() != authorize_path {
         return false;
     }
     crate::handlers::federation_login::require_deployment_spa_origin(state, resolved.as_str())
@@ -527,7 +563,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
 
         return Err(Box::new(match redirect_uri {
             Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
-                build_error_redirect(uri, &refusal, echo_state, &state.auth_config)
+                build_error_redirect(uri, &refusal, echo_state, &issuer_config(http_req, state))
             }
             _ => authorize_error_response(http_req, &refusal),
         }));
@@ -624,9 +660,12 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         // comparison `AuthorizeService::authorize` makes — an unregistered
         // or absent one is answered directly instead.
         return Err(Box::new(match q.redirect_uri.as_deref() {
-            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
-                build_error_redirect(uri, &refusal, q.state.as_deref(), &state.auth_config)
-            }
+            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => build_error_redirect(
+                uri,
+                &refusal,
+                q.state.as_deref(),
+                &issuer_config(http_req, state),
+            ),
             _ => authorize_error_response(http_req, &refusal),
         }));
     }
@@ -692,9 +731,12 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             Some(_) => OAuth2Error::UnsupportedResponseType,
         };
         return Err(Box::new(match q.redirect_uri.as_deref() {
-            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
-                build_error_redirect(uri, &refusal, q.state.as_deref(), &state.auth_config)
-            }
+            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => build_error_redirect(
+                uri,
+                &refusal,
+                q.state.as_deref(),
+                &issuer_config(http_req, state),
+            ),
             _ => authorize_error_response(http_req, &refusal),
         }));
     }
@@ -746,9 +788,12 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         let reported = request_uri_error_for_client(&refusal);
         let reported = reported.as_ref().unwrap_or(&refusal);
         return Err(Box::new(match q.redirect_uri.as_deref() {
-            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
-                build_error_redirect(uri, reported, q.state.as_deref(), &state.auth_config)
-            }
+            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => build_error_redirect(
+                uri,
+                reported,
+                q.state.as_deref(),
+                &issuer_config(http_req, state),
+            ),
             // Rendered for the person, with the wording `ParService` produced.
             // The OIDC code above is what a *relying party* can act on; a page
             // saying `invalid_request_uri` to somebody who did not send the
@@ -757,13 +802,21 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         }));
     }
 
-    let Some(return_to) = axiam_oauth2::login_hop::build_return_to(http_req.query_string()) else {
+    // T21.6 — the browser comes back to the endpoint it left. On the
+    // deployment-wide path that is `/oauth2/authorize`, exactly as before; on a
+    // per-tenant path it is `/t/{tenant_id}/oauth2/authorize`, which is what
+    // makes the authorization response the return leg produces carry the tenant
+    // issuer in its RFC 9207 `iss` — the issuer the client discovered.
+    let authorize_path = authorize_path_of(http_req);
+    let Some(return_to) =
+        axiam_oauth2::login_hop::build_return_to_at(&authorize_path, http_req.query_string())
+    else {
         // Nothing safe to come back to. Answer as if the request had been
         // anonymous with no `browser_sso` at all rather than send a browser
         // somewhere on a value that did not validate.
         return Err(Box::new(auth_error.error_response()));
     };
-    if !return_to_is_on_this_deployment(state, &return_to) {
+    if !return_to_is_on_this_deployment(state, &return_to, &authorize_path) {
         return Err(Box::new(auth_error.error_response()));
     }
 
@@ -963,6 +1016,109 @@ async fn resolve_sensitive_scopes<C: Connection + Clone>(
     )
 }
 
+/// T21.4 / D4 — resolve whether this authorization needs the external-client
+/// consent hop.
+///
+/// Returns `NotApplicable` for a client an administrator created, which is
+/// every client in every deployment today and is the whole of I1 for this
+/// gate: the function reads one row it was going to read anyway (the client is
+/// looked up again inside `AuthorizeService`, so this is one extra read on the
+/// authorization path — see below) and returns before touching the consent
+/// repository.
+///
+/// # The cost, measured rather than assumed
+///
+/// This adds **one** indexed read by `client_id` to every authorization
+/// request, including those from administrators' clients, which never need the
+/// answer. That is a real cost and it was weighed rather than missed:
+///
+/// * It is not avoidable at this boundary. `AuthorizeService` owns the client
+///   lookup and this handler owns the consent repository, and the decision
+///   needs both. Passing a consent repository into the service would put a
+///   repository into a crate whose whole design is that it decides and does
+///   not fetch (see `crate::sensitive`'s module docs), and returning early
+///   from the service so the handler could resolve and re-call would mean
+///   running every validation twice.
+/// * `/oauth2/authorize` is a **browser-interactive** endpoint: one request per
+///   user sign-in, not a machine path. The reads AXIAM caches rather than
+///   repeats — `tenant_org_cache`, for one immutable field — are on the
+///   refresh-rotation and authz-check paths, which run per API call. This one
+///   is not in that class, and a `client_id`-indexed read beside a code write
+///   is not where an authorization request spends its time.
+/// * The **consent** read, which is the more expensive of the two, still
+///   happens only for a client that is actually external: this function
+///   returns before it for every `admin` row.
+///
+/// If a future profile shows otherwise, the cache to add is the same shape as
+/// `tenant_org_cache` — `client_id -> managed_by` is immutable for a row's
+/// lifetime, because the field is absent from the update API on purpose.
+///
+/// # Both reads fail closed, in the recoverable direction
+///
+/// A client read that fails reports `NotApplicable` — there is no client, so
+/// the authorization is about to fail anyway inside the service, with the
+/// error that names the real problem rather than a consent question about a
+/// client that does not exist. A consent read that fails reports the consent
+/// as **missing**, which asks again rather than proceeding: the same direction
+/// `resolve_sensitive_scopes` takes, for the same reason.
+async fn resolve_external_consent<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    client_id: &str,
+    scope: Option<&str>,
+) -> axiam_oauth2::external_consent::Requested {
+    use axiam_oauth2::external_consent::Requested;
+
+    let Ok(client) = axiam_core::repository::OAuth2ClientRepository::get_by_client_id(
+        &state.oauth2_client_repo,
+        tenant_id,
+        client_id,
+    )
+    .await
+    else {
+        return Requested::NotApplicable;
+    };
+    if !axiam_oauth2::external_consent::applies_to(client.managed_by) {
+        return Requested::NotApplicable;
+    }
+
+    let scopes: Vec<String> = scope
+        .unwrap_or("")
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let consent_type = axiam_oauth2::external_consent::consent_type(client_id);
+    let version = axiam_oauth2::external_consent::version(&scopes);
+
+    match axiam_core::repository::ConsentRepository::list_by_user(
+        &state.gdpr.consent_repo,
+        tenant_id,
+        user_id,
+    )
+    .await
+    {
+        Ok(records)
+            if records
+                .iter()
+                .any(|c| c.consent_type == consent_type && c.version == version) =>
+        {
+            Requested::Consented
+        }
+        Ok(_) => Requested::ConsentMissing,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                %tenant_id,
+                "could not read the end user's consent records for an externally registered \
+                 client; treating the client as unconsented, which asks again rather than \
+                 letting it act as the user"
+            );
+            Requested::ConsentMissing
+        }
+    }
+}
+
 /// `GET /oauth2/authorize` -- OAuth2 authorization endpoint.
 ///
 /// A request carrying an access token authorizes as its subject. A request
@@ -1016,6 +1172,14 @@ pub async fn authorize<C: Connection + Clone>(
         Ok(principal) => principal,
         Err(response) => return *response,
     };
+
+    // T21.5 — a `client_id` that is a URL may be a client this tenant has
+    // never seen. Here, before anything looks the client up, so that everything
+    // below acts on an ordinary row: two `starts_with` calls for every
+    // authorization request AXIAM has ever served, and a fetch only for a
+    // tenant that has enabled the mechanism. It returns nothing and cannot
+    // refuse the request — see `crate::cimd`.
+    crate::cimd::materialise_if_cimd(&state, &http_req, user.tenant_id, &q.client_id).await;
 
     // X7 G12 (plan §4.10). Classify request objects FIRST, before the PAR
     // branch below: a `request_uri` that is not a PAR handle would otherwise
@@ -1216,9 +1380,21 @@ pub async fn authorize<C: Connection + Clone>(
                     .as_deref()
                     .map(axiam_oauth2::claims_request::userinfo_claims)
                     .unwrap_or_default(),
+                // RFC 8707 — from the PUSHED copy, like every other parameter
+                // beside a `request_uri`. The PAR endpoint already validated
+                // it against this client's allow-list under client
+                // authentication; a query-string `resource` here is a browser
+                // proposing an audience, which is the substitution PAR exists
+                // to prevent.
+                resource: params.resource,
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
+                // T21.4 / D4 — a placeholder, resolved below for the same
+                // reason the two above are: both arms produce the same inputs
+                // and a copy of the resolution in each is a copy that can
+                // drift.
+                external_consent: axiam_oauth2::external_consent::Requested::NotApplicable,
             }
         }
         None => {
@@ -1290,9 +1466,12 @@ pub async fn authorize<C: Connection + Clone>(
                 };
 
                 return match redirect_target {
-                    Some(uri) => {
-                        build_error_redirect(&uri, &error, q.state.as_deref(), &state.auth_config)
-                    }
+                    Some(uri) => build_error_redirect(
+                        &uri,
+                        &error,
+                        q.state.as_deref(),
+                        &issuer_config(&http_req, &state),
+                    ),
                     None => authorize_error_response(&http_req, &error),
                 };
             };
@@ -1336,9 +1515,20 @@ pub async fn authorize<C: Connection + Clone>(
                     .as_deref()
                     .map(axiam_oauth2::claims_request::userinfo_claims)
                     .unwrap_or_default(),
+                // RFC 8707 §2, from the query string. Validated by the
+                // authorization service against this client's
+                // `allowed_resources`, after the `redirect_uri` is known good,
+                // so an `invalid_target` redirects to a URI the client
+                // registered rather than rendering at AXIAM's own origin.
+                resource: q.resource.clone(),
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
+                // T21.4 / D4 — a placeholder, resolved below for the same
+                // reason the two above are: both arms produce the same inputs
+                // and a copy of the resolution in each is a copy that can
+                // drift.
+                external_consent: axiam_oauth2::external_consent::Requested::NotApplicable,
             }
         }
     };
@@ -1350,6 +1540,16 @@ pub async fn authorize<C: Connection + Clone>(
     // the pushed copy, never from the query string.
     let mut req = req;
     (req.sensitive_scopes, req.sensitive_scopes_switch_is_off) = resolve_sensitive_scopes(
+        &state,
+        user.tenant_id,
+        user.user_id,
+        &req.client_id,
+        req.scope.as_deref(),
+    )
+    .await;
+    // T21.4 / D4 — resolved beside W7's, from the same three inputs, and for
+    // the same reason it is resolved here rather than in either arm above.
+    req.external_consent = resolve_external_consent(
         &state,
         user.tenant_id,
         user.user_id,
@@ -1418,6 +1618,10 @@ pub async fn authorize<C: Connection + Clone>(
         (c.login_hint.map(str::to_owned), c.display, c.ui_locale)
     };
 
+    // T21.6 — see `resolve_authorize_principal`'s use of the same value: an
+    // interaction hop comes back to the endpoint the request arrived at.
+    let authorize_path = authorize_path_of(&http_req);
+
     let outcome = match state.oauth2.authorize_service.authorize(req).await {
         Ok(axiam_oauth2::authorize::AuthorizeOutcome::Interact(interaction)) => {
             // W4 — the honour lane asked for an interaction. It rides W3's
@@ -1448,9 +1652,15 @@ pub async fn authorize<C: Connection + Clone>(
             // `login_hop::CONSENT_HOP_MARKER` for why sharing the login one
             // would answer the consent question with the login hop's evidence.
             let built = if interaction.reason.requires_reauthentication() {
-                axiam_oauth2::login_hop::build_return_to(http_req.query_string())
+                axiam_oauth2::login_hop::build_return_to_at(
+                    &authorize_path,
+                    http_req.query_string(),
+                )
             } else {
-                axiam_oauth2::login_hop::build_consent_return_to(http_req.query_string())
+                axiam_oauth2::login_hop::build_consent_return_to_at(
+                    &authorize_path,
+                    http_req.query_string(),
+                )
             };
             let Some(return_to) = built else {
                 // Nothing safe to come back to, so there is nothing to send
@@ -1464,10 +1674,10 @@ pub async fn authorize<C: Connection + Clone>(
                             .into(),
                     ),
                     resolved_state.as_deref(),
-                    &state.auth_config,
+                    &issuer_config(&http_req, &state),
                 );
             };
-            if !return_to_is_on_this_deployment(&state, &return_to) {
+            if !return_to_is_on_this_deployment(&state, &return_to, &authorize_path) {
                 return build_error_redirect(
                     &resolved_redirect_uri,
                     &OAuth2Error::LoginRequired(
@@ -1476,7 +1686,7 @@ pub async fn authorize<C: Connection + Clone>(
                             .into(),
                     ),
                     resolved_state.as_deref(),
-                    &state.auth_config,
+                    &issuer_config(&http_req, &state),
                 );
             }
             let (login_hint, display, ui_locale) = &cosmetic_owned;
@@ -1548,7 +1758,7 @@ pub async fn authorize<C: Connection + Clone>(
                     if let Some(ref state) = resp.state {
                         url.query_pairs_mut().append_pair("state", state);
                     }
-                    append_issuer(&mut url, &state.auth_config);
+                    append_issuer(&mut url, &issuer_config(&http_req, &state));
                     HttpResponse::Found()
                         .append_header(("Location", url.to_string()))
                         .finish()
@@ -1584,7 +1794,7 @@ pub async fn authorize<C: Connection + Clone>(
                         &resolved_redirect_uri,
                         &e,
                         resolved_state.as_deref(),
-                        &state.auth_config,
+                        &issuer_config(&http_req, &state),
                     )
                 }
             }
@@ -1667,7 +1877,17 @@ async fn token_inner<C: Connection + Clone>(
         return match state
             .oauth2
             .device_authorization_service
-            .poll(tenant_id, &device_code)
+            .poll_at(
+                tenant_id,
+                &device_code,
+                form.resource.as_deref(),
+                // T21.6. The device-code grant runs above the point where a
+                // `TokenRequestContext` is built (RFC 8628 performs no client
+                // authentication), so the binding is read directly here.
+                crate::middleware::tenant_path::binding_of(&req)
+                    .map(|binding| binding.issuer().to_owned())
+                    .as_deref(),
+            )
             .await
         {
             Ok(resp) => HttpResponse::Ok()
@@ -1681,6 +1901,15 @@ async fn token_inner<C: Connection + Clone>(
             // ones under it.
             Err(e) => build_oauth2_error_response(&e),
         };
+    }
+
+    // T21.5 — before client authentication, for the reason the authorize
+    // endpoint calls it before the client lookup: what follows must act on an
+    // ordinary row. Placed after the device-code branch because RFC 8628's
+    // grant authenticates no client at all and carries no `client_id` worth
+    // resolving.
+    if let Some(client_id) = form.client_id.as_deref() {
+        crate::cimd::materialise_if_cimd(&state, &req, tenant_id, client_id).await;
     }
 
     // SEC-096: ONE context construction and ONE DPoP verification, ahead of
@@ -1902,6 +2131,12 @@ fn token_request_context(req: &HttpRequest) -> Result<TokenRequestContext, Box<H
 
     Ok(TokenRequestContext {
         client_certificate: certificate,
+        // T21.6 — the issuer this request arrived under, read from the scope
+        // middleware's binding and therefore from the PATH, never from the
+        // form. `None` on `/oauth2/token`, which is every request on a
+        // deployment with `AXIAM__AUTH__TENANT_ISSUER_PATHS` unset.
+        issuer: crate::middleware::tenant_path::binding_of(req)
+            .map(|binding| binding.issuer().to_owned()),
         ..TokenRequestContext::default()
     }
     .with_basic_credentials(basic))
@@ -2561,8 +2796,146 @@ pub async fn discovery<C: Connection + Clone>(
     query: web::Query<DiscoveryQuery>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
+    discovery_document(query.tenant_id, None, &state).await
+}
+
+/// Authorization-server metadata for one tenant, at the RFC 8414 §3.1
+/// path-insertion form of the issuer `{root}/t/{tenant_id}`.
+//
+// The rest of the rationale is deliberately NOT a doc comment: utoipa lifts a
+// doc block verbatim into the OpenAPI `description`, and eleven SDK repos
+// vendor `sdks/openapi.json` byte-for-byte. Same reasoning as the F3 note on
+// `jwks` and the one on `MtlsEndpointAliases`.
+//
+// T21.6. Mounted only where `AXIAM__AUTH__TENANT_ISSUER_PATHS` is set. The
+// document names `{root}/t/{tenant_id}` as its `issuer` and every endpoint
+// under that same prefix, with no `tenant_id` query anywhere — which is what
+// makes the issuer one RFC 8414 §2 permits, and therefore one an MCP server
+// can put in the `authorization_servers` of its RFC 9728 metadata.
+#[utoipa::path(
+    get,
+    path = "/.well-known/oauth-authorization-server/t/{tenant_id}",
+    params(("tenant_id" = Uuid, Path, description = "The tenant this issuer names.")),
+    tag = "oidc",
+    responses(
+        (status = 200, description = "Authorization-server metadata for one tenant",
+         body = OidcDiscoveryDocument),
+        (status = 400, description = "The tenant segment is not a UUID",
+         body = OAuth2ErrorResponse),
+    ),
+)]
+pub async fn discovery_rfc8414_tenant_path<C: Connection + Clone>(
+    req: HttpRequest,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    tenant_path_discovery(&req, &state).await
+}
+
+/// The same tenant discovery document, at the OIDC Discovery path with the
+/// RFC 8414 §3.1 insertion applied.
+//
+// T21.6. See `discovery_rfc8414_tenant_path`; both delegate to
+// `tenant_path_discovery`, so the two documents cannot differ.
+#[utoipa::path(
+    get,
+    path = "/.well-known/openid-configuration/t/{tenant_id}",
+    params(("tenant_id" = Uuid, Path, description = "The tenant this issuer names.")),
+    tag = "oidc",
+    responses(
+        (status = 200, description = "OpenID Connect Discovery document for one tenant",
+         body = OidcDiscoveryDocument),
+        (status = 400, description = "The tenant segment is not a UUID",
+         body = OAuth2ErrorResponse),
+    ),
+)]
+pub async fn discovery_oidc_tenant_path<C: Connection + Clone>(
+    req: HttpRequest,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    tenant_path_discovery(&req, &state).await
+}
+
+/// The same tenant discovery document, at the path OpenID Connect Discovery
+/// 1.0 §4 constructs by appending `/.well-known/openid-configuration` to the
+/// issuer.
+//
+// T21.6. All three forms exist because clients disagree about which to derive:
+// RFC 8414 §3.1 inserts the well-known segment after the host, OIDC Discovery
+// §4 appends it to the issuer. A client that picked either must find AXIAM,
+// and the three are produced by one function so they cannot differ.
+#[utoipa::path(
+    get,
+    path = "/t/{tenant_id}/.well-known/openid-configuration",
+    params(("tenant_id" = Uuid, Path, description = "The tenant this issuer names.")),
+    tag = "oidc",
+    responses(
+        (status = 200, description = "OpenID Connect Discovery document for one tenant",
+         body = OidcDiscoveryDocument),
+        (status = 400, description = "The tenant segment is not a UUID",
+         body = OAuth2ErrorResponse),
+    ),
+)]
+pub async fn discovery_oidc_tenant_appended<C: Connection + Clone>(
+    req: HttpRequest,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    tenant_path_discovery(&req, &state).await
+}
+
+/// The body all three T21.6 discovery routes share.
+///
+/// Reads the tenant from the path — never from a query, which the tenant form
+/// does not have — and refuses a segment that is not a UUID with
+/// `invalid_request`, from the path alone and with no repository read. An
+/// unknown-but-well-formed tenant is served the document, exactly as
+/// `?tenant_id=<unknown>` is today: discovery is unauthenticated, and a `404`
+/// here would be a tenant-enumeration oracle.
+async fn tenant_path_discovery<C: Connection + Clone>(
+    req: &HttpRequest,
+    state: &web::Data<AppState<C>>,
+) -> HttpResponse {
+    let Some(tenant_id) = req
+        .match_info()
+        .get("tenant_id")
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+    else {
+        return HttpResponse::BadRequest().json(OAuth2ErrorResponse {
+            error: "invalid_request".into(),
+            error_description: "the tenant segment of the path is not a UUID".into(),
+        });
+    };
+    // `None` means this deployment does not serve tenant paths. Unreachable —
+    // these routes are mounted only where it does — and answered rather than
+    // unwrapped.
+    let Some(issuer) = state.auth_config.tenant_issuer(tenant_id) else {
+        return HttpResponse::NotFound().finish();
+    };
+    discovery_document(Some(tenant_id), Some(issuer), state).await
+}
+
+/// Build and serve a discovery document.
+///
+/// `tenant_issuer` is `Some` only for the three T21.6 tenant-path routes. It
+/// changes exactly two things and nothing else:
+///
+/// * the document's `issuer`, and with it every endpoint URL, which is derived
+///   from it;
+/// * whether the endpoints carry `?tenant_id=` — they do not under a tenant
+///   issuer, because the tenant is already in the path, and an issuer with a
+///   query is not an issuer RFC 8414 §2 allows.
+///
+/// Everything else — the capability members, the sensitive-scope rows, the
+/// mTLS aliases, the error posture — is the same code answering the same way,
+/// which is what the "the three forms agree" test asserts.
+async fn discovery_document<C: Connection + Clone>(
+    described_tenant: Option<Uuid>,
+    tenant_issuer: Option<String>,
+    state: &web::Data<AppState<C>>,
+) -> HttpResponse {
     let auth_config = &state.auth_config;
-    let issuer = auth_config.effective_issuer();
+    let issuer = tenant_issuer
+        .as_deref()
+        .unwrap_or_else(|| auth_config.effective_issuer());
     // Guard: effective_issuer must be a valid URL for a compliant
     // discovery document.  Startup validation should catch this, but
     // defend in depth at the endpoint level.
@@ -2595,10 +2968,18 @@ pub async fn discovery<C: Connection + Clone>(
     // document offering `address` for tenant X while pointing its token
     // endpoint at tenant Y would be internally inconsistent in a way no client
     // could detect and every client would trust.
-    let described_tenant = query.tenant_id.or_else(|| auth_config.default_tenant_id());
+    let described_tenant = described_tenant.or_else(|| auth_config.default_tenant_id());
 
-    let sensitive_scopes_enabled = match described_tenant {
-        None => false,
+    // T21.4 — the two per-tenant capability rows are resolved from **one**
+    // settings read, for the reason `described_tenant` is one value: a
+    // document that advertised `address` for tenant X and a registration
+    // endpoint for tenant Y would be internally inconsistent in a way no
+    // client could detect. Both default to `false` when no tenant was named,
+    // which is every caller written before W7 and every conformance run — such
+    // a caller receives a document byte-identical to the one served before
+    // this task (I1).
+    let capabilities = match described_tenant {
+        None => axiam_oauth2::oidc::TenantCapabilities::default(),
         Some(tenant_id) => match state.tenant_repo.get_by_id(tenant_id).await {
             Ok(tenant) => axiam_core::repository::SettingsRepository::get_effective_settings(
                 &state.settings_repo,
@@ -2606,25 +2987,59 @@ pub async fn discovery<C: Connection + Clone>(
                 tenant_id,
             )
             .await
-            .map(|s| s.oidc.sensitive_scopes_enabled)
+            .map(|s| axiam_oauth2::oidc::TenantCapabilities {
+                sensitive_scopes_enabled: s.oidc.sensitive_scopes_enabled,
+                dynamic_registration_enabled: s.oidc.dynamic_registration.is_enabled(),
+                // T21.5 — the third row the `TenantCapabilities` struct was
+                // built to hold, resolved from the same one settings read for
+                // the same reason: one document, one tenant.
+                cimd_enabled: s.oidc.cimd.enabled,
+            })
             // A settings read that fails advertises less rather than more.
             // A relying party told a scope exists and then refused it has a
-            // worse day than one that was never told.
-            .unwrap_or(false),
+            // worse day than one that was never told. The same reasoning
+            // covers the registration endpoint: an MCP client told it may
+            // register and then refused `403` is worse off than one that was
+            // never told.
+            .unwrap_or_default(),
             // An unknown tenant is not an error here: discovery is public and
             // unauthenticated, and answering `404` for a tenant id would make
             // this endpoint a tenant-enumeration oracle. The deployment-wide
             // document is served instead, which is what a caller that named no
             // tenant gets.
-            Err(_) => false,
+            Err(_) => axiam_oauth2::oidc::TenantCapabilities::default(),
         },
     };
 
+    // RFC 8705 §5 — the alias host is re-based on the tenant path too, so an
+    // mTLS client following an alias reaches the same tenant it discovered. It
+    // must be: §5 tells such a client it MUST prefer the alias, so an alias
+    // pointing at the deployment-wide endpoint would silently move it to
+    // another tenant.
+    let tenant_path_suffix = tenant_issuer
+        .as_ref()
+        .and(described_tenant)
+        .map(|tenant| format!("{}{}", axiam_auth::config::TENANT_PATH_PREFIX, tenant));
+    let mtls_base = match tenant_path_suffix {
+        None => auth_config.mtls_base_url().map(str::to_owned),
+        Some(ref suffix) => auth_config
+            .mtls_base_url()
+            .map(|base| format!("{base}{suffix}")),
+    };
     let doc = match build_discovery_document_for(
         issuer,
-        auth_config.mtls_base_url(),
-        sensitive_scopes_enabled,
-        described_tenant,
+        mtls_base.as_deref(),
+        capabilities,
+        // `None` under a tenant issuer: the endpoints are already tenant-scoped
+        // by their path, and `?tenant_id=` on top would be a second selector
+        // saying the same thing — which `middleware::tenant_path` refuses on
+        // arrival anyway. `capabilities` above is still resolved from the real
+        // `described_tenant`, so the document says what THAT tenant can do.
+        if tenant_issuer.is_some() {
+            None
+        } else {
+            described_tenant
+        },
     ) {
         Ok(doc) => doc,
         Err(e) => {
@@ -3438,6 +3853,36 @@ pub async fn userinfo_post<C: Connection + Clone>(
 /// this, and it is not a formality: one variant of the mix-up attack works by
 /// injecting an error response, so a client that validates `iss` on success
 /// and skips it on failure has left the door it just closed ajar.
+/// The config this request stamps an `iss` with (T21.6).
+///
+/// The deployment's own, borrowed and free, for every request that did not
+/// arrive on a `/t/{tenant_id}` path — which is every request on a deployment
+/// with `AXIAM__AUTH__TENANT_ISSUER_PATHS` unset. A clone carrying the tenant
+/// issuer for one that did, so that the RFC 9207 `iss` parameter, the access
+/// token, the ID token and the logout token all say what the discovery document
+/// the client read says.
+fn issuer_config<'a, C: Connection + Clone>(
+    req: &HttpRequest,
+    state: &'a AppState<C>,
+) -> std::borrow::Cow<'a, AuthConfig> {
+    crate::middleware::tenant_path::minting_config(req, &state.auth_config)
+}
+
+/// [`issuer_config`] for a token-endpoint grant, which carries the issuer on
+/// its [`TokenRequestContext`] rather than reading the request again (T21.6).
+fn uma_issuer_config<'a, C: Connection + Clone>(
+    ctx: &TokenRequestContext,
+    state: &'a AppState<C>,
+) -> std::borrow::Cow<'a, AuthConfig> {
+    match ctx.issuer.as_deref() {
+        None => std::borrow::Cow::Borrowed(&state.auth_config),
+        Some(issuer) => std::borrow::Cow::Owned(AuthConfig {
+            request_issuer: Some(issuer.to_owned()),
+            ..state.auth_config.clone()
+        }),
+    }
+}
+
 fn append_issuer(url: &mut url::Url, auth_config: &AuthConfig) {
     let issuer = auth_config.effective_issuer();
     if issuer.is_empty() {
@@ -3737,7 +4182,9 @@ async fn handle_uma_ticket<C: Connection + Clone>(
         org_id,
         granted.permissions.clone(),
         granted.lifetime_secs,
-        &state.auth_config,
+        // T21.6 — the RPT is a token this request minted, so it names the
+        // issuer the request arrived under like every other one.
+        &uma_issuer_config(ctx, state),
         cnf.clone(),
     ) {
         Ok(token) => token,
@@ -3919,7 +4366,7 @@ async fn handle_token_exchange<C: Connection + Clone>(
     match state
         .oauth2
         .token_exchange_service
-        .exchange(tenant_id, &client, exchange_req, cnf)
+        .exchange_at(tenant_id, &client, exchange_req, cnf, ctx.issuer.as_deref())
         .await
     {
         Ok(outcome) => {
@@ -4110,7 +4557,7 @@ async fn refuse_request_uri_to_client<C: Connection + Clone>(
             uri,
             mapped.as_ref().unwrap_or(e),
             state_param,
-            &state.auth_config,
+            &issuer_config(http_req, state),
         )
     } else {
         authorize_error_response(http_req, e)
@@ -4223,7 +4670,8 @@ mod jwks_handler_tests {
 
         assert!(return_to_is_on_this_deployment(
             &state,
-            "/oauth2/authorize?client_id=oa_1&axiam_login_hop=1"
+            "/oauth2/authorize?client_id=oa_1&axiam_login_hop=1",
+            axiam_oauth2::login_hop::AUTHORIZE_PATH,
         ));
 
         for hostile in [
@@ -4237,7 +4685,11 @@ mod jwks_handler_tests {
             "https://iam.example.com.evil.test/oauth2/authorize?x=1",
         ] {
             assert!(
-                !return_to_is_on_this_deployment(&state, hostile),
+                !return_to_is_on_this_deployment(
+                    &state,
+                    hostile,
+                    axiam_oauth2::login_hop::AUTHORIZE_PATH
+                ),
                 "must refuse {hostile}"
             );
         }
@@ -4259,7 +4711,11 @@ mod jwks_handler_tests {
             "response_type=code&client_id=oa_1&tenant_id=00000000-0000-0000-0000-000000000001",
         )
         .expect("a return_to");
-        assert!(return_to_is_on_this_deployment(&state, &built));
+        assert!(return_to_is_on_this_deployment(
+            &state,
+            &built,
+            axiam_oauth2::login_hop::AUTHORIZE_PATH
+        ));
     }
 
     #[actix_web::test]
@@ -4383,6 +4839,15 @@ pub struct PushedAuthorizationRequest {
     /// both arrive they must agree, and the handler refuses the request when
     /// they do not.
     pub dpop_jkt: Option<String>,
+    /// T21.3 / RFC 8707 §2 — the target service this request is for.
+    ///
+    /// Pushed alongside the parameters above it, for the reason they are: PAR
+    /// and the query string are two carriers of one request, and for a
+    /// `require_par` client PAR is the only carrier there is. Validated here,
+    /// where the client is authenticated, so an `invalid_target` reaches the
+    /// client as a protocol error rather than surfacing in a browser after a
+    /// sign-in the user should never have been asked for.
+    pub resource: Option<String>,
 }
 
 /// `POST /oauth2/par` success body (RFC 9126 §2.2).
@@ -4418,11 +4883,98 @@ pub struct PushedAuthorizationResponse {
 ///
 /// Wired at the route rather than inside the handler because the handler is
 /// never reached — see `crate::server`'s `/par` resource.
+/// The message `serde` produces for a repeated field, for the one field this
+/// server has to answer for specially (T21.3 / D1).
+///
+/// Pinned by [`the_duplicate_field_message_is_what_serde_still_says`] so that
+/// a `serde` upgrade which reworded it fails a test rather than silently
+/// reverting the error code below to `invalid_request`.
+const DUPLICATE_RESOURCE_MESSAGE: &str = "duplicate field `resource`";
+
+/// Answer a repeated `resource` parameter with `invalid_target` (D1), or
+/// `None` when the failure is anything else.
+///
+/// # Why a string comparison, and why that is not load-bearing
+///
+/// RFC 8707 §2 lets `resource` repeat; D1 of the MCP plan accepts one value
+/// and refuses a second, because AXIAM's access token carries a single `aud`
+/// (`AccessTokenClaims::aud`) and there is no honest way to serve two targets
+/// with one string.
+///
+/// The refusal itself is **not** implemented here. `serde_urlencoded`
+/// deserializes a repeated key into a non-sequence field by failing, so a
+/// second `resource` never reaches a handler at all: the request is refused
+/// before any of this runs, and it is refused whatever this function returns.
+/// That is the fail-closed property, and it holds by construction — there is
+/// no path on which two values are silently narrowed to one.
+///
+/// What this function buys is the *code*: a client that repeats the parameter
+/// is told `invalid_target`, which is what RFC 8707 defines and what a client
+/// can act on, instead of a `400` describing a deserializer. If the string
+/// ever stops matching, the answer degrades to that `400` — still a refusal,
+/// merely a less useful one.
+fn duplicate_resource_response(message: &str) -> Option<HttpResponse> {
+    message.contains(DUPLICATE_RESOURCE_MESSAGE).then(|| {
+        build_oauth2_error_response(&OAuth2Error::InvalidTarget(
+            "resource may be given at most once: AXIAM issues a token for one target service              (RFC 8707 section 2). Start a separate authorization for each resource"
+                .into(),
+        ))
+    })
+}
+
+/// `QueryConfig` error handler for `/oauth2/authorize` (T21.3 / D1).
+///
+/// Answers a repeated `resource` with `invalid_target`, and **delegates every
+/// other failure to actix unchanged** — `err.into()` is precisely what actix
+/// does when no handler is registered, so a malformed query that fails for any
+/// other reason gets byte-for-byte the response it got before this existed
+/// (I1).
+///
+/// The refusal is not redirected, and cannot be: this runs before the handler,
+/// so no client has been looked up and no `redirect_uri` has been validated.
+/// RFC 6749 §4.1.2.1 is explicit that an error may only be redirected once the
+/// redirect URI is known good, so a direct response is the only correct answer
+/// here.
+pub fn authorize_query_error(
+    err: actix_web::error::QueryPayloadError,
+    _req: &HttpRequest,
+) -> actix_web::Error {
+    match duplicate_resource_response(&err.to_string()) {
+        Some(body) => actix_web::error::InternalError::from_response(err, body).into(),
+        None => err.into(),
+    }
+}
+
+/// `FormConfig` error handler for `/oauth2/token` (T21.3 / D1).
+///
+/// The token endpoint's twin of [`authorize_query_error`], and it keeps the
+/// same discipline: only a repeated `resource` is answered differently, and
+/// every other body actix could not deserialize produces exactly today's
+/// response (I1). The token endpoint has never had a form error handler, so
+/// this is the first one, and it is deliberately not an opportunity to make
+/// every malformed body render as JSON — that would be a behaviour change for
+/// clients that have been getting the `text/plain` answer for years.
+pub fn token_form_error(
+    err: actix_web::error::UrlencodedError,
+    _req: &HttpRequest,
+) -> actix_web::Error {
+    match duplicate_resource_response(&err.to_string()) {
+        Some(body) => actix_web::error::InternalError::from_response(err, body).into(),
+        None => err.into(),
+    }
+}
+
 pub fn par_form_error(
     err: actix_web::error::UrlencodedError,
     _req: &HttpRequest,
 ) -> actix_web::Error {
-    let body = build_oauth2_error_response(&OAuth2Error::InvalidRequest(err.to_string()));
+    // T21.3 / D1 — a repeated `resource` gets RFC 8707's own code. Everything
+    // else keeps the `invalid_request` this endpoint has answered since B5;
+    // the body was already JSON here, so this arm changes one member of a
+    // response shape that is otherwise untouched.
+    let body = duplicate_resource_response(&err.to_string()).unwrap_or_else(|| {
+        build_oauth2_error_response(&OAuth2Error::InvalidRequest(err.to_string()))
+    });
     actix_web::error::InternalError::from_response(err, body).into()
 }
 
@@ -4494,6 +5046,9 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
                 .into(),
         ));
     }
+
+    // T21.5 — before client authentication, as at the token endpoint.
+    crate::cimd::materialise_if_cimd(&state, &http_req, tenant_id, &req.client_id).await;
 
     // One client-authentication path in the codebase, shared with the token
     // endpoint, rather than a second one to keep correct — and since SEC-093
@@ -4614,6 +5169,7 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
             ui_locales: req.ui_locales,
             claims_locales: req.claims_locales,
             dpop_jkt,
+            resource: req.resource,
         })
         .await
     {
@@ -4694,11 +5250,17 @@ pub struct EndSessionQuery {
     ),
 )]
 pub async fn end_session<C: Connection + Clone>(
+    req: HttpRequest,
     query: web::Query<EndSessionQuery>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     let q = query.into_inner();
     let tenant_id = q.tenant_id;
+    // T21.6 — `None` on the deployment-wide endpoint. Only the logout token's
+    // `iss` reads it; which session is ended and where the browser may be sent
+    // afterwards are decided exactly as before.
+    let tenant_issuer =
+        crate::middleware::tenant_path::binding_of(&req).map(|binding| binding.issuer().to_owned());
 
     // 1. Identify the session and client. The hint is a *signed* statement of
     //    both; `client_id` is an unauthenticated parameter and is only a
@@ -4729,7 +5291,14 @@ pub async fn end_session<C: Connection + Clone>(
 
     // 3. End the session, and notify the clients that were in it.
     if let (Some(session_id), Some(subject_id)) = (session_id, subject_id) {
-        dispatch_backchannel_logout(&state, tenant_id, session_id, subject_id).await;
+        dispatch_backchannel_logout(
+            &state,
+            tenant_id,
+            session_id,
+            subject_id,
+            tenant_issuer.as_deref(),
+        )
+        .await;
         // Best-effort: a session that has already expired is not an error —
         // the user asked to be logged out and they are.
         let _ = state.auth_service.logout(tenant_id, session_id).await;
@@ -4816,6 +5385,16 @@ async fn dispatch_backchannel_logout<C: Connection + Clone>(
     tenant_id: Uuid,
     session_id: Uuid,
     subject_id: Uuid,
+    // T21.6 — the issuer the end-session request arrived under. `None` on the
+    // deployment-wide endpoint, which is every request on a deployment with
+    // `AXIAM__AUTH__TENANT_ISSUER_PATHS` unset.
+    //
+    // Back-Channel Logout 1.0 §2.4 requires the logout token's `iss` to be the
+    // OP's issuer, and the relying party validates it against the `issuer` of
+    // the discovery document it registered with — so a logout token minted
+    // under the root issuer for a session established under a tenant issuer
+    // would be dropped by every conforming RP.
+    request_issuer: Option<&str>,
 ) {
     let participants = match state
         .oauth2
@@ -4857,7 +5436,9 @@ async fn dispatch_backchannel_logout<C: Connection + Clone>(
         }
     }
 
-    let issuer = state.auth_config.effective_issuer().to_string();
+    let issuer = request_issuer
+        .unwrap_or_else(|| state.auth_config.effective_issuer())
+        .to_string();
     let auth_config = state.auth_config.clone();
     let participant_ids: Vec<String> = participants.into_iter().map(|p| p.client_id).collect();
 

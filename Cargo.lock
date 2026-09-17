@@ -1143,6 +1143,7 @@ dependencies = [
  "url",
  "utoipa",
  "uuid",
+ "wiremock",
  "x509-parser 0.18.1",
 ]
 

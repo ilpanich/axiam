@@ -5,7 +5,8 @@ use crate::handle::DbHandle;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
-    CertificatePolicy, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
+    CertificatePolicy, CimdPolicy, DEFAULT_DCR_MAX_CLIENTS, DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
+    DynamicRegistrationMode, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
     OidcPolicy, OpaquePolicy, PasswordPolicy, PrivacyPolicy, SecuritySettings, SetOrgSettings,
     SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy, WebauthnPolicy,
     clamp_overrides_to_org, diff_against_org, effective_settings, settings_from_org_input,
@@ -73,6 +74,30 @@ struct SettingsRow {
     // to the value that releases nothing, and to no locale preference.
     oidc_sensitive_scopes_enabled: Option<bool>,
     oidc_default_locale: Option<String>,
+    // Dynamic client registration (V64 / T21.4). `Option` for the same reason
+    // again: a row written before the migration has no such column. Absent
+    // resolves to `disabled` with empty lists, which is what every deployment
+    // did before the endpoint existed (I1).
+    #[surreal(default)]
+    oidc_dynamic_registration: Option<String>,
+    #[surreal(default)]
+    oidc_dcr_allowed_scopes: Option<Vec<String>>,
+    #[surreal(default)]
+    oidc_dcr_allowed_redirect_hosts: Option<Vec<String>>,
+    #[surreal(default)]
+    oidc_external_client_allowed_resources: Option<Vec<String>>,
+    #[surreal(default)]
+    oidc_dcr_max_clients: Option<u32>,
+    #[surreal(default)]
+    oidc_dcr_unused_client_ttl_days: Option<u32>,
+    // Client ID metadata documents (V65 / T21.5). One column rather than
+    // nine, carrying a JSON-encoded `CimdPolicy`, for the reason the policy is
+    // nested in the first place: the nine fields are terms of one decision and
+    // are written, read and inherited together. `overrides_json` beside it is
+    // the same pattern for the same reason. Absent — a pre-V65 row — reads as
+    // the default, which is `enabled: false` (I1).
+    #[surreal(default)]
+    oidc_cimd_json: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     // JSON-encoded `TenantSettingsOverride`; `None` for org rows.
     overrides_json: Option<String>,
@@ -132,6 +157,27 @@ struct SettingsRowWithId {
     // OIDC (V57 / X7 G8).
     oidc_sensitive_scopes_enabled: Option<bool>,
     oidc_default_locale: Option<String>,
+    // Dynamic client registration (V64 / T21.4) — see `SettingsRow`.
+    #[surreal(default)]
+    oidc_dynamic_registration: Option<String>,
+    #[surreal(default)]
+    oidc_dcr_allowed_scopes: Option<Vec<String>>,
+    #[surreal(default)]
+    oidc_dcr_allowed_redirect_hosts: Option<Vec<String>>,
+    #[surreal(default)]
+    oidc_external_client_allowed_resources: Option<Vec<String>>,
+    #[surreal(default)]
+    oidc_dcr_max_clients: Option<u32>,
+    #[surreal(default)]
+    oidc_dcr_unused_client_ttl_days: Option<u32>,
+    // Client ID metadata documents (V65 / T21.5). One column rather than
+    // nine, carrying a JSON-encoded `CimdPolicy`, for the reason the policy is
+    // nested in the first place: the nine fields are terms of one decision and
+    // are written, read and inherited together. `overrides_json` beside it is
+    // the same pattern for the same reason. Absent — a pre-V65 row — reads as
+    // the default, which is `enabled: false` (I1).
+    #[surreal(default)]
+    oidc_cimd_json: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     overrides_json: Option<String>,
     // Timestamps
@@ -182,13 +228,82 @@ fn decode_webauthn(uv: Option<&str>) -> WebauthnPolicy {
 /// unreadable `oidc_sensitive_scopes_enabled` reads as `false`, so a row this
 /// build cannot understand releases nothing. There is no shape of stored data
 /// that turns the release on by accident.
-fn decode_oidc(enabled: Option<bool>, locale: Option<&str>) -> OidcPolicy {
+/// The dynamic-registration half of the OIDC policy (V64 / T21.4), as stored.
+///
+/// One struct rather than six parameters on `decode_oidc`, because the six
+/// travel together from both row types and a positional call with six
+/// same-shaped arguments is a call two of them can be transposed in.
+struct StoredDcrColumns<'a> {
+    mode: Option<&'a str>,
+    allowed_scopes: Option<Vec<String>>,
+    allowed_redirect_hosts: Option<Vec<String>>,
+    external_client_allowed_resources: Option<Vec<String>>,
+    max_clients: Option<u32>,
+    unused_client_ttl_days: Option<u32>,
+}
+
+/// Decode the V65 `oidc_cimd_json` column.
+///
+/// The fallback direction is the strict one, for the third time in this file
+/// and with the most at stake: a column this build cannot parse reads as
+/// [`CimdPolicy::default`], whose `enabled` is `false`. A stored posture that
+/// has been corrupted, truncated or written by a future build therefore stops
+/// AXIAM fetching anybody's document rather than fetching it under a policy
+/// nobody can read. The parse failure is logged because, unlike an absent
+/// column, it means something is wrong.
+fn decode_cimd(raw: Option<&str>) -> CimdPolicy {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return CimdPolicy::default();
+    };
+    serde_json::from_str::<CimdPolicy>(raw).unwrap_or_else(|e| {
+        tracing::warn!(
+            error = %e,
+            "stored oidc_cimd_json could not be parsed; client ID metadata documents are \
+             disabled for this scope until it is rewritten"
+        );
+        CimdPolicy::default()
+    })
+}
+
+fn decode_oidc(
+    enabled: Option<bool>,
+    locale: Option<&str>,
+    dcr: StoredDcrColumns<'_>,
+    cimd_json: Option<&str>,
+) -> OidcPolicy {
     OidcPolicy {
         sensitive_scopes_enabled: enabled.unwrap_or(false),
         default_locale: locale
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(str::to_owned),
+        // T21.4. The fallback direction is the strict one, as it is for
+        // `sensitive_scopes_enabled` above: an absent column is a pre-V64 row
+        // and reads as `disabled`, and an **unrecognised** value reads as
+        // `disabled` too. That second case is the one worth stating — this
+        // column gates an unauthenticated write endpoint, so a value this
+        // build cannot parse must close the endpoint rather than guess at
+        // which of the two open modes was meant. There is no shape of stored
+        // data that opens registration by accident.
+        dynamic_registration: dcr
+            .mode
+            .and_then(DynamicRegistrationMode::from_wire)
+            .unwrap_or_default(),
+        dcr_allowed_scopes: dcr.allowed_scopes.unwrap_or_default(),
+        dcr_allowed_redirect_hosts: dcr.allowed_redirect_hosts.unwrap_or_default(),
+        external_client_allowed_resources: dcr
+            .external_client_allowed_resources
+            .unwrap_or_default(),
+        // The two numbers fall back to the shipped defaults rather than to
+        // zero: a pre-V64 row made no decision about them, and `0` would read
+        // as "no self-registered client may exist" and "never sweep" — two
+        // decisions nobody took, pointing opposite ways.
+        dcr_max_clients: dcr.max_clients.unwrap_or(DEFAULT_DCR_MAX_CLIENTS),
+        dcr_unused_client_ttl_days: dcr
+            .unused_client_ttl_days
+            .unwrap_or(DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS),
+        // T21.5 — see `decode_cimd`.
+        cimd: decode_cimd(cimd_json),
     }
 }
 
@@ -265,6 +380,17 @@ impl SettingsRowWithId {
             oidc: decode_oidc(
                 self.oidc_sensitive_scopes_enabled,
                 self.oidc_default_locale.as_deref(),
+                StoredDcrColumns {
+                    mode: self.oidc_dynamic_registration.as_deref(),
+                    allowed_scopes: self.oidc_dcr_allowed_scopes.clone(),
+                    allowed_redirect_hosts: self.oidc_dcr_allowed_redirect_hosts.clone(),
+                    external_client_allowed_resources: self
+                        .oidc_external_client_allowed_resources
+                        .clone(),
+                    max_clients: self.oidc_dcr_max_clients,
+                    unused_client_ttl_days: self.oidc_dcr_unused_client_ttl_days,
+                },
+                self.oidc_cimd_json.as_deref(),
             ),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -305,6 +431,13 @@ privacy_deletion_grace_days = $privacy_deletion_grace_days, \
 webauthn_user_verification = $webauthn_user_verification, \
 oidc_sensitive_scopes_enabled = $oidc_sensitive_scopes_enabled, \
 oidc_default_locale = $oidc_default_locale, \
+oidc_dynamic_registration = $oidc_dynamic_registration, \
+oidc_dcr_allowed_scopes = $oidc_dcr_allowed_scopes, \
+oidc_dcr_allowed_redirect_hosts = $oidc_dcr_allowed_redirect_hosts, \
+oidc_external_client_allowed_resources = $oidc_external_client_allowed_resources, \
+oidc_dcr_max_clients = $oidc_dcr_max_clients, \
+oidc_dcr_unused_client_ttl_days = $oidc_dcr_unused_client_ttl_days, \
+oidc_cimd_json = $oidc_cimd_json, \
 overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
@@ -450,6 +583,43 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             "oidc_default_locale",
             BindValue::OptionStr(settings.oidc.default_locale.clone()),
         ));
+        // T21.4. Fully-resolved values, as the two OIDC bindings above: the
+        // row records a decision rather than an absence, so nothing reading it
+        // back has to decide what an empty column meant.
+        bindings.push((
+            "oidc_dynamic_registration",
+            BindValue::Str(settings.oidc.dynamic_registration.as_str().to_owned()),
+        ));
+        bindings.push((
+            "oidc_dcr_allowed_scopes",
+            BindValue::StrList(settings.oidc.dcr_allowed_scopes.clone()),
+        ));
+        bindings.push((
+            "oidc_dcr_allowed_redirect_hosts",
+            BindValue::StrList(settings.oidc.dcr_allowed_redirect_hosts.clone()),
+        ));
+        bindings.push((
+            "oidc_external_client_allowed_resources",
+            BindValue::StrList(settings.oidc.external_client_allowed_resources.clone()),
+        ));
+        bindings.push((
+            "oidc_dcr_max_clients",
+            BindValue::U32(settings.oidc.dcr_max_clients),
+        ));
+        bindings.push((
+            "oidc_dcr_unused_client_ttl_days",
+            BindValue::U32(settings.oidc.dcr_unused_client_ttl_days),
+        ));
+        // T21.5 — the nine-field posture as one JSON column, always written
+        // (never `None` on a row this build wrote), so a reader never has to
+        // distinguish "no CIMD decision" from "CIMD off": both are the
+        // serialised default. Serialisation of a plain struct of scalars and
+        // string lists cannot fail; if it somehow did, the column is written
+        // absent, which reads back as the default — the same closed posture.
+        bindings.push((
+            "oidc_cimd_json",
+            BindValue::OptionStr(serde_json::to_string(&settings.oidc.cimd).ok()),
+        ));
         bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
         bindings
     }
@@ -566,6 +736,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             builder = match value {
                 BindValue::Str(v) => builder.bind((name, v)),
                 BindValue::OptionStr(v) => builder.bind((name, v)),
+                BindValue::StrList(v) => builder.bind((name, v)),
                 BindValue::Bool(v) => builder.bind((name, v)),
                 BindValue::U32(v) => builder.bind((name, v)),
                 BindValue::U64(v) => builder.bind((name, v)),
@@ -632,6 +803,17 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             oidc: decode_oidc(
                 row.oidc_sensitive_scopes_enabled,
                 row.oidc_default_locale.as_deref(),
+                StoredDcrColumns {
+                    mode: row.oidc_dynamic_registration.as_deref(),
+                    allowed_scopes: row.oidc_dcr_allowed_scopes.clone(),
+                    allowed_redirect_hosts: row.oidc_dcr_allowed_redirect_hosts.clone(),
+                    external_client_allowed_resources: row
+                        .oidc_external_client_allowed_resources
+                        .clone(),
+                    max_clients: row.oidc_dcr_max_clients,
+                    unused_client_ttl_days: row.oidc_dcr_unused_client_ttl_days,
+                },
+                row.oidc_cimd_json.as_deref(),
             ),
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -643,6 +825,10 @@ impl<C: Connection> SurrealSettingsRepository<C> {
 enum BindValue {
     Str(String),
     OptionStr(Option<String>),
+    /// T21.4 — the three dynamic-registration allow-lists. A `Vec<String>`
+    /// rather than a JSON string so the column is an array SurrealDB can read
+    /// back as one, matching `oauth2_client.allowed_resources` next door.
+    StrList(Vec<String>),
     Bool(bool),
     U32(u32),
     U64(u64),

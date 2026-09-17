@@ -20,7 +20,7 @@ use axiam_api_rest::RateLimitConfig;
 const TEST_PEER: &str = "127.0.0.1:12345";
 
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
-use axiam_api_rest::register_api_v1_routes;
+use axiam_api_rest::register_api_v1_routes_with;
 use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
@@ -70,9 +70,26 @@ fn test_auth_config() -> AuthConfig {
         access_token_lifetime_secs: 900,
         jwt_issuer: "axiam-test".into(),
         oauth2_issuer_url: "https://localhost".into(),
+        // T21.6 — this suite runs TWICE in CI, once with per-tenant path
+        // issuers off and once with them on, and asserts the identical things
+        // in both. That is the whole of T21.6's invariant I1 for the two
+        // conformance suites: with the flag set, nothing an existing request
+        // does changes. Read from the environment because it is a deployment
+        // switch, not a per-test one — the CI job sets it for the whole run.
+        tenant_issuer_paths: tenant_issuer_paths(),
         sso_spa_origins: Vec::new(),
         ..AuthConfig::default()
     }
+}
+
+/// Whether this run has `AXIAM__AUTH__TENANT_ISSUER_PATHS` set (T21.6).
+///
+/// Anything but `true` is off, including unset, which is the default this
+/// suite has always run under.
+fn tenant_issuer_paths() -> bool {
+    std::env::var("AXIAM__AUTH__TENANT_ISSUER_PATHS")
+        .map(|v| v == "true")
+        .unwrap_or(false)
 }
 
 async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid) {
@@ -146,7 +163,16 @@ macro_rules! test_app {
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
                 .configure(|cfg| {
-                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                    // T21.6 — the same switch the config above reads, so the
+                    // routes and the issuer agree in both CI modes.
+                    register_api_v1_routes_with::<TestDb>(
+                        cfg,
+                        &RateLimitConfig::default(),
+                        axiam_api_rest::RouteOptions {
+                            tenant_issuer_paths: tenant_issuer_paths(),
+                            ..axiam_api_rest::RouteOptions::default()
+                        },
+                    )
                 }),
         )
         .await

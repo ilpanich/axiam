@@ -190,6 +190,27 @@ impl fmt::Display for ReturnToError {
 /// [`ReturnToError`], naming which member of the open-redirect family the
 /// candidate belongs to.
 pub fn validate_return_to(candidate: &str) -> Result<(), ReturnToError> {
+    validate_return_to_at(candidate, AUTHORIZE_PATH)
+}
+
+/// [`validate_return_to`], for a deployment that serves the authorization
+/// endpoint at a per-tenant path as well (T21.6).
+///
+/// `authorize_path` is the **one** path this candidate may name — the caller
+/// supplies it from the request it is answering (`/oauth2/authorize`, or
+/// `/t/{tenant_id}/oauth2/authorize`), never from the candidate itself. That is
+/// what keeps this exactly as strict as the single-path version it generalises:
+/// the set of accepted paths for any one call is still a set of one, so there
+/// is still nothing to normalise and nothing traversal can reach.
+///
+/// Every other rule — the length bound, the character class, the leading
+/// single `/`, the required query — is applied to the candidate before the
+/// path is looked at, and is the same rule in the same order.
+///
+/// # Errors
+///
+/// [`ReturnToError`], as [`validate_return_to`].
+pub fn validate_return_to_at(candidate: &str, authorize_path: &str) -> Result<(), ReturnToError> {
     if candidate.len() > MAX_RETURN_TO_LEN {
         return Err(ReturnToError::TooLong);
     }
@@ -215,10 +236,24 @@ pub fn validate_return_to(candidate: &str) -> Result<(), ReturnToError> {
     let Some((path, query)) = candidate.split_once('?') else {
         return Err(ReturnToError::NotTheAuthorizeEndpoint);
     };
-    if path != AUTHORIZE_PATH || query.is_empty() {
+    if path != authorize_path || query.is_empty() {
         return Err(ReturnToError::NotTheAuthorizeEndpoint);
     }
     Ok(())
+}
+
+/// The authorization endpoint's path under the T21.6 per-tenant issuer form.
+///
+/// Built from the typed tenant id rather than from a path segment a request
+/// carried, so the result cannot be anything but `/t/{uuid}/oauth2/authorize`.
+#[must_use]
+pub fn tenant_authorize_path(tenant_id: uuid::Uuid) -> String {
+    format!(
+        "{}{}{}",
+        axiam_auth::config::TENANT_PATH_PREFIX,
+        tenant_id,
+        AUTHORIZE_PATH
+    )
 }
 
 /// Build the `return_to` for an authorization request whose raw query string is
@@ -235,8 +270,26 @@ pub fn build_return_to(query: &str) -> Option<String> {
     if query.is_empty() {
         return None;
     }
-    let candidate = format!("{AUTHORIZE_PATH}?{query}&{LOGIN_HOP_MARKER}=1");
-    validate_return_to(&candidate).ok()?;
+    build_return_to_at(AUTHORIZE_PATH, query)
+}
+
+/// [`build_return_to`], for an authorization request that arrived at
+/// `authorize_path` (T21.6).
+///
+/// The caller passes the path of the request it is answering, so the browser
+/// comes back to the endpoint it left — which on a per-tenant path is what
+/// makes the `iss` of the resulting authorization response the tenant issuer
+/// the client discovered, rather than the deployment root.
+///
+/// `None` on the same two conditions [`build_return_to`] answers `None` on: an
+/// empty query, and a result this module would not accept back.
+#[must_use]
+pub fn build_return_to_at(authorize_path: &str, query: &str) -> Option<String> {
+    if query.is_empty() {
+        return None;
+    }
+    let candidate = format!("{authorize_path}?{query}&{LOGIN_HOP_MARKER}=1");
+    validate_return_to_at(&candidate, authorize_path).ok()?;
     Some(candidate)
 }
 
@@ -311,8 +364,18 @@ pub fn build_consent_return_to(query: &str) -> Option<String> {
     if query.is_empty() {
         return None;
     }
-    let candidate = format!("{AUTHORIZE_PATH}?{query}&{CONSENT_HOP_MARKER}=1");
-    validate_return_to(&candidate).ok()?;
+    build_consent_return_to_at(AUTHORIZE_PATH, query)
+}
+
+/// [`build_consent_return_to`], for an authorization request that arrived at
+/// `authorize_path` (T21.6). See [`build_return_to_at`].
+#[must_use]
+pub fn build_consent_return_to_at(authorize_path: &str, query: &str) -> Option<String> {
+    if query.is_empty() {
+        return None;
+    }
+    let candidate = format!("{authorize_path}?{query}&{CONSENT_HOP_MARKER}=1");
+    validate_return_to_at(&candidate, authorize_path).ok()?;
     Some(candidate)
 }
 
@@ -1029,5 +1092,112 @@ mod tests {
             "presence is what the guard reads; a caller who sent 0 has still been here"
         );
         assert!(is_return_leg(Some("")));
+    }
+
+    // -----------------------------------------------------------------------
+    // T21.6 — the tenant-path form of the authorization endpoint
+    // -----------------------------------------------------------------------
+
+    const T21_6_TENANT: &str = "11111111-2222-3333-4444-555555555555";
+
+    fn t21_6_path() -> String {
+        tenant_authorize_path(uuid::Uuid::parse_str(T21_6_TENANT).unwrap())
+    }
+
+    #[test]
+    fn the_tenant_authorize_path_is_the_derived_one() {
+        assert_eq!(t21_6_path(), format!("/t/{T21_6_TENANT}/oauth2/authorize"));
+    }
+
+    /// The generalisation is "one path per call", not "a set of paths". A
+    /// candidate is still measured against exactly one expected path, so there
+    /// is still nothing to normalise and traversal still has nothing to reach.
+    #[test]
+    fn a_return_to_is_measured_against_exactly_one_path() {
+        let tenant = t21_6_path();
+        let on_tenant = format!("{tenant}?client_id=oa_1");
+
+        assert!(validate_return_to_at(&on_tenant, &tenant).is_ok());
+        // The root form is not accepted when the tenant path is expected, and
+        // vice versa. A hop that arrived on one path may not send the browser
+        // to the other — that is how the RFC 9207 `iss` of the return leg would
+        // come to disagree with the issuer the client discovered.
+        assert_eq!(
+            validate_return_to_at(&on_tenant, AUTHORIZE_PATH),
+            Err(ReturnToError::NotTheAuthorizeEndpoint)
+        );
+        assert_eq!(
+            validate_return_to_at("/oauth2/authorize?client_id=oa_1", &tenant),
+            Err(ReturnToError::NotTheAuthorizeEndpoint)
+        );
+    }
+
+    /// Every member of the open-redirect family is refused on the tenant path
+    /// too — the path check is the LAST rule, and the four before it are the
+    /// same four.
+    #[test]
+    fn the_open_redirect_family_is_refused_on_the_tenant_path_too() {
+        let tenant = t21_6_path();
+        for (candidate, expected) in [
+            (
+                "https://evil.example/t/x/oauth2/authorize?a=1",
+                ReturnToError::NotAPath,
+            ),
+            (
+                "//evil.example/oauth2/authorize?a=1",
+                ReturnToError::SchemeRelative,
+            ),
+            (
+                "/\\evil.example/oauth2/authorize?a=1",
+                ReturnToError::IllegalCharacter,
+            ),
+            (
+                "/t/11111111-2222-3333-4444-555555555555/oauth2/authorize/../../admin?a=1",
+                ReturnToError::NotTheAuthorizeEndpoint,
+            ),
+            (
+                "/t/11111111-2222-3333-4444-555555555555/oauth2/authorize",
+                ReturnToError::NotTheAuthorizeEndpoint,
+            ),
+        ] {
+            assert_eq!(
+                validate_return_to_at(candidate, &tenant),
+                Err(expected),
+                "{candidate}"
+            );
+        }
+    }
+
+    /// The property that makes the two directions one predicate: what the
+    /// builder emits is what the validator accepts, on either path.
+    #[test]
+    fn what_the_tenant_builder_emits_the_tenant_validator_accepts() {
+        let tenant = t21_6_path();
+        let built = build_return_to_at(&tenant, "client_id=oa_1&state=abc").expect("a return_to");
+        assert!(built.starts_with(&tenant));
+        assert!(built.contains(LOGIN_HOP_MARKER));
+        assert!(validate_return_to_at(&built, &tenant).is_ok());
+
+        let consent = build_consent_return_to_at(&tenant, "client_id=oa_1&scope=address")
+            .expect("a return_to");
+        assert!(consent.contains(CONSENT_HOP_MARKER));
+        assert!(validate_return_to_at(&consent, &tenant).is_ok());
+    }
+
+    /// I1: the un-suffixed builders and validator are the tenant ones told to
+    /// expect the root path, and answer exactly what they answered before.
+    #[test]
+    fn the_root_form_is_unchanged() {
+        let built = build_return_to("client_id=oa_1").expect("a return_to");
+        assert_eq!(
+            built,
+            format!("{AUTHORIZE_PATH}?client_id=oa_1&{LOGIN_HOP_MARKER}=1")
+        );
+        assert!(validate_return_to(&built).is_ok());
+        assert_eq!(
+            validate_return_to(&format!("{}?a=1", t21_6_path())),
+            Err(ReturnToError::NotTheAuthorizeEndpoint),
+            "the un-suffixed validator still accepts only the root path"
+        );
     }
 }

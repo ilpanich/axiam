@@ -6,8 +6,8 @@ use axiam_auth::client_secret::{self, ClientSecretVerdict};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
     IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_access_token_for_client,
-    issue_client_credentials_token_enriched, issue_id_token,
-    issue_service_account_client_credentials_token_enriched, validate_access_token,
+    issue_client_credentials_token_for_resource, issue_id_token,
+    issue_service_account_client_credentials_token_enriched,
 };
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
@@ -261,6 +261,21 @@ pub struct IntrospectionResponse {
     /// as unbound — the exact failure the binding exists to prevent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cnf: Option<axiam_auth::token::CnfClaim>,
+    /// RFC 7662 §2.2 `aud` — who the token is for (T21.3).
+    ///
+    /// Echoed from the token, like `permissions` and `cnf`. RFC 7662 lists it
+    /// as an optional top-level member, and it stopped being optional in
+    /// practice the moment RFC 8707 let a token be minted for a resource
+    /// server that is not AXIAM: such a server's whole audience check is
+    /// "is this token for me", and an introspecting one has no other way to
+    /// ask.
+    ///
+    /// `None` on a refresh token (an opaque server-stored value with no
+    /// audience) and on a pre-Phase-4 access token that carries no `aud`.
+    /// Absent rather than `""`, so a resource server cannot read "no audience"
+    /// as "an audience that is not mine" or the other way round.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
 }
 
 /// What the token endpoint knows about the **connection** a request arrived
@@ -329,6 +344,20 @@ pub struct TokenRequestContext {
     /// is authenticated" — see
     /// [`crate::private_key_jwt::unverified_client_id`].
     pub assertion_client_id: Option<String>,
+    /// T21.6 — the issuer identifier this request arrived under, when it
+    /// arrived on a per-tenant path (`{root}/t/{tenant_id}`).
+    ///
+    /// `None` on every request to the deployment-wide `/oauth2/token`, which
+    /// is every request on a deployment that has not set
+    /// `AXIAM__AUTH__TENANT_ISSUER_PATHS` — so `Default` reproduces today's
+    /// behaviour exactly, and so does every test that builds a context
+    /// without naming this field.
+    ///
+    /// It belongs on the *connection* context rather than on `TokenRequest`
+    /// for the same reason the certificate does: it is a property of where the
+    /// request arrived, never of what its body said. A client cannot put it in
+    /// a form field, which is what keeps `iss` from being caller-chosen.
+    pub issuer: Option<String>,
 }
 
 /// Which client id a token request is for, given a body parameter that may be
@@ -627,6 +656,29 @@ where
             auth_config,
             refresh_token_lifetime_secs,
             reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
+        }
+    }
+
+    /// The config every token minted for **this** request is signed under
+    /// (T21.6).
+    ///
+    /// `Borrowed` — and therefore free, and therefore byte-identical to the
+    /// code that predates tenant paths — for every request that did not arrive
+    /// on a `/t/{tenant_id}` path. `Owned` for one that did, carrying the
+    /// tenant issuer so that the access token's `iss`, the ID token's `iss`
+    /// and the discovery document a client read all say the same thing, which
+    /// OIDC Core §2 requires and RFC 9207 makes a client check.
+    ///
+    /// Only *minting* reads this. Every validation decision keeps reading
+    /// `self.auth_config`, whose `root_issuer` is the deployment's and cannot
+    /// be moved by a request.
+    fn minting_config<'a>(&'a self, issuer: Option<&str>) -> std::borrow::Cow<'a, AuthConfig> {
+        match issuer {
+            None => std::borrow::Cow::Borrowed(&self.auth_config),
+            Some(issuer) => std::borrow::Cow::Owned(AuthConfig {
+                request_issuer: Some(issuer.to_owned()),
+                ..self.auth_config.clone()
+            }),
         }
     }
 
@@ -1262,6 +1314,11 @@ where
         client_secret: &str,
         requested_scope: Option<&str>,
         started: std::time::Instant,
+        // T21.6 — the tenant issuer, when this request arrived on a tenant
+        // path. Passed rather than read from a context because this branch
+        // takes no `TokenRequestContext`: RFC 6749 §4.4 client credentials for
+        // an `sa_…` id authenticate from the body alone.
+        issuer: Option<&str>,
     ) -> Result<TokenResponse, OAuth2Error> {
         let t_client_lookup = std::time::Instant::now();
         let sa = self
@@ -1356,7 +1413,7 @@ where
             tenant_id,
             tenant.organization_id,
             &[],
-            &self.auth_config,
+            &self.minting_config(issuer),
             ext,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
@@ -1825,13 +1882,34 @@ where
         // Core §5.5 would have made twelve — the builder exists so that a
         // capability only this path needs does not become an argument every
         // caller has to pass `None` for.
+        // T21.3 / RFC 8707 §2 — the audience is the resource this
+        // authorization was issued for, which the code carries. The token
+        // request may repeat it or omit it; naming a different one is
+        // `invalid_target`, because a grant's audience is decided when the
+        // grant is made and not when the code is spent
+        // (`crate::resource::resolve_bound`).
+        //
+        // The client's `allowed_resources` is deliberately NOT re-consulted
+        // here: it was consulted at the authorization endpoint, and asking
+        // again would let a registration edited in the fifteen seconds since
+        // change what an outstanding code means.
+        //
+        // `None` for every code issued without a `resource`, and
+        // `unwrap_or(AUD_USER)` below then mints exactly the token this grant
+        // has always minted (I2).
+        let resource =
+            crate::resource::resolve_bound(auth_code.resource.as_deref(), req.resource.as_deref())?;
+        let audience = resource
+            .as_deref()
+            .unwrap_or(axiam_auth::token::AUD_USER)
+            .to_owned();
         let access_token = axiam_auth::token::AccessTokenSpec::user(
             auth_code.user_id,
             tenant_id,
             tenant.organization_id,
             uuid::Uuid::new_v4().to_string(),
         )
-        .aud(axiam_auth::token::AUD_USER)
+        .aud(&audience)
         .scopes(&auth_code.scopes)
         .cnf(cnf)
         .ext(ext)
@@ -1846,7 +1924,7 @@ where
         // Empty for every grant that sent no `claims` parameter, and an empty
         // list leaves the token byte-identical to what it was before §5.5.
         .requested_userinfo_claims(&auth_code.requested_userinfo_claims)
-        .issue(&self.auth_config)
+        .issue(&self.minting_config(ctx.issuer.as_deref()))
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
         // Only issue a refresh token when the client is authorized
@@ -1871,6 +1949,12 @@ where
                     // client's second token, fifteen minutes later, releases
                     // nothing it consented to and it must re-authorize.
                     requested_userinfo_claims: auth_code.requested_userinfo_claims.clone(),
+                    // T21.3 / RFC 8707 — the target travels with the grant,
+                    // so a refresh re-mints the SAME audience. Without this a
+                    // resource-bound token would silently become an
+                    // `axiam:user` token fifteen minutes later, which is a
+                    // widening performed by the server.
+                    resource: resource.clone(),
                     expires_at: refresh_expires,
                 })
                 .await
@@ -1903,7 +1987,7 @@ where
                     auth_code.nonce.as_deref(),
                     Some(&user.username),
                     &auth_code.scopes,
-                    &self.auth_config,
+                    &self.minting_config(ctx.issuer.as_deref()),
                     auth_code.session_id,
                     &evidence,
                 )
@@ -2020,6 +2104,7 @@ where
                     client_secret,
                     req.scope.as_deref(),
                     started,
+                    ctx.issuer.as_deref(),
                 )
                 .await;
         }
@@ -2137,14 +2222,26 @@ where
         let ext = self
             .pre_issue_ext_claims(tenant_id, client_id, "oauth2_client", client_id, &scopes)
             .await?;
-        let access_token = issue_client_credentials_token_enriched(
+        // T21.3 / RFC 8707 §2 — the machine grant is the one grant with no
+        // earlier credential to inherit a target from, so this is where the
+        // client's allow-list is consulted (`resolve_requested`) rather than a
+        // stored binding (`resolve_bound`). There is no end user to widen
+        // anything on behalf of: the client is asking for a token for itself,
+        // and what bounds it is its own registration.
+        //
+        // Absent — which is every client-credentials request in every
+        // deployment today — mints `axiam:m2m`, byte for byte (I2).
+        let resource =
+            crate::resource::resolve_requested(&client.allowed_resources, req.resource.as_deref())?;
+        let access_token = issue_client_credentials_token_for_resource(
             client_id,
             tenant_id,
             tenant.organization_id,
             &scopes,
-            &self.auth_config,
+            &self.minting_config(ctx.issuer.as_deref()),
             cnf,
             ext,
+            resource.as_deref(),
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
@@ -2360,6 +2457,19 @@ where
                 &stored.scopes,
             )
             .await?;
+        // T21.3 / RFC 8707 §2 — **the rule that stops a token being widened by
+        // refreshing it.** The refresh token carries the target the grant was
+        // made for; this request may repeat it or omit it, and anything else —
+        // a different resource, or a resource on a grant that has none — is
+        // `invalid_target`.
+        //
+        // `resolve_bound` and not `resolve_requested`, deliberately: the
+        // client's allow-list is not consulted here at all. A client whose
+        // registration gained a resource yesterday must not be able to
+        // re-address an outstanding refresh token at it today, because nobody
+        // asked the end user about that resource when the grant was made.
+        let resource =
+            crate::resource::resolve_bound(stored.resource.as_deref(), req.resource.as_deref())?;
         let access_token = if let Some(user_id) = stored.user_id {
             // W7 — carried across the rotation, because the grant it names is
             // the same grant. A refreshed token that lost the claim would lose
@@ -2371,9 +2481,12 @@ where
                 tenant_id,
                 tenant.organization_id,
                 &stored.scopes,
-                &self.auth_config,
+                &self.minting_config(ctx.issuer.as_deref()),
                 uuid::Uuid::new_v4().to_string(),
-                axiam_auth::token::AUD_USER,
+                // RFC 8707 — the SAME audience the grant was issued for.
+                // `None` for every grant that named no resource, which mints
+                // `axiam:user` exactly as this path always did (I2).
+                resource.as_deref().unwrap_or(axiam_auth::token::AUD_USER),
                 cnf,
                 ext,
                 Some(client_id),
@@ -2392,14 +2505,16 @@ where
         } else {
             // Client-credentials-originated refresh (shouldn't normally
             // happen, but handle gracefully)
-            issue_client_credentials_token_enriched(
+            issue_client_credentials_token_for_resource(
                 client_id,
                 tenant_id,
                 tenant.organization_id,
                 &stored.scopes,
-                &self.auth_config,
+                &self.minting_config(ctx.issuer.as_deref()),
                 cnf,
                 ext,
+                // RFC 8707 — carried across the rotation on this branch too.
+                resource.as_deref(),
             )
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         };
@@ -2430,6 +2545,11 @@ where
                 // through `claims_request::RELEASABLE` at the authorization
                 // endpoint, and UserInfo re-asks every gate on every call.
                 requested_userinfo_claims: stored.requested_userinfo_claims.clone(),
+                // T21.3 / RFC 8707 — and the target, by exactly the same rule.
+                // The successor is bound to the resource its predecessor was
+                // bound to, so an unbounded chain of refreshes can never
+                // reach an audience the original grant did not name.
+                resource: resource.clone(),
                 expires_at: refresh_expires,
             })
             .await
@@ -2532,7 +2652,7 @@ where
                         None,
                         Some(&user.username),
                         &stored.scopes,
-                        &self.auth_config,
+                        &self.minting_config(ctx.issuer.as_deref()),
                         // The same session the original login created: an RP
                         // that only ever sees refreshed ID tokens must still
                         // be able to match a logout token to its session.
@@ -2656,9 +2776,29 @@ where
             ));
         }
 
-        // First try: decode as JWT access token
-        if let Ok(validated) = validate_access_token(&req.token, &self.auth_config) {
-            let claims = &validated.0;
+        // First try: decode as JWT access token.
+        //
+        // T21.3 — `decode_access_token_any_audience`, NOT
+        // `validate_access_token`. The two differ in exactly one respect: this
+        // one does not pin `aud` to AXIAM's own two audiences. Everything else
+        // a token must satisfy — the EdDSA signature, the issuer, the expiry,
+        // the tenant check two lines below — is unchanged.
+        //
+        // This is the one place in the codebase where that is the right call,
+        // and I3 is why. AXIAM's own extractors and `validate_access_token`
+        // stay pinned, so a token minted for an MCP server is refused at
+        // `/users/me` and at `CheckAccess`. Introspection is not admitting a
+        // caller, it is **describing a token to an already-authenticated
+        // resource server** (RFC 7662), and a server that cannot be told what
+        // a token's audience is cannot perform the audience check RFC 8707
+        // exists to make possible. Refusing here would have made every
+        // resource-bound token look *inactive* — the one answer that is
+        // actively misleading, because `active: false` means "revoked,
+        // expired or never issued" and this token is none of those.
+        if let Ok(claims) =
+            axiam_auth::token::decode_access_token_any_audience(&req.token, &self.auth_config)
+        {
+            let claims = &claims;
 
             // Verify the token belongs to this tenant to prevent
             // cross-tenant introspection / metadata leaks.
@@ -2687,6 +2827,10 @@ where
                 // locally learns from this field, and only from this field,
                 // that the token in its hand is not a bearer token.
                 cnf: claims.cnf.clone(),
+                // RFC 7662 §2.2 / RFC 8707 — echoed for the same reason, and
+                // the reason this endpoint decodes without pinning the
+                // audience in the first place.
+                aud: claims.aud.clone(),
             });
         }
 
@@ -2731,6 +2875,13 @@ where
                 // mints is re-derived from that fresh authentication (see
                 // `handle_refresh_token`).
                 cnf: None,
+                // A refresh token is not addressed at anybody: it is redeemed
+                // at AXIAM's token endpoint and nowhere else. The resource it
+                // is *bound* to is deliberately not reported — it is not this
+                // token's audience, it is the audience of a token this one
+                // will mint, and RFC 7662's `aud` describes the token being
+                // introspected.
+                aud: None,
             });
         }
 
@@ -2843,6 +2994,7 @@ mod tests {
             expires_at: Utc::now(),
             used: false,
             created_at: Utc::now(),
+            resource: None,
         }
     }
 

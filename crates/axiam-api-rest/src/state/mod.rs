@@ -64,21 +64,23 @@ use axiam_db::{
     SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
     SurrealMdsRepository, SurrealNotificationRuleRepository, SurrealOAuth2ClientRepository,
-    SurrealOpaqueCredentialRepository, SurrealOpaqueServerSetupRepository,
-    SurrealOrganizationRepository, SurrealPasswordHistoryRepository, SurrealPermissionRepository,
-    SurrealProofReplayRepository, SurrealPushedAuthRequestRepository,
-    SurrealRateLimitBucketRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScimTokenRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealSsoHandoffCodeRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
-    SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
+    SurrealOAuth2RegistrationTokenRepository, SurrealOpaqueCredentialRepository,
+    SurrealOpaqueServerSetupRepository, SurrealOrganizationRepository,
+    SurrealPasswordHistoryRepository, SurrealPermissionRepository, SurrealProofReplayRepository,
+    SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository, SurrealReactorRepository,
+    SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScimTokenRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
+    SurrealSessionClientRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealSsoHandoffCodeRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealWebauthnAttestationPolicyRepository, SurrealWebauthnCredentialRepository,
+    SurrealWebhookRepository,
 };
 use axiam_federation::jwks_cache::JwksCache;
 use axiam_federation::oidc::OidcFederationService;
 #[cfg(feature = "saml")]
 use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
+use axiam_oauth2::cimd::ClientMetadataCache;
 use axiam_oauth2::device_service::DeviceAuthorizationService;
 use axiam_oauth2::jwks_cache::{
     JwksCache as Oauth2JwksCache, JwksCacheConfig as Oauth2JwksCacheConfig,
@@ -312,6 +314,11 @@ pub struct AppState<C: Connection + Clone> {
     pub refresh_token_repo: SurrealRefreshTokenRepository<C>,
     pub password_history_repo: SurrealPasswordHistoryRepository<C>,
     pub oauth2_client_repo: SurrealOAuth2ClientRepository<C>,
+    /// RFC 7591 initial access tokens (T21.4). Read by the unauthenticated
+    /// `POST /oauth2/register` when the tenant runs the protected registration
+    /// profile, and written by the `/oauth2-clients/registration-tokens`
+    /// admin endpoints.
+    pub oauth2_registration_token_repo: SurrealOAuth2RegistrationTokenRepository<C>,
     pub settings_repo: SurrealSettingsRepository<C>,
     /// Stored OPAQUE registration records. Read by
     /// `/auth/opaque/login/start` and written by every path that legitimately
@@ -699,6 +706,9 @@ impl<C: Connection + Clone> AppState<C> {
             refresh_token_repo,
             password_history_repo,
             oauth2_client_repo,
+            oauth2_registration_token_repo: SurrealOAuth2RegistrationTokenRepository::new(
+                db.clone(),
+            ),
             settings_repo: SurrealSettingsRepository::new(db.clone()),
             opaque_credential_repo: SurrealOpaqueCredentialRepository::new(db.clone()),
             opaque_setup_repo: SurrealOpaqueServerSetupRepository::new(db.clone()),
@@ -780,6 +790,9 @@ impl<C: Connection + Clone> AppState<C> {
                 proof_replay_repo,
                 oauth2_jwks_cache: Arc::new(Oauth2JwksCache::new()),
                 oauth2_jwks_cache_config: Oauth2JwksCacheConfig::default(),
+                // T21.5 — empty; it fills only for a tenant that enables
+                // client ID metadata documents.
+                cimd_cache: axiam_oauth2::cimd::ClientMetadataCache::new(),
             },
             federation: bundles::FederationState {
                 federation_config_repo: federation_config_repo.clone(),

@@ -109,12 +109,58 @@ fn matches_public_allowlist(path: &str, entries: &[&str]) -> bool {
     false
 }
 
+/// Strip a T21.6 `/t/{uuid}/` prefix, if `path` carries one.
+///
+/// `Some("/oauth2/token")` for `/t/<uuid>/oauth2/token`; `None` for every path
+/// that is not of that shape — including `/t/`, `/t/not-a-uuid/…` and
+/// `/t/<uuid>` with nothing after it.
+///
+/// # Why the allow-list is not taught a third matching form
+///
+/// A tenant path carries a UUID in the **middle**, so it is neither one of the
+/// allow-list's exact entries nor one of its trailing-`*` prefixes. Adding a
+/// `{}`-placeholder form would have meant writing every one of the eleven
+/// endpoints under the scope twice, in two files that must agree.
+///
+/// Stripping instead states the rule that is actually true: **a route under
+/// `/t/{tenant_id}` is public exactly when the same route at the deployment
+/// root is public**, because it *is* the same route — the scope re-bases the
+/// existing handlers, it does not add any. The two answers cannot drift,
+/// because there is only one list; and mounting an authenticated route under
+/// the tenant scope does not silently make it public, because it is not public
+/// at the root either. The alternative that was rejected — a blanket `/t/*`
+/// prefix entry — has exactly that failure mode.
+///
+/// The UUID parse is what keeps this from being a traversal primitive:
+/// `/t/../oauth2/token` and `/t/%2e%2e/oauth2/token` answer `None`, and
+/// `normalize_for_public_check` has already refused a literal `..` segment
+/// before this is reached.
+fn strip_tenant_path_prefix(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix(axiam_auth::config::TENANT_PATH_PREFIX)?;
+    let (tenant, remainder) = rest.split_once('/')?;
+    uuid::Uuid::parse_str(tenant).ok()?;
+    // `split_once` consumed the separator; the remainder must be a path.
+    if remainder.is_empty() {
+        return None;
+    }
+    Some(&rest[tenant.len()..])
+}
+
 /// Returns `true` if `path` is in the public-path allowlist and should be
 /// allowed through without credential validation.
 ///
-/// See [`matches_public_allowlist`] for the matching rules.
+/// See [`matches_public_allowlist`] for the matching rules and
+/// [`strip_tenant_path_prefix`] for how a T21.6 tenant path is matched against
+/// the same list.
 pub fn is_public_path(path: &str) -> bool {
-    matches_public_allowlist(path, PUBLIC_PATHS)
+    if matches_public_allowlist(path, PUBLIC_PATHS) {
+        return true;
+    }
+    // T21.6. Inert on a deployment with `AXIAM__AUTH__TENANT_ISSUER_PATHS`
+    // unset: nothing is mounted under `/t/`, no scope carrying
+    // `AuthzMiddleware` matches such a path, and so this arm is never reached
+    // for a request that exists.
+    strip_tenant_path_prefix(path).is_some_and(|rest| matches_public_allowlist(rest, PUBLIC_PATHS))
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +267,11 @@ mod tests {
         assert!(is_public_path("/.well-known/openid-configuration"));
         assert!(is_public_path("/.well-known/oauth-authorization-server"));
         assert!(is_public_path("/oauth2/token"));
+        // T21.4 — RFC 7591 registration. Public in the middleware's sense:
+        // the caller is a client that does not exist yet, so there is nothing
+        // it could authenticate as. The tenant's policy decides whether the
+        // endpoint does anything.
+        assert!(is_public_path("/oauth2/register"));
         assert!(is_public_path("/api/docs/openapi.json")); // prefix match via /api/docs/*
         assert!(is_public_path("/api/v1/admin/bootstrap"));
     }
@@ -241,6 +292,13 @@ mod tests {
         assert!(!is_public_path("/api/v1/roles"));
         assert!(!is_public_path("/api/v1/permissions"));
         assert!(!is_public_path("/api/v1/settings"));
+        // T21.4 — the endpoint that MINTS an initial access token is an
+        // administrative one and must stay behind the middleware, even though
+        // the endpoint that SPENDS one does not. Asserted because the two live
+        // in one handler module and share a name.
+        assert!(!is_public_path(
+            "/api/v1/oauth2-clients/registration-tokens"
+        ));
     }
 
     // -----------------------------------------------------------------
@@ -327,5 +385,92 @@ mod tests {
         assert!(is_public_path("/health"));
         assert!(is_public_path("/api/v1/auth/login"));
         assert!(!is_public_path("/health/"));
+    }
+
+    // -----------------------------------------------------------------------
+    // T21.6 — a UUID in the middle of a path
+    // -----------------------------------------------------------------------
+
+    use super::strip_tenant_path_prefix;
+
+    const T21_6_TENANT: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// The rule, stated as a property: a route under `/t/{tenant_id}` is public
+    /// exactly when the same route at the deployment root is public. Nothing
+    /// becomes public by being reachable under a tenant path.
+    #[test]
+    fn a_tenant_path_is_public_exactly_when_its_root_twin_is() {
+        for (root, expected) in [
+            ("/oauth2/token", true),
+            ("/oauth2/authorize", true),
+            ("/oauth2/jwks", true),
+            ("/.well-known/openid-configuration", true),
+            // Not public at the root, and therefore not public under a tenant
+            // path either — this is the assertion a blanket `/t/*` entry would
+            // have failed.
+            ("/api/v1/users", false),
+            ("/api/v1/oauth2-clients", false),
+            ("/uma2/perm", false),
+        ] {
+            assert_eq!(is_public_path(root), expected, "root {root}");
+            assert_eq!(
+                is_public_path(&format!("/t/{T21_6_TENANT}{root}")),
+                expected,
+                "tenant path /t/…{root}"
+            );
+        }
+    }
+
+    /// The UUID parse is what keeps the strip from being a traversal primitive.
+    #[test]
+    fn only_a_uuid_segment_is_stripped() {
+        assert_eq!(
+            strip_tenant_path_prefix(&format!("/t/{T21_6_TENANT}/oauth2/token")),
+            Some("/oauth2/token")
+        );
+        for not_a_tenant_path in [
+            "/t/admin/oauth2/token",
+            "/t/../oauth2/token",
+            "/t//oauth2/token",
+            "/t/",
+            "/t",
+            &format!("/t/{T21_6_TENANT}"),
+            &format!("/tt/{T21_6_TENANT}/oauth2/token"),
+            "/oauth2/token",
+        ] {
+            assert_eq!(
+                strip_tenant_path_prefix(not_a_tenant_path),
+                None,
+                "{not_a_tenant_path} must not be read as a tenant path"
+            );
+        }
+    }
+
+    /// The `..` guard runs before the strip, so a traversal spelling fails
+    /// closed twice rather than once.
+    #[test]
+    fn a_traversal_segment_is_still_never_public() {
+        assert!(!is_public_path(&format!(
+            "/t/{T21_6_TENANT}/../api/v1/users"
+        )));
+        assert!(!is_public_path(&format!(
+            "/t/{T21_6_TENANT}/oauth2/../../api/v1/users"
+        )));
+    }
+
+    /// The two root-level RFC 8414 §3.1 forms, which ARE spellable as
+    /// segment-boundary prefixes — and the near-miss the boundary rule exists
+    /// to refuse.
+    #[test]
+    fn the_root_level_tenant_discovery_prefixes_match_only_at_a_boundary() {
+        assert!(is_public_path(&format!(
+            "/.well-known/openid-configuration/t/{T21_6_TENANT}"
+        )));
+        assert!(is_public_path(&format!(
+            "/.well-known/oauth-authorization-server/t/{T21_6_TENANT}"
+        )));
+        assert!(!is_public_path(
+            "/.well-known/openid-configuration/tenants/secret"
+        ));
     }
 }

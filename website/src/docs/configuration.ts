@@ -275,6 +275,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "0b5f4d2e-6c31-4a8e-9f77-2d1c8a4b6e90",
           ],
           [
+            "AXIAM__AUTH__TENANT_ISSUER_PATHS",
+            "Serve a second, query-free issuer identifier per tenant: `{root}/t/{tenant_id}`. Default `false`. RFC 8414 §2 forbids a query component in an issuer, so the deployment-wide issuer plus `?tenant_id=` cannot be published as one tenant's issuer — which is what an MCP server needs to put in the `authorization_servers` of its RFC 9728 metadata, and what an MCP client turns into a discovery URL. With it set, discovery is served at all three conventional forms (RFC 8414 §3.1 insertion at both well-known paths, and the OpenID Connect Discovery §4 append), each returning the identical document whose endpoints carry no `tenant_id`; an Actix scope re-bases the existing OAuth2 endpoints without duplicating a handler; and the `iss` of the access token, the ID token, the RFC 9207 response parameter and the logout token is the tenant issuer. One JWKS signs every issuer, so a token's tenant is checked twice — its `iss` must agree with its `tenant_id` claim, and both must be the tenant the path named. The path is derived, never configured: the root issuer must be a bare URL and the server refuses to start with this set and no root issuer. With it off nothing is mounted and the `?tenant_id=` documents are byte-identical. Turn it on when one deployment fronts MCP servers for more than one tenant; a single-tenant deployment wants `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` instead.",
+            "true",
+          ],
+          [
             "AXIAM__AUTH__REVOCATION_FEED_ENABLED",
             "Publish `GET /oauth2/revocations` — the hashed ids of sessions revoked within the last access-token lifetime, so an SDK route guard that polls it rejects a revoked session within one poll interval instead of within one token lifetime. Default `false`, and with it off the route is not mounted and no row is written. The document carries base64url SHA-256 hashes and nothing else: never a session id, a subject or a tenant. It is a narrowing of a residual window and never a control — a guard that cannot fetch it behaves exactly as it does without it, and the token itself still decides. Turn it on where sign-out has to take effect faster than fifteen minutes and routing every authorization decision through gRPC introspection is too expensive.",
             "true",
@@ -378,6 +383,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "120",
           ],
           ["AXIAM__RATE_LIMIT__PAR_PER_MIN", "Max /oauth2/par per minute.", "120"],
+          [
+            "AXIAM__RATE_LIMIT__DCR_PER_MIN",
+            "Max RFC 7591 dynamic client registrations per minute, per IP. The smallest limit here, because it is the only unauthenticated write endpoint: every accepted request allocates a client row against the tenant's dcr_max_clients. Sized for one person registering one MCP client once, with room for a retry \u2014 not for throughput. Never client-keyed, since obtaining a client identity is what the call is for.",
+            "5",
+          ],
           [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
             "Max /oauth2/end_session per minute. Never moved by a profile preset.",

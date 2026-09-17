@@ -903,6 +903,51 @@ fn cached_identity(req: &HttpRequest) -> Result<Option<Arc<CachedUserIdentity>>,
     Ok(Some(cached))
 }
 
+/// Refuse a principal whose tenant is not the tenant the path named (T21.6).
+///
+/// Inert on every request that did not arrive through the `/t/{tenant_id}`
+/// scope, which is every request on a deployment with
+/// `AXIAM__AUTH__TENANT_ISSUER_PATHS` unset: there is no binding to read, so
+/// this returns `Ok` without looking at anything.
+///
+/// # Why this is here and not in the scope middleware
+///
+/// The middleware cannot decode a token — the key, the audience rules and the
+/// sender-constraint check all live behind this extractor — so the only place
+/// that knows both "which tenant the path named" and "which tenant the caller
+/// proved" is here, after validation. Putting it at the funnel every
+/// `AuthenticatedUser` passes through means a route mounted under the tenant
+/// scope later inherits the check rather than having to remember it.
+///
+/// # Why a path selector needs a check at all
+///
+/// The JWKS is shared: one key set signs every tenant's tokens. A token minted
+/// for tenant `A` therefore verifies perfectly on a request addressed to
+/// tenant `B` — the signature says nothing about which tenant was meant.
+/// `decode_access_token` already refuses an `iss` that disagrees with the
+/// `tenant_id` claim, so the token is internally coherent; this is the other
+/// half, that the token's tenant is the one the *request* addressed. Without
+/// it, a path-shaped tenant selector would be a selector the caller and the
+/// token could disagree about, which on a multi-tenant authorization server is
+/// the whole ball game.
+fn enforce_tenant_path_binding(
+    req: &HttpRequest,
+    principal_tenant_id: Uuid,
+) -> Result<(), AxiamApiError> {
+    let Some(binding) = crate::middleware::tenant_path::binding_of(req) else {
+        return Ok(());
+    };
+    if binding.tenant_id == principal_tenant_id {
+        return Ok(());
+    }
+    // The same refusal an unauthenticated caller gets, and deliberately so: a
+    // distinguishable answer here would tell the holder of a tenant-`A` token
+    // that tenant `B` exists.
+    Err(AxiamApiError(AxiamError::AuthenticationFailed {
+        reason: "authentication required".into(),
+    }))
+}
+
 fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
     // Try to reuse claims cached by the audit middleware.
     if let Some(cached) = cached_identity(req)? {
@@ -911,6 +956,7 @@ fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
             .ok_or(AxiamError::Internal("missing auth config".into()))?;
 
         let session_id = check_user_aud_and_parse_jti(&cached.claims, config)?;
+        enforce_tenant_path_binding(req, cached.tenant_id)?;
         return Ok(AuthenticatedUser {
             user_id: cached.user_id,
             tenant_id: cached.tenant_id,
@@ -929,7 +975,9 @@ fn extract_user(req: &HttpRequest) -> Result<AuthenticatedUser, AxiamApiError> {
         .ok_or(AxiamError::Internal("missing auth config".into()))?;
 
     let validated = parse_validated_claims(req)?;
-    user_from_validated(validated, config)
+    let user = user_from_validated(validated, config)?;
+    enforce_tenant_path_binding(req, user.principal_tenant_id)?;
+    Ok(user)
 }
 
 /// Turn validated claims into the principal they describe.
@@ -1008,6 +1056,10 @@ pub(crate) async fn authenticate_presented_token(
         .ok_or(AxiamError::Internal("missing auth config".into()))?;
     let validated = validate_presented_token(req, token, config)?;
     let user = user_from_validated(validated, config)?;
+    // T21.6 — the same check the extractor makes, on the one route that
+    // authenticates from the body rather than through it (`POST
+    // /oauth2/userinfo`, RFC 6750 §2.2).
+    enforce_tenant_path_binding(req, user.principal_tenant_id)?;
     RequestScopeHandles::read(req).apply(user).await
 }
 
@@ -1432,6 +1484,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             oauth2_issuer_url: String::new(),
             oauth2_mtls_base_url: String::new(),
             oauth2_default_tenant_id: String::new(),
+            tenant_issuer_paths: false,
+            request_issuer: None,
             revocation_feed_enabled: false,
             sso_spa_origins: Vec::new(),
             email_verification_grace_period_hours: 24,

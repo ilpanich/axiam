@@ -398,6 +398,14 @@ fn test_auth_config() -> AuthConfig {
         max_concurrent_hashes: 0,
         hash_acquire_timeout_secs: 5,
         session_validation_cache_ttl_secs: 0,
+        // T21.5: the spread, for the reason `models_coverage.rs` states in
+        // full — this literal stopped being exhaustive at T21.6, which added
+        // `tenant_issuer_paths` and `request_issuer` to `AuthConfig` and left
+        // this initializer missing them, so this test has not compiled since.
+        // Every field it does not name takes the value `AuthConfig::default()`
+        // gives it, which for both new fields is the one that reproduces the
+        // behaviour this test was written against.
+        ..AuthConfig::default()
     }
 }
 

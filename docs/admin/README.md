@@ -20,6 +20,20 @@ third-party relying party's redirect reach a sign-in page, the
 (`token_endpoint_auth_method: "none"`: when to register a client that holds no
 secret, what such a registration is refused, the RFC 8252 §7.3 ephemeral-port
 rule and why `localhost` and `127.0.0.1` are not interchangeable),
+[Resource indicators](../api/resource-indicators.md)
+(`allowed_resources`: the target services a client may mint tokens for, the
+`resource` parameter on each grant, why a refresh cannot re-address a token,
+and why such a token is refused by AXIAM's own endpoints),
+[Dynamic client registration](dynamic-client-registration.md)
+(`dynamic_registration`: letting an MCP client create itself over RFC 7591,
+the three modes, the D3 audience interlock that makes open registration safe,
+the forced consent screen, and the ceiling, rate limit and sweeper that bound
+it),
+[Client ID metadata documents](client-id-metadata-documents.md)
+(`cimd`: accepting a `client_id` that is a URL and fetching the registration
+it names, the two interlocks that must be answered before it can be enabled,
+the URL and document rules, the desktop and server-side profiles, and every
+bound on an outbound fetch a stranger chooses the target of),
 [Standard-lane OIDC parameters](oidc-authn-parameters.md)
 (`authn_request_params`: making `prompt`, `max_age`, `acr_values` and
 `id_token_hint` mean what they say, the two ACR values, why `max_age=0`

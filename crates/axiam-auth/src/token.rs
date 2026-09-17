@@ -1128,11 +1128,45 @@ pub fn issue_client_credentials_token_enriched(
     cnf: Option<CnfClaim>,
     ext: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<String, AuthError> {
-    AccessTokenSpec::oauth2_client(client_id, tenant_id, org_id)
+    issue_client_credentials_token_for_resource(
+        client_id, tenant_id, org_id, scopes, config, cnf, ext, None,
+    )
+}
+
+/// [`issue_client_credentials_token_enriched`], addressed at an RFC 8707
+/// resource rather than at AXIAM itself (T21.3).
+///
+/// Passing `None` produces a byte-identical token to
+/// [`issue_client_credentials_token_enriched`] — which is why *that* function
+/// is now a one-line delegation rather than a copy, the same relationship, and
+/// the same reason, that `cnf` and `ext` already have to the wrappers above
+/// it. Every existing caller keeps minting `axiam:m2m` without knowing this
+/// parameter exists (I2).
+///
+/// `resource` is the **normalised** value
+/// `axiam_oauth2::resource::resolve_requested` returned, never the client's
+/// raw parameter: this function performs no validation and must not be
+/// mistaken for the place the allow-list is enforced.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_client_credentials_token_for_resource(
+    client_id: &str,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+    cnf: Option<CnfClaim>,
+    ext: Option<std::collections::BTreeMap<String, String>>,
+    resource: Option<&str>,
+) -> Result<String, AuthError> {
+    let spec = AccessTokenSpec::oauth2_client(client_id, tenant_id, org_id)
         .scopes(scopes)
         .cnf(cnf)
-        .ext(ext)
-        .issue(config)
+        .ext(ext);
+    match resource {
+        Some(aud) => spec.aud(aud),
+        None => spec,
+    }
+    .issue(config)
 }
 
 /// Issue an RPT — the requesting party token of the UMA 2.0 grant (X2).
@@ -1499,6 +1533,51 @@ pub fn issue_id_token(
 /// the library skips the audience check, preserving backward compatibility
 /// during the rollout window. Per-route narrowing to a specific audience
 /// happens in plan 04-04.
+/// The T21.6 issuer check, applied to an already-signature-verified claim set.
+///
+/// A no-op on a deployment with `tenant_issuer_paths` off: `jsonwebtoken` has
+/// already pinned `iss` to the root issuer there, and this function's own
+/// first test asserts it accepts exactly what that pinning accepts.
+///
+/// With tenant paths on it enforces **two** rules, and the second is the one
+/// that matters:
+///
+/// 1. `iss` is the root issuer or a `{root}/t/{uuid}` tenant issuer
+///    ([`AuthConfig::accepts_issuer`]);
+/// 2. a tenant issuer **agrees with the `tenant_id` claim**.
+///
+/// Rule 2 exists because the JWKS is shared. One key set signs every tenant's
+/// tokens — RFC 8414 permits that and the deployment documentation says so —
+/// so once rule 1 admits `{root}/t/{B}`, the signature alone no longer
+/// distinguishes a token minted for tenant `A` from one minted for `B`. If
+/// `iss` and `tenant_id` were allowed to disagree, the two claims would be two
+/// answers to "which tenant is this?", and every consumer that picked the
+/// other one from the one that was checked would be a cross-tenant hole.
+/// Refusing the disagreement outright means there is only ever one answer.
+///
+/// Rule 2 is deliberately **not** conditional on rule 1's tenant form being
+/// used: a root-issuer token names no tenant in its `iss`, so there is nothing
+/// to disagree with and its `tenant_id` stands alone exactly as it does today.
+fn enforce_issuer(
+    claims: AccessTokenClaims,
+    config: &AuthConfig,
+) -> Result<AccessTokenClaims, AuthError> {
+    if !config.tenant_issuer_paths {
+        return Ok(claims);
+    }
+    if !config.accepts_issuer(&claims.iss) {
+        return Err(AuthError::TokenInvalid("InvalidIssuer".into()));
+    }
+    if let Some(issuer_tenant) = config.tenant_of_issuer(&claims.iss)
+        && claims.tenant_id != issuer_tenant.to_string()
+    {
+        return Err(AuthError::TokenInvalid(
+            "issuer names a different tenant from the tenant_id claim".into(),
+        ));
+    }
+    Ok(claims)
+}
+
 pub fn decode_access_token(
     token: &str,
     config: &AuthConfig,
@@ -1514,7 +1593,15 @@ pub fn decode_access_token(
     };
 
     let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&[config.effective_issuer()]);
+    // T21.6 — `set_issuer` pins ONE string, which is the right check for a
+    // deployment with one issuer and cannot express "the root issuer or any
+    // `{root}/t/{uuid}`". With tenant paths off the pinned check is kept
+    // verbatim; with them on the set is checked by `enforce_issuer` after the
+    // decode, which is the only place that decides it. `iss` stays a required
+    // claim either way, so nothing is accepted for want of one.
+    if !config.tenant_issuer_paths {
+        validation.set_issuer(&[config.root_issuer()]);
+    }
     // Do NOT require `aud` — pre-Phase-4 tokens omit it (D-20 back-compat).
     validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
     // Accept both user and M2M audiences; presence is checked for membership
@@ -1529,6 +1616,73 @@ pub fn decode_access_token(
             jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
             _ => AuthError::TokenInvalid(e.to_string()),
         })
+        .and_then(|claims| enforce_issuer(claims, config))
+}
+
+/// Decode and verify an access token **without pinning its audience** (T21.3).
+///
+/// The sibling of [`decode_access_token`], and the difference between them is
+/// the whole of I3. That one is what AXIAM's own resource endpoints run, and it
+/// pins `aud` to [`AUD_USER`] or [`AUD_M2M`] so that a token minted for
+/// somebody else's MCP server is **refused** by AXIAM's own APIs. This one
+/// verifies everything else a token must satisfy — the EdDSA signature over
+/// AXIAM's own public key, the issuer, the expiry and the `nbf`/`iat`
+/// windows — and then treats `aud` as *data* to be reported rather than as a
+/// gate to be passed.
+///
+/// # Why that is safe here and nowhere else
+///
+/// The distinction is between **authenticating a caller** and **describing a
+/// token**. Introspection (RFC 7662) does the second: an authenticated
+/// resource server asks what a token it is holding says, and the answer
+/// includes `aud` precisely so that the resource server can decide whether the
+/// token is for it. Refusing to describe a token because its audience is not
+/// AXIAM's own would make introspection unusable for every resource server
+/// that is not AXIAM — which is every resource server RFC 8707 exists for.
+///
+/// So the rule for callers is short and has no exceptions: **anything that
+/// decides whether a request may proceed calls [`validate_access_token`]**,
+/// and this function is called only by code that is reporting, never by code
+/// that is admitting. There is exactly one caller today,
+/// `axiam_oauth2::token::TokenService::introspect_token`, and it hands the
+/// result to a JSON body.
+pub fn decode_access_token_any_audience(
+    token: &str,
+    config: &AuthConfig,
+) -> Result<AccessTokenClaims, AuthError> {
+    let owned;
+    let key: &DecodingKey = if let Some(ref cached) = config.jwt_decoding_key {
+        cached.as_ref()
+    } else {
+        owned = DecodingKey::from_ed_pem(config.jwt_public_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
+        &owned
+    };
+
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    // Identical to `decode_access_token` in every respect but one: the issuer
+    // is still pinned (a token AXIAM did not mint is not AXIAM's to describe),
+    // the required claims are the same, and the leeway is the same. T21.6's
+    // widening applies here too, and by the same mechanism — see the comment
+    // on `decode_access_token`.
+    if !config.tenant_issuer_paths {
+        validation.set_issuer(&[config.root_issuer()]);
+    }
+    validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+    // The one difference. `validate_aud = false` makes jsonwebtoken skip the
+    // membership check entirely rather than compare against a wider set —
+    // there is no set that could be written here, because the whole point is
+    // that the audience is a URI the deployment's operator chose.
+    validation.validate_aud = false;
+    validation.leeway = 60;
+
+    jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation)
+        .map(|data| data.claims)
+        .map_err(|e| match e.kind() {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
+            _ => AuthError::TokenInvalid(e.to_string()),
+        })
+        .and_then(|claims| enforce_issuer(claims, config))
 }
 
 /// Validated JWT claims — a newtype proving the token was verified.
@@ -1852,6 +2006,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             oauth2_issuer_url: String::new(),
             oauth2_mtls_base_url: String::new(),
             oauth2_default_tenant_id: String::new(),
+            tenant_issuer_paths: false,
+            request_issuer: None,
             revocation_feed_enabled: false,
             sso_spa_origins: Vec::new(),
             email_verification_grace_period_hours: 24,
@@ -3368,5 +3524,131 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             .unwrap();
         assert_eq!(claims.sub, "oa_machine");
         assert_eq!(claims.client_id, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // T21.6 — the issuer rules `enforce_issuer` applies
+    // -----------------------------------------------------------------------
+
+    const T21_6_TENANT: &str = "11111111-2222-3333-4444-555555555555";
+    const T21_6_OTHER: &str = "99999999-8888-7777-6666-555555555555";
+
+    fn t21_6_config(tenant_issuer_paths: bool) -> AuthConfig {
+        AuthConfig {
+            oauth2_issuer_url: "https://id.example.com".into(),
+            tenant_issuer_paths,
+            ..test_config()
+        }
+    }
+
+    fn t21_6_token(config: &AuthConfig, tenant_id: Uuid) -> String {
+        issue_access_token(
+            Uuid::new_v4(),
+            tenant_id,
+            Uuid::new_v4(),
+            &[],
+            config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .expect("token issue")
+    }
+
+    /// I1. With the flag off the accepted set is one string, and a token
+    /// carrying a tenant-shaped issuer is refused exactly as any foreign issuer
+    /// always was.
+    #[test]
+    fn with_tenant_paths_off_only_the_root_issuer_decodes() {
+        let off = t21_6_config(false);
+        let tenant = Uuid::parse_str(T21_6_TENANT).unwrap();
+
+        let root_token = t21_6_token(&off, tenant);
+        assert!(decode_access_token(&root_token, &off).is_ok());
+
+        // Signed by the same key, naming a tenant issuer: refused, because the
+        // deployment does not serve that issuer.
+        let on = t21_6_config(true);
+        let tenant_token = t21_6_token(&on.for_tenant_path(tenant).unwrap(), tenant);
+        assert!(
+            decode_access_token(&tenant_token, &off).is_err(),
+            "a tenant issuer must not decode on a deployment that does not serve tenant paths"
+        );
+    }
+
+    #[test]
+    fn with_tenant_paths_on_both_issuer_forms_decode() {
+        let on = t21_6_config(true);
+        let tenant = Uuid::parse_str(T21_6_TENANT).unwrap();
+
+        let root_token = t21_6_token(&on, tenant);
+        let tenant_token = t21_6_token(&on.for_tenant_path(tenant).unwrap(), tenant);
+
+        assert_eq!(
+            decode_access_token(&root_token, &on).unwrap().iss,
+            "https://id.example.com"
+        );
+        assert_eq!(
+            decode_access_token(&tenant_token, &on).unwrap().iss,
+            format!("https://id.example.com/t/{T21_6_TENANT}")
+        );
+    }
+
+    /// The rule the shared JWKS makes necessary. One key set signs every
+    /// tenant, so `iss` and `tenant_id` are two answers to "which tenant is
+    /// this?" that a forged pairing would get past the signature. They must
+    /// agree, or the token is not decodable at all.
+    #[test]
+    fn an_issuer_that_names_a_different_tenant_than_the_claim_is_refused() {
+        let on = t21_6_config(true);
+        let tenant = Uuid::parse_str(T21_6_TENANT).unwrap();
+        let other = Uuid::parse_str(T21_6_OTHER).unwrap();
+
+        // Minted with tenant A's issuer but tenant B's `tenant_id`.
+        let mismatched = t21_6_token(&on.for_tenant_path(tenant).unwrap(), other);
+        let err = decode_access_token(&mismatched, &on)
+            .expect_err("iss and tenant_id must not be allowed to disagree");
+        assert!(matches!(err, AuthError::TokenInvalid(_)), "got {err:?}");
+
+        // And the coherent pairing still decodes, so the test above is not
+        // passing because everything is refused.
+        let coherent = t21_6_token(&on.for_tenant_path(other).unwrap(), other);
+        assert!(decode_access_token(&coherent, &on).is_ok());
+    }
+
+    /// The root issuer names no tenant, so there is nothing for its
+    /// `tenant_id` to disagree with — it stands alone exactly as it does today.
+    #[test]
+    fn a_root_issuer_token_is_not_subject_to_the_coherence_rule() {
+        let on = t21_6_config(true);
+        let token = t21_6_token(&on, Uuid::parse_str(T21_6_OTHER).unwrap());
+        assert!(decode_access_token(&token, &on).is_ok());
+    }
+
+    /// I3 is about `aud`, and T21.6 widened only `iss`. A resource-bound token
+    /// is still refused by the audience-pinning decoder on both issuer forms.
+    #[test]
+    fn widening_the_issuer_set_does_not_widen_the_audience_set() {
+        let on = t21_6_config(true);
+        let tenant = Uuid::parse_str(T21_6_TENANT).unwrap();
+        let scoped = on.for_tenant_path(tenant).unwrap();
+
+        let foreign_audience = issue_access_token(
+            Uuid::new_v4(),
+            tenant,
+            Uuid::new_v4(),
+            &[],
+            &scoped,
+            Uuid::new_v4().to_string(),
+            "https://mcp.example.com",
+        )
+        .expect("token issue");
+
+        assert!(
+            decode_access_token(&foreign_audience, &on).is_err(),
+            "a foreign audience must stay refused however the issuer is spelled"
+        );
+        // The audience-agnostic sibling introspection uses still reads it, and
+        // still pins the issuer set.
+        assert!(decode_access_token_any_audience(&foreign_audience, &on).is_ok());
     }
 }

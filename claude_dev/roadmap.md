@@ -664,7 +664,7 @@ Generate the website to be deployed on github.io for the documentation. Produce 
 
 ---
 
-## Phase 21: MCP authorization-server support
+## Phase 21: MCP authorization-server support — ✓ COMPLETE (2026-09-17)
 
 Make AXIAM usable as the OAuth 2.0 authorization server for Model Context
 Protocol servers, at parity with or ahead of Keycloak's published support.
@@ -672,50 +672,78 @@ Full specification, invariants, model assignment per task and the regression
 gate: [`mcp-authorization-server-plan.md`](mcp-authorization-server-plan.md).
 Every task is additive and opt-in; existing flows must stay byte-identical.
 
-### T21.1 — RFC 8414 well-known alias — Sonnet 5
+**All nine tasks executed.** T21.1 and T21.2 are on `main`; T21.3 through
+T21.6 and T21.9a are on the accumulation branch; T21.7, T21.8 and T21.9d are
+in PRs #467, #473 and #468. The eleven SDK ports (T21.9b/c) are merged in
+their own repositories. Two things are deliberately left open and are not
+defects of execution: the four security findings filed as #469–#472, and
+**F-28-01**, the single re-sync of the eleven vendored contract copies that
+must happen from `main` after this phase merges.
+
+### T21.1 — RFC 8414 well-known alias — Sonnet 5 ✓ LANDED
 Serve `/.well-known/oauth-authorization-server` from the existing discovery handler; public-path and OpenAPI parity.
 
-**Commit** `feat(oauth2): serve RFC 8414 authorization-server metadata path`
+**Commit** `573373a` `feat(oauth2): serve RFC 8414 discovery alongside OIDC discovery (T21.1)`
 
-### T21.2 — Public clients and loopback redirects — Opus 5 (server), Sonnet 5 (admin UI)
+### T21.2 — Public clients and loopback redirects — Opus 5 (server), Sonnet 5 (admin UI) ✓ LANDED
 `token_endpoint_auth_method: none`, PKCE required at the token endpoint, RFC 8252 §7.3 port-agnostic loopback matching for registered loopback URIs only.
 
-**Commit** `feat(oauth2): public clients with PKCE and loopback redirect matching`
+**Commits** `0534af6` "feat(oauth2): public clients (`none`) and RFC 8252 loopback redirects (T21.2)" · `ed9e9f0` `feat(frontend): admin UI for public OAuth2 clients (T21.2)`
 
-### T21.3 — RFC 8707 resource indicators end to end — Opus 5
+### T21.3 — RFC 8707 resource indicators end to end — Opus 5 ✓ LANDED
 `allowed_resources` on clients; `resource` honoured on authorize, PAR, device and token; `aud` minted from it; AXIAM's own APIs keep refusing foreign audiences.
 
-**Commit** `feat(oauth2): RFC 8707 resource indicators with audience-bound access tokens`
+**Commit** `ffec785` `feat(oauth2): RFC 8707 resource indicators, end to end (T21.3)`
 
-### T21.4 — RFC 7591 dynamic client registration — Opus 5 (endpoint), Sonnet 5 (admin UI)
+### T21.4 — RFC 7591 dynamic client registration — Opus 5 (endpoint), Sonnet 5 (admin UI) ✓ LANDED
 Per-tenant policy (disabled by default), `POST /oauth2/register`, abuse controls, forced consent for externally registered clients.
 
-**Commit** `feat(oauth2): RFC 7591 dynamic client registration behind a tenant policy`
+**Commits** `ff1919b` `feat(oauth2): RFC 7591 dynamic client registration (T21.4)` · `e1540b5` `Add admin UI for dynamic client registration (T21.4b)`
 
-### T21.5 — OAuth Client ID Metadata Document — Opus 5
+T21.7 recorded the admin UI as "not found on this branch" and was right about
+its branch: `claude/t21-4b-dcr-admin-ui` merged into the accumulation branch
+(PR #465) twelve minutes before T21.5 branched from elsewhere, so it is absent
+from `claude/t21-7-mcp-docs` and from everything cut after it. It is present
+here.
+
+### T21.5 — OAuth Client ID Metadata Document — Opus 5 ✓ LANDED
 URL-shaped `client_id` resolved through an SSRF-guarded, cache-bounded fetch; per-tenant trust policy; VS Code and Claude Code flows.
 
-**Commit** `feat(oauth2): client ID metadata documents behind a tenant policy`
+**Commits** `0213087` `feat(oauth2): resolve a URL-shaped client_id from its metadata document (T21.5)` · `ddc1d2a` `docs(oauth2): client ID metadata documents — operator page, spec, contract (T21.5)`
 
-### T21.6 — Per-tenant path-based issuers — Opus 5
+### T21.6 — Per-tenant path-based issuers — Opus 5 ✓ LANDED
 Opt-in `{root}/t/{tenant}` issuer with RFC 8414 and OIDC Discovery path forms; no `tenant_id` query in the advertised endpoints.
 
-**Commit** `feat(oauth2): opt-in per-tenant path-based issuers`
+**Commit** `41aa36f` `feat(oauth2): per-tenant path issuers, opt-in (T21.6)`
 
-### T21.7 — Documentation, contract, website — Sonnet 5
+### T21.7 — Documentation, contract, website — Sonnet 5 ✓ LANDED
 `docs/api/mcp.md`, CONTRACT §10.1 audience note, token-exchange audience rewrite, website block.
 
-**Commit** `docs(mcp): fronting an MCP server with AXIAM`
+**Commit** `abdb3b6` `docs(mcp): fronting an MCP server with AXIAM, and the b7-mcp-server example` — `docs/api/mcp.md`, `examples/b7-mcp-server/`, the CONTRACT §10.1 row 6 sentence, the `oauth2.ts` website block; `docs/api/token-exchange.md#audience` was already rewritten by T21.3. PR #467.
 
-### T21.8 — End-to-end MCP harness and security review — Opus 5
+### T21.8 — End-to-end MCP harness and security review — Opus 5 ✓ LANDED
 Integration test driving the MCP client sequence in both issuer modes; security review of the new surfaces; STRIDE model update.
 
-**Commit** `test(oauth2): end-to-end MCP authorization harness and security review`
+**Commits** `f154d24` `test(mcp): the MCP client sequence end to end, in both issuer modes (T21.8)` · `1ab4e7a` `test(mcp): the adversarial half of the T21.8 harness` · `013903d` `fix(oauth2): reserve the axiam scheme against use as a resource (MCP-02)` · `0233742` `docs(security): the MCP security review, and nine STRIDE entries for it (T21.8)` · `2350ae2` `docs: discharge the I1 conformance condition, and link the filed findings`. PR #473.
 
-### T21.9 — SDK fan-out: MCP resource-server helpers — Opus 5 (contract §28, TypeScript reference, review), Sonnet 5 (ten ports)
+The harness drives the MCP client sequence four times — `{DCR, CIMD}` ×
+`{?tenant_id=, /t/{tenant}}`. One finding (**MCP-02**, AXIAM's own audiences
+were valid RFC 8707 resource indicators) was fixed in the same task; four are
+filed as #469–#472 and one is accepted. Evidence:
+[`claude_dev/security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md).
+
+### T21.9 — SDK fan-out: MCP resource-server helpers — Opus 5 (contract §28, TypeScript reference, review), Sonnet 5 (ten ports) — complete
 CONTRACT §28 (RFC 9728 document builder and route, `WWW-Authenticate` challenge, `resource_metadata_url` middleware option); TypeScript reference; ports in the other ten SDK repositories; cross-SDK conformance review. Every task also ships docs, the `examples/b7-mcp-server` entry and tests per the plan's §4.0.
 
-**Commit** `feat(sdk): CONTRACT §28 MCP resource-server helpers (contract 1.47)`
+**Commit** `63a19af` `docs(sdk-contract): §28 MCP resource-server helpers, contract 1.48 (T21.9)` — the contract text only, ahead of every port (T9a)
+
+**T9b / T9c — all eleven ports merged.** TypeScript is the reference
+(`axiam-typescript-sdk` #110); the ten ports are `axiam-rust-sdk` #109,
+`axiam-python-sdk` #83, `axiam-java-sdk` #98, `axiam-kotlin-sdk` #65,
+`axiam-csharp-sdk` #91, `axiam-php-sdk` #70, `axiam-go-sdk` #81,
+`axiam-swift-sdk` #63, `axiam-c-sdk` #62 and `axiam-cplusplus-sdk` #63.
+
+**Commits** `8bdd062` `docs(sdk-contract): §28 cross-SDK conformance review, contract 1.49 (T21.9 T9d)` · `b1aedc8` `docs(sdk-contract): correct §28.10/§28.11 R-2's count of unrecorded posture rows`. PR #468 — all eleven ports read against §28 and against the reference; thirteen divergences recorded in §28.11 with no open row; six contract defects fixed; §28.10's posture table filled in from the merged code and moved to upstream maintenance. Evidence: [`claude_dev/sdk-mcp-helpers-conformance-review.md`](sdk-mcp-helpers-conformance-review.md). One follow-up, **F-28-01**, is open by design and blocked on Phase 21 merging: the eleven vendored `CONTRACT.md`/`openapi.json` copies are re-synced from `main` in one step afterwards, and the review explains why doing it from a phase branch is what left the eleven holding five distinct files.
 
 ---
 

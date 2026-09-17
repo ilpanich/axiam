@@ -78,6 +78,11 @@ struct DeviceGrantRow {
     expires_at: DateTime<Utc>,
     interval_secs: i64,
     last_polled_at: Option<DateTime<Utc>>,
+    /// T21.3 / RFC 8707 — see [`DeviceGrant::resource`]. `#[surreal(default)]`
+    /// because schema v63 adds no backfill: a grant created before it named no
+    /// resource, and absent is the value that says so.
+    #[surreal(default)]
+    resource: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -113,6 +118,7 @@ impl DeviceGrantRow {
             expires_at: self.expires_at,
             interval_secs: self.interval_secs.max(1) as u64,
             last_polled_at: self.last_polled_at,
+            resource: self.resource,
             created_at: self.created_at,
         })
     }
@@ -121,7 +127,7 @@ impl DeviceGrantRow {
 /// Projection shared by every read below.
 const SELECT_FIELDS: &str = "meta::id(id) AS record_id, tenant_id, client_id, \
      device_code_hash, user_code, scopes, status, user_id, expires_at, \
-     interval_secs, last_polled_at, created_at";
+     interval_secs, last_polled_at, resource, created_at";
 
 /// SurrealDB implementation of the device-grant repository.
 pub struct SurrealDeviceGrantRepository<C: Connection> {
@@ -160,7 +166,8 @@ impl<C: Connection> DeviceGrantRepository for SurrealDeviceGrantRepository<C> {
                  user_id = NONE, \
                  expires_at = $expires_at, \
                  interval_secs = $interval_secs, \
-                 last_polled_at = NONE \
+                 last_polled_at = NONE, \
+                 resource = $resource \
                  RETURN {SELECT_FIELDS}"
             ))
             .bind(("id", id.to_string()))
@@ -171,6 +178,7 @@ impl<C: Connection> DeviceGrantRepository for SurrealDeviceGrantRepository<C> {
             .bind(("scopes", input.scopes))
             .bind(("expires_at", input.expires_at))
             .bind(("interval_secs", input.interval_secs as i64))
+            .bind(("resource", input.resource))
             .await
             .map_err(DbError::from)?;
 

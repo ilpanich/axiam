@@ -7,6 +7,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import { OAuth2ClientsPage } from "./OAuth2ClientsPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
+import type { SecuritySettings } from "@/services/settings";
 
 const clients = [
   {
@@ -473,6 +474,138 @@ describe("OAuth2ClientsPage", () => {
     ).toBeChecked();
   });
 
+  // ─── T21.2 — public clients (token_endpoint_auth_method: none) ────────────
+
+  it("I1/I4 — defaults the auth method to client_secret_post, never to none", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByLabelText("Token Endpoint Authentication")
+    ).toHaveValue("client_secret_post");
+  });
+
+  it("offers Public client (no secret) as an auth method option", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    const select = within(dialog).getByLabelText(
+      "Token Endpoint Authentication"
+    ) as HTMLSelectElement;
+    expect(
+      within(select).getByRole("option", { name: "Public client (no secret)" })
+    ).toBeInTheDocument();
+  });
+
+  it("registers a public client with no secret and skips the secret-reveal modal", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    apiMock.post.mockResolvedValue(
+      // T21.2 — the response the server actually sends for a public client:
+      // client_secret is omitted entirely, not "".
+      res({
+        id: "c-pub",
+        client_id: "client-public-1",
+        name: "Public App",
+        redirect_uris: ["http://127.0.0.1/callback"],
+        grant_types: ["authorization_code", "refresh_token"],
+        scopes: ["openid"],
+        created_at: "t",
+      })
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Public App");
+    fireEvent.change(within(dialog).getByLabelText("Redirect URIs (one per line)"), {
+      target: { value: "http://127.0.0.1/callback" },
+    });
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "refresh_token" }));
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "none"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/oauth2-clients",
+        expect.objectContaining({ token_endpoint_auth_method: "none" })
+      )
+    );
+    // No secret was returned, so there is nothing to acknowledge.
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("refuses a public client registered for client_credentials", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Public CC");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "none"
+    );
+    await userEvent.click(
+      within(dialog).getByRole("checkbox", { name: "client_credentials" })
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    expect(
+      await screen.findByText(/may not be registered for the client_credentials grant/)
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("I4 — refuses moving a confidential client to public by editing it", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Web App" })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "none"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+
+    expect(
+      await screen.findByText(/token_endpoint_auth_method cannot be changed/)
+    ).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("I4 — refuses moving a public client to confidential by editing it", async () => {
+    apiMock.get.mockResolvedValue(
+      res([
+        {
+          ...clients[0],
+          id: "c-pub",
+          name: "Public App",
+          token_endpoint_auth_method: "none",
+        },
+      ])
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Public App" })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "client_secret_post"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+
+    expect(
+      await screen.findByText(/token_endpoint_auth_method cannot be changed/)
+    ).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
   it("deletes a client after confirmation", async () => {
     apiMock.get.mockResolvedValue(res(clients));
     apiMock.delete.mockResolvedValue(res(undefined));
@@ -486,5 +619,236 @@ describe("OAuth2ClientsPage", () => {
     await waitFor(() =>
       expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/oauth2-clients/c2")
     );
+  });
+});
+
+// ─── T21.4 / T21.4b — dynamic client registration admin surfaces ───────────
+
+const BASE_SETTINGS: SecuritySettings = {
+  id: "s1",
+  scope: "Tenant",
+  scope_id: "t1",
+  password: {
+    min_length: 12,
+    require_uppercase: true,
+    require_lowercase: true,
+    require_digits: true,
+    require_symbols: false,
+    password_history_count: 5,
+    hibp_check_enabled: true,
+  },
+  mfa: { mfa_enforced: false, mfa_challenge_lifetime_secs: 300 },
+  lockout: {
+    max_failed_login_attempts: 5,
+    lockout_duration_secs: 900,
+    lockout_backoff_multiplier: 2,
+    max_lockout_duration_secs: 3600,
+  },
+  token: {
+    access_token_lifetime_secs: 900,
+    refresh_token_lifetime_secs: 1_209_600,
+  },
+  email: {
+    email_verification_required: true,
+    email_verification_grace_period_hours: 24,
+  },
+  certificate: { default_cert_validity_days: 365, max_cert_validity_days: 3650 },
+  notification: { admin_notifications_enabled: true },
+  opaque: {
+    opaque_mode: "optional",
+    opaque_suite: "ristretto255_sha512",
+    opaque_ksf: "argon2id",
+  },
+  oidc: {
+    dynamic_registration: "disabled",
+    dcr_allowed_scopes: [],
+    dcr_allowed_redirect_hosts: [],
+    external_client_allowed_resources: [],
+    dcr_max_clients: 20,
+    dcr_unused_client_ttl_days: 30,
+  },
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+};
+
+const dcrClients = [
+  clients[0],
+  {
+    ...clients[1],
+    id: "c-dcr",
+    name: "Self-Registered App",
+    managed_by: "dcr" as const,
+    last_authorized_at: "2026-02-01T00:00:00Z",
+  },
+];
+
+/** Routes GET by url so a settings-shaped response doesn't collide with the client list. */
+function mockGetByUrl(opts: {
+  clients?: unknown;
+  settings?: SecuritySettings;
+  tokens?: unknown[];
+}) {
+  apiMock.get.mockImplementation((url: string) => {
+    if (url === "/api/v1/settings") {
+      return Promise.resolve(res(opts.settings ?? BASE_SETTINGS));
+    }
+    if (url === "/api/v1/oauth2-clients/registration-tokens") {
+      return Promise.resolve(res(opts.tokens ?? []));
+    }
+    return Promise.resolve(res(opts.clients ?? clients));
+  });
+}
+
+describe("OAuth2ClientsPage — T21.4 managed_by badge and filter", () => {
+  it("badges a dcr client and leaves an admin client unbadged", async () => {
+    mockGetByUrl({ clients: dcrClients });
+    renderWithProviders(<OAuth2ClientsPage />);
+    expect(await screen.findByText("Self-Registered App")).toBeInTheDocument();
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("Self-registered (DCR)")).toBeInTheDocument();
+    expect(within(table).getAllByText("Admin").length).toBeGreaterThan(0);
+  });
+
+  it("filters the fetched page down to the selected managed_by value", async () => {
+    mockGetByUrl({ clients: dcrClients });
+    renderWithProviders(<OAuth2ClientsPage />);
+    await screen.findByText("Self-Registered App");
+    expect(screen.getByText("Web App")).toBeInTheDocument();
+
+    await userEvent.selectOptions(
+      screen.getByLabelText("Filter by managed by"),
+      "dcr"
+    );
+    expect(screen.getByText("Self-Registered App")).toBeInTheDocument();
+    expect(screen.queryByText("Web App")).not.toBeInTheDocument();
+  });
+});
+
+describe("OAuth2ClientsPage — T21.4 / D5 read-only dcr client detail", () => {
+  it("opens a read-only detail view instead of the edit form for a dcr client", async () => {
+    mockGetByUrl({ clients: dcrClients });
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "View OAuth2 client Self-Registered App" })
+    );
+    const dialog = screen.getByRole("dialog");
+    // Read-only: no editable "Name *" field, and no Save Changes button — the
+    // server does not model an administrator editing a self-registration.
+    expect(within(dialog).queryByLabelText("Name *")).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: "Save Changes" })
+    ).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/does not model an administrator editing/))
+      .toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("still opens the editable form for an admin client", async () => {
+    mockGetByUrl({ clients: dcrClients });
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Web App" })
+    );
+    expect(screen.getByLabelText("Name *")).toBeInTheDocument();
+  });
+});
+
+describe("OAuth2ClientsPage — T21.4 registration-token issuance", () => {
+  // I1 — mandatory: the mint endpoint refuses outside initial_access_token
+  // mode, so the panel that fills it out must not render for the default
+  // (disabled) policy — nor, since the mode gate is the same either way, for
+  // anonymous.
+  it("I1 — hides the registration-token panel when dynamic_registration is disabled", async () => {
+    mockGetByUrl({ settings: BASE_SETTINGS });
+    renderWithProviders(<OAuth2ClientsPage />);
+    await screen.findByText("Web App");
+    expect(screen.queryByText("Dynamic Registration Tokens")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Issue Registration Token/ })
+    ).not.toBeInTheDocument();
+  });
+
+  it("I1 — hides the registration-token panel under anonymous mode too", async () => {
+    mockGetByUrl({
+      settings: {
+        ...BASE_SETTINGS,
+        oidc: {
+          ...BASE_SETTINGS.oidc!,
+          dynamic_registration: "anonymous",
+          external_client_allowed_resources: ["https://mcp.example.com/mcp"],
+        },
+      },
+    });
+    renderWithProviders(<OAuth2ClientsPage />);
+    await screen.findByText("Web App");
+    expect(screen.queryByText("Dynamic Registration Tokens")).not.toBeInTheDocument();
+  });
+
+  it("shows the panel under initial_access_token mode and issues a token, revealed once", async () => {
+    mockGetByUrl({
+      settings: {
+        ...BASE_SETTINGS,
+        oidc: { ...BASE_SETTINGS.oidc!, dynamic_registration: "initial_access_token" },
+      },
+      tokens: [],
+    });
+    apiMock.post.mockResolvedValue(
+      res({
+        token: {
+          id: "tok1",
+          tenant_id: "t1",
+          name: "mcp-demo",
+          created_by: "u1",
+          expires_at: "2026-02-01T00:00:00Z",
+          used_at: null,
+          created_at: "2026-01-01T00:00:00Z",
+        },
+        initial_access_token: "axiam_dcr_secretvalue",
+      })
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    await screen.findByText("Dynamic Registration Tokens");
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /Issue Registration Token/ })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "mcp-demo");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Issue" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/oauth2-clients/registration-tokens",
+        { name: "mcp-demo", expires_in_hours: 24 }
+      )
+    );
+
+    const secret = await screen.findByRole("alertdialog");
+    expect(within(secret).getByText("axiam_dcr_secretvalue")).toBeInTheDocument();
+    await userEvent.click(
+      within(secret).getByRole("button", { name: "I've saved this information" })
+    );
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("requires a name before issuing a token", async () => {
+    mockGetByUrl({
+      settings: {
+        ...BASE_SETTINGS,
+        oidc: { ...BASE_SETTINGS.oidc!, dynamic_registration: "initial_access_token" },
+      },
+      tokens: [],
+    });
+    renderWithProviders(<OAuth2ClientsPage />);
+    await screen.findByText("Dynamic Registration Tokens");
+    await userEvent.click(
+      screen.getByRole("button", { name: /Issue Registration Token/ })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Issue" }));
+    expect(await screen.findByText("Name is required.")).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
   });
 });

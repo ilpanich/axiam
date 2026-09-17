@@ -226,6 +226,17 @@ pub struct OAuth2State<C: Connection + Clone> {
     /// `GET /oauth2/jwks` response. Configured via
     /// `AXIAM__OAUTH2__JWKS_CACHE_MAX_AGE_SECS` (default 300s).
     pub oauth2_jwks_cache_config: Oauth2JwksCacheConfig,
+    /// T21.5: the client-metadata-document cache — REMOTE documents fetched
+    /// because a `client_id` was a URL. Unrelated to either JWKS cache above,
+    /// and a third distinct thing: `jwks_cache` holds an identity provider's
+    /// keys, `oauth2_jwks_cache` holds AXIAM's own, and this holds a client's
+    /// *registration*.
+    ///
+    /// **One instance per process**, cloned (an `Arc` clone) into every actix
+    /// worker, for the reason `shared_rate_limit` states: N per-worker caches
+    /// would be N times the outbound fetches for the same document, which is
+    /// the amplification `cimd.min_cache_secs` exists to bound.
+    pub cimd_cache: ClientMetadataCache,
 }
 
 /// Inbound SAML and OIDC federation.

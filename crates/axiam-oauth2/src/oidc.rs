@@ -202,6 +202,41 @@ pub struct OidcDiscoveryDocument {
     // hand every mTLS client a member to interpret where the RFC wants none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mtls_endpoint_aliases: Option<MtlsEndpointAliases>,
+    /// RFC 7591 §2 / RFC 8414 §2 `registration_endpoint` — T21.4.
+    ///
+    /// Present **only** when the tenant this document describes has dynamic
+    /// client registration enabled. That is the same per-tenant conditionality
+    /// the two sensitive-scope members already have, and I7 is why it is
+    /// phrased that way rather than as a per-client one: this is a statement
+    /// about what the deployment will do for the tenant named in the request,
+    /// not about any client's posture.
+    ///
+    /// `Option` with `skip_serializing_if`, not an empty string, and the
+    /// distinction is load-bearing for I1: a tenant on the default policy
+    /// receives a document with the member **absent**, byte-identical to the
+    /// one served before T21.4. RFC 8414 §2 makes the member OPTIONAL and
+    /// defines no default, so absence is the truthful way to say "this server
+    /// does not register clients for you" — where an empty or present-but-dead
+    /// URL would be a value a conforming client would try.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registration_endpoint: Option<String>,
+    /// `client_id_metadata_document_supported` —
+    /// `draft-ietf-oauth-client-id-metadata-document` (T21.5).
+    ///
+    /// Present, and `true`, **only** when the tenant this document describes
+    /// has the mechanism enabled; the same per-tenant conditionality
+    /// `registration_endpoint` has, for the same reason (I7). `Option` with
+    /// `skip_serializing_if` rather than a plain `false`, and the distinction
+    /// is I1: a tenant on the default policy receives a document with the
+    /// member **absent**, byte-identical to the one served before this task.
+    ///
+    /// A `false` would also be a slightly different claim from an absence —
+    /// "this server has considered your URL-shaped client_id and will not
+    /// resolve it" rather than "this server says nothing about it" — and the
+    /// second is the truthful one for a deployment that has never heard of the
+    /// draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id_metadata_document_supported: Option<bool>,
 }
 
 /// Build the endpoint paths for a base URL.
@@ -334,7 +369,7 @@ pub fn build_discovery_document(
     issuer: &str,
     mtls_base_url: Option<&str>,
 ) -> Result<OidcDiscoveryDocument, String> {
-    build_discovery_document_for(issuer, mtls_base_url, false, None)
+    build_discovery_document_for(issuer, mtls_base_url, TenantCapabilities::default(), None)
 }
 
 /// [`build_discovery_document`], told whether the tenant this document
@@ -363,12 +398,35 @@ pub fn build_discovery_document(
 /// that cannot name the client is still truthful about what the server can do
 /// for some client; a document that cannot name the tenant cannot say whether
 /// the capability exists at all in the deployment the caller is talking to.
+/// [`build_discovery_document_for`]'s per-tenant capability inputs.
+///
+/// A struct rather than a growing tail of `bool` parameters: there are two
+/// today and T5 adds a third, and three adjacent booleans at a call site is
+/// three chances to transpose two of them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TenantCapabilities {
+    /// X7 G8 (W7) — whether `address` and `phone` are available to this
+    /// tenant.
+    pub sensitive_scopes_enabled: bool,
+    /// T21.4 — whether `POST /oauth2/register` will do anything for this
+    /// tenant. `false` omits `registration_endpoint` entirely.
+    pub dynamic_registration_enabled: bool,
+    /// T21.5 — whether a URL-shaped `client_id` is resolved for this tenant.
+    /// `false` omits `client_id_metadata_document_supported` entirely.
+    pub cimd_enabled: bool,
+}
+
 pub fn build_discovery_document_for(
     issuer: &str,
     mtls_base_url: Option<&str>,
-    sensitive_scopes_enabled: bool,
+    capabilities: TenantCapabilities,
     tenant_id: Option<Uuid>,
 ) -> Result<OidcDiscoveryDocument, String> {
+    let TenantCapabilities {
+        sensitive_scopes_enabled,
+        dynamic_registration_enabled,
+        cimd_enabled,
+    } = capabilities;
     let issuer = issuer.trim_end_matches('/');
     let mtls_endpoint_aliases = build_mtls_aliases(mtls_base_url, tenant_id)?;
     let mut doc = OidcDiscoveryDocument {
@@ -529,6 +587,16 @@ pub fn build_discovery_document_for(
         code_challenge_methods_supported: vec!["S256".into()],
         token_endpoint_auth_signing_alg_values_supported: crate::jose::permitted_algorithm_names(),
         mtls_endpoint_aliases,
+        // T21.4. `tenant_scoped` like every other endpoint that needs to know
+        // which tenant it is acting for: the registration endpoint takes
+        // `?tenant_id=`, and an MCP client that follows this document must not
+        // have to be told the parameter out of band — which is the same
+        // failure the first conformance run hit at the token endpoint.
+        registration_endpoint: dynamic_registration_enabled
+            .then(|| tenant_scoped(endpoint!(issuer, "/oauth2/register"), tenant_id)),
+        // T21.5. A capability rather than an endpoint: there is nothing to
+        // publish a URL for, because the client's own `client_id` is the URL.
+        client_id_metadata_document_supported: cimd_enabled.then_some(true),
     };
     if sensitive_scopes_enabled {
         doc.claims_supported
@@ -779,7 +847,7 @@ mod tests {
     const TENANT: Uuid = Uuid::from_u128(0x01a0813a_cd24_7632_9d6f_439f872d861e);
 
     fn doc_for_tenant(mtls: Option<&str>) -> OidcDiscoveryDocument {
-        build_discovery_document_for(ISSUER, mtls, false, Some(TENANT))
+        build_discovery_document_for(ISSUER, mtls, TenantCapabilities::default(), Some(TENANT))
             .expect("valid inputs build a document")
     }
 
@@ -908,7 +976,13 @@ mod tests {
             "https://mtls.example.test#frag",
         ] {
             assert!(
-                build_discovery_document_for(ISSUER, Some(bad), false, Some(TENANT)).is_err(),
+                build_discovery_document_for(
+                    ISSUER,
+                    Some(bad),
+                    TenantCapabilities::default(),
+                    Some(TENANT)
+                )
+                .is_err(),
                 "{bad:?} must fail the document rather than be published"
             );
         }
@@ -966,11 +1040,20 @@ mod tests {
             .default_tenant_id()
         };
 
-        let misconfigured =
-            build_discovery_document_for(ISSUER, Some(MTLS), false, resolve("not-a-uuid"))
-                .expect("an ignored default still builds a document");
-        let unset = build_discovery_document_for(ISSUER, Some(MTLS), false, resolve(""))
-            .expect("an unset default builds a document");
+        let misconfigured = build_discovery_document_for(
+            ISSUER,
+            Some(MTLS),
+            TenantCapabilities::default(),
+            resolve("not-a-uuid"),
+        )
+        .expect("an ignored default still builds a document");
+        let unset = build_discovery_document_for(
+            ISSUER,
+            Some(MTLS),
+            TenantCapabilities::default(),
+            resolve(""),
+        )
+        .expect("an unset default builds a document");
 
         assert_eq!(
             serde_json::to_string(&misconfigured).unwrap(),

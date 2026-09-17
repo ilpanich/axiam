@@ -30,9 +30,10 @@ use crate::models::{
     notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateDeviceGrant, CreateOAuth2Client,
-        CreatePushedAuthRequest, CreateRefreshToken, CreateSessionClient, DeviceGrant,
+        CreatePushedAuthRequest, CreateRefreshToken, CreateSessionClient, DeviceGrant, ManagedBy,
         OAuth2Client, PushedAuthRequest, RefreshToken, SessionClient, UpdateOAuth2Client,
     },
+    oauth2_registration_token::{CreateOAuth2RegistrationToken, OAuth2RegistrationToken},
     opaque::{CreateOpaqueCredential, OpaqueCredential, OpaqueServerSetup, OpaqueSuite},
     organization::{CreateOrganization, Organization, UpdateOrganization},
     password_history::{CreatePasswordHistoryEntry, PasswordHistoryEntry},
@@ -1280,6 +1281,141 @@ pub trait OAuth2ClientRepository: Send + Sync {
         expected_hash: &str,
         new_hash: &str,
     ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// How many clients with the given provenance this tenant holds (T21.4).
+    ///
+    /// The `dcr_max_clients` ceiling, asked as a count rather than derived
+    /// from a paginated list: the quota is checked on every anonymous
+    /// registration, which is an unauthenticated write, and paging a table to
+    /// count it is exactly the work an attacker would be choosing for us.
+    fn count_by_managed_by(
+        &self,
+        tenant_id: Uuid,
+        managed_by: ManagedBy,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Every client with the given provenance, across **all** tenants
+    /// (T21.4's sweeper).
+    ///
+    /// Tenant-free deliberately: the sweeper runs deployment-wide, and the TTL
+    /// it applies is each row's *own* tenant's, resolved per row. A
+    /// per-tenant query would mean the sweeper first had to enumerate tenants
+    /// to discover which of them have any such row at all — and a deployment
+    /// with a thousand tenants and no self-registration would pay for a
+    /// feature it has not turned on.
+    ///
+    /// Bounded by construction: `dcr_max_clients` caps the rows per tenant,
+    /// and only `dcr` rows are ever returned to the sweeper.
+    fn list_all_by_managed_by(
+        &self,
+        managed_by: ManagedBy,
+    ) -> impl Future<Output = AxiamResult<Vec<OAuth2Client>>> + Send;
+
+    /// Create or refresh the **shadow row** of a client whose `client_id` is
+    /// the URL of its metadata document (T21.5, CIMD).
+    ///
+    /// # Why this is not `create`
+    ///
+    /// [`Self::create`] mints the `client_id`. A CIMD client's `client_id` is
+    /// not AXIAM's to mint: it *is* the URL the document was fetched from,
+    /// because that URL is the client's identity under
+    /// `draft-ietf-oauth-client-id-metadata-document`. And the row is
+    /// refreshed on every successful fetch rather than created once, so the
+    /// operation is an upsert by `(tenant_id, client_id)` — the pair the
+    /// table's unique index already keys on.
+    ///
+    /// # What an implementation MUST guarantee
+    ///
+    /// * **A row whose `managed_by` is not `cimd` is never modified.** An
+    ///   administrator's client whose `client_id` happens to be a URL keeps
+    ///   its registration, its secret and its profile, whatever any document
+    ///   at that URL says. An implementation that cannot make that guarantee
+    ///   must return an error rather than write.
+    /// * **No secret is ever minted.** A CIMD client authenticates with
+    ///   `none` or `private_key_jwt`; a shared secret cannot exist for a
+    ///   client whose registration is a public document.
+    /// * `created_at` survives a refresh; `updated_at` moves.
+    ///
+    /// Returns the row as stored, so the caller acts on what was written
+    /// rather than on what it asked for.
+    fn upsert_cimd_client(
+        &self,
+        client_id: &str,
+        input: CreateOAuth2Client,
+    ) -> impl Future<Output = AxiamResult<OAuth2Client>> + Send;
+
+    /// Stamp `last_authorized_at` (T21.4).
+    ///
+    /// Called **only** for a client whose `managed_by` is not `admin` — see
+    /// [`OAuth2Client::last_authorized_at`] for why that restriction is
+    /// invariant I1 rather than an optimisation. Best effort in the caller's
+    /// hands: a failure here must never fail the authorization it describes,
+    /// because the worst it costs is a client swept one cycle early.
+    fn touch_last_authorized(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+/// Storage for RFC 7591 initial access tokens (T21.4).
+///
+/// Shaped like [`ScimTokenRepository`] and differing in exactly one place:
+/// [`Self::consume_by_token_hash`] is a compare-and-swap rather than a read,
+/// because this credential is single-use and "read it, check it, then mark it"
+/// is how two concurrent registrations both succeed on one token.
+pub trait OAuth2RegistrationTokenRepository: Send + Sync {
+    /// Mint a token. The caller has already hashed the handle.
+    fn create(
+        &self,
+        input: CreateOAuth2RegistrationToken,
+    ) -> impl Future<Output = AxiamResult<OAuth2RegistrationToken>> + Send;
+
+    /// Spend a token, atomically.
+    ///
+    /// Returns the row **only** when this call is the one that spent it: an
+    /// expired token, a token belonging to another tenant, and a token a
+    /// concurrent request already spent all return `None`, indistinguishably.
+    /// The `tenant_id` is part of the condition rather than checked
+    /// afterwards, so a handle minted for one tenant cannot register a client
+    /// in another even for the instant between the read and the write.
+    ///
+    /// The single-use guarantee lives here and nowhere else. A caller that
+    /// read the row, decided, and then marked it would be two statements where
+    /// the datastore offers one, and the registration endpoint is
+    /// unauthenticated — which is to say the race is reachable by anybody.
+    /// The row records **that** it was spent and **when**, and deliberately
+    /// not which client the spending registration produced: the `client_id`
+    /// does not exist yet at the moment the token has to be spent, and writing
+    /// a placeholder that a later step may fail to replace would put a value
+    /// in an operator-facing list that is not true. The link between a token
+    /// and the client it created lives in the audit log, which records the
+    /// registration with its `client_id`, its source address and its time, and
+    /// is append-only.
+    fn consume_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<Option<OAuth2RegistrationToken>>> + Send;
+
+    /// The tenant's tokens, newest first, for the admin list. Never includes a
+    /// handle — the row does not hold one.
+    fn list_for_tenant(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<OAuth2RegistrationToken>>> + Send;
+
+    /// Drop tokens that expired before `before`, spent or not.
+    ///
+    /// Swept rather than kept forever: the evidence a spent token carries is
+    /// duplicated in the audit log, which is append-only and is where an
+    /// operator looks a year later.
+    fn prune_expired(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 /// Storage for RFC 8628 device-authorization grants (B2).

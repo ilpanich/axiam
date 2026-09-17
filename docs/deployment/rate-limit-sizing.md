@@ -73,6 +73,7 @@ category, and the presets leave both alone in every profile:
 | Knob | Default | Why this number |
 |---|---:|---|
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | 12 | Unauthenticated *and* state-allocating. Each accepted request reserves a pending grant and a user code from a deliberately small, human-typable space, so what is being limited is exhaustion of that space, not throughput. |
+| `AXIAM__RATE_LIMIT__DCR_PER_MIN` | 5 | The smallest number in this file, and for the sharpest reason: `POST /oauth2/register` is the only endpoint that **writes** on behalf of a caller holding no credential, and every accepted request allocates a row against the tenant's `dcr_max_clients`. What is being limited is an anonymous party filling a tenant's client table and probing the registration rules; the honest traffic is one person, one MCP client, once. Five leaves room for a retry and a mistyped callback. Per-IP, never client-keyed — a registration request has no client identity, obtaining one is the point. |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | 10 | The brute-force bound on user codes. `RateLimitConfig::validate` **asserts** the OWASP condition (`charset^len / (rate × lifetime) > 10⁶`) against the shipped 10-minute grant lifetime, so raising this past the point where an 8-character typed code becomes guessable fails at startup rather than in an incident review. |
 
 The posture did not change: still strict, still per-IP, still opt-in to
@@ -136,6 +137,7 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 1800 | 6000 | 60000 |
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | 12 | 12 | 12 |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | 10 | 10 | 10 |
+| `AXIAM__RATE_LIMIT__DCR_PER_MIN` | 5 | 5 | 5 |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | 600 | 600 | 600 |
 | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | 100 | 1000 | 5000 |
 | `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | 500 | 5000 | 25000 |

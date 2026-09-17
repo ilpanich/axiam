@@ -63,6 +63,32 @@ also be issued one it was told to discard.
 
 ---
 
+## From the admin dashboard
+
+Open **OAuth2 Clients** → **New Client**, and set **Token Endpoint
+Authentication** to **Public client (no secret)**. The dashboard then:
+
+* mints no secret and skips the "save this secret" step entirely — there is
+  nothing to save, so no dialog claiming otherwise appears;
+* refuses, before the request is even sent, the same combinations
+  `POST /api/v1/oauth2-clients` refuses: `client_credentials` or the
+  token-exchange grant among the selected grant types, a `fapi2` profile, or
+  an mTLS/`private_key_jwt` credential registered alongside `none`;
+* never offers `none` as the default for a new client, and never lets an
+  existing client be edited across the public/confidential line — selecting a
+  method on the wrong side of that line for the client being edited is
+  refused with the same "register a new client with the method you want"
+  the API gives, because the secret cannot follow either direction of that
+  change (see "What a public registration is refused" below).
+
+Two of the refusals below — a public client presenting the UMA-ticket grant,
+and a public client at the introspection endpoint — have no corresponding
+field on this form to validate against, so the dashboard cannot warn about
+them before the request is sent; they are enforced only by the endpoints
+themselves.
+
+---
+
 ## The token endpoint's authentication methods
 
 | `token_endpoint_auth_method` | Credential | FAPI 2.0 |

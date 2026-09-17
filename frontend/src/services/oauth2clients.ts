@@ -21,7 +21,10 @@ export type ClientProfile = (typeof CLIENT_PROFILES)[number];
  * and is ordered the same way, which is the operator's order of preference
  * rather than the enum's declaration order by accident: `client_secret_post`
  * first because the header channel `client_secret_basic` uses is the one
- * reverse proxies and APM agents log (W8).
+ * reverse proxies and APM agents log (W8). `none` (T21.2 — public clients) is
+ * last, matching the order the backend advertises it in discovery: it is the
+ * odd one out, since it authenticates with nothing rather than with a
+ * stronger credential.
  */
 export const CLIENT_AUTH_METHODS = [
   "client_secret_post",
@@ -29,8 +32,19 @@ export const CLIENT_AUTH_METHODS = [
   "tls_client_auth",
   "self_signed_tls_client_auth",
   "private_key_jwt",
+  "none",
 ] as const;
 export type ClientAuthMethod = (typeof CLIENT_AUTH_METHODS)[number];
+
+/**
+ * T21.2 — whether a method authenticates the client with **nothing**, mirroring
+ * `ClientAuthMethod::is_public` (`crates/axiam-core/src/models/oauth2_client.rs`).
+ * Asked rather than compared against the literal so every call site reads the
+ * same as the backend's.
+ */
+export function isPublicAuthMethod(m: ClientAuthMethod): boolean {
+  return m === "none";
+}
 
 /**
  * The two methods FAPI 2.0 §5.3.1.1 accepts, mirroring
@@ -147,7 +161,15 @@ export interface UpdateOAuth2ClientPayload extends ClientPosturePayload {
 
 // Client creation returns the client fields plus the one-time plaintext secret.
 export interface CreateOAuth2ClientResponse extends OAuth2Client {
-  client_secret: string;
+  /**
+   * T21.2 — **absent**, not `""`, for a client created with
+   * `token_endpoint_auth_method: "none"`: `OAuth2ClientCreatedResponse` on the
+   * backend omits the member entirely rather than sending an empty string,
+   * because an empty string is a secret that happens to be empty and this is
+   * a client with no secret to show. Callers must check for `undefined`, not
+   * falsiness of a string.
+   */
+  client_secret?: string;
 }
 
 // ─── Available options ────────────────────────────────────────────────────────
@@ -195,13 +217,46 @@ function nonBlank(value: string | undefined): string | undefined {
 }
 
 /**
- * Client-side mirror of `axiam_oauth2::fapi::validate_registration`.
+ * T21.2 — grants that rest on a client credential, which a public client
+ * never holds. Mirrors `GRANTS_FORBIDDEN_TO_PUBLIC_CLIENTS`
+ * (`crates/axiam-api-rest/src/handlers/oauth2_clients.rs`). The token-exchange
+ * URN is not in {@link GRANT_TYPES} — this form offers no way to select it —
+ * so this list exists independently of the grant-type checkboxes rather than
+ * as a filter over them.
+ */
+const GRANTS_FORBIDDEN_TO_PUBLIC_CLIENTS: readonly string[] = [
+  "client_credentials",
+  "urn:ietf:params:oauth:grant-type:token-exchange",
+];
+
+/**
+ * Extra context {@link validateClientPosture} needs beyond the posture itself
+ * to mirror every T21.2 registration-time refusal.
+ */
+export interface ClientPostureContext {
+  /**
+   * The client's currently-stored `token_endpoint_auth_method`, present only
+   * when editing an existing client. Mirrors the update handler's refusal to
+   * move a client across the public/confidential line
+   * (`crates/axiam-api-rest/src/handlers/oauth2_clients.rs`, `update`) — a
+   * check the create form has no occasion to run, since there is no prior
+   * registration to compare against.
+   */
+  existingMethod?: ClientAuthMethod;
+  /** The grant types the form has selected, to check against T21.2 §2. */
+  grantTypes?: string[];
+}
+
+/**
+ * Client-side mirror of `axiam_oauth2::fapi::validate_registration` and the
+ * T21.2 public-client refusals in
+ * `crates/axiam-api-rest/src/handlers/oauth2_clients.rs`.
  *
  * The backend runs the authoritative check and refuses a bad registration with
- * a 400 either way — this exists so an operator building a FAPI 2.0 client
- * sees *which* constraint is unmet while they are still filling the form,
- * rather than as one opaque server error after submitting. The rules are in
- * the same order as the backend's, so the two agree about which constraint
+ * a 400 either way — this exists so an operator building a FAPI 2.0 or public
+ * client sees *which* constraint is unmet while they are still filling the
+ * form, rather than as one opaque server error after submitting. The rules are
+ * in the same order as the backend's, so the two agree about which constraint
  * fails first.
  *
  * One check is deliberately weaker: the backend parses the inline JWKS as a
@@ -211,11 +266,54 @@ function nonBlank(value: string | undefined): string | undefined {
  * material. A JWKS that is valid JSON but not a valid key set therefore passes
  * here and is refused by the server — a later error, never a missed one.
  *
+ * Two T21.2 refusals are deliberately **not** mirrored here, because neither
+ * corresponds to anything this form lets an operator set: the token endpoint
+ * refuses the `none` method the uma-ticket and token-exchange grants at
+ * *request* time regardless of what was registered, and refuses a public
+ * client at the introspection endpoint (RFC 7662 §2.1 requires an
+ * authenticated caller) — there is no "introspect" or "uma-ticket" control on
+ * a client registration form to validate against. Guessing a client-side rule
+ * for either would show an operator a refusal this form cannot actually cause.
+ *
  * Returns `null` when the posture is valid.
  */
-export function validateClientPosture(p: ClientPosturePayload): string | null {
+export function validateClientPosture(
+  p: ClientPosturePayload,
+  ctx: ClientPostureContext = {}
+): string | null {
   const method = p.token_endpoint_auth_method ?? "client_secret_post";
   const thumbprints = p.self_signed_tls_client_auth_thumbprints ?? [];
+
+  // T21.2 I4 — `none` is a registration decision, and it stays one: nothing
+  // may move a client across the public/confidential line after the fact,
+  // because the secret cannot follow the change either way.
+  if (
+    ctx.existingMethod !== undefined &&
+    isPublicAuthMethod(ctx.existingMethod) !== isPublicAuthMethod(method)
+  ) {
+    return (
+      `token_endpoint_auth_method cannot be changed from ${ctx.existingMethod} to ${method}: ` +
+      "whether a client is public is decided at registration, because the client secret " +
+      "cannot follow the change. Register a new client with the method you want."
+    );
+  }
+
+  // T21.2 §2 — grants that rest on a client credential are refused to a
+  // public client, since it authenticates with nothing but the client_id
+  // that travels in every authorization request it makes.
+  if (isPublicAuthMethod(method)) {
+    const forbidden = (ctx.grantTypes ?? []).find((gt) =>
+      GRANTS_FORBIDDEN_TO_PUBLIC_CLIENTS.includes(gt)
+    );
+    if (forbidden !== undefined) {
+      return (
+        `a public client (token_endpoint_auth_method: none) may not be registered for the ` +
+        `${forbidden} grant: it authenticates with nothing, so the only thing that grant ` +
+        "could rest on is a client_id that travels in every authorization request this " +
+        "client makes. Register a confidential client for it instead."
+      );
+    }
+  }
 
   // RFC 8705 / RFC 7591 consistency — applies to any client using a strong
   // method, whatever profile it declares.
@@ -240,6 +338,42 @@ export function validateClientPosture(p: ClientPosturePayload): string | null {
     ).length;
     if (sources !== 1) {
       return `private_key_jwt requires exactly one of JWKS or JWKS URI — ${sources} registered.`;
+    }
+  }
+
+  // T21.2 — the public method's consistency rule runs the other way round
+  // from every other method: it asks whether a credential that `none` will
+  // never read is registered anyway. Mirrors the `ClientAuthMethod::None` arm
+  // of `axiam_oauth2::fapi::validate_registration` — shared secrets are not
+  // in this list because the backend mints one for every confidential client,
+  // so there is nothing here to observe for them.
+  if (isPublicAuthMethod(method)) {
+    const credential = [
+      {
+        present: [
+          p.tls_client_auth_subject_dn,
+          p.tls_client_auth_san_dns,
+          p.tls_client_auth_san_uri,
+        ].some((v) => nonBlank(v) !== undefined),
+        label: "a tls_client_auth subject DN or SAN",
+      },
+      {
+        present: thumbprints.length > 0,
+        label: "a self_signed_tls_client_auth thumbprint",
+      },
+      {
+        present:
+          nonBlank(p.jwks) !== undefined || nonBlank(p.jwks_uri) !== undefined,
+        label: "jwks or jwks_uri",
+      },
+    ].find((c) => c.present);
+    if (credential !== undefined) {
+      return (
+        `a public client (token_endpoint_auth_method: none) may not also register ` +
+        `${credential.label}: \`none\` means this client authenticates with nothing, and the ` +
+        "token endpoint refuses any credential it presents. Register it for the method that " +
+        "matches the credential it actually holds, or drop the credential."
+      );
     }
   }
 

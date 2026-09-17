@@ -69,6 +69,44 @@ it pushes:
   tenant setting enabled, no `resource` parameter sent and no client registered
   with a new auth method, every existing request produces the same response it
   produces today. The regression gate in §5 is how this is shown.
+
+  **Maintainer ruling, 2026-09-17 — I1 admits additive capability
+  advertisements.** T2a is the first task to collide with I1 as written, and
+  the collision is real: the plan's own T2a item 6 orders `none` into
+  `token_endpoint_auth_methods_supported`, which changes
+  `GET /.well-known/openid-configuration` for every deployment with no flag
+  set, so the response is not byte-identical. T2a changed the existing
+  assertion that pinned the old behaviour
+  (`crates/axiam-api-rest/tests/oidc_conformance.rs`,
+  `discovery_advertises_every_implemented_client_auth_method`, which asserted
+  `!methods.contains(&"none")`) rather than stopping, and the question went to
+  the maintainer. The ruling: **an addition is allowed where it does not
+  impact the OIDF conformance tests — Basic OP and FAPI 2.0.** I1 therefore
+  binds the *behaviour of existing flows*, not the exact bytes of a capability
+  statement. What is still forbidden is unchanged: no existing request may
+  take a different path, be refused where it succeeded, or succeed where it
+  was refused.
+
+  **The condition is not yet discharged, and one module carries the risk.**
+  All three FAPI 2.0 plans run
+  `fapi2-security-profile-final-discovery-end-point-verification`
+  (`docs/conformance/2026-09-15-fapi2-*.md`). FAPI 2.0 §5.3.1.1 admits only
+  `private_key_jwt` and mTLS, and `none` is not a weak credential but the
+  absence of one, so a suite that tolerates a weak method may still object to
+  this. The evidence in hand is encouraging but circumstantial: AXIAM already
+  advertises `client_secret_post` **and** `client_secret_basic` (row 140 of
+  `docs/compliance/oidc-conformance.md`), and that module passed on every
+  plan in the 2026-09-15 sweep — so it plainly does not require the advertised
+  set to be FAPI-strong-only. It is not proof, because a check may single out
+  `none`. No repository asset asserts on this field, and the suite cannot be
+  run from the orchestrator sandbox (no Docker daemon), so the verification
+  belongs to the first environment that has one. **T8 must run that module
+  first, before the rest of its harness**, and report it explicitly rather
+  than folding it into "the same result as the 2026-09-15 sweep". If it
+  objects, the fallback is to advertise `none` only for a tenant that permits
+  public clients — which costs I7's "capability statement, never per-tenant
+  state" and is the maintainer's call, not the executing session's.
+
 - **I2 — Existing tokens keep their audience.** A request without `resource`
   still mints `aud: axiam:user` / `axiam:m2m`. The SDK contract's expectation
   (`CONTRACT.md` §10.1 row 6) holds unchanged.
@@ -707,7 +745,7 @@ challenge that starts the MCP client's discovery. Same structure as
 [`sdk-oidc-sso-plan.md`](sdk-oidc-sso-plan.md): one normative amendment, one
 reference implementation, ten ports, one review.
 
-#### T9a — CONTRACT §28 "MCP resource-server helpers" (contract 1.47) — **Opus 5**
+#### T9a — CONTRACT §28 "MCP resource-server helpers" (contract 1.48) — **Opus 5**
 
 **What.** A new §28 in `sdks/CONTRACT.md`, in the register of §12 and §20:
 1. **Canonical operation set** (per-language naming map, as §12.2 does):
@@ -733,7 +771,9 @@ reference implementation, ten ports, one review.
 3. **Required tests, per SDK** (as §8b §"Required tests" does): document
    shape and validation negatives; challenge quoting; 401 with challenge; 403
    `insufficient_scope`; a token whose `aud` is not the resource refused.
-4. Version trailer bumped to 1.47 with the re-sync note for all eleven repos;
+4. Version trailer bumped to **1.48** with the re-sync note for all eleven repos
+   (T2a took 1.47 for the additive `openapi.json` change — the `none` enum value
+   and `client_secret` becoming optional — so §28 is the next number);
    `sdks/openapi.json` regenerated from T1–T6.
 
 #### T9b — TypeScript reference implementation — **Opus 5**
@@ -796,6 +836,67 @@ cargo test -p axiam-api-rest --no-default-features \
 python3 scripts/check-crate-layering.py
 ```
 
+**Gate erratum, 2026-09-16 (orchestrator), found by T1.** The block above is
+incomplete: it never regenerates the OpenAPI artifacts, although §4.0 item 2
+requires it. `.github/workflows/sdk-openapi-drift.yml` builds `axiam-server`
+with `--no-default-features` and `diff`s a fresh `--dump-openapi` export against
+the committed `sdks/openapi.json`, so **any** task that touches
+`crates/axiam-api-rest/src/openapi.rs` — T1 through T6 all do — pushes a red CI
+with a green §5. T1 pushed exactly that. Every task that changes the OpenAPI
+surface therefore appends to the gate:
+
+```bash
+apt-get install -y protobuf-compiler            # absent from the sandbox; see below
+export SWAGGER_UI_DOWNLOAD_URL="file://$(scripts/make-swagger-ui-placeholder.sh)"
+cargo build -p axiam-server --no-default-features
+./target/debug/axiam-server --dump-openapi > sdks/openapi.json
+python3 scripts/check-spec-digest.py            # the exporter already stamps the digest
+python3 scripts/gen-management-registry.py      # re-derive; it pins the spec digest
+python3 scripts/gen-management-registry.py --check
+diff <(./target/debug/axiam-server --dump-openapi) sdks/openapi.json
+```
+
+Three things this block learned the hard way, each of which cost T1 a CI cycle:
+
+- **`protoc` is not installed.** `axiam-server` depends on `axiam-api-grpc`,
+  whose build script dies with `Could not find \`protoc\``, so the build above
+  cannot complete as the sandbox ships. CI never notices because
+  `sdk-openapi-drift.yml` installs `protobuf-compiler` first. Now recorded in
+  `CLAUDE.md`'s build-hygiene section.
+- **`sdks/management-registry.json` pins the spec digest.** Regenerating the
+  spec leaves it stale and fails the **Architecture Invariants** job, which is a
+  different job from the drift gate and reports a different message. Re-derive
+  it in the same commit. For a route that is not a management operation the only
+  change is the digest pointer, and `operation_count` must not move.
+- **`docs/api/openapi.json` is a symlink** to `sdks/openapi.json`. There is one
+  file, not two; §4.0 item 2 and T1's "Where" line both read as if there were.
+
+The `--no-default-features` is load-bearing: the drift workflow builds with SAML
+off on purpose, so an export carrying SAML paths will not match whatever the
+local toolchain can build.
+
+**Second gate erratum, 2026-09-16 (orchestrator), also found by T1.** The gate
+never compiles `axiam-api-rest`'s own unit tests. Its `cargo test` lines cover
+`-p axiam-oauth2 --lib`, `-p axiam-auth --lib` and `-p axiam-api-rest --test
+<named>` — the integration binaries — but never `-p axiam-api-rest --lib`, and
+`cargo clippy` without `--all-targets` does not build `#[cfg(test)]` code
+either. §4.0 item 1 asks for "unit tests in the crate that owns the logic", so
+the gate is silent on precisely the tests it asks for. T1's two new unit tests
+in `crates/axiam-api-rest/src/openapi.rs` did not compile at all
+(`assert_eq!` on `utoipa::openapi::PathItem`, which implements neither `Debug`
+nor `PartialEq`); §5 was green and the Coverage job, which builds
+`--workspace --tests`, failed on the first push. Add to the gate:
+
+```bash
+cargo test -p axiam-api-rest --lib --no-default-features
+cargo clippy -p axiam-api-rest --all-targets --no-default-features -- -D warnings
+```
+
+Note also that the Coverage workflow builds with **default features on**
+(`--cfg feature="saml"`), while §5 builds `--no-default-features` throughout. A
+task whose code is feature-gated must satisfy both; the gate as written proves
+only one.
+
 Plus, per task, the tests the task adds, and for T2b / T4b the frontend suite.
 The end-of-phase gate (after T8) is the full `just check` and the FAPI
 conformance runbook, which must report the same result as the 2026-09-15 sweep
@@ -824,6 +925,25 @@ T8 and T9d last.
 | 4 | T4b, T5, T9b | yes — T9b is in another repository |
 | 5 | T7, T9c (ten sessions) | yes — the ports need only T9a and T9b |
 | 6 | T8, T9d | T8 starts once T7's example exists, so the harness follows the documented flow; T9d once every port's CI is green |
+
+**Execution amendment, 2026-09-16 (orchestrator).** Two things the wave table
+above does not say, recorded here before any task starts:
+
+- **T9a is missing from the table.** §6's dependency list places it ("T9a after
+  T3; T9b after T9a") but no wave carries it, and T9b sits in wave 4. T9a is
+  therefore executed in **wave 3**, beside T4a and T6, which is the earliest
+  wave its stated dependency allows and the latest that leaves T9b where the
+  table puts it. Nothing else moves.
+- **Where each task branches from.** The plan says "a fresh branch" without
+  saying from what, and the waves are dependent, so the branches stack: T1 and
+  T2a from `main`; T2b and T3 from `claude/t21-2a-public-clients`; T4a, T6 and
+  T9a from `claude/t21-3-resource-indicators`; T4b and T5 from
+  `claude/t21-4a-dynamic-registration`. Each PR's base is the branch its task
+  was cut from, so each PR shows only its own task's diff and no PR is closed
+  by another's landing. T7 needs the union of T4b, T5, T6 and T9a, which no
+  single task branch carries, so the orchestrator joins those lines on
+  `claude/phase-21-mcp-auth-8te9sx` and T7 is cut from — and targets — that
+  branch; T8 stacks on T7. Nothing is merged through GitHub at any point.
 
 Each wave ends with `cargo clean`. Each task ends with a signed commit on its
 own branch and a PR referencing this plan and the roadmap task id (Phase 21);

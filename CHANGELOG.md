@@ -276,6 +276,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AXIAM__AUTH__TENANT_ISSUER_PATHS` without a root issuer is refused at boot
   rather than producing issuers no client can resolve (T21.6).
 
+### Fixed
+
+- **An authorization error is redirected to a desktop client's ephemeral
+  loopback port (MCP-01, T21.8, #472).** Six refusal paths in the authorization
+  and PAR handlers compared the presented `redirect_uri` with `==` while the
+  success path has applied RFC 8252 §7.3's port allowance since T21.2a. The
+  effect landed on exactly the clients this phase exists to serve: a client
+  that registered `http://127.0.0.1/callback` and listened on the port the
+  operating system gave it got its codes redirected and its errors rendered as
+  a page nothing was reading. All six now route through
+  `any_redirect_uri_matches`, the one comparison the success path uses.
+  Ungated — the widening is bounded by what the client registered, and for any
+  registration that is not an `http` loopback URI the matcher is string
+  equality and the answer is byte-for-byte unchanged. No error is redirected to
+  a URI that was not registered, before or after.
+
 ### Security
 
 - **The `axiam` URI scheme is reserved and can no longer be named as a

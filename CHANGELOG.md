@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/.well-known/openid-configuration` — a capability statement about the
   deployment, not per-client posture (T21.2).
 
+- **Admin UI for public clients.** The OAuth2 client form offers "Public
+  client (no secret)" as a Token Endpoint Authentication option, validates
+  the T21.2 refusals (credential-bearing grants, the `fapi2` profile, an
+  mTLS/`private_key_jwt` credential alongside `none`, and moving a client
+  across the public/confidential line by editing it) before the request is
+  sent, and skips the one-time secret dialog for a client that has no secret
+  to show (T21.2).
+
 - **RFC 8707 resource indicators.** A `resource` parameter on
   `/oauth2/authorize`, `/oauth2/par`, `/oauth2/device_authorization` and
   `/oauth2/token` names the service a token is for, and the access token minted

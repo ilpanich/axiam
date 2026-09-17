@@ -220,6 +220,23 @@ pub struct OidcDiscoveryDocument {
     /// URL would be a value a conforming client would try.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registration_endpoint: Option<String>,
+    /// `client_id_metadata_document_supported` —
+    /// `draft-ietf-oauth-client-id-metadata-document` (T21.5).
+    ///
+    /// Present, and `true`, **only** when the tenant this document describes
+    /// has the mechanism enabled; the same per-tenant conditionality
+    /// `registration_endpoint` has, for the same reason (I7). `Option` with
+    /// `skip_serializing_if` rather than a plain `false`, and the distinction
+    /// is I1: a tenant on the default policy receives a document with the
+    /// member **absent**, byte-identical to the one served before this task.
+    ///
+    /// A `false` would also be a slightly different claim from an absence —
+    /// "this server has considered your URL-shaped client_id and will not
+    /// resolve it" rather than "this server says nothing about it" — and the
+    /// second is the truthful one for a deployment that has never heard of the
+    /// draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id_metadata_document_supported: Option<bool>,
 }
 
 /// Build the endpoint paths for a base URL.
@@ -394,6 +411,9 @@ pub struct TenantCapabilities {
     /// T21.4 — whether `POST /oauth2/register` will do anything for this
     /// tenant. `false` omits `registration_endpoint` entirely.
     pub dynamic_registration_enabled: bool,
+    /// T21.5 — whether a URL-shaped `client_id` is resolved for this tenant.
+    /// `false` omits `client_id_metadata_document_supported` entirely.
+    pub cimd_enabled: bool,
 }
 
 pub fn build_discovery_document_for(
@@ -405,6 +425,7 @@ pub fn build_discovery_document_for(
     let TenantCapabilities {
         sensitive_scopes_enabled,
         dynamic_registration_enabled,
+        cimd_enabled,
     } = capabilities;
     let issuer = issuer.trim_end_matches('/');
     let mtls_endpoint_aliases = build_mtls_aliases(mtls_base_url, tenant_id)?;
@@ -573,6 +594,9 @@ pub fn build_discovery_document_for(
         // failure the first conformance run hit at the token endpoint.
         registration_endpoint: dynamic_registration_enabled
             .then(|| tenant_scoped(endpoint!(issuer, "/oauth2/register"), tenant_id)),
+        // T21.5. A capability rather than an endpoint: there is nothing to
+        // publish a URL for, because the client's own `client_id` is the URL.
+        client_id_metadata_document_supported: cimd_enabled.then_some(true),
     };
     if sensitive_scopes_enabled {
         doc.claims_supported

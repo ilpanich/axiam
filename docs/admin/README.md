@@ -29,6 +29,11 @@ and why such a token is refused by AXIAM's own endpoints),
 the three modes, the D3 audience interlock that makes open registration safe,
 the forced consent screen, and the ceiling, rate limit and sweeper that bound
 it),
+[Client ID metadata documents](client-id-metadata-documents.md)
+(`cimd`: accepting a `client_id` that is a URL and fetching the registration
+it names, the two interlocks that must be answered before it can be enabled,
+the URL and document rules, the desktop and server-side profiles, and every
+bound on an outbound fetch a stranger chooses the target of),
 [Standard-lane OIDC parameters](oidc-authn-parameters.md)
 (`authn_request_params`: making `prompt`, `max_age`, `acr_values` and
 `id_token_hint` mean what they say, the two ACR values, why `max_age=0`

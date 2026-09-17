@@ -2607,6 +2607,9 @@ async fn main() -> std::io::Result<()> {
             proof_replay_repo: proof_replay_repo.clone(),
             oauth2_jwks_cache: oauth2_jwks_cache.clone(),
             oauth2_jwks_cache_config: config.oauth2.clone(),
+            // T21.5 — built once here, cloned into every worker with the
+            // rest of `AppState`; see `OAuth2State::cimd_cache`.
+            cimd_cache: axiam_oauth2::cimd::ClientMetadataCache::new(),
         },
         federation: bundles::FederationState {
             federation_config_repo: federation_config_repo.clone(),

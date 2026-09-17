@@ -276,6 +276,17 @@ fn many_less_restrictive_overrides_are_rejected() {
         sensitive_scopes_enabled: None,
         // Not ordered, so it can never be a violation. See `OidcPolicy`.
         default_locale: None,
+        // T21.5: every field this literal does not name is `None`, which is
+        // "inherit". It stopped being exhaustive at T21.4, which added six
+        // dynamic-registration members and left this initializer missing them
+        // — so this test has not compiled since that task landed, and the
+        // `--workspace --tests` build has been red on this branch ever since.
+        // The spread is the fix, and it is not a relaxation: the assertion
+        // below is untouched, the fields left out are the ones the case
+        // deliberately leaves inherited (as the OPAQUE and WebAuthn comments
+        // above already say of theirs), and each of them is ordered or
+        // unordered in its own case in `models::settings::tests`.
+        ..Default::default()
     };
     let err = validate_tenant_override(&org, &overrides)
         .unwrap_err()

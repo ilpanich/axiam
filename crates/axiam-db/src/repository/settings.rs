@@ -5,7 +5,7 @@ use crate::handle::DbHandle;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
-    CertificatePolicy, DEFAULT_DCR_MAX_CLIENTS, DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
+    CertificatePolicy, CimdPolicy, DEFAULT_DCR_MAX_CLIENTS, DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
     DynamicRegistrationMode, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
     OidcPolicy, OpaquePolicy, PasswordPolicy, PrivacyPolicy, SecuritySettings, SetOrgSettings,
     SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy, WebauthnPolicy,
@@ -90,6 +90,14 @@ struct SettingsRow {
     oidc_dcr_max_clients: Option<u32>,
     #[surreal(default)]
     oidc_dcr_unused_client_ttl_days: Option<u32>,
+    // Client ID metadata documents (V65 / T21.5). One column rather than
+    // nine, carrying a JSON-encoded `CimdPolicy`, for the reason the policy is
+    // nested in the first place: the nine fields are terms of one decision and
+    // are written, read and inherited together. `overrides_json` beside it is
+    // the same pattern for the same reason. Absent — a pre-V65 row — reads as
+    // the default, which is `enabled: false` (I1).
+    #[surreal(default)]
+    oidc_cimd_json: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     // JSON-encoded `TenantSettingsOverride`; `None` for org rows.
     overrides_json: Option<String>,
@@ -162,6 +170,14 @@ struct SettingsRowWithId {
     oidc_dcr_max_clients: Option<u32>,
     #[surreal(default)]
     oidc_dcr_unused_client_ttl_days: Option<u32>,
+    // Client ID metadata documents (V65 / T21.5). One column rather than
+    // nine, carrying a JSON-encoded `CimdPolicy`, for the reason the policy is
+    // nested in the first place: the nine fields are terms of one decision and
+    // are written, read and inherited together. `overrides_json` beside it is
+    // the same pattern for the same reason. Absent — a pre-V65 row — reads as
+    // the default, which is `enabled: false` (I1).
+    #[surreal(default)]
+    oidc_cimd_json: Option<String>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     overrides_json: Option<String>,
     // Timestamps
@@ -226,10 +242,34 @@ struct StoredDcrColumns<'a> {
     unused_client_ttl_days: Option<u32>,
 }
 
+/// Decode the V65 `oidc_cimd_json` column.
+///
+/// The fallback direction is the strict one, for the third time in this file
+/// and with the most at stake: a column this build cannot parse reads as
+/// [`CimdPolicy::default`], whose `enabled` is `false`. A stored posture that
+/// has been corrupted, truncated or written by a future build therefore stops
+/// AXIAM fetching anybody's document rather than fetching it under a policy
+/// nobody can read. The parse failure is logged because, unlike an absent
+/// column, it means something is wrong.
+fn decode_cimd(raw: Option<&str>) -> CimdPolicy {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return CimdPolicy::default();
+    };
+    serde_json::from_str::<CimdPolicy>(raw).unwrap_or_else(|e| {
+        tracing::warn!(
+            error = %e,
+            "stored oidc_cimd_json could not be parsed; client ID metadata documents are \
+             disabled for this scope until it is rewritten"
+        );
+        CimdPolicy::default()
+    })
+}
+
 fn decode_oidc(
     enabled: Option<bool>,
     locale: Option<&str>,
     dcr: StoredDcrColumns<'_>,
+    cimd_json: Option<&str>,
 ) -> OidcPolicy {
     OidcPolicy {
         sensitive_scopes_enabled: enabled.unwrap_or(false),
@@ -262,6 +302,8 @@ fn decode_oidc(
         dcr_unused_client_ttl_days: dcr
             .unused_client_ttl_days
             .unwrap_or(DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS),
+        // T21.5 — see `decode_cimd`.
+        cimd: decode_cimd(cimd_json),
     }
 }
 
@@ -348,6 +390,7 @@ impl SettingsRowWithId {
                     max_clients: self.oidc_dcr_max_clients,
                     unused_client_ttl_days: self.oidc_dcr_unused_client_ttl_days,
                 },
+                self.oidc_cimd_json.as_deref(),
             ),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -394,6 +437,7 @@ oidc_dcr_allowed_redirect_hosts = $oidc_dcr_allowed_redirect_hosts, \
 oidc_external_client_allowed_resources = $oidc_external_client_allowed_resources, \
 oidc_dcr_max_clients = $oidc_dcr_max_clients, \
 oidc_dcr_unused_client_ttl_days = $oidc_dcr_unused_client_ttl_days, \
+oidc_cimd_json = $oidc_cimd_json, \
 overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
@@ -565,6 +609,16 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         bindings.push((
             "oidc_dcr_unused_client_ttl_days",
             BindValue::U32(settings.oidc.dcr_unused_client_ttl_days),
+        ));
+        // T21.5 — the nine-field posture as one JSON column, always written
+        // (never `None` on a row this build wrote), so a reader never has to
+        // distinguish "no CIMD decision" from "CIMD off": both are the
+        // serialised default. Serialisation of a plain struct of scalars and
+        // string lists cannot fail; if it somehow did, the column is written
+        // absent, which reads back as the default — the same closed posture.
+        bindings.push((
+            "oidc_cimd_json",
+            BindValue::OptionStr(serde_json::to_string(&settings.oidc.cimd).ok()),
         ));
         bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
         bindings
@@ -759,6 +813,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
                     max_clients: row.oidc_dcr_max_clients,
                     unused_client_ttl_days: row.oidc_dcr_unused_client_ttl_days,
                 },
+                row.oidc_cimd_json.as_deref(),
             ),
             created_at: row.created_at,
             updated_at: row.updated_at,

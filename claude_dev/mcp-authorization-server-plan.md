@@ -707,6 +707,96 @@ Claude Code profiles with `restrict_same_domain` off and why.
   callback on a random port.
 - I1, I5, I8.
 
+**Amendments, recorded by the executing session (2026-09-17).** Five. None
+changed an existing test's expectation. Three are refusals the task's text did
+not ask for, each taken toward the answer that refuses more; one is a shape the
+plan's own spelling implied; one is a promise this environment could not keep.
+
+1. **The draft revision could not be pinned, and is recorded as unpinned
+   rather than guessed.** The task's first sentence asks the executing session
+   to pin "the draft revision current at execution time" in the module header
+   and in the documentation. This environment's egress proxy refuses
+   `datatracker.ietf.org` and `ietf.org` — HTTP 403 on CONNECT, verified with
+   both the fetch tool and `curl` — so the revision could not be read, and a
+   number written from memory would be a claim the code cannot support. What is
+   implemented is the draft's stable core: the URL rules, the document shape,
+   and the RFC 7591 §2 members the draft reuses, cross-checked against
+   Keycloak's validation list, which the task names as the reference behaviour.
+   Both the module header and `docs/admin/client-id-metadata-documents.md` say
+   this in full, and state the rules exhaustively so that a reader with the
+   draft in front of them can diff the two. **T7 or T8, from an environment
+   with egress, should pin the revision and re-read the delta.**
+
+2. **`cimd.trusted_client_id_domains` may not be empty when the mechanism is
+   enabled, and the settings handler refuses it.** The task lists the field
+   without saying what an empty one means. The draft's premise is that any URL
+   is a valid client identifier, and Keycloak's equivalent list is a narrowing
+   of that premise rather than a precondition for it. AXIAM refuses the empty
+   list, and the reason is the sentence the task itself opens with: the fetch
+   is triggered by an **unauthenticated** request that names the URL. An
+   unrestricted list is therefore an outbound request whose target a stranger
+   chooses, bounded only by the SSRF guard's address rules — which stop
+   `169.254.169.254` and do not stop `anything-else.example`. The guard is what
+   keeps the fetch out of the private network; the trusted list is what keeps
+   it from being a general-purpose request-forgery primitive, and there is no
+   second control that does that job. It is one settings field, it is refused
+   in the same shape and the same place as D3's interlock, and it removes the
+   class. `cimd.trusted_redirect_domains` is **not** interlocked, because
+   empty there means "loopback only", which is a working posture — it is
+   exactly the desktop MCP profile.
+
+3. **The policy is one nested `CimdPolicy`, inherited and overridden whole.**
+   The task spells the fields `cimd.enabled`, `cimd.allow_http`, and so on, and
+   that spelling is the design: the nine are terms of a single decision and
+   none of them means anything without `enabled`. They are therefore one struct
+   on `OidcPolicy`, one `Option<CimdPolicy>` on the tenant override, and one
+   `option<string>` JSON column on `security_settings` (schema v65) rather than
+   nine columns — the `overrides_json` precedent on the same table, for the
+   same reason: nothing queries the parts. The consequence worth stating is
+   that a tenant states its whole CIMD posture or none of it. A per-field merge
+   could produce a combination neither the organization nor the tenant wrote —
+   this tenant's trusted publishers under the organization's `enabled` — and
+   that is a posture no operator could predict from either settings page. Two
+   of the nine are ordered against the baseline (`enabled` and `allow_http`,
+   the two that widen); the other seven name this tenant's own publishers,
+   callbacks and bounds and are unordered, exactly as T21.4's three lists are.
+
+4. **`dcr_allowed_scopes` governs both external mechanisms, and no second
+   scope list was added.** The task's policy list has no CIMD scope field, and
+   a document may carry `scope`. Registering nothing would make every CIMD
+   client unable to ask for `openid`; accepting anything would let a stranger's
+   file name the scopes it wants. The tenant's existing external-client scope
+   list is the answer, and it is the right one rather than a convenient one:
+   what the field means is "what an externally registered client may ask for",
+   and a CIMD client is an externally registered client. It also inherits
+   T21.4's amendment 1 for free — the settings layer already refuses `address`
+   and `phone` on that list, so the W7 double-consent state cannot arise in
+   this lane either, with no second rule. The field keeps its `dcr_` name
+   because DCR defined it; the documentation says plainly that it governs both.
+
+5. **`cimd.allow_http` also opens the SSRF guard's address rule on the first
+   hop, and this is documented rather than worked around.**
+   `axiam_pki::ssrf::guarded_fetch` couples the scheme rule to the address
+   rule: `allow_private` is the one flag that admits both, and it is the seam
+   the JWKS and OIDC discovery tests already use for a loopback mock server.
+   Splitting it would have meant a second parameter on a reviewed security API
+   for the benefit of a development-only setting. The coupling is stated on the
+   field, in the module, and in the operator page under its own heading; the
+   redirect hops are validated strictly whatever it says, which is what the
+   "redirect to a private address" test asserts.
+
+Two further notes for the reviewer, neither a divergence:
+
+- **No new crate edge (I8).** The fetch goes through
+  `axiam_federation::ssrf`, which re-exports `axiam_pki::ssrf`, over the
+  `axiam-oauth2 → axiam-federation` edge that already existed.
+  `scripts/check-crate-layering.py` is clean.
+- **`upsert_cimd_client` is a new repository method rather than a widened
+  `create`.** `create` mints the `client_id`; a CIMD client's `client_id` is
+  the URL, and the row is refreshed on every successful fetch. The method
+  never modifies a row whose `managed_by` is not `cimd` (the guard is in the
+  `WHERE`, so it cannot be bypassed by a caller) and never mints a secret.
+
 ### T6 — Per-tenant path-based issuers — **Opus 5**
 
 **What.** An opt-in issuer form that an MCP server can name in its

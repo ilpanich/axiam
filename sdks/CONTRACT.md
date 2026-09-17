@@ -3542,6 +3542,49 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-09 (contract version pending, T21.5)** — **non-breaking / additive.**
+  Client ID metadata documents reach `openapi.json`. **No version number is
+  taken here on purpose**, on exactly the terms T21.3, T21.4 and T21.6 state
+  below: 1.47 is T21.2's and 1.48 is T21.9a's, both published, and an SDK
+  written against 1.48 is conformant with this change unedited. The next
+  version to be published folds this entry in with theirs.
+
+  - `openapi.json` gains **no path**. The change is two schema additions: the
+    discovery document (`OidcDiscoveryDocument`) gains an optional boolean
+    `client_id_metadata_document_supported`, and the two settings DTOs
+    (`SetOrgSettings`, `TenantSettingsOverride`) gain a `cimd` member of a new
+    `CimdPolicy` schema. `management-registry.json` regenerates with the spec
+    digest; its operation count does not move, because no operation was added.
+  - **No SDK operation changes signature or behaviour.** `CimdPolicy` is an
+    administrative settings shape, reached only by the settings operations an
+    SDK already generates from this document; a generated client picks the
+    member up on its next regeneration and an SDK that does not model settings
+    is unaffected.
+  - **What an SDK's client-side code may do with it.** Nothing is required.
+    `client_id_metadata_document_supported: true` in a tenant's discovery
+    document says that tenant will resolve a `client_id` that is an `https`
+    URL. AXIAM's SDKs guard MCP *servers* rather than drive MCP *clients*
+    (plan §7 puts client-side CIMD out of scope), so no §-level surface is
+    specified for it here; the member exists so that a client which does
+    implement the draft can discover the capability rather than probe for it.
+  - **The audience rule is unchanged and is the one that matters.** A client
+    materialised from a metadata document inherits the tenant's
+    `external_client_allowed_resources` as its `allowed_resources` and cannot
+    name its own (plan D3), so §10.1 row 6's expectation — the middleware
+    verifies a configured `aud` — holds exactly as written for a token such a
+    client obtains.
+
+  The server change behind it is AXIAM Phase 21 T21.5
+  (`docs/admin/client-id-metadata-documents.md`).
+
+  **Re-sync required, with the version that folds this entry in**, in all
+  eleven SDK repositories — `axiam-rust-sdk`, `axiam-typescript-sdk`,
+  `axiam-python-sdk`, `axiam-java-sdk`, `axiam-kotlin-sdk`, `axiam-csharp-sdk`,
+  `axiam-php-sdk`, `axiam-go-sdk`, `axiam-swift-sdk`, `axiam-c-sdk`,
+  `axiam-cplusplus-sdk` — for the vendored `CONTRACT.md` and `openapi.json`.
+  `proto/` is unchanged; `management-registry.json`'s operation set is
+  unchanged and only its recorded spec digest moves.
+
 - **2026-09 (contract version pending, T21.6)** — **non-breaking / additive.**
   Per-tenant path issuers reach `openapi.json`. **No version number is taken
   here on purpose.** 1.47 is T21.2's and 1.48 is T21.9a's — published below

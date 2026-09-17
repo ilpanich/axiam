@@ -1,7 +1,7 @@
 //! SurrealDB implementation of [`OAuth2ClientRepository`].
 
 use axiam_auth::client_secret;
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{
     AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
@@ -474,6 +474,164 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         let client = row.try_into_client(id)?;
 
         Ok((client, raw_secret))
+    }
+
+    /// T21.5 — create or refresh a CIMD shadow row. See the trait's
+    /// documentation for the three guarantees; this is how each is kept.
+    ///
+    /// **A row with another provenance is never modified** because the
+    /// `UPDATE` carries `AND managed_by = 'cimd'` in its `WHERE`, and because
+    /// the `CREATE` that follows an update matching nothing is guarded by a
+    /// re-read: a row that exists but did not match the update is an
+    /// administrator's (or a DCR client's) and is returned as a conflict
+    /// rather than written over. The unique index on
+    /// `(tenant_id, client_id)` is the backstop for the race — two concurrent
+    /// first authorizations for the same document — and the loser of that race
+    /// re-reads rather than failing the request, because the row it wanted now
+    /// exists and is the one it would have written.
+    ///
+    /// **No secret is minted**: `client_secret_hash` is written as the empty
+    /// string on create and is not in the update's `SET` list at all, so a row
+    /// that somehow held one keeps it invisible to the only arm that could
+    /// read it (`authenticate_client_credential`'s public arm returns before
+    /// any hash is consulted, and `private_key_jwt` never looks at one).
+    ///
+    /// **`created_at` survives** because the update does not set it; the
+    /// table's `updated_at` moves on every write.
+    async fn upsert_cimd_client(
+        &self,
+        client_id: &str,
+        input: CreateOAuth2Client,
+    ) -> AxiamResult<OAuth2Client> {
+        let tenant_id = input.tenant_id;
+        let tenant_id_str = tenant_id.to_string();
+        let client_id_owned = client_id.to_string();
+
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "UPDATE oauth2_client SET \
+                 name = $name, \
+                 redirect_uris = $redirect_uris, \
+                 grant_types = $grant_types, \
+                 scopes = $scopes, \
+                 token_endpoint_auth_method = $token_endpoint_auth_method, \
+                 jwks = $jwks, \
+                 jwks_uri = $jwks_uri, \
+                 allowed_resources = $allowed_resources, \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+                 AND managed_by = 'cimd' \
+                 RETURN meta::id(id) AS record_id, *",
+            )
+            .bind(("tenant_id", tenant_id_str.clone()))
+            .bind(("client_id", client_id_owned.clone()))
+            .bind(("name", input.name.clone()))
+            .bind(("redirect_uris", input.redirect_uris.clone()))
+            .bind(("grant_types", input.grant_types.clone()))
+            .bind(("scopes", input.scopes.clone()))
+            .bind((
+                "token_endpoint_auth_method",
+                input.token_endpoint_auth_method.as_str(),
+            ))
+            .bind(("jwks", normalise_optional(input.jwks.clone())))
+            .bind(("jwks_uri", normalise_optional(input.jwks_uri.clone())))
+            .bind(("allowed_resources", input.allowed_resources.clone()))
+            .await
+            .map_err(DbError::from)?;
+
+        let refreshed: Vec<OAuth2ClientRowWithId> = result.take(0).map_err(DbError::from)?;
+        if let Some(row) = refreshed.into_iter().next() {
+            return row.try_into_client().map_err(Into::into);
+        }
+
+        // Nothing was refreshed: either there is no row at all, or there is
+        // one this mechanism does not own.
+        match self.get_by_client_id(tenant_id, &client_id_owned).await {
+            Ok(existing) => {
+                return Err(AxiamError::Conflict {
+                    reason: format!(
+                        "client_id {client_id_owned} already names a {} client in this tenant; \
+                         a client ID metadata document cannot replace a registration AXIAM's \
+                         operator created",
+                        existing.managed_by,
+                    ),
+                });
+            }
+            Err(AxiamError::NotFound { .. }) => {}
+            Err(e) => return Err(e),
+        }
+
+        let id = new_id();
+        let id_str = id.to_string();
+        let result = self
+            .db
+            .current()
+            .query(
+                "CREATE type::record('oauth2_client', $id) SET \
+                 tenant_id = $tenant_id, \
+                 client_id = $client_id, \
+                 client_secret_hash = '', \
+                 name = $name, \
+                 redirect_uris = $redirect_uris, \
+                 grant_types = $grant_types, \
+                 scopes = $scopes, \
+                 post_logout_redirect_uris = [], \
+                 backchannel_logout_uri = NONE, \
+                 require_par = false, \
+                 profile = $profile, \
+                 token_endpoint_auth_method = $token_endpoint_auth_method, \
+                 tls_client_auth_subject_dn = NONE, \
+                 tls_client_auth_san_dns = NONE, \
+                 tls_client_auth_san_uri = NONE, \
+                 self_signed_tls_client_auth_thumbprints = [], \
+                 tls_client_certificate_bound_access_tokens = false, \
+                 jwks = $jwks, \
+                 jwks_uri = $jwks_uri, \
+                 dpop_bound_access_tokens = false, \
+                 dpop_require_nonce = false, \
+                 authn_request_params = $authn_request_params, \
+                 browser_sso = false, \
+                 allowed_resources = $allowed_resources, \
+                 managed_by = $managed_by, \
+                 last_authorized_at = NONE",
+            )
+            .bind(("id", id_str.clone()))
+            .bind(("tenant_id", tenant_id_str))
+            .bind(("client_id", client_id_owned.clone()))
+            .bind(("name", input.name))
+            .bind(("redirect_uris", input.redirect_uris))
+            .bind(("grant_types", input.grant_types))
+            .bind(("scopes", input.scopes))
+            .bind(("profile", input.profile.as_str()))
+            .bind((
+                "token_endpoint_auth_method",
+                input.token_endpoint_auth_method.as_str(),
+            ))
+            .bind(("jwks", normalise_optional(input.jwks)))
+            .bind(("jwks_uri", normalise_optional(input.jwks_uri)))
+            .bind(("authn_request_params", input.authn_request_params.as_str()))
+            .bind(("allowed_resources", input.allowed_resources))
+            .bind(("managed_by", input.managed_by.as_str().to_owned()))
+            .await
+            .map_err(DbError::from);
+
+        match result {
+            Ok(mut result) => {
+                let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
+                let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
+                Ok(row.try_into_client(id)?)
+            }
+            // The unique index refused the write: a concurrent first
+            // authorization for the same document won. The row it created is
+            // the row this call was about to create, so it is read back rather
+            // than reported — the outcome the caller asked for has happened.
+            Err(e) => match self.get_by_client_id(tenant_id, &client_id_owned).await {
+                Ok(existing) if existing.managed_by == ManagedBy::Cimd => Ok(existing),
+                _ => Err(e.into()),
+            },
+        }
     }
 
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<OAuth2Client> {

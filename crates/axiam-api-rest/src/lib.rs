@@ -3,6 +3,7 @@
 
 pub mod authz;
 pub mod backchannel_logout;
+pub mod cimd;
 pub mod config;
 pub mod error;
 pub mod extractors;

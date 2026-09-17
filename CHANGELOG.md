@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Client ID metadata documents (CIMD).** A tenant can accept a `client_id`
+  that is an `https` URL and fetch the JSON document published there as the
+  client's registration — `draft-ietf-oauth-client-id-metadata-document`, the
+  mechanism that lets a desktop MCP client be the same client at every
+  deployment it talks to with nothing registered in advance. Enabled by the
+  new tenant policy `cimd.enabled` (default `false`): with it off, a
+  URL-shaped `client_id` is byte-for-byte today's unknown client and no
+  document is ever fetched. Enabling it is refused while
+  `external_client_allowed_resources` is empty (a client from a stranger's
+  document inherits that list as its audiences and must not be able to name
+  its own) or while `cimd.trusted_client_id_domains` is empty (the fetch is
+  reachable by an unauthenticated caller who chooses the URL). Eight further
+  policy fields bound it: `allow_http`, `trusted_redirect_domains`,
+  `restrict_same_domain`, `confidential_only`, `min_cache_secs`,
+  `max_cache_secs` and `max_metadata_bytes`. A materialised client is
+  `managed_by: cimd`, always faces the consent screen, can never carry a FAPI
+  profile, holds no secret, and never overwrites a registration an
+  administrator created. The document is fetched through AXIAM's shared SSRF
+  guard — resolve, canonicalise, validate, pin, no automatic redirects — with
+  a streaming size cap, a content-type check and a timeout. A tenant that
+  enables it advertises `client_id_metadata_document_supported` in its
+  discovery document; every other tenant's document is unchanged, member for
+  member. See
+  [`docs/admin/client-id-metadata-documents.md`](docs/admin/client-id-metadata-documents.md)
+  (T21.5).
+
 - **SDK contract §28 — MCP resource-server helpers (contract 1.48).** The
   eleven SDKs gain a specified surface for the resource-server half of the MCP
   authorization handshake: build and validate the RFC 9728 protected-resource

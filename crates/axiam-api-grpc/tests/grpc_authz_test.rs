@@ -95,6 +95,12 @@ fn test_auth_config() -> AuthConfig {
         max_concurrent_hashes: 0,
         hash_acquire_timeout_secs: 5,
         session_validation_cache_ttl_secs: 0,
+        // T21.5: the spread. T21.6 added `tenant_issuer_paths` and
+        // `request_issuer` to `AuthConfig` without updating this initializer,
+        // so this test has not compiled since; both take their `Default`
+        // value, which is the one that reproduces the behaviour this test was
+        // written against.
+        ..AuthConfig::default()
     }
 }
 

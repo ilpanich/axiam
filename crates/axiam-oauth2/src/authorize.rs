@@ -757,6 +757,13 @@ mod tests {
         async fn create(&self, _input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
             unimplemented!()
         }
+        async fn upsert_cimd_client(
+            &self,
+            _client_id: &str,
+            _input: CreateOAuth2Client,
+        ) -> AxiamResult<OAuth2Client> {
+            unimplemented!()
+        }
         async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
             unimplemented!()
         }
@@ -831,6 +838,13 @@ mod tests {
 
     impl OAuth2ClientRepository for MockClientRepoDbOutage {
         async fn create(&self, _input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
+            unimplemented!()
+        }
+        async fn upsert_cimd_client(
+            &self,
+            _client_id: &str,
+            _input: CreateOAuth2Client,
+        ) -> AxiamResult<OAuth2Client> {
             unimplemented!()
         }
         async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
@@ -968,6 +982,13 @@ mod tests {
 
     impl OAuth2ClientRepository for MockClientRepoNotFound {
         async fn create(&self, _input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
+            unimplemented!()
+        }
+        async fn upsert_cimd_client(
+            &self,
+            _client_id: &str,
+            _input: CreateOAuth2Client,
+        ) -> AxiamResult<OAuth2Client> {
             unimplemented!()
         }
         async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {

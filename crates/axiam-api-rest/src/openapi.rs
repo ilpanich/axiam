@@ -511,6 +511,8 @@ use crate::handlers;
         // echoes, and the registration mode the settings API takes.
         axiam_core::models::oauth2_client::ManagedBy,
         axiam_core::models::settings::DynamicRegistrationMode,
+        // T21.5 — the nested CIMD posture, referenced by both settings DTOs.
+        axiam_core::models::settings::CimdPolicy,
         // T21.4 — the RFC 7591 request, response and error shapes, plus the
         // two initial-access-token DTOs. The first two live in `axiam-oauth2`
         // beside the validation that produces them.

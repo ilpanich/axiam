@@ -163,6 +163,18 @@ service use the Token Exchange grant (RFC 8693). Delegation vs impersonation,
 the scope-narrowing rule, the lifetime cap and the error table are in
 [`token-exchange.md`](token-exchange.md).
 
+## MCP servers
+
+Fronting a [Model Context Protocol](https://modelcontextprotocol.io) server
+with AXIAM as its OAuth 2.0 authorization server — the RFC 9728
+protected-resource document the MCP server publishes, the
+`WWW-Authenticate: Bearer resource_metadata="…"` challenge, SDK middleware
+configuration, tenant settings translated from Keycloak's MCP guide, and one
+worked example per registration mode (pre-registered, dynamic client
+registration, Client ID Metadata Documents) are in [`mcp.md`](mcp.md), with a
+runnable example at
+[`examples/b7-mcp-server/`](../../examples/b7-mcp-server/).
+
 ## UMA 2.0 — Protection API and ticket grant
 
 A service that guards resources it does not own registers them, asks AXIAM what

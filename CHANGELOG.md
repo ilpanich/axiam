@@ -51,6 +51,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unnumbered, and all eleven SDK repositories must re-sync the vendored
   `CONTRACT.md` (T21.9).
 
+- **Documentation and a runnable example for fronting an MCP server with
+  AXIAM.** [`docs/api/mcp.md`](docs/api/mcp.md) ties together the pieces T21.1
+  through T21.6 and T21.9 shipped separately: the RFC 9728 protected-resource
+  document and `WWW-Authenticate` challenge an MCP server publishes (built
+  with the SDK's §28 helpers, not by AXIAM), the SDK middleware configuration
+  that checks it, tenant settings translated from Keycloak's MCP guide for
+  MCP Inspector, VS Code and Claude Code, the D3 audience warning, and one
+  worked example per registration mode. [`examples/b7-mcp-server/`](examples/b7-mcp-server)
+  is a runnable MCP server on the official `@modelcontextprotocol/sdk`
+  streamable-HTTP transport, with a `walkthrough.sh` driving 401 → discovery →
+  registration → PKCE + `resource` → token → tool call in each of
+  pre-registered, dynamic-registration and CIMD mode, and a `smoke-test.sh`
+  proving the server runs. No AXIAM behaviour changes (T21.7).
+
 - **`GET /.well-known/oauth-authorization-server`** (T21.1) — the RFC 8414
   authorization-server metadata path, serving the same document as
   `/.well-known/openid-configuration` with the same optional `?tenant_id=`.

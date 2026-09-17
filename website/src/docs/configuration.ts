@@ -384,6 +384,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           ["AXIAM__RATE_LIMIT__PAR_PER_MIN", "Max /oauth2/par per minute.", "120"],
           [
+            "AXIAM__RATE_LIMIT__DCR_PER_MIN",
+            "Max RFC 7591 dynamic client registrations per minute, per IP. The smallest limit here, because it is the only unauthenticated write endpoint: every accepted request allocates a client row against the tenant's dcr_max_clients. Sized for one person registering one MCP client once, with room for a retry \u2014 not for throughput. Never client-keyed, since obtaining a client identity is what the call is for.",
+            "5",
+          ],
+          [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
             "Max /oauth2/end_session per minute. Never moved by a profile preset.",
             "30",

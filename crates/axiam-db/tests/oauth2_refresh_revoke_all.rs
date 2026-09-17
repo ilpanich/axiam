@@ -92,6 +92,7 @@ async fn insert_token(
         session_id: None,
         requested_userinfo_claims: Vec::new(),
         expires_at: Utc::now() + Duration::days(30),
+        resource: None,
     })
     .await
     .unwrap();

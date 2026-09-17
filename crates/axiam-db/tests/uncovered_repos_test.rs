@@ -774,6 +774,7 @@ async fn oauth2_client_crud() {
             dpop_require_nonce: false,
             authn_request_params: AuthnRequestParamsMode::Ignore,
             browser_sso: false,
+            allowed_resources: Vec::new(),
         })
         .await
         .unwrap();
@@ -845,6 +846,7 @@ async fn oauth2_client_secret_hash_is_upgraded_with_a_compare_and_swap() {
             dpop_require_nonce: false,
             authn_request_params: AuthnRequestParamsMode::Ignore,
             browser_sso: false,
+            allowed_resources: Vec::new(),
         })
         .await
         .unwrap();

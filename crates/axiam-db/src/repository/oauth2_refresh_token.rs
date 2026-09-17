@@ -51,6 +51,12 @@ struct RefreshTokenRow {
     /// exactly what such a row produced before the column existed.
     #[surreal(default)]
     requested_userinfo_claims: Option<Vec<String>>,
+    /// T21.3 / RFC 8707 — see [`RefreshToken::resource`]. Absent on every row
+    /// written before schema v63, which is the honest value: those grants
+    /// named no resource, and a refresh of one mints `axiam:user` exactly as
+    /// it always did.
+    #[surreal(default)]
+    resource: Option<String>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -72,6 +78,12 @@ struct RefreshTokenRowWithId {
     /// T-241 — see [`RefreshToken::requested_userinfo_claims`].
     #[surreal(default)]
     requested_userinfo_claims: Option<Vec<String>>,
+    /// T21.3 / RFC 8707 — see [`RefreshToken::resource`]. Absent on every row
+    /// written before schema v63, which is the honest value: those grants
+    /// named no resource, and a refresh of one mints `axiam:user` exactly as
+    /// it always did.
+    #[surreal(default)]
+    resource: Option<String>,
 }
 
 impl RefreshTokenRowWithId {
@@ -101,6 +113,7 @@ impl RefreshTokenRowWithId {
             created_at: self.created_at,
             rotated_at: self.rotated_at,
             requested_userinfo_claims: self.requested_userinfo_claims.unwrap_or_default(),
+            resource: self.resource,
         })
     }
 }
@@ -146,6 +159,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
                  scopes = $scopes, \
                  session_id = $session_id, \
                  requested_userinfo_claims = $requested_userinfo_claims, \
+                 resource = $resource, \
                  expires_at = $expires_at, \
                  revoked = false",
             )
@@ -157,6 +171,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             .bind(("scopes", input.scopes))
             .bind(("session_id", input.session_id.map(|id| id.to_string())))
             .bind(("requested_userinfo_claims", input.requested_userinfo_claims))
+            .bind(("resource", input.resource))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -191,6 +206,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             created_at: row.created_at,
             rotated_at: row.rotated_at,
             requested_userinfo_claims: row.requested_userinfo_claims.unwrap_or_default(),
+            resource: row.resource,
         })
     }
 
@@ -506,6 +522,7 @@ mod tests {
             session_id: Some(Uuid::new_v4()),
             requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now() + chrono::Duration::days(30),
+            resource: None,
         })
         .await
         .unwrap()
@@ -534,6 +551,7 @@ mod tests {
                 session_id: None,
                 requested_userinfo_claims: vec!["email".into(), "name".into()],
                 expires_at: Utc::now() + chrono::Duration::days(30),
+                resource: None,
             })
             .await
             .unwrap();
@@ -576,6 +594,7 @@ mod tests {
             session_id: None,
             requested_userinfo_claims: vec!["email".into()],
             expires_at: Utc::now() + chrono::Duration::days(30),
+            resource: None,
         })
         .await
         .unwrap();

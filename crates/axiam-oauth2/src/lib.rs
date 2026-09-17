@@ -22,6 +22,7 @@ pub mod par;
 pub mod pkce;
 pub mod private_key_jwt;
 pub mod redirect_uri;
+pub mod resource;
 pub mod sensitive;
 pub mod token;
 pub mod token_exchange;

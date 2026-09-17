@@ -2243,6 +2243,7 @@ async fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
         browser_sso: false,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        allowed_resources: Vec::new(),
     };
     assert_eq!(validate_registration(&client), Ok(()));
     assert!(
@@ -2312,6 +2313,7 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
         browser_sso: false,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        allowed_resources: Vec::new(),
     };
 
     let cases: [(&str, RawAuthnParams<'_>); 4] = [

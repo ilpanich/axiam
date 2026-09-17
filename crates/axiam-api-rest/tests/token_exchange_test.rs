@@ -146,6 +146,7 @@ async fn setup() -> Fixture {
             dpop_require_nonce: false,
             authn_request_params: AuthnRequestParamsMode::Ignore,
             browser_sso: false,
+            allowed_resources: Vec::new(),
         })
         .await
         .unwrap();
@@ -176,6 +177,7 @@ async fn setup() -> Fixture {
             dpop_require_nonce: false,
             authn_request_params: AuthnRequestParamsMode::Ignore,
             browser_sso: false,
+            allowed_resources: Vec::new(),
         })
         .await
         .unwrap();
@@ -813,4 +815,131 @@ async fn client_row_id(f: &Fixture) -> uuid::Uuid {
         .await
         .unwrap()
         .id
+}
+
+// ---------------------------------------------------------------------------
+// T21.3 / D2 — the audience allow-list moves to `allowed_resources`
+// ---------------------------------------------------------------------------
+
+/// In-memory writer, so the deprecation warning can be asserted on rather than
+/// assumed. The same shape `gdpr_audit_dlq_test.rs` and
+/// `client_secret_basic_test.rs` already use.
+#[derive(Clone)]
+struct BufWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for BufWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+    type Writer = BufWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// D2 — `allowed_resources` is the field that means "audiences this client may
+/// address", and the exchange grant honours it.
+///
+/// Registered as a resource and **not** as a redirect URI, so a pass here
+/// cannot come from the deprecated branch below.
+#[actix_web::test]
+async fn an_audience_registered_as_a_resource_is_accepted() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    const TARGET: &str = "https://mcp.example.com/mcp";
+    axiam_db::repository::SurrealOAuth2ClientRepository::new(f.db.clone())
+        .update(
+            f.tenant_id,
+            client_row_id(&f).await,
+            axiam_core::models::oauth2_client::UpdateOAuth2Client {
+                allowed_resources: Some(vec![TARGET.into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let extra = format!("{}&audience={}", subject_params(&f, &["read"]), enc(TARGET));
+    let (status, body) = exchange!(app, f, f.client_id, f.client_secret, extra);
+    assert_eq!(status, 200, "exchange returned {body:?}");
+    assert_eq!(
+        decode_claims(body["access_token"].as_str().unwrap())["aud"],
+        TARGET
+    );
+}
+
+/// D2's deprecation half. SEC-089's rule — a registered `redirect_uri` doubles
+/// as a token audience — still works, because removing it outright would break
+/// every deployment with a working exchange on the day they upgrade.
+///
+/// The warning is asserted, not assumed. It is the only thing that turns "this
+/// still works" into "this still works and the operator has been told which
+/// registrations to migrate", and a deprecation nobody is told about is a
+/// deprecation that never ends.
+#[actix_web::test]
+async fn the_deprecated_redirect_uri_branch_still_works_and_says_so() {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(BufWriter(captured.clone()))
+        .with_ansi(false)
+        .finish();
+
+    {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let f = setup().await;
+        let app = test_app!(f);
+
+        // `https://orders.internal` is this client's registered redirect URI
+        // and is NOT in its (empty) `allowed_resources`.
+        let extra = format!(
+            "{}&audience={}",
+            subject_params(&f, &["read"]),
+            enc("https://orders.internal")
+        );
+        let (status, body) = exchange!(app, f, f.client_id, f.client_secret, extra);
+        assert_eq!(
+            status, 200,
+            "the deprecated branch must still work: {body:?}"
+        );
+    }
+
+    let logs = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("DEPRECATED"),
+        "the redirect-URI branch must announce itself: {logs}"
+    );
+    assert!(
+        logs.contains("allowed_resources"),
+        "and must name the remedy: {logs}"
+    );
+    assert!(
+        logs.contains("https://orders.internal"),
+        "and the registration to migrate: {logs}"
+    );
+}
+
+/// The union widens nothing: a target on neither list is still
+/// `invalid_target`.
+#[actix_web::test]
+async fn a_target_on_neither_list_is_still_invalid_target() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let extra = format!(
+        "{}&audience={}",
+        subject_params(&f, &["read"]),
+        enc("https://mcp.example.com/mcp")
+    );
+    let (status, body) = exchange!(app, f, f.client_id, f.client_secret, extra);
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"], "invalid_target");
 }

@@ -114,6 +114,14 @@ struct PushedAuthParamsRow {
     /// no key.
     #[surreal(default)]
     dpop_jkt: Option<String>,
+    /// T21.3 / RFC 8707 — the resource the pushed request named.
+    ///
+    /// No migration, for the reason `dpop_jkt` above needs none: `params` is
+    /// `TYPE object FLEXIBLE`, so a new key inside it needs no `DEFINE FIELD`.
+    /// `#[surreal(default)]` carries a row pushed before the field existed,
+    /// and such a row named no resource.
+    #[surreal(default)]
+    resource: Option<String>,
 }
 
 impl From<PushedAuthParams> for PushedAuthParamsRow {
@@ -136,6 +144,7 @@ impl From<PushedAuthParams> for PushedAuthParamsRow {
             ui_locales: p.ui_locales,
             claims_locales: p.claims_locales,
             dpop_jkt: p.dpop_jkt,
+            resource: p.resource,
         }
     }
 }
@@ -160,6 +169,7 @@ impl From<PushedAuthParamsRow> for PushedAuthParams {
             ui_locales: p.ui_locales,
             claims_locales: p.claims_locales,
             dpop_jkt: p.dpop_jkt,
+            resource: p.resource,
         }
     }
 }

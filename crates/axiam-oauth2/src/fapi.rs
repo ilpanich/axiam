@@ -1070,6 +1070,7 @@ mod tests {
             browser_sso: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            allowed_resources: Vec::new(),
         }
     }
 

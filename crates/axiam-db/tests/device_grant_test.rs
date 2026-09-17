@@ -31,6 +31,7 @@ fn grant(tenant_id: Uuid, user_code: &str, hash: &str, ttl_secs: i64) -> CreateD
         scopes: vec!["openid".into(), "profile".into()],
         expires_at: Utc::now() + Duration::seconds(ttl_secs),
         interval_secs: 5,
+        resource: None,
     }
 }
 

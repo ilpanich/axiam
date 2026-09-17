@@ -352,6 +352,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "session_revocation_feed",
         sql: SCHEMA_V62,
     },
+    Migration {
+        version: 63,
+        name: "rfc8707_resource_indicators",
+        sql: SCHEMA_V63,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3393,9 +3398,97 @@ DEFINE INDEX IF NOT EXISTS idx_revoked_session_expiry ON TABLE revoked_session \
     FIELDS expires_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v63 — T21.3 / RFC 8707: the resource a grant was issued for
+// -----------------------------------------------------------------------
+//
+// One allow-list on the client and one optional column on each of the three
+// credentials a grant survives in. Additive, no backfill, no index — v58's
+// shape, for v58's reasons, on four tables.
+//
+// **`oauth2_client.allowed_resources`.** The only source of truth for what a
+// client may name in a `resource` parameter (D2). `array DEFAULT []` rather
+// than `option<array>`, and this is the one place in this migration where the
+// two differ in meaning rather than in cost: the column is an allow-list read
+// on every request that carries the parameter, and a `NONE` an author must
+// remember to coalesce is a `NONE` that eventually coalesces the wrong way.
+// `[]` says "this client may name no resource", which is exactly what every
+// client registered before this migration may do, and says it in the same
+// shape whether the row predates the column or not. The write is one value per
+// row rather than per grant, so the cost of the default is bounded by the
+// number of clients a tenant has.
+//
+// **`oauth2_auth_code.resource`, `oauth2_refresh_token.resource`,
+// `device_grant.resource`.** `option<string>`, because a code, a refresh token
+// or a device grant written before this migration was issued by a client that
+// could not have named a resource, and absent says that exactly — which is
+// what makes the token endpoint mint `axiam:user` for it, unchanged (I2).
+// Writing a placeholder would instead claim an audience nobody asked for.
+//
+// The refresh-token column is what stops a token being widened by refreshing
+// it: the rotation copies it forward, and a refresh naming a different
+// resource is `invalid_target`.
+//
+// **`pushed_auth_request` needs no column.** Its `params` field is
+// `TYPE object FLEXIBLE`, so the pushed `resource` travels inside it with no
+// DDL at all — the same way the nine OIDC authentication-request parameters
+// did in v54.
+//
+// **No index anywhere.** None of these columns is a search key: the client row
+// is located by `client_id`, the code by `code_hash`, the refresh token by
+// `token_hash` and the device grant by `device_code_hash`, each by its own
+// unique index.
+const SCHEMA_V63: &str = "\
+DEFINE FIELD IF NOT EXISTS allowed_resources ON TABLE oauth2_client TYPE array DEFAULT [];
+DEFINE FIELD IF NOT EXISTS allowed_resources.* ON TABLE oauth2_client TYPE string;
+DEFINE FIELD IF NOT EXISTS resource ON TABLE oauth2_auth_code TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS resource ON TABLE oauth2_refresh_token TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS resource ON TABLE device_grant TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T21.3 — v63 adds one allow-list and three optional columns, and the
+    /// things that would make it a behaviour change rather than an addition
+    /// are asserted absent: a non-optional column on a grant table (which
+    /// would claim an audience for every in-flight code), an `UPDATE` (which
+    /// would be a backfill inventing one), and an index (which none of these
+    /// columns is a search key for).
+    #[test]
+    fn v63_is_additive_and_defaults_to_todays_behaviour() {
+        for definition in [
+            "allowed_resources ON TABLE oauth2_client TYPE array DEFAULT []",
+            "allowed_resources.* ON TABLE oauth2_client TYPE string",
+            "resource ON TABLE oauth2_auth_code TYPE option<string>",
+            "resource ON TABLE oauth2_refresh_token TYPE option<string>",
+            "resource ON TABLE device_grant TYPE option<string>",
+        ] {
+            assert!(
+                SCHEMA_V63.contains(definition),
+                "v63 must define {definition}"
+            );
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DEFINE INDEX", "DELETE"] {
+            assert!(
+                !SCHEMA_V63.contains(forbidden),
+                "v63 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        assert_eq!(
+            SCHEMA_V63.matches("DEFINE FIELD").count(),
+            5,
+            "v63 defines exactly the five fields above"
+        );
+        // The three grant columns are optional, so no row written before this
+        // migration has to be rewritten to satisfy them (I1/I2).
+        assert_eq!(
+            SCHEMA_V63.matches("TYPE option<string>").count(),
+            3,
+            "each grant-table column must be optional"
+        );
+    }
 
     /// T-39/T-143 — v62 is one new table and nothing else. The things that
     /// would make it dangerous are asserted absent: any write to an existing
@@ -3695,9 +3788,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&62),
-            "v62 is the newest migration (T-39/T-143 — the revocation feed's \
-             backing table). \
+            Some(&63),
+            "v63 is the newest migration (T21.3 — RFC 8707's client allow-list \
+             and the resource a grant was issued for). \
              This assertion is a tripwire, not bookkeeping: bumping it is how a new \
              migration is declared deliberate rather than merged in by accident."
         );

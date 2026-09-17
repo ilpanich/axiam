@@ -464,6 +464,7 @@ impl RefreshTokenRepository for MockRefreshRepo {
                 revoked: false,
                 created_at: Utc::now(),
                 rotated_at: None,
+                resource: None,
             })
         } else {
             Err(AxiamError::Database("create failed".into()))
@@ -662,6 +663,7 @@ fn make_client(grants: &[&str], scopes: &[&str]) -> Box<OAuth2Client> {
         browser_sso: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        allowed_resources: Vec::new(),
     })
 }
 
@@ -689,6 +691,7 @@ fn make_auth_code(scopes: &[&str], challenge: Option<&str>) -> AuthorizationCode
         expires_at: Utc::now() + chrono::Duration::minutes(10),
         used: false,
         created_at: Utc::now(),
+        resource: None,
     }
 }
 
@@ -706,6 +709,7 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
         revoked: false,
         created_at: Utc::now(),
         rotated_at: None,
+        resource: None,
     }
 }
 

@@ -177,7 +177,13 @@ where
         // authenticated *now*, so a rejection is attributable, and the browser
         // never gets a request_uri standing for a request that was going to
         // fail anyway.
-        if !client.redirect_uris.iter().any(|u| u == &req.redirect_uri) {
+        // T21.2: the same matcher the authorization endpoint uses, so the two
+        // cannot come to disagree about what this client registered — a PAR
+        // request accepted here and refused at `/oauth2/authorize` would hand
+        // the user agent a `request_uri` standing for a request that cannot
+        // complete, which is the failure this check exists to prevent.
+        if !crate::redirect_uri::any_redirect_uri_matches(&client.redirect_uris, &req.redirect_uri)
+        {
             return Err(OAuth2Error::InvalidRedirectUri(
                 "redirect_uri is not registered for this client".into(),
             ));

@@ -316,6 +316,52 @@ worked example; the token-endpoint page's auth-method table gains `none`.
   unchanged and green.
 - I1, I4, I5, I6.
 
+**Amendment, recorded by the executing session (2026-09-16).** Item 6
+(advertise `none`) cannot be landed without changing the expectation of two
+existing tests, which §5 says to stop and report rather than relax. Both are
+**premise** assertions rather than behaviour ones — each pins, in its own
+comment, the fact that no public-client story existed — and T21.2 is the task
+that builds the story:
+
+- `crates/axiam-api-rest/tests/oidc_conformance.rs:365`
+  (`discovery_advertises_every_implemented_client_auth_method`) asserts the
+  advertised list **exhaustively** and then asserts `none` is absent, with the
+  reason "there is no public-client story; advertising `none` would claim
+  one". The exhaustive half is the gate doing exactly its job: it exists so
+  that a method added to `ClientAuthMethod` and wired into
+  `authenticate_client_credential` cannot go unadvertised. Its expectation is
+  therefore *extended* (`none`, pinned in last place, so a future change that
+  advertised it first would still fail), and the absence assertion is
+  removed — the only line in this task that a reader could call a relaxation,
+  and the one the plan's item 6 explicitly asks for.
+- `crates/axiam-core/src/models/oauth2_client.rs`
+  (`an_unrecognised_auth_method_is_refused`) listed `"none"` among the wire
+  values `from_wire` must refuse. Keeping it would make a stored `none` row
+  unreadable. The precedent is in the test's own comment: W8 moved
+  `client_secret_basic` from that list to the accepted one when the server
+  implemented it, calling it "a deliberate, reviewed reversal". This is the
+  same reversal, recorded the same way.
+
+Nothing else in §5's gate changed, and no existing test's *behavioural*
+expectation did. I1 holds for every request except the discovery document,
+which gains one array element — which item 6 mandates and I7 classifies as
+additive.
+
+Two further decisions the task's text did not settle, both taken toward the
+stricter answer and documented in `docs/admin/public-clients.md`:
+
+- **Introspection is refused to public clients** (RFC 7662 §2.1 requires an
+  authenticated caller; a `client_id` that appears in every browser redirect
+  is not one), as are the **uma-ticket** and **token-exchange** grants at
+  request time. Revocation is *not* refused — RFC 7009 §2.1 contemplates
+  public clients, and a revocation only reaches a token the caller holds.
+- **`is_public_client` at `authorize.rs` is the union** of "registered for
+  `none`" and "empty `client_secret_hash`", not a replacement of the second by
+  the first. SEC-025 has required PKCE of an empty-hash row since long before
+  `none` existed; dropping that arm would quietly stop requiring it for any
+  deployment that reached that state another way. The union is fail-closed and
+  identical to today's answer for every client that exists.
+
 #### T2b — Admin UI — **Sonnet 5**
 
 **What.** `frontend/src/services/oauth2clients.ts` gains the `none` method;

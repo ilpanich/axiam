@@ -3534,6 +3534,35 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-09 (contract 1.47)** — **non-breaking / additive.** Two server
+  capabilities an SDK may observe and MUST NOT act on unasked:
+
+  - `token_endpoint_auth_methods_supported` gains `none` (RFC 6749 §2.1),
+    listed last. §21.5's row says what it means and what it does not: an SDK
+    configured with a client secret keeps sending it, because the registration
+    decides how a client authenticates and this member describes the
+    deployment. No SDK operation changes signature or behaviour; an SDK written
+    against 1.46 is conformant against 1.47 with no edit.
+  - `openapi.json` regenerates: `token_endpoint_auth_method` gains the enum
+    value `none` on the OAuth2-client create/update schemas, and
+    `OAuth2ClientCreatedResponse.client_secret` becomes optional (it is
+    **absent**, never empty, for a client registered as public). A generated
+    management-layer model for that response must therefore treat the member
+    as nullable/optional; every confidential registration still carries it.
+    `management-registry.json` regenerates with it — the operation count is
+    unchanged at 160 across 24 namespaces, and only the recorded spec digest
+    moves.
+
+  The server change behind it is AXIAM Phase 21 T21.2: public clients at the
+  token endpoint and the RFC 8252 §7.3 loopback port allowance
+  (`docs/admin/public-clients.md`).
+
+  **Re-sync required** in all eleven SDK repositories — `axiam-rust-sdk`,
+  `axiam-typescript-sdk`, `axiam-python-sdk`, `axiam-java-sdk`,
+  `axiam-kotlin-sdk`, `axiam-csharp-sdk`, `axiam-php-sdk`, `axiam-go-sdk`,
+  `axiam-swift-sdk`, `axiam-c-sdk`, `axiam-cplusplus-sdk` — for the vendored
+  `CONTRACT.md` and `openapi.json`. `proto/` is unchanged.
+
 - **2026-09 (contract 1.46)** — **documentation only; no SDK behaviour changes, no
   signature moves, and `openapi.json` is byte-identical to 1.45.**
 
@@ -4171,7 +4200,7 @@ skips it on failure has left ajar the door it just closed.
 |---|---|---|
 | `authorization_response_iss_parameter_supported` | `true` | §21.4 |
 | `tls_client_certificate_bound_access_tokens` | `true` | The server can issue bound tokens. Whether a *given* client receives them is that client's registration and is deliberately not discoverable — this document is scoped to the server, and a per-client answer here would leak one client's posture to every reader. |
-| `token_endpoint_auth_methods_supported` | includes `tls_client_auth`, `self_signed_tls_client_auth`, (contract 1.16) `private_key_jwt`, and (contract 1.41) `client_secret_basic` | Advertised unconditionally; whether an mTLS listener is reachable is a deployment's listener configuration, discovered at connect time. `private_key_jwt` needs nothing from the listeners at all. `client_secret_basic` is a server capability an SDK MUST NOT act on — see §5 rule 3: the list is a statement about the deployment, not an instruction to the client. |
+| `token_endpoint_auth_methods_supported` | includes `tls_client_auth`, `self_signed_tls_client_auth`, (contract 1.16) `private_key_jwt`, (contract 1.41) `client_secret_basic`, and (contract 1.47) `none`, listed last | Advertised unconditionally; whether an mTLS listener is reachable is a deployment's listener configuration, discovered at connect time. `private_key_jwt` needs nothing from the listeners at all. `client_secret_basic` is a server capability an SDK MUST NOT act on — see §5 rule 3: the list is a statement about the deployment, not an instruction to the client. The same applies to `none` (RFC 6749 §2.1): it says the deployment can serve public clients, never that this client is one — whether a client authenticates, and how, is its registration's answer, and an SDK MUST keep sending the credential it was configured with. |
 | `mtls_endpoint_aliases` | an object, or **absent** (contract 1.40) | RFC 8705 §5. Present only when the deployment terminates mutual TLS on a different host from the issuer; absent — never `null` — when it does not. See §21.3 rule 2 for what an SDK owes it. |
 | `dpop_signing_alg_values_supported` | `["PS256", "ES256", "EdDSA"]` (contract 1.16) | RFC 9449 §5.1. Its **presence** is what says DPoP is supported — the RFC defines no separate boolean. Note the omission of `RS256`: a client library defaulting to RSA-PKCS#1 will be refused, and this list is where it should find that out. |
 | `code_challenge_methods_supported` | `["S256"]` (contract 1.42) | RFC 8414 §2 / RFC 7636 §4.3. `S256` and only `S256` — the authorization endpoint refuses `plain`. RFC 8414 defines no default for this member, so its **absence** does not mean "S256"; it means a conforming client cannot establish that PKCE is available at all. It was absent until the first OIDF conformance run reported it NOT FOUND. |

@@ -435,6 +435,20 @@ pub fn build_discovery_document_for(
             // so advertising it carries no caveat: every AXIAM deployment can
             // serve it.
             "private_key_jwt".into(),
+            // T21.2 / RFC 6749 §2.1, OIDC Core §9. Listed LAST, because the
+            // order is the operator's recommendation and no deployment should
+            // reach for the method that authenticates nothing while one of the
+            // five above fits. It is advertised for the same reason as the
+            // others — this document states what the DEPLOYMENT can serve, not
+            // what any one client may use (I7) — and a client registered for a
+            // credential still cannot fall back to it: the registration
+            // decides, and `none` is only ever reached by a registration that
+            // named it (I4).
+            //
+            // MCP clients (Claude Code, VS Code, MCP Inspector) read this
+            // member to decide whether they can register at all; before T21.2
+            // the truthful answer was no.
+            "none".into(),
         ],
         claims_supported: vec![
             "sub".into(),

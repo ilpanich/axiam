@@ -143,6 +143,17 @@ pub enum FapiRegistrationError {
     /// client whose posture answers two different questions depending on
     /// which parameter arrived.
     AuthnParamsOnFapiClient,
+    /// T21.2 — a public client (`token_endpoint_auth_method: none`) also
+    /// registered a credential.
+    ///
+    /// `none` means the client authenticates with nothing. A registration that
+    /// also carries an mTLS binding, a certificate thumbprint or a key source
+    /// says two different things about the same client, and the token endpoint
+    /// would honour the first of them: its public arm accepts no credential
+    /// and refuses a presented one, so the registered key material would sit
+    /// there unused and unusable. An operator reading the row would see a
+    /// credential AXIAM will never check.
+    PublicClientWithCredential { credential: &'static str },
     /// X7 G8 — a `fapi2` client registered a GDPR-sensitive scope.
     ///
     /// `address` and `phone` release personal data AXIAM has no consent
@@ -216,6 +227,13 @@ impl std::fmt::Display for FapiRegistrationError {
                  authentication-request parameters (prompt, max_age, acr_values, claims, \
                  id_token_hint and the display hints) belong to the standard lane, and a \
                  fapi2 client is refused them at the authorization endpoint as well"
+            ),
+            Self::PublicClientWithCredential { credential } => write!(
+                f,
+                "a public client (token_endpoint_auth_method: none) may not also register \
+                 {credential}: `none` means this client authenticates with nothing, and the \
+                 token endpoint refuses any credential it presents. Register it for the method \
+                 that matches the credential it actually holds, or drop the credential"
             ),
             Self::SensitiveScopesOnFapiClient { scopes } => write!(
                 f,
@@ -361,6 +379,34 @@ pub fn validate_registration<'a>(
                 return Err(FapiRegistrationError::JwksSourceCount {
                     registered: reg.jwks_source_count,
                 });
+            }
+        }
+        // T21.2 — the public registration, whose consistency rule runs the
+        // other way round: every other method asks "is the credential this
+        // method needs registered?", and this one asks "is a credential this
+        // method will never read registered anyway?".
+        //
+        // Shared secrets are not in the list, and cannot be: the repository
+        // mints one for every confidential client and this validator runs
+        // before that happens, so there is no secret to observe here. The
+        // public path in `SurrealOAuth2ClientRepository::create` is what makes
+        // "no secret" true for `none`, and the admin API is what refuses a
+        // method change that would strand one on an existing row.
+        ClientAuthMethod::None => {
+            for (present, credential) in [
+                (
+                    reg.mtls_binding_count > 0,
+                    "a tls_client_auth subject DN or SAN",
+                ),
+                (
+                    !reg.self_signed_thumbprints.is_empty(),
+                    "a self_signed_tls_client_auth thumbprint",
+                ),
+                (reg.jwks_source_count > 0, "jwks or jwks_uri"),
+            ] {
+                if present {
+                    return Err(FapiRegistrationError::PublicClientWithCredential { credential });
+                }
             }
         }
         // Both shared-secret spellings register the same way: the secret is
@@ -920,6 +966,81 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use uuid::Uuid;
+
+    /// T21.2 — a public registration is accepted when it carries no
+    /// credential, and refused when it carries one.
+    #[test]
+    fn a_public_client_may_register_no_credential_and_only_that() {
+        let mut c = base_client();
+        c.token_endpoint_auth_method = ClientAuthMethod::None;
+        validate_registration(&c).expect("a bare public client is a valid registration");
+
+        for (label, mutate) in [
+            (
+                "a subject DN",
+                Box::new(|c: &mut OAuth2Client| {
+                    c.tls_client_auth_subject_dn = Some("CN=rp".into());
+                }) as Box<dyn Fn(&mut OAuth2Client)>,
+            ),
+            (
+                "a SAN",
+                Box::new(|c: &mut OAuth2Client| {
+                    c.tls_client_auth_san_dns = Some("rp.example".into());
+                }),
+            ),
+            (
+                "a thumbprint",
+                Box::new(|c: &mut OAuth2Client| {
+                    c.self_signed_tls_client_auth_thumbprints =
+                        vec!["E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into()];
+                }),
+            ),
+            (
+                "an inline jwks",
+                Box::new(|c: &mut OAuth2Client| {
+                    c.jwks = Some(r#"{"keys":[]}"#.into());
+                }),
+            ),
+            (
+                "a jwks_uri",
+                Box::new(|c: &mut OAuth2Client| {
+                    c.jwks_uri = Some("https://rp.example/jwks.json".into());
+                }),
+            ),
+        ] {
+            let mut c = base_client();
+            c.token_endpoint_auth_method = ClientAuthMethod::None;
+            mutate(&mut c);
+            assert!(
+                matches!(
+                    validate_registration(&c),
+                    Err(FapiRegistrationError::PublicClientWithCredential { .. })
+                ),
+                "a public client registered with {label} must be refused"
+            );
+        }
+    }
+
+    /// I5 — the FAPI profile refuses `none` through the gate that has always
+    /// refused a shared secret. No new code, and none needed: `is_strong()` is
+    /// the whole test.
+    #[test]
+    fn a_fapi2_client_may_not_be_public() {
+        let mut c = base_client();
+        c.profile = ClientProfile::Fapi2;
+        c.require_par = true;
+        c.tls_client_certificate_bound_access_tokens = true;
+        c.token_endpoint_auth_method = ClientAuthMethod::None;
+        assert!(
+            matches!(
+                validate_registration(&c),
+                Err(FapiRegistrationError::WeakClientAuth {
+                    method: ClientAuthMethod::None
+                })
+            ),
+            "a fapi2 profile must refuse the public method (FAPI 2.0 §5.3.1.1)"
+        );
+    }
 
     fn base_client() -> OAuth2Client {
         OAuth2Client {

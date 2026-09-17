@@ -375,6 +375,18 @@ async fn discovery_advertises_every_implemented_client_auth_method() {
     // the new value: a method added to `ClientAuthMethod` and wired into
     // `authenticate_client_credential` but never advertised is a silent
     // half-landing, and this is where it stops.
+    //
+    // T21.2 is the first time that mechanism fired. `none` was asserted
+    // ABSENT here, with the reason "there is no public-client story;
+    // advertising `none` would claim one" — true when it was written, and
+    // false as of T21.2, which builds the story: the public arm of
+    // `authenticate_client_credential`, PKCE required at both ends of the code
+    // flow, and an admin API that refuses `none` beside any grant or
+    // credential that contradicts it. The expectation moves rather than
+    // relaxes: the list is still exhaustive, and `none` is pinned in last
+    // place, so a future change that advertised it *first* — presenting the
+    // method that authenticates nothing as the deployment's recommendation —
+    // would still fail here.
     let (db, _org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let _user_id = create_admin_user(&db, tenant_id).await;
@@ -403,12 +415,9 @@ async fn discovery_advertises_every_implemented_client_auth_method() {
             "tls_client_auth",
             "self_signed_tls_client_auth",
             "private_key_jwt",
+            "none",
         ],
-        "the advertised methods, in the operator's order of preference —          `client_secret_post` stays first because the header channel is the one          intermediaries log (W8)"
-    );
-    assert!(
-        !methods.contains(&"none"),
-        "there is no public-client story; advertising `none` would claim one"
+        "the advertised methods, in the operator's order of preference —          `client_secret_post` stays first because the header channel is the one          intermediaries log (W8), and `none` stays last because a deployment          should reach for it only when no credential is possible (T21.2)"
     );
 }
 

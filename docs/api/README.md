@@ -119,6 +119,16 @@ curl -s https://axiam.example.com/.well-known/oauth-authorization-server
 curl -s "https://axiam.example.com/.well-known/oauth-authorization-server?tenant_id=$TENANT_ID"
 ```
 
+## OAuth2 public clients
+
+A client that cannot keep a secret — a desktop or CLI application, a
+single-page application, a mobile app — registers with
+`token_endpoint_auth_method: "none"` and authenticates with PKCE instead. When
+to do that, what such a registration is refused, and the RFC 8252 §7.3
+ephemeral-port rule for `http://127.0.0.1`, `http://[::1]` and
+`http://localhost` callbacks are in
+[`../admin/public-clients.md`](../admin/public-clients.md).
+
 ## OAuth2 device flow
 
 Input-constrained clients (televisions, CLIs, headless commissioning) use the

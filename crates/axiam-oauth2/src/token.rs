@@ -1002,6 +1002,36 @@ where
         presented_secret: Option<&str>,
         ctx: &TokenRequestContext,
     ) -> Result<(), OAuth2Error> {
+        // T21.2 — the public-client arm, first, because it is the one arm
+        // that may succeed with no credential at all and the reader should
+        // not have to establish that the other five cannot.
+        //
+        // Two rules, and the second is the one that keeps this from being a
+        // hole. A client registered for `none` authenticates with nothing, so
+        // nothing is what it must present: a secret, a Basic header, a client
+        // assertion or a client certificate arriving on a request from a
+        // public client is refused, not ignored. RFC 6749 §2.3 permits exactly
+        // one authentication method per request and this registration names
+        // none of them, so a credential here is either a misconfigured client
+        // — pointing at the wrong registration, or at a `client_id` it does
+        // not own — or somebody probing with one. Accepting it would make the
+        // registration an OR over "nothing" and "whatever was sent", which is
+        // strictly weaker than either, and it is the shape SEC-093 exists to
+        // prevent.
+        if client.token_endpoint_auth_method.is_public() {
+            if !ctx.carries_no_client_credential(presented_secret) {
+                tracing::warn!(
+                    client_id = %client.client_id,
+                    "a credential was presented for a client registered as public \
+                     (token_endpoint_auth_method: none); the request is refused rather than \
+                     authenticated, because a public registration names no credential to check \
+                     it against (T21.2)"
+                );
+                return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
+            }
+            return Ok(());
+        }
+
         if client.token_endpoint_auth_method.is_mtls() {
             return crate::mtls::authenticate_mtls_client(client, ctx.client_certificate.as_ref());
         }
@@ -1533,12 +1563,22 @@ where
         // request carries, never what this client registered — so SEC-086's
         // property is preserved exactly: a caller with no credential gets one
         // answer regardless of whether the client id exists.
+        //
+        // T21.2 moves the *answer* after the lookup without moving the
+        // *question*. A public client presents no credential by construction,
+        // so the refusal can no longer be decided from the request alone — but
+        // it must still be indistinguishable for everybody else. It is: both
+        // the unknown-client branch below and the confidential-client branch
+        // after it answer `invalid_client: client authentication is required`,
+        // the same error, in the same order, that this early return produced
+        // for both cases before. What changed is that a client registered for
+        // `none` now reaches its grant instead, which is the whole feature and
+        // is exactly as decidable as the existence of a public client already
+        // is at `/oauth2/authorize`.
         let client_secret = req.client_secret.as_deref();
-        if ctx.carries_no_client_credential(client_secret) {
-            return Err(OAuth2Error::InvalidClient(
-                "client authentication is required".into(),
-            ));
-        }
+        let carries_no_credential = ctx.carries_no_client_credential(client_secret);
+        let no_credential_error =
+            || OAuth2Error::InvalidClient("client authentication is required".into());
 
         // Authenticate client
         let client = self
@@ -1546,6 +1586,9 @@ where
             .get_by_client_id(tenant_id, client_id)
             .await
             .map_err(|e| match e {
+                // T21.2: an unknown client that presented no credential keeps
+                // the answer the pre-lookup check gave it, byte for byte.
+                AxiamError::NotFound { .. } if carries_no_credential => no_credential_error(),
                 // QUAL-03/D-11: only a genuinely-unknown client maps to
                 // invalid_client. Any other error (e.g. a DB outage) must
                 // surface as a distinct server error, never masquerade as
@@ -1558,6 +1601,12 @@ where
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
+
+        // T21.2: and a *known* client that presented no credential is refused
+        // here unless its registration says it has none to present.
+        if carries_no_credential && !client.token_endpoint_auth_method.is_public() {
+            return Err(no_credential_error());
+        }
 
         // Secret verification must also precede the grant-type check, and for
         // the same reason: `unauthorized_client` is only reachable by a caller
@@ -1623,6 +1672,35 @@ where
                 ));
             }
         };
+
+        // T21.2 — PKCE is required of a public client HERE as well as at
+        // `/oauth2/authorize`.
+        //
+        // The authorization endpoint refuses a public client's request that
+        // carries no `code_challenge` (step 2b there), so a code with no
+        // stored challenge should not exist for such a client. "Should not
+        // exist" is the part worth checking: a code predating the client's
+        // registration change, a row written by another path, or a bug in that
+        // gate all produce one, and redeeming it would complete the flow with
+        // the code as the only credential — which is precisely the attack PKCE
+        // replaces the client secret with, for a client that has no secret.
+        //
+        // `invalid_grant` rather than `invalid_request`: what is wrong is the
+        // grant being presented, not the shape of this request. The client
+        // cannot fix it by adding a parameter; it has to start a new
+        // authorization, which is what this error tells it to do.
+        if client.token_endpoint_auth_method.is_public() && auth_code.code_challenge.is_none() {
+            tracing::warn!(
+                client_id = %client.client_id,
+                "a public client presented an authorization code that carries no PKCE \
+                 challenge; refused (T21.2, OAuth 2.0 Security BCP §2.1.1)"
+            );
+            return Err(OAuth2Error::InvalidGrant(
+                "this authorization code was issued without PKCE and cannot be redeemed by a \
+                 public client (RFC 7636)"
+                    .into(),
+            ));
+        }
 
         // Verify PKCE before consuming the code
         if let Some(ref challenge) = auth_code.code_challenge {
@@ -1967,6 +2045,21 @@ where
             })?;
         let client_lookup_us = t_client_lookup.elapsed().as_micros() as u64;
 
+        // T21.2 — a public client has no business here. The admin API refuses
+        // to register `none` together with `client_credentials`, so this is
+        // the second gate rather than the first: a row that acquired the
+        // combination some other way must not be able to mint a machine token
+        // on the strength of its `client_id` alone, which is all a public
+        // client has. The grant-type check further down would also refuse it,
+        // and this says why.
+        if client.token_endpoint_auth_method.is_public() {
+            return Err(OAuth2Error::UnauthorizedClient(
+                "a public client (token_endpoint_auth_method: none) cannot use the \
+                 client_credentials grant: it has no credential to present"
+                    .into(),
+            ));
+        }
+
         // Stage 2 — client-secret verification. Keyed HMAC-SHA256 into a stack
         // buffer + constant-time compare (`axiam_auth::client_secret`); no heap
         // allocation, no lock, and this does NOT touch the Argon2id
@@ -2116,18 +2209,24 @@ where
         // widens it again for a secret carried in the `Authorization` header.
         // Still answered from the request alone, so the oracle this ordering
         // exists to close stays closed.
+        //
+        // T21.2 defers the answer past the lookup for the same reason, and
+        // with the same care, as the authorization-code grant above: a public
+        // client must be able to refresh the tokens it was legitimately
+        // issued — that is how a desktop MCP client stays signed in — and
+        // every other caller keeps the answer it got before.
         let client_secret_val = req.client_secret.as_deref();
-        if ctx.carries_no_client_credential(client_secret_val) {
-            return Err(OAuth2Error::InvalidClient(
-                "client authentication is required".into(),
-            ));
-        }
+        let carries_no_credential = ctx.carries_no_client_credential(client_secret_val);
+        let no_credential_error =
+            || OAuth2Error::InvalidClient("client authentication is required".into());
 
         let client = self
             .client_repo
             .get_by_client_id(tenant_id, client_id)
             .await
             .map_err(|e| match e {
+                // T21.2, as above: unchanged for a caller with no credential.
+                AxiamError::NotFound { .. } if carries_no_credential => no_credential_error(),
                 // QUAL-03/D-11: only a genuinely-unknown client maps to
                 // invalid_client. Any other error (e.g. a DB outage) must
                 // surface as a distinct server error, never masquerade as
@@ -2140,6 +2239,10 @@ where
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
+
+        if carries_no_credential && !client.token_endpoint_auth_method.is_public() {
+            return Err(no_credential_error());
+        }
 
         self.authenticate_client_credential(tenant_id, &client, client_secret_val, ctx)
             .await?;
@@ -2521,13 +2624,37 @@ where
             req.client_assertion.as_deref(),
             req.client_assertion_type.as_deref(),
         );
-        self.authenticate_client(
-            tenant_id,
-            &req.client_id,
-            req.client_secret.as_deref(),
-            &ctx,
-        )
-        .await?;
+        let client = self
+            .authenticate_client(
+                tenant_id,
+                &req.client_id,
+                req.client_secret.as_deref(),
+                &ctx,
+            )
+            .await?;
+
+        // T21.2 — a public client may not introspect.
+        //
+        // RFC 7662 §2.1: "the endpoint MUST also require some form of
+        // authorization to access this endpoint". A public client presents
+        // nothing, so its `client_id` — a value that travels in every browser
+        // redirect it makes — would be the whole of the authorization, and
+        // this endpoint answers questions about tokens belonging to anyone in
+        // the tenant. That is a token-metadata oracle for whoever reads one
+        // authorization URL, so it is refused here rather than served.
+        //
+        // Revocation is deliberately NOT refused: RFC 7009 §2.1 contemplates
+        // public clients explicitly, and `revoke_token` acts only on a token
+        // the requesting client already owns, so the worst a caller who
+        // guessed a public `client_id` can do is destroy a token they already
+        // hold.
+        if client.token_endpoint_auth_method.is_public() {
+            return Err(OAuth2Error::InvalidClient(
+                "a public client (token_endpoint_auth_method: none) cannot introspect tokens \
+                 (RFC 7662 §2.1 requires an authenticated caller)"
+                    .into(),
+            ));
+        }
 
         // First try: decode as JWT access token
         if let Ok(validated) = validate_access_token(&req.token, &self.auth_config) {

@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta15",
-    "x-axiam-spec-digest": "sha256:5b00681647ad6f16fe4df8838e90273483c9c2503a2b658dcc21d7aa08f06bf2"
+    "x-axiam-spec-digest": "sha256:6eb166644eb26e8a802e574d74518b36d44d92f6db5eb32af70f05e42aad8057"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -12477,13 +12477,14 @@
       },
       "ClientAuthMethod": {
         "type": "string",
-        "description": "How a client proves its identity at the token endpoint (RFC 8705 §2,\nOIDC Core §9 naming).\n\nOnly the methods AXIAM actually implements are representable. There is\ndeliberately no `none` variant: every AXIAM client is confidential today\n(see `handle_authorization_code`), and adding a public-client value here\nbefore the rest of the server understands one would let an operator\nregister a client whose authentication is silently skipped.",
+        "description": "How a client proves its identity at the token endpoint (RFC 8705 §2,\nOIDC Core §9 naming).\n\nOnly the methods AXIAM actually implements are representable. `None` — the\npublic-client value — was deliberately absent until T21.2: adding it before\nthe rest of the server understood one would have let an operator register a\nclient whose authentication is silently skipped. The server understands one\nnow (`token.rs`'s `authenticate_client_credential` has an arm that accepts\n*no* credential and refuses a presented one, the authorization endpoint\nderives its PKCE requirement from this enum, and the admin API refuses the\nmethod alongside any grant or binding that contradicts it), so the variant\nexists — and only that arm may ever treat a missing credential as success.",
         "enum": [
           "client_secret_post",
           "client_secret_basic",
           "tls_client_auth",
           "self_signed_tls_client_auth",
-          "private_key_jwt"
+          "private_key_jwt",
+          "none"
         ]
       },
       "ClientProfile": {
@@ -15554,7 +15555,6 @@
           "id",
           "tenant_id",
           "client_id",
-          "client_secret",
           "name",
           "redirect_uris",
           "grant_types",
@@ -15567,7 +15567,11 @@
             "type": "string"
           },
           "client_secret": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The plaintext client secret, shown exactly once.\n\nT21.2 — **absent** for a client registered with\n`token_endpoint_auth_method: none`. A public client is created with no\nsecret, so there is nothing to show; the member is omitted rather than\nsent as `\"\"`, which an operator (or an SDK) would reasonably read as a\nsecret that happens to be empty. Every confidential registration — that\nis, every registration that existed before T21.2 — carries it exactly\nas before."
           },
           "created_at": {
             "type": "string",

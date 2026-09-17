@@ -298,16 +298,33 @@ where
 
         // 2. Validate redirect_uri — also before any redirectable
         //    errors per RFC 6749 §4.1.2.1.
-        if !client.redirect_uris.contains(&req.redirect_uri) {
+        //
+        // T21.2: `contains()` became `any_redirect_uri_matches`, which IS
+        // `contains()` for every URI that is not a registered `http` loopback
+        // one — see `crate::redirect_uri` for why the non-loopback path
+        // compares strings rather than parsed URLs, and for the RFC 8252 §7.3
+        // allowance that is the whole of the difference.
+        if !crate::redirect_uri::any_redirect_uri_matches(&client.redirect_uris, &req.redirect_uri)
+        {
             return Err(OAuth2Error::InvalidRedirectUri(
                 "redirect_uri not registered".into(),
             ));
         }
 
         // 2b. SEC-025: Enforce PKCE for public clients.
-        // A public client has no client_secret (client_secret_hash is empty).
         // Per OAuth 2.0 Security BCP §7.6 and RFC 7636, public clients MUST use PKCE.
-        let is_public_client = client.client_secret_hash.is_empty();
+        //
+        // T21.2: publicness is what the REGISTRATION says
+        // (`token_endpoint_auth_method: none`), not what the stored hash looks
+        // like. The empty-hash arm is kept beside it rather than replaced by
+        // it: before T21.2 it was the whole test, and a deployment that
+        // reached that state some other way — a half-finished migration, a
+        // hand-edited row — has had PKCE required of it ever since SEC-025.
+        // Dropping the arm would quietly stop requiring it there, which is a
+        // weakening no part of this task asked for. The union is fail-closed
+        // and identical to today's answer for every client that exists.
+        let is_public_client =
+            client.token_endpoint_auth_method.is_public() || client.client_secret_hash.is_empty();
         if is_public_client && req.code_challenge.is_none() {
             return Err(OAuth2Error::InvalidRequest(
                 "PKCE (code_challenge) is required for public clients".into(),
@@ -856,7 +873,12 @@ mod tests {
             id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             client_id: "test-client".into(),
-            // Public client has an empty secret hash; confidential has a non-empty one.
+            // T21.2: a public client is one registered for `none`, and holds
+            // no secret to hash. Before T21.2 the empty hash WAS the test, so
+            // the fixture set only that; it now sets both halves of what a
+            // public registration actually looks like, and
+            // `a_none_client_is_public_however_its_hash_looks` covers the case
+            // where the two disagree.
             client_secret_hash: if is_public {
                 String::new()
             } else {
@@ -870,8 +892,11 @@ mod tests {
             backchannel_logout_uri: None,
             require_par: false,
             profile: axiam_core::models::oauth2_client::ClientProfile::Standard,
-            token_endpoint_auth_method:
-                axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretPost,
+            token_endpoint_auth_method: if is_public {
+                axiam_core::models::oauth2_client::ClientAuthMethod::None
+            } else {
+                axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretPost
+            },
             tls_client_auth_subject_dn: None,
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -991,6 +1016,124 @@ mod tests {
             result.is_ok(),
             "confidential client without PKCE must still succeed, got: {:?}",
             result
+        );
+    }
+
+    // T21.2: publicness is the registration's answer, not the hash's.
+    #[tokio::test]
+    async fn a_none_client_is_public_however_its_hash_looks() {
+        // A row registered for `none` that nonetheless carries a secret hash —
+        // the shape a client would have if it were ever allowed to switch
+        // method in place (the admin API refuses that, and this is what makes
+        // the refusal unnecessary for correctness here). PKCE is still
+        // required of it, because the METHOD says it is public.
+        let mut client = make_client(true);
+        client.client_secret_hash = "a-stale-hash".into();
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let result = svc
+            .authorize(make_authorize_request(tenant_id, &client, None))
+            .await;
+        assert!(
+            matches!(result, Err(OAuth2Error::InvalidRequest(_))),
+            "a client registered for `none` is public whatever its stored hash says, \
+             so PKCE is required; got {result:?}"
+        );
+    }
+
+    // SEC-025 has required PKCE of an empty-hash client since long before
+    // `none` existed. T21.2 must not quietly stop: the union in step 2b is
+    // what keeps this true.
+    #[tokio::test]
+    async fn a_confidential_client_with_an_empty_hash_still_needs_pkce() {
+        let mut client = make_client(false);
+        client.client_secret_hash = String::new();
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let result = svc
+            .authorize(make_authorize_request(tenant_id, &client, None))
+            .await;
+        assert!(
+            matches!(result, Err(OAuth2Error::InvalidRequest(_))),
+            "SEC-025's empty-hash rule must survive T21.2; got {result:?}"
+        );
+    }
+
+    // T21.2 / RFC 8252 §7.3 — the loopback allowance, at the endpoint rather
+    // than in the matcher's own unit tests: what matters here is that
+    // `authorize` consults the matcher at all.
+    #[tokio::test]
+    async fn a_loopback_client_may_present_any_port() {
+        let mut client = make_client(true);
+        client.redirect_uris = vec!["http://127.0.0.1/callback".into()];
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+
+        let mut req = make_authorize_request(
+            tenant_id,
+            &client,
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
+        );
+        req.redirect_uri = "http://127.0.0.1:51703/callback".into();
+        assert!(
+            svc.authorize(req).await.is_ok(),
+            "an ephemeral loopback port must be accepted (RFC 8252 §7.3)"
+        );
+
+        // And a different loopback spelling is still a different host.
+        let mut req = make_authorize_request(
+            tenant_id,
+            &client,
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
+        );
+        req.redirect_uri = "http://localhost:51703/callback".into();
+        assert!(
+            matches!(
+                svc.authorize(req).await,
+                Err(OAuth2Error::InvalidRedirectUri(_))
+            ),
+            "`localhost` and `127.0.0.1` are not interchangeable"
+        );
+    }
+
+    // I6 — an `https` registration keeps exact matching at the endpoint too.
+    #[tokio::test]
+    async fn an_https_client_may_not_vary_its_port() {
+        let client = make_client(false);
+        let tenant_id = client.tenant_id;
+        let svc = AuthorizeService::new(
+            MockClientRepo {
+                client: client.clone(),
+            },
+            MockCodeRepo,
+            300,
+        );
+        let mut req = make_authorize_request(tenant_id, &client, None);
+        req.redirect_uri = "https://app.example.com:8443/callback".into();
+        assert!(
+            matches!(
+                svc.authorize(req).await,
+                Err(OAuth2Error::InvalidRedirectUri(_))
+            ),
+            "the port allowance must not reach an https registration (I6)"
         );
     }
 

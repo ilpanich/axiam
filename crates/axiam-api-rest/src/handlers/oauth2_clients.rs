@@ -245,7 +245,17 @@ pub struct OAuth2ClientCreatedResponse {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub client_id: String,
-    pub client_secret: String,
+    /// The plaintext client secret, shown exactly once.
+    ///
+    /// T21.2 — **absent** for a client registered with
+    /// `token_endpoint_auth_method: none`. A public client is created with no
+    /// secret, so there is nothing to show; the member is omitted rather than
+    /// sent as `""`, which an operator (or an SDK) would reasonably read as a
+    /// secret that happens to be empty. Every confidential registration — that
+    /// is, every registration that existed before T21.2 — carries it exactly
+    /// as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
     pub name: String,
     pub redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
@@ -418,6 +428,49 @@ async fn reject_sensitive_scopes_when_disabled<C: Connection + Clone>(
     )))
 }
 
+/// Grants a public client may never be registered for (T21.2).
+///
+/// Both mint a token on the strength of the client's own credential, and a
+/// public client's credential is its `client_id` — a value that travels in
+/// every authorization request it makes, in the clear, through a browser.
+/// `client_credentials` would turn that into a machine token; the RFC 8693
+/// exchange would turn it into somebody else's.
+const GRANTS_FORBIDDEN_TO_PUBLIC_CLIENTS: &[&str] = &[
+    "client_credentials",
+    axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE,
+];
+
+/// Refuse a registration that says `none` and something else at the same time
+/// (T21.2).
+///
+/// The refusals that are *about the registration's own consistency* — a
+/// credential registered alongside `none` — live in
+/// `axiam_oauth2::fapi::validate_registration` beside the other methods'
+/// consistency rules, and the FAPI refusal needs no code at all (`none` is not
+/// `is_strong()`, so a `fapi2` profile rejects it through the gate that has
+/// always rejected `client_secret_post`, I5). What is left here is the one
+/// question that is about this API's grant vocabulary rather than about the
+/// client: which grants a public client may hold.
+fn reject_public_client_grants(
+    method: ClientAuthMethod,
+    grant_types: &[String],
+) -> Result<(), AxiamApiError> {
+    if !method.is_public() {
+        return Ok(());
+    }
+    for gt in grant_types {
+        if GRANTS_FORBIDDEN_TO_PUBLIC_CLIENTS.contains(&gt.as_str()) {
+            return Err(validation_err(format!(
+                "a public client (token_endpoint_auth_method: none) may not be registered for \
+                 the {gt} grant: it authenticates with nothing, so the only thing that grant \
+                 could rest on is a client_id that travels in every authorization request this \
+                 client makes. Register a confidential client for it instead"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `POST /api/v1/oauth2-clients`
 #[utoipa::path(
     post,
@@ -445,6 +498,7 @@ pub async fn create<C: Connection + Clone>(
         return Err(validation_err("name must not be empty"));
     }
     validate_grant_types(&req.grant_types)?;
+    reject_public_client_grants(req.token_endpoint_auth_method, &req.grant_types)?;
     reject_unimplemented_dpop_nonce(Some(req.dpop_require_nonce))?;
     // redirect_uris are only required when the client uses
     // authorization_code (which involves user-agent redirects).
@@ -491,11 +545,19 @@ pub async fn create<C: Connection + Clone>(
 
     let (client, raw_secret) = state.oauth2_client_repo.create(create).await?;
 
+    // T21.2 — a public client has no secret to show. The decision is read off
+    // the stored method rather than off `raw_secret.is_empty()`: the two agree
+    // by construction (the repository mints nothing for `none`), and asking
+    // the registration means a future bug in the repository surfaces as an
+    // operator who cannot find their secret, not as a client silently treated
+    // as public.
+    let client_secret = (!client.token_endpoint_auth_method.is_public()).then_some(raw_secret);
+
     Ok(HttpResponse::Created().json(OAuth2ClientCreatedResponse {
         id: client.id,
         tenant_id: client.tenant_id,
         client_id: client.client_id,
-        client_secret: raw_secret,
+        client_secret,
         name: client.name,
         redirect_uris: client.redirect_uris,
         grant_types: client.grant_types,
@@ -609,6 +671,41 @@ pub async fn update<C: Connection + Clone>(
         validate_grant_types(gts)?;
     }
     reject_unimplemented_dpop_nonce(req.dpop_require_nonce)?;
+
+    // T21.2 — `none` is a registration decision, and it stays one (I4).
+    //
+    // A PATCH may not move a client across the public/confidential line in
+    // either direction, because the secret cannot follow it. Going public
+    // would leave a live secret hash on a row whose token-endpoint arm never
+    // reads it — a credential an operator believes they revoked by changing
+    // the method, and SEC-093's exact shape. Going confidential would leave a
+    // row with no hash at all, so every authentication attempt fails on a
+    // secret that was never minted and cannot be minted by this endpoint,
+    // which only ever shows one at creation.
+    //
+    // Both directions are refused with a message that names the remedy:
+    // register the client the operator actually wants. The refusal is cheap to
+    // relax later — a rotate-secret endpoint would make the second direction
+    // meaningful — and impossible to take back once a deployment has rows that
+    // relied on it.
+    if let Some(requested_method) = req.token_endpoint_auth_method {
+        let existing = state
+            .oauth2_client_repo
+            .get_by_id(user.tenant_id, id)
+            .await?;
+        let existing_method = existing.token_endpoint_auth_method;
+        if requested_method.is_public() != existing_method.is_public() {
+            return Err(validation_err(format!(
+                "token_endpoint_auth_method cannot be changed from {} to {}: whether a client \
+                 is public is decided at registration, because the client secret cannot follow \
+                 the change — this endpoint mints one only at creation, and a stale one on a \
+                 public row would be a credential AXIAM never checks. Register a new client \
+                 with the method you want",
+                existing_method.as_str(),
+                requested_method.as_str(),
+            )));
+        }
+    }
     if let Some(ref uris) = req.redirect_uris {
         let needs_redirects = req
             .grant_types

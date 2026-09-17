@@ -112,11 +112,15 @@ impl AuthnRequestParamsMode {
 /// How a client proves its identity at the token endpoint (RFC 8705 §2,
 /// OIDC Core §9 naming).
 ///
-/// Only the methods AXIAM actually implements are representable. There is
-/// deliberately no `none` variant: every AXIAM client is confidential today
-/// (see `handle_authorization_code`), and adding a public-client value here
-/// before the rest of the server understands one would let an operator
-/// register a client whose authentication is silently skipped.
+/// Only the methods AXIAM actually implements are representable. `None` — the
+/// public-client value — was deliberately absent until T21.2: adding it before
+/// the rest of the server understood one would have let an operator register a
+/// client whose authentication is silently skipped. The server understands one
+/// now (`token.rs`'s `authenticate_client_credential` has an arm that accepts
+/// *no* credential and refuses a presented one, the authorization endpoint
+/// derives its PKCE requirement from this enum, and the admin API refuses the
+/// method alongside any grant or binding that contradicts it), so the variant
+/// exists — and only that arm may ever treat a missing credential as success.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientAuthMethod {
@@ -168,6 +172,30 @@ pub enum ClientAuthMethod {
     /// TLS-terminating load balancer it does not control can still
     /// authenticate strongly.
     PrivateKeyJwt,
+    /// No client authentication at all (RFC 6749 §2.1 "public client", OIDC
+    /// Core §9 wire value `none`) — T21.2.
+    ///
+    /// The client holds no credential because it *cannot*: a desktop MCP
+    /// client, a CLI, a single-page application and a mobile app all ship
+    /// their configuration to the user, so a secret in it is a secret the user
+    /// has. RFC 8252 §8.5 and the OAuth 2.0 Security BCP §2.1.1 answer that by
+    /// dropping the credential and replacing what it was protecting — the
+    /// binding between the authorization request and the token request — with
+    /// PKCE, which is why [`Self::is_public`] and the PKCE gates are the same
+    /// decision read twice.
+    ///
+    /// # What this variant is not
+    ///
+    /// It is not a fallback. A client registered for any other method that
+    /// presents no credential stays `invalid_client`; this variant is reached
+    /// only by a registration that *named* it (I4). And a client registered
+    /// for it that presents a secret anyway is also refused: a credential on a
+    /// public client is a misconfiguration, not a bonus, and accepting it
+    /// would recreate the OR over two credentials SEC-093 exists to prevent.
+    ///
+    /// `is_strong()` is false, so FAPI 2.0 refuses it at registration with no
+    /// new gate code (I5), exactly as it refuses `client_secret_basic`.
+    None,
 }
 
 impl ClientAuthMethod {
@@ -178,6 +206,7 @@ impl ClientAuthMethod {
             Self::TlsClientAuth => "tls_client_auth",
             Self::SelfSignedTlsClientAuth => "self_signed_tls_client_auth",
             Self::PrivateKeyJwt => "private_key_jwt",
+            Self::None => "none",
         }
     }
 
@@ -190,6 +219,7 @@ impl ClientAuthMethod {
             "tls_client_auth" => Some(Self::TlsClientAuth),
             "self_signed_tls_client_auth" => Some(Self::SelfSignedTlsClientAuth),
             "private_key_jwt" => Some(Self::PrivateKeyJwt),
+            "none" => Some(Self::None),
             _ => None,
         }
     }
@@ -204,6 +234,20 @@ impl ClientAuthMethod {
     /// (RFC 7523 §2.2).
     pub const fn is_private_key_jwt(self) -> bool {
         matches!(self, Self::PrivateKeyJwt)
+    }
+
+    /// Whether this method authenticates the client with **nothing** — the
+    /// public-client registration (T21.2).
+    ///
+    /// Asked rather than `client_secret_hash.is_empty()` inferred. The two
+    /// answered the same question until a public client could exist, and only
+    /// one of them is a decision an operator took: an empty hash is a *state*,
+    /// reachable by a half-finished migration or a hand-edited row, while this
+    /// is what the registration says. Every gate that treats a client as
+    /// public — the PKCE requirement at authorize and at the token endpoint,
+    /// the credential arm, the admin refusals — asks this.
+    pub const fn is_public(self) -> bool {
+        matches!(self, Self::None)
     }
 
     /// Whether this method is one of the two client-authentication *families*
@@ -1165,12 +1209,18 @@ mod tests {
         // server does NOT implement, so accepting it as anything would claim
         // support that does not exist". The server now implements it
         // (maintainer decision A, 2026-09-07), so the claim is true and the
-        // value moves to the accepted list below. `none` does NOT move with
-        // it: there is still no public-client story, and the enum's own doc
-        // comment says why that absence is load-bearing rather than an
-        // oversight.
+        // value moves to the accepted list below.
+        //
+        // T21.2 — the same reversal, for the same reason, on `none`. It headed
+        // this list after W8 with the comment "there is still no public-client
+        // story"; there is one now (the public arm of
+        // `authenticate_client_credential`, the PKCE gates at both ends of the
+        // code flow, and the admin API's refusals), so refusing to parse the
+        // value would mean a stored `none` row reading back as an unknown
+        // method. The list keeps its point: every entry below is a spelling of
+        // a real method that this parser must NOT guess at, plus the empty
+        // string.
         for raw in [
-            "none",
             "client-secret-basic",
             "private-key-jwt",
             "tls_client_auth ",
@@ -1195,6 +1245,59 @@ mod tests {
         assert_eq!(
             ClientAuthMethod::default(),
             ClientAuthMethod::ClientSecretPost
+        );
+    }
+
+    /// T21.2 — the public-client variant round-trips and is weak.
+    ///
+    /// `none` must never become the default by accident: a row with no stored
+    /// method is a pre-v38 confidential client, and reading it as public would
+    /// switch client authentication off for every one of them at once.
+    #[test]
+    fn the_public_client_method_round_trips_and_is_never_the_default() {
+        assert_eq!(ClientAuthMethod::None.as_str(), "none");
+        assert_eq!(
+            ClientAuthMethod::from_wire("none"),
+            Some(ClientAuthMethod::None)
+        );
+        assert_eq!(
+            ClientAuthMethod::from_wire("  NONE "),
+            Some(ClientAuthMethod::None)
+        );
+        assert_ne!(ClientAuthMethod::default(), ClientAuthMethod::None);
+
+        // `is_public` is the only predicate it answers yes to. `is_strong` in
+        // particular stays false, which is the whole of FAPI's refusal (I5).
+        assert!(ClientAuthMethod::None.is_public());
+        assert!(!ClientAuthMethod::None.is_strong());
+        assert!(!ClientAuthMethod::None.is_mtls());
+        assert!(!ClientAuthMethod::None.is_private_key_jwt());
+
+        // And nothing else is public — the predicate is not "has no secret".
+        for m in [
+            ClientAuthMethod::ClientSecretPost,
+            ClientAuthMethod::ClientSecretBasic,
+            ClientAuthMethod::TlsClientAuth,
+            ClientAuthMethod::SelfSignedTlsClientAuth,
+            ClientAuthMethod::PrivateKeyJwt,
+        ] {
+            assert!(!m.is_public(), "{m:?} must not be public");
+        }
+    }
+
+    /// The wire spelling serde produces must be the one `as_str` promises:
+    /// the admin API deserialises this enum from JSON and the repository
+    /// persists `as_str`, so a disagreement would store a value the reader
+    /// cannot parse back.
+    #[test]
+    fn the_public_client_method_serialises_as_its_wire_value() {
+        assert_eq!(
+            serde_json::to_value(ClientAuthMethod::None).unwrap(),
+            serde_json::json!("none"),
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientAuthMethod>(serde_json::json!("none")).unwrap(),
+            ClientAuthMethod::None,
         );
     }
 

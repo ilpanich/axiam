@@ -278,6 +278,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`cimd.trusted_client_id_domains` no longer accepts `*` (MCP-03, T21.8,
+  #469).** Enabling client ID metadata documents with an *empty*
+  trusted-publisher list was already refused, because the fetch is triggered by
+  an unauthenticated request that names the URL and no second control bounds
+  which host a caller may name — AXIAM's SSRF guard bounds addresses, not
+  hosts. `["*"]` produced the same posture and was admitted, so the refusal had
+  a one-character bypass and the validator's own entry-shape message
+  recommended the spelling that produced it. `*` is now refused, and so is a
+  wildcard over a whole top-level domain (`*.com`, `*.io`), which is the same
+  posture spelled longer. It is a floor rather than a public-suffix check:
+  `*.github.io` still passes, because trusting shared hosting is a decision an
+  operator may reasonably make and what bounds it is the per-tenant quota, not
+  this rule. `*` remains valid in `cimd.trusted_redirect_domains`, whose
+  entries are not fetch targets. Enforced at both settings doors. Validation
+  runs on write, so a stored `*` keeps working until that settings row is next
+  saved — and no released deployment can hold one, because CIMD itself ships in
+  this same unreleased version.
+
 - **The `axiam` URI scheme is reserved and can no longer be named as a
   `resource` (MCP-02, T21.8).** AXIAM's own token audiences are spelled
   `axiam:user` and `axiam:m2m`, which are well-formed absolute URIs and were

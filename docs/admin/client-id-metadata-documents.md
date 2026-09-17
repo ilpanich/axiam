@@ -109,11 +109,26 @@ general-purpose matcher:
 * `*.example.com` — any host with at least one label before `example.com`. It
   does **not** match `example.com` itself, and it does **not** match
   `evil-example.com`: the match lands on a label boundary, not on a suffix.
-* `*` — any host.
+* `*` — any host. **Refused for `cimd.trusted_client_id_domains`, admitted for
+  `cimd.trusted_redirect_domains`.** So is a wildcard over a whole top-level
+  domain (`*.com`, `*.io`), which is the same posture spelled longer. The
+  trusted-publisher list is what decides whose server AXIAM will make an
+  outbound request to on an unauthenticated caller's word, an empty list is
+  refused for that reason, and a control with a one-character bypass is not
+  the control. A redirect domain is not a fetch target: it bounds where a
+  document may point a browser, the loopback hosts are allowed whatever the
+  list says, and an empty list there means "loopback only" rather than
+  "nothing".
 * Anything else containing `*` matches nothing at all.
 
 An entry that is a URL, a path or a `host:port` is **refused at the settings
 page** rather than silently matching nothing.
+
+The wildcard refusal is a **floor, not a public-suffix check.**
+`*.github.io`, `*.pages.dev` and any other shared-hosting domain still pass,
+because a tenant fronting hobbyist MCP tools may reasonably trust one and
+nothing here should second-guess that. What bounds shared hosting is the
+per-tenant quota and the sweep below, not this rule.
 
 ---
 
@@ -285,8 +300,9 @@ bound there is the per-IP rate limit on the endpoint the request arrived at
 (`AXIAM__RATE_LIMIT__TOKEN_PER_MIN` and its siblings, see
 [rate-limit sizing](../deployment/rate-limit-sizing.md)) and the fact that the
 host is one you chose. It is an amplifier pointed at *your publisher*, not a
-way into your network — but it is a reason to name specific hosts rather than
-`*`.
+way into your network — and AXIAM refuses `*` (and `*.com`) in
+`cimd.trusted_client_id_domains` for exactly this reason, so the list always
+names a publisher you chose.
 
 A cached document survives a publisher outage for up to 24 hours past its TTL
 (the same stale-while-revalidate window AXIAM gives a federated identity

@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta15",
-    "x-axiam-spec-digest": "sha256:edb709e9c7b090a4931d49db5d123e1151830ae91518d4199344f2d2751e94db"
+    "x-axiam-spec-digest": "sha256:548ddb07bf751f03c0fb0a50046e580113af2611a6a474c5af21ab3128bbd299"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -12813,7 +12813,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The hosts whose documents this tenant will fetch at all, as globs\n(`*.example.com`, or `*` for any).\n\n**An empty list resolves nothing**, and enabling CIMD while it is empty\nis refused — see [`validate_cimd_policy`]. That is a deliberate\ndeparture from \"a URL is a client identifier, so any URL will do\": the\nfetch is triggered by an unauthenticated request naming the URL, so an\nunrestricted list is a request-forgery primitive offered to strangers,\nbounded only by the SSRF guard's address rules. Naming the publishers a\ntenant actually fronts costs one settings field and removes the class."
+            "description": "The hosts whose documents this tenant will fetch at all, as globs\n(`mcp.example.com`, or `*.example.com` for every host under one\ndomain).\n\n**An empty list resolves nothing**, and enabling CIMD while it is empty\nis refused — see [`validate_cimd_policy`]. That is a deliberate\ndeparture from \"a URL is a client identifier, so any URL will do\": the\nfetch is triggered by an unauthenticated request naming the URL, so an\nunrestricted list is a request-forgery primitive offered to strangers,\nbounded only by the SSRF guard's address rules. Naming the publishers a\ntenant actually fronts costs one settings field and removes the class.\n\n**`*` is refused here, and so is a wildcard over a whole top-level\ndomain** (`*.com`): both are the posture the empty list is refused for,\nspelled differently, and a control with no second control behind it\ncannot have a one-character bypass and still be the control. It is a\nfloor and not a public-suffix check — `*.github.io` passes, and\ntrusting shared hosting stays the operator's decision, bounded by the\nper-tenant quota rather than by this field. `*` remains valid in\n[`CimdPolicy::trusted_redirect_domains`], whose entries are not fetch\ntargets."
           },
           "trusted_redirect_domains": {
             "type": "array",

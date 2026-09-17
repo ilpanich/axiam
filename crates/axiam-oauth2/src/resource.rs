@@ -388,7 +388,12 @@ mod tests {
     /// scheme and a check on the raw input would have missed the second.
     #[test]
     fn axiams_own_audiences_are_refused_as_resources() {
-        for raw in ["axiam:user", "axiam:m2m", "AXIAM:user", "axiam:anything-later"] {
+        for raw in [
+            "axiam:user",
+            "axiam:m2m",
+            "AXIAM:user",
+            "axiam:anything-later",
+        ] {
             assert_eq!(
                 normalise(raw),
                 Err(ResourceError::ReservedAudience),

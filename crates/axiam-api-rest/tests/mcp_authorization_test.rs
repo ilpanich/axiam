@@ -528,11 +528,13 @@ async fn mcp_stub(issuer: &str) -> McpStub {
 
     Mock::given(method("GET"))
         .and(path("/mcp"))
-        .respond_with(ResponseTemplate::new(401).insert_header(
-            "www-authenticate",
-            format!("Bearer resource_metadata=\"{metadata_url}\", error=\"invalid_token\"")
-                .as_str(),
-        ))
+        .respond_with(
+            ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                format!("Bearer resource_metadata=\"{metadata_url}\", error=\"invalid_token\"")
+                    .as_str(),
+            ),
+        )
         .with_priority(2)
         .mount(&server)
         .await;
@@ -629,7 +631,10 @@ fn host_of(url: &str) -> String {
 async fn discover(app: &app_svc!(), stub: &McpStub, mode: Mode, tenant: Uuid) -> Value {
     // 1 — the unauthenticated call is challenged.
     let (status, challenge) = call_mcp(&stub.resource, None).await;
-    assert_eq!(status, 401, "an MCP server answers an uncredentialed call 401");
+    assert_eq!(
+        status, 401,
+        "an MCP server answers an uncredentialed call 401"
+    );
     let metadata_url = challenge.expect(
         "RFC 9728 §5.1: the challenge must carry resource_metadata, or the client has nowhere \
          to go",
@@ -1104,24 +1109,16 @@ async fn v2_a_tenant_path_binds_the_token_to_that_tenant() {
 
     // Tenant A's user, on tenant A's path: this is the control, and it must
     // work, or the refusals below would prove nothing.
-    let (status, ..) = get_as_user(
-        &app,
-        &format!("/t/{}/oauth2/userinfo", f.a.id),
-        &f.a.token,
-    )
-    .await;
+    let (status, ..) =
+        get_as_user(&app, &format!("/t/{}/oauth2/userinfo", f.a.id), &f.a.token).await;
     assert_ne!(
         status, 401,
         "the control must pass: tenant A's token on tenant A's path"
     );
 
     // The same token, on tenant B's path.
-    let (status, _, body) = get_as_user(
-        &app,
-        &format!("/t/{}/oauth2/userinfo", f.b.id),
-        &f.a.token,
-    )
-    .await;
+    let (status, _, body) =
+        get_as_user(&app, &format!("/t/{}/oauth2/userinfo", f.b.id), &f.a.token).await;
     assert_eq!(
         status, 401,
         "a token minted for tenant A must not act on tenant B's path, however well it \

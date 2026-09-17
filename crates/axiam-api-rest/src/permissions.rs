@@ -349,6 +349,25 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // RFC 8414 §3 authorization-server metadata (T21.1) — the same document as
     // the OIDC discovery entry above, at the path MCP clients probe first.
     "/.well-known/oauth-authorization-server",
+    // T21.6 — the RFC 8414 §3.1 path-insertion forms of the two entries above,
+    // `{well-known}/t/{tenant_id}`, served only where
+    // `AXIAM__AUTH__TENANT_ISSUER_PATHS` is set. Public for exactly the reason
+    // their root forms are: a client fetches discovery before it holds any
+    // credential.
+    //
+    // Prefix entries because the tenant is a UUID at the END of the path, which
+    // no exact entry can spell. The trailing-`*` rule is segment-boundary
+    // aware, so `/.well-known/openid-configuration/tenants` does NOT match; and
+    // everything reachable under a `/.well-known/` prefix is metadata this
+    // deployment publishes to anyone, so the prefix admits nothing an exact
+    // entry would have kept out. The THIRD form,
+    // `/t/{tenant_id}/.well-known/openid-configuration`, carries its UUID in
+    // the middle and is matched by `is_public_path`'s tenant-prefix strip
+    // against the `/.well-known/openid-configuration` entry above — see
+    // `middleware::authz::strip_tenant_path_prefix` for why that is the rule
+    // rather than a `/t/*` blanket.
+    "/.well-known/oauth-authorization-server/t/*",
+    "/.well-known/openid-configuration/t/*",
     // UMA 2.0 discovery (X2). Public for the same reason as OIDC discovery:
     // §2 makes it the document a resource server fetches *before* it holds any
     // credential, and it carries only endpoint URLs the deployment publishes.

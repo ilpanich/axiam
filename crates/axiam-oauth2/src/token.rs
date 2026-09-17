@@ -344,6 +344,20 @@ pub struct TokenRequestContext {
     /// is authenticated" — see
     /// [`crate::private_key_jwt::unverified_client_id`].
     pub assertion_client_id: Option<String>,
+    /// T21.6 — the issuer identifier this request arrived under, when it
+    /// arrived on a per-tenant path (`{root}/t/{tenant_id}`).
+    ///
+    /// `None` on every request to the deployment-wide `/oauth2/token`, which
+    /// is every request on a deployment that has not set
+    /// `AXIAM__AUTH__TENANT_ISSUER_PATHS` — so `Default` reproduces today's
+    /// behaviour exactly, and so does every test that builds a context
+    /// without naming this field.
+    ///
+    /// It belongs on the *connection* context rather than on `TokenRequest`
+    /// for the same reason the certificate does: it is a property of where the
+    /// request arrived, never of what its body said. A client cannot put it in
+    /// a form field, which is what keeps `iss` from being caller-chosen.
+    pub issuer: Option<String>,
 }
 
 /// Which client id a token request is for, given a body parameter that may be
@@ -642,6 +656,29 @@ where
             auth_config,
             refresh_token_lifetime_secs,
             reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
+        }
+    }
+
+    /// The config every token minted for **this** request is signed under
+    /// (T21.6).
+    ///
+    /// `Borrowed` — and therefore free, and therefore byte-identical to the
+    /// code that predates tenant paths — for every request that did not arrive
+    /// on a `/t/{tenant_id}` path. `Owned` for one that did, carrying the
+    /// tenant issuer so that the access token's `iss`, the ID token's `iss`
+    /// and the discovery document a client read all say the same thing, which
+    /// OIDC Core §2 requires and RFC 9207 makes a client check.
+    ///
+    /// Only *minting* reads this. Every validation decision keeps reading
+    /// `self.auth_config`, whose `root_issuer` is the deployment's and cannot
+    /// be moved by a request.
+    fn minting_config<'a>(&'a self, issuer: Option<&str>) -> std::borrow::Cow<'a, AuthConfig> {
+        match issuer {
+            None => std::borrow::Cow::Borrowed(&self.auth_config),
+            Some(issuer) => std::borrow::Cow::Owned(AuthConfig {
+                request_issuer: Some(issuer.to_owned()),
+                ..self.auth_config.clone()
+            }),
         }
     }
 
@@ -1277,6 +1314,11 @@ where
         client_secret: &str,
         requested_scope: Option<&str>,
         started: std::time::Instant,
+        // T21.6 — the tenant issuer, when this request arrived on a tenant
+        // path. Passed rather than read from a context because this branch
+        // takes no `TokenRequestContext`: RFC 6749 §4.4 client credentials for
+        // an `sa_…` id authenticate from the body alone.
+        issuer: Option<&str>,
     ) -> Result<TokenResponse, OAuth2Error> {
         let t_client_lookup = std::time::Instant::now();
         let sa = self
@@ -1371,7 +1413,7 @@ where
             tenant_id,
             tenant.organization_id,
             &[],
-            &self.auth_config,
+            &self.minting_config(issuer),
             ext,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
@@ -1882,7 +1924,7 @@ where
         // Empty for every grant that sent no `claims` parameter, and an empty
         // list leaves the token byte-identical to what it was before §5.5.
         .requested_userinfo_claims(&auth_code.requested_userinfo_claims)
-        .issue(&self.auth_config)
+        .issue(&self.minting_config(ctx.issuer.as_deref()))
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
         // Only issue a refresh token when the client is authorized
@@ -1945,7 +1987,7 @@ where
                     auth_code.nonce.as_deref(),
                     Some(&user.username),
                     &auth_code.scopes,
-                    &self.auth_config,
+                    &self.minting_config(ctx.issuer.as_deref()),
                     auth_code.session_id,
                     &evidence,
                 )
@@ -2062,6 +2104,7 @@ where
                     client_secret,
                     req.scope.as_deref(),
                     started,
+                    ctx.issuer.as_deref(),
                 )
                 .await;
         }
@@ -2195,7 +2238,7 @@ where
             tenant_id,
             tenant.organization_id,
             &scopes,
-            &self.auth_config,
+            &self.minting_config(ctx.issuer.as_deref()),
             cnf,
             ext,
             resource.as_deref(),
@@ -2438,7 +2481,7 @@ where
                 tenant_id,
                 tenant.organization_id,
                 &stored.scopes,
-                &self.auth_config,
+                &self.minting_config(ctx.issuer.as_deref()),
                 uuid::Uuid::new_v4().to_string(),
                 // RFC 8707 — the SAME audience the grant was issued for.
                 // `None` for every grant that named no resource, which mints
@@ -2467,7 +2510,7 @@ where
                 tenant_id,
                 tenant.organization_id,
                 &stored.scopes,
-                &self.auth_config,
+                &self.minting_config(ctx.issuer.as_deref()),
                 cnf,
                 ext,
                 // RFC 8707 — carried across the rotation on this branch too.
@@ -2609,7 +2652,7 @@ where
                         None,
                         Some(&user.username),
                         &stored.scopes,
-                        &self.auth_config,
+                        &self.minting_config(ctx.issuer.as_deref()),
                         // The same session the original login created: an RP
                         // that only ever sees refreshed ID tokens must still
                         // be able to match a logout token to its session.

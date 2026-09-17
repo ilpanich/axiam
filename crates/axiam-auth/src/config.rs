@@ -32,6 +32,20 @@ impl std::fmt::Display for DefaultTenantProblem {
     }
 }
 
+/// The path segment that separates a deployment's root issuer from a tenant
+/// identifier under the T21.6 per-tenant issuer form: `{root}/t/{tenant_id}`.
+///
+/// One constant rather than three string literals, because the value appears
+/// in an issuer this module builds, in the routes `axiam-api-rest` mounts and
+/// in the `PUBLIC_PATHS` entries that must agree with them. A deployment that
+/// built issuers with one spelling and routed the other would publish a
+/// discovery document naming endpoints it does not serve.
+///
+/// `/t/` rather than `/tenants/` or `/realms/`: it is short enough that the
+/// three RFC 8414 §3 discovery forms stay readable, and it collides with no
+/// path AXIAM already serves.
+pub const TENANT_PATH_PREFIX: &str = "/t/";
+
 /// Configuration for the authentication service.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -165,6 +179,47 @@ pub struct AuthConfig {
     /// therefore safe and is the correct setting for a deployment that serves
     /// many tenants from one issuer.
     pub oauth2_default_tenant_id: String,
+    /// T21.6 — whether this deployment serves the per-tenant **path** issuer
+    /// form `{root}/t/{tenant_id}` (`AXIAM__AUTH__TENANT_ISSUER_PATHS`).
+    ///
+    /// `false` by default, and with it false nothing about this deployment
+    /// changes: the `/t/{tenant_id}` scope and the three tenant discovery
+    /// routes are not mounted, no token can carry a tenant issuer, and
+    /// [`Self::accepts_issuer`] answers exactly what the pinned-issuer check
+    /// answered before this field existed.
+    ///
+    /// # What it is for
+    ///
+    /// RFC 8414 §2 forbids a query component in an issuer identifier, so the
+    /// deployment-wide issuer plus `?tenant_id=` cannot be published as the
+    /// issuer of one tenant. An MCP server naming AXIAM in its RFC 9728
+    /// `authorization_servers` therefore has no way to point a client at
+    /// anything but the default tenant. The path form is an issuer a client
+    /// can turn into a discovery URL by the RFC 8414 §3 rule with no query at
+    /// all.
+    ///
+    /// The tenant path is **derived, never configured**: a deployment sets a
+    /// root issuer, and `{root}/t/{tenant_id}` follows from it.
+    pub tenant_issuer_paths: bool,
+    /// T21.6 — the issuer the **current request** arrived under, when it
+    /// arrived on a per-tenant path.
+    ///
+    /// `None` on every request that is not on a `/t/{tenant_id}` path, which
+    /// is every request on a deployment with [`Self::tenant_issuer_paths`]
+    /// off. It is set only by cloning a deployment config through
+    /// [`Self::for_tenant_path`], never by configuration — hence `serde(skip)`:
+    /// an operator cannot set a per-request value from the environment, and an
+    /// environment that appeared to offer one would be offering a way to
+    /// forge `iss`.
+    ///
+    /// [`Self::effective_issuer`] answers this when it is set, which is what
+    /// makes every `iss` a request mints — access token, ID token, logout
+    /// token, the RFC 9207 response parameter — the tenant issuer without any
+    /// of the four minting sites learning that tenant paths exist.
+    /// [`Self::root_issuer`] answers the deployment's issuer regardless, and
+    /// is what every **validation** decision reads.
+    #[serde(skip)]
+    pub request_issuer: Option<String>,
     /// T-39/T-143 — whether this deployment publishes
     /// `GET /oauth2/revocations`.
     ///
@@ -410,11 +465,128 @@ impl AuthConfig {
     /// OIDC discovery `issuer` exactly matches token `iss` claims
     /// (OIDC Core §2 requires an exact string match).
     pub fn effective_issuer(&self) -> &str {
+        // T21.6 — the per-request tenant issuer wins when there is one, and
+        // there is one only on a `/t/{tenant_id}` request. Every caller that
+        // *stamps* an `iss` reads this and is therefore correct on both path
+        // forms without knowing either exists; every caller that *checks* one
+        // reads `root_issuer` instead.
+        if let Some(ref issuer) = self.request_issuer {
+            return issuer.trim_end_matches('/');
+        }
+        self.root_issuer()
+    }
+
+    /// The deployment's own issuer, ignoring any per-request tenant issuer
+    /// (T21.6).
+    ///
+    /// Identical to [`Self::effective_issuer`] on every request that is not on
+    /// a `/t/{tenant_id}` path, which is every request on a deployment with
+    /// [`Self::tenant_issuer_paths`] off.
+    ///
+    /// This is the value every **validation** decision is derived from. The
+    /// distinction matters exactly once and it is load-bearing: the set of
+    /// issuers AXIAM accepts must be a property of the deployment, so a
+    /// request that arrived under tenant `A` cannot narrow — or widen — what
+    /// counts as a valid `iss`.
+    #[must_use]
+    pub fn root_issuer(&self) -> &str {
         if self.oauth2_issuer_url.is_empty() {
             self.jwt_issuer.trim_end_matches('/')
         } else {
             self.oauth2_issuer_url.trim_end_matches('/')
         }
+    }
+
+    /// The issuer identifier of one tenant under the T21.6 path form, or
+    /// `None` when this deployment does not serve it.
+    ///
+    /// `{root}/t/{tenant_id}`, with no query and no fragment — which is what
+    /// RFC 8414 §2 requires of an issuer and what the `?tenant_id=` form could
+    /// never be.
+    #[must_use]
+    pub fn tenant_issuer(&self, tenant_id: uuid::Uuid) -> Option<String> {
+        if !self.tenant_issuer_paths {
+            return None;
+        }
+        Some(format!(
+            "{}{}{}",
+            self.root_issuer(),
+            TENANT_PATH_PREFIX,
+            tenant_id
+        ))
+    }
+
+    /// This config, as seen by a request that arrived under tenant
+    /// `tenant_id`'s path (T21.6).
+    ///
+    /// A clone rather than a mutation, and a clone rather than a borrow of a
+    /// shared cell: the deployment config is shared by every concurrent
+    /// request, and the one thing that must never happen is a request on the
+    /// root path minting an `iss` a neighbouring tenant-path request put
+    /// there. The cost is a handful of small allocations on a path that is
+    /// about to sign a token.
+    ///
+    /// `None` when this deployment does not serve tenant paths, so a caller
+    /// cannot manufacture a tenant issuer on a deployment that has not opted
+    /// in.
+    #[must_use]
+    pub fn for_tenant_path(&self, tenant_id: uuid::Uuid) -> Option<Self> {
+        let issuer = self.tenant_issuer(tenant_id)?;
+        Some(Self {
+            request_issuer: Some(issuer),
+            ..self.clone()
+        })
+    }
+
+    /// Is `iss` an issuer identifier this deployment mints under?
+    ///
+    /// With [`Self::tenant_issuer_paths`] off this is `iss == root_issuer()`,
+    /// which is exactly the set `jsonwebtoken`'s pinned-issuer check accepted
+    /// before T21.6 — so the default deployment's answer is unchanged.
+    ///
+    /// With it on the set is the root issuer **and** every `{root}/t/{uuid}`.
+    /// Three properties of that widening are worth stating, because each one
+    /// is a way it could have gone wrong:
+    ///
+    /// * the tenant segment must parse as a UUID, so `{root}/t/../admin`,
+    ///   `{root}/t/` and `{root}/t/a%2Fb` are all refused rather than
+    ///   normalised;
+    /// * nothing is accepted **after** the tenant segment, so
+    ///   `{root}/t/{uuid}/anything` is not an issuer;
+    /// * the comparison is on the exact string, with no trailing-slash or
+    ///   case folding — OIDC Core §2 requires `iss` to match the discovery
+    ///   document's `issuer` exactly, and a comparison that is more forgiving
+    ///   than the specification is one an attacker gets to choose the input to.
+    ///
+    /// Widening the accepted `iss` set does **not** widen the accepted `aud`
+    /// set (I3): the audience check is a separate decision in
+    /// [`crate::token::decode_access_token`] and stays pinned to the two
+    /// built-in audiences.
+    #[must_use]
+    pub fn accepts_issuer(&self, iss: &str) -> bool {
+        let root = self.root_issuer();
+        if iss == root {
+            return true;
+        }
+        if !self.tenant_issuer_paths {
+            return false;
+        }
+        self.tenant_of_issuer(iss).is_some()
+    }
+
+    /// The tenant a `{root}/t/{uuid}` issuer names, or `None` when `iss` is
+    /// not one (T21.6).
+    ///
+    /// `None` for the root issuer too: the root issuer names no tenant, which
+    /// is the whole reason the path form exists.
+    #[must_use]
+    pub fn tenant_of_issuer(&self, iss: &str) -> Option<uuid::Uuid> {
+        if !self.tenant_issuer_paths {
+            return None;
+        }
+        let rest = iss.strip_prefix(self.root_issuer())?;
+        let tenant = rest.strip_prefix(TENANT_PATH_PREFIX)?;
+        uuid::Uuid::parse_str(tenant).ok()
     }
 
     /// The mTLS listener's base URL, or `None` when this deployment has no
@@ -549,6 +721,12 @@ impl Default for AuthConfig {
             // today's behaviour and the right default for a multi-tenant
             // deployment. A single-tenant issuer sets it.
             oauth2_default_tenant_id: String::new(),
+            // T21.6 — off. The whole feature is opt-in (I1): with this false
+            // no route, no claim and no accepted issuer differs from a build
+            // that predates it.
+            tenant_issuer_paths: false,
+            // Never a configured value; see the field docs.
+            request_issuer: None,
             revocation_feed_enabled: false,
             sso_spa_origins: Vec::new(),
             pepper: None,
@@ -677,5 +855,105 @@ mod default_tenant_tests {
             config_with("").default_tenant_id(),
             "a bad value and no value must be indistinguishable to the builder"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // T21.6 — per-tenant path issuers
+    // -----------------------------------------------------------------------
+
+    fn issuer_config(tenant_issuer_paths: bool) -> AuthConfig {
+        AuthConfig {
+            oauth2_issuer_url: "https://id.example.com".into(),
+            jwt_issuer: "axiam".into(),
+            tenant_issuer_paths,
+            ..AuthConfig::default()
+        }
+    }
+
+    const TENANT: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// The flag's off-state is the whole of I1 for this feature: no tenant
+    /// issuer can be built, none is accepted, and the accepted set is exactly
+    /// the one string `jsonwebtoken`'s pinned check accepted before T21.6.
+    #[test]
+    fn with_the_flag_off_no_tenant_issuer_exists_and_none_is_accepted() {
+        let c = issuer_config(false);
+        let tenant = uuid::Uuid::parse_str(TENANT).unwrap();
+        assert_eq!(c.tenant_issuer(tenant), None);
+        assert_eq!(c.for_tenant_path(tenant).map(|_| ()), None);
+        assert_eq!(
+            c.tenant_of_issuer(&format!("https://id.example.com/t/{TENANT}")),
+            None
+        );
+        assert!(c.accepts_issuer("https://id.example.com"));
+        assert!(!c.accepts_issuer(&format!("https://id.example.com/t/{TENANT}")));
+        assert_eq!(c.effective_issuer(), c.root_issuer());
+    }
+
+    #[test]
+    fn a_tenant_issuer_is_the_root_plus_the_derived_path() {
+        let c = issuer_config(true);
+        let tenant = uuid::Uuid::parse_str(TENANT).unwrap();
+        assert_eq!(
+            c.tenant_issuer(tenant).unwrap(),
+            format!("https://id.example.com/t/{TENANT}")
+        );
+        let scoped = c.for_tenant_path(tenant).unwrap();
+        assert_eq!(
+            scoped.effective_issuer(),
+            format!("https://id.example.com/t/{TENANT}")
+        );
+        // The deployment's own issuer is unmoved, and every VALIDATION decision
+        // reads it — a request cannot narrow or widen what counts as valid by
+        // choosing a path.
+        assert_eq!(scoped.root_issuer(), "https://id.example.com");
+    }
+
+    /// The widening is a set of two shapes and no more. Each of these is a way
+    /// a looser comparison — a prefix match, a trailing-slash tolerance, a
+    /// normalising parse — would have admitted something it must not.
+    #[test]
+    fn only_the_root_and_a_well_formed_tenant_issuer_are_accepted() {
+        let c = issuer_config(true);
+        assert!(c.accepts_issuer("https://id.example.com"));
+        assert!(c.accepts_issuer(&format!("https://id.example.com/t/{TENANT}")));
+
+        for rejected in [
+            // A tenant segment that is not a UUID.
+            "https://id.example.com/t/admin",
+            "https://id.example.com/t/..",
+            "https://id.example.com/t/",
+            "https://id.example.com/t",
+            // Anything AFTER the tenant segment.
+            &format!("https://id.example.com/t/{TENANT}/extra"),
+            &format!("https://id.example.com/t/{TENANT}/"),
+            // A trailing slash on the root, which OIDC Core §2 makes a
+            // different identifier.
+            "https://id.example.com/",
+            // Another host that merely starts the same way.
+            &format!("https://id.example.com.evil.test/t/{TENANT}"),
+            "https://evil.test",
+            // The right shape at the wrong scheme.
+            &format!("http://id.example.com/t/{TENANT}"),
+        ] {
+            assert!(
+                !c.accepts_issuer(rejected),
+                "{rejected} must not be accepted as an issuer"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tenant_of_an_issuer_is_only_read_from_the_tenant_form() {
+        let c = issuer_config(true);
+        assert_eq!(
+            c.tenant_of_issuer(&format!("https://id.example.com/t/{TENANT}")),
+            Some(uuid::Uuid::parse_str(TENANT).unwrap())
+        );
+        // The root issuer names no tenant — which is the reason the path form
+        // exists, so answering `Some` here would be answering the wrong
+        // question.
+        assert_eq!(c.tenant_of_issuer("https://id.example.com"), None);
+        assert_eq!(c.tenant_of_issuer("https://id.example.com/t/nope"), None);
     }
 }

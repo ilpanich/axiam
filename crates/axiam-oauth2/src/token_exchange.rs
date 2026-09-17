@@ -461,12 +461,48 @@ where
     /// belongs to the HTTP layer and this service must not learn about it.
     /// `None` — every client that registered no binding — issues exactly the
     /// bytes this grant issued before SEC-096.
+    /// The config the exchanged token is signed under (T21.6).
+    ///
+    /// See `TokenService::minting_config`: `Borrowed`, and therefore exactly
+    /// today's behaviour, for every request that did not arrive on a
+    /// `/t/{tenant_id}` path.
+    fn minting_config<'a>(&'a self, issuer: Option<&str>) -> std::borrow::Cow<'a, AuthConfig> {
+        match issuer {
+            None => std::borrow::Cow::Borrowed(&self.auth_config),
+            Some(issuer) => std::borrow::Cow::Owned(AuthConfig {
+                request_issuer: Some(issuer.to_owned()),
+                ..self.auth_config.clone()
+            }),
+        }
+    }
+
+    /// [`Self::exchange_at`] for a request that arrived on the deployment-wide
+    /// token endpoint.
     pub async fn exchange(
         &self,
         tenant_id: Uuid,
         client: &OAuth2Client,
         req: TokenExchangeRequest,
         cnf: Option<axiam_auth::token::CnfClaim>,
+    ) -> Result<ExchangeOutcome, OAuth2Error> {
+        self.exchange_at(tenant_id, client, req, cnf, None).await
+    }
+
+    /// RFC 8693 token exchange, told which issuer the request arrived under.
+    ///
+    /// `issuer` is `None` for `/oauth2/token` and `Some("{root}/t/{tenant}")`
+    /// for the T21.6 per-tenant path. It decides the `iss` of the **minted**
+    /// token and nothing else: which subject tokens are accepted, which
+    /// audiences may be named and every other decision here reads the
+    /// deployment's own issuer set, so a caller cannot widen its rights by
+    /// choosing a path.
+    pub async fn exchange_at(
+        &self,
+        tenant_id: Uuid,
+        client: &OAuth2Client,
+        req: TokenExchangeRequest,
+        cnf: Option<axiam_auth::token::CnfClaim>,
+        issuer: Option<&str>,
     ) -> Result<ExchangeOutcome, OAuth2Error> {
         if !client
             .grant_types
@@ -533,12 +569,20 @@ where
         // rather than two that differ by which branch noticed.
         let claimed_issuer = unverified_issuer_of(&req.subject_token);
         let is_external = match claimed_issuer.as_deref() {
-            Some(iss) => iss != self.auth_config.effective_issuer(),
+            // T21.6 — "ours" is the deployment's issuer set, not one string.
+            // With tenant paths off that set is exactly `{root_issuer()}` and
+            // this is the comparison it has always been; with them on a token
+            // minted under `{root}/t/{uuid}` is ours too, and routing it to
+            // the *external* path would have meant verifying an AXIAM token
+            // against a partner's JWKS.
+            Some(iss) => !self.auth_config.accepts_issuer(iss),
             None => false,
         };
 
         if is_external {
-            return self.exchange_external(tenant_id, client, req, cnf).await;
+            return self
+                .exchange_external(tenant_id, client, req, cnf, issuer)
+                .await;
         }
 
         // From here down is B3, unchanged except for the transitivity check.
@@ -721,7 +765,7 @@ where
             tenant_id,
             tenant.organization_id,
             &granted,
-            &self.auth_config,
+            &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
             &audience,
             expires_at,
@@ -774,6 +818,7 @@ where
         client: &OAuth2Client,
         req: TokenExchangeRequest,
         cnf: Option<axiam_auth::token::CnfClaim>,
+        issuer: Option<&str>,
     ) -> Result<ExchangeOutcome, OAuth2Error> {
         // Not configured ⇒ the external path does not exist. Deliberately the
         // same answer as "no provider trusts this issuer": whether a
@@ -946,7 +991,7 @@ where
             tenant_id,
             tenant.organization_id,
             &granted,
-            &self.auth_config,
+            &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
             &audience,
             now + lifetime,

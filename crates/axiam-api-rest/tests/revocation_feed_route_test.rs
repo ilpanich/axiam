@@ -49,6 +49,7 @@ async fn the_feed_is_served_when_the_deployment_asked_for_it() {
             &RateLimitConfig::default(),
             RouteOptions {
                 revocation_feed_enabled: true,
+                ..RouteOptions::default()
             },
         )
     }))
@@ -115,6 +116,7 @@ async fn a_conditional_poll_is_answered_not_modified() {
             &RateLimitConfig::default(),
             RouteOptions {
                 revocation_feed_enabled: true,
+                ..RouteOptions::default()
             },
         )
     }))

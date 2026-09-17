@@ -125,6 +125,21 @@ fn is_public(openapi_path: &str) -> bool {
             return true;
         }
     }
+    // T21.6 — a documented per-tenant path carries its UUID in the MIDDLE, so
+    // no entry above can spell it. Rather than re-implement the middleware's
+    // tenant-prefix rule here — two implementations of one access-control
+    // decision is precisely the drift this test exists to catch — substitute a
+    // real UUID for the `{tenant_id}` placeholder and ask the middleware the
+    // live request would be answered by.
+    if let Some(rest) = openapi_path.strip_prefix("/t/{tenant_id}") {
+        let concrete = format!(
+            "{}{}{}",
+            axiam_auth::config::TENANT_PATH_PREFIX,
+            uuid::Uuid::nil(),
+            rest
+        );
+        return crate::middleware::authz::is_public_path(&concrete);
+    }
     false
 }
 

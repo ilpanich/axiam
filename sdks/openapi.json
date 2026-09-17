@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta15",
-    "x-axiam-spec-digest": "sha256:de38f318f85abf70b7f2f2072cde87402727338d8944a53e3dfefba3f8fcb884"
+    "x-axiam-spec-digest": "sha256:791212ec43e937589f6d4d55cec92d34ef28b388814f888aa0d902cfa448c045"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -45,6 +45,49 @@
         }
       }
     },
+    "/.well-known/oauth-authorization-server/t/{tenant_id}": {
+      "get": {
+        "tags": [
+          "oidc"
+        ],
+        "summary": "Authorization-server metadata for one tenant, at the RFC 8414 §3.1\npath-insertion form of the issuer `{root}/t/{tenant_id}`.",
+        "operationId": "discovery_rfc8414_tenant_path",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "The tenant this issuer names.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorization-server metadata for one tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcDiscoveryDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The tenant segment is not a UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/.well-known/openid-configuration": {
       "get": {
         "tags": [
@@ -70,6 +113,49 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OidcDiscoveryDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/openid-configuration/t/{tenant_id}": {
+      "get": {
+        "tags": [
+          "oidc"
+        ],
+        "summary": "The same tenant discovery document, at the OIDC Discovery path with the\nRFC 8414 §3.1 insertion applied.",
+        "operationId": "discovery_oidc_tenant_path",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "The tenant this issuer names.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenID Connect Discovery document for one tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcDiscoveryDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The tenant segment is not a UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
                 }
               }
             }
@@ -11478,6 +11564,49 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ReadyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/t/{tenant_id}/.well-known/openid-configuration": {
+      "get": {
+        "tags": [
+          "oidc"
+        ],
+        "summary": "The same tenant discovery document, at the path OpenID Connect Discovery\n1.0 §4 constructs by appending `/.well-known/openid-configuration` to the\nissuer.",
+        "operationId": "discovery_oidc_tenant_appended",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "The tenant this issuer names.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenID Connect Discovery document for one tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcDiscoveryDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The tenant segment is not a UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
                 }
               }
             }

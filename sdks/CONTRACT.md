@@ -3534,6 +3534,52 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-09 (contract version pending, T21.6)** — **non-breaking / additive.**
+  Per-tenant path issuers reach `openapi.json`. **No version number is taken
+  here on purpose**, for the reason the T21.3 entry below gives: the MCP plan
+  reserves 1.48 for T9a (§28). T9a folds both entries into the version it
+  publishes.
+
+  - `openapi.json` gains three paths, all `GET` and all unauthenticated:
+    `/.well-known/oauth-authorization-server/t/{tenant_id}`,
+    `/.well-known/openid-configuration/t/{tenant_id}` and
+    `/t/{tenant_id}/.well-known/openid-configuration`. All three return the
+    same `OidcDiscoveryDocument` schema the existing discovery path returns; no
+    schema changes. `management-registry.json` regenerates with it: the
+    operation count is unchanged at 160 across 24 namespaces (discovery is
+    outside the §27 management vocabulary) and only the recorded spec digest
+    moves.
+  - **The eleven OAuth2 endpoints the `/t/{tenant_id}` scope re-bases are
+    deliberately not in the document.** They are the documented endpoints with
+    a prefix, served by the same handlers; documenting them would have meant a
+    second copy of every path item for no new operation. A client does not need
+    them from the specification, because the discovery document it fetches
+    names every endpoint in full.
+  - **No SDK operation changes signature or behaviour**, and an SDK written
+    against 1.47 is conformant with no edit. The three paths are served only
+    where the deployment sets `AXIAM__AUTH__TENANT_ISSUER_PATHS`; they are
+    documented unconditionally for the same reason `/oauth2/revocations` is,
+    because a capability statement that changed shape per deployment would be
+    one no SDK could vendor.
+  - **What an SDK's resource-server middleware must know.** On such a
+    deployment, the `iss` of a token minted through a tenant path is
+    `{root}/t/{tenant_id}` rather than `{root}`. An SDK that pins one issuer
+    string must be configured with the issuer of the tenant it guards — which
+    is the value the discovery document it read reports as `issuer`, so an SDK
+    that takes its issuer from discovery is already correct. The **JWKS is
+    shared**: one key set verifies every issuer of a deployment, so the
+    `jwks_uri` of either form resolves to the same keys. `aud` rules are
+    unchanged; §10.1 row 6's expectation holds as written.
+
+  The server change behind it is AXIAM Phase 21 T21.6 (the issuer section of
+  `docs/deployment/README.md`).
+
+  **Re-sync required** in all eleven SDK repositories — `axiam-rust-sdk`,
+  `axiam-typescript-sdk`, `axiam-python-sdk`, `axiam-java-sdk`,
+  `axiam-kotlin-sdk`, `axiam-csharp-sdk`, `axiam-php-sdk`, `axiam-go-sdk`,
+  `axiam-swift-sdk`, `axiam-c-sdk`, `axiam-cplusplus-sdk` — for the vendored
+  `CONTRACT.md` and `openapi.json`. `proto/` is unchanged.
+
 - **2026-09 (contract version pending, T21.3)** — **non-breaking / additive.**
   RFC 8707 resource indicators reach `openapi.json`. **No version number is
   taken here on purpose**: the MCP plan reserves 1.48 for T9a (§28), and a task

@@ -1098,6 +1098,162 @@ allowlisted host. Every use is logged.
 The full reasoning, and the five properties that keep this from being a bypass,
 are in [`../security-profiles.md`](../security-profiles.md#outbound-ssrf-guard--the-operator-override-sec-107).
 
+## The issuer, and per-tenant path issuers (optional, T21.6)
+
+`AXIAM__AUTH__OAUTH2_ISSUER_URL` — the deployment's issuer identifier.
+`AXIAM__AUTH__TENANT_ISSUER_PATHS` — default `false`.
+
+### The root issuer
+
+`AXIAM__AUTH__OAUTH2_ISSUER_URL` is the `issuer` of the discovery document, the
+`iss` of every token AXIAM mints, and the base every endpoint URL is built from.
+It must be a **bare root URL** — `https://id.example.com`, not
+`https://id.example.com/auth` — and the server refuses to start otherwise. It
+must be `https` except on `localhost`, and it may carry neither a query nor a
+fragment, which is what RFC 8414 §2 requires of an issuer identifier.
+
+If it is unset the server falls back to `AXIAM__AUTH__JWT_ISSUER`, which is a
+bare identifier rather than a URL. That is enough to sign tokens and not enough
+to publish a conformant discovery document, so set it on any deployment a third
+party talks to.
+
+### Two ways to name a tenant
+
+AXIAM is multi-tenant and one issuer serves every tenant, so something in the
+request has to say which tenant it is for. There are two forms, and a deployment
+chooses one at boot.
+
+**`?tenant_id=` — the default.** Every endpoint that authenticates a client
+takes a `tenant_id` query parameter, and the discovery document publishes the
+endpoint URLs with it already attached:
+
+```console
+$ curl -s https://id.example.com/.well-known/openid-configuration\
+?tenant_id=6f9619ff-8b86-d011-b42d-00c04fc964ff | jq -r .issuer,.token_endpoint
+https://id.example.com
+https://id.example.com/oauth2/token?tenant_id=6f9619ff-8b86-d011-b42d-00c04fc964ff
+```
+
+Note what the two lines say: the endpoints name the tenant, and the **issuer
+does not**. It cannot — RFC 8414 §2 forbids a query component in an issuer
+identifier, so `https://id.example.com?tenant_id=…` is not a legal issuer and
+there is nothing else to put in the parameter. A client that is handed only an
+issuer and derives discovery from it therefore always lands on the deployment's
+default tenant (`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`, or none).
+
+For a browser-based relying party configured by hand that is fine: an operator
+pastes the endpoint URLs and the query rides along. For an **MCP** server it is
+not, because the MCP specification gives an MCP client exactly one thing — the
+`authorization_servers` entry of the RFC 9728 protected-resource metadata — and
+that entry is an *issuer*.
+
+**`{root}/t/{tenant_id}` — the path form.** Set
+`AXIAM__AUTH__TENANT_ISSUER_PATHS=true` and each tenant gains a second,
+query-free issuer identifier:
+
+```
+https://id.example.com/t/6f9619ff-8b86-d011-b42d-00c04fc964ff
+```
+
+The path is **derived, never configured**. There is no per-tenant issuer
+setting: a deployment sets the root issuer and the tenant path follows from it,
+which is why the boot check above still insists the root be a bare URL.
+
+### The three discovery forms
+
+With the flag set, all three of the conventional ways a client turns an issuer
+into a discovery URL are served, and all three return the identical document:
+
+```console
+# RFC 8414 §3.1 — insert the well-known segment after the host
+$ curl -s https://id.example.com/.well-known/oauth-authorization-server/t/6f9619ff-8b86-d011-b42d-00c04fc964ff
+
+# the same insertion at the OIDC discovery path
+$ curl -s https://id.example.com/.well-known/openid-configuration/t/6f9619ff-8b86-d011-b42d-00c04fc964ff
+
+# OpenID Connect Discovery 1.0 §4 — append to the issuer
+$ curl -s https://id.example.com/t/6f9619ff-8b86-d011-b42d-00c04fc964ff/.well-known/openid-configuration
+```
+
+Three forms because clients disagree about which to derive, and a client that
+picked any of them must find AXIAM. They are produced by one function, so they
+cannot drift.
+
+The document they return names the tenant issuer and endpoints under it, with
+**no** `tenant_id` anywhere:
+
+```console
+$ curl -s https://id.example.com/t/6f9619ff-8b86-d011-b42d-00c04fc964ff/.well-known/openid-configuration \
+  | jq -r .issuer,.token_endpoint,.jwks_uri
+https://id.example.com/t/6f9619ff-8b86-d011-b42d-00c04fc964ff
+https://id.example.com/t/6f9619ff-8b86-d011-b42d-00c04fc964ff/oauth2/token
+https://id.example.com/t/6f9619ff-8b86-d011-b42d-00c04fc964ff/oauth2/jwks
+```
+
+Every OAuth2 endpoint is served under `/t/{tenant_id}` as well as at the root —
+the same handlers, the same rate limits, the same behaviour — and the `iss` of
+everything a request there mints is the tenant issuer: the access token, the ID
+token, the RFC 9207 `iss` authorization-response parameter, and the
+Back-Channel Logout token.
+
+### One JWKS, many issuers
+
+`jwks_uri` is re-based on the tenant path, but the key set behind it is the
+**same key set** as the root issuer's, byte for byte. RFC 8414 permits an
+authorization server to publish one key set for several issuer identifiers, and
+AXIAM does: there is one signing key per deployment, not one per tenant.
+
+That has a consequence worth stating plainly, because it is what the
+implementation had to defend against. A tenant-`A` token and a tenant-`B` token
+are signed by the same key, so **the signature does not say which tenant a token
+is for**. AXIAM therefore checks two further things on every request:
+
+* the token's `iss` and its `tenant_id` claim must agree — a token whose issuer
+  names tenant `A` and whose claim says `B` is refused outright; and
+* the tenant in the request's path must be the tenant the token was minted for
+  — a tenant-`A` token presented under `/t/{B}` is refused with `401`, exactly
+  as a request with no credential at all is.
+
+Sending `?tenant_id=` on a `/t/{tenant_id}` path is refused with
+`invalid_request`, agreeing or not. Two tenant selectors on one request is the
+shape a confused-deputy bug takes, and a client that followed the tenant
+discovery document never sends one.
+
+### What an MCP server puts in `authorization_servers`
+
+An MCP server publishes RFC 9728 protected-resource metadata naming the
+authorization server that fronts it. What goes in `authorization_servers`
+depends on which form this deployment serves:
+
+| Mode | `authorization_servers` entry | What the MCP client reaches |
+| --- | --- | --- |
+| Default (`?tenant_id=`) | `https://id.example.com` | The deployment's default tenant, whatever the MCP server is scoped to |
+| `TENANT_ISSUER_PATHS=true` | `https://id.example.com/t/{tenant_id}` | Exactly that tenant |
+
+```jsonc
+// The MCP server's /.well-known/oauth-protected-resource, path form
+{
+  "resource": "https://mcp.example.com",
+  "authorization_servers": [
+    "https://id.example.com/t/6f9619ff-8b86-d011-b42d-00c04fc964ff"
+  ],
+  "bearer_methods_supported": ["header"]
+}
+```
+
+A single-tenant deployment needs none of this: one issuer already means one
+tenant, and `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` makes the bare document
+name it. Turn the flag on when **one** AXIAM fronts MCP servers for **more than
+one** tenant.
+
+### With it off
+
+Nothing above is mounted. `/t/{tenant_id}/…` and the two
+`/.well-known/…/t/{tenant_id}` paths do not exist, no token can carry a tenant
+issuer, and the only issuer AXIAM accepts on an inbound token is the root one —
+which is what it accepted before this setting existed. The `?tenant_id=`
+documents are byte-identical either way.
+
 ## Session revocation feed (optional, T-39 / T-143)
 
 `AXIAM__AUTH__REVOCATION_FEED_ENABLED` — default `false`.

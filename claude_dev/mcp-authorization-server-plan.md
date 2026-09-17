@@ -638,6 +638,98 @@ discovery forms, the shared-JWKS statement, and what an MCP server puts in
   request scoped to tenant `B` (tenant isolation is not weakened by the path).
 - I1, I3.
 
+**Amendments, recorded by the executing session (2026-09-17).** Five. None
+changed an existing test's *expectation*; two added a parameter to a function
+whose existing callers now pass the value that reproduces today's behaviour,
+which the stop rule does not cover and which is noted here so a reviewer can
+check that reading.
+
+1. **The browser login hop had to learn the tenant path, and the plan's item 1
+   did not name it.** `/oauth2/authorize` answers an anonymous `browser_sso`
+   request by redirecting to the SPA's sign-in page with a `return_to`, and
+   that value was built as the literal `AUTHORIZE_PATH`
+   (`crates/axiam-oauth2/src/login_hop.rs`). Left alone, a request that arrived
+   at `/t/{T}/oauth2/authorize` would have come back to `/oauth2/authorize`
+   carrying `tenant_id={T}` — a flow that *works*, and whose RFC 9207 `iss` is
+   then the **root** issuer while the client is comparing against
+   `{root}/t/{T}`. The client would refuse the response in the one check
+   RFC 9207 exists for.
+
+   `validate_return_to`, `build_return_to` and `build_consent_return_to`
+   therefore gained `…_at` siblings taking the one path the candidate may name,
+   and the REST layer passes the path of the request it is answering. The
+   un-suffixed three delegate with `AUTHORIZE_PATH`, so the accepted set for a
+   root-path request is unchanged — the generalisation is "one expected path
+   per call", not "a set of paths", so there is still nothing to normalise and
+   traversal still has nothing to reach.
+
+   The SPA validates `return_to` a third time before navigating
+   (`frontend/src/lib/returnTo.ts`), so it had to accept the tenant form too or
+   the server would emit a value the page refuses. It accepts
+   `/t/{uuid}/oauth2/authorize` unconditionally, where the server accepts it
+   only with the flag on: the page cannot read the server's flag, and the worst
+   a hand-crafted tenant `return_to` achieves without it is a navigation to a
+   404 on the same origin. An open redirect needs another origin, and the three
+   rules before the path check are what refuse those.
+
+2. **`iss` and `tenant_id` are required to agree. The plan did not ask for
+   this; the shared JWKS makes it necessary.** Item 1 says the JWKS is shared —
+   one key set, many issuers — and it says the extractors must accept the root
+   issuer and any `{root}/t/{uuid}`. Those two sentences together mean the
+   signature no longer distinguishes tenant `A`'s token from tenant `B`'s: both
+   verify, and both carry an `iss` the extractor now admits. `iss` and
+   `tenant_id` would have been two answers to "which tenant is this?" that a
+   forged pairing could make disagree, with every consumer picking whichever
+   one it happened to read.
+
+   `axiam_auth::token::enforce_issuer` refuses the disagreement outright, so
+   there is only ever one answer. It runs only with the flag on; with it off
+   `jsonwebtoken`'s pinned-issuer check is kept verbatim and this function
+   returns immediately.
+
+   The path-level half is `enforce_tenant_path_binding` in
+   `axiam-api-rest`'s `AuthenticatedUser` funnel: a token whose tenant is not
+   the tenant the path named is refused with the same `401` a request with no
+   credential gets. It is placed at the funnel rather than in the scope
+   middleware because the middleware cannot decode a token, and because a route
+   mounted under the tenant scope later then inherits the check instead of
+   having to remember it.
+
+3. **I9's mid-path UUID: the prefix is stripped, and the remainder is matched
+   against the same allow-list.** The three discovery paths were easy — two are
+   segment-boundary prefixes (`/.well-known/…/t/*`) and the third is
+   `/t/{uuid}/.well-known/openid-configuration`. The eleven OAuth2 endpoints
+   the scope re-bases are the real question, because `AuthzMiddleware` sees
+   `/t/{uuid}/oauth2/token` and `PUBLIC_PATHS` can spell neither an exact match
+   nor a trailing prefix for it.
+
+   Rejected: a blanket `/t/*` entry (it would make an authenticated route
+   mounted under the scope later silently public), and a `{}`-placeholder
+   matching form (eleven endpoints written twice, in two files that must
+   agree). Taken: `is_public_path` strips a leading `/t/{uuid}/` — the UUID
+   parse is what keeps it from being a traversal primitive — and matches the
+   remainder against `PUBLIC_PATHS` unchanged. The rule that states is the one
+   that is actually true: **a route under `/t/{tenant_id}` is public exactly
+   when the same route at the deployment root is public, because it is the same
+   route.** The route↔OpenAPI parity test asks the middleware itself, with a
+   real UUID substituted for the `{tenant_id}` template, rather than carrying a
+   second implementation of an access-control decision.
+
+4. **The eleven re-based OAuth2 endpoints are not in `openapi.json`, and could
+   not be without violating item 1.** §4.0 asks for utoipa annotations on every
+   new route. utoipa attaches one `#[utoipa::path]` per function, so
+   documenting `/t/{tenant_id}/oauth2/token` and its ten siblings would have
+   required eleven wrapper handlers — "no handler is duplicated" is item 1's
+   own words. The three discovery forms *are* documented (three thin functions
+   over one shared body, which is the `userinfo`/`userinfo_post` pattern), and
+   the deployment page plus the discovery document a client actually reads name
+   the endpoints in full. Recorded in the contract trailer as well.
+
+5. **No contract version was taken**, for the reason T21.3 gives: 1.48 is
+   reserved for T9a (§28). The entry is recorded **unnumbered** ("contract
+   version pending, T21.6") with the full eleven-repository fan-out list, for
+   T9a to fold into the version it publishes. Flagged on the PR.
+
 ### T7 — Documentation, example, website — **Sonnet 5**
 
 **What.**

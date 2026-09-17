@@ -16,6 +16,7 @@ use crate::handlers;
 use crate::middleware::authz::AuthzMiddleware;
 use crate::middleware::csrf::CsrfMiddleware;
 use crate::middleware::rate_limit_shared::RateLimitShared;
+use crate::middleware::tenant_path::TenantPathScope;
 use crate::openapi::api_doc;
 
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
@@ -126,6 +127,13 @@ pub fn api_v1_routes(cfg: &mut web::ServiceConfig) {
 /// type existed.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RouteOptions {
+    /// T21.6: mount the `/t/{tenant_id}` per-tenant issuer scope and the three
+    /// tenant discovery routes (`AXIAM__AUTH__TENANT_ISSUER_PATHS`).
+    ///
+    /// `false` — the default — means none of them exists. Not "exists and
+    /// answers 404", for the reason the field below gives: an off-by-default
+    /// feature that leaves traces is not off.
+    pub tenant_issuer_paths: bool,
     /// T-39/T-143: mount `GET /oauth2/revocations`.
     ///
     /// `false` — the default — means the route does not exist. Not "exists and
@@ -613,183 +621,39 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     .route(web::delete().to(handlers::uma::delete_resource_set::<C>)),
             ),
     );
-    // T-39/T-143: the revocation feed is mounted only where a deployment has
-    // asked for it. Not "mounted and answering 404": a route that exists is a
-    // route an operator can find in a log, a proxy can be configured for and a
-    // scanner can report on, and an off-by-default feature that leaves traces
-    // is not off. With the setting unset this scope is byte-identical to the
-    // one built before the feed existed, 404 included.
-    let mut oauth2_scope = web::scope("/oauth2")
-            .wrap(AuthzMiddleware)
-            // T21.3 / D1 — a repeated `resource` is answered `invalid_target`
-            // rather than with actix's deserializer prose. Every other query
-            // this extractor cannot read keeps the response it has always
-            // had; see `handlers::oauth2::authorize_query_error`.
-            .service(
-                web::resource("/authorize")
-                    .app_data(
-                        web::QueryConfig::default()
-                            .error_handler(handlers::oauth2::authorize_query_error),
-                    )
-                    .route(web::get().to(handlers::oauth2::authorize::<C>)),
-            )
-            // D8: `/token`, `/revoke`, `/introspect` are the ONLY three
-            // endpoints with a form-encoded OAuth2 `client_id`
-            // (`client_secret_post`, RFC 6749 §2.3.1) — the client-aware
-            // governor/`RateLimitShared` constructors honor
-            // `rate_limit_cfg.key` (`AXIAM__RATE_LIMIT__KEY`) here so a
-            // NAT'd fleet of distinct OAuth2 clients no longer collides into
-            // one shared per-IP bucket. `key` defaults to `ip`, which is
-            // byte-for-byte the pre-D8 behavior.
-            .service(
-                web::resource("/token")
-                    .wrap(build_client_aware_governor(
-                        rate_limit_cfg.token_per_min,
-                        rate_limit_cfg.key,
-                    ))
-                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
-                        "oauth2_token",
-                        rate_limit_cfg.token_per_min,
-                        rate_limit_cfg.key,
-                    ))
-                    // T21.3 / D1 — as on `/authorize`. Only a repeated
-                    // `resource` is answered differently; every other body
-                    // actix cannot deserialize keeps today's response.
-                    .app_data(
-                        web::FormConfig::default()
-                            .error_handler(handlers::oauth2::token_form_error),
-                    )
-                    .route(web::post().to(handlers::oauth2::token::<C>)),
-            )
-            // SEC-020: revoke and introspect rate-limited to prevent DoS via token flooding
-            // and token probing attacks.
-            .service(
-                web::resource("/revoke")
-                    .wrap(build_client_aware_governor(
-                        rate_limit_cfg.revoke_per_min,
-                        rate_limit_cfg.key,
-                    ))
-                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
-                        "oauth2_revoke",
-                        rate_limit_cfg.revoke_per_min,
-                        rate_limit_cfg.key,
-                    ))
-                    .route(web::post().to(handlers::oauth2::revoke::<C>)),
-            )
-            .service(
-                web::resource("/introspect")
-                    .wrap(build_client_aware_governor(
-                        rate_limit_cfg.introspect_per_min,
-                        rate_limit_cfg.key,
-                    ))
-                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
-                        "oauth2_introspect",
-                        rate_limit_cfg.introspect_per_min,
-                        rate_limit_cfg.key,
-                    ))
-                    .route(web::post().to(handlers::oauth2::introspect::<C>)),
-            )
-            // B2 / RFC 8628 §3.1. Its own bucket rather than the token
-            // endpoint's: this one is unauthenticated AND every accepted
-            // request allocates state (a pending grant plus a user code drawn
-            // from a deliberately small, human-typable space). Sharing the
-            // token bucket would let ordinary token traffic pay for — or mask
-            // — an attempt to exhaust that space. Per-IP, never client-keyed:
-            // RFC 8628 clients are public, so `client_id` is caller-supplied
-            // and worthless as a bucket key here.
-            .service(
-                web::resource("/device_authorization")
-                    .wrap(build_governor(rate_limit_cfg.device_authorization_per_min))
-                    .wrap(RateLimitShared::<C>::new(
-                        "oauth2_device_authorization",
-                        rate_limit_cfg.device_authorization_per_min,
-                    ))
-                    .route(web::post().to(handlers::oauth2::device_authorization::<C>)),
-            )
-            // B5 / RFC 9126. Its own bucket, and unlike
-            // `/device_authorization` this one is client-keyed: PAR always
-            // carries client credentials, so there is a real identity to key
-            // on, and the per-client check happens inside the handler after
-            // authentication so an unauthenticated caller cannot burn a real
-            // client's allowance. The governor here is the per-IP floor that
-            // keeps unauthenticated flooding off the authentication path.
-            .service(
-                web::resource("/par")
-                    .wrap(build_governor(rate_limit_cfg.par_per_min))
-                    // RFC 9126 §2.3 — a body `web::Form` cannot deserialize is
-                    // rejected before the handler runs, and actix's default
-                    // rendering is `text/plain`. The PAR endpoint's errors are
-                    // the token endpoint's: a JSON object. See
-                    // `handlers::oauth2::par_form_error`.
-                    .app_data(web::FormConfig::default().error_handler(
-                        handlers::oauth2::par_form_error,
-                    ))
-                    .route(
-                        web::post().to(handlers::oauth2::pushed_authorization_request::<C>),
-                    ),
-            )
-            // B5 / RP-Initiated Logout 1.0. GET and POST both, because §2
-            // permits either and browsers reach it by navigation. Its own
-            // bucket, per-IP: like `/device_authorization` it is
-            // unauthenticated and it TERMINATES state, which is a different
-            // abuse profile from the token endpoint's.
-            .service(
-                web::resource("/end_session")
-                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
-                    .wrap(RateLimitShared::<C>::new(
-                        "oauth2_end_session",
-                        rate_limit_cfg.end_session_per_min,
-                    ))
-                    .route(web::get().to(handlers::oauth2::end_session::<C>))
-                    .route(web::post().to(handlers::oauth2::end_session::<C>)),
-            )
-            .route("/jwks", web::get().to(handlers::oauth2::jwks::<C>))
-            // W6 / OIDC Core §5.3: the UserInfo endpoint MUST accept both
-            // methods. Same shape as `/end_session` above — one resource, two
-            // routes — but deliberately **without** the rate-limit wraps those
-            // endpoints carry, for two reasons.
-            //
-            //   * Every one of the wrapped endpoints (`/end_session`,
-            //     `/device_authorization`, `/par`, `/token`) is reachable
-            //     unauthenticated, and each accepted request either allocates
-            //     state or terminates it. UserInfo does neither: it requires a
-            //     valid access token, so its abuse ceiling is already the token
-            //     endpoint's own bucket, and it reads one row.
-            //   * Adding one would change what `GET /oauth2/userinfo` does
-            //     under load, which is exactly the byte-identical behaviour
-            //     invariant 4 protects — rows 17-20 of
-            //     `docs/compliance/oidc-conformance.md` are its twin. A wave
-            //     that adds a method must not also add a 429.
-            //
-            // GET keeps taking `AuthenticatedUser`, so an unauthenticated GET
-            // is the same 401 it was, produced in the same order. POST resolves
-            // its own token because RFC 6750 §2.2 puts one carrier in the body.
-            .service(
-                web::resource("/userinfo")
-                    .route(web::get().to(handlers::oauth2::userinfo::<C>))
-                    .route(web::post().to(handlers::oauth2::userinfo_post::<C>)),
-            );
-    if revocation_feed_enabled {
-        // Beside the JWKS, and served exactly as the JWKS is: a plain route
-        // with `Cache-Control` and an `ETag`, and **no** rate-limit wrap.
-        //
-        // The plan for this item said "rate-limited like `jwks`", and checking
-        // what that meant is the reason this comment exists: `/oauth2/jwks`
-        // carries no limiter. Nor should this. Every wrapped endpoint in this
-        // scope is unauthenticated AND allocates or terminates state; the feed
-        // does neither, it answers one indexed read of a set bounded by the
-        // revocation rate over one access-token lifetime, and the caching
-        // headers are what a conformant poller actually costs. Adding a
-        // limiter would also make the feed fail *differently* under load, and
-        // a guard that gets a 429 must behave as though the feed were
-        // unreachable — which it does, but that is a subtlety worth not
-        // introducing for an endpoint shaped like the JWKS.
-        oauth2_scope = oauth2_scope.route(
-            "/revocations",
-            web::get().to(handlers::oauth2::revocations::<C>),
+    cfg.service(oauth2_scope::<C>(rate_limit_cfg, revocation_feed_enabled));
+    // T21.6 — the per-tenant path issuer form, mounted only where
+    // `AXIAM__AUTH__TENANT_ISSUER_PATHS` is set. Everything under `/t/` is the
+    // scope above, re-based: `TenantPathScope` turns the path segment into the
+    // `tenant_id` the handlers already read, and records the issuer the four
+    // `iss`-stamping sites use. See `middleware::tenant_path`.
+    if options.tenant_issuer_paths {
+        cfg.service(
+            web::scope("/t/{tenant_id}")
+                .wrap(TenantPathScope)
+                // OpenID Connect Discovery 1.0 §4 — the form a client builds by
+                // APPENDING `/.well-known/openid-configuration` to the issuer.
+                // Outside the `/oauth2` scope for the same reason its root twin
+                // is: the specification fixes the path relative to the issuer.
+                .route(
+                    "/.well-known/openid-configuration",
+                    web::get().to(handlers::oauth2::discovery_oidc_tenant_appended::<C>),
+                )
+                .service(oauth2_scope::<C>(rate_limit_cfg, revocation_feed_enabled)),
+        );
+        // RFC 8414 §3.1 — the form a client builds by INSERTING the well-known
+        // segment between the host and the issuer's path. Both spellings,
+        // because clients disagree about which to derive and a client that
+        // picked either must find the same document.
+        cfg.route(
+            "/.well-known/oauth-authorization-server/t/{tenant_id}",
+            web::get().to(handlers::oauth2::discovery_rfc8414_tenant_path::<C>),
+        );
+        cfg.route(
+            "/.well-known/openid-configuration/t/{tenant_id}",
+            web::get().to(handlers::oauth2::discovery_oidc_tenant_path::<C>),
         );
     }
-    cfg.service(oauth2_scope);
     let api_scope = web::scope("/api/v1")
             .wrap(AuthzMiddleware)
             .wrap(CsrfMiddleware) // SEC-046: CSRF protection on all /api/v1 CRUD routes
@@ -1556,4 +1420,200 @@ pub fn build_cors(allowed_origins: &[String]) -> Cors {
         cors = cors.allowed_origin(origin);
     }
     cors
+}
+
+/// The `/oauth2` scope, as a factory.
+///
+/// A function rather than a `let` because T21.6 mounts this scope **twice**: at
+/// the deployment root, and again under `/t/{tenant_id}` for a deployment that
+/// serves per-tenant path issuers. `Scope` is not `Clone` and the tenant form
+/// must be the same eleven endpoints, served by the same handlers, with the
+/// same rate limits — so it is built from one piece of code rather than copied.
+///
+/// One thing the second mount does duplicate: the in-memory `build_governor`
+/// buckets, which are per-instance. The shared, name-keyed `RateLimitShared`
+/// counters are not duplicated — both mounts register the same names, which is
+/// what binds a caller alternating between the two paths to one allowance
+/// wherever a shared store is configured.
+fn oauth2_scope<C: surrealdb::Connection + Clone>(
+    rate_limit_cfg: &RateLimitConfig,
+    revocation_feed_enabled: bool,
+) -> impl actix_web::dev::HttpServiceFactory + 'static {
+    // T-39/T-143: the revocation feed is mounted only where a deployment has
+    // asked for it. Not "mounted and answering 404": a route that exists is a
+    // route an operator can find in a log, a proxy can be configured for and a
+    // scanner can report on, and an off-by-default feature that leaves traces
+    // is not off. With the setting unset this scope is byte-identical to the
+    // one built before the feed existed, 404 included.
+    let mut oauth2_scope = web::scope("/oauth2")
+            .wrap(AuthzMiddleware)
+            // T21.3 / D1 — a repeated `resource` is answered `invalid_target`
+            // rather than with actix's deserializer prose. Every other query
+            // this extractor cannot read keeps the response it has always
+            // had; see `handlers::oauth2::authorize_query_error`.
+            .service(
+                web::resource("/authorize")
+                    .app_data(
+                        web::QueryConfig::default()
+                            .error_handler(handlers::oauth2::authorize_query_error),
+                    )
+                    .route(web::get().to(handlers::oauth2::authorize::<C>)),
+            )
+            // D8: `/token`, `/revoke`, `/introspect` are the ONLY three
+            // endpoints with a form-encoded OAuth2 `client_id`
+            // (`client_secret_post`, RFC 6749 §2.3.1) — the client-aware
+            // governor/`RateLimitShared` constructors honor
+            // `rate_limit_cfg.key` (`AXIAM__RATE_LIMIT__KEY`) here so a
+            // NAT'd fleet of distinct OAuth2 clients no longer collides into
+            // one shared per-IP bucket. `key` defaults to `ip`, which is
+            // byte-for-byte the pre-D8 behavior.
+            .service(
+                web::resource("/token")
+                    .wrap(build_client_aware_governor(
+                        rate_limit_cfg.token_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
+                        "oauth2_token",
+                        rate_limit_cfg.token_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    // T21.3 / D1 — as on `/authorize`. Only a repeated
+                    // `resource` is answered differently; every other body
+                    // actix cannot deserialize keeps today's response.
+                    .app_data(
+                        web::FormConfig::default()
+                            .error_handler(handlers::oauth2::token_form_error),
+                    )
+                    .route(web::post().to(handlers::oauth2::token::<C>)),
+            )
+            // SEC-020: revoke and introspect rate-limited to prevent DoS via token flooding
+            // and token probing attacks.
+            .service(
+                web::resource("/revoke")
+                    .wrap(build_client_aware_governor(
+                        rate_limit_cfg.revoke_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
+                        "oauth2_revoke",
+                        rate_limit_cfg.revoke_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    .route(web::post().to(handlers::oauth2::revoke::<C>)),
+            )
+            .service(
+                web::resource("/introspect")
+                    .wrap(build_client_aware_governor(
+                        rate_limit_cfg.introspect_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
+                        "oauth2_introspect",
+                        rate_limit_cfg.introspect_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    .route(web::post().to(handlers::oauth2::introspect::<C>)),
+            )
+            // B2 / RFC 8628 §3.1. Its own bucket rather than the token
+            // endpoint's: this one is unauthenticated AND every accepted
+            // request allocates state (a pending grant plus a user code drawn
+            // from a deliberately small, human-typable space). Sharing the
+            // token bucket would let ordinary token traffic pay for — or mask
+            // — an attempt to exhaust that space. Per-IP, never client-keyed:
+            // RFC 8628 clients are public, so `client_id` is caller-supplied
+            // and worthless as a bucket key here.
+            .service(
+                web::resource("/device_authorization")
+                    .wrap(build_governor(rate_limit_cfg.device_authorization_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_device_authorization",
+                        rate_limit_cfg.device_authorization_per_min,
+                    ))
+                    .route(web::post().to(handlers::oauth2::device_authorization::<C>)),
+            )
+            // B5 / RFC 9126. Its own bucket, and unlike
+            // `/device_authorization` this one is client-keyed: PAR always
+            // carries client credentials, so there is a real identity to key
+            // on, and the per-client check happens inside the handler after
+            // authentication so an unauthenticated caller cannot burn a real
+            // client's allowance. The governor here is the per-IP floor that
+            // keeps unauthenticated flooding off the authentication path.
+            .service(
+                web::resource("/par")
+                    .wrap(build_governor(rate_limit_cfg.par_per_min))
+                    // RFC 9126 §2.3 — a body `web::Form` cannot deserialize is
+                    // rejected before the handler runs, and actix's default
+                    // rendering is `text/plain`. The PAR endpoint's errors are
+                    // the token endpoint's: a JSON object. See
+                    // `handlers::oauth2::par_form_error`.
+                    .app_data(web::FormConfig::default().error_handler(
+                        handlers::oauth2::par_form_error,
+                    ))
+                    .route(
+                        web::post().to(handlers::oauth2::pushed_authorization_request::<C>),
+                    ),
+            )
+            // B5 / RP-Initiated Logout 1.0. GET and POST both, because §2
+            // permits either and browsers reach it by navigation. Its own
+            // bucket, per-IP: like `/device_authorization` it is
+            // unauthenticated and it TERMINATES state, which is a different
+            // abuse profile from the token endpoint's.
+            .service(
+                web::resource("/end_session")
+                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_end_session",
+                        rate_limit_cfg.end_session_per_min,
+                    ))
+                    .route(web::get().to(handlers::oauth2::end_session::<C>))
+                    .route(web::post().to(handlers::oauth2::end_session::<C>)),
+            )
+            .route("/jwks", web::get().to(handlers::oauth2::jwks::<C>))
+            // W6 / OIDC Core §5.3: the UserInfo endpoint MUST accept both
+            // methods. Same shape as `/end_session` above — one resource, two
+            // routes — but deliberately **without** the rate-limit wraps those
+            // endpoints carry, for two reasons.
+            //
+            //   * Every one of the wrapped endpoints (`/end_session`,
+            //     `/device_authorization`, `/par`, `/token`) is reachable
+            //     unauthenticated, and each accepted request either allocates
+            //     state or terminates it. UserInfo does neither: it requires a
+            //     valid access token, so its abuse ceiling is already the token
+            //     endpoint's own bucket, and it reads one row.
+            //   * Adding one would change what `GET /oauth2/userinfo` does
+            //     under load, which is exactly the byte-identical behaviour
+            //     invariant 4 protects — rows 17-20 of
+            //     `docs/compliance/oidc-conformance.md` are its twin. A wave
+            //     that adds a method must not also add a 429.
+            //
+            // GET keeps taking `AuthenticatedUser`, so an unauthenticated GET
+            // is the same 401 it was, produced in the same order. POST resolves
+            // its own token because RFC 6750 §2.2 puts one carrier in the body.
+            .service(
+                web::resource("/userinfo")
+                    .route(web::get().to(handlers::oauth2::userinfo::<C>))
+                    .route(web::post().to(handlers::oauth2::userinfo_post::<C>)),
+            );
+    if revocation_feed_enabled {
+        // Beside the JWKS, and served exactly as the JWKS is: a plain route
+        // with `Cache-Control` and an `ETag`, and **no** rate-limit wrap.
+        //
+        // The plan for this item said "rate-limited like `jwks`", and checking
+        // what that meant is the reason this comment exists: `/oauth2/jwks`
+        // carries no limiter. Nor should this. Every wrapped endpoint in this
+        // scope is unauthenticated AND allocates or terminates state; the feed
+        // does neither, it answers one indexed read of a set bounded by the
+        // revocation rate over one access-token lifetime, and the caching
+        // headers are what a conformant poller actually costs. Adding a
+        // limiter would also make the feed fail *differently* under load, and
+        // a guard that gets a 429 must behave as though the feed were
+        // unreachable — which it does, but that is a subtlety worth not
+        // introducing for an endpoint shaped like the JWKS.
+        oauth2_scope = oauth2_scope.route(
+            "/revocations",
+            web::get().to(handlers::oauth2::revocations::<C>),
+        );
+    }
+    oauth2_scope
 }

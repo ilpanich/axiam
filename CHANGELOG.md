@@ -79,6 +79,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `axiam:m2m`, so a token minted for another resource server is refused with
   `401` / `UNAUTHENTICATED` there (T21.3).
 
+- **Per-tenant path issuers (`AXIAM__AUTH__TENANT_ISSUER_PATHS`, default
+  `false`).** With the flag set, each tenant gains a second issuer identifier,
+  `{root}/t/{tenant_id}` — one with no query string, so it is an issuer an MCP
+  server can name in the `authorization_servers` of its RFC 9728
+  protected-resource metadata and an MCP client can turn into a discovery URL.
+  Discovery is served at all three conventional forms (RFC 8414 §3.1 path
+  insertion at both well-known paths, and the OIDC Discovery §4 append), each
+  returning the identical document whose endpoints are
+  `{root}/t/{tenant_id}/oauth2/…` with no `tenant_id` query. An Actix scope
+  `/t/{tenant_id}` re-bases the existing OAuth2 endpoints — the same handlers,
+  no duplicates — and the `iss` of everything minted there is the tenant issuer:
+  the access token, the ID token, the RFC 9207 authorization-response parameter
+  and the Back-Channel Logout token. One JWKS signs every issuer. AXIAM's own
+  extractors accept the root issuer and any `{root}/t/{uuid}`; the audience
+  rules are untouched. With the flag unset nothing is mounted and the existing
+  `?tenant_id=` documents are byte-identical. See the issuer section of
+  [`docs/deployment/README.md`](docs/deployment/README.md) (T21.6).
+
+- **Tenant isolation under path issuers.** Because one key set signs every
+  tenant's tokens, two checks were added rather than assumed: a token whose
+  `iss` names a different tenant from its `tenant_id` claim is refused, and a
+  token presented under `/t/{tenant}` whose tenant is not that one is refused
+  with `401` — the same answer a request with no credential gets. A `tenant_id`
+  query parameter on a tenant path is `invalid_request`, agreeing or not
+  (T21.6).
+
 ### Changed
 
 - **Token exchange reads `allowed_resources` for its `audience`/`resource`
@@ -91,6 +117,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowed_resources` now:
   [`docs/api/token-exchange.md#audience`](docs/api/token-exchange.md#audience)
   (T21.3).
+
+- **The issuer boot check now says what it is about.** A configured
+  `AXIAM__AUTH__OAUTH2_ISSUER_URL` must still be a bare root URL, and the
+  message says why: the per-tenant issuer path is derived from it as
+  `{root}/t/{tenant_id}` and is never configured. Setting
+  `AXIAM__AUTH__TENANT_ISSUER_PATHS` without a root issuer is refused at boot
+  rather than producing issuers no client can resolve (T21.6).
 
 ## [1.0.0-beta15] - 2026-09-15
 

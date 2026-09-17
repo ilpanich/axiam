@@ -985,3 +985,380 @@ async fn mcp_sequence_with_a_client_id_metadata_document_on_query_tenants() {
 async fn mcp_sequence_with_a_client_id_metadata_document_on_path_issuers() {
     cimd_sequence(Mode::TenantPath).await;
 }
+
+// ---------------------------------------------------------------------------
+// The adversarial half
+// ---------------------------------------------------------------------------
+//
+// Everything above asks whether the documented flow works. Everything below
+// asks whether a flow nobody documented also works, and is named for the entry
+// in `claude_dev/security-review-mcp-2026-09-17.md` that it pins. A finding
+// that is fixed gets a test that would fail if the fix were reverted; a finding
+// that is filed gets a test that asserts what the code *does* today, with the
+// issue number in its name, so the day somebody fixes it the test says so.
+
+/// **MCP-04.** The loopback allowance widens a registration by a port and by
+/// nothing else.
+///
+/// The matcher has its own unit tests in `axiam-oauth2`; what this asserts is
+/// that the endpoint an attacker can actually reach agrees with them. Each
+/// candidate is a way of spelling a host that is *not* `127.0.0.1` while
+/// looking like one, and every one of them must be refused at the
+/// authorization endpoint — where a mistake would hand the authorization code
+/// to the attacker's origin, which is the whole of the open-redirect class.
+#[actix_rt::test]
+async fn mcp04_the_loopback_allowance_does_not_widen_the_host() {
+    let mode = Mode::Query;
+    let f = setup(mode).await;
+    let stub = mcp_stub(&mode.issuer(f.a.id)).await;
+    set_org_settings(&f, dcr_policy(&stub.resource)).await;
+    let app = test_app!(f, mode);
+
+    let (status, registered) = post_json(
+        &app,
+        &mode.endpoint(f.a.id, "register", ""),
+        json!({
+            "client_name": "loopback client",
+            "redirect_uris": [LOOPBACK_CALLBACK],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "scope": "openid",
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{registered}");
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+    let challenge = pkce_challenge(VERIFIER);
+
+    for (candidate, why) in [
+        (
+            "http://127.0.0.1@evil.example.com/callback",
+            "a userinfo segment that reads as the registered host",
+        ),
+        (
+            "http://localhost.evil.example.com/callback",
+            "a registered host that is a label prefix of the presented one",
+        ),
+        (
+            "http://evil.example.com/callback",
+            "an unrelated host entirely",
+        ),
+        (
+            "http://127.0.0.1:8080/callback/../../evil",
+            "a path that leaves the registered one",
+        ),
+        (
+            "http://127.0.0.1:8080/%63allback",
+            "a path that differs only by percent-encoding: the comparison is on \
+             the serialised form, which keeps the two spellings distinct and \
+             therefore fails closed",
+        ),
+        (
+            "https://127.0.0.1:8080/callback",
+            "https, which never takes the port allowance (I6)",
+        ),
+        (
+            "http://[::1]:8080/callback",
+            "a different loopback host: the three are not interchangeable",
+        ),
+    ] {
+        let uri = mode.endpoint(
+            f.a.id,
+            "authorize",
+            &format!(
+                "response_type=code&client_id={}&redirect_uri={}&scope=openid\
+                 &code_challenge={challenge}&code_challenge_method=S256",
+                enc(&client_id),
+                enc(candidate)
+            ),
+        );
+        let (status, location, body) = get_as_user(&app, &uri, &f.a.token).await;
+        assert_ne!(
+            status, 302,
+            "{candidate} must not be redirected to ({why}): {location:?} {body}"
+        );
+        if let Some(location) = location {
+            assert!(
+                !location.starts_with(candidate),
+                "{candidate} must never receive a code ({why}): {location}"
+            );
+        }
+    }
+}
+
+/// **MCP-05.** A token minted under one tenant's path is not a credential under
+/// another's, and the two tenant selectors cannot be made to disagree.
+///
+/// This is the hole T21.6's own amendment 2 found: the JWKS is shared, so
+/// tenant `A`'s token verifies perfectly as a signature when presented on
+/// tenant `B`'s path. `enforce_issuer` and `enforce_tenant_path_binding` are
+/// what close it, and this asserts both halves against live routes rather than
+/// against the functions.
+#[actix_rt::test]
+async fn mcp05_a_tenant_path_binds_the_token_to_that_tenant() {
+    let mode = Mode::TenantPath;
+    let f = setup(mode).await;
+    let app = test_app!(f, mode);
+
+    // Tenant A's user, on tenant A's path: this is the control, and it must
+    // work, or the refusals below would prove nothing.
+    let (status, ..) = get_as_user(
+        &app,
+        &format!("/t/{}/oauth2/userinfo", f.a.id),
+        &f.a.token,
+    )
+    .await;
+    assert_ne!(
+        status, 401,
+        "the control must pass: tenant A's token on tenant A's path"
+    );
+
+    // The same token, on tenant B's path.
+    let (status, _, body) = get_as_user(
+        &app,
+        &format!("/t/{}/oauth2/userinfo", f.b.id),
+        &f.a.token,
+    )
+    .await;
+    assert_eq!(
+        status, 401,
+        "a token minted for tenant A must not act on tenant B's path, however well it \
+         verifies against the shared key set: {body}"
+    );
+
+    // The query selector cannot be smuggled in beside the path one. Answering
+    // this any other way would leave two answers to "which tenant is this?"
+    // for whichever consumer read the other one.
+    let (status, body) = get_json(
+        &app,
+        &format!("/t/{}/oauth2/authorize?tenant_id={}", f.a.id, f.b.id),
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "a tenant_id query parameter on a tenant path must be refused outright: {body}"
+    );
+    assert_eq!(body["error"], "invalid_request", "{body}");
+}
+
+/// **MCP-06.** An initial access token is single-use even when it is redeemed
+/// more than once before the first redemption has finished.
+///
+/// The interesting case is not "spend it twice in sequence" — that is
+/// `dynamic_registration_test`'s — but two redemptions in flight at once, which
+/// is what a read-then-write implementation gets wrong and a conditional
+/// `UPDATE … WHERE used_at IS NONE` gets right.
+///
+/// Honest about what it measures: the actix test runtime is single-threaded, so
+/// these interleave at the `await` points rather than running on two cores. That
+/// is still the window that matters, because the window a two-phase
+/// implementation opens is exactly an `await` — the gap between reading the row
+/// and writing it back.
+#[actix_rt::test]
+async fn mcp06_an_initial_access_token_survives_concurrent_redemption() {
+    let mode = Mode::Query;
+    let f = setup(mode).await;
+    let stub = mcp_stub(&mode.issuer(f.a.id)).await;
+    set_org_settings(
+        &f,
+        SetOrgSettings {
+            dynamic_registration: DynamicRegistrationMode::InitialAccessToken,
+            ..dcr_policy(&stub.resource)
+        },
+    )
+    .await;
+    let app = test_app!(f, mode);
+
+    let (status, minted) = post_as_user(
+        &app,
+        "/api/v1/oauth2-clients/registration-tokens",
+        &f.a.token,
+        json!({ "name": "race-handle", "expires_in_hours": 1 }),
+    )
+    .await;
+    assert_eq!(status, 201, "{minted}");
+    let handle = minted["initial_access_token"]
+        .as_str()
+        .expect("the handle is shown once")
+        .to_owned();
+
+    let body = json!({
+        "client_name": "racer",
+        "redirect_uris": [LOOPBACK_CALLBACK],
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "scope": "openid",
+    });
+    let uri = mode.endpoint(f.a.id, "register", "");
+
+    // Four requests built up front and then driven together, so that none has
+    // completed before the others are submitted.
+    let requests: Vec<_> = (0..4)
+        .map(|_| {
+            test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(&uri)
+                .insert_header(("Authorization", format!("Bearer {handle}")))
+                .set_json(body.clone())
+                .to_request()
+        })
+        .collect();
+    let responses =
+        futures::future::join_all(requests.into_iter().map(|r| test::call_service(&app, r))).await;
+
+    let statuses: Vec<u16> = responses.iter().map(|r| r.status().as_u16()).collect();
+    let created = statuses.iter().filter(|s| **s == 201).count();
+
+    assert_eq!(
+        created, 1,
+        "exactly one of four concurrent redemptions of one single-use handle may create a \
+         client; got {statuses:?}"
+    );
+}
+
+/// **MCP-02.** `axiam:user` is a syntactically valid absolute URI, so it is a
+/// syntactically valid `resource` — and nothing refuses it.
+///
+/// This test asserts what the code does **today**, not what it should do. It
+/// exists so that the collision is visible in the suite rather than only in the
+/// review, and so that whoever closes it has a test that tells them they did.
+///
+/// The consequence worth understanding is the `client_credentials` one. Without
+/// `resource`, that grant mints `axiam:m2m`, which AXIAM's user-facing
+/// extractors refuse. Naming `axiam:user` as the resource makes the same grant
+/// mint a token stamped with the *user* audience, which is the one claim those
+/// extractors gate on — so the resource parameter reaches past the audience
+/// boundary that I3 is built out of, instead of being confined by it.
+#[actix_rt::test]
+async fn mcp02_a_builtin_audience_is_accepted_as_a_resource_today() {
+    let mode = Mode::Query;
+    let f = setup(mode).await;
+    let app = test_app!(f, mode);
+
+    let (status, client) = post_as_user(
+        &app,
+        "/api/v1/oauth2-clients",
+        &f.a.token,
+        json!({
+            "name": "audience-collision",
+            "redirect_uris": ["https://rp.example.com/cb"],
+            "grant_types": ["client_credentials"],
+            "scopes": ["openid"],
+            "allowed_resources": [axiam_auth::token::AUD_USER],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 201,
+        "MCP-02: registering AXIAM's own audience as a resource is accepted today. If this \
+         line starts failing, the collision has been closed and this test should become the \
+         assertion that it is refused: {client}"
+    );
+
+    let (status, tokens) = post_form(
+        &app,
+        &mode.endpoint(f.a.id, "token", ""),
+        &format!(
+            "grant_type=client_credentials&client_id={}&client_secret={}&resource={}",
+            enc(client["client_id"].as_str().unwrap()),
+            enc(client["client_secret"].as_str().unwrap()),
+            enc(axiam_auth::token::AUD_USER)
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(
+        claims_of(tokens["access_token"].as_str().unwrap())["aud"],
+        axiam_auth::token::AUD_USER,
+        "a client_credentials grant that names axiam:user as its resource is stamped with the \
+         user audience rather than axiam:m2m: {tokens}"
+    );
+}
+
+/// **MCP-01.** A loopback client on an ephemeral port gets its *codes*
+/// redirected and its *errors* rendered.
+///
+/// The success path compares the presented `redirect_uri` with
+/// `any_redirect_uri_matches`, which applies RFC 8252 §7.3's port allowance.
+/// Five error paths in `handlers/oauth2.rs` still compare with `==`. The
+/// direction is fail-closed — no error is ever redirected to a URI that was not
+/// registered — so this is an interoperability defect rather than a
+/// vulnerability, and it lands on exactly the client family this phase exists
+/// to serve: the desktop client's loopback listener waits for a callback that
+/// never arrives.
+///
+/// Asserted as the behaviour it has today. Filed, not fixed — the fix touches
+/// five call sites in a file no other part of this task changes.
+#[actix_rt::test]
+async fn mcp01_an_error_is_not_redirected_to_an_ephemeral_loopback_port() {
+    let mode = Mode::Query;
+    let f = setup(mode).await;
+    let stub = mcp_stub(&mode.issuer(f.a.id)).await;
+    set_org_settings(&f, dcr_policy(&stub.resource)).await;
+    let app = test_app!(f, mode);
+
+    let (status, registered) = post_json(
+        &app,
+        &mode.endpoint(f.a.id, "register", ""),
+        json!({
+            "client_name": "desktop client",
+            "redirect_uris": [LOOPBACK_CALLBACK],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "scope": "openid",
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{registered}");
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+    let callback = "http://127.0.0.1:49999/callback";
+
+    // `response_type` omitted entirely. This is the refusal that reaches
+    // `handlers/oauth2.rs`'s `redirect_uris.contains(candidate)` — one of the
+    // five sites that still compare exactly — rather than the shared matcher
+    // the success path and `unsupported_response_type` both use.
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "client_id={}&redirect_uri={}&scope=openid&code_challenge={}\
+             &code_challenge_method=S256",
+            enc(&client_id),
+            enc(callback),
+            pkce_challenge(VERIFIER)
+        ),
+    );
+    let (status, location, body) = get_as_user(&app, &uri, &f.a.token).await;
+    assert_ne!(
+        status, 302,
+        "MCP-01: the error is answered directly rather than redirected to the ephemeral port. \
+         If this starts failing, the five `==` comparisons in handlers/oauth2.rs have been \
+         brought into line with the matcher and this test should assert the redirect instead: \
+         {location:?} {body}"
+    );
+
+    // The contrast that makes the finding precise, and the reason it is Low
+    // rather than a functional break: a refusal raised *after* the matcher has
+    // run is redirected correctly, so only the handful of pre-matcher refusals
+    // are affected.
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "response_type=token&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256",
+            enc(&client_id),
+            enc(callback),
+            pkce_challenge(VERIFIER)
+        ),
+    );
+    let (status, location, _) = get_as_user(&app, &uri, &f.a.token).await;
+    assert_eq!(status, 302, "{location:?}");
+    assert!(
+        location.as_deref().is_some_and(|l| l.starts_with(callback)),
+        "an unsupported_response_type IS redirected to the ephemeral port: {location:?}"
+    );
+}

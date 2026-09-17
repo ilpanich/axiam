@@ -1128,11 +1128,45 @@ pub fn issue_client_credentials_token_enriched(
     cnf: Option<CnfClaim>,
     ext: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<String, AuthError> {
-    AccessTokenSpec::oauth2_client(client_id, tenant_id, org_id)
+    issue_client_credentials_token_for_resource(
+        client_id, tenant_id, org_id, scopes, config, cnf, ext, None,
+    )
+}
+
+/// [`issue_client_credentials_token_enriched`], addressed at an RFC 8707
+/// resource rather than at AXIAM itself (T21.3).
+///
+/// Passing `None` produces a byte-identical token to
+/// [`issue_client_credentials_token_enriched`] — which is why *that* function
+/// is now a one-line delegation rather than a copy, the same relationship, and
+/// the same reason, that `cnf` and `ext` already have to the wrappers above
+/// it. Every existing caller keeps minting `axiam:m2m` without knowing this
+/// parameter exists (I2).
+///
+/// `resource` is the **normalised** value
+/// `axiam_oauth2::resource::resolve_requested` returned, never the client's
+/// raw parameter: this function performs no validation and must not be
+/// mistaken for the place the allow-list is enforced.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_client_credentials_token_for_resource(
+    client_id: &str,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    config: &AuthConfig,
+    cnf: Option<CnfClaim>,
+    ext: Option<std::collections::BTreeMap<String, String>>,
+    resource: Option<&str>,
+) -> Result<String, AuthError> {
+    let spec = AccessTokenSpec::oauth2_client(client_id, tenant_id, org_id)
         .scopes(scopes)
         .cnf(cnf)
-        .ext(ext)
-        .issue(config)
+        .ext(ext);
+    match resource {
+        Some(aud) => spec.aud(aud),
+        None => spec,
+    }
+    .issue(config)
 }
 
 /// Issue an RPT — the requesting party token of the UMA 2.0 grant (X2).
@@ -1521,6 +1555,67 @@ pub fn decode_access_token(
     // only when the claim exists (jsonwebtoken skips aud check when token has
     // no `aud` claim and validate_aud=true with a configured audience set).
     validation.set_audience(&[AUD_USER, AUD_M2M]);
+    validation.leeway = 60;
+
+    jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation)
+        .map(|data| data.claims)
+        .map_err(|e| match e.kind() {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
+            _ => AuthError::TokenInvalid(e.to_string()),
+        })
+}
+
+/// Decode and verify an access token **without pinning its audience** (T21.3).
+///
+/// The sibling of [`decode_access_token`], and the difference between them is
+/// the whole of I3. That one is what AXIAM's own resource endpoints run, and it
+/// pins `aud` to [`AUD_USER`] or [`AUD_M2M`] so that a token minted for
+/// somebody else's MCP server is **refused** by AXIAM's own APIs. This one
+/// verifies everything else a token must satisfy — the EdDSA signature over
+/// AXIAM's own public key, the issuer, the expiry and the `nbf`/`iat`
+/// windows — and then treats `aud` as *data* to be reported rather than as a
+/// gate to be passed.
+///
+/// # Why that is safe here and nowhere else
+///
+/// The distinction is between **authenticating a caller** and **describing a
+/// token**. Introspection (RFC 7662) does the second: an authenticated
+/// resource server asks what a token it is holding says, and the answer
+/// includes `aud` precisely so that the resource server can decide whether the
+/// token is for it. Refusing to describe a token because its audience is not
+/// AXIAM's own would make introspection unusable for every resource server
+/// that is not AXIAM — which is every resource server RFC 8707 exists for.
+///
+/// So the rule for callers is short and has no exceptions: **anything that
+/// decides whether a request may proceed calls [`validate_access_token`]**,
+/// and this function is called only by code that is reporting, never by code
+/// that is admitting. There is exactly one caller today,
+/// `axiam_oauth2::token::TokenService::introspect_token`, and it hands the
+/// result to a JSON body.
+pub fn decode_access_token_any_audience(
+    token: &str,
+    config: &AuthConfig,
+) -> Result<AccessTokenClaims, AuthError> {
+    let owned;
+    let key: &DecodingKey = if let Some(ref cached) = config.jwt_decoding_key {
+        cached.as_ref()
+    } else {
+        owned = DecodingKey::from_ed_pem(config.jwt_public_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
+        &owned
+    };
+
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    // Identical to `decode_access_token` in every respect but one: the issuer
+    // is still pinned (a token AXIAM did not mint is not AXIAM's to describe),
+    // the required claims are the same, and the leeway is the same.
+    validation.set_issuer(&[config.effective_issuer()]);
+    validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+    // The one difference. `validate_aud = false` makes jsonwebtoken skip the
+    // membership check entirely rather than compare against a wider set —
+    // there is no set that could be written here, because the whole point is
+    // that the audience is a URI the deployment's operator chose.
+    validation.validate_aud = false;
     validation.leeway = 60;
 
     jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation)

@@ -124,6 +124,14 @@ pub struct PushedRequest {
     /// endpoint owes the client before anything is stored. What arrives here
     /// is the single key the authorization is bound to, or `None`.
     pub dpop_jkt: Option<String>,
+    /// T21.3 / RFC 8707 §2 — the target service this request is for.
+    ///
+    /// Validated here rather than deferred to `/oauth2/authorize`, for the
+    /// same reason the `redirect_uri` is: the client is authenticated *now*,
+    /// so an `invalid_target` is attributable and reaches the client as a
+    /// protocol error — instead of surfacing in a browser after a sign-in the
+    /// user should never have been asked for.
+    pub resource: Option<String>,
 }
 
 /// What `/oauth2/par` answers with (RFC 9126 §2.2).
@@ -234,6 +242,13 @@ where
             }
         }
 
+        // T21.3 / RFC 8707 §2 — the resource indicator, validated against the
+        // client's allow-list and stored in its normalised form so the
+        // authorization endpoint compares the same string this endpoint
+        // accepted. Absent is `Ok(None)` and changes nothing (I2).
+        let resource =
+            crate::resource::resolve_requested(&client.allowed_resources, req.resource.as_deref())?;
+
         // RFC 9126 §2.1: `request_uri` is not a parameter a client may push.
         // Accepting one would let a client chain pushed requests, and the
         // second would inherit the first's authentication.
@@ -263,6 +278,7 @@ where
                     ui_locales: req.ui_locales,
                     claims_locales: req.claims_locales,
                     dpop_jkt: req.dpop_jkt,
+                    resource,
                 },
                 expires_at,
             })

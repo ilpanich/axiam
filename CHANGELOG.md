@@ -51,6 +51,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sent, and skips the one-time secret dialog for a client that has no secret
   to show (T21.2).
 
+- **RFC 8707 resource indicators.** A `resource` parameter on
+  `/oauth2/authorize`, `/oauth2/par`, `/oauth2/device_authorization` and
+  `/oauth2/token` names the service a token is for, and the access token minted
+  carries that URI as its `aud` instead of `axiam:user` / `axiam:m2m` — which
+  is what lets an MCP server, a partner API or one service in a mesh check that
+  a token was issued for *it*. Enabled per client by the new
+  `allowed_resources` registration field, which is empty on every existing
+  client; a request that sends no `resource` mints exactly the token it always
+  did. Entries are absolute URIs without a fragment, compared after RFC 3986
+  §6.2.2 normalisation and never by prefix; an unregistered or malformed value
+  is `invalid_target`, and a second value is too. See
+  [`docs/api/resource-indicators.md`](docs/api/resource-indicators.md) (T21.3).
+
+- **A grant's audience cannot be widened.** The resource travels with the grant
+  — onto the authorization code, the device grant and the refresh token, where
+  each rotation copies it forward — so a refresh re-mints the *same* audience.
+  A token request or refresh may repeat the resource or omit it; naming a
+  different one, or naming one at all on a grant that was issued without one,
+  is `invalid_target` (T21.3).
+
+- **`aud` in the introspection response (RFC 7662 §2.2).** Introspection now
+  reports the token's audience, and decodes resource-bound tokens rather than
+  reporting them inactive — an introspecting resource server's whole audience
+  check is "is this token for me", and it had no way to ask. AXIAM's own REST
+  and gRPC endpoints are **unchanged**: they still accept only `axiam:user` and
+  `axiam:m2m`, so a token minted for another resource server is refused with
+  `401` / `UNAUTHENTICATED` there (T21.3).
+
+### Changed
+
+- **Token exchange reads `allowed_resources` for its `audience`/`resource`
+  target, and the redirect-URI allow-list is deprecated (SEC-089).** A target is
+  accepted if it is one of AXIAM's built-in audiences, appears in
+  `allowed_resources`, or — for one release — appears in the client's
+  `redirect_uris`. The last branch logs a deprecation warning naming the client
+  and the target when it is the one that matched; it will be removed in the next
+  release. Nothing that worked stops working today. Move exchange targets to
+  `allowed_resources` now:
+  [`docs/api/token-exchange.md#audience`](docs/api/token-exchange.md#audience)
+  (T21.3).
+
 ## [1.0.0-beta15] - 2026-09-15
 
 ### Added

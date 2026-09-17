@@ -386,9 +386,13 @@ impl TenantRepository for MockTenantRepo {
 // Mock: RefreshTokenRepository
 // ---------------------------------------------------------------------------
 
+/// `Found` is boxed because `RefreshToken` grew past clippy's
+/// `large_enum_variant` threshold when T21.3 added its `resource` column, and a
+/// 224-byte payload beside a unit variant makes every `Get` that size. A `Box`
+/// here costs one allocation in a mock and nothing anywhere else.
 #[derive(Clone)]
 enum Get {
-    Found(RefreshToken),
+    Found(Box<RefreshToken>),
     NotFound,
 }
 
@@ -431,7 +435,7 @@ impl MockRefreshRepo {
         }
     }
     fn with_get(mut self, rt: RefreshToken) -> Self {
-        self.get = Get::Found(rt);
+        self.get = Get::Found(Box::new(rt));
         self
     }
     /// T-254 — stage a refused replay: the read path finds nothing live, and
@@ -464,6 +468,7 @@ impl RefreshTokenRepository for MockRefreshRepo {
                 revoked: false,
                 created_at: Utc::now(),
                 rotated_at: None,
+                resource: None,
             })
         } else {
             Err(AxiamError::Database("create failed".into()))
@@ -471,7 +476,7 @@ impl RefreshTokenRepository for MockRefreshRepo {
     }
     async fn get_by_token_hash(&self, _t: Uuid, _h: &str) -> AxiamResult<RefreshToken> {
         match &self.get {
-            Get::Found(rt) => Ok(rt.clone()),
+            Get::Found(rt) => Ok((**rt).clone()),
             Get::NotFound => Err(not_found()),
         }
     }
@@ -662,6 +667,7 @@ fn make_client(grants: &[&str], scopes: &[&str]) -> Box<OAuth2Client> {
         browser_sso: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        allowed_resources: Vec::new(),
     })
 }
 
@@ -689,6 +695,7 @@ fn make_auth_code(scopes: &[&str], challenge: Option<&str>) -> AuthorizationCode
         expires_at: Utc::now() + chrono::Duration::minutes(10),
         used: false,
         created_at: Utc::now(),
+        resource: None,
     }
 }
 
@@ -706,6 +713,7 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
         revoked: false,
         created_at: Utc::now(),
         rotated_at: None,
+        resource: None,
     }
 }
 

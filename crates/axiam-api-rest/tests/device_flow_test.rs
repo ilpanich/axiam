@@ -147,6 +147,7 @@ async fn setup() -> Fixture {
             dpop_require_nonce: false,
             authn_request_params: AuthnRequestParamsMode::Ignore,
             browser_sso: false,
+            allowed_resources: Vec::new(),
         })
         .await
         .unwrap();
@@ -239,6 +240,7 @@ async fn seed_grant_with_interval(
         scopes: vec!["openid".into()],
         expires_at: Utc::now() + Duration::seconds(expires_in_secs),
         interval_secs,
+        resource: None,
     })
     .await
     .unwrap();

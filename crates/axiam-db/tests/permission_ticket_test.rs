@@ -470,6 +470,7 @@ mod single_use_serialisation {
                 scopes: vec!["openid".into()],
                 expires_at: Utc::now() + Duration::seconds(600),
                 interval_secs: 5,
+                resource: None,
             })
             .await
             .unwrap();
@@ -685,6 +686,7 @@ mod single_use_serialisation {
                 dpop_jkt: None,
                 requested_userinfo_claims: Vec::new(),
                 expires_at: Utc::now() + Duration::seconds(60),
+                resource: None,
             })
             .await
             .unwrap();
@@ -749,6 +751,7 @@ mod single_use_serialisation {
             dpop_jkt: None,
             requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now() + Duration::seconds(60),
+            resource: None,
         })
         .await
         .unwrap();
@@ -839,6 +842,7 @@ mod single_use_serialisation {
             session_id: None,
             requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now() + Duration::seconds(3600),
+            resource: None,
         })
         .await
         .unwrap();

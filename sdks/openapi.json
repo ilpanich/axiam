@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta15",
-    "x-axiam-spec-digest": "sha256:6eb166644eb26e8a802e574d74518b36d44d92f6db5eb32af70f05e42aad8057"
+    "x-axiam-spec-digest": "sha256:de38f318f85abf70b7f2f2072cde87402727338d8944a53e3dfefba3f8fcb884"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4244,10 +4244,18 @@
                           "require_par",
                           "authn_request_params",
                           "browser_sso",
+                          "allowed_resources",
                           "created_at",
                           "updated_at"
                         ],
                         "properties": {
+                          "allowed_resources": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "T21.3 — echoed in its stored, normalised form, so an operator auditing\nwhich audiences a client may mint tokens for reads the strings the\nserver actually compares rather than the ones they typed."
+                          },
                           "authn_request_params": {
                             "$ref": "#/components/schemas/AuthnRequestParamsMode",
                             "description": "X7.1 — echoed so an operator can audit which clients act on the OIDC\nauthentication-request parameters, from this endpoint rather than from\nthe database."
@@ -10880,6 +10888,18 @@
             }
           },
           {
+            "name": "resource",
+            "in": "path",
+            "description": "T21.3 / RFC 8707 §2 — the target service this authorization is for.\n\nRead only on the inline branch: beside a `request_uri` the pushed copy\nwins, exactly as `state`, `nonce` and `dpop_jkt` do, so a browser\ncannot re-address somebody's pushed request at a resource of its own.\n\nA single value. RFC 8707 §2 permits the parameter to repeat; AXIAM\nissues a token for one target service, so a second value is\n`invalid_target`. That refusal is answered before this struct is built\n— see `duplicate_resource_response` below — because the deserializer\nrejects a repeated key first.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "tenant_id",
             "in": "path",
             "description": "W3 — which tenant this authorization request is for, read **only** when\nthe request carries no authenticated principal (plan §4.0).\n\nEvery session, client and code in AXIAM is tenant-scoped, and until this\nwave the tenant came exclusively from the caller's own access token. An\nanonymous browser has no token, so the login hop cannot even look up the\nclient whose `browser_sso` field decides how to answer it — hence a\nparameter, the same way `/oauth2/end_session` and `/oauth2/token` already\ntake one, and the same way the tenant-scoped discovery document is\nfetched.\n\n**Ignored whenever a principal was resolved from a token**, which is\nevery request that works today: the token's tenant wins, unconditionally,\nexactly as before. A request that omits it and has no principal is\nanswered with today's 401 — so a client registered today, which has never\nsent it, cannot observe that it exists.",
@@ -13085,6 +13105,13 @@
           "scopes"
         ],
         "properties": {
+          "allowed_resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "T21.3 / RFC 8707 — the target services this client may name in a\n`resource` parameter, at `/oauth2/authorize`, `/oauth2/par`,\n`/oauth2/device_authorization` and `/oauth2/token`.\n\nEach entry must be an absolute URI without a fragment (RFC 8707 §2).\nEntries are stored in their RFC 3986 §6.2.2 normalised form, which is\nwhat the read-back shows and what every comparison uses; matching is by\nequivalence and **never by prefix**.\n\nEmpty (the default) means the client may name no resource, so every\ntoken it obtains carries `axiam:user` or `axiam:m2m` exactly as before\nRFC 8707 support existed. This is also the list the RFC 8693 token\nexchange consults for its `audience`/`resource` target."
+          },
           "authn_request_params": {
             "$ref": "#/components/schemas/AuthnRequestParamsMode",
             "description": "X7.1 — whether this client's authorization requests may carry the\nOpenID Connect authentication-request parameters (`prompt`, `max_age`,\n`acr_values`, `claims`, `id_token_hint`, `login_hint`, `display`,\n`ui_locales`, `claims_locales`).\n\n`\"ignore\"` (the default) is what every AXIAM client has always done:\nthey are dropped and reach no decision. `\"honour\"` opts in, and is\n**refused on a `fapi2` client** at both this gate and the authorization\nendpoint — the two are different answers to the same question about\nwhat a request from this client means."
@@ -13149,7 +13176,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Allowed redirect URIs (must be HTTPS, except localhost for dev).\nSEC-089: this list doubles as the token-exchange audience allow-list\n— adding a URI here also authorises it as a token audience for this\nclient, so review additions on exchange-capable clients with that in\nmind (see `docs/api/token-exchange.md#audience`)."
+            "description": "Allowed redirect URIs (must be HTTPS, except localhost for dev).\n\nSEC-089 / T21.3: this list **also** authorises token-exchange\naudiences, and that coupling is now deprecated — `allowed_resources`\nis the field that means \"audiences this client may address\". The\nredirect-URI branch survives one release so that no deployment's\nworking exchange breaks on upgrade, and it logs a deprecation warning\nwhen it is the branch that matched. Register exchange targets in\n`allowed_resources` (see `docs/api/token-exchange.md#audience`)."
           },
           "require_par": {
             "type": "boolean",
@@ -13821,6 +13848,13 @@
         "properties": {
           "client_id": {
             "type": "string"
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "T21.3 / RFC 8707 §2 — the target service this device wants a token for.\n\nNamed here, where the device makes its request, because the poll that\nredeems the grant carries nothing but a `device_code`. Validated\nagainst the client's `allowed_resources` and stored on the grant;\nabsent leaves the flow exactly as it was (I2)."
           },
           "scope": {
             "type": [
@@ -14583,6 +14617,13 @@
         "properties": {
           "active": {
             "type": "boolean"
+          },
+          "aud": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7662 §2.2 `aud` — who the token is for (T21.3).\n\nEchoed from the token, like `permissions` and `cnf`. RFC 7662 lists it\nas an optional top-level member, and it stopped being optional in\npractice the moment RFC 8707 let a token be minted for a resource\nserver that is not AXIAM: such a server's whole audience check is\n\"is this token for me\", and an introspecting one has no other way to\nask.\n\n`None` on a refresh token (an opaque server-stored value with no\naudience) and on a pre-Phase-4 access token that carries no `aud`.\nAbsent rather than `\"\"`, so a resource server cannot read \"no audience\"\nas \"an audience that is not mine\" or the other way round."
           },
           "client_id": {
             "type": [
@@ -15632,10 +15673,18 @@
           "require_par",
           "authn_request_params",
           "browser_sso",
+          "allowed_resources",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "allowed_resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "T21.3 — echoed in its stored, normalised form, so an operator auditing\nwhich audiences a client may mint tokens for reads the strings the\nserver actually compares rather than the ones they typed."
+          },
           "authn_request_params": {
             "$ref": "#/components/schemas/AuthnRequestParamsMode",
             "description": "X7.1 — echoed so an operator can audit which clients act on the OIDC\nauthentication-request parameters, from this endpoint rather than from\nthe database."
@@ -17117,6 +17166,13 @@
               "null"
             ],
             "description": "RFC 9126 §2.1 — the one authorization parameter a client may NOT push.\n\nModelled so that it can be refused. Leaving it off the struct made\n`serde` drop it silently and the endpoint answer `201` to a request the\nspecification says must be rejected:\n\n> The `request_uri` authorization request parameter is one exception,\n> and it MUST NOT be provided.\n\nRefusing matters beyond conformance. A `request_uri` accepted here would\nbe a pushed request that names another pushed request, and the second\nwould inherit the client authentication of the first — a chain whose\nauthenticated origin is a different request from the one finally\npresented at the authorization endpoint."
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "T21.3 / RFC 8707 §2 — the target service this request is for.\n\nPushed alongside the parameters above it, for the reason they are: PAR\nand the query string are two carriers of one request, and for a\n`require_par` client PAR is the only carrier there is. Validated here,\nwhere the client is authenticated, so an `invalid_target` reaches the\nclient as a protocol error rather than surfacing in a browser after a\nsign-in the user should never have been asked for."
           },
           "response_type": {
             "type": "string"
@@ -19103,7 +19159,7 @@
               "string",
               "null"
             ],
-            "description": "Target audience for the issued token. **The allow-list is the\nclient's `redirect_uris`** (SEC-089): a target is accepted if it\nappears in the client's registered redirect URIs, or is one of\nAXIAM's own built-in audiences. There is no separate audience field\nin v1 — adding a redirect URI to a client also authorises it as a\ntoken audience for that client. This allow-list is checked at two\ncall sites in this file (same-domain exchange, and the X4 external\nexchange) — both are tagged `SEC-089` and must be touched together\n(and together with this comment) if a future dedicated\n`allowed_token_targets` field replaces this reuse. Full write-up in\n`docs/api/token-exchange.md#audience`."
+            "description": "Target audience for the issued token. **The allow-list is the client's\n`allowed_resources`** (T21.3 / D2), in union with the `redirect_uris`\nSEC-089 documented — which is deprecated and lasts one release.\n\nA target is accepted if it is one of AXIAM's two built-in audiences, or\nappears in `allowed_resources`, or (deprecated) appears in\n`redirect_uris`. The last branch logs a warning naming the client and\nthe target when it is the one that matched, so an operator has the list\nof registrations to migrate before it goes. Both call sites in this\nfile — the same-domain exchange and the X4 external one — go through\n[`client_may_address`], which is one function precisely so the two\ncannot come apart. Full write-up in\n`docs/api/token-exchange.md#audience`."
           },
           "requested_token_type": {
             "type": [
@@ -19735,6 +19791,16 @@
       "UpdateOAuth2ClientRequest": {
         "type": "object",
         "properties": {
+          "allowed_resources": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "T21.3 — see [`CreateOAuth2ClientRequest::allowed_resources`]. A\nwhole-list replacement; `[]` withdraws every target."
+          },
           "authn_request_params": {
             "oneOf": [
               {

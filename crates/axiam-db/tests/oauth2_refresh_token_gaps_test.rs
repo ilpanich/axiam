@@ -75,6 +75,7 @@ async fn insert_token_expiring(
         session_id: None,
         requested_userinfo_claims: Vec::new(),
         expires_at,
+        resource: None,
     })
     .await
     .unwrap();

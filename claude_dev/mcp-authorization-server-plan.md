@@ -426,6 +426,57 @@ redrafted for D2.
   redirect-URI branch still works and logs the deprecation.
 - `scripts/check-crate-layering.py` clean (I8).
 
+**Amendments, recorded by the executing session (2026-09-17).** Three, none of
+which changed an existing test's expectation.
+
+1. **RFC 3986 §6.2.2 is applied as far as the `url` crate applies it, and no
+   further.** Item 1 says entries are "compared after RFC 3986 syntax-based
+   normalisation". The `url` crate performs §6.2.2.1 (case normalisation of
+   scheme and host), §6.2.2.3 (dot segments) and §6.2.3 (default port), and
+   **does not** perform §6.2.2.2's decoding of a percent-encoded *unreserved*
+   character in the path: `https://h/%6Dcp` and `https://h/mcp` serialise
+   differently. Measured, not assumed — the first draft of
+   `crates/axiam-oauth2/src/resource.rs`'s own test asserted the collapse and
+   failed.
+
+   Hand-rolling the decoder was rejected. `redirect_uri.rs`'s standing argument
+   applies unchanged — a normalising comparison in front of a security check is
+   where the decoder bug becomes an authorisation bug — and the direction of
+   the error settles it: skipping §6.2.2.2 keeps two spellings **distinct**, so
+   a request is refused that would otherwise have been admitted. Under-matching
+   fails closed; over-matching widens an allow-list on the operator's behalf.
+   The module documents exactly what it normalises and what it does not, the
+   test asserts both halves, and `docs/api/resource-indicators.md` tells
+   operators to register the form their resource server publishes.
+
+2. **D1's refusal is structural; only its error code needed code.**
+   `serde_urlencoded` refuses a repeated key for a non-sequence field
+   (`duplicate field \`resource\``), so a second `resource` never reaches a
+   handler on any of the four endpoints — verified against 0.7.1, the version
+   in `Cargo.lock`. Two values are therefore refused by construction, with no
+   path on which they are silently narrowed to one. What the plan's
+   `invalid_target` needed was a `QueryConfig`/`FormConfig` error handler on
+   `/oauth2/authorize` and `/oauth2/token` that answers **only** that case and
+   delegates every other deserialization failure to `err.into()` — byte-identical
+   to today's response, which is what keeps I1 (`/oauth2/par` already had a JSON
+   error handler, so only one member of an existing shape changed). The string
+   match on serde's message is pinned by a test and is not load-bearing: if it
+   ever stops matching, the answer degrades to today's `400`, which is still a
+   refusal.
+
+   One consequence worth stating: at `/oauth2/authorize` a repeated `resource`
+   is answered **directly**, not by redirecting. The extractor fails before the
+   handler runs, so no client has been looked up and no `redirect_uri` has been
+   validated — and RFC 6749 §4.1.2.1 forbids redirecting an error to a URI that
+   has not been. A single unregistered `resource` *is* redirected, as the plan
+   requires, because by then both have been.
+
+3. **No contract version was taken.** §4.0 item 5 requires the `openapi.json`
+   change to be recorded in the contract's version trailer; the task's
+   constraints reserve 1.48 for T9a. The entry is therefore recorded
+   **unnumbered** ("contract version pending, T21.3") with the full fan-out
+   list, for T9a to fold into the version it publishes. Flagged on the PR.
+
 ### T4 — RFC 7591 dynamic client registration
 
 #### T4a — Endpoint, policy, abuse controls — **Opus 5**

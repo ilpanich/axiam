@@ -3534,6 +3534,42 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-09 (contract version pending, T21.3)** — **non-breaking / additive.**
+  RFC 8707 resource indicators reach `openapi.json`. **No version number is
+  taken here on purpose**: the MCP plan reserves 1.48 for T9a (§28), and a task
+  that quietly took it would have collided with the one that was promised it.
+  T9a folds this entry into the version it publishes; until then it is recorded
+  unnumbered so the fan-out is not lost.
+
+  - `openapi.json` regenerates with the RFC 8707 `resource` parameter on
+    `/oauth2/authorize`, `/oauth2/par`, `/oauth2/device_authorization` and
+    `/oauth2/token`; with `allowed_resources` (an array of absolute URIs) on
+    the OAuth2-client create, update and read schemas; and with `aud` on the
+    introspection response (RFC 7662 §2.2). `management-registry.json`
+    regenerates with it — the operation count is unchanged and only the
+    recorded spec digest moves.
+  - **No SDK operation changes signature or behaviour**, and an SDK written
+    against 1.47 is conformant with no edit. The parameter is opt-in per
+    client: a client whose `allowed_resources` is empty — which is every client
+    that exists — may not name a resource, and a request that sends none mints
+    `axiam:user` / `axiam:m2m` exactly as before, so §10.1 row 6's expectation
+    is unchanged.
+  - **One thing an SDK's resource-server middleware must NOT infer.** A token
+    whose `aud` is neither `axiam:user` nor `axiam:m2m` is not malformed: it is
+    a token for somebody else's resource server. AXIAM's own `/oauth2/introspect`
+    now reports such a token as `active` and names its `aud`; AXIAM's own REST
+    and gRPC endpoints still refuse it. An SDK guarding an AXIAM API keeps
+    checking for its configured audience and keeps refusing anything else.
+
+  The server change behind it is AXIAM Phase 21 T21.3
+  (`docs/api/resource-indicators.md`).
+
+  **Re-sync required** in all eleven SDK repositories — `axiam-rust-sdk`,
+  `axiam-typescript-sdk`, `axiam-python-sdk`, `axiam-java-sdk`,
+  `axiam-kotlin-sdk`, `axiam-csharp-sdk`, `axiam-php-sdk`, `axiam-go-sdk`,
+  `axiam-swift-sdk`, `axiam-c-sdk`, `axiam-cplusplus-sdk` — for the vendored
+  `CONTRACT.md` and `openapi.json`. `proto/` is unchanged.
+
 - **2026-09 (contract 1.47)** — **non-breaking / additive.** Two server
   capabilities an SDK may observe and MUST NOT act on unasked:
 

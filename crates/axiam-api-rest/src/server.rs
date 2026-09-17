@@ -621,9 +621,17 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
     // one built before the feed existed, 404 included.
     let mut oauth2_scope = web::scope("/oauth2")
             .wrap(AuthzMiddleware)
-            .route(
-                "/authorize",
-                web::get().to(handlers::oauth2::authorize::<C>),
+            // T21.3 / D1 — a repeated `resource` is answered `invalid_target`
+            // rather than with actix's deserializer prose. Every other query
+            // this extractor cannot read keeps the response it has always
+            // had; see `handlers::oauth2::authorize_query_error`.
+            .service(
+                web::resource("/authorize")
+                    .app_data(
+                        web::QueryConfig::default()
+                            .error_handler(handlers::oauth2::authorize_query_error),
+                    )
+                    .route(web::get().to(handlers::oauth2::authorize::<C>)),
             )
             // D8: `/token`, `/revoke`, `/introspect` are the ONLY three
             // endpoints with a form-encoded OAuth2 `client_id`
@@ -644,6 +652,13 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         rate_limit_cfg.token_per_min,
                         rate_limit_cfg.key,
                     ))
+                    // T21.3 / D1 — as on `/authorize`. Only a repeated
+                    // `resource` is answered differently; every other body
+                    // actix cannot deserialize keeps today's response.
+                    .app_data(
+                        web::FormConfig::default()
+                            .error_handler(handlers::oauth2::token_form_error),
+                    )
                     .route(web::post().to(handlers::oauth2::token::<C>)),
             )
             // SEC-020: revoke and introspect rate-limited to prevent DoS via token flooding

@@ -165,6 +165,20 @@ pub struct AuthorizeRequest {
     /// a later request that holds nothing but an access token, so anything it
     /// must honour has to survive the round trip rather than be re-derived.
     pub requested_userinfo_claims: Vec<String>,
+    /// T21.3 / RFC 8707 §2 — the target service this authorization is for.
+    ///
+    /// Read from the *pushed* copy when there is one, never from the query
+    /// string beside a `request_uri`, for the reason `state`, `nonce` and
+    /// `dpop_jkt` are: a target the client named under client authentication
+    /// must not be substitutable by the browser that merely carries the
+    /// handle.
+    ///
+    /// Validated below against the client's `allowed_resources` and
+    /// snapshotted onto the authorization code, which is what makes the token
+    /// minted at redemption carry it as `aud`. `None` for every request that
+    /// sends no `resource`, which is every request in every deployment today
+    /// — and such a request mints `axiam:user` exactly as it always did (I2).
+    pub resource: Option<String>,
 }
 
 /// What an authorization request earned (W4, plan §4.2).
@@ -505,6 +519,21 @@ where
             }
         }
 
+        // 6d. T21.3 / RFC 8707 §2 — the resource indicator.
+        //
+        // Placed with the other per-request validations and **after** the
+        // client and its `redirect_uri` are known good, so an `invalid_target`
+        // is reported by redirecting to a URI this client registered rather
+        // than rendered at AXIAM's own origin (T-255). Placed **before** the
+        // code exists, so a request naming a resource this client may not
+        // address never mints the credential it was going to be refused for.
+        //
+        // A request that sends no `resource` gets `Ok(None)` and nothing
+        // below it changes: the code stores no resource, the token endpoint
+        // mints `axiam:user`, and the whole of this block is invisible (I2).
+        let resource =
+            crate::resource::resolve_requested(&client.allowed_resources, req.resource.as_deref())?;
+
         // 7. Generate random authorization code
         let raw_code = generate_auth_code();
         let code_hash = hash_code(&raw_code);
@@ -552,6 +581,11 @@ where
                 // as it stood then, not against anything it sends now.
                 dpop_jkt: req.dpop_jkt,
                 requested_userinfo_claims: req.requested_userinfo_claims,
+                // RFC 8707 — snapshotted in its normalised form, for the
+                // reason `code_challenge` is: the client committed to this
+                // target here, and the token request that redeems the code is
+                // answered against the commitment as it stood now.
+                resource,
                 expires_at,
             })
             .await
@@ -733,6 +767,7 @@ mod tests {
                 amr: input.amr,
                 dpop_jkt: input.dpop_jkt,
                 requested_userinfo_claims: input.requested_userinfo_claims,
+                resource: input.resource,
                 expires_at: input.expires_at,
                 used: false,
                 created_at: Utc::now(),
@@ -910,6 +945,7 @@ mod tests {
             browser_sso: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            allowed_resources: Vec::new(),
         }
     }
 
@@ -942,6 +978,7 @@ mod tests {
             login_hop_return_leg: false,
             dpop_jkt: None,
             requested_userinfo_claims: Vec::new(),
+            resource: None,
         }
     }
 

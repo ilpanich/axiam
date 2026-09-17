@@ -136,6 +136,15 @@ Device Authorization Grant. Endpoints, the polling answer table, the
 verification page's API, and the rate-limit reasoning are in
 [`device-flow.md`](device-flow.md).
 
+## OAuth2 resource indicators
+
+A client that needs a token for something other than AXIAM — an MCP server, a
+partner API, one service in a mesh — sends `resource` and gets an access token
+whose `aud` names it. The registration field that bounds what a client may
+name, the parameter on each grant, why a refresh cannot re-address a token, and
+why such a token is refused by AXIAM's own endpoints are in
+[`resource-indicators.md`](resource-indicators.md).
+
 ## OAuth2 token exchange
 
 Services that hold a user's token and need a narrower one to call a second

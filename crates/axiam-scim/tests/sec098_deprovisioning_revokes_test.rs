@@ -211,6 +211,7 @@ async fn give_live_credentials(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: U
             session_id: None,
             requested_userinfo_claims: Vec::new(),
             expires_at: chrono::Utc::now() + chrono::Duration::days(7),
+            resource: None,
         })
         .await
         .expect("create oauth2 refresh token");

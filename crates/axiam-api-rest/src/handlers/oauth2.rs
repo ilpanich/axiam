@@ -115,6 +115,18 @@ pub struct AuthorizeQuery {
     /// `request_uri` the pushed copy wins, like every other parameter, so a
     /// browser cannot re-pin somebody's pushed request to a key of its own.
     pub dpop_jkt: Option<String>,
+    /// T21.3 / RFC 8707 §2 — the target service this authorization is for.
+    ///
+    /// Read only on the inline branch: beside a `request_uri` the pushed copy
+    /// wins, exactly as `state`, `nonce` and `dpop_jkt` do, so a browser
+    /// cannot re-address somebody's pushed request at a resource of its own.
+    ///
+    /// A single value. RFC 8707 §2 permits the parameter to repeat; AXIAM
+    /// issues a token for one target service, so a second value is
+    /// `invalid_target`. That refusal is answered before this struct is built
+    /// — see `duplicate_resource_response` below — because the deserializer
+    /// rejects a repeated key first.
+    pub resource: Option<String>,
     /// W3 — which tenant this authorization request is for, read **only** when
     /// the request carries no authenticated principal (plan §4.0).
     ///
@@ -1216,6 +1228,13 @@ pub async fn authorize<C: Connection + Clone>(
                     .as_deref()
                     .map(axiam_oauth2::claims_request::userinfo_claims)
                     .unwrap_or_default(),
+                // RFC 8707 — from the PUSHED copy, like every other parameter
+                // beside a `request_uri`. The PAR endpoint already validated
+                // it against this client's allow-list under client
+                // authentication; a query-string `resource` here is a browser
+                // proposing an audience, which is the substitution PAR exists
+                // to prevent.
+                resource: params.resource,
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
@@ -1336,6 +1355,12 @@ pub async fn authorize<C: Connection + Clone>(
                     .as_deref()
                     .map(axiam_oauth2::claims_request::userinfo_claims)
                     .unwrap_or_default(),
+                // RFC 8707 §2, from the query string. Validated by the
+                // authorization service against this client's
+                // `allowed_resources`, after the `redirect_uri` is known good,
+                // so an `invalid_target` redirects to a URI the client
+                // registered rather than rendering at AXIAM's own origin.
+                resource: q.resource.clone(),
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
@@ -1667,7 +1692,7 @@ async fn token_inner<C: Connection + Clone>(
         return match state
             .oauth2
             .device_authorization_service
-            .poll(tenant_id, &device_code)
+            .poll(tenant_id, &device_code, form.resource.as_deref())
             .await
         {
             Ok(resp) => HttpResponse::Ok()
@@ -4383,6 +4408,15 @@ pub struct PushedAuthorizationRequest {
     /// both arrive they must agree, and the handler refuses the request when
     /// they do not.
     pub dpop_jkt: Option<String>,
+    /// T21.3 / RFC 8707 §2 — the target service this request is for.
+    ///
+    /// Pushed alongside the parameters above it, for the reason they are: PAR
+    /// and the query string are two carriers of one request, and for a
+    /// `require_par` client PAR is the only carrier there is. Validated here,
+    /// where the client is authenticated, so an `invalid_target` reaches the
+    /// client as a protocol error rather than surfacing in a browser after a
+    /// sign-in the user should never have been asked for.
+    pub resource: Option<String>,
 }
 
 /// `POST /oauth2/par` success body (RFC 9126 §2.2).
@@ -4418,11 +4452,98 @@ pub struct PushedAuthorizationResponse {
 ///
 /// Wired at the route rather than inside the handler because the handler is
 /// never reached — see `crate::server`'s `/par` resource.
+/// The message `serde` produces for a repeated field, for the one field this
+/// server has to answer for specially (T21.3 / D1).
+///
+/// Pinned by [`the_duplicate_field_message_is_what_serde_still_says`] so that
+/// a `serde` upgrade which reworded it fails a test rather than silently
+/// reverting the error code below to `invalid_request`.
+const DUPLICATE_RESOURCE_MESSAGE: &str = "duplicate field `resource`";
+
+/// Answer a repeated `resource` parameter with `invalid_target` (D1), or
+/// `None` when the failure is anything else.
+///
+/// # Why a string comparison, and why that is not load-bearing
+///
+/// RFC 8707 §2 lets `resource` repeat; D1 of the MCP plan accepts one value
+/// and refuses a second, because AXIAM's access token carries a single `aud`
+/// (`AccessTokenClaims::aud`) and there is no honest way to serve two targets
+/// with one string.
+///
+/// The refusal itself is **not** implemented here. `serde_urlencoded`
+/// deserializes a repeated key into a non-sequence field by failing, so a
+/// second `resource` never reaches a handler at all: the request is refused
+/// before any of this runs, and it is refused whatever this function returns.
+/// That is the fail-closed property, and it holds by construction — there is
+/// no path on which two values are silently narrowed to one.
+///
+/// What this function buys is the *code*: a client that repeats the parameter
+/// is told `invalid_target`, which is what RFC 8707 defines and what a client
+/// can act on, instead of a `400` describing a deserializer. If the string
+/// ever stops matching, the answer degrades to that `400` — still a refusal,
+/// merely a less useful one.
+fn duplicate_resource_response(message: &str) -> Option<HttpResponse> {
+    message.contains(DUPLICATE_RESOURCE_MESSAGE).then(|| {
+        build_oauth2_error_response(&OAuth2Error::InvalidTarget(
+            "resource may be given at most once: AXIAM issues a token for one target service              (RFC 8707 section 2). Start a separate authorization for each resource"
+                .into(),
+        ))
+    })
+}
+
+/// `QueryConfig` error handler for `/oauth2/authorize` (T21.3 / D1).
+///
+/// Answers a repeated `resource` with `invalid_target`, and **delegates every
+/// other failure to actix unchanged** — `err.into()` is precisely what actix
+/// does when no handler is registered, so a malformed query that fails for any
+/// other reason gets byte-for-byte the response it got before this existed
+/// (I1).
+///
+/// The refusal is not redirected, and cannot be: this runs before the handler,
+/// so no client has been looked up and no `redirect_uri` has been validated.
+/// RFC 6749 §4.1.2.1 is explicit that an error may only be redirected once the
+/// redirect URI is known good, so a direct response is the only correct answer
+/// here.
+pub fn authorize_query_error(
+    err: actix_web::error::QueryPayloadError,
+    _req: &HttpRequest,
+) -> actix_web::Error {
+    match duplicate_resource_response(&err.to_string()) {
+        Some(body) => actix_web::error::InternalError::from_response(err, body).into(),
+        None => err.into(),
+    }
+}
+
+/// `FormConfig` error handler for `/oauth2/token` (T21.3 / D1).
+///
+/// The token endpoint's twin of [`authorize_query_error`], and it keeps the
+/// same discipline: only a repeated `resource` is answered differently, and
+/// every other body actix could not deserialize produces exactly today's
+/// response (I1). The token endpoint has never had a form error handler, so
+/// this is the first one, and it is deliberately not an opportunity to make
+/// every malformed body render as JSON — that would be a behaviour change for
+/// clients that have been getting the `text/plain` answer for years.
+pub fn token_form_error(
+    err: actix_web::error::UrlencodedError,
+    _req: &HttpRequest,
+) -> actix_web::Error {
+    match duplicate_resource_response(&err.to_string()) {
+        Some(body) => actix_web::error::InternalError::from_response(err, body).into(),
+        None => err.into(),
+    }
+}
+
 pub fn par_form_error(
     err: actix_web::error::UrlencodedError,
     _req: &HttpRequest,
 ) -> actix_web::Error {
-    let body = build_oauth2_error_response(&OAuth2Error::InvalidRequest(err.to_string()));
+    // T21.3 / D1 — a repeated `resource` gets RFC 8707's own code. Everything
+    // else keeps the `invalid_request` this endpoint has answered since B5;
+    // the body was already JSON here, so this arm changes one member of a
+    // response shape that is otherwise untouched.
+    let body = duplicate_resource_response(&err.to_string()).unwrap_or_else(|| {
+        build_oauth2_error_response(&OAuth2Error::InvalidRequest(err.to_string()))
+    });
     actix_web::error::InternalError::from_response(err, body).into()
 }
 
@@ -4614,6 +4735,7 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
             ui_locales: req.ui_locales,
             claims_locales: req.claims_locales,
             dpop_jkt,
+            resource: req.resource,
         })
         .await
     {

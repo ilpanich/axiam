@@ -93,6 +93,10 @@ struct OAuth2ClientRow {
     authn_request_params: Option<String>,
     #[surreal(default)]
     browser_sso: bool,
+    // T21.3. Rows written before schema v63 have none; the empty list is what
+    // such a client may name, which is nothing (see `SCHEMA_V63`).
+    #[surreal(default)]
+    allowed_resources: Vec<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -146,6 +150,10 @@ struct OAuth2ClientRowWithId {
     authn_request_params: Option<String>,
     #[surreal(default)]
     browser_sso: bool,
+    // T21.3. Rows written before schema v63 have none; the empty list is what
+    // such a client may name, which is nothing (see `SCHEMA_V63`).
+    #[surreal(default)]
+    allowed_resources: Vec<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -239,6 +247,7 @@ impl OAuth2ClientRow {
                 self.authn_request_params.as_deref(),
             )?,
             browser_sso: self.browser_sso,
+            allowed_resources: self.allowed_resources,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -281,6 +290,7 @@ impl OAuth2ClientRowWithId {
                 self.authn_request_params.as_deref(),
             )?,
             browser_sso: self.browser_sso,
+            allowed_resources: self.allowed_resources,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -353,7 +363,8 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                  dpop_bound_access_tokens = $dpop_bound_tokens, \
                  dpop_require_nonce = $dpop_require_nonce, \
                  authn_request_params = $authn_request_params, \
-                 browser_sso = $browser_sso",
+                 browser_sso = $browser_sso, \
+                 allowed_resources = $allowed_resources",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
@@ -397,6 +408,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .bind(("dpop_require_nonce", input.dpop_require_nonce))
             .bind(("authn_request_params", input.authn_request_params.as_str()))
             .bind(("browser_sso", input.browser_sso))
+            .bind(("allowed_resources", input.allowed_resources))
             .await
             .map_err(DbError::from)?;
 
@@ -529,6 +541,9 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         if input.authn_request_params.is_some() {
             sets.push("authn_request_params = $authn_request_params");
         }
+        if input.allowed_resources.is_some() {
+            sets.push("allowed_resources = $allowed_resources");
+        }
         if input.browser_sso.is_some() {
             sets.push("browser_sso = $browser_sso");
         }
@@ -612,6 +627,9 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         }
         if let Some(mode) = input.authn_request_params {
             builder = builder.bind(("authn_request_params", mode.as_str()));
+        }
+        if let Some(resources) = input.allowed_resources {
+            builder = builder.bind(("allowed_resources", resources));
         }
         if let Some(enabled) = input.browser_sso {
             builder = builder.bind(("browser_sso", enabled));

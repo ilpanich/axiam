@@ -3593,9 +3593,10 @@ recorded here until one exists.
     one *for §28*, not using the one a language already has.
   - **§28.10** is now maintained here, by the review, and a port records its
     posture in its own README and `CHANGELOG.md` instead. 1.48 told each port to
-    update its own row in a file it holds only as a vendored copy; eight declined
-    and three complied, and the eleven ended up holding five distinct byte-states
-    of one document. Every row is filled in from the merged code.
+    update its own row in a file it holds only as a vendored copy; seven left
+    theirs reading *not yet* while shipping §28, three edited theirs, and the
+    eleven ended up holding five distinct byte-states of one document. Every
+    row is filled in from the merged code.
   - **The Closing Notes' §28 sentence** is corrected: it said no SDK may state
     §28 at 1.48 because none implemented it. All eleven do now.
 
@@ -8186,8 +8187,10 @@ repository rather than this contract's expectation of it.
 Contract 1.48 said "each SDK's own PR updates its row", and that instruction was
 a mistake: the row lives in `CONTRACT.md`, which each SDK holds as a *vendored
 copy* of this file. A port that follows the instruction makes its copy diverge
-from upstream; a port that declines leaves the row unrecorded. Eight of the
-eleven declined and three complied, and the result was five distinct byte-states
+from upstream; a port that declines leaves the row unrecorded. **Seven of the
+eleven left their row reading *not yet* while shipping §28**, three edited
+theirs, and TypeScript's was written here by T9a and never said *not yet* at
+all — so the instruction produced five distinct byte-states
 of one document all calling themselves contract 1.48 ([§28.11](#§2811-cross-sdk-conformance-review-contract-149) row R-1).
 A port now records its posture in its **own** README and `CHANGELOG.md` — files
 it owns — and the review transcribes it here. The rows below were established
@@ -8230,7 +8233,7 @@ recorded** (neither is wrong; the divergence is real and permanent), or
 | # | Divergence | SDKs | §28 clause | Disposition | Where the fix landed |
 |---|---|---|---|---|---|
 | R-1 | "Vendored at contract 1.48" denotes **five different files**. Seven repos re-synced `openapi.json` from the unmerged phase branch and regenerated their §27 surfaces; four declined. None of the eleven matches this repository. TypeScript vendored an older `CONTRACT.md` snapshot than the other ten | all eleven | 1.48 version trailer | **contract fixed** | The 1.49 trailer below states the rule: a vendored artefact is re-synced from a **merged** `main`, never a phase branch. The `openapi.json` half of 1.48 is deferred to **follow-up F-28-01**, named in all eleven `CHANGELOG.md` files |
-| R-2 | §28.10's rows went unrecorded in eight of eleven repos | Rust, Python, Java, Kotlin, Go, Swift, C++ (unrecorded); C#, PHP, C (recorded, by editing a vendored file) | §28.10 | **contract fixed** | §28.10 above: the table is maintained upstream by this review; a port records its posture in its own README and CHANGELOG |
+| R-2 | §28.10's row still read *not yet* in seven repos that had shipped §28 | Rust, Python, Java, Kotlin, Go, Swift, C++ (left as *not yet*); C#, PHP, C (edited theirs, in a vendored file); TypeScript (a forward-looking reference row T9a wrote, never *not yet*) | §28.10 | **contract fixed** | §28.10 above: the table is maintained upstream by this review; a port records its posture in its own README and CHANGELOG |
 | R-3 | The README conformance statement does not follow the code: four repos omit §28 entirely, two name it at a stale contract version | Rust, Java, Go, Swift (omit); Python, C# (stale version) | Closing Notes, "the statement follows the code" | **SDK fixed** | One PR per repository (F-28-02) |
 | R-4 | `Content-Type: application/json` cannot be emitted exactly on Fastify, which appends `; charset=utf-8` and offers no supported suppression | TypeScript (Fastify); PHP and C# assert the media type defensively | §28.3 rule 1 | **contract fixed** | §28.3 rule 1 above: the **media type** binds, a framework-appended `charset` is permitted, and a test compares with parameters dropped |
 | R-5 | The returned value's type name collides with the pinned function name in one language only | Go | §28.7 | **forced by the language, recorded** | §28.7 above reserves `MCPResourceMetadata` for Go and states that no other language needs it. Go's premise that seven others would hit the same wall was checked against all seven and is **not** the case |

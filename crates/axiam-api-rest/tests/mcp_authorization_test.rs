@@ -1479,3 +1479,102 @@ async fn mcp01_a_dead_request_uri_is_reported_to_an_ephemeral_loopback_port() {
         "an unregistered path is answered in place, not redirected: {location:?}"
     );
 }
+
+/// The matcher's `[::1]` arm, reached end to end for the first time.
+///
+/// `redirect_uri.rs` has accepted `[::1]` as a loopback host since T21.2a and
+/// has a unit test for it, but no URI with that host could be *registered*:
+/// `validate_redirect_uris` compared against the bare `::1`, which no URL
+/// parser produces. So the arm was live code nothing could reach. With the
+/// registration side fixed, this drives the whole path — register a port-less
+/// IPv6 loopback URI through `/oauth2/register`, then present an ephemeral
+/// port against it at the authorization endpoint and get a code back.
+#[actix_rt::test]
+async fn an_ipv6_loopback_registration_takes_the_port_allowance() {
+    let mode = Mode::Query;
+    let f = setup(mode).await;
+    let stub = mcp_stub(&mode.issuer(f.a.id)).await;
+    set_org_settings(&f, dcr_policy(&stub.resource)).await;
+    let app = test_app!(f, mode);
+
+    let (status, registered) = post_json(
+        &app,
+        &mode.endpoint(f.a.id, "register", ""),
+        json!({
+            "client_name": "ipv6 desktop client",
+            "redirect_uris": ["http://[::1]/callback"],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "scope": "openid",
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 201,
+        "an IPv6 loopback redirect URI registers (T21.8): {registered}"
+    );
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+
+    let callback = "http://[::1]:49152/callback";
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256",
+            enc(&client_id),
+            enc(callback),
+            pkce_challenge(VERIFIER)
+        ),
+    );
+
+    // D4 first — an externally registered client asks the end user before it
+    // gets a code, so the matcher's answer is only visible after consent.
+    let (status, location, body) = get_as_user(&app, &uri, &f.a.token).await;
+    assert_eq!(status, 302, "{location:?} {body}");
+    assert!(
+        location.is_some_and(|l| l.contains("consent")),
+        "D4: the consent hop comes first"
+    );
+    let (status, body) = post_as_user(
+        &app,
+        "/api/v1/account/consents/oidc-scopes",
+        &f.a.token,
+        json!({ "client_id": client_id, "scopes": ["openid"] }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, location, body) = get_as_user(&app, &uri, &f.a.token).await;
+    assert_eq!(status, 302, "{location:?} {body}");
+    let location = location.expect("a 302 carries a Location");
+    assert!(
+        location.starts_with(callback) && location.contains("code="),
+        "the ephemeral IPv6 port takes the RFC 8252 §7.3 allowance: {location}"
+    );
+
+    // The allowance is still a port and nothing else: the three loopback hosts
+    // are not interchangeable, so the IPv4 literal does not match this
+    // registration.
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256",
+            enc(&client_id),
+            enc("http://127.0.0.1:49152/callback"),
+            pkce_challenge(VERIFIER)
+        ),
+    );
+    let (status, location, _) = get_as_user(&app, &uri, &f.a.token).await;
+    if status == 302 {
+        let location = location.unwrap_or_default();
+        assert!(
+            !location.starts_with("http://127.0.0.1"),
+            "[::1] and 127.0.0.1 are different hosts and the IPv4 literal must never \
+             receive a code against an IPv6 registration: {location}"
+        );
+    }
+}

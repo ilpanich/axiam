@@ -278,6 +278,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`http://[::1]/…` can be registered as a redirect URI (T21.8).** The
+  structural validator both registration endpoints share compared the parsed
+  host against `::1`, while a URL parser returns an IPv6 literal *with* its
+  brackets — so the IPv6 loopback arm was unreachable and the refusal named
+  `::1` as allowed in the same message that refused it. Every other loopback
+  comparison in AXIAM spells it `[::1]`: the redirect matcher, the dynamic
+  registration host allow-list and the CIMD document validator, all tested on
+  it. RFC 8252 §7.3 lists the IPv6 loopback beside `127.0.0.1`. This is the one
+  change in this group that makes a request that was refused succeed; the
+  widening is one host, reachable only from the machine the user is sitting at,
+  and a routable IPv6 literal over `http` is still refused.
+
 - **An authorization error is redirected to a desktop client's ephemeral
   loopback port (MCP-01, T21.8, #472).** Six refusal paths in the authorization
   and PAR handlers compared the presented `redirect_uri` with `==` while the

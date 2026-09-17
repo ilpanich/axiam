@@ -1044,24 +1044,20 @@ async fn the_loopback_hosts_need_no_glob_entry() {
     set_org_settings(&f, anonymous_policy()).await.unwrap();
     let app = test_app!(f);
 
-    // `http://[::1]/…` is deliberately absent, and this is a **finding rather
-    // than an omission**. The T21.2 matcher accepts three loopback hosts —
-    // `127.0.0.1`, `[::1]` and `localhost` — but `validate_redirect_uris`
-    // (`handlers/oauth2_clients.rs`), which both the admin API and this
-    // endpoint use, compares the host against the string `"::1"` while
-    // `url::Url::host_str` returns an IPv6 literal **with** its brackets. So
-    // no `[::1]` redirect URI can be registered through either endpoint today,
-    // and the matcher's IPv6 arm is unreachable.
-    //
-    // It is not fixed here. Fixing it would make a registration that is
-    // refused today succeed, which is precisely what I1 forbids ("no existing
-    // request may ... succeed where it was refused"), and it is an admin-API
-    // behaviour change that has nothing to do with dynamic registration. It is
-    // reported on the T21.4 PR instead. Nothing in MCP depends on it: Claude
-    // Code registers `localhost` and VS Code registers `127.0.0.1`.
+    // All three, including `http://[::1]/…`, which T21.4 recorded here as a
+    // finding rather than an omission and left refused: `validate_redirect_uris`
+    // compared the host against the bare `"::1"` while `url::Url::host_str`
+    // returns an IPv6 literal **with** its brackets, so no `[::1]` URI could be
+    // registered through either endpoint and the matcher's IPv6 arm was
+    // unreachable. Closed as a bug fix, in its own commit, because a validator
+    // that refuses what its own error message says it allows was never a
+    // decision — see the T21.8 fix plan §6 for why that is a bug and not an I1
+    // breach. Nothing in MCP depended on the gap: Claude Code registers
+    // `localhost` and VS Code registers `127.0.0.1`.
     for uri in [
         "http://127.0.0.1:6274/oauth/callback",
         "http://localhost:33418/callback",
+        "http://[::1]:33418/callback",
     ] {
         let (status, body) = register!(
             app,

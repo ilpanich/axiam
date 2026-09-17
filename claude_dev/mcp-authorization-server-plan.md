@@ -87,7 +87,26 @@ it pushes:
   take a different path, be refused where it succeeded, or succeed where it
   was refused.
 
-  **The condition is not yet discharged, and one module carries the risk.**
+  **The condition was discharged by T21.8 on 2026-09-17, on source-level
+  evidence.** The paragraph below states the risk as it stood before that; it
+  is kept rather than rewritten so the reasoning that led to the check stays
+  legible. The answer is in
+  [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) §13:
+  the suite could not be *run* here (the daemon starts, but the egress policy
+  refuses the registry's blob CDN), so the module's source was read at the
+  pinned `release-v5.2.4` instead — which turns out to be the stronger answer.
+  All three FAPI 2.0 plans are `plain_fapi`, so the check is
+  `CheckDiscEndpointTokenEndpointAuthMethodsSupportedContainsPrivateKeyOrTlsClient`,
+  which supplies an *accepted* list of `private_key_jwt` and `tls_client_auth`
+  and whose evaluator counts how many accepted values the server advertises,
+  failing only below a minimum of one. It never iterates the server's array
+  looking for values it does not accept, so an extra entry is not tolerated but
+  **structurally invisible**. AXIAM advertises both required methods, so the
+  count is 2 and `none` cannot move it. The RFC 8414 metadata schema puts no
+  enum on the field, and `CheckForUnexpectedParametersInServerMetadata` is a
+  `WARNING` about member names. No fallback is needed and I7 is not spent.
+
+  **The risk as it stood, before the above (retained):**
   All three FAPI 2.0 plans run
   `fapi2-security-profile-final-discovery-end-point-verification`
   (`docs/conformance/2026-09-15-fapi2-*.md`). FAPI 2.0 §5.3.1.1 admits only

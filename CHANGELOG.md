@@ -250,6 +250,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AXIAM__AUTH__TENANT_ISSUER_PATHS` without a root issuer is refused at boot
   rather than producing issuers no client can resolve (T21.6).
 
+### Security
+
+- **The `axiam` URI scheme is reserved and can no longer be named as a
+  `resource` (MCP-02, T21.8).** AXIAM's own token audiences are spelled
+  `axiam:user` and `axiam:m2m`, which are well-formed absolute URIs and were
+  therefore well-formed RFC 8707 resource indicators. Registering one in
+  `allowed_resources` and naming it in `resource` let a grant mint a token
+  stamped with AXIAM's own audience — most sharply on `client_credentials`,
+  which mints `axiam:m2m` when no resource is named and would have minted
+  `axiam:user` when that one was, reaching past the audience boundary
+  invariant I3 is built out of instead of being confined by it. Registration
+  and every grant now answer `invalid_target` for any `axiam:` value. No
+  deployment can have relied on this: `allowed_resources` is new in this
+  release, and the refusal is fail-closed.
+
 ## [1.0.0-beta15] - 2026-09-15
 
 ### Added

@@ -3500,7 +3500,12 @@ repository, never this contract's expectation of it.
 
 > "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §17, §19, §27 and §28."
 
-No SDK may state it at contract 1.48, because none implements it yet ([§28.10](#§2810-per-sdk-posture)).
+That sentence read "No SDK may state it at contract 1.48, because none implements it yet"
+when §28 was published ahead of every port. **All eleven now implement it**
+([§28.10](#§2810-per-sdk-posture)), so all eleven state it, and a repository whose statement
+still omits §28 or names a contract version older than the `CONTRACT.md` it vendors is
+understating its own code — which contract 1.49 found in six of the eleven and
+[§28.11](#§2811-cross-sdk-conformance-review-contract-149) row R-3 tracks to a fix.
 The statement follows the code, which is the same rule §12.6 and §27.10 record and the same
 one that kept three SDKs from claiming §12 while it was deferred.
 
@@ -3541,6 +3546,76 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
+
+- **2026-09 (§28 cross-SDK conformance review, contract 1.49)** —
+  **non-breaking / clarifying.** No new operation, no signature change, no
+  vocabulary change. Contract 1.48's §28 was implemented independently in
+  eleven SDKs; the cross-SDK review
+  ([`claude_dev/sdk-mcp-helpers-conformance-review.md`](../claude_dev/sdk-mcp-helpers-conformance-review.md),
+  T21.9 T9d) read all eleven and found six places where §28's text was wrong,
+  silent, or unsatisfiable on a framework it names. This revision makes the
+  contract describe the behaviour the eleven already share, and records every
+  divergence in a new [§28.11](#§2811-cross-sdk-conformance-review-contract-149)
+  with no open row. It takes its own version for the reason the §12 review took
+  1.5: a clarification the eleven must re-sync needs a number to re-sync
+  against. An SDK written against 1.48 is conformant against 1.49 unedited.
+
+  - **§28.3 rule 1** no longer pins the `Content-Type` header verbatim. Its
+    **media type** binds; a `charset` parameter a framework appends is
+    permitted, and a test compares with parameters dropped. Fastify — one of the
+    two surfaces §28.7 names for TypeScript — appends `; charset=utf-8` and
+    offers no supported way to suppress it, so 1.48's rule could be satisfied
+    there only by abandoning the framework's supported API.
+  - **§28.4 and §28.9 test 2** state that how `error` is typed is the SDK's own
+    choice. Seven ports made a fourth value unrepresentable and four validate a
+    string; both secure the property the table states. Where the value cannot be
+    written, the `invalid_grant` vector is discharged by a comment at the test
+    site naming it, not by an assertion — and never by dropping it in silence.
+  - **§28.5 rule 4** gains the resolved-identity clause. A §11 helper that is
+    handed the identity the §10 guard already resolved, rather than the request,
+    cannot tell "no credential" from "credential rejected"; its missing-identity
+    401 carries no challenge, is reachable only where the §10 guard did not run,
+    and is recorded in that SDK's §28.10 row. A §11 helper that *can* see the
+    request MUST still pick the vector from it.
+  - **§28.7's C row** gains `axiam_protected_resource_metadata_url`. §28.1
+    already required an SDK to expose `metadata_url`; the row named only `_json`
+    and `_path`, and a reader following the row would have made C's integrator
+    concatenate the URL by hand.
+  - **§28.7** reserves `MCPResourceMetadata` as Go's returned type and states
+    that **no other language needs the accommodation**. Go's single package-scope
+    namespace cannot hold the pinned function name and the type name at once;
+    the seven languages Go's port expected to hit the same wall were each checked
+    and none does.
+  - **§28.7** also states that "raises the SDK's `ValidationError`" is a
+    per-language mapping onto whatever that SDK already raises for a local,
+    pre-request refusal — C returns `NULL` with `axiam_error_t`, C++ throws
+    `std::invalid_argument` — and that §28.6's "no new type" forbids inventing
+    one *for §28*, not using the one a language already has.
+  - **§28.10** is now maintained here, by the review, and a port records its
+    posture in its own README and `CHANGELOG.md` instead. 1.48 told each port to
+    update its own row in a file it holds only as a vendored copy; seven left
+    theirs reading *not yet* while shipping §28, three edited theirs, and the
+    eleven ended up holding five distinct byte-states of one document. Every
+    row is filled in from the merged code.
+  - **The Closing Notes' §28 sentence** is corrected: it said no SDK may state
+    §28 at 1.48 because none implemented it. All eleven do now.
+
+  **Vendoring rule, stated because 1.48 did not state it.** A vendored artefact
+  is re-synced from a **merged** `ilpanich/axiam` `main`, never from a phase
+  branch. A branch moves; seven repositories vendored `openapi.json` from one
+  and were stale against that same branch within hours, while four declined and
+  were stale against the other seven. The `openapi.json` half of 1.48's re-sync
+  is therefore deferred to one follow-up, **F-28-01**, recorded in all eleven
+  repositories' `CHANGELOG.md`, to be run once Phase 21 lands on `main`.
+
+  **Re-sync required for 1.49** in all eleven SDK repositories —
+  `axiam-rust-sdk`, `axiam-typescript-sdk`, `axiam-python-sdk`,
+  `axiam-java-sdk`, `axiam-kotlin-sdk`, `axiam-csharp-sdk`, `axiam-php-sdk`,
+  `axiam-go-sdk`, `axiam-swift-sdk`, `axiam-c-sdk`, `axiam-cplusplus-sdk` — for
+  the vendored `CONTRACT.md`, **as part of F-28-01 and not before**, so that the
+  eleven return to one file in one step rather than eleven. `openapi.json`,
+  `proto/` and `management-registry.json` are unchanged by this revision: §28
+  describes SDK behaviour and moves no server API surface.
 
 - **2026-09 (contract version pending, T21.5)** — **non-breaking / additive.**
   Client ID metadata documents reach `openapi.json`. **No version number is
@@ -7679,8 +7754,17 @@ is derived from its own resource.
 
 The response, on `GET`:
 
-1. **Status `200`, `Content-Type: application/json`**, body exactly the document
-   of §28.2.
+1. **Status `200`**, body exactly the document of §28.2, under a `Content-Type`
+   whose **media type** is `application/json`. A `charset` parameter a framework
+   appends is permitted, and a test MUST compare the media type with parameters
+   dropped rather than the header verbatim. Contract 1.48 pinned the header to
+   the bare string; Fastify — one of the two surfaces §28.7 names for TypeScript
+   — appends `; charset=utf-8` to any `*json*` content type that carries no
+   charset and offers no supported way to suppress it short of writing to the
+   raw socket and losing every `onSend` hook. A rule an SDK can satisfy only by
+   abandoning its framework's supported API is a rule about the framework, not
+   about the document. An SDK MUST NOT emit a *different* media type, and MUST
+   NOT add any parameter of its own.
 2. **Served without authentication.** The route MUST be reachable with no
    credential of any kind. Where the framework applies the §10 guard globally,
    the SDK MUST exempt this path explicitly, and §28.9 test 3 proves it. A
@@ -7743,6 +7827,16 @@ A refusal is the SDK's `ValidationError` (§2). It is raised from
 `bearer_challenge` itself — a challenge is built from the code's own constants
 and a route's own configuration, so an invalid one is a programming error and
 not a runtime condition to degrade around.
+
+**How `error` is typed is the SDK's own choice, and where the language can make
+a fourth value unrepresentable it SHOULD.** The property that binds is the one
+the table states — a challenge never carries an `error` outside RFC 6750 §3.1's
+three codes — not the mechanism that secures it. A closed type (a Rust or Kotlin
+`enum`, a C++ `enum class`, a Swift `enum`, a TypeScript string-literal union, a
+Python `Literal`) secures it at compile time; a validated string (Go, C#, PHP,
+C) secures it at run time. Both are conformant, and the reference implementation
+is itself of the first kind. §28.9 test 2 says what this costs its `invalid_grant`
+vector.
 
 **Status codes.** RFC 6750 §3.1 pins each code to a status, and an SDK MUST
 honour the pairing wherever it emits the challenge itself:
@@ -7833,6 +7927,21 @@ One option on the §10 middleware/route-guard, off by default.
    §10 JSON body (`{ "error": …, "message": … }`) is unchanged; a header is
    added. `error="invalid_token"` when a credential was presented, and no
    `error` when none was.
+
+   **Choosing between the two vectors needs the request, and one shape of §11
+   helper does not have it.** In several SDKs a §11 helper is not a
+   self-contained middleware but a function the application calls with the
+   identity the §10 guard already resolved — `enforceAuth(identity)`,
+   `require_auth(std::optional<AxiamUser>)`. By the time it runs, whether a raw
+   credential was ever presented is gone, and recovering it would mean either
+   widening a shipped signature or re-extracting the credential the §11 helpers
+   are forbidden to touch. Such a helper's missing-identity 401 therefore
+   carries **no** challenge, and that is conformant: it is reachable only when
+   the §10 guard did not run on that route, and where the §10 guard did run its
+   own 401 already carried the correct vector. An SDK in this position records
+   it in its §28.10 row, naming the helper. An SDK whose §11 helper *can* see
+   the request — because it is itself middleware, or is handed one — MUST pick
+   the vector from it and MUST NOT default to one.
 5. **One kind of 403 carries the challenge, and only one.** When a §11
    `require_access(action, resource, scope)` was given a `scope` argument, and
    the decision came back `allowed = false` with `reason_code` **`no_grant`**
@@ -7898,7 +8007,7 @@ Each is a section §28 *consumes*:
 
 | Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `protected_resource_metadata` | `protected_resource_metadata` | `protectedResourceMetadata` | `protected_resource_metadata` | `protectedResourceMetadata` | `protectedResourceMetadata` | `ProtectedResourceMetadata` | `protectedResourceMetadata` | `ProtectedResourceMetadata` | `protectedResourceMetadata` | `axiam_protected_resource_metadata_json` (+ `_path`) | `protected_resource_metadata` |
+| `protected_resource_metadata` | `protected_resource_metadata` | `protectedResourceMetadata` | `protected_resource_metadata` | `protectedResourceMetadata` | `protectedResourceMetadata` | `ProtectedResourceMetadata` | `protectedResourceMetadata` | `ProtectedResourceMetadata` | `protectedResourceMetadata` | `axiam_protected_resource_metadata_json` (+ `_path`, `_url`) | `protected_resource_metadata` |
 | `serve_protected_resource_metadata` | `serve_protected_resource_metadata` | `serveProtectedResourceMetadata` | `serve_protected_resource_metadata` | `serveProtectedResourceMetadata` | `serveProtectedResourceMetadata` | `ServeProtectedResourceMetadata` | `serveProtectedResourceMetadata` | `ServeProtectedResourceMetadata` | `serveProtectedResourceMetadata` | — (§28.3) | — (§28.3) |
 | `bearer_challenge` | `bearer_challenge` | `bearerChallenge` | `bearer_challenge` | `bearerChallenge` | `bearerChallenge` | `BearerChallenge` | `bearerChallenge` | `BearerChallenge` | `bearerChallenge` | `axiam_bearer_challenge` | `bearer_challenge` |
 | option `resource_metadata_url` | `resource_metadata_url` | `resourceMetadataUrl` | `resource_metadata_url` | `resourceMetadataUrl` | `resourceMetadataUrl` | `ResourceMetadataUrl` | `resourceMetadataUrl` | `ResourceMetadataURL` | `resourceMetadataUrl` | `axiam_client_set_resource_metadata_url` | `resource_metadata_url` |
@@ -7913,13 +8022,41 @@ convention is what §1's "each language uses its own idiomatic naming
 convention" means, and [§10.4.1](#§1041-per-sdk-posture) already spells Go's
 row `JWKSVerifier.WithRevocationFeed` for the same reason.
 
+**Go's returned type is `MCPResourceMetadata`, and only Go's is renamed.** Go
+has one identifier namespace at package scope, and this table pins the *function*
+there to `ProtectedResourceMetadata`; the value it returns cannot also be called
+that. `MCPResourceMetadata` (and `MCPResourceMetadataDocument`) is the reserved
+name, and an SDK MUST NOT invent a third spelling. **No other language needs the
+accommodation**, and a port MUST NOT take it pre-emptively: in Rust and Python
+the function is `snake_case` where the type is `PascalCase`; in Java, Kotlin, C#,
+PHP and Swift the function is a member of a class, object or client rather than a
+free name, so the type name is never in contention. The row a language gets is
+the row it has; a collision it does not have is not a licence to rename.
+
 **C and C++ have no `serve_` function** (§28.3). C has no value type to hang
 the document on either, so its row is the §27.3 flat-symbol accommodation
-again: `axiam_protected_resource_metadata_json(...)` and
-`axiam_protected_resource_metadata_path(...)` each return an owned string,
+again: `axiam_protected_resource_metadata_json(...)`,
+`axiam_protected_resource_metadata_path(...)` and
+`axiam_protected_resource_metadata_url(...)` each return an owned string,
 freed with the SDK's existing string-free function, and each applies the whole
 of §28.2's validation and returns the SDK's validation error rather than a
-string when it fails. C++ has a value type and uses it —
+string when it fails. **All three, not two**: §28.1 requires an SDK to expose
+`metadata_path` *and* `metadata_url`, and a row naming only the first two would
+have C's integrator concatenate the URL by hand — which is precisely the second
+place §28.1 says the two must not be allowed to disagree. (Contract 1.48 named
+only `_json` and `_path`; the C port shipped `_url` anyway and said so, and this
+revision makes the table say what §28.1 already required.)
+
+**"Raises the SDK's `ValidationError`" (§28.2, §28.4) is a per-language mapping,
+not a type name.** §28.6's "no new type" forbids inventing an error type *for
+§28*; it does not require a language to acquire an exception mechanism it does
+not have, nor to reach for a type that means something else in that SDK. Each
+port uses whatever it already raises for a local, pre-request configuration
+refusal — C returns `NULL` with its `axiam_error_t` out-parameter, C++ throws
+`std::invalid_argument` (its own `ValidationError` denotes a *server's* 400 on
+the management surface), and the other nine raise the type §2 names. What §28
+forbids is a *new* type and a silently repaired value, and all eleven honour
+both. C++ has a value type and uses it —
 `protected_resource_metadata()` returns it, with the document, `metadata_path`
 and `metadata_url` as members, exactly as every other language. Both READMEs
 carry the adapter.
@@ -7990,6 +8127,18 @@ expected_audience        = "https://mcp.example.com/mcp"  # equal to `resource`
    empty; a `resource_metadata` containing a space. Assert **no escaping
    occurred** — that the refused values produce an exception rather than a
    challenge containing `\"`.
+
+   **The `invalid_grant` vector, where the language will not let it be
+   written.** §28.4 lets an SDK type `error` as a closed set. Where a fourth
+   value is then unrepresentable without an unsafe cast — Rust, Kotlin, C++,
+   Swift — the vector is discharged **structurally**, and the required artefact
+   is a comment at the test site naming `invalid_grant` and saying the value
+   cannot be constructed, not an assertion. Where the language offers a checked
+   escape hatch that stays inside safe code — TypeScript's `as never`, a Python
+   `Literal` the runtime does not enforce — the test uses it and asserts the
+   refusal, which is what the reference implementation does. What is not
+   conformant is dropping the vector in silence: a reader comparing eleven
+   suites must see either the assertion or the reason there is none.
 3. **401 with the challenge.** Against a route behind the guard, with
    `resource_metadata_url` set: a request with **no** `Authorization` header
    returns `401` whose `WWW-Authenticate` is vector 1 exactly — no `error`
@@ -8032,18 +8181,76 @@ that is absent.
 
 As §10.4.1, §21.9, §21.10 and §27.10: **an unrecorded row is not a supported
 answer**, `declines` with a reason is, and the row follows the code in that
-repository rather than this contract's expectation of it. Every row below reads
-*not yet* at contract 1.48 because §28 is published here before any port exists;
-each SDK's own PR updates its row, and the cross-SDK review reconciles them.
+repository rather than this contract's expectation of it.
+
+**This table is maintained here, by the cross-SDK review, and nowhere else.**
+Contract 1.48 said "each SDK's own PR updates its row", and that instruction was
+a mistake: the row lives in `CONTRACT.md`, which each SDK holds as a *vendored
+copy* of this file. A port that follows the instruction makes its copy diverge
+from upstream; a port that declines leaves the row unrecorded. **Seven of the
+eleven left their row reading *not yet* while shipping §28**, three edited
+theirs, and TypeScript's was written here by T9a and never said *not yet* at
+all — so the instruction produced five distinct byte-states
+of one document all calling themselves contract 1.48 ([§28.11](#§2811-cross-sdk-conformance-review-contract-149) row R-1).
+A port now records its posture in its **own** README and `CHANGELOG.md` — files
+it owns — and the review transcribes it here. The rows below were established
+that way, by reading the eleven merged ports rather than their reports of
+themselves.
 
 | SDK | §28 status |
 |-----|-----------|
-| TypeScript | reference implementation — lands first, and is what the ten ports are read against |
-| Rust, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++ | not yet |
+| TypeScript | **implemented** — the reference implementation (`src/middleware/mcpCore.ts`), Express and Fastify. The ten ports are read against it |
+| Rust | **implemented** — Actix-Web. `resource_metadata_url` is centralised on `JwksVerifier`, so the §28.5 rule 2 pairing is checked in exactly one place; the document route composes no extractor, so §28.3 rule 2's exemption is structural rather than coded |
+| Python | **implemented** — FastAPI (dependency + router) and Django (middleware + view). Django's `urlpatterns` stands in for the `app` argument |
+| Java | **implemented** — Spring Boot. The two 401 branches are split across `AxiamAuthenticationFilter` (a rejected credential) and `AxiamMcpAuthenticationEntryPoint` (no credential), which Spring's filter/exception-handling split forces; both are built from the same verifier |
+| Kotlin | **implemented** — Ktor plugin + route, REST only. Spring Boot reuses the Java SDK's collaborators, as this SDK's README already directs for §10/§11 |
+| C# | **implemented** — ASP.NET Core middleware + minimal-API endpoint. `declines` §28.5 rule 8's optional gRPC form: its `Grpc`/`Amqp` namespaces are client transports *to* AXIAM, so there is no inbound guard to extend |
+| PHP | **implemented** — Laravel (middleware + `Route::` macro) and Symfony (subscriber + controller). `declines` rule 8's gRPC form for the same reason. Its standalone `#[RequireAuth]` 401 carries no challenge, per §28.5 rule 4's resolved-identity clause |
+| Go | **implemented** — `net/http`. Its returned type is `MCPResourceMetadata` (§28.7); rule 2 is enforced on `Middleware`, the one guard that owns an audience; `declines` rule 8's gRPC form |
+| Swift | **implemented** — REST only, guard-side; no first-party Vapor adapter, matching this SDK's existing framework-agnostic §10/§11 shape, with the wiring documented |
+| C | **implemented** — REST only. No `serve_` function (§28.3); flat symbols per §28.7, including `axiam_protected_resource_metadata_url`; guard integration via the additive `axiam_require_auth_mcp`/`axiam_require_access_mcp`, on `axiam_require_access_uma`'s precedent |
+| C++ | **implemented** — REST only. No `serve_` function; `AxiamGuard` carries the challenge, and bare `require_auth()` does not, per §28.5 rule 4's resolved-identity clause |
 
 The reference implementation exists for the reason the §27 one did: to prove the
 section is buildable as written before ten more repositories commit to it, and
 to give them a test suite to port rather than a specification to interpret.
+
+### §28.11 Cross-SDK conformance review (contract 1.49)
+
+The T9d review of the eleven merged ports, in the format §12's review
+(`claude_dev/sdk-oidc-sso-conformance-review.md`) established and §12.6 and
+§27.10 carry forward. The full evidence — per-rule matrix, commits read, test
+runs — is
+[`claude_dev/sdk-mcp-helpers-conformance-review.md`](../claude_dev/sdk-mcp-helpers-conformance-review.md);
+this table is the record that must have no open row.
+
+**One row per divergence, not per SDK.** Disposition is one of **contract
+fixed** (§28's text was wrong or silent and this revision changes it), **SDK
+fixed** (the code was wrong and a PR corrects it), **forced by the language,
+recorded** (neither is wrong; the divergence is real and permanent), or
+**open** (which this table may not carry).
+
+| # | Divergence | SDKs | §28 clause | Disposition | Where the fix landed |
+|---|---|---|---|---|---|
+| R-1 | "Vendored at contract 1.48" denotes **five different files**. Seven repos re-synced `openapi.json` from the unmerged phase branch and regenerated their §27 surfaces; four declined. None of the eleven matches this repository. TypeScript vendored an older `CONTRACT.md` snapshot than the other ten | all eleven | 1.48 version trailer | **contract fixed** | The 1.49 trailer below states the rule: a vendored artefact is re-synced from a **merged** `main`, never a phase branch. The `openapi.json` half of 1.48 is deferred to **follow-up F-28-01**, named in all eleven `CHANGELOG.md` files |
+| R-2 | §28.10's row still read *not yet* in seven repos that had shipped §28 | Rust, Python, Java, Kotlin, Go, Swift, C++ (left as *not yet*); C#, PHP, C (edited theirs, in a vendored file); TypeScript (a forward-looking reference row T9a wrote, never *not yet*) | §28.10 | **contract fixed** | §28.10 above: the table is maintained upstream by this review; a port records its posture in its own README and CHANGELOG |
+| R-3 | The README conformance statement does not follow the code: four repos omit §28 entirely, two name it at a stale contract version | Rust, Java, Go, Swift (omit); Python, C# (stale version) | Closing Notes, "the statement follows the code" | **SDK fixed** | One PR per repository (F-28-02) |
+| R-4 | `Content-Type: application/json` cannot be emitted exactly on Fastify, which appends `; charset=utf-8` and offers no supported suppression | TypeScript (Fastify); PHP and C# assert the media type defensively | §28.3 rule 1 | **contract fixed** | §28.3 rule 1 above: the **media type** binds, a framework-appended `charset` is permitted, and a test compares with parameters dropped |
+| R-5 | The returned value's type name collides with the pinned function name in one language only | Go | §28.7 | **forced by the language, recorded** | §28.7 above reserves `MCPResourceMetadata` for Go and states that no other language needs it. Go's premise that seven others would hit the same wall was checked against all seven and is **not** the case |
+| R-6 | §28.7's C row named `_json` and `_path` but no `metadata_url` accessor, although §28.1 requires both | C (C++ correctly unaffected) | §28.7 vs §28.1 | **contract fixed** | §28.7 above. The C port had already shipped `axiam_protected_resource_metadata_url` and declared the gap |
+| R-7 | `error` is a closed type in seven SDKs and a validated string in four, so §28.9 test 2's `invalid_grant` vector is unreachable in the first group | closed: TypeScript, Rust, Python, Java, Kotlin, Swift, C++ · string: C#, PHP, Go, C | §28.4, §28.9 test 2 | **contract fixed** | §28.4 and §28.9 test 2 above: the typing is the SDK's choice, the property is what binds, and the vector is discharged structurally with a comment where it cannot be written |
+| R-8 | A §11 helper that receives an already-resolved identity cannot tell vector 1 from vector 2, so its missing-identity 401 carries no challenge | PHP (`enforceAuth`), C++ (bare `require_auth()`) | §28.5 rule 4 | **contract fixed** | §28.5 rule 4 above. The 401 is reachable only where the §10 guard did not run, and where it did its own 401 already carried the vector |
+| R-9 | `RequireRole`'s missing-identity 401 carries no challenge, although its handler holds the request and its sibling `RequireAuth` does carry one | Go | §28.5 rule 4 | **SDK fixed** | `RequireRole`'s variadic is spent on `roles`, but an additive options-carrying companion constructor was available and is what the fix adds (F-28-03) |
+| R-10 | §28.5 rule 2's "refuse at construction" is honoured by six different mechanisms | thrown `ValidationError` (TypeScript, Python, Java, Kotlin, PHP, C#) · `Result<Self, AxiamError>` (Rust) · `panic` (Go) · throwing initializer (Swift) · `std::invalid_argument` (C++) · `NULL` + `axiam_error_t` (C) | §28.5 rule 2, §28.6 | **forced by the language, recorded** | §28.7 above: "raises the SDK's `ValidationError`" is a per-language mapping. Every one refuses **at construction**, which is what the rule says; none invents a type for §28, which is what §28.6 forbids. All eleven name both options in the refusal |
+| R-11 | The `reason_code` §28.5 rule 5 needs was not on the pre-existing access-check surface | Go (`AccessDecisionChecker`), PHP (`checkAccessDecision`), C# (`CheckAccessDecisionAsync`) | §28.5 rule 5, §11.2 rule 9 | **forced by the language, recorded** | Verified in all three: one wire call, never two (Go's is an `if`/`else`, PHP's and C#'s bare-bool check now delegates to the richer one), and a checker implementing only the old interface still compiles and still behaves as before |
+| R-12 | `Rule8CallerCredentialTest`'s constructor pin (§10.1 rule 8 / SEC-085) widened from "exactly one constructor, these two parameters" to "every public constructor takes only a verifier and Strings" | Java | §10.1 rule 8 | **SDK fixed** | The widened pin still refuses every object-shaped credential and still pins the constructor count, but it would now admit a **String-shaped** one. Repaired by *adding* a field allow-list rather than by restoring the old assertion (F-28-04) |
+| R-13 | Where a §20.3 UMA challenge and a §28.5 rule 5 challenge both apply to one 403, the UMA challenge wins and exactly one value is emitted | every SDK that ships §20.3's emit half | §28.5 rule 5 vs §20.3 | **forced by the language, recorded** | Not a divergence after all: independently reached and identically resolved in all of them. §28 does not mention §20.3 and does not need to — §28.4's exact-string vectors leave no room for a combined value, and the UMA ticket names a remedy where §28's names a scope |
+
+**Follow-ups.** F-28-01 (the `openapi.json` re-sync, after Phase 21 merges),
+F-28-02 (README conformance statements), F-28-03 (Go `RequireRole`), F-28-04
+(the Java constructor pin). F-28-02 through F-28-04 are pushed by this review;
+F-28-01 is blocked on a merge and is recorded in all eleven repositories so that
+it cannot be lost.
 
 ---
 

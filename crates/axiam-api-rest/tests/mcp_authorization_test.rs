@@ -1140,6 +1140,83 @@ async fn v2_a_tenant_path_binds_the_token_to_that_tenant() {
     assert_eq!(body["error"], "invalid_request", "{body}");
 }
 
+/// **MCP-06, pinned rather than fixed.** A percent-encoded `tenant_id` key on a
+/// tenant path is still refused.
+///
+/// The guard in `middleware/tenant_path.rs` matches the **raw** query string,
+/// while the extractor downstream matches the **percent-decoded** one, so
+/// `tenant%5Fid=` decodes to the key `tenant_id` and the guard does not see it.
+/// The 2026-09-17 review accepted that: the request is refused anyway, because
+/// the middleware appends `&tenant_id={path tenant}` and the extractor then
+/// sees two pairs decoding to one non-sequence field, which `serde_urlencoded`
+/// answers `duplicate field`. Putting a percent-decoder in front of a security
+/// check to buy a better error message on a request that is already refused is
+/// the thing `redirect_uri.rs` and `resource.rs` argue against at length.
+///
+/// **What this test is for.** The acceptance rests on the extractor's field
+/// type and on a dependency's duplicate-field behaviour, not on the guard —
+/// which is to say on nothing the guard's own tests would notice. No case in
+/// the crate sent the encoded spelling. This pins the refusal so that a change
+/// to the extractor, or to how `serde_urlencoded` answers a duplicate, cannot
+/// silently turn an accepted informational into an open Medium. It changes no
+/// behaviour and asserts no particular *code*: a `400` either way is the
+/// property that matters, and pinning the message would pin the half of this
+/// the review deliberately left alone.
+///
+/// The reopen conditions are in the review's §7 and in the T21.8 fix plan's §7:
+/// a handler under `/t/{tenant_id}` that reads the parameter through anything
+/// other than a non-sequence `serde_urlencoded` field, or the scope widening to
+/// `/api/v1`. Either turns the second `400` into no `400`.
+#[actix_rt::test]
+async fn mcp06_a_percent_encoded_tenant_id_on_a_tenant_path_is_still_refused() {
+    let mode = Mode::TenantPath;
+    let f = setup(mode).await;
+    let app = test_app!(f, mode);
+
+    // The control: the guard sees this spelling and refuses it itself.
+    let (status, body) = get_json(
+        &app,
+        &format!("/t/{}/oauth2/authorize?tenant_id={}", f.a.id, f.b.id),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        body["error"], "invalid_request",
+        "the guard's own refusal, for contrast: {body}"
+    );
+
+    // `tenant%5Fid` is `tenant_id` once decoded. The guard's raw-string match
+    // misses it; the extractor refuses it anyway.
+    for spelling in ["tenant%5Fid", "tenant%5fid"] {
+        let path = format!("/t/{}/oauth2/authorize?{spelling}={}", f.a.id, f.b.id);
+
+        // With a credential, this is the refusal the review's acceptance rests
+        // on: the middleware has appended `&tenant_id={path tenant}`, the
+        // extractor sees two pairs decoding to one non-sequence field, and
+        // `serde_urlencoded` answers `duplicate field`.
+        let (status, _, body) = get_as_user(&app, &path, &f.a.token).await;
+        assert_eq!(
+            status, 400,
+            "MCP-06: {spelling} on a tenant path must be refused by the extractor's \
+             duplicate-field answer. If this starts returning anything else, the acceptance \
+             recorded in security-review-mcp-2026-09-17.md §7 no longer holds and the guard \
+             needs to decode after all: {body}"
+        );
+
+        // Without one, the refusal comes earlier and is a 401. Worth pinning
+        // beside the 400 because it is the shape a stranger actually gets, and
+        // because it is the reason the guard's own `400` is not what a
+        // first reading of §7 predicts here: authentication is refused before
+        // the query is ever deserialised, so the extractor's answer needs a
+        // credential to be observable at all.
+        let (status, body) = get_json(&app, &path).await;
+        assert_eq!(
+            status, 401,
+            "{spelling} with no credential is refused before the query is read: {body}"
+        );
+    }
+}
+
 /// **V3 (verification, no finding).** An initial access token is single-use even
 /// when it is redeemed more than once before the first redemption has
 /// finished.

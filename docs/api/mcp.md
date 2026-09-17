@@ -206,7 +206,7 @@ settings, across all three ways a client can arrive:
 | Redirect URI `http://localhost:6274/*` | register what the client uses, port omitted (RFC 8252 §7.3) | nothing — the client registers its own URI, any port accepted | nothing — loopback is always allowed regardless of `cimd.trusted_redirect_domains` |
 | Allowed scopes | `scopes: [...]` on the client | `dcr_allowed_scopes: ["openid", "profile"]` | same field — CIMD reuses it |
 | Audience mapper adding the MCP server to `aud` | `allowed_resources: ["https://mcp.example.com/mcp"]`, client sends `resource=` | `external_client_allowed_resources: [...]` (D3) | same field (D3) |
-| — | — | `dcr_max_clients`, `dcr_unused_client_ttl_days` — no Keycloak equivalent | `cimd.trusted_client_id_domains` (**required**, non-empty) — no Keycloak equivalent |
+| — | — | `dcr_max_clients`, `dcr_unused_client_ttl_days`, and a one-hour sweep of never-authorized registrations in `anonymous` mode — no Keycloak equivalent | `cimd.trusted_client_id_domains` (**required**, non-empty, and `*` is refused) — no Keycloak equivalent; `dcr_max_clients` and `dcr_unused_client_ttl_days` bound shadow rows too |
 
 Keycloak's audience mapper is a workaround for not implementing RFC 8707;
 AXIAM mints the audience from the `resource` parameter the client actually

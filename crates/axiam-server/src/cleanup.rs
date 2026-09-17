@@ -20,6 +20,7 @@ use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::gdpr::CreateErasureProof;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
+use axiam_core::models::settings::{DCR_UNAUTHORIZED_CLIENT_TTL_SECS, DynamicRegistrationMode};
 use axiam_core::repository::{
     AccountDeletionRepository, AmqpNonceRepository, AssertionReplayRepository, AuditLogFilter,
     AuditLogRepository, ConsentRepository, ErasureProofRepository, ExportJobRepository,
@@ -123,22 +124,72 @@ pub struct CleanupTask<C: Connection> {
 /// worth testing directly.
 ///
 /// The clock it reads is `last_authorized_at` when the client has ever been
-/// authorized and `created_at` when it has not. The second case is what the
-/// TTL is really for: a registration made once by a tool nobody kept.
+/// authorized and `created_at` when it has not.
 ///
-/// `ttl_days == 0` is never due. Zero means "never sweep", which an operator
-/// who prunes out of band may legitimately want, and reading it as "sweep
-/// everything immediately" would delete a tenant's whole client table on the
-/// next tick.
+/// `DcrSweepWindow::days == 0` is never due. Zero means "never sweep", which
+/// an operator who prunes out of band may legitimately want, and reading it as
+/// "sweep everything immediately" would delete a tenant's whole client table
+/// on the next tick.
+///
+/// # The second clock (T21.8 / MCP-05)
+///
+/// A row that has **never** been authorized, in a tenant whose effective
+/// `dynamic_registration` is `anonymous`, is measured against
+/// [`axiam_core::models::settings::DCR_UNAUTHORIZED_CLIENT_TTL_SECS`] instead
+/// — an hour. That constant's own documentation says why it is a constant and
+/// what promoting it to a tenant setting would cost.
+///
+/// Those two conditions are the whole of the change, and each is load-bearing.
+///
+/// **Never authorized.** The thirty-day window is sized, in
+/// `DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`'s own doc comment, for "a client
+/// somebody uses monthly". A client registered and never authorized is not
+/// that client: every MCP client this phase exists to serve authorizes within
+/// seconds of registering, because registration is the first step of the same
+/// flow. One TTL served two situations that have nothing in common, which is
+/// what made `dcr_max_clients` an availability budget a stranger could spend
+/// for a month. The sweeper could always tell the two apart — the row carries
+/// `last_authorized_at: None` — so the fix is a second clock, not a bigger
+/// quota.
+///
+/// **`anonymous` only.** In `initial_access_token` mode the row exists because
+/// an administrator minted a handle for it and somebody redeemed it. There is
+/// no unauthenticated exposure to bound, and the thirty-day clock is the right
+/// one: an operator who hands somebody a registration token on Friday should
+/// not find the registration gone on Monday.
+///
+/// Every tenant on `disabled` or `initial_access_token` — which is every
+/// tenant that did not opt into `anonymous` behind D3 — takes byte for byte
+/// the path it took before T21.8.
 pub fn dcr_client_is_due_for_sweep(
     client: &axiam_core::models::oauth2_client::OAuth2Client,
-    ttl_days: u32,
+    ttl: DcrSweepWindow,
     now: chrono::DateTime<Utc>,
 ) -> bool {
-    if ttl_days == 0 {
+    if client.last_authorized_at.is_none() && ttl.mode == DynamicRegistrationMode::Anonymous {
+        return now - client.created_at
+            > chrono::Duration::seconds(i64::from(DCR_UNAUTHORIZED_CLIENT_TTL_SECS));
+    }
+    if ttl.days == 0 {
         return false;
     }
-    now - dcr_client_last_seen(client) > chrono::Duration::days(i64::from(ttl_days))
+    now - dcr_client_last_seen(client) > chrono::Duration::days(i64::from(ttl.days))
+}
+
+/// Everything the sweep needs from one tenant's settings.
+///
+/// A struct rather than the `Option<u32>` the per-tenant cache used to hold,
+/// because T21.8's second clock is selected by the tenant's registration
+/// mode, and two values read from one settings row should travel together
+/// rather than as two parallel maps that can disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DcrSweepWindow {
+    /// `dcr_unused_client_ttl_days`. `0` never sweeps.
+    pub days: u32,
+    /// The tenant's effective registration mode, which decides whether the
+    /// second clock applies at all. Only `anonymous` has the exposure the
+    /// second clock bounds; see [`dcr_client_is_due_for_sweep`].
+    pub mode: DynamicRegistrationMode,
 }
 
 /// When a `dcr` row was last any use to anybody.
@@ -187,15 +238,21 @@ pub fn cimd_client_last_seen(
 /// operator has already chosen once.
 ///
 /// `0` is never due, for the same reason it is not in the `dcr` arm.
+/// The second clock does **not** apply here, and that is deliberate: a `cimd`
+/// row is never "registered and never authorized" in the sense T21.8's window
+/// is about. It exists because somebody presented a document AXIAM fetched, so
+/// it has been used once by definition, and `updated_at` moves every time it
+/// is used again. What bounds a stranger materialising rows is the quota
+/// checked before the fetch, not a shorter window.
 pub fn cimd_client_is_due_for_sweep(
     client: &axiam_core::models::oauth2_client::OAuth2Client,
-    ttl_days: u32,
+    ttl: DcrSweepWindow,
     now: chrono::DateTime<Utc>,
 ) -> bool {
-    if ttl_days == 0 {
+    if ttl.days == 0 {
         return false;
     }
-    now - cimd_client_last_seen(client) > chrono::Duration::days(i64::from(ttl_days))
+    now - cimd_client_last_seen(client) > chrono::Duration::days(i64::from(ttl.days))
 }
 
 /// The `dcr` arm of [`sweep_unused_external_clients`], kept as a named entry
@@ -307,8 +364,11 @@ where
     use axiam_core::models::oauth2_client::ManagedBy;
     use axiam_core::repository::SettingsRepository;
 
-    type DuePredicate =
-        fn(&axiam_core::models::oauth2_client::OAuth2Client, u32, chrono::DateTime<Utc>) -> bool;
+    type DuePredicate = fn(
+        &axiam_core::models::oauth2_client::OAuth2Client,
+        DcrSweepWindow,
+        chrono::DateTime<Utc>,
+    ) -> bool;
     let (job, is_due): (&str, DuePredicate) = match managed_by {
         ManagedBy::Dcr => ("dcr_unused_clients", dcr_client_is_due_for_sweep),
         ManagedBy::Cimd => ("cimd_unused_clients", cimd_client_is_due_for_sweep),
@@ -323,12 +383,12 @@ where
         return Ok(0);
     }
 
-    let mut ttl_by_tenant: std::collections::HashMap<Uuid, Option<u32>> =
+    let mut ttl_by_tenant: std::collections::HashMap<Uuid, Option<DcrSweepWindow>> =
         std::collections::HashMap::new();
     let mut removed = 0u64;
 
     for client in clients {
-        let ttl_days = match ttl_by_tenant.get(&client.tenant_id) {
+        let ttl = match ttl_by_tenant.get(&client.tenant_id) {
             Some(cached) => *cached,
             None => {
                 let resolved = match tenant_repo.get_by_id(client.tenant_id).await {
@@ -339,7 +399,10 @@ where
                     )
                     .await
                     .ok()
-                    .map(|s| s.oidc.dcr_unused_client_ttl_days),
+                    .map(|s| DcrSweepWindow {
+                        days: s.oidc.dcr_unused_client_ttl_days,
+                        mode: s.oidc.dynamic_registration,
+                    }),
                     Err(_) => None,
                 };
                 ttl_by_tenant.insert(client.tenant_id, resolved);
@@ -347,10 +410,10 @@ where
             }
         };
         // `None` is an unreadable tenant or an unreadable settings row.
-        let Some(ttl_days) = ttl_days else {
+        let Some(ttl) = ttl else {
             continue;
         };
-        if !is_due(&client, ttl_days, now) {
+        if !is_due(&client, ttl, now) {
             continue;
         }
 
@@ -370,7 +433,9 @@ where
             job,
             tenant_id = %client.tenant_id,
             client_id = %client.client_id,
-            ttl_days,
+            ttl_days = ttl.days,
+            ever_authorized = client.last_authorized_at.is_some(),
+            mode = %ttl.mode,
             "deleted an externally registered client that has gone unseen within its \
              tenant's TTL"
         );

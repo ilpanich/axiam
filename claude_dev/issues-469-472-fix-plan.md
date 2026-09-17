@@ -337,6 +337,59 @@ express.
 
 ## 4. Issue #471 — quota exhaustion denies registration for a month (MCP-05, T-272)
 
+> **Landed** as the third commit of PR A, **in the constant variant this
+> section names as its fallback**, not the field it recommends. The reason is a
+> second wrong cost, found the same way fact 5 was and recorded here with its
+> evidence.
+>
+> The cost table below says: *Schema / migration — **no** — `OidcPolicy` lives
+> in the settings JSON; a missing key deserialises to the default.* That is
+> true of two things and not of the one this section needs. `OidcPolicy::cimd`
+> is one `oidc_cimd_json` column, and a tenant override is `overrides_json`, so
+> both tolerate a new key. **`OidcPolicy`'s scalars are individual columns on a
+> `SCHEMAFULL` `security_settings` table** —
+> `crates/axiam-db/src/schema.rs:919` defines the table `SCHEMAFULL`, and
+> `oidc_dcr_max_clients` and `oidc_dcr_unused_client_ttl_days` are
+> `DEFINE FIELD` statements added by migration v64 (`schema.rs:3522`, `:3524`),
+> read through `StoredDcrColumns` and written by name in
+> `crates/axiam-db/src/repository/settings.rs:438`. A fifth DCR number is
+> therefore a `DEFINE FIELD`, a **migration v66** and a bump to the tripwire at
+> `schema.rs:3992`.
+>
+> The implementing brief's constraints are explicit that there is to be no
+> migration and that the tripwire stays at 65 — and this section already names
+> the variant that satisfies them: *"a constant with the same value and the
+> same mode gate, which removes every row below marked 'field only'; the
+> sweeper logic and its tests are identical either way."* That is what landed.
+> `DCR_UNAUTHORIZED_CLIENT_TTL_SECS` is a documented `pub const` in
+> `axiam-core`'s settings module beside the other DCR defaults, the mode gate
+> is exactly as specified, and the sweeper's predicate and its whole test table
+> are the ones this section describes.
+>
+> **The field remains the right answer and the recommendation stands.** Its
+> argument — every other sweep window in this file is a tenant setting, and
+> this is the one sweep that deletes rows strangers created, so it should not
+> be the first window an operator cannot see — is untouched by any of the
+> above. What changed is only the price: it is **one migration away, not one
+> line away**, so it is the maintainer's call and not an implementing session's
+> to make against a stated constraint. Everything else it needs is already
+> written: the value, the mode gate, the predicate, the range, the strictness
+> ordering and the operator documentation. Promoting it is v66, the eight
+> mirrored sites this section lists, the second `*_strictness` map, the range
+> check, the admin card and one spec regeneration — and **no change at all to
+> the behaviour that landed**, which is the property that makes deferring it
+> safe. The constant's own doc comment carries this paragraph so that whoever
+> picks it up finds it at the code rather than here.
+>
+> Two smaller notes. The spec regeneration this section calls unavoidable "even
+> in the constant variant" is in fact a no-op there: nothing in the constant
+> variant touches a `ToSchema` type or a doc comment on one, and
+> `--dump-openapi` was diffed against the committed spec to prove it.
+> `dcr_unused_client_ttl_days`'s description did move, but in the **#470**
+> commit and for #470's reason. And the frontend rows — the card, the types,
+> the card test — are all "field only" and are therefore absent, which is why
+> this PR touches no frontend file at all.
+
 ### The leave-it case
 
 `anonymous` mode is opt-in, is refused while `external_client_allowed_resources`

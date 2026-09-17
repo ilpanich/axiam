@@ -248,6 +248,55 @@ pub const DEFAULT_DCR_MAX_CLIENTS: u32 = 20;
 /// touches `managed_by: dcr` rows — see `OAuth2Client::managed_by`.
 pub const DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS: u32 = 30;
 
+/// How long a self-registered client that was **never authorized** survives,
+/// in seconds (T21.8 / MCP-05). One hour.
+///
+/// # Why a second clock at all
+///
+/// [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`] is sized, in its own doc comment,
+/// for "a client somebody uses monthly". A client registered and never
+/// authorized is not that client: every MCP client Phase 21 exists to serve —
+/// Inspector, Claude Code, VS Code — authorizes within seconds of registering,
+/// because registration is the first step of the same flow. A never-authorized
+/// row that is an hour old is either abandoned or hostile.
+///
+/// One TTL was serving two situations that have nothing in common, and that is
+/// what made [`OidcPolicy::dcr_max_clients`] an *availability* budget as well
+/// as a storage one: in `anonymous` mode a stranger could fill the quota in
+/// about four minutes and hold it for thirty days. The sweeper could always
+/// tell the two situations apart with no new data, because the row carries
+/// `last_authorized_at: None` — so the fix is a second clock rather than a
+/// bigger quota.
+///
+/// # Why a constant rather than a tenant setting
+///
+/// **Every other sweep window in AXIAM is a tenant setting, and this one
+/// should be too.** The owner of the decision is the tenant, not the
+/// datastore, which is the argument the sweeper's own doc comment makes about
+/// [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`]; and this is the one sweep that
+/// deletes rows created by strangers, so it is the last window an operator
+/// should be unable to see or change. The T21.8 fix plan's §4 recommends the
+/// field for exactly those reasons and this constant is its stated fallback.
+///
+/// What the plan got wrong is the cost. Its §4 recorded "no migration —
+/// `OidcPolicy` lives in the settings JSON; a missing key deserialises to the
+/// default". That is true of [`OidcPolicy::cimd`], which is one
+/// `oidc_cimd_json` column, and of the tenant override, which is
+/// `overrides_json`. It is **not** true of `OidcPolicy`'s scalars: they are
+/// individual columns on a `SCHEMAFULL` `security_settings` table
+/// (`oidc_dcr_max_clients`, `oidc_dcr_unused_client_ttl_days`, both added by
+/// migration v64), so a fifth DCR number is a `DEFINE FIELD`, a migration
+/// v66 and a bump to the schema tripwire.
+///
+/// The field is therefore the maintainer's call and not this task's, and it is
+/// one migration rather than one line away. Everything else about it is
+/// already written here: the value, the mode gate, the sweeper's predicate and
+/// its tests are identical either way, so promoting the constant to
+/// `OidcPolicy::dcr_unauthorized_client_ttl_secs` is v66, eight mirrored
+/// sites, an ordering map, a range check, the admin card and a spec
+/// regeneration — and no change at all to the behaviour below.
+pub const DCR_UNAUTHORIZED_CLIENT_TTL_SECS: u32 = 3_600;
+
 /// OpenID Connect surface controls (X7 G8, plan §4.6/§4.8; T21.4).
 ///
 /// Settings that are not password rules, here because this is the

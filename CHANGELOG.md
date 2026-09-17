@@ -296,6 +296,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saved — and no released deployment can hold one, because CIMD itself ships in
   this same unreleased version.
 
+- **A registration nobody authorized is reclaimed in an hour, not thirty days
+  (MCP-05, T21.8, #471).** In `anonymous` mode `dcr_max_clients` (default 20)
+  is a storage bound *and* an availability budget, and one unauthenticated
+  stranger could spend all of it in about four minutes at the endpoint's
+  five-a-minute rate limit — then hold it for `dcr_unused_client_ttl_days`,
+  30 days by default, because one TTL served two situations with nothing in
+  common. The 30-day window is sized for a client somebody uses monthly; a
+  client registered and never authorized is not that client, and every MCP
+  client this phase serves authorizes within seconds of registering because
+  registration is the first step of the same flow. The sweeper now measures a
+  `managed_by: dcr` row with no `last_authorized_at`, in a tenant whose
+  effective mode is `anonymous`, against **one hour** from `created_at`. It
+  does not apply in `initial_access_token` or `disabled` mode — there the row
+  exists because an administrator minted a handle, and an operator who does
+  that on Friday should not find the registration gone on Monday — it does not
+  touch a client that has completed a flow, and it is not switched off by
+  `dcr_unused_client_ttl_days: 0`, which is a decision about clients somebody
+  uses. The hour is a constant, not a tenant setting: making it one needs a new
+  `security_settings` column and therefore a schema migration, which is the
+  maintainer's call rather than this change's, and the constant's own
+  documentation says what promoting it would cost. `docs/admin/dynamic-client-registration.md`
+  now also gives the reason to prefer `initial_access_token` that matters most
+  — its quota cannot be spent by somebody with no credential. A per-IP share of
+  the quota remains the accepted residual.
+
 - **CIMD shadow rows are bounded by a quota and reclaimed by a sweep (MCP-04,
   T21.8, #470).** A `managed_by: cimd` row counted against no ceiling and was
   deleted by nothing, so a tenant whose trusted-publisher list named shared

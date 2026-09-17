@@ -81,6 +81,12 @@ fn test_config() -> AuthConfig {
         webauthn_rp_name: "AXIAM-Test".into(),
         jwt_encoding_key: None,
         jwt_decoding_key: None,
+        // T21.5: the spread. T21.6 added `tenant_issuer_paths` and
+        // `request_issuer` to `AuthConfig` without updating this initializer,
+        // so this test has not compiled since; both take their `Default`
+        // value, which is the one that reproduces the behaviour this test was
+        // written against.
+        ..AuthConfig::default()
     }
 }
 

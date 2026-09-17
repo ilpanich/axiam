@@ -101,6 +101,12 @@ fn test_config() -> AuthConfig {
         max_concurrent_hashes: 0,
         hash_acquire_timeout_secs: 5,
         session_validation_cache_ttl_secs: 0,
+        // T21.5: the spread, for the reason `models_coverage.rs` states in
+        // full — T21.6 added `tenant_issuer_paths` and `request_issuer` to
+        // `AuthConfig` and left this initializer missing them, so this test
+        // has not compiled since. Both take their `Default` value, which is
+        // the one that reproduces the behaviour this test was written against.
+        ..AuthConfig::default()
     }
 }
 
@@ -206,6 +212,13 @@ struct MockClientRepo(ClientOutcome, UpgradeLog);
 
 impl OAuth2ClientRepository for MockClientRepo {
     async fn create(&self, _i: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
+        unimplemented!()
+    }
+    async fn upsert_cimd_client(
+        &self,
+        _client_id: &str,
+        _i: CreateOAuth2Client,
+    ) -> AxiamResult<OAuth2Client> {
         unimplemented!()
     }
     async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<OAuth2Client> {

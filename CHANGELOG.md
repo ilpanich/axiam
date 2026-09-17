@@ -149,6 +149,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and is absent from the update API — a registration's provenance is a fact
   about how it came to exist (T21.4).
 
+- **Admin UI for dynamic client registration.** The tenant settings page gains
+  a Dynamic Client Registration card for every `T21.4` policy field
+  (`dynamic_registration`, `dcr_allowed_scopes`, `dcr_allowed_redirect_hosts`,
+  `external_client_allowed_resources`, `dcr_max_clients`,
+  `dcr_unused_client_ttl_days`), refusing to save `anonymous` mode with an
+  empty audience list (D3) or a `dcr_allowed_scopes` naming `address`/`phone`
+  client-side, with the same messages the server answers with. The OAuth2
+  Clients page gains registration-token issuance (single-use, shown once, like
+  a client secret; only shown once a tenant is in `initial_access_token`
+  mode), a `managed_by` badge and filter in the client list, and a read-only
+  detail view for a `dcr`/`cimd` client in place of the edit form — AXIAM does
+  not model an administrator editing a self-registration. The audit log viewer
+  badges the three new registration events. Default (`disabled`) tenants see
+  none of it (T21.4b).
+
 - **Per-tenant path issuers (`AXIAM__AUTH__TENANT_ISSUER_PATHS`, default
   `false`).** With the flag set, each tenant gains a second issuer identifier,
   `{root}/t/{tenant_id}` — one with no query string, so it is an issuer an MCP

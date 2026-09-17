@@ -252,3 +252,67 @@ describe("AuditLogsPage", () => {
     );
   });
 });
+
+// ─── T21.4 — dynamic client registration events ────────────────────────────
+
+describe("AuditLogsPage — T21.4 DCR event recognition", () => {
+  it("badges a dynamic-registration event", async () => {
+    apiMock.get.mockResolvedValue(
+      res(
+        page(
+          [
+            {
+              id: "l3",
+              tenant_id: "t1",
+              actor_id: "unknown",
+              actor_type: "Anonymous",
+              action: "oauth2.client_registered",
+              resource_id: "c1",
+              outcome: "Success",
+              ip_address: "203.0.113.9",
+              metadata: { client_id: "c1" },
+              timestamp: "2026-01-03T10:00:00Z",
+            },
+          ],
+          1
+        )
+      )
+    );
+    renderWithProviders(<AuditLogsPage />);
+    await screen.findByText("oauth2.client_registered");
+    expect(
+      screen.getByTitle("RFC 7591 dynamic client registration event")
+    ).toBeInTheDocument();
+  });
+
+  // I1 — an ordinary event renders exactly as it did before this task: no
+  // badge appears for anything outside the three DCR actions.
+  it("I1 — does not badge an ordinary audit event", async () => {
+    apiMock.get.mockResolvedValue(res(page(logs, 2)));
+    renderWithProviders(<AuditLogsPage />);
+    await screen.findByText("user.created");
+    expect(
+      screen.queryByTitle("RFC 7591 dynamic client registration event")
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    "oauth2.client_registered",
+    "oauth2.client_registration_refused",
+    "oauth2.registration_token_created",
+  ])("recognises %s", async (action) => {
+    apiMock.get.mockResolvedValue(
+      res(
+        page(
+          [{ ...logs[0], id: "l-dcr", action }],
+          1
+        )
+      )
+    );
+    renderWithProviders(<AuditLogsPage />);
+    await screen.findByText(action);
+    expect(
+      screen.getByTitle("RFC 7591 dynamic client registration event")
+    ).toBeInTheDocument();
+  });
+});

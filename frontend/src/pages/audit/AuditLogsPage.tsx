@@ -36,6 +36,36 @@ function OutcomeBadge({ outcome }: { outcome: AuditLog["outcome"] }) {
   );
 }
 
+// ─── T21.4 — dynamic client registration events ────────────────────────────
+
+/**
+ * Mirrors the events `crates/axiam-api-rest/src/handlers/dcr.rs` emits under
+ * `target: "axiam::audit"`. Named rather than left to the generic renderer so
+ * an operator scanning the trail can spot a self-registration event — one an
+ * unrelated party caused, not an administrator — without reading `action`
+ * strings closely.
+ */
+const DCR_AUDIT_ACTIONS = new Set([
+  "oauth2.client_registered",
+  "oauth2.client_registration_refused",
+  "oauth2.registration_token_created",
+]);
+
+function isDcrAuditAction(action: string): boolean {
+  return DCR_AUDIT_ACTIONS.has(action);
+}
+
+function DcrEventBadge() {
+  return (
+    <span
+      title="RFC 7591 dynamic client registration event"
+      className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-fuchsia-500/15 text-fuchsia-400 border border-fuchsia-500/30"
+    >
+      DCR
+    </span>
+  );
+}
+
 // ─── Details expander ─────────────────────────────────────────────────────────
 
 function DetailsExpander({
@@ -390,14 +420,17 @@ export function AuditLogsPage() {
       key: "action",
       header: "Action",
       render: (row) => (
-        <span
-          className={cn(
-            "text-sm font-mono",
-            row.outcome === "Success" ? "text-blue-400" : "text-red-400"
-          )}
-        >
-          {row.action}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <span
+            className={cn(
+              "text-sm font-mono",
+              row.outcome === "Success" ? "text-blue-400" : "text-red-400"
+            )}
+          >
+            {row.action}
+          </span>
+          {isDcrAuditAction(row.action) && <DcrEventBadge />}
+        </div>
       ),
     },
     {

@@ -113,7 +113,30 @@ export interface OAuth2Client {
    */
   post_logout_redirect_uris?: string[];
   backchannel_logout_uri?: string | null;
+  /**
+   * T21.4 / D5 — who created this registration: `admin`, `dcr` or `cimd`.
+   * Optional and falls back to `admin` (the backend's own default and serde
+   * default), matching every X5.1 posture field's convention here: a
+   * response that predates T21.4 simply omits it.
+   *
+   * Read-only — there is no corresponding member on the update payload; see
+   * `OAuth2ClientResponse.managed_by` on the backend.
+   */
+  managed_by?: ManagedBy;
+  /**
+   * T21.4 — when this client last obtained an authorization code. Always
+   * absent for an `admin` client (I1); `undefined` on a self-registered one
+   * that has never been authorized.
+   */
+  last_authorized_at?: string;
 }
+
+/**
+ * T21.4 / D5 — mirrors `ManagedBy` in
+ * `crates/axiam-core/src/models/oauth2_client.rs`.
+ */
+export const MANAGED_BY_VALUES = ["admin", "dcr", "cimd"] as const;
+export type ManagedBy = (typeof MANAGED_BY_VALUES)[number];
 
 // ─── Request payloads ─────────────────────────────────────────────────────────
 

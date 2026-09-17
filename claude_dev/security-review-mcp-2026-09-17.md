@@ -25,10 +25,10 @@ in tenant isolation" deserves to know what was tried.
 | ID | Finding | Severity | State |
 |---|---|---|---|
 | **MCP-02** | The `axiam` URI scheme is a valid absolute URI, so AXIAM's own token audiences were registrable and requestable as RFC 8707 resources. `client_credentials` could thereby mint a token carrying the **user** audience. | **Medium** | **Fixed** — `013903d` |
-| **MCP-03** | `cimd.trusted_client_id_domains` refuses the empty list and accepts `*`, which means the same thing. The interlock T21.5 added to remove the "stranger chooses the fetch target" class is defeated by one character. | Medium | **Filed** |
-| **MCP-04** | `managed_by: cimd` shadow rows are bounded by no quota and swept by nothing. A tenant whose trusted publisher list names shared hosting grows client rows without limit. | Medium | **Filed** |
-| **MCP-05** | In `anonymous` mode a stranger can fill `dcr_max_clients` (default 20) in about four minutes and deny registration to legitimate clients for `dcr_unused_client_ttl_days` (default 30). | Medium | **Filed** |
-| **MCP-01** | A refusal raised *before* the redirect matcher runs is answered directly rather than redirected, so a desktop client on an ephemeral loopback port never learns its authorization failed. Fail-closed; an interoperability defect, not a vulnerability. | Low | **Filed** |
+| **MCP-03** | `cimd.trusted_client_id_domains` refuses the empty list and accepts `*`, which means the same thing. The interlock T21.5 added to remove the "stranger chooses the fetch target" class is defeated by one character. | Medium | **Filed** — [#469](https://github.com/ilpanich/axiam/issues/469) |
+| **MCP-04** | `managed_by: cimd` shadow rows are bounded by no quota and swept by nothing. A tenant whose trusted publisher list names shared hosting grows client rows without limit. | Medium | **Filed** — [#470](https://github.com/ilpanich/axiam/issues/470) |
+| **MCP-05** | In `anonymous` mode a stranger can fill `dcr_max_clients` (default 20) in about four minutes and deny registration to legitimate clients for `dcr_unused_client_ttl_days` (default 30). | Medium | **Filed** — [#471](https://github.com/ilpanich/axiam/issues/471) |
+| **MCP-01** | A refusal raised *before* the redirect matcher runs is answered directly rather than redirected, so a desktop client on an ephemeral loopback port never learns its authorization failed. Fail-closed; an interoperability defect, not a vulnerability. | Low | **Filed** — [#472](https://github.com/ilpanich/axiam/issues/472) |
 | **MCP-06** | The "no `tenant_id` on a tenant path" check matches the raw query string, where the extractor that consumes it matches the percent-decoded one. | Informational | **Accepted** |
 
 | ID | Verified, no finding |
@@ -59,7 +59,7 @@ past an invariant, and it is closed.
 
 **A live stack was available, in part, and this is worth recording** because
 two earlier documents in this series state that it was not. There is no Docker
-daemon *running* in this sandbox, but `dockerd` starts: see §6. What could not
+daemon *running* in this sandbox, but `dockerd` starts: see §13. What could not
 be done is pulling the conformance suite image, whose blob CDN the egress
 policy refuses. Everything in this review was therefore established either by
 reading code or by the Rust harness, which runs a real server against a real
@@ -148,7 +148,7 @@ and at the parser by
 
 ## 3. MCP-03 — the CIMD trusted-publisher interlock admits `*`
 
-**Severity: Medium. Filed (T21.5).**
+**Severity: Medium. Filed as [#469](https://github.com/ilpanich/axiam/issues/469) (T21.5).**
 
 T21.5's amendment 2 records a deliberate decision, and its reasoning is right:
 
@@ -213,7 +213,7 @@ drafting against the operator page — which is T21.5's document, not T21.8's.
 
 ## 4. MCP-04 — CIMD shadow rows are unbounded and never reclaimed
 
-**Severity: Medium. Filed (T21.5).**
+**Severity: Medium. Filed as [#470](https://github.com/ilpanich/axiam/issues/470) (T21.5).**
 
 Every successful CIMD resolution upserts a `managed_by: cimd` row keyed by the
 document URL. Two bounds that exist for the other externally registered
@@ -259,7 +259,7 @@ job registration, which is T21.5's shape of change rather than a review's.
 
 ## 5. MCP-05 — registration quota exhaustion denies registration for a month
 
-**Severity: Medium. Filed (T21.4a).**
+**Severity: Medium. Filed as [#471](https://github.com/ilpanich/axiam/issues/471) (T21.4a).**
 
 In `dynamic_registration: anonymous`, the quota is a per-tenant ceiling on rows
 that anybody may create:
@@ -317,7 +317,7 @@ refused at step 2, before the quota is consulted.
 
 ## 6. MCP-01 — a loopback client on an ephemeral port is not told its errors
 
-**Severity: Low. Filed (T21.2a).**
+**Severity: Low. Filed as [#472](https://github.com/ilpanich/axiam/issues/472) (T21.2a).**
 
 T21.2a introduced `redirect_uri_matches` and routed the authorization and PAR
 endpoints through it, so that RFC 8252 §7.3's port allowance applies where a
@@ -618,3 +618,132 @@ Checked against §1 of the plan, for this task's own change:
 * **I9** — no new route.
 
 No existing test's expectation was changed by this task.
+
+
+---
+
+## 13. Appendix — the I1 conformance condition, discharged
+
+The plan's §1 records the maintainer's ruling of 2026-09-17 and the one
+condition attached to it: T21.2's unconditional `none` in
+`token_endpoint_auth_methods_supported` is acceptable **provided it does not
+impact the OIDF conformance tests (Basic OP and FAPI 2.0)**. §1 records the
+condition as undischarged and assigns it to this task, ahead of everything
+else. This appendix discharges it.
+
+### The suite could not be run, and this is not that
+
+There is no Docker daemon running in this sandbox, but — contrary to the
+environment notes carried into this task and into two earlier documents in this
+series — **`dockerd` starts**, and did. What stops the run is one hop further
+on: `registry.gitlab.com` serves the pinned manifest, and its blob CDN,
+`cdn.registry.gitlab-static.net`, is refused by this environment's egress
+policy with a `403` on `CONNECT`. Per the proxy's own guidance an organization
+policy denial is reported rather than retried or routed around, so the image
+could not be pulled and no plan was executed.
+
+That correction is worth recording on its own: "no Docker daemon" has been
+repeated as a settled fact and is only half true, and the half that is false is
+the half a future session would waste time rediscovering.
+
+### What was done instead, and why it is stronger than a run
+
+The suite is open source and the pin is a release tag. The module's source at
+exactly `release-v5.2.4` — the version `conformance/suite.env` pins — was read
+from `gitlab.com`, which the egress policy does allow. That is a better answer
+than a green run, because a run shows the module passing on one configuration
+while the source shows **why**, for every configuration.
+
+The chain, module to assertion:
+
+1. `FAPI2SPFinalDiscoveryEndpointVerification.performEndpointVerification()`
+   delegates to its abstract parent for everything about client-authentication
+   metadata.
+2. `AbstractFAPI2SPFinalDiscoveryEndpointVerification` makes exactly one check
+   of the field in question:
+
+   ```java
+   callAndContinueOnFailure(profileBehavior.getDiscoveryTokenEndpointAuthMethodsCheck(),
+                            Condition.ConditionResult.FAILURE, "FAPI2-SP-FINAL-5.3.2.1-6");
+   ```
+3. All three of AXIAM's plans set `"fapi_profile": "plain_fapi"`, so
+   `profileBehavior` is the base `FAPI2ProfileBehavior`, whose
+   `getDiscoveryTokenEndpointAuthMethodsCheck()` returns
+   `CheckDiscEndpointTokenEndpointAuthMethodsSupportedContainsPrivateKeyOrTlsClient`.
+4. That condition supplies an **accepted** list and nothing else:
+
+   ```java
+   protected List<String> getAcceptedAuthMethods() {
+       return List.of("private_key_jwt", "tls_client_auth");
+   }
+   ```
+5. Its parent evaluates `validate(env, …, getAcceptedAuthMethods(), 1, …)`, and
+   `AbstractValidateJsonArray.validate` counts how many of the **accepted**
+   values appear in the server's array and fails only if that count is below
+   the minimum:
+
+   ```java
+   if (countMatchingElements(setValues, serverValues.getAsJsonArray()) < minimumMatchesRequired) {
+       errorMessage = errorMessageNotEnough;
+   }
+   ```
+
+`countMatchingElements` iterates the *accepted* list looking into the server's
+array. **It never iterates the server's array looking for values that are not
+accepted.** An extra entry is therefore not merely tolerated; it is
+structurally invisible to this condition. AXIAM advertises `tls_client_auth`
+and `private_key_jwt`, so the count is 2 against a minimum of 1, and `none`
+cannot change that number.
+
+The variant-specific checks are the same shape:
+`EnsureServerConfigurationSupportsMTLS` and
+`EnsureServerConfigurationSupportsPrivateKeyJwt` both scan for a method they
+require and throw only when they find none.
+
+### The two other ways it could have objected, both closed
+
+* **`ValidateServerMetadataAgainstSchema`** runs at `FAILURE` severity, so a
+  schema enum on the field would have been the second way to fail. There is
+  none: `json-schemas/rfc8414/oauth_authorization_server_metadata.json` gives
+  `token_endpoint_auth_methods_supported` as
+  `{"type": "array", "items": {"type": "string"}}`. The condition's own doc
+  comment says it is "purely structural (types/formats of whatever fields are
+  present)" and it strips unknown-property errors before failing.
+* **`CheckForUnexpectedParametersInServerMetadata`** is `WARNING`, not
+  `FAILURE`, and concerns member *names* rather than values. Checked anyway for
+  the members this phase adds: `registration_endpoint` **and**
+  `client_id_metadata_document_supported` are both in the schema's
+  `properties`, so neither produces even a warning on a tenant that enables
+  them.
+
+### Conclusion
+
+`none` in `token_endpoint_auth_methods_supported` **cannot** cause
+`fapi2-security-profile-final-discovery-end-point-verification` to fail, on any
+of AXIAM's three plans, at the pinned suite version. This is a property of the
+condition's implementation rather than an observation of one run, so it holds
+for the Basic OP plan too — that plan does not run this module at all, and
+nothing in it asserts on the field.
+
+The maintainer's condition is **discharged**, on source-level evidence. §1's
+standing caveat — that the existing evidence was circumstantial because `none`
+is "not a weak credential but the absence of one, and a check could single it
+out" — is answered directly: no check singles out anything, because no check
+looks at what the server advertises beyond the values it requires.
+
+**What a maintainer with a working registry should still do**, and what to look
+for: run
+
+```bash
+conformance/scripts/run-some.sh \
+  conformance/plans/fapi2-security-profile-final-mtls.json \
+  fapi2-security-profile-final-test-plan \
+  fapi2-security-profile-final-discovery-end-point-verification
+```
+
+for each of the three plans, and confirm `FINISHED / PASSED`. The log entry to
+read is `Contents of 'token_endpoint_auth_methods_supported' in discovery
+document matches expectations`, whose `actual` will list all six advertised
+methods and whose `minimum_matches_required` will be `1`. If it ever reports
+otherwise, the suite's condition has changed and this appendix is the thing to
+re-derive.

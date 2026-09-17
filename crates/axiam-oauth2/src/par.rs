@@ -501,6 +501,32 @@ mod tests {
             ) -> AxiamResult<bool> {
                 unreachable!("peek must not touch the client registration")
             }
+            async fn count_by_managed_by(
+                &self,
+                _tid: Uuid,
+                _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+            ) -> AxiamResult<u64> {
+                unimplemented!()
+            }
+
+            async fn list_all_by_managed_by(
+                &self,
+                _managed_by: axiam_core::models::oauth2_client::ManagedBy,
+            ) -> AxiamResult<Vec<OAuth2Client>> {
+                unimplemented!()
+            }
+
+            async fn touch_last_authorized(
+                &self,
+                _tid: Uuid,
+                _client_id: &str,
+                _at: chrono::DateTime<chrono::Utc>,
+            ) -> AxiamResult<()> {
+                // T21.4 — a no-op rather than `unimplemented!()`: the
+                // authorization path calls this for an external client, so a
+                // panic here would fail a test about something else entirely.
+                Ok(())
+            }
         }
 
         #[derive(Default)]

@@ -756,3 +756,303 @@ async fn run_erasure_pipeline_retry_after_success_is_rejected_idempotently() {
         "exactly one erasure_proof row must exist even after a retried pipeline run"
     );
 }
+
+// ---------------------------------------------------------------------------
+// T21.4 — the dynamic-registration sweeps
+// ---------------------------------------------------------------------------
+
+/// Back-date a client's `created_at` and `last_authorized_at`.
+///
+/// There is no API for this and there should not be: both columns are written
+/// by the server, one at creation and one when an authorization code is
+/// issued. A test about a TTL has to move the clock somehow, and moving the
+/// row is honest where mocking `Utc::now()` across three crates would not be.
+async fn backdate_client(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    client_id: &str,
+    days: i64,
+    ever_authorized: bool,
+) {
+    let when = Utc::now() - chrono::Duration::days(days);
+    let sql = if ever_authorized {
+        "UPDATE oauth2_client SET created_at = $when, last_authorized_at = $when \
+         WHERE client_id = $client_id"
+    } else {
+        "UPDATE oauth2_client SET created_at = $when, last_authorized_at = NONE \
+         WHERE client_id = $client_id"
+    };
+    db.query(sql)
+        .bind(("when", when))
+        .bind(("client_id", client_id.to_string()))
+        .await
+        .expect("backdate")
+        .check()
+        .expect("backdate check");
+}
+
+/// Create one client with the given provenance and return its `client_id`.
+async fn seed_client(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    name: &str,
+    managed_by: axiam_core::models::oauth2_client::ManagedBy,
+) -> String {
+    use axiam_core::repository::OAuth2ClientRepository as _;
+    let (client, _) = axiam_db::SurrealOAuth2ClientRepository::new(db.clone())
+        .create(axiam_core::models::oauth2_client::CreateOAuth2Client {
+            tenant_id,
+            name: name.into(),
+            redirect_uris: vec!["http://127.0.0.1/cb".into()],
+            grant_types: vec!["authorization_code".into()],
+            scopes: vec!["openid".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
+            profile: Default::default(),
+            token_endpoint_auth_method: Default::default(),
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: Vec::new(),
+            tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
+            authn_request_params: Default::default(),
+            browser_sso: false,
+            allowed_resources: Vec::new(),
+            managed_by,
+        })
+        .await
+        .expect("seed client");
+    client.client_id
+}
+
+/// Create an organization and a tenant, and write the organization baseline.
+async fn seed_tenant_with_ttl(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    slug: &str,
+    ttl_days: u32,
+) -> Uuid {
+    use axiam_core::repository::{
+        OrganizationRepository as _, SettingsRepository as _, TenantRepository as _,
+    };
+    let org = axiam_db::SurrealOrganizationRepository::new(db.clone())
+        .create(axiam_core::models::organization::CreateOrganization {
+            name: format!("org {slug}"),
+            slug: format!("org-{slug}"),
+            metadata: None,
+        })
+        .await
+        .expect("org");
+    let tenant = axiam_db::SurrealTenantRepository::new(db.clone())
+        .create(axiam_core::models::tenant::CreateTenant {
+            organization_id: org.id,
+            kind: axiam_core::models::tenant::TenantKind::Standard,
+            name: format!("tenant {slug}"),
+            slug: format!("tenant-{slug}"),
+            metadata: None,
+        })
+        .await
+        .expect("tenant");
+    axiam_db::SurrealSettingsRepository::new(db.clone())
+        .set_org_settings(
+            org.id,
+            axiam_core::models::settings::SetOrgSettings {
+                dcr_unused_client_ttl_days: ttl_days,
+                ..axiam_core::models::settings::system_defaults()
+            },
+        )
+        .await
+        .expect("org settings");
+    tenant.id
+}
+
+/// The acceptance case, and the one property the sweeper must never get wrong:
+/// it removes a self-registered client nobody has used, and leaves an
+/// administrator's client alone however old it is.
+#[tokio::test]
+async fn dcr_sweep_removes_an_unused_client_and_leaves_an_admin_one() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let db = setup_db().await;
+    let tenant_id = seed_tenant_with_ttl(&db, "sweep", 30).await;
+
+    let stale_dcr = seed_client(&db, tenant_id, "stale-dcr", ManagedBy::Dcr).await;
+    let fresh_dcr = seed_client(&db, tenant_id, "fresh-dcr", ManagedBy::Dcr).await;
+    let stale_admin = seed_client(&db, tenant_id, "stale-admin", ManagedBy::Admin).await;
+
+    // Both stale rows are 60 days past anything; only one of them is `dcr`.
+    backdate_client(&db, &stale_dcr, 60, false).await;
+    backdate_client(&db, &stale_admin, 60, false).await;
+    // The fresh one was authorized yesterday, though it was registered long
+    // before — which is the whole point of reading `last_authorized_at` first.
+    backdate_client(&db, &fresh_dcr, 90, false).await;
+    db.query("UPDATE oauth2_client SET last_authorized_at = $when WHERE client_id = $client_id")
+        .bind(("when", Utc::now() - chrono::Duration::days(1)))
+        .bind(("client_id", fresh_dcr.clone()))
+        .await
+        .expect("touch")
+        .check()
+        .expect("touch check");
+
+    let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
+    let tenant_repo = axiam_db::SurrealTenantRepository::new(db.clone());
+    let settings_repo = axiam_db::SurrealSettingsRepository::new(db.clone());
+
+    let removed = axiam_server::cleanup::sweep_unused_dcr_clients(
+        &client_repo,
+        &tenant_repo,
+        &settings_repo,
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 1, "exactly the one stale self-registered client");
+
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &stale_dcr)
+            .await
+            .is_err(),
+        "a self-registered client unused past its tenant's TTL is swept"
+    );
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &fresh_dcr)
+            .await
+            .is_ok(),
+        "a self-registered client authorized yesterday is not"
+    );
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &stale_admin)
+            .await
+            .is_ok(),
+        "an administrator's client is never swept, however long it sits unused: somebody \
+         decided it should exist"
+    );
+}
+
+/// `0` means "never sweep", which is the explicit opt-out for a deployment
+/// that prunes out of band. Read the other way round — "sweep everything
+/// immediately" — it would delete a tenant's whole client table on the next
+/// tick, so the direction is asserted rather than assumed.
+#[tokio::test]
+async fn a_zero_ttl_sweeps_nothing() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let db = setup_db().await;
+    let tenant_id = seed_tenant_with_ttl(&db, "never", 0).await;
+    let ancient = seed_client(&db, tenant_id, "ancient", ManagedBy::Dcr).await;
+    backdate_client(&db, &ancient, 3650, false).await;
+
+    let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
+    let removed = axiam_server::cleanup::sweep_unused_dcr_clients(
+        &client_repo,
+        &axiam_db::SurrealTenantRepository::new(db.clone()),
+        &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 0);
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &ancient)
+            .await
+            .is_ok()
+    );
+}
+
+/// The TTL is each row's own tenant's, so two tenants with different windows
+/// get different answers from one sweep.
+#[tokio::test]
+async fn the_ttl_is_resolved_per_tenant() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let db = setup_db().await;
+    let short = seed_tenant_with_ttl(&db, "short", 7).await;
+    let long = seed_tenant_with_ttl(&db, "long", 365).await;
+
+    let a = seed_client(&db, short, "a", ManagedBy::Dcr).await;
+    let b = seed_client(&db, long, "b", ManagedBy::Dcr).await;
+    // Thirty days: past the seven-day window, inside the year-long one.
+    backdate_client(&db, &a, 30, true).await;
+    backdate_client(&db, &b, 30, true).await;
+
+    let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
+    let removed = axiam_server::cleanup::sweep_unused_dcr_clients(
+        &client_repo,
+        &axiam_db::SurrealTenantRepository::new(db.clone()),
+        &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 1);
+    assert!(client_repo.get_by_client_id(short, &a).await.is_err());
+    assert!(client_repo.get_by_client_id(long, &b).await.is_ok());
+}
+
+/// The decision function on its own, at the boundary, where an off-by-one
+/// would be a client swept a day early or kept a day late.
+#[test]
+fn the_sweep_decision_reads_last_authorized_then_created() {
+    use axiam_core::models::oauth2_client::{ManagedBy, OAuth2Client};
+    use axiam_server::cleanup::dcr_client_is_due_for_sweep;
+
+    let now = Utc::now();
+    let client = |created_days: i64, authorized_days: Option<i64>| OAuth2Client {
+        id: Uuid::new_v4(),
+        tenant_id: Uuid::new_v4(),
+        client_id: "c".into(),
+        client_secret_hash: String::new(),
+        name: "c".into(),
+        redirect_uris: Vec::new(),
+        grant_types: Vec::new(),
+        scopes: Vec::new(),
+        post_logout_redirect_uris: Vec::new(),
+        backchannel_logout_uri: None,
+        require_par: false,
+        profile: Default::default(),
+        token_endpoint_auth_method: Default::default(),
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        self_signed_tls_client_auth_thumbprints: Vec::new(),
+        tls_client_certificate_bound_access_tokens: false,
+        jwks: None,
+        jwks_uri: None,
+        dpop_bound_access_tokens: false,
+        dpop_require_nonce: false,
+        authn_request_params: Default::default(),
+        browser_sso: false,
+        allowed_resources: Vec::new(),
+        managed_by: ManagedBy::Dcr,
+        last_authorized_at: authorized_days.map(|d| now - chrono::Duration::days(d)),
+        created_at: now - chrono::Duration::days(created_days),
+        updated_at: now,
+    };
+
+    // Never authorized: `created_at` is the clock.
+    assert!(dcr_client_is_due_for_sweep(&client(31, None), 30, now));
+    assert!(!dcr_client_is_due_for_sweep(&client(29, None), 30, now));
+    // Authorized: `last_authorized_at` wins, however old the registration is.
+    assert!(!dcr_client_is_due_for_sweep(
+        &client(3650, Some(1)),
+        30,
+        now
+    ));
+    assert!(dcr_client_is_due_for_sweep(
+        &client(3650, Some(31)),
+        30,
+        now
+    ));
+    // Zero is never.
+    assert!(!dcr_client_is_due_for_sweep(&client(3650, None), 0, now));
+}

@@ -139,24 +139,156 @@ pub struct WebauthnPolicy {
     pub webauthn_user_verification: WebauthnUserVerification,
 }
 
-/// OpenID Connect surface controls (X7 G8, plan §4.6/§4.8).
+/// Whether, and on what terms, a client may register itself through
+/// RFC 7591 dynamic client registration (T21.4).
 ///
-/// Two settings that are not password rules, and are here because this is the
+/// Three values rather than a `bool` plus a second `bool`, because the middle
+/// one is the whole point: a deployment that wants MCP Inspector to register
+/// itself during a demonstration and a deployment that wants Claude Code to
+/// register itself in production want different things, and the difference is
+/// whether an administrator handed out a credential first.
+///
+/// [`Disabled`](Self::Disabled) is the serde default and the system default
+/// (I1). `POST /oauth2/register` exists on every deployment and answers `403`
+/// on every one that has not chosen otherwise — the path is there, the feature
+/// is not, and a scanner learns nothing from the difference because there is
+/// none to learn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DynamicRegistrationMode {
+    /// No self-registration. Every client is an administrator's decision,
+    /// which is what every AXIAM deployment does today.
+    #[default]
+    Disabled,
+    /// Self-registration, but only for a caller presenting a single-use
+    /// initial access token minted by `POST /oauth2-clients/registration-tokens`.
+    /// RFC 7591 §1.2's "protected" profile: the endpoint is open, the act is
+    /// not.
+    InitialAccessToken,
+    /// Self-registration by anybody who can reach the endpoint. RFC 7591 §1.2's
+    /// "open" profile, and the one MCP Inspector and the desktop clients
+    /// actually use. Refused while
+    /// [`OidcPolicy::external_client_allowed_resources`] is empty — see D3.
+    Anonymous,
+}
+
+impl DynamicRegistrationMode {
+    /// The stored/wire spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::InitialAccessToken => "initial_access_token",
+            Self::Anonymous => "anonymous",
+        }
+    }
+
+    /// Parse a stored/wire value. `None` for anything unrecognised, for the
+    /// reason `ClientProfile::from_wire` gives: a typo that degraded to a
+    /// permissive default would open an unauthenticated write endpoint.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "disabled" => Some(Self::Disabled),
+            "initial_access_token" => Some(Self::InitialAccessToken),
+            "anonymous" => Some(Self::Anonymous),
+            _ => None,
+        }
+    }
+
+    /// Whether the endpoint does anything at all on this policy.
+    pub const fn is_enabled(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// How permissive this mode is, for the tenant-override ordering.
+    ///
+    /// The only field of [`OidcPolicy`] added by T21.4 that *has* a
+    /// restrictiveness: `disabled` refuses everybody, `anonymous` refuses
+    /// nobody, and `initial_access_token` sits between them because the set of
+    /// callers it admits is a subset of `anonymous`'s and a superset of
+    /// `disabled`'s. A tenant may move down this ladder and never up.
+    const fn permissiveness(self) -> u8 {
+        match self {
+            Self::Disabled => 0,
+            Self::InitialAccessToken => 1,
+            Self::Anonymous => 2,
+        }
+    }
+}
+
+impl std::fmt::Display for DynamicRegistrationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether `tenant` admits no more callers than `org` does.
+pub const fn dynamic_registration_is_at_most(
+    tenant: DynamicRegistrationMode,
+    org: DynamicRegistrationMode,
+) -> bool {
+    tenant.permissiveness() <= org.permissiveness()
+}
+
+/// How many self-registered clients a tenant may hold when nothing says
+/// otherwise (T21.4).
+///
+/// A ceiling rather than no ceiling because `dynamic_registration: anonymous`
+/// is an unauthenticated write endpoint, and the only thing standing between
+/// it and an unbounded table is this number and the per-IP rate limit. Twenty
+/// is enough for every MCP client a tenant's people actually run and small
+/// enough that hitting it is a signal rather than a milestone.
+pub const DEFAULT_DCR_MAX_CLIENTS: u32 = 20;
+
+/// How long a self-registered client survives without being authorized, in
+/// days, when nothing says otherwise (T21.4).
+///
+/// Thirty days: long enough that a client somebody uses monthly is not swept
+/// out from under them, short enough that a registration made once by a tool
+/// nobody kept does not sit in the table forever. The sweeper only ever
+/// touches `managed_by: dcr` rows — see `OAuth2Client::managed_by`.
+pub const DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS: u32 = 30;
+
+/// OpenID Connect surface controls (X7 G8, plan §4.6/§4.8; T21.4).
+///
+/// Settings that are not password rules, here because this is the
 /// org-baseline-plus-tenant-override surface every other per-tenant control
-/// lives on. They are also the two settings in this model that are *not* of
-/// the same kind as each other, so it is worth saying which is which:
+/// lives on. They are not all of the same kind as each other, and which is
+/// which is the whole of what [`validate_tenant_override`] and
+/// [`clamp_overrides_to_org`] read, so it is set out rather than inferred.
 ///
-/// * [`Self::sensitive_scopes_enabled`] **is** ordered. Releasing personal
-///   data is the less-restrictive direction, so it is validated
-///   disable-only — the mirror image of `mfa_enforced` — and a tenant can turn
-///   its organization's decision off but never on.
-/// * [`Self::default_locale`] is **not** ordered, and no ordering is invented
-///   for it. A language is a presentation preference; there is no sense in
-///   which Italian is stricter than French. [`validate_tenant_override`]
-///   therefore does not check it and [`clamp_overrides_to_org`] never clears
-///   it. The model's rule is "a tenant may only be more restrictive", which
-///   binds every field that *has* a restrictiveness; a field that has none
-///   cannot violate it.
+/// **Ordered** — a tenant may be stricter than its organization and never more
+/// permissive:
+///
+/// * [`Self::sensitive_scopes_enabled`], validated **disable-only** — the
+///   mirror image of `mfa_enforced`, because releasing personal data is the
+///   less-restrictive direction, so a tenant can turn its organization's
+///   decision off but never on.
+/// * [`Self::dynamic_registration`], on the ladder
+///   `disabled` → `initial_access_token` → `anonymous`: a tenant may move down
+///   it and never up.
+/// * [`Self::dcr_max_clients`] and [`Self::dcr_unused_client_ttl_days`], on the
+///   ordinary `tenant <= org` rule — with the wrinkle that `0` on the second
+///   means *never sweep*, which is the longest window of all and is handled by
+///   [`dcr_ttl_strictness`].
+///
+/// **Not ordered**, therefore never validated against the baseline and never
+/// clamped:
+///
+/// * [`Self::default_locale`]. A language is a presentation preference; there
+///   is no sense in which Italian is stricter than French.
+/// * [`Self::dcr_allowed_scopes`], [`Self::dcr_allowed_redirect_hosts`] and
+///   [`Self::external_client_allowed_resources`]. Each names per-tenant
+///   resources — *this* tenant's MCP servers, *this* tenant's callback hosts —
+///   and there is no sense in which one such list is stricter than another. A
+///   subset rule would force an organization to enumerate every tenant's
+///   resource servers in its own baseline before any tenant could name one.
+///
+/// The model's rule is "a tenant may only be more restrictive", which binds
+/// every field that *has* a restrictiveness; a field that has none cannot
+/// violate it.
+///
+/// One cross-field interlock spans both groups and is checked on the resolved
+/// policy rather than on either input: see [`validate_dcr_policy`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct OidcPolicy {
     /// Whether `address` and `phone` may be registered on a client, requested
@@ -189,6 +321,169 @@ pub struct OidcPolicy {
     /// layering points inward.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_locale: Option<String>,
+    /// T21.4 — whether a client may register itself (RFC 7591), and on what
+    /// terms. `disabled` unless somebody says otherwise (I1).
+    #[serde(default)]
+    #[schema(value_type = String, example = "disabled")]
+    pub dynamic_registration: DynamicRegistrationMode,
+    /// T21.4 — the scopes a self-registered client may ask for. A `scope` a
+    /// registration names that is not on this list is
+    /// `invalid_client_metadata`; an empty list means a self-registered client
+    /// gets no scopes at all, which is the honest default for a tenant that
+    /// has turned registration on without deciding what it grants.
+    ///
+    /// May not contain `address` or `phone` — see this module's
+    /// [`sensitive_scope_in_dcr_list`].
+    #[serde(default)]
+    pub dcr_allowed_scopes: Vec<String>,
+    /// T21.4 — hosts a self-registered client's `redirect_uris` may point at,
+    /// as globs (`*.example.com`, or `*` for any). The loopback hosts
+    /// (`127.0.0.1`, `[::1]`, `localhost`) are always allowed whatever this
+    /// says, because RFC 8252 §7.3 is how every desktop MCP client receives
+    /// its callback and a tenant that forbade them would have turned
+    /// registration on for nobody.
+    #[serde(default)]
+    pub dcr_allowed_redirect_hosts: Vec<String>,
+    /// **D3** — the audiences an externally registered client may address.
+    ///
+    /// The single most important field on this policy, and the reason the
+    /// settings handler refuses `dynamic_registration: anonymous` while it is
+    /// empty. A client an unrelated party registered cannot declare its own
+    /// `allowed_resources`; it inherits this list verbatim, so what a stranger
+    /// can mint a token *for* is a decision the tenant took in advance rather
+    /// than one the registration request makes.
+    ///
+    /// Empty means an externally registered client can obtain only today's
+    /// `axiam:user` tokens — which AXIAM's own APIs accept. That is why the
+    /// interlock exists: the empty list is not a safe default for an *open*
+    /// registration endpoint, it is the most dangerous one.
+    ///
+    /// Shared with T5 (CIMD), which inherits the same list for the same
+    /// reason.
+    #[serde(default)]
+    pub external_client_allowed_resources: Vec<String>,
+    /// T21.4 — how many `managed_by: dcr` clients this tenant may hold. See
+    /// [`DEFAULT_DCR_MAX_CLIENTS`].
+    #[serde(default = "default_dcr_max_clients")]
+    #[schema(example = 20)]
+    pub dcr_max_clients: u32,
+    /// T21.4 — how long a `managed_by: dcr` client survives without being
+    /// authorized. See [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`]. `0` disables
+    /// the sweep for this tenant, which an operator who prunes out of band
+    /// may legitimately want.
+    #[serde(default = "default_dcr_unused_client_ttl_days")]
+    #[schema(example = 30)]
+    pub dcr_unused_client_ttl_days: u32,
+}
+
+/// See [`DEFAULT_DCR_MAX_CLIENTS`]. A function because `serde(default = ..)`
+/// takes one, and because a settings row written before T21.4 must decode to
+/// the shipped ceiling rather than to `0` — which would read as "no
+/// self-registered client may exist" on a tenant that never made a decision.
+fn default_dcr_max_clients() -> u32 {
+    DEFAULT_DCR_MAX_CLIENTS
+}
+
+/// See [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`], and
+/// [`default_dcr_max_clients`] for why this is a function.
+fn default_dcr_unused_client_ttl_days() -> u32 {
+    DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS
+}
+
+/// How strict a `dcr_unused_client_ttl_days` value is, as a number that
+/// increases with permissiveness (T21.4).
+///
+/// `0` means "never sweep", which is the **most** permissive value and not the
+/// least — an unused self-registered client kept forever is exactly what the
+/// TTL exists to prevent. A plain `tenant <= org` comparison would therefore
+/// have read `0` as the strictest possible override and let a tenant turn the
+/// sweeper off under an organization that had turned it on. Mapping `0` to the
+/// top of the range is what makes the ordinary comparison mean what it says.
+const fn dcr_ttl_strictness(days: u32) -> u32 {
+    if days == 0 { u32::MAX } else { days }
+}
+
+/// Everything wrong with a resolved dynamic-registration policy, as operator
+/// sentences (T21.4).
+///
+/// A function of the **effective** policy rather than of an input, because
+/// both ways in produce one: an organization baseline is a policy, and a
+/// tenant override merged onto its baseline is a policy. The interlock this
+/// enforces would be trivially bypassable otherwise — a tenant that set
+/// `anonymous` while inheriting an empty
+/// [`OidcPolicy::external_client_allowed_resources`] from its organization
+/// would pass a check that only looked at what the request carried.
+///
+/// # The D3 interlock
+///
+/// `anonymous` registration with an empty `external_client_allowed_resources`
+/// is refused. This is a security control, not a validation nicety. An
+/// externally registered client inherits that list as its
+/// `allowed_resources`, and an empty one leaves it able to obtain only
+/// `axiam:user` tokens — the audience **AXIAM's own APIs accept**. So the
+/// combination is not "a registration endpoint that grants nothing"; it is an
+/// unauthenticated endpoint that mints clients able to ask for tokens against
+/// AXIAM itself. The operator has to name the MCP servers this tenant fronts
+/// before strangers may register for them.
+///
+/// `initial_access_token` is deliberately **not** interlocked: a caller there
+/// presented a credential an administrator minted, so an administrator has
+/// already decided this registration should happen, and a deployment that
+/// wants exactly today's `axiam:user` behaviour for a hand-issued client is
+/// making a choice rather than leaving a door open.
+pub fn validate_dcr_policy(oidc: &OidcPolicy) -> Vec<String> {
+    let mut violations = Vec::new();
+
+    if oidc.dynamic_registration == DynamicRegistrationMode::Anonymous
+        && oidc.external_client_allowed_resources.is_empty()
+    {
+        violations.push(
+            "dynamic_registration: anonymous registration cannot be enabled while \
+             external_client_allowed_resources is empty (D3). A client registered by an \
+             unrelated party inherits that list as its allowed_resources, and an empty list \
+             leaves it able to obtain only the axiam:user tokens AXIAM's own APIs accept. \
+             Name the MCP servers this tenant fronts first"
+                .into(),
+        );
+    }
+
+    if let Some(scope) = sensitive_scope_in_dcr_list(&oidc.dcr_allowed_scopes) {
+        violations.push(format!(
+            "dcr_allowed_scopes: {scope} releases personal data under W7's per-client consent \
+             record and cannot be offered to a self-registered client, which already carries a \
+             forced consent record of its own (D4). Register a client for it through \
+             POST /oauth2-clients instead"
+        ));
+    }
+
+    violations
+}
+
+/// The GDPR-sensitive scope a `dcr_allowed_scopes` list names, if it names one
+/// (T21.4 amendment 1).
+///
+/// W7 gates `address` and `phone` behind a consent record per relying party,
+/// and D4 gates every externally registered client behind a consent record of
+/// its own. Both records live in the `oidc_scope_release:<client_id>`
+/// namespace, so a self-registered client holding `address` would need two of
+/// them — two consent screens for one authorization, or one record standing
+/// for the other while the UserInfo gate, which re-reads the sensitive record
+/// on every call, releases nothing anyway.
+///
+/// Refusing the combination is also the answer D3's reasoning points at on its
+/// own: a party that registered itself, unauthenticated, must not be able to
+/// *ask* for a postal address, whatever the tenant's sensitive-scope switch
+/// says.
+///
+/// The two names are written here rather than taken from
+/// `axiam_oauth2::sensitive::SENSITIVE_SCOPES` because that constant lives
+/// four layers out and this crate is layer 0. `axiam-oauth2`'s own test
+/// asserts the two lists agree.
+pub fn sensitive_scope_in_dcr_list(scopes: &[String]) -> Option<&str> {
+    scopes
+        .iter()
+        .find(|s| matches!(s.trim(), "address" | "phone"))
+        .map(String::as_str)
 }
 
 // -----------------------------------------------------------------------
@@ -299,6 +594,16 @@ pub struct TenantSettingsOverride {
     /// The tenant's fallback UI language. Not ordered, therefore not validated
     /// against the baseline and never clamped — see [`OidcPolicy`].
     pub default_locale: Option<String>,
+    // Dynamic client registration (T21.4). Only `dynamic_registration`,
+    // `dcr_max_clients` and `dcr_unused_client_ttl_days` are ordered; the
+    // three lists are not, for the reason stated on `OidcPolicy`.
+    #[schema(value_type = Option<String>)]
+    pub dynamic_registration: Option<DynamicRegistrationMode>,
+    pub dcr_allowed_scopes: Option<Vec<String>>,
+    pub dcr_allowed_redirect_hosts: Option<Vec<String>>,
+    pub external_client_allowed_resources: Option<Vec<String>>,
+    pub dcr_max_clients: Option<u32>,
+    pub dcr_unused_client_ttl_days: Option<u32>,
 }
 
 impl TenantSettingsOverride {
@@ -372,6 +677,24 @@ pub struct SetOrgSettings {
     #[serde(default)]
     #[schema(example = "it")]
     pub default_locale: Option<String>,
+    // Dynamic client registration (T21.4) — every one defaulted, so an API
+    // client written before this task lands on `disabled` with empty lists,
+    // which is what every deployment did before the endpoint existed (I1).
+    #[serde(default)]
+    #[schema(value_type = String, example = "disabled")]
+    pub dynamic_registration: DynamicRegistrationMode,
+    #[serde(default)]
+    pub dcr_allowed_scopes: Vec<String>,
+    #[serde(default)]
+    pub dcr_allowed_redirect_hosts: Vec<String>,
+    #[serde(default)]
+    pub external_client_allowed_resources: Vec<String>,
+    #[serde(default = "default_dcr_max_clients")]
+    #[schema(example = 20)]
+    pub dcr_max_clients: u32,
+    #[serde(default = "default_dcr_unused_client_ttl_days")]
+    #[schema(example = 30)]
+    pub dcr_unused_client_ttl_days: u32,
 }
 
 /// The erasure grace window a deployment gets when nothing says otherwise.
@@ -449,6 +772,17 @@ pub fn system_defaults() -> SetOrgSettings {
         // No tenant preference: the sign-in page falls back to the deployment
         // default, exactly as it did before W5 shipped the chain.
         default_locale: None,
+        // T21.4 — self-registration off, and every list empty. A deployment
+        // that has never thought about RFC 7591 registers no client it did not
+        // create, which is exactly what it did before the endpoint existed
+        // (I1). The two numbers carry their shipped values rather than zero so
+        // that turning the switch on is one decision rather than three.
+        dynamic_registration: DynamicRegistrationMode::Disabled,
+        dcr_allowed_scopes: Vec::new(),
+        dcr_allowed_redirect_hosts: Vec::new(),
+        external_client_allowed_resources: Vec::new(),
+        dcr_max_clients: DEFAULT_DCR_MAX_CLIENTS,
+        dcr_unused_client_ttl_days: DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
     }
 }
 
@@ -510,6 +844,21 @@ pub fn validate_org_settings(input: &SetOrgSettings) -> AxiamResult<()> {
             input.deletion_grace_period_days, MAX_DELETION_GRACE_PERIOD_DAYS,
         ));
     }
+
+    // T21.4 — the dynamic-registration interlocks, on the policy this input
+    // resolves to. An organization baseline reaches every tenant that has not
+    // overridden it, so a baseline naming `anonymous` with no resources is the
+    // same open door as a tenant one; see `validate_dcr_policy`.
+    violations.extend(validate_dcr_policy(&OidcPolicy {
+        sensitive_scopes_enabled: input.sensitive_scopes_enabled,
+        default_locale: input.default_locale.clone(),
+        dynamic_registration: input.dynamic_registration,
+        dcr_allowed_scopes: input.dcr_allowed_scopes.clone(),
+        dcr_allowed_redirect_hosts: input.dcr_allowed_redirect_hosts.clone(),
+        external_client_allowed_resources: input.external_client_allowed_resources.clone(),
+        dcr_max_clients: input.dcr_max_clients,
+        dcr_unused_client_ttl_days: input.dcr_unused_client_ttl_days,
+    }));
 
     if violations.is_empty() {
         Ok(())
@@ -637,6 +986,34 @@ pub fn effective_settings(
                 .default_locale
                 .clone()
                 .or_else(|| org.oidc.default_locale.clone()),
+            // T21.4. `unwrap_or` on each, exactly as every other field here:
+            // an absent override inherits. The three lists inherit *whole* —
+            // a tenant that sets `external_client_allowed_resources` replaces
+            // the organization's list rather than adding to it, which is the
+            // same whole-list semantics `allowed_resources` has on a client
+            // and for the same reason: a list assembled from two places is a
+            // list nobody can state from one request.
+            dynamic_registration: tenant_override
+                .dynamic_registration
+                .unwrap_or(org.oidc.dynamic_registration),
+            dcr_allowed_scopes: tenant_override
+                .dcr_allowed_scopes
+                .clone()
+                .unwrap_or_else(|| org.oidc.dcr_allowed_scopes.clone()),
+            dcr_allowed_redirect_hosts: tenant_override
+                .dcr_allowed_redirect_hosts
+                .clone()
+                .unwrap_or_else(|| org.oidc.dcr_allowed_redirect_hosts.clone()),
+            external_client_allowed_resources: tenant_override
+                .external_client_allowed_resources
+                .clone()
+                .unwrap_or_else(|| org.oidc.external_client_allowed_resources.clone()),
+            dcr_max_clients: tenant_override
+                .dcr_max_clients
+                .unwrap_or(org.oidc.dcr_max_clients),
+            dcr_unused_client_ttl_days: tenant_override
+                .dcr_unused_client_ttl_days
+                .unwrap_or(org.oidc.dcr_unused_client_ttl_days),
         },
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -844,6 +1221,33 @@ pub fn clamp_overrides_to_org(
     if !org.oidc.sensitive_scopes_enabled && overrides.sensitive_scopes_enabled == Some(true) {
         overrides.sensitive_scopes_enabled = None;
         cleared.push("sensitive_scopes_enabled");
+    }
+
+    // T21.4 — the three ordered dynamic-registration controls, on the same
+    // ordering `validate_tenant_override` uses. The three *lists* are
+    // deliberately absent for the reason `OidcPolicy` gives: they name
+    // per-tenant resources (this tenant's MCP servers, this tenant's callback
+    // hosts), and there is no sense in which one such list is stricter than
+    // another, so an organization baseline cannot overtake one.
+    if overrides
+        .dynamic_registration
+        .is_some_and(|m| !dynamic_registration_is_at_most(m, org.oidc.dynamic_registration))
+    {
+        overrides.dynamic_registration = None;
+        cleared.push("dynamic_registration");
+    }
+    if overrides
+        .dcr_max_clients
+        .is_some_and(|n| n > org.oidc.dcr_max_clients)
+    {
+        overrides.dcr_max_clients = None;
+        cleared.push("dcr_max_clients");
+    }
+    if overrides.dcr_unused_client_ttl_days.is_some_and(|d| {
+        dcr_ttl_strictness(d) > dcr_ttl_strictness(org.oidc.dcr_unused_client_ttl_days)
+    }) {
+        overrides.dcr_unused_client_ttl_days = None;
+        cleared.push("dcr_unused_client_ttl_days");
     }
 
     cleared
@@ -1087,6 +1491,48 @@ pub fn validate_tenant_override(
         );
     }
 
+    // --- T21.4 dynamic client registration: three ordered controls ---
+    //
+    // A tenant may refuse a registration mode its organization allows; it may
+    // not admit callers the organization does not. `dcr_max_clients` and
+    // `dcr_unused_client_ttl_days` run the ordinary "tenant <= org" way: a
+    // smaller ceiling and a shorter unused-client lifetime are both the
+    // stricter direction, and a tenant raising either would be granting itself
+    // more self-registered clients, for longer, than the organization allowed.
+    //
+    // The three lists are not checked, for the reason `OidcPolicy` states:
+    // `external_client_allowed_resources` names the MCP servers *this* tenant
+    // fronts, and a subset rule would force an organization to enumerate every
+    // tenant's resource servers in its own baseline before any tenant could
+    // name one.
+    if let Some(mode) = overrides.dynamic_registration
+        && !dynamic_registration_is_at_most(mode, org.oidc.dynamic_registration)
+    {
+        violations.push(format!(
+            "dynamic_registration: tenant value {mode} admits callers the org baseline {} \
+             does not",
+            org.oidc.dynamic_registration,
+        ));
+    }
+    if let Some(n) = overrides.dcr_max_clients
+        && n > org.oidc.dcr_max_clients
+    {
+        violations.push(format!(
+            "dcr_max_clients ({n}) must be <= org baseline ({})",
+            org.oidc.dcr_max_clients,
+        ));
+    }
+    if let Some(d) = overrides.dcr_unused_client_ttl_days
+        && dcr_ttl_strictness(d) > dcr_ttl_strictness(org.oidc.dcr_unused_client_ttl_days)
+    {
+        violations.push(format!(
+            "dcr_unused_client_ttl_days ({d}) keeps an unused self-registered client longer \
+             than the org baseline ({}); 0 means never sweep, which is the longest value of \
+             all",
+            org.oidc.dcr_unused_client_ttl_days,
+        ));
+    }
+
     if !violations.is_empty() {
         return Err(AxiamError::Validation {
             message: format!(
@@ -1117,6 +1563,13 @@ pub fn validate_tenant_override(
     if merged.privacy.deletion_grace_period_days == 0 {
         cross.push("effective deletion_grace_period_days must be >= 1".into());
     }
+
+    // T21.4 — the D3 interlock and the sensitive-scope refusal, on the policy
+    // the tenant will actually run under. Checked on the *merge* rather than
+    // on the override, because a tenant that names `anonymous` while
+    // inheriting an empty resource list from its organization is exactly the
+    // state the interlock exists to refuse.
+    cross.extend(validate_dcr_policy(&merged.oidc));
 
     if merged.lockout.max_lockout_duration_secs < merged.lockout.lockout_duration_secs {
         cross.push(format!(
@@ -1295,6 +1748,43 @@ pub fn diff_against_org(
         // limitation every other field here has and it is the safe direction:
         // a locale is a presentation preference, so inheriting one is never a
         // policy failure.
+        dynamic_registration: diff!(
+            dynamic_registration,
+            org.oidc.dynamic_registration,
+            tenant.oidc.dynamic_registration
+        ),
+        // The three list fields cannot use the `diff!` macro: it yields
+        // `Some($tenant_path)` by value, and a `Vec` behind a `&` has to be
+        // cloned rather than moved out of the borrow.
+        dcr_allowed_scopes: if tenant.oidc.dcr_allowed_scopes != org.oidc.dcr_allowed_scopes {
+            Some(tenant.oidc.dcr_allowed_scopes.clone())
+        } else {
+            None
+        },
+        dcr_allowed_redirect_hosts: if tenant.oidc.dcr_allowed_redirect_hosts
+            != org.oidc.dcr_allowed_redirect_hosts
+        {
+            Some(tenant.oidc.dcr_allowed_redirect_hosts.clone())
+        } else {
+            None
+        },
+        external_client_allowed_resources: if tenant.oidc.external_client_allowed_resources
+            != org.oidc.external_client_allowed_resources
+        {
+            Some(tenant.oidc.external_client_allowed_resources.clone())
+        } else {
+            None
+        },
+        dcr_max_clients: diff!(
+            dcr_max_clients,
+            org.oidc.dcr_max_clients,
+            tenant.oidc.dcr_max_clients
+        ),
+        dcr_unused_client_ttl_days: diff!(
+            dcr_unused_client_ttl_days,
+            org.oidc.dcr_unused_client_ttl_days,
+            tenant.oidc.dcr_unused_client_ttl_days
+        ),
         default_locale: if tenant.oidc.default_locale != org.oidc.default_locale {
             tenant.oidc.default_locale.clone()
         } else {
@@ -1358,6 +1848,12 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
         oidc: OidcPolicy {
             sensitive_scopes_enabled: input.sensitive_scopes_enabled,
             default_locale: input.default_locale.clone(),
+            dynamic_registration: input.dynamic_registration,
+            dcr_allowed_scopes: input.dcr_allowed_scopes.clone(),
+            dcr_allowed_redirect_hosts: input.dcr_allowed_redirect_hosts.clone(),
+            external_client_allowed_resources: input.external_client_allowed_resources.clone(),
+            dcr_max_clients: input.dcr_max_clients,
+            dcr_unused_client_ttl_days: input.dcr_unused_client_ttl_days,
         },
         created_at: now,
         updated_at: now,
@@ -1478,6 +1974,336 @@ mod tests {
         assert_eq!(round_tripped.opaque_mode, Some(OpaqueMode::Required));
         assert_eq!(round_tripped.opaque_suite, None);
         assert_eq!(round_tripped.opaque_ksf, None);
+    }
+
+    // -------------------------------------------------------------------
+    // T21.4 — dynamic client registration
+    // -------------------------------------------------------------------
+
+    /// I1, as the first assertion about this feature: a deployment that has
+    /// never heard of RFC 7591 registers no client it did not create.
+    #[test]
+    fn dynamic_registration_is_off_and_empty_by_default() {
+        let d = system_defaults();
+        assert_eq!(d.dynamic_registration, DynamicRegistrationMode::Disabled);
+        assert!(d.dcr_allowed_scopes.is_empty());
+        assert!(d.dcr_allowed_redirect_hosts.is_empty());
+        assert!(d.external_client_allowed_resources.is_empty());
+        // The two numbers carry their shipped values rather than zero, so
+        // turning the switch on is one decision rather than three.
+        assert_eq!(d.dcr_max_clients, DEFAULT_DCR_MAX_CLIENTS);
+        assert_eq!(
+            d.dcr_unused_client_ttl_days,
+            DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS
+        );
+        // And the default policy is internally consistent, so nothing an
+        // existing deployment writes starts failing validation.
+        assert!(validate_org_settings(&d).is_ok());
+    }
+
+    /// The D3 interlock, at the organization. This is a security control:
+    /// without it an open registration endpoint mints clients able to obtain
+    /// the `axiam:user` tokens AXIAM's own APIs accept.
+    #[test]
+    fn anonymous_registration_needs_at_least_one_audience() {
+        let refused = SetOrgSettings {
+            dynamic_registration: DynamicRegistrationMode::Anonymous,
+            external_client_allowed_resources: Vec::new(),
+            ..system_defaults()
+        };
+        let err = validate_org_settings(&refused)
+            .expect_err("anonymous with no audiences must be refused")
+            .to_string();
+        assert!(err.contains("D3"), "{err}");
+        assert!(err.contains("external_client_allowed_resources"), "{err}");
+
+        let accepted = SetOrgSettings {
+            external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+            ..refused
+        };
+        assert!(validate_org_settings(&accepted).is_ok());
+    }
+
+    /// The interlock binds `anonymous` and nothing else: in
+    /// `initial_access_token` mode an administrator has already decided this
+    /// registration should happen.
+    #[test]
+    fn the_interlock_does_not_bind_the_initial_access_token_mode() {
+        assert!(
+            validate_org_settings(&SetOrgSettings {
+                dynamic_registration: DynamicRegistrationMode::InitialAccessToken,
+                external_client_allowed_resources: Vec::new(),
+                ..system_defaults()
+            })
+            .is_ok()
+        );
+    }
+
+    /// The T21.4 amendment: a self-registered client cannot be offered a scope
+    /// W7 gates, so an end user never answers two consent screens for one
+    /// authorization.
+    #[test]
+    fn a_sensitive_scope_cannot_be_offered_to_self_registered_clients() {
+        for scope in ["address", "phone"] {
+            let err = validate_org_settings(&SetOrgSettings {
+                dcr_allowed_scopes: vec!["openid".into(), scope.into()],
+                ..system_defaults()
+            })
+            .expect_err("{scope} must be refused in dcr_allowed_scopes")
+            .to_string();
+            assert!(
+                err.contains(scope),
+                "the refusal must name the scope: {err}"
+            );
+        }
+        assert_eq!(
+            sensitive_scope_in_dcr_list(&["openid".into(), "profile".into()]),
+            None
+        );
+    }
+
+    /// The tenant-override ordering: a tenant may refuse what its organization
+    /// allows and may never admit callers the organization does not.
+    #[test]
+    fn a_tenant_may_narrow_the_registration_mode_but_never_widen_it() {
+        let org = settings_from_org_input(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &SetOrgSettings {
+                dynamic_registration: DynamicRegistrationMode::InitialAccessToken,
+                external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+                ..system_defaults()
+            },
+        );
+
+        for narrower in [
+            DynamicRegistrationMode::Disabled,
+            DynamicRegistrationMode::InitialAccessToken,
+        ] {
+            assert!(
+                validate_tenant_override(
+                    &org,
+                    &TenantSettingsOverride {
+                        dynamic_registration: Some(narrower),
+                        ..Default::default()
+                    }
+                )
+                .is_ok(),
+                "{narrower} is no more permissive than the baseline"
+            );
+        }
+
+        let err = validate_tenant_override(
+            &org,
+            &TenantSettingsOverride {
+                dynamic_registration: Some(DynamicRegistrationMode::Anonymous),
+                ..Default::default()
+            },
+        )
+        .expect_err("a tenant may not open registration wider than its organization")
+        .to_string();
+        assert!(err.contains("dynamic_registration"), "{err}");
+    }
+
+    /// `0` is the **most** permissive TTL, not the least. A plain
+    /// `tenant <= org` comparison would have read it as the strictest possible
+    /// override and let a tenant turn the sweeper off under an organization
+    /// that had turned it on.
+    #[test]
+    fn a_tenant_cannot_disable_the_sweeper_its_organization_enabled() {
+        let org = settings_from_org_input(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &SetOrgSettings {
+                dcr_unused_client_ttl_days: 30,
+                ..system_defaults()
+            },
+        );
+
+        // Shorter is stricter and allowed.
+        assert!(
+            validate_tenant_override(
+                &org,
+                &TenantSettingsOverride {
+                    dcr_unused_client_ttl_days: Some(7),
+                    ..Default::default()
+                }
+            )
+            .is_ok()
+        );
+        // Longer is not.
+        assert!(
+            validate_tenant_override(
+                &org,
+                &TenantSettingsOverride {
+                    dcr_unused_client_ttl_days: Some(90),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        // And neither is "never".
+        assert!(
+            validate_tenant_override(
+                &org,
+                &TenantSettingsOverride {
+                    dcr_unused_client_ttl_days: Some(0),
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+            "0 means never sweep, which is longer than any window"
+        );
+    }
+
+    /// `clamp_overrides_to_org` is what keeps an override honest **after** the
+    /// baseline moves. Every ordered T21.4 field is cleared; the three lists
+    /// are deliberately left alone, because they name per-tenant resources.
+    #[test]
+    fn a_baseline_that_tightens_clears_the_overtaken_registration_overrides() {
+        let org = settings_from_org_input(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &SetOrgSettings {
+                dynamic_registration: DynamicRegistrationMode::Disabled,
+                dcr_max_clients: 5,
+                dcr_unused_client_ttl_days: 10,
+                ..system_defaults()
+            },
+        );
+        let mut overrides = TenantSettingsOverride {
+            dynamic_registration: Some(DynamicRegistrationMode::Anonymous),
+            dcr_max_clients: Some(50),
+            dcr_unused_client_ttl_days: Some(0),
+            // Not ordered, so not cleared.
+            external_client_allowed_resources: Some(vec!["https://mcp.example.com".into()]),
+            ..Default::default()
+        };
+        let cleared = clamp_overrides_to_org(&org, &mut overrides);
+
+        for field in [
+            "dynamic_registration",
+            "dcr_max_clients",
+            "dcr_unused_client_ttl_days",
+        ] {
+            assert!(
+                cleared.contains(&field),
+                "{field} must be cleared: {cleared:?}"
+            );
+        }
+        assert_eq!(overrides.dynamic_registration, None);
+        assert_eq!(overrides.dcr_max_clients, None);
+        assert_eq!(overrides.dcr_unused_client_ttl_days, None);
+        assert!(
+            overrides.external_client_allowed_resources.is_some(),
+            "a list that names this tenant's own MCP servers is not something the \
+             organization baseline can overtake"
+        );
+    }
+
+    /// The interlock runs on the **merge**, so a tenant that names `anonymous`
+    /// while inheriting an empty resource list is refused — which is the state
+    /// a check that looked only at the request would have let through.
+    #[test]
+    fn the_interlock_is_checked_against_the_merged_policy() {
+        let org = settings_from_org_input(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &SetOrgSettings {
+                dynamic_registration: DynamicRegistrationMode::Anonymous,
+                external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+                ..system_defaults()
+            },
+        );
+
+        // The tenant keeps the mode and withdraws the audiences.
+        let err = validate_tenant_override(
+            &org,
+            &TenantSettingsOverride {
+                external_client_allowed_resources: Some(Vec::new()),
+                ..Default::default()
+            },
+        )
+        .expect_err("withdrawing the last audience under anonymous must be refused")
+        .to_string();
+        assert!(err.contains("D3"), "{err}");
+    }
+
+    /// A tenant override merges whole rather than adding to the baseline, and
+    /// an absent one inherits. Both halves, because a list that silently
+    /// unioned would be a list nobody could state from one request.
+    #[test]
+    fn a_registration_list_override_replaces_rather_than_adds() {
+        let org = settings_from_org_input(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &SetOrgSettings {
+                external_client_allowed_resources: vec!["https://a.example.com".into()],
+                dcr_allowed_scopes: vec!["openid".into()],
+                ..system_defaults()
+            },
+        );
+
+        let inherited = effective_settings(
+            &org,
+            &TenantSettingsOverride::default(),
+            Uuid::nil(),
+            Uuid::nil(),
+        );
+        assert_eq!(
+            inherited.oidc.external_client_allowed_resources,
+            vec!["https://a.example.com".to_string()]
+        );
+
+        let replaced = effective_settings(
+            &org,
+            &TenantSettingsOverride {
+                external_client_allowed_resources: Some(vec!["https://b.example.com".into()]),
+                ..Default::default()
+            },
+            Uuid::nil(),
+            Uuid::nil(),
+        );
+        assert_eq!(
+            replaced.oidc.external_client_allowed_resources,
+            vec!["https://b.example.com".to_string()],
+            "an override replaces the baseline list; it does not union with it"
+        );
+    }
+
+    /// The wire spellings, round-tripped. `from_wire` must refuse anything it
+    /// does not recognise: a typo that degraded to a permissive default would
+    /// open an unauthenticated write endpoint.
+    #[test]
+    fn the_registration_mode_round_trips_and_refuses_anything_else() {
+        for mode in [
+            DynamicRegistrationMode::Disabled,
+            DynamicRegistrationMode::InitialAccessToken,
+            DynamicRegistrationMode::Anonymous,
+        ] {
+            assert_eq!(
+                DynamicRegistrationMode::from_wire(mode.as_str()),
+                Some(mode)
+            );
+        }
+        // Whitespace and case are forgiven, as they are for every other
+        // stored enum in this file — a stored value is not user input.
+        assert_eq!(
+            DynamicRegistrationMode::from_wire("  Anonymous "),
+            Some(DynamicRegistrationMode::Anonymous)
+        );
+        // A value that names nothing resolves to nothing. `""` and `"enabled"`
+        // are the two an operator might plausibly type, and neither may become
+        // a mode: the permissive direction here opens an unauthenticated write
+        // endpoint.
+        for bad in ["", "open", "enabled", "true", "nonsense", "dcr"] {
+            assert_eq!(
+                DynamicRegistrationMode::from_wire(bad),
+                None,
+                "{bad:?} names no mode and must not be guessed at"
+            );
+        }
+        assert!(!DynamicRegistrationMode::default().is_enabled());
     }
 
     // --- validate_org_settings ---

@@ -4,8 +4,8 @@ use axiam_auth::client_secret;
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{
-    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client,
-    UpdateOAuth2Client,
+    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
+    OAuth2Client, UpdateOAuth2Client,
 };
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -97,6 +97,14 @@ struct OAuth2ClientRow {
     // such a client may name, which is nothing (see `SCHEMA_V63`).
     #[surreal(default)]
     allowed_resources: Vec<String>,
+    // T21.4. Rows written before schema v64 have neither. An absent
+    // `managed_by` is an administrator's client, which is what every such row
+    // is, and an absent `last_authorized_at` is a client the sweeper has never
+    // seen authorized — see `SCHEMA_V64`.
+    #[surreal(default)]
+    managed_by: Option<String>,
+    #[surreal(default)]
+    last_authorized_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -154,6 +162,14 @@ struct OAuth2ClientRowWithId {
     // such a client may name, which is nothing (see `SCHEMA_V63`).
     #[surreal(default)]
     allowed_resources: Vec<String>,
+    // T21.4. Rows written before schema v64 have neither. An absent
+    // `managed_by` is an administrator's client, which is what every such row
+    // is, and an absent `last_authorized_at` is a client the sweeper has never
+    // seen authorized — see `SCHEMA_V64`.
+    #[surreal(default)]
+    managed_by: Option<String>,
+    #[surreal(default)]
+    last_authorized_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -213,6 +229,31 @@ fn decode_authn_request_params(raw: Option<&str>) -> Result<AuthnRequestParamsMo
     }
 }
 
+/// Decode the stored `managed_by` discriminator (T21.4 / D5).
+///
+/// An **absent** value is a pre-v64 row and correctly reads as `Admin`: every
+/// client that existed before this migration was created by an administrator
+/// through `POST /oauth2-clients`, so that is the fact rather than a guess.
+///
+/// An **unrecognised** value fails closed, and this is the decoder where that
+/// matters most. `Admin` is the permissive answer in three independent places
+/// — it is the only provenance that may carry a FAPI profile (I5), the only
+/// one exempt from the forced consent hop (D4), and the only one the sweeper
+/// will not touch — so a rollback reading a `cimd` row it does not implement
+/// must refuse it rather than promote it to an administrator's client.
+fn decode_managed_by(raw: Option<&str>) -> Result<ManagedBy, DbError> {
+    match raw {
+        None => Ok(ManagedBy::default()),
+        Some(s) => ManagedBy::from_wire(s).ok_or_else(|| {
+            DbError::Migration(format!(
+                "oauth2_client.managed_by holds an unrecognised value {s:?}; this binary \
+                 cannot serve a client whose provenance it does not implement, because \
+                 every gate that reads this field treats 'admin' as the trusted answer"
+            ))
+        }),
+    }
+}
+
 impl OAuth2ClientRow {
     fn try_into_client(self, id: Uuid) -> Result<OAuth2Client, DbError> {
         let tenant_id = Uuid::parse_str(&self.tenant_id)
@@ -248,6 +289,8 @@ impl OAuth2ClientRow {
             )?,
             browser_sso: self.browser_sso,
             allowed_resources: self.allowed_resources,
+            managed_by: decode_managed_by(self.managed_by.as_deref())?,
+            last_authorized_at: self.last_authorized_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -291,6 +334,8 @@ impl OAuth2ClientRowWithId {
             )?,
             browser_sso: self.browser_sso,
             allowed_resources: self.allowed_resources,
+            managed_by: decode_managed_by(self.managed_by.as_deref())?,
+            last_authorized_at: self.last_authorized_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -364,7 +409,9 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                  dpop_require_nonce = $dpop_require_nonce, \
                  authn_request_params = $authn_request_params, \
                  browser_sso = $browser_sso, \
-                 allowed_resources = $allowed_resources",
+                 allowed_resources = $allowed_resources, \
+                 managed_by = $managed_by, \
+                 last_authorized_at = NONE",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str))
@@ -409,6 +456,11 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .bind(("authn_request_params", input.authn_request_params.as_str()))
             .bind(("browser_sso", input.browser_sso))
             .bind(("allowed_resources", input.allowed_resources))
+            // T21.4 / D5 — written from the create input, which the creating
+            // code path sets and no request body can reach. A registration
+            // arriving at `POST /oauth2/register` cannot claim `admin`,
+            // because the handler builds this value rather than echoing one.
+            .bind(("managed_by", input.managed_by.as_str().to_owned()))
             .await
             .map_err(DbError::from)?;
 
@@ -756,5 +808,85 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
 
         let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
         Ok(!rows.is_empty())
+    }
+
+    /// T21.4 — the `dcr_max_clients` ceiling, counted in the datastore.
+    ///
+    /// `managed_by = $managed_by` rather than `!= 'admin'`: the quota is per
+    /// mechanism, so a tenant that later runs both DCR and CIMD gets two
+    /// ceilings rather than one shared between them, and a CIMD shadow row
+    /// materialised by a legitimate client cannot exhaust the allowance for
+    /// self-registration.
+    async fn count_by_managed_by(
+        &self,
+        tenant_id: Uuid,
+        managed_by: ManagedBy,
+    ) -> AxiamResult<u64> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM oauth2_client \
+                 WHERE tenant_id = $tenant_id AND managed_by = $managed_by GROUP ALL",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("managed_by", managed_by.as_str().to_owned()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        // No rows at all is `GROUP ALL` over an empty set, which is zero
+        // clients rather than a missing answer.
+        Ok(rows.first().map_or(0, |r| r.total))
+    }
+
+    /// T21.4 — every row with this provenance, deployment-wide, for the
+    /// sweeper. See the trait for why it is not tenant-scoped.
+    async fn list_all_by_managed_by(
+        &self,
+        managed_by: ManagedBy,
+    ) -> AxiamResult<Vec<OAuth2Client>> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM oauth2_client \
+                 WHERE managed_by = $managed_by ORDER BY created_at ASC",
+            )
+            .bind(("managed_by", managed_by.as_str().to_owned()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<OAuth2ClientRowWithId> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.try_into_client())
+            .collect::<Result<Vec<_>, DbError>>()?)
+    }
+
+    /// T21.4 — stamp `last_authorized_at`.
+    ///
+    /// `AND managed_by != 'admin'` in the `WHERE` clause, not only in the
+    /// caller: the restriction is what keeps I1 exact, and a guard that lives
+    /// only at one call site is a guard the second call site will not have.
+    /// The statement is a no-op against an administrator's client whatever the
+    /// caller believed.
+    async fn touch_last_authorized(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> AxiamResult<()> {
+        self.db
+            .current()
+            .query(
+                "UPDATE oauth2_client SET last_authorized_at = $at \
+                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+                 AND managed_by != 'admin'",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_string()))
+            .bind(("at", at))
+            .await
+            .map_err(DbError::from)?;
+        Ok(())
     }
 }

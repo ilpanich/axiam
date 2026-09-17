@@ -558,6 +558,7 @@ async fn setup(keycloak_user_id: Uuid) -> Fixture {
             authn_request_params: AuthnRequestParamsMode::Ignore,
             browser_sso: false,
             allowed_resources: Vec::new(),
+            managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         })
         .await
         .unwrap();

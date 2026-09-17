@@ -101,6 +101,11 @@ pub struct CleanupTask<C: Connection> {
     /// truthful document over a table that grows forever. It is a size bound,
     /// not a correctness one.
     revoked_session_repo: Option<Arc<axiam_db::SurrealRevokedSessionRepository<C>>>,
+    // T21.4 — the two repositories the dynamic-registration sweep reads, plus
+    // the settings repository it resolves each row's tenant TTL from.
+    oauth2_client_repo: Arc<axiam_db::SurrealOAuth2ClientRepository<C>>,
+    oauth2_registration_token_repo: Arc<axiam_db::SurrealOAuth2RegistrationTokenRepository<C>>,
+    settings_repo: Arc<axiam_db::SurrealSettingsRepository<C>>,
     /// T-129: records each sweep's outcome for `GET /health/jobs`.
     job_health: crate::job_health::JobHealth,
     shutdown: watch::Receiver<bool>,
@@ -136,6 +141,135 @@ pub struct CleanupTask<C: Connection> {
 ///   UNIQUE index on `(tenant_id, user_id)` (plan 25-04) makes a retried
 ///   erasure's duplicate proof insert an idempotent rejection (D-03b), not
 ///   a silent overwrite.
+/// Whether a self-registered client is due to be swept (T21.4).
+///
+/// A free function, and public, for the reason [`run_erasure_pipeline`] is
+/// one: the loop that calls it is awkward to construct in a test, and the
+/// decision it makes — *delete somebody's client registration* — is the part
+/// worth testing directly.
+///
+/// The clock it reads is `last_authorized_at` when the client has ever been
+/// authorized and `created_at` when it has not. The second case is what the
+/// TTL is really for: a registration made once by a tool nobody kept.
+///
+/// `ttl_days == 0` is never due. Zero means "never sweep", which an operator
+/// who prunes out of band may legitimately want, and reading it as "sweep
+/// everything immediately" would delete a tenant's whole client table on the
+/// next tick.
+pub fn dcr_client_is_due_for_sweep(
+    client: &axiam_core::models::oauth2_client::OAuth2Client,
+    ttl_days: u32,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    if ttl_days == 0 {
+        return false;
+    }
+    let last_seen = client.last_authorized_at.unwrap_or(client.created_at);
+    now - last_seen > chrono::Duration::days(i64::from(ttl_days))
+}
+
+/// Delete `managed_by: dcr` clients that have not been authorized within their
+/// tenant's `dcr_unused_client_ttl_days` (T21.4).
+///
+/// # What it will not touch
+///
+/// Only `dcr`. Not `admin` — an administrator's client is never swept, however
+/// long it sits unused, because somebody decided it should exist and nothing
+/// here is entitled to reverse that. Not `cimd` either: a CIMD shadow row is a
+/// cache of a document the client publishes, so deleting it would be
+/// re-materialised on the next request and the TTL would mean nothing. The
+/// repository query filters on the value rather than on "not admin", so a
+/// fourth provenance added later is opted **in** by somebody writing it down.
+///
+/// # Per-tenant TTL, resolved per row
+///
+/// The window is a tenant setting, so each row's tenant is resolved and its
+/// effective settings read. Deployment-wide sweeps elsewhere in this file
+/// (audit retention) deliberately do **not** work this way, and the difference
+/// is who owns the decision: audit retention is a property of the datastore an
+/// operator is responsible for, where this is a property of the tenant's
+/// relationship with the clients it lets register.
+///
+/// The settings read is cached per tenant for the duration of one sweep —
+/// `dcr_max_clients` bounds the rows per tenant, so a hundred clients in one
+/// tenant is one read rather than a hundred.
+///
+/// A tenant whose settings cannot be read is skipped: the fail-closed
+/// direction for a sweep that **deletes** is to delete nothing.
+pub async fn sweep_unused_dcr_clients<CR, TR, SR>(
+    client_repo: &CR,
+    tenant_repo: &TR,
+    settings_repo: &SR,
+    now: chrono::DateTime<Utc>,
+) -> Result<u64, AxiamError>
+where
+    CR: axiam_core::repository::OAuth2ClientRepository,
+    TR: TenantRepository,
+    SR: axiam_core::repository::SettingsRepository,
+{
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::SettingsRepository;
+
+    let clients = client_repo.list_all_by_managed_by(ManagedBy::Dcr).await?;
+    if clients.is_empty() {
+        return Ok(0);
+    }
+
+    let mut ttl_by_tenant: std::collections::HashMap<Uuid, Option<u32>> =
+        std::collections::HashMap::new();
+    let mut removed = 0u64;
+
+    for client in clients {
+        let ttl_days = match ttl_by_tenant.get(&client.tenant_id) {
+            Some(cached) => *cached,
+            None => {
+                let resolved = match tenant_repo.get_by_id(client.tenant_id).await {
+                    Ok(tenant) => SettingsRepository::get_effective_settings(
+                        settings_repo,
+                        tenant.organization_id,
+                        client.tenant_id,
+                    )
+                    .await
+                    .ok()
+                    .map(|s| s.oidc.dcr_unused_client_ttl_days),
+                    Err(_) => None,
+                };
+                ttl_by_tenant.insert(client.tenant_id, resolved);
+                resolved
+            }
+        };
+        // `None` is an unreadable tenant or an unreadable settings row.
+        let Some(ttl_days) = ttl_days else {
+            continue;
+        };
+        if !dcr_client_is_due_for_sweep(&client, ttl_days, now) {
+            continue;
+        }
+
+        if let Err(e) = client_repo.delete(client.tenant_id, client.id).await {
+            // One failure must not stop the sweep: the next row may be a
+            // different tenant entirely.
+            tracing::warn!(
+                error = %e,
+                client_id = %client.client_id,
+                "could not delete an unused self-registered client"
+            );
+            continue;
+        }
+        removed += 1;
+        tracing::info!(
+            job = "dcr_unused_clients",
+            tenant_id = %client.tenant_id,
+            client_id = %client.client_id,
+            ttl_days,
+            "deleted a self-registered client that has not been authorized within its \
+             tenant's TTL"
+        );
+    }
+
+    Ok(removed)
+}
+
 pub async fn run_erasure_pipeline<A, EP, U>(
     audit_repo: &A,
     erasure_proof_repo: &EP,
@@ -246,6 +380,11 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         audit_retention: Option<chrono::Duration>,
         // T-39/T-143. `None` when the deployment does not run the feed.
         revoked_session_repo: Option<Arc<axiam_db::SurrealRevokedSessionRepository<C>>>,
+        // T21.4 — the two repositories the dynamic-registration sweep reads,
+        // plus the settings repository it resolves each row's tenant TTL from.
+        oauth2_client_repo: Arc<axiam_db::SurrealOAuth2ClientRepository<C>>,
+        oauth2_registration_token_repo: Arc<axiam_db::SurrealOAuth2RegistrationTokenRepository<C>>,
+        settings_repo: Arc<axiam_db::SurrealSettingsRepository<C>>,
         // T-129: passed in rather than constructed here so `main` can hand
         // the same handle to `AppState`, which is what lets the HTTP layer
         // read what this loop writes.
@@ -277,6 +416,9 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             interval,
             audit_retention,
             revoked_session_repo,
+            oauth2_client_repo,
+            oauth2_registration_token_repo,
+            settings_repo,
             job_health,
             shutdown,
         }
@@ -363,6 +505,30 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         self.sweep_revocation_feed().await,
                         tracing::Level::DEBUG,
                     );
+
+                    // T21.4 — delete self-registered clients nobody has used.
+                    // INFO rather than DEBUG, and for the audit sweep's
+                    // reason: this one destroys a registration an end user's
+                    // client depends on, and an operator debugging "my MCP
+                    // client suddenly has to register again" needs to find the
+                    // sweep in the log.
+                    Self::record(
+                        &self.job_health,
+                        "dcr_unused_clients",
+                        self.sweep_unused_dcr_clients().await,
+                        tracing::Level::INFO,
+                    );
+
+                    // T21.4 — drop expired initial access tokens, spent or
+                    // not. DEBUG: an expired token authorises nothing, and
+                    // the evidence a spent one carried is in the audit log,
+                    // which is append-only.
+                    Self::record(
+                        &self.job_health,
+                        "dcr_registration_tokens",
+                        self.sweep_expired_registration_tokens().await,
+                        tracing::Level::DEBUG,
+                    );
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && *self.shutdown.borrow() {
@@ -447,6 +613,67 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             return Ok(0);
         };
         repo.prune_expired(Utc::now()).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic client registration sweeps (T21.4)
+    // -----------------------------------------------------------------------
+
+    /// Delete `managed_by: dcr` clients that have not been authorized within
+    /// their tenant's `dcr_unused_client_ttl_days`.
+    ///
+    /// # What it will not touch
+    ///
+    /// Only `dcr`. Not `admin` — an administrator's client is never swept,
+    /// however long it sits unused, because somebody decided it should exist
+    /// and nothing here is entitled to reverse that. Not `cimd` either: a CIMD
+    /// shadow row is a cache of a document the client publishes, so deleting
+    /// it would be re-materialised on the next request and the TTL would mean
+    /// nothing. The repository query filters on the value rather than on
+    /// "not admin", so a fourth provenance added later is opted **in** by
+    /// somebody writing it down.
+    ///
+    /// # Which clock it reads
+    ///
+    /// `last_authorized_at` when the client has ever been authorized,
+    /// `created_at` when it has not. The second case is the one the TTL is
+    /// really for: a registration made by a tool somebody tried once and never
+    /// ran again.
+    ///
+    /// # Per-tenant TTL, resolved per row
+    ///
+    /// The window is a tenant setting, so each row's tenant is resolved and
+    /// its effective settings read. Deployment-wide sweeps elsewhere in this
+    /// file (audit retention) deliberately do **not** work this way, and the
+    /// difference is who owns the decision: audit retention is a property of
+    /// the datastore an operator is responsible for, where this is a property
+    /// of the tenant's relationship with the clients it lets register.
+    ///
+    /// The settings read is cached per tenant for the duration of one sweep —
+    /// `dcr_max_clients` bounds the rows per tenant, so a hundred clients in
+    /// one tenant is one read rather than a hundred.
+    ///
+    /// A tenant whose TTL is `0` is skipped: `0` means "never sweep", which an
+    /// operator who prunes out of band may legitimately want. A tenant whose
+    /// settings cannot be read is skipped too — the fail-closed direction for
+    /// a sweep that **deletes** is to delete nothing.
+    async fn sweep_unused_dcr_clients(&self) -> Result<u64, AxiamError> {
+        sweep_unused_dcr_clients(
+            self.oauth2_client_repo.as_ref(),
+            self.tenant_repo.as_ref(),
+            self.settings_repo.as_ref(),
+            Utc::now(),
+        )
+        .await
+    }
+
+    /// Drop initial access tokens that have expired, spent or not.
+    async fn sweep_expired_registration_tokens(&self) -> Result<u64, AxiamError> {
+        use axiam_core::repository::OAuth2RegistrationTokenRepository;
+
+        self.oauth2_registration_token_repo
+            .prune_expired(Utc::now())
+            .await
     }
 
     // -----------------------------------------------------------------------

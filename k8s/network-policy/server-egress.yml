@@ -31,6 +31,31 @@ spec:
         - protocol: TCP
           port: 5671
 
+    # K8S-F1: Allow server → Vault (secret provider, and CA key custody).
+    #
+    # Without this the server starts, reaches its first secret fetch and dies —
+    # on a Vault that is running, unsealed and healthy — because
+    # `default-deny-all` denies its egress. The 443 rule below does not cover
+    # it: Vault listens on 8200, and that rule excludes in-cluster addresses on
+    # purpose.
+    #
+    # Needed whenever `AXIAM__AUTH__SECRET_PROVIDER` is `vault`, which
+    # `k8s/server/configmap.yml` documents as the production choice, and
+    # whenever CA signing keys are held in Vault — `custodians_from_env`
+    # inherits `AXIAM__AUTH__VAULT_ADDR`/`_TOKEN` when no `AXIAM__PKI__VAULT_*`
+    # pair is set, so that is the same connection, not a second one.
+    #
+    # Harmless while the deployment uses the `file` provider: a permitted path
+    # nothing dials costs nothing. The receiver-side half is
+    # `allow-ingress-to-vault.yml` — both are required.
+    - to:
+        - podSelector:
+            matchLabels:
+              component: vault
+      ports:
+        - protocol: TCP
+          port: 8200
+
     # Allow server → external HTTPS (OIDC JWKS, SAML IdP, email APIs) (D-12)
     # Excludes private ranges to deny lateral movement on 443.
     # RFC1918 + CGN are excluded; cluster-specific CIDRs are also excluded below (D-07c).

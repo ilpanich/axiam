@@ -554,6 +554,16 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
         "/.well-known/openid-configuration",
         web::get().to(handlers::oauth2::discovery::<C>),
     );
+    // RFC 8414 §3 authorization-server metadata (T21.1). MCP clients probe this
+    // path before falling back to the OIDC one, and several client libraries
+    // never implement the fallback. Routed to the exact same handler — with the
+    // same optional `?tenant_id=` — rather than a copy, so the two documents
+    // can never drift apart (I1): there is one discovery document, served at
+    // two conventional paths.
+    cfg.route(
+        "/.well-known/oauth-authorization-server",
+        web::get().to(handlers::oauth2::discovery::<C>),
+    );
     // X2 / UMA 2.0 §2. Outside the `/oauth2` scope for the same reason as OIDC
     // discovery: the spec fixes the path at the host root.
     cfg.route(

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`GET /.well-known/oauth-authorization-server`** (T21.1) — the RFC 8414
+  authorization-server metadata path, serving the same document as
+  `/.well-known/openid-configuration` with the same optional `?tenant_id=`.
+  No flag: the alias is always on, since it publishes nothing the OIDC path
+  does not already publish. MCP clients probe this path first and several
+  client libraries never fall back to the OIDC one.
+
 - **Public clients (`token_endpoint_auth_method: "none"`).** An OAuth2 client
   can be registered with no credential at all (RFC 6749 §2.1) and completes the
   authorization-code flow with PKCE instead — the shape a desktop or CLI

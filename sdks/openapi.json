@@ -10,9 +10,41 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta15",
-    "x-axiam-spec-digest": "sha256:c78b3453c0bce89134370f392a524f189aeb392b1de2a88eb9e02319cd627aeb"
+    "x-axiam-spec-digest": "sha256:de38f318f85abf70b7f2f2072cde87402727338d8944a53e3dfefba3f8fcb884"
   },
   "paths": {
+    "/.well-known/oauth-authorization-server": {
+      "get": {
+        "tags": [
+          "oidc"
+        ],
+        "operationId": "discovery",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant whose OIDC capabilities the document should describe. Omit for the deployment-wide document.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenID Connect Discovery document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcDiscoveryDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/.well-known/openid-configuration": {
       "get": {
         "tags": [
@@ -10858,7 +10890,7 @@
           {
             "name": "resource",
             "in": "path",
-            "description": "T21.3 / RFC 8707 §2 — the target service this authorization is for.\n\nRead only on the inline branch: beside a `request_uri` the pushed copy\nwins, exactly as `state`, `nonce` and `dpop_jkt` do, so a browser\ncannot re-address somebody's pushed request at a resource of its own.\n\nA single value. RFC 8707 §2 permits the parameter to repeat, and D1 of\nthe MCP plan accepts one and refuses a second — see\n[`duplicate_resource_response`] for where a repeated parameter is\nanswered, which is before this struct is built.",
+            "description": "T21.3 / RFC 8707 §2 — the target service this authorization is for.\n\nRead only on the inline branch: beside a `request_uri` the pushed copy\nwins, exactly as `state`, `nonce` and `dpop_jkt` do, so a browser\ncannot re-address somebody's pushed request at a resource of its own.\n\nA single value. RFC 8707 §2 permits the parameter to repeat; AXIAM\nissues a token for one target service, so a second value is\n`invalid_target`. That refusal is answered before this struct is built\n— see `duplicate_resource_response` below — because the deserializer\nrejects a repeated key first.",
             "required": true,
             "schema": {
               "type": [

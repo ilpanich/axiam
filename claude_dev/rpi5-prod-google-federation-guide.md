@@ -1465,6 +1465,15 @@ In this order:
 - **You are running a released tag**, not `main`: `git describe --tags` names
   the release whose images you pulled (§1).
 - **`k8s/`, not `docker-compose.prod.yml`, is the supported production path** —
-  the compose file says so in its own header.
+  the compose file says so in its own header. There is now a Kubernetes runbook
+  for this same Pi, this same hostname and these same five providers:
+  [`docs/deployment/rpi5-k3s.md`](../docs/deployment/rpi5-k3s.md). It is the k3s
+  counterpart of this guide — §3 and §9–§12 link back here unchanged — and it
+  differs in four places worth knowing about even if you stay on Compose: the
+  backend leaf comes from an in-cluster CA rather than Let's Encrypt, cert-manager
+  replaces certbot, OpenTofu mints the credentials, and **§6.2 corrects the
+  derivation in §6.3 above** — ingress-nginx *replaces* `X-Forwarded-For` rather
+  than appending to it. The value stays `0`; the reasoning does not carry over.
+  §15 there covers migrating a Pi from this guide.
 - Consider putting the admin UI behind a VPN or Tailscale and exposing only what
   actually needs to be public. The API surface a login page needs is small.

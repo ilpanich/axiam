@@ -101,14 +101,34 @@ Key manifests:
 - [`k8s/surrealdb/statefulset.yml`](../../k8s/surrealdb/statefulset.yml),
   [`k8s/rabbitmq/statefulset.yml`](../../k8s/rabbitmq/statefulset.yml) — the
   stateful backing services.
-- [`k8s/ingress.yml`](../../k8s/ingress.yml) — routes `/api`, `/oauth2`, and
-  `/.well-known` to `axiam-server:8090`, and `/` to `axiam-frontend:80`.
-  Update the `host:` (`axiam.example.com`) and TLS `secretName` before
-  applying. gRPC (port 50051) is intentionally **not** exposed through
-  Ingress — it is reachable only in-cluster via the `axiam-server` ClusterIP
-  service.
+- [`k8s/ingress.yml`](../../k8s/ingress.yml) — **two** Ingress objects sharing
+  one host. `axiam-ingress-api` routes `/api`, `/oauth2` and `/.well-known` to
+  `axiam-server:8090` **over HTTPS, verified against the in-cluster CA**;
+  `axiam-ingress-app` routes `/` to `axiam-frontend:80` over HTTP. The split is
+  forced: `backend-protocol` and the `proxy-ssl-*` annotations are per-Ingress,
+  and the two upstreams do not speak the same protocol. Update the `host:`
+  (`axiam.example.com`, four occurrences) and the TLS `secretName` before
+  applying. gRPC (port 50051) is intentionally **not** exposed through Ingress —
+  it is reachable only in-cluster via the `axiam-server` ClusterIP service.
+
+- [`k8s/certs/`](../../k8s/certs/) — **cert-manager `Certificate` and `Issuer`
+  examples, and a hard requirement rather than an extra.** Three Secrets are
+  consumed by the manifests above and produced by nothing in `k8s/`:
+  `vault-tls` (Vault's listener), `rabbitmq-broker-tls` (the broker's leaf, plus
+  the `ca.crt` the server projects to verify it) and `axiam-server-tls` (the
+  backend's own TLS 1.3 listener). Without them the Vault and RabbitMQ pods stay
+  `ContainerCreating` and the server cannot terminate TLS. This directory is
+  deliberately **not** in `kustomization.yml`, because applying a cert-manager
+  custom resource to a cluster without its CRDs fails; apply it as a second
+  step. See [`k8s/certs/README.md`](../../k8s/certs/README.md) — it also covers
+  bringing your own CA instead, and the renewal semantics, which are not the
+  same for all four consumers.
+- **On a single Raspberry Pi 5 with k3s**, all of this is scripted:
+  [`docs/deployment/rpi5-k3s.md`](rpi5-k3s.md) and `infra/rpi5-k3s/`.
 
 Before applying, an operator must:
+0. Install cert-manager and apply [`k8s/certs/`](../../k8s/certs/) (or create
+   the three TLS Secrets some other way). Nothing below works without them.
 1. Populate [`k8s/server/secret.yml`](../../k8s/server/secret.yml) with real
    secret values (see **Required secrets & environment** below) — via a
    CI/CD secret store, `sealed-secrets`, or the `external-secrets` operator.
@@ -886,9 +906,10 @@ implicit rule = deny everything), then opens narrow, explicit exceptions:
 | [`allow-dns-egress.yml`](../../k8s/network-policy/allow-dns-egress.yml) | Allows every pod to resolve DNS (UDP/TCP 53) against `kube-system` — without this, in-cluster service-name resolution breaks. |
 | [`allow-ingress-to-frontend.yml`](../../k8s/network-policy/allow-ingress-to-frontend.yml) | Allows the ingress controller (namespace selector, default `ingress-nginx` — adjust to match your cluster) to reach `axiam-frontend:8080`. |
 | [`allow-ingress-to-server.yml`](../../k8s/network-policy/allow-ingress-to-server.yml) | Allows the ingress controller to reach `axiam-server:8090`. |
-| [`allow-ingress-to-rabbitmq.yml`](../../k8s/network-policy/allow-ingress-to-rabbitmq.yml) | Restricts RabbitMQ (`5672`) ingress to pods labeled `component: server` only. |
+| [`allow-ingress-to-rabbitmq.yml`](../../k8s/network-policy/allow-ingress-to-rabbitmq.yml) | Restricts RabbitMQ (`5671`) ingress to pods labeled `component: server` only. |
 | [`allow-ingress-to-surrealdb.yml`](../../k8s/network-policy/allow-ingress-to-surrealdb.yml) | Restricts SurrealDB (`8000`) ingress to pods labeled `component: server` only. |
-| [`server-egress.yml`](../../k8s/network-policy/server-egress.yml) | Allows `axiam-server` to reach SurrealDB (`8000`), RabbitMQ (`5672`), external HTTPS on `443` (OIDC JWKS, SAML IdPs, email APIs — RFC1918/CGN ranges and the cluster's pod/service CIDRs are explicitly excluded to prevent lateral movement), and an operator-configured SMTP relay on `25`/`465`/`587`. The SMTP rule ships pointed at a placeholder RFC 5737 TEST-NET-1 CIDR (`192.0.2.0/24`) — mail will not send until the operator replaces it with their real relay's CIDR; **never widen this to `0.0.0.0/0`**. |
+| [`allow-ingress-to-vault.yml`](../../k8s/network-policy/allow-ingress-to-vault.yml) | Restricts Vault (`8200`) ingress to pods labeled `component: server` only. Required whenever `AXIAM__AUTH__SECRET_PROVIDER` is `vault` or CA signing keys are held in Vault; `kubectl port-forward` bypasses the pod network and is unaffected. |
+| [`server-egress.yml`](../../k8s/network-policy/server-egress.yml) | Allows `axiam-server` to reach SurrealDB (`8000`), RabbitMQ (`5671`), Vault (`8200`), external HTTPS on `443` (OIDC JWKS, SAML IdPs, email APIs — RFC1918/CGN ranges and the cluster's pod/service CIDRs are explicitly excluded to prevent lateral movement), and an operator-configured SMTP relay on `25`/`465`/`587`. The SMTP rule ships pointed at a placeholder RFC 5737 TEST-NET-1 CIDR (`192.0.2.0/24`) — mail will not send until the operator replaces it with their real relay's CIDR; **never widen this to `0.0.0.0/0`**. |
 
 No pod in the `axiam` namespace can reach anything not explicitly listed
 above — this is intentional fail-closed network isolation, not an

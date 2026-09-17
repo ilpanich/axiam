@@ -34,6 +34,15 @@ spec:
       containers:
         - name: axiam-server
           # Pin a concrete tag, not :latest (KSV-0013). Update per release.
+          #
+          # K8S-F7: `OWNER` is a placeholder, and deliberately so — this base is
+          # meant to be usable by a fork publishing to its own registry. For the
+          # upstream project the real path is
+          # `ghcr.io/ilpanich/axiam/server`, the tag is the workspace version
+          # with the leading `v` stripped, and linux/amd64 + linux/arm64 ship
+          # under one manifest list. There are no moving tags — no `latest`, no
+          # `1.0` — so nothing drifts under you. Set both names in an overlay
+          # (`images:` in kustomization.yml); infra/rpi5-k3s/overlay does.
           image: ghcr.io/OWNER/server:1.0.0-beta15
           ports:
             - name: http
@@ -49,16 +58,26 @@ spec:
             limits:
               cpu: 1000m
               memory: 512Mi
+          # K8S-F5: `scheme: HTTPS`, because the listener these probe now
+          # terminates TLS (AXIAM__SERVER__TLS__ENABLED in the ConfigMap).
+          # Left at the default of HTTP, both probes fail forever, the pod never
+          # becomes Ready and the Deployment reports a rollout that will not
+          # finish — with a perfectly healthy server behind it.
+          #
+          # The kubelet does not verify the certificate on an HTTPS probe, by
+          # design, so there is no CA bundle to give it and no name to match.
           readinessProbe:
             httpGet:
               path: /ready
               port: 8090
+              scheme: HTTPS
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
               port: 8090
+              scheme: HTTPS
             initialDelaySeconds: 30
             periodSeconds: 30
           envFrom:
@@ -88,6 +107,14 @@ spec:
             # T-132: one file per logical secret name.
             - name: key-material
               mountPath: /etc/axiam/secrets
+              readOnly: true
+            # K8S-F5: the server's own TLS leaf. NOT mounted with `subPath` —
+            # the kubelet does not refresh a subPath mount, and this leaf is
+            # renewed in place by cert-manager and re-read by the server's
+            # hourly poll. A subPath here would serve an expired certificate
+            # from a process that believes it reloaded.
+            - name: server-tls
+              mountPath: /etc/axiam/server-tls
               readOnly: true
           securityContext:
             runAsNonRoot: true
@@ -121,4 +148,13 @@ spec:
         - name: key-material
           secret:
             secretName: axiam-key-material
+            defaultMode: 0440
+        # K8S-F5: issued by the in-cluster CA — see k8s/certs/. 0440 for the
+        # same reason as the key material above: this Secret holds a private
+        # key, and 0440 is readable by the container only because the pod sets
+        # `fsGroup: 65532`. Change one without the other and the server fails at
+        # startup with `failed to open TLS key file`.
+        - name: server-tls
+          secret:
+            secretName: axiam-server-tls
             defaultMode: 0440

@@ -1,0 +1,88 @@
+# D3: the public hostname, the ACME issuer and the Secret the leaf lands in.
+#
+# `axiam-iam.duckdns.org` — the same string as in configmap-env.yml. Four
+# occurrences here (two `spec.tls[].hosts`, two `spec.rules[].host`) and five
+# there; they all have to agree.
+#
+# The `cert-manager.io/cluster-issuer` annotation is what makes cert-manager
+# notice an Ingress at all: it watches for it, reads `spec.tls`, and creates a
+# `Certificate` named after the Secret. Nothing else has to be applied for the
+# public leaf — unlike the four internal ones, which are explicit `Certificate`
+# objects in k8s/certs/ because no Ingress describes them.
+#
+# `letsencrypt-http01` solves the challenge on port 80 through this same
+# controller, which works because it is a hostNetwork DaemonSet bound to the
+# node's 80 and the router forwards 80 to the Pi. USE `letsencrypt-staging`
+# FIRST: production rate limits are per registered domain and per week, and five
+# failed orders is a lockout longer than the afternoon you have to debug in.
+# `infra/rpi5-k3s/tofu/20-axiam` takes the issuer name from the `acme_issuer`
+# variable so switching is a tfvars edit, not a manifest edit.
+#
+# If your ISP blocks inbound 80, HTTP-01 cannot work and no annotation changes
+# that — docs/deployment/rpi5-k3s.md §4.4 has the DNS-01 options.
+#
+# Both objects get the same host and Secret; ingress-nginx merges them into one
+# server block. Only the API object carries the proxy-ssl-* annotations, which
+# is why the base splits them — see k8s/ingress.yml.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: axiam-ingress-api
+  namespace: axiam
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-http01"
+spec:
+  tls:
+    - hosts:
+        - axiam-iam.duckdns.org
+      secretName: axiam-public-tls
+  rules:
+    - host: axiam-iam.duckdns.org
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-server
+                port:
+                  number: 8090
+          - path: /oauth2
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-server
+                port:
+                  number: 8090
+          - path: /.well-known
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-server
+                port:
+                  number: 8090
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: axiam-ingress-app
+  namespace: axiam
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-http01"
+spec:
+  tls:
+    - hosts:
+        - axiam-iam.duckdns.org
+      secretName: axiam-public-tls
+  rules:
+    - host: axiam-iam.duckdns.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: axiam-frontend
+                port:
+                  number: 80

@@ -82,3 +82,32 @@ stories/
 frontend/vendor/opaque-wasm/
 crates/axiam-opaque-wasm/pkg/
 gsd-planning.tar.xz
+
+# ---------------------------------------------------------------------------
+# OpenTofu / Terraform — infra/rpi5-k3s/tofu
+# ---------------------------------------------------------------------------
+# The state holds the SurrealDB and RabbitMQ passwords and the server's Vault
+# token. `run.sh` keeps it outside the repository (~/axiam-infra/state/) so this
+# should never match anything — it is here so that a state file created by a
+# hand-run `tofu apply` inside the tree cannot be committed by accident.
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+crash.log
+crash.*.log
+# Real variable values: hostnames, the ACME email, the admin address. Not
+# secrets by policy — no secret is ever a tofu variable — but not the project's
+# to publish either. `example.tfvars` IS committed.
+*.auto.tfvars
+*.auto.tfvars.json
+!example.tfvars
+# .terraform.lock.hcl is deliberately NOT ignored: provider checksums belong in
+# version control. This tree does not ship one — see the note in run.sh — so
+# commit the one your first `run.sh <stage> init` generates.
+
+# Real identity-provider credentials for infra/rpi5-k3s/scripts/03-axiam-bootstrap.sh.
+# `providers.example.yml` IS committed; a filled-in copy never is.
+infra/rpi5-k3s/scripts/providers.yml
+infra/rpi5-k3s/scripts/providers.*.yml
+!infra/rpi5-k3s/scripts/providers.example.yml

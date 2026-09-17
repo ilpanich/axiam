@@ -34,6 +34,28 @@ data:
   vault.hcl: |
     ui = false
 
+    # K8S-F2: mlock off, which is what lets this pod admit under Pod Security
+    # Admission `restricted` (k8s/namespace.yml).
+    #
+    # Locking memory needs the IPC_LOCK capability, and `restricted` permits
+    # adding exactly one capability — NET_BIND_SERVICE. A pod asking for
+    # IPC_LOCK is rejected at admission with
+    # `violates PodSecurity "restricted": non-default capabilities`, so the
+    # choice is not "mlock or no mlock", it is "mlock or no Vault".
+    #
+    # HashiCorp recommends `disable_mlock = true` for integrated (Raft) storage
+    # specifically, and the reason applies exactly here: Raft's BoltDB file is
+    # mmap'd, so its pages are already on disk and locking the process's memory
+    # protects a copy of data that is durably written anyway. What mlock buys on
+    # a `file`- or Consul-backed Vault, it does not buy on this one.
+    #
+    # What you lose is the guarantee that decrypted secrets are never swapped
+    # out. Close that at the node instead, which is where it belongs on
+    # Kubernetes: the kubelet refuses to start with swap enabled unless it is
+    # explicitly told otherwise, so a conforming node has no swap to leak to.
+    # Do not re-enable this without also re-checking that.
+    disable_mlock = true
+
     storage "raft" {
       path    = "/vault/data"
       # Stable across restarts because the StatefulSet gives the pod a stable
@@ -86,12 +108,27 @@ kind: Service
 metadata:
   name: vault
   namespace: axiam
+  labels:
+    app: axiam
+    component: vault
 spec:
   # ClusterIP: Vault is reached by AXIAM inside the cluster and by an operator
   # through `kubectl port-forward`. It is never published.
   type: ClusterIP
+  # K8S-F11: `app: axiam` AND `component: vault`, the same two-label shape every
+  # other component here uses — not the bare `app: vault` this carried.
+  #
+  # `k8s/kustomization.yml` applies `commonLabels: {app: axiam}`, and kustomize
+  # rewrites Service selectors and workload `spec.selector` along with the
+  # labels. A selector of `app: vault` therefore did not survive the render: it
+  # became `app: axiam`, which matches EVERY pod in the namespace. This Service
+  # was load-balancing `https://vault.axiam.svc.cluster.local:8200` across the
+  # server, the frontend, SurrealDB and RabbitMQ, so the first secret fetch hit
+  # whichever one round-robin picked. Two labels are immune: kustomize
+  # overwrites `app` with the value it already has and leaves `component` alone.
   selector:
-    app: vault
+    app: axiam
+    component: vault
   ports:
     - name: https
       port: 8200
@@ -102,33 +139,77 @@ kind: StatefulSet
 metadata:
   name: vault
   namespace: axiam
+  labels:
+    app: axiam
+    component: vault
 spec:
   serviceName: vault
   replicas: 1
+  # K8S-F11: see the Service above. `commonLabels` collapsed this selector to
+  # `app: axiam` too, which made the StatefulSet's selector overlap every other
+  # workload in the namespace — an overlap the API server does not reject and
+  # the controller is not defined over.
+  #
+  # UPGRADING AN EXISTING DEPLOYMENT: `spec.selector` is immutable, so
+  # `kubectl apply` against a StatefulSet created from the previous revision
+  # fails with `Forbidden: updates to statefulset spec for fields other than
+  # 'replicas', 'ordinals', ... are forbidden`. Recreate it without touching
+  # the data:
+  #
+  #     kubectl -n axiam delete statefulset vault --cascade=orphan
+  #     kubectl apply -k k8s/
+  #
+  # The PVC and the running pod both survive `--cascade=orphan`; the new
+  # StatefulSet adopts the pod once its labels match.
   selector:
     matchLabels:
-      app: vault
+      app: axiam
+      component: vault
   template:
     metadata:
       labels:
-        app: vault
+        app: axiam
+        component: vault
     spec:
       serviceAccountName: vault
+      # Pod-level restricted security context (KSV-0118), mirroring the
+      # container context below. `runAsUser: 100` / `fsGroup: 1000` are the
+      # `vault` user and group in hashicorp/vault; fsGroup is what makes the
+      # Raft PVC at /vault/data writable under that non-root UID.
       securityContext:
         runAsNonRoot: true
         runAsUser: 100
+        # K8S-F2: named rather than inherited. Without it the container runs
+        # with the image's GID, which is 0 in hashicorp/vault — a root group on
+        # a pod whose whole point is custody of the OPAQUE setup key.
+        runAsGroup: 1000
         fsGroup: 1000
+        # K8S-F2: `restricted` REQUIRES a seccomp profile of `RuntimeDefault`
+        # or `Localhost`, at pod or container scope. This manifest set neither,
+        # so it was rejected at admission with
+        # `violates PodSecurity "restricted": seccompProfile`. Every other
+        # workload in this tree already sets it; Vault was the one that did not.
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: vault
           image: hashicorp/vault:1.20
           args: ["server", "-config=/vault/config/vault.hcl"]
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            runAsGroup: 1000
             allowPrivilegeEscalation: false
             capabilities:
+              # K8S-F2: drop ALL, add NOTHING. This used to add IPC_LOCK so
+              # Vault could lock its memory; `restricted` permits adding only
+              # NET_BIND_SERVICE, so that add was an admission rejection rather
+              # than a hardening measure. `disable_mlock = true` in the config
+              # above is the other half of this change — see the reasoning there.
               drop: ["ALL"]
-              # Vault locks its memory so secrets are never swapped to disk.
-              add: ["IPC_LOCK"]
             readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: VAULT_ADDR
               value: "https://127.0.0.1:8200"

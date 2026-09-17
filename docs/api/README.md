@@ -100,6 +100,25 @@ API. The `.proto` files themselves live in
 [`proto/axiam/v1/`](../../proto/axiam/v1/) and are the source of truth —
 `grpc.md` references them by path rather than duplicating their contents.
 
+## Discovery — OIDC and RFC 8414
+
+`GET /.well-known/openid-configuration` returns the OpenID Provider metadata
+document (OIDC Discovery 1.0 §3). The same document, built by the same
+handler, is also served at `GET /.well-known/oauth-authorization-server`
+(RFC 8414 §3) — a second conventional path some clients probe first and never
+fall back from, most notably [MCP](https://modelcontextprotocol.io) clients
+per the [MCP authorization
+specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization).
+Both accept the same optional `?tenant_id=` query parameter (X7 G8) and are
+otherwise identical: same JSON body, same `Cache-Control` and `Content-Type`
+headers, same tenant-scoped `sensitive_scopes_enabled` behaviour. There is one
+discovery document; the second path is an alias, not a second implementation.
+
+```bash
+curl -s https://axiam.example.com/.well-known/oauth-authorization-server
+curl -s "https://axiam.example.com/.well-known/oauth-authorization-server?tenant_id=$TENANT_ID"
+```
+
 ## OAuth2 public clients
 
 A client that cannot keep a secret — a desktop or CLI application, a

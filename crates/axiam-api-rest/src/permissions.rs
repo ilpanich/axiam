@@ -346,6 +346,9 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/health/jobs",
     // OIDC discovery and token endpoints
     "/.well-known/openid-configuration",
+    // RFC 8414 §3 authorization-server metadata (T21.1) — the same document as
+    // the OIDC discovery entry above, at the path MCP clients probe first.
+    "/.well-known/oauth-authorization-server",
     // UMA 2.0 discovery (X2). Public for the same reason as OIDC discovery:
     // §2 makes it the document a resource server fetches *before* it holds any
     // credential, and it carries only endpoint URLs the deployment publishes.

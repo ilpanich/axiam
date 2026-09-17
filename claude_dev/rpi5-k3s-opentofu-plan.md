@@ -1,10 +1,83 @@
 # AXIAM on a Raspberry Pi 5 with k3s and OpenTofu — feasibility answer and build plan
 
-**Status:** planning document, written 2026-09-16 against `1.0.0-beta15`
-(`main` at `7505ae5`). Nothing described here exists yet. It is the brief for
-a dedicated session that will create the scripts, the Kubernetes overlay, the
-OpenTofu configuration and the operator guide; §9 is the prompt that starts
-that session.
+> **EXECUTED 2026-09-16, at `1.0.0-beta15`.** All six waves of §6 were worked in
+> order on `claude/rpi5-k3s-opentofu-deploy-ge4ff4`, in eleven commits. Everything
+> §5 lists is delivered: five base fixes in `k8s/`, the certificate examples in
+> `k8s/certs/`, the Pi overlay, six host scripts, three OpenTofu stages with the
+> `run.sh` wrapper, and the operator guide at `docs/deployment/rpi5-k3s.md`.
+> Nothing in §5's "not deliverables" was touched — no Rust, no `Cargo.*`, no
+> website, no SDK contract, no Compose path.
+>
+> **Every §4 finding reproduced**, and one more was found that the plan did not
+> have. **K8S-F11:** `commonLabels: {app: axiam}` in `k8s/kustomization.yml`
+> collapsed the Vault `Service` and `StatefulSet` selectors from `app: vault` to
+> `app: axiam`, so the rendered Vault Service selected *every pod in the
+> namespace* and `https://vault.axiam.svc.cluster.local:8200` load-balanced
+> across the server, the frontend, SurrealDB and RabbitMQ. It also left no label
+> for a NetworkPolicy to name, which is what blocked F1. Fixed first, as its
+> prerequisite.
+>
+> **Four decisions were revised on evidence**, each recorded in the guide's
+> §Appendix decision table. **D2's mechanism was wrong**: ingress-nginx does not
+> append to `X-Forwarded-For` — at chart 4.15.1 `nginx.tmpl` emits
+> `proxy_set_header X-Forwarded-For $remote_addr` unless both
+> `use-forwarded-headers` and `compute-full-forwarded-for` are true, so it
+> *replaces*. `TRUSTED_HOPS` stays `0` and the property is stronger, but the Pi
+> guide §6.3's derivation does not carry over and §17 there now says so.
+> **D5 no longer generates the JWT keypair**: `vault_seed_payload.py` mints an
+> Ed25519 pair itself with openssl, without the key touching disk, so a
+> `tls_private_key` resource would have put a signing key in the state for no
+> benefit. **F10 sets no `AXIAM__PKI__VAULT_*` variables**: `vault_endpoint_from`
+> inherits the `AXIAM__AUTH__VAULT_*` trio and defaults custody to `vault`, and a
+> half-filled PKI pair is a startup failure — only `AXIAM__PKI__CA_KEY_STORE` is
+> set, to convert a silent `database` fallback into a loud one. **F2's
+> `runAsGroup` is not a `restricted` requirement**; it is set anyway, as
+> hardening, and the commit says which.
+>
+> **Two path changes**, both forced by kustomize and both recorded where they
+> are. The overlay is `infra/rpi5-k3s/overlay/`, not `k8s/overlays/rpi5-k3s/`:
+> kustomize refuses to build an overlay nested inside its own base root, and
+> `k8s/` *is* the base, so the alternative was splitting it into `k8s/base/` and
+> invalidating the `kubectl apply -k k8s/` command `docs/deployment/README.md`
+> documents. And the three `$patch: delete` documents that hand the credential
+> Secrets to OpenTofu are three files, because kustomize v5.4.2 segfaults on a
+> multi-document strategic-merge patch listed under `patches:`.
+>
+> **§7 was applied literally, and the honest half of it matters more than the
+> other.** Executed: both kustomize renders, `kubeconform -strict` (29/29 base,
+> 25/25 overlay, 9/9 cert-manager CRs against the upstream CRD schemas), a static
+> re-implementation of the Pod Security `restricted` field list that reproduces
+> the pre-fix F2 failure before confirming 5/5 after it, the rendered
+> overlay-vs-base diff reviewed line by line, `shellcheck -S warning` and
+> `bash -n` on every script, `tofu fmt -check -recursive`, `check-doc-links.sh`,
+> a Trivy config scan whose only HIGH is pre-existing (verified by scanning the
+> tree at `d20293a`), and — beyond what §7 asked — every pinned version fetched
+> from its real release and every pinned image's manifest list resolved to
+> confirm `linux/arm64`.
+>
+> **Not executed, and named at the top of the operator guide as well as here:**
+> `tofu init`, `tofu validate` and `tofu plan` never ran, because
+> `registry.opentofu.org` *and* `registry.terraform.io` both answer 403 through
+> the authoring environment's proxy and no provider could be downloaded. The HCL
+> has therefore been formatted but never semantically checked, and no
+> `.terraform.lock.hcl` is shipped — a hand-written one would fail `init` on a
+> checksum mismatch, which is worse than none. `helm template` could not run
+> either (`get.helm.sh` and the helm GitHub releases are both blocked), so stage
+> 10's chart values have never been rendered. Nothing was applied to a cluster;
+> the scripts' guards were exercised but their happy paths were not; and the
+> two-address `TRUSTED_HOPS` check needs two public networks. **Plan every stage
+> on the Pi before applying it.**
+>
+> Two code observations were recorded rather than fixed, per §8's scope rule:
+> the base Deployment's inline `AXIAM__AUTH__SECRET_PROVIDER: "file"` silently
+> overrides the ConfigMap's documented `vault` (noted in the F1 commit and the
+> overlay), and Trivy's inline `#trivy:ignore:` comments do not apply to
+> Kubernetes YAML in 0.70.0 — which is why the Vault-provider patch is JSON 6902
+> rather than a suppression.
+
+**Status:** ~~planning document~~ **EXECUTED**, written 2026-09-16 against
+`1.0.0-beta15` (`main` at `7505ae5`), executed the same day. §9 is the prompt
+that started the executing session.
 **Audience:** first the maintainer, who asked two questions and gets them
 answered in §0; then the executing session, which must read every section.
 **Companion documents:**

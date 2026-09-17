@@ -1,0 +1,42 @@
+# D7 / K8S-F6: one replica of everything, and no autoscaler.
+#
+# Two copies of the server on one node buys nothing — there is no second node to
+# survive, and both die with the Pi — and costs about 512 MiB of the 8 GB the
+# whole stack has to fit in, next to k3s's own ~600 MB, ingress-nginx, three
+# pods of cert-manager, Vault, RabbitMQ and SurrealDB.
+#
+# The HPA is DELETED rather than retuned, and that is the load-bearing half.
+# k3s bundles metrics-server, so the shipped HPA would actually function here,
+# and at `minReplicas: 2` its first reconcile would scale the Deployment back up
+# and silently undo the patch above. A `replicas: 1` patch next to a live HPA is
+# a setting that reverts.
+#
+# It also makes an assumption elsewhere true by construction: the
+# session-validation cache is process-local and every session-deleting path
+# invalidates it in the same call, so on ONE replica a logout takes effect
+# immediately. Across replicas it would not — that is the cache's documented
+# window (docs/deployment/README.md, "Session-validation cache"), and this Pi
+# does not have it.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: axiam-server
+  namespace: axiam
+spec:
+  replicas: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: axiam-frontend
+  namespace: axiam
+spec:
+  replicas: 1
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: axiam-server
+  namespace: axiam
+$patch: delete

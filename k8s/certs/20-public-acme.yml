@@ -1,0 +1,56 @@
+# K8S-F4: an example ACME issuer for the PUBLIC leaf — the certificate a browser
+# sees, which `k8s/ingress.yml` names in `spec.tls[].secretName`.
+#
+# A different CA from `axiam-ca` (00-private-ca.yml), deliberately: a public CA
+# will not issue for `vault.axiam.svc.cluster.local`, and a private CA is not in
+# any browser's trust store. See README.md in this directory.
+#
+# NOT part of k8s/kustomization.yml — see README.md.
+#
+# EDIT BEFORE APPLYING: `email` below is a placeholder. Let's Encrypt sends
+# expiry warnings there, and an account registered with an address nobody reads
+# is the reason most expired-certificate incidents are discovered by a user.
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-http01
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: REPLACE-ME@example.com
+    privateKeySecretRef:
+      # The ACME ACCOUNT key, not a certificate. Back it up: losing it means
+      # re-registering, which resets your rate-limit history with Let's Encrypt.
+      name: letsencrypt-http01-account-key
+    solvers:
+      - http01:
+          ingress:
+            # Requires a controller of this class actually listening on the
+            # node's port 80. On the single-node k3s topology in
+            # docs/deployment/rpi5-k3s.md that is ingress-nginx in hostNetwork
+            # mode; on a cloud cluster it is whatever answers your public 80.
+            #
+            # If your ISP blocks inbound 80, HTTP-01 cannot work at all and no
+            # amount of configuration here changes that — use a DNS-01 solver.
+            ingressClassName: nginx
+---
+# The staging issuer. Use it first, every time, on a new deployment: Let's
+# Encrypt's production rate limits are per registered domain and per week, and
+# five failed orders is a lockout that outlasts the afternoon you have to debug
+# in. Staging issues an untrusted certificate from the same code path, which is
+# exactly what you want to be wrong about.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: REPLACE-ME@example.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx

@@ -1,0 +1,23 @@
+{
+  "name": "b7-mcp-server",
+  "private": true,
+  "version": "0.1.0",
+  "description": "B7 example: an MCP server on the official streamable-HTTP transport, guarded by an AXIAM-audience-checking resource-server middleware, fronted by a bootstrapped AXIAM (docs/api/mcp.md).",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^5.2.1",
+    "jose": "^6.2.9",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.9.0",
+    "typescript": "^6.0.3"
+  }
+}

@@ -270,6 +270,16 @@ jobs:
       # modes it drives, so no separate build step is needed here — the
       # smoke-test step below reuses the node_modules it installs.
       - name: b7-mcp-server (walkthrough — MCP authorization handshake, all three registration modes)
+        # AXIAM resolves the CIMD `client_id` by fetching it itself, from
+        # inside the `axiam-e2e-server` container, while the publisher this
+        # script starts runs on the runner. `127.0.0.1` there is the
+        # container's own loopback and the fetch fails, surfacing as an
+        # authorization that answers 401 for an unknown client. Same boundary
+        # and same remedy as b5's back-channel logout: name the host, and let
+        # `docker-compose.host-gateway.override.yml` — already layered above
+        # for b5 — map it to the runner.
+        env:
+          B7_CIMD_PUBLISHER_HOST: host.docker.internal
         run: ./examples/b7-mcp-server/walkthrough.sh
 
       - name: b7-mcp-server (smoke test — the built server runs end to end)

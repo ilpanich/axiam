@@ -28,6 +28,23 @@ ADMIN_PASSWORD="${E2E_TENANT_ADMIN_PASSWORD:-${E2E_ADMIN_PASSWORD:-Test@Admin123
 MCP_PORT="${MCP_PORT:-8091}"
 MCP_HOST="127.0.0.1"
 MCP_RESOURCE="http://${MCP_HOST}:${MCP_PORT}/mcp"
+
+# The host AXIAM uses to reach this example's CIMD publisher.
+#
+# The publisher is served by this script, on the host. AXIAM resolves the
+# URL-shaped `client_id` and fetches it *itself*, and in the e2e stack AXIAM
+# is a container: `127.0.0.1` there is the container's own loopback, nothing
+# listens on the publisher port inside it, and the fetch fails — the symptom
+# is an authorization that answers 401 for an unknown client, with the reason
+# visible only in AXIAM's log. This is the same boundary
+# `examples/b5-rp-logout-app` crosses for back-channel logout, and it is
+# solved the same way: `.github/workflows/examples-smoke.yml` sets this to
+# `host.docker.internal` and layers b5's `docker-compose.host-gateway.override.yml`,
+# which maps that name to the runner host.
+#
+# Default: `127.0.0.1`, which is correct whenever AXIAM and this script share
+# a network namespace (`just run`, or any non-containerised local repro).
+CIMD_PUBLISHER_HOST="${B7_CIMD_PUBLISHER_HOST:-127.0.0.1}"
 MODE="${MODE:-all}" # pre-registered | dcr | cimd | all
 
 RUN_ID="$(date +%s)-$$"
@@ -157,13 +174,13 @@ fi
 
 log "raising the org baseline: anonymous registration, CIMD over plaintext loopback"
 ORG_BASELINE=$(api_expect GET "${ADMIN_JAR}" "" "/api/v1/organizations/${ORG_ID}/settings" "" 200 \
-  | jq -c --arg res "${MCP_RESOURCE}" '[.password, .mfa, .lockout, .token, .email, .certificate, .notification,
+  | jq -c --arg res "${MCP_RESOURCE}" --arg pubhost "${CIMD_PUBLISHER_HOST}" '[.password, .mfa, .lockout, .token, .email, .certificate, .notification,
             .opaque, .privacy, .webauthn, .oidc] | add
            | .dynamic_registration = "anonymous"
            | .external_client_allowed_resources = [$res]
            | .cimd.enabled = true
            | .cimd.allow_http = true
-           | .cimd.trusted_client_id_domains = ["127.0.0.1"]')
+           | .cimd.trusted_client_id_domains = [$pubhost]')
 api_expect PUT "${ADMIN_JAR}" "${ADMIN_CSRF}" "/api/v1/organizations/${ORG_ID}/settings" \
   "${ORG_BASELINE}" 200 >/dev/null
 ok "org baseline permits what the tenant settings below ask for"
@@ -409,7 +426,7 @@ run_cimd() {
   local pub_port=8099
   cat >"${PUBLISHER_DIR}/client.json" <<JSON
 {
-  "client_id": "http://127.0.0.1:${pub_port}/client.json",
+  "client_id": "http://${CIMD_PUBLISHER_HOST}:${pub_port}/client.json",
   "client_name": "Example Editor",
   "redirect_uris": ["http://127.0.0.1/callback"],
   "grant_types": ["authorization_code", "refresh_token"],
@@ -418,7 +435,14 @@ run_cimd() {
   "scope": "openid profile mcp:tools"
 }
 JSON
-  python3 -m http.server "${pub_port}" --bind 127.0.0.1 --directory "${PUBLISHER_DIR}" \
+  # Bind only as widely as the configured publisher host requires. Left at the
+  # default, AXIAM shares this network namespace and loopback is enough. Once
+  # the host is overridden, AXIAM is dialling in from a container over the
+  # bridge, and a loopback-only listener would refuse it — the same 401 the
+  # container's own `127.0.0.1` produces, for a different reason.
+  local pub_bind=127.0.0.1
+  [ "${CIMD_PUBLISHER_HOST}" = "127.0.0.1" ] || pub_bind=0.0.0.0
+  python3 -m http.server "${pub_port}" --bind "${pub_bind}" --directory "${PUBLISHER_DIR}" \
     >/dev/null 2>&1 &
   PUBLISHER_PID=$!
   for i in $(seq 1 10); do
@@ -428,7 +452,7 @@ JSON
     [ "${i}" = "10" ] && fail "the throwaway CIMD publisher never came up"
   done
 
-  local client_id="http://127.0.0.1:${pub_port}/client.json"
+  local client_id="http://${CIMD_PUBLISHER_HOST}:${pub_port}/client.json"
 
   log "I1 — a URL-shaped client_id is an unknown client while cimd is disabled"
   local url_status opaque_status
@@ -447,7 +471,7 @@ JSON
   ok "I1 holds: both refused with ${url_status}"
 
   api_expect PUT "${ADMIN_JAR}" "${ADMIN_CSRF}" "/api/v1/tenants/${TENANT_ID}/settings" \
-    "{\"dcr_allowed_scopes\":[\"openid\",\"profile\",\"mcp:tools\"],\"external_client_allowed_resources\":[\"${MCP_RESOURCE}\"],\"cimd\":{\"enabled\":true,\"allow_http\":true,\"trusted_client_id_domains\":[\"127.0.0.1\"],\"trusted_redirect_domains\":[],\"restrict_same_domain\":false,\"confidential_only\":false}}" \
+    "{\"dcr_allowed_scopes\":[\"openid\",\"profile\",\"mcp:tools\"],\"external_client_allowed_resources\":[\"${MCP_RESOURCE}\"],\"cimd\":{\"enabled\":true,\"allow_http\":true,\"trusted_client_id_domains\":[\"${CIMD_PUBLISHER_HOST}\"],\"trusted_redirect_domains\":[],\"restrict_same_domain\":false,\"confidential_only\":false}}" \
     200 >/dev/null
 
   local port=51705 verifier challenge result status location

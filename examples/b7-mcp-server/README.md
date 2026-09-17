@@ -72,6 +72,19 @@ AXIAM_URL=http://localhost:8090 MODE=dcr ./walkthrough.sh # one mode
 AXIAM_URL=http://localhost:8090 ./smoke-test.sh
 ```
 
+If AXIAM itself runs in a container while you run these scripts on the host —
+the arrangement `docker/docker-compose.e2e.yml` and CI use — set
+`B7_CIMD_PUBLISHER_HOST=host.docker.internal`. The CIMD leg is the one step
+where AXIAM reaches back out to something this script serves: it resolves the
+URL-shaped `client_id` by fetching it, and inside the container `127.0.0.1` is
+the container, not you. The symptom is an authorization that answers `401` for
+an unknown client, with the cause visible only in AXIAM's log. This is the same
+boundary [`b5-rp-logout-app`](../b5-rp-logout-app/README.md) crosses for
+back-channel logout; on Linux it also needs that example's
+`docker-compose.host-gateway.override.yml`, which maps the name to your host.
+The default, `127.0.0.1`, is right whenever AXIAM shares your network namespace
+(`just run`, or any non-containerised local repro).
+
 Both scripts build and start the MCP server themselves (on `MCP_PORT`,
 default `8091` / `8092`) and tear it down on exit; neither needs `npm start`
 run separately.

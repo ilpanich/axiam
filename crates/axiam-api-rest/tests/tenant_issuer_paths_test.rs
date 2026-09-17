@@ -135,6 +135,9 @@ fn public_client(tenant_id: Uuid, name: &str, backchannel: Option<String>) -> Cr
         authn_request_params: AuthnRequestParamsMode::Ignore,
         browser_sso: false,
         allowed_resources: Vec::new(),
+        // T21.4 / D5 — an administrator-created client, which is what these
+        // fixtures stand in for.
+        managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
     }
 }
 
@@ -794,18 +797,26 @@ async fn every_endpoint_the_tenant_document_advertises_is_routed() {
         test::read_body(get(&app, &format!("/t/{t}/.well-known/openid-configuration")).await).await;
     let doc: Value = serde_json::from_slice(&body).unwrap();
 
-    for endpoint in [
-        "authorization_endpoint",
-        "token_endpoint",
-        "userinfo_endpoint",
-        "jwks_uri",
-        "revocation_endpoint",
-        "introspection_endpoint",
-        "device_authorization_endpoint",
-        "pushed_authorization_request_endpoint",
-        "end_session_endpoint",
-    ] {
-        let url = doc[endpoint].as_str().unwrap();
+    // Every URL-valued member the document actually carries, rather than a list
+    // written down here: a conditional member added later — T21.4's
+    // `registration_endpoint` is the first — would otherwise be re-based by
+    // this feature and checked by nobody.
+    let endpoints: Vec<(String, String)> = doc
+        .as_object()
+        .expect("the discovery document is a JSON object")
+        .iter()
+        .filter(|(k, v)| {
+            (k.ends_with("_endpoint") || *k == "jwks_uri")
+                && v.as_str().is_some_and(|u| u.starts_with(ROOT_ISSUER))
+        })
+        .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned()))
+        .collect();
+    assert!(
+        endpoints.len() >= 9,
+        "the tenant document must advertise every endpoint; got {endpoints:?}"
+    );
+
+    for (endpoint, url) in endpoints {
         let path = url.strip_prefix(ROOT_ISSUER).unwrap();
         // GET on every one of them: some answer 405 or 400, none may answer
         // 404, which is the only status that means "not routed".

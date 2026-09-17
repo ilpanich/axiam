@@ -77,6 +77,31 @@ fn reject_unshipped_locale(tag: Option<&str>) -> Result<(), AxiamApiError> {
     }))
 }
 
+/// T21.4 / D3 — normalise `external_client_allowed_resources` before it is
+/// stored, and refuse an entry RFC 8707 §2 does not admit.
+///
+/// The same treatment `validate_allowed_resources` gives a client's own
+/// `allowed_resources` next door, and for the same two reasons: the read-back
+/// then shows the strings the request path will actually compare, and a
+/// duplicate differing only in case or default port shows up as a duplicate.
+///
+/// Here there is a third reason, and it is the one that matters. This list is
+/// copied verbatim onto every client that registers itself, and a malformed
+/// entry copied onto a client is an entry `resource::is_allowed` skips — so a
+/// tenant that typed one would have an allow-list with a hole in it that
+/// nothing announced. Refusing at the settings page is where the operator can
+/// act on it.
+fn normalise_external_resources(entries: &[String]) -> Result<Vec<String>, AxiamApiError> {
+    axiam_oauth2::resource::normalise_registration(entries).map_err(|(entry, err)| {
+        AxiamApiError(AxiamError::Validation {
+            message: format!(
+                "invalid external_client_allowed_resources entry {entry:?}: {}",
+                err.message()
+            ),
+        })
+    })
+}
+
 /// Mint a tenant's OPAQUE key material now that OPAQUE is switched on.
 ///
 /// `opaque_server_setup` was created lazily, on the first `/auth/opaque/*`
@@ -340,7 +365,14 @@ pub async fn set_org_settings<C: Connection + Clone>(
         ));
     }
 
-    let input = body.into_inner();
+    let mut input = body.into_inner();
+    // T21.4 — normalised **before** `validate_org_settings`, so the interlock
+    // it runs (`validate_dcr_policy`) sees the list that will be stored rather
+    // than the spelling that was typed. An entry that does not normalise is
+    // refused here.
+    input.external_client_allowed_resources =
+        normalise_external_resources(&input.external_client_allowed_resources)?;
+    let input = input;
     validate_org_settings(&input)?;
     reject_unshipped_locale(input.default_locale.as_deref())?;
     reject_opaque_without_keys(input.opaque_mode, &state)?;
@@ -566,7 +598,15 @@ pub async fn set_tenant_override<C: Connection + Clone>(
         }));
     }
 
-    let overrides = body.into_inner();
+    let mut overrides = body.into_inner();
+    // T21.4 — as at the organization. `validate_tenant_override` merges the
+    // override onto the baseline and runs the D3 interlock on the result, so
+    // the list it sees must be the stored form.
+    if let Some(resources) = overrides.external_client_allowed_resources.take() {
+        overrides.external_client_allowed_resources =
+            Some(normalise_external_resources(&resources)?);
+    }
+    let overrides = overrides;
     let org = state.settings_repo.get_org_settings(user.org_id).await?;
     validate_tenant_override(&org, &overrides)?;
     reject_unshipped_locale(overrides.default_locale.as_deref())?;

@@ -3550,17 +3550,17 @@ recorded here until one exists.
   unedited (nothing here alters an operation), so rather than take a number for
   a change no SDK has to act on, this is recorded unnumbered for the next
   version to fold in — the same discipline T21.3 followed, and the reason its
-  fan-out was not lost.
+  fan-out was not lost. T21.4's entry below is pending on the same terms;
+  whichever version publishes next carries both.
 
   - `openapi.json` gains three paths, all `GET` and all unauthenticated:
     `/.well-known/oauth-authorization-server/t/{tenant_id}`,
     `/.well-known/openid-configuration/t/{tenant_id}` and
     `/t/{tenant_id}/.well-known/openid-configuration`. All three return the
     same `OidcDiscoveryDocument` schema the existing discovery path returns; no
-    schema changes. `management-registry.json` regenerates with it: the
-    operation count is unchanged at 160 across 24 namespaces (discovery is
-    outside the §27 management vocabulary) and only the recorded spec digest
-    moves.
+    schema changes. `management-registry.json` regenerates with it, but its
+    operation count does not move — discovery is outside the §27 management
+    vocabulary — so only the recorded spec digest changes.
   - **The eleven OAuth2 endpoints the `/t/{tenant_id}` scope re-bases are
     deliberately not in the document.** They are the documented endpoints with
     a prefix, served by the same handlers; documenting them would have meant a
@@ -3585,6 +3585,39 @@ recorded here until one exists.
 
   The server change behind it is AXIAM Phase 21 T21.6 (the issuer section of
   `docs/deployment/README.md`).
+
+- **2026-09 (contract version pending, T21.4)** — **non-breaking / additive.**
+  RFC 7591 dynamic client registration reaches `openapi.json`. **No version
+  number is taken here on purpose.** 1.47 is taken by T21.2, and 1.48 — below —
+  has since been published by T9a, closed around exactly two halves (§28 and
+  T21.3's folded-in entry). Adding a third half to a number that is already
+  published would mean two different contents re-syncing downstream under the
+  same label, so this entry stays unnumbered on the same terms T21.3 used: the
+  next contract version to be published folds it in.
+
+  - `openapi.json` gains three paths — `POST /oauth2/register` (unauthenticated,
+    RFC 7591 §3.1) and `POST` / `GET /api/v1/oauth2-clients/registration-tokens`
+    (the initial access tokens §1.2's protected profile needs) — and the
+    schemas behind them. `management-registry.json` regenerates: the
+    `oauth2_clients` namespace gains `create_registration_token` and
+    `list_registration_tokens`, so the operation count moves by **two**.
+    `/oauth2/register` is **not** management surface and is excluded by the
+    existing `oauth2` tag exclusion — it is a protocol endpoint an MCP client
+    calls, not one an administrator does.
+  - **No SDK operation changes signature or behaviour**, and an SDK written
+    against 1.48 is conformant with no edit. The two management operations are
+    new surface an SDK MAY expose; nothing existing moves.
+  - **What an SDK MUST NOT infer from a `registration_endpoint` in discovery.**
+    Its presence says this *tenant* accepts self-registration; it says nothing
+    about whether the caller may register, since `initial_access_token` mode
+    answers `403` to a caller holding no handle. An SDK that offers
+    registration must treat a `403` with an `invalid_request` body as "not for
+    you" rather than as an error to retry. Its **absence** is not a failure
+    either: a deployment whose clients are all administrator-created publishes
+    no such member, which is the default.
+
+  The server change behind it is AXIAM Phase 21 T21.4
+  (`docs/admin/dynamic-client-registration.md`).
 
   **Re-sync required** in all eleven SDK repositories — `axiam-rust-sdk`,
   `axiam-typescript-sdk`, `axiam-python-sdk`, `axiam-java-sdk`,

@@ -1240,6 +1240,10 @@ async fn main() -> std::io::Result<()> {
         .build()
         .expect("failed to build reqwest client");
     let oauth2_client_repo = SurrealOAuth2ClientRepository::new(pool.handle_for_repo());
+    // T21.4 — RFC 7591 initial access tokens. Read by the unauthenticated
+    // registration endpoint and swept by the cleanup task.
+    let oauth2_registration_token_repo =
+        axiam_db::SurrealOAuth2RegistrationTokenRepository::new(pool.handle_for_repo());
     let auth_code_repo = SurrealAuthorizationCodeRepository::new(pool.handle_for_repo());
     let refresh_token_repo = SurrealRefreshTokenRepository::new(pool.handle_for_repo());
     // Separate instance for password-reset/change handlers that need direct
@@ -2447,6 +2451,10 @@ async fn main() -> std::io::Result<()> {
         Duration::from_secs(config.cleanup_interval_secs),
         audit_retention,
         revoked_session_repo,
+        // T21.4 — the dynamic-registration sweeps.
+        Arc::new(oauth2_client_repo.clone()),
+        Arc::new(oauth2_registration_token_repo.clone()),
+        Arc::new(settings_repo.clone()),
         job_health.clone(),
         cleanup_shutdown_rx,
     );
@@ -2513,6 +2521,7 @@ async fn main() -> std::io::Result<()> {
         refresh_token_repo: handler_refresh_token_repo.clone(),
         password_history_repo: password_history_repo.clone(),
         oauth2_client_repo: oauth2_client_repo.clone(),
+        oauth2_registration_token_repo: oauth2_registration_token_repo.clone(),
         // The device endpoints size their own governors from this (see
         // `server.rs`), so the handlers need the same numbers the middleware
         // was built from — not a second default that could disagree.

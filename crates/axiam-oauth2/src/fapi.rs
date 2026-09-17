@@ -97,7 +97,8 @@
 //! asserted by tests at the bottom of this file rather than hoped for.
 
 use axiam_core::models::oauth2_client::{
-    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client,
+    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
+    OAuth2Client,
 };
 
 use crate::authn_params::AuthnRequestParams;
@@ -160,6 +161,22 @@ pub enum FapiRegistrationError {
     /// record for on the FAPI lane, and FAPI 2.0's whole argument is that the
     /// data a token reaches is the data the client was authorised for.
     SensitiveScopesOnFapiClient { scopes: Vec<String> },
+    /// T21.4 / I5 / D5 — a client that registered itself asked for the `fapi2`
+    /// profile.
+    ///
+    /// The plan states this as an invariant rather than a feature: "`fapi.rs`
+    /// refuses `none` on any FAPI profile **and refuses DCR/CIMD-sourced
+    /// clients from ever carrying a FAPI profile**". The argument is that the
+    /// profile is not a set of switches, it is a claim about a client an
+    /// operator vetted — and nobody vetted a registration that arrived over an
+    /// open endpoint.
+    ///
+    /// In T21.4 this is unreachable through `POST /oauth2/register`, which
+    /// forces `ClientProfile::Standard` and never reads a profile from the
+    /// request (item 3). It is here anyway, for the reason every second gate
+    /// in this file is here: the forcing is one line in one handler, and the
+    /// invariant should not depend on that line staying written.
+    FapiProfileOnExternalClient { managed_by: ManagedBy },
 }
 
 /// The scopes X7 G8 treats as GDPR-sensitive, refused on a `fapi2` row.
@@ -235,6 +252,13 @@ impl std::fmt::Display for FapiRegistrationError {
                  token endpoint refuses any credential it presents. Register it for the method \
                  that matches the credential it actually holds, or drop the credential"
             ),
+            Self::FapiProfileOnExternalClient { managed_by } => write!(
+                f,
+                "a client registered through {managed_by} may not carry the fapi2 profile: the \
+                 FAPI 2.0 posture rests on an operator having vetted the client, and a \
+                 registration that arrived over an open endpoint has been vetted by nobody. \
+                 Register it through POST /oauth2-clients instead"
+            ),
             Self::SensitiveScopesOnFapiClient { scopes } => write!(
                 f,
                 "a fapi2 client may not register the scope(s) {}: address and phone release \
@@ -298,12 +322,16 @@ pub struct RegistrationView<'a> {
     pub authn_request_params: AuthnRequestParamsMode,
     /// X7 G8 — the registered scopes, read only for the sensitive-scope arm.
     pub scopes: &'a [String],
+    /// T21.4 / D5 — where this registration came from. `admin` is the only
+    /// provenance a FAPI profile may carry (I5).
+    pub managed_by: ManagedBy,
 }
 
 impl<'a> From<&'a OAuth2Client> for RegistrationView<'a> {
     fn from(c: &'a OAuth2Client) -> Self {
         Self {
             profile: c.profile,
+            managed_by: c.managed_by,
             token_endpoint_auth_method: c.token_endpoint_auth_method,
             require_par: c.require_par,
             tls_client_certificate_bound_access_tokens: c
@@ -324,6 +352,7 @@ impl<'a> From<&'a CreateOAuth2Client> for RegistrationView<'a> {
     fn from(c: &'a CreateOAuth2Client) -> Self {
         Self {
             profile: c.profile,
+            managed_by: c.managed_by,
             token_endpoint_auth_method: c.token_endpoint_auth_method,
             require_par: c.require_par,
             tls_client_certificate_bound_access_tokens: c
@@ -450,6 +479,17 @@ pub fn validate_registration<'a>(
     // --- the profile bundle -----------------------------------------------
     if !reg.profile.is_fapi2() {
         return Ok(());
+    }
+
+    // T21.4 / I5 / D5. **First** of the bundle, and deliberately so: every
+    // other arm below tells the operator which switch to set, and this one
+    // tells them the profile is unavailable at all. Hearing "set require_par"
+    // about a client that could never be FAPI whatever it sets would be advice
+    // that cannot be followed.
+    if reg.managed_by.is_external() {
+        return Err(FapiRegistrationError::FapiProfileOnExternalClient {
+            managed_by: reg.managed_by,
+        });
     }
 
     if !reg.require_par {
@@ -1071,6 +1111,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             allowed_resources: Vec::new(),
+            managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+            last_authorized_at: None,
         }
     }
 
@@ -1648,6 +1690,59 @@ mod tests {
             c.authn_request_params = mode;
             assert_eq!(validate_registration(&c), Ok(()), "{mode:?}");
         }
+    }
+
+    /// T21.4 / I5 / D5 — a client nobody vetted cannot be financial-grade.
+    ///
+    /// Unreachable through `POST /oauth2/register`, which forces
+    /// `ClientProfile::Standard`; this is the second gate, and it is the one
+    /// that keeps the invariant true if that line is ever changed.
+    #[test]
+    fn t21_4_an_externally_registered_client_may_not_carry_a_fapi_profile() {
+        for managed_by in [ManagedBy::Dcr, ManagedBy::Cimd] {
+            let mut c = fapi_client();
+            c.managed_by = managed_by;
+            assert_eq!(
+                validate_registration(&c),
+                Err(FapiRegistrationError::FapiProfileOnExternalClient { managed_by }),
+                "a {managed_by} client must not be admitted to the FAPI profile"
+            );
+        }
+
+        // An administrator's client — every client that exists — is
+        // unaffected: `fapi_client()` is one, and it passes.
+        assert_eq!(validate_registration(&fapi_client()), Ok(()));
+    }
+
+    /// The refusal is reported **before** the switches, because the switches
+    /// are advice an operator cannot follow: no combination of `require_par`
+    /// and mTLS makes a self-registered client eligible.
+    #[test]
+    fn t21_4_the_provenance_refusal_outranks_the_missing_switches() {
+        let mut c = fapi_client();
+        c.managed_by = ManagedBy::Dcr;
+        // Strip every other FAPI requirement as well, so several arms could
+        // fire and only the provenance one may.
+        c.require_par = false;
+        c.token_endpoint_auth_method = ClientAuthMethod::ClientSecretPost;
+        c.tls_client_certificate_bound_access_tokens = false;
+        c.dpop_bound_access_tokens = false;
+        assert_eq!(
+            validate_registration(&c),
+            Err(FapiRegistrationError::FapiProfileOnExternalClient {
+                managed_by: ManagedBy::Dcr
+            })
+        );
+    }
+
+    /// A non-FAPI self-registered client is not touched by any of this — which
+    /// is every client `POST /oauth2/register` actually creates.
+    #[test]
+    fn t21_4_a_standard_profile_self_registered_client_passes() {
+        let mut c = fapi_client();
+        c.managed_by = ManagedBy::Dcr;
+        c.profile = ClientProfile::Standard;
+        assert_eq!(validate_registration(&c), Ok(()));
     }
 
     /// M8 registration half, create.

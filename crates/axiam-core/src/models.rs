@@ -17,6 +17,8 @@ pub mod mds;
 pub mod mfa_method;
 pub mod notification_rule;
 pub mod oauth2_client;
+/// RFC 7591 initial access tokens (T21.4).
+pub mod oauth2_registration_token;
 pub mod opaque;
 pub mod organization;
 pub mod password_history;

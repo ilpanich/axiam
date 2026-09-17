@@ -217,6 +217,9 @@ use crate::handlers;
         handlers::oauth2_clients::get,
         handlers::oauth2_clients::update,
         handlers::oauth2_clients::delete,
+        // T21.4 — RFC 7591 initial access tokens (the admin half).
+        handlers::dcr::create_registration_token,
+        handlers::dcr::list_registration_tokens,
         // OAuth2 Flow
         handlers::oauth2::authorize,
         handlers::oauth2::token,
@@ -227,6 +230,10 @@ use crate::handlers;
         // `grant_type` — so only the two extra paths appear here.
         handlers::oauth2::device_authorization,
         handlers::oauth2::pushed_authorization_request,
+        // T21.4 / RFC 7591 §3.1 — dynamic client registration. Unauthenticated,
+        // so I9 applies twice over: the path is in `PUBLIC_PATHS` and here, in
+        // the same commit.
+        handlers::dcr::register,
         handlers::oauth2::end_session,
         handlers::device::verify,
         handlers::device::decide,
@@ -500,6 +507,19 @@ use crate::handlers;
         handlers::oauth2_clients::UpdateOAuth2ClientRequest,
         handlers::oauth2_clients::OAuth2ClientResponse,
         handlers::oauth2_clients::OAuth2ClientCreatedResponse,
+        // T21.4 / D5 — the provenance discriminator the client read API
+        // echoes, and the registration mode the settings API takes.
+        axiam_core::models::oauth2_client::ManagedBy,
+        axiam_core::models::settings::DynamicRegistrationMode,
+        // T21.4 — the RFC 7591 request, response and error shapes, plus the
+        // two initial-access-token DTOs. The first two live in `axiam-oauth2`
+        // beside the validation that produces them.
+        axiam_oauth2::dcr::RegistrationRequest,
+        axiam_oauth2::dcr::RegistrationResponse,
+        handlers::dcr::DcrErrorResponse,
+        handlers::dcr::CreateRegistrationTokenRequest,
+        handlers::dcr::RegistrationTokenResponse,
+        handlers::dcr::CreateRegistrationTokenResponse,
         // Federation
         handlers::federation::CreateFederationConfigRequest,
         handlers::federation::UpdateFederationConfigRequest,

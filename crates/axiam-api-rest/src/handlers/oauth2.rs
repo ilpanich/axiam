@@ -1016,6 +1016,109 @@ async fn resolve_sensitive_scopes<C: Connection + Clone>(
     )
 }
 
+/// T21.4 / D4 — resolve whether this authorization needs the external-client
+/// consent hop.
+///
+/// Returns `NotApplicable` for a client an administrator created, which is
+/// every client in every deployment today and is the whole of I1 for this
+/// gate: the function reads one row it was going to read anyway (the client is
+/// looked up again inside `AuthorizeService`, so this is one extra read on the
+/// authorization path — see below) and returns before touching the consent
+/// repository.
+///
+/// # The cost, measured rather than assumed
+///
+/// This adds **one** indexed read by `client_id` to every authorization
+/// request, including those from administrators' clients, which never need the
+/// answer. That is a real cost and it was weighed rather than missed:
+///
+/// * It is not avoidable at this boundary. `AuthorizeService` owns the client
+///   lookup and this handler owns the consent repository, and the decision
+///   needs both. Passing a consent repository into the service would put a
+///   repository into a crate whose whole design is that it decides and does
+///   not fetch (see `crate::sensitive`'s module docs), and returning early
+///   from the service so the handler could resolve and re-call would mean
+///   running every validation twice.
+/// * `/oauth2/authorize` is a **browser-interactive** endpoint: one request per
+///   user sign-in, not a machine path. The reads AXIAM caches rather than
+///   repeats — `tenant_org_cache`, for one immutable field — are on the
+///   refresh-rotation and authz-check paths, which run per API call. This one
+///   is not in that class, and a `client_id`-indexed read beside a code write
+///   is not where an authorization request spends its time.
+/// * The **consent** read, which is the more expensive of the two, still
+///   happens only for a client that is actually external: this function
+///   returns before it for every `admin` row.
+///
+/// If a future profile shows otherwise, the cache to add is the same shape as
+/// `tenant_org_cache` — `client_id -> managed_by` is immutable for a row's
+/// lifetime, because the field is absent from the update API on purpose.
+///
+/// # Both reads fail closed, in the recoverable direction
+///
+/// A client read that fails reports `NotApplicable` — there is no client, so
+/// the authorization is about to fail anyway inside the service, with the
+/// error that names the real problem rather than a consent question about a
+/// client that does not exist. A consent read that fails reports the consent
+/// as **missing**, which asks again rather than proceeding: the same direction
+/// `resolve_sensitive_scopes` takes, for the same reason.
+async fn resolve_external_consent<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    client_id: &str,
+    scope: Option<&str>,
+) -> axiam_oauth2::external_consent::Requested {
+    use axiam_oauth2::external_consent::Requested;
+
+    let Ok(client) = axiam_core::repository::OAuth2ClientRepository::get_by_client_id(
+        &state.oauth2_client_repo,
+        tenant_id,
+        client_id,
+    )
+    .await
+    else {
+        return Requested::NotApplicable;
+    };
+    if !axiam_oauth2::external_consent::applies_to(client.managed_by) {
+        return Requested::NotApplicable;
+    }
+
+    let scopes: Vec<String> = scope
+        .unwrap_or("")
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let consent_type = axiam_oauth2::external_consent::consent_type(client_id);
+    let version = axiam_oauth2::external_consent::version(&scopes);
+
+    match axiam_core::repository::ConsentRepository::list_by_user(
+        &state.gdpr.consent_repo,
+        tenant_id,
+        user_id,
+    )
+    .await
+    {
+        Ok(records)
+            if records
+                .iter()
+                .any(|c| c.consent_type == consent_type && c.version == version) =>
+        {
+            Requested::Consented
+        }
+        Ok(_) => Requested::ConsentMissing,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                %tenant_id,
+                "could not read the end user's consent records for an externally registered \
+                 client; treating the client as unconsented, which asks again rather than \
+                 letting it act as the user"
+            );
+            Requested::ConsentMissing
+        }
+    }
+}
+
 /// `GET /oauth2/authorize` -- OAuth2 authorization endpoint.
 ///
 /// A request carrying an access token authorizes as its subject. A request
@@ -1279,6 +1382,11 @@ pub async fn authorize<C: Connection + Clone>(
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
+                // T21.4 / D4 — a placeholder, resolved below for the same
+                // reason the two above are: both arms produce the same inputs
+                // and a copy of the resolution in each is a copy that can
+                // drift.
+                external_consent: axiam_oauth2::external_consent::Requested::NotApplicable,
             }
         }
         None => {
@@ -1408,6 +1516,11 @@ pub async fn authorize<C: Connection + Clone>(
                 // Resolved below, once, for both carriers.
                 sensitive_scopes: axiam_oauth2::sensitive::Requested::None,
                 sensitive_scopes_switch_is_off: false,
+                // T21.4 / D4 — a placeholder, resolved below for the same
+                // reason the two above are: both arms produce the same inputs
+                // and a copy of the resolution in each is a copy that can
+                // drift.
+                external_consent: axiam_oauth2::external_consent::Requested::NotApplicable,
             }
         }
     };
@@ -1419,6 +1532,16 @@ pub async fn authorize<C: Connection + Clone>(
     // the pushed copy, never from the query string.
     let mut req = req;
     (req.sensitive_scopes, req.sensitive_scopes_switch_is_off) = resolve_sensitive_scopes(
+        &state,
+        user.tenant_id,
+        user.user_id,
+        &req.client_id,
+        req.scope.as_deref(),
+    )
+    .await;
+    // T21.4 / D4 — resolved beside W7's, from the same three inputs, and for
+    // the same reason it is resolved here rather than in either arm above.
+    req.external_consent = resolve_external_consent(
         &state,
         user.tenant_id,
         user.user_id,
@@ -2830,8 +2953,16 @@ async fn discovery_document<C: Connection + Clone>(
     // could detect and every client would trust.
     let described_tenant = described_tenant.or_else(|| auth_config.default_tenant_id());
 
-    let sensitive_scopes_enabled = match described_tenant {
-        None => false,
+    // T21.4 — the two per-tenant capability rows are resolved from **one**
+    // settings read, for the reason `described_tenant` is one value: a
+    // document that advertised `address` for tenant X and a registration
+    // endpoint for tenant Y would be internally inconsistent in a way no
+    // client could detect. Both default to `false` when no tenant was named,
+    // which is every caller written before W7 and every conformance run — such
+    // a caller receives a document byte-identical to the one served before
+    // this task (I1).
+    let capabilities = match described_tenant {
+        None => axiam_oauth2::oidc::TenantCapabilities::default(),
         Some(tenant_id) => match state.tenant_repo.get_by_id(tenant_id).await {
             Ok(tenant) => axiam_core::repository::SettingsRepository::get_effective_settings(
                 &state.settings_repo,
@@ -2839,17 +2970,23 @@ async fn discovery_document<C: Connection + Clone>(
                 tenant_id,
             )
             .await
-            .map(|s| s.oidc.sensitive_scopes_enabled)
+            .map(|s| axiam_oauth2::oidc::TenantCapabilities {
+                sensitive_scopes_enabled: s.oidc.sensitive_scopes_enabled,
+                dynamic_registration_enabled: s.oidc.dynamic_registration.is_enabled(),
+            })
             // A settings read that fails advertises less rather than more.
             // A relying party told a scope exists and then refused it has a
-            // worse day than one that was never told.
-            .unwrap_or(false),
+            // worse day than one that was never told. The same reasoning
+            // covers the registration endpoint: an MCP client told it may
+            // register and then refused `403` is worse off than one that was
+            // never told.
+            .unwrap_or_default(),
             // An unknown tenant is not an error here: discovery is public and
             // unauthenticated, and answering `404` for a tenant id would make
             // this endpoint a tenant-enumeration oracle. The deployment-wide
             // document is served instead, which is what a caller that named no
             // tenant gets.
-            Err(_) => false,
+            Err(_) => axiam_oauth2::oidc::TenantCapabilities::default(),
         },
     };
 
@@ -2871,11 +3008,12 @@ async fn discovery_document<C: Connection + Clone>(
     let doc = match build_discovery_document_for(
         issuer,
         mtls_base.as_deref(),
-        sensitive_scopes_enabled,
+        capabilities,
         // `None` under a tenant issuer: the endpoints are already tenant-scoped
         // by their path, and `?tenant_id=` on top would be a second selector
         // saying the same thing — which `middleware::tenant_path` refuses on
-        // arrival anyway.
+        // arrival anyway. `capabilities` above is still resolved from the real
+        // `described_tenant`, so the document says what THAT tenant can do.
         if tenant_issuer.is_some() {
             None
         } else {

@@ -2,8 +2,8 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::oauth2_client::{
-    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client,
-    UpdateOAuth2Client,
+    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
+    OAuth2Client, UpdateOAuth2Client,
 };
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -230,6 +230,29 @@ pub struct OAuth2ClientResponse {
     /// which audiences a client may mint tokens for reads the strings the
     /// server actually compares rather than the ones they typed.
     pub allowed_resources: Vec<String>,
+    /// T21.4 / D5 — who created this registration: `admin`, `dcr` or `cimd`.
+    ///
+    /// Echoed because an operator auditing a tenant needs to answer "which of
+    /// these did we create?" from this endpoint rather than from the database,
+    /// and because three behaviours hang off it: a non-`admin` client may
+    /// never carry the FAPI profile, is always consent-gated, and is the only
+    /// kind the unused-client sweeper touches.
+    ///
+    /// Read-only. There is no corresponding member on the update DTO: a
+    /// registration's provenance is a fact about how it came to exist, and a
+    /// field that could be edited to `admin` would be a field that launders
+    /// one.
+    pub managed_by: ManagedBy,
+    /// T21.4 — when this client was last issued an authorization code, for the
+    /// sweeper that deletes self-registered clients nobody uses.
+    ///
+    /// Always absent for an `admin` client: the stamp is written only for a
+    /// non-`admin` one, so that an administrator's client takes exactly the
+    /// path it took before T21.4 (I1). `null` on a self-registered client
+    /// means it has never been authorized, and the sweeper reads `created_at`
+    /// instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_authorized_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -259,6 +282,8 @@ impl From<OAuth2Client> for OAuth2ClientResponse {
             authn_request_params: c.authn_request_params,
             browser_sso: c.browser_sso,
             allowed_resources: c.allowed_resources,
+            managed_by: c.managed_by,
+            last_authorized_at: c.last_authorized_at,
             require_par: c.require_par,
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -357,7 +382,15 @@ fn validation_err(msg: impl Into<String>) -> AxiamApiError {
     .into()
 }
 
-fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiError> {
+/// Structural rules for a redirect URI, shared by the admin registration API
+/// and by `POST /oauth2/register` (T21.4).
+///
+/// `pub(crate)` rather than private since T21.4: dynamic registration applies
+/// the same rules and must not grow a second copy of them. What the DCR path
+/// adds on top is the tenant's host allow-list, which has no admin-API
+/// equivalent because an administrator registering a URI has already decided
+/// it is acceptable.
+pub(crate) fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiError> {
     if uris.is_empty() {
         return Err(validation_err("redirect_uris must not be empty"));
     }
@@ -581,6 +614,11 @@ pub async fn create<C: Connection + Clone>(
         authn_request_params: req.authn_request_params,
         browser_sso: req.browser_sso,
         allowed_resources,
+        // T21.4 / D5 — this endpoint is the definition of an administrator's
+        // client. Not read from the request body: `CreateOAuth2ClientRequest`
+        // has no such member, so an API caller cannot claim a provenance, and
+        // this is the one handler entitled to assert `admin`.
+        managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
     };
 
     // X5.1 — refuse a registration that could not satisfy the profile it

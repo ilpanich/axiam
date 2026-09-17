@@ -997,8 +997,8 @@ async fn mcp_sequence_with_a_client_id_metadata_document_on_path_issuers() {
 // that is filed gets a test that asserts what the code *does* today, with the
 // issue number in its name, so the day somebody fixes it the test says so.
 
-/// **MCP-04.** The loopback allowance widens a registration by a port and by
-/// nothing else.
+/// **V1 (verification, no finding).** The loopback allowance widens a
+/// registration by a port and by nothing else.
 ///
 /// The matcher has its own unit tests in `axiam-oauth2`; what this asserts is
 /// that the endpoint an attacker can actually reach agrees with them. Each
@@ -1007,7 +1007,7 @@ async fn mcp_sequence_with_a_client_id_metadata_document_on_path_issuers() {
 /// authorization endpoint — where a mistake would hand the authorization code
 /// to the attacker's origin, which is the whole of the open-redirect class.
 #[actix_rt::test]
-async fn mcp04_the_loopback_allowance_does_not_widen_the_host() {
+async fn v1_the_loopback_allowance_does_not_widen_the_host() {
     let mode = Mode::Query;
     let f = setup(mode).await;
     let stub = mcp_stub(&mode.issuer(f.a.id)).await;
@@ -1087,8 +1087,9 @@ async fn mcp04_the_loopback_allowance_does_not_widen_the_host() {
     }
 }
 
-/// **MCP-05.** A token minted under one tenant's path is not a credential under
-/// another's, and the two tenant selectors cannot be made to disagree.
+/// **V2 (verification, no finding).** A token minted under one tenant's path is
+/// not a credential under another's, and the two tenant selectors cannot be
+/// made to disagree.
 ///
 /// This is the hole T21.6's own amendment 2 found: the JWKS is shared, so
 /// tenant `A`'s token verifies perfectly as a signature when presented on
@@ -1096,7 +1097,7 @@ async fn mcp04_the_loopback_allowance_does_not_widen_the_host() {
 /// what close it, and this asserts both halves against live routes rather than
 /// against the functions.
 #[actix_rt::test]
-async fn mcp05_a_tenant_path_binds_the_token_to_that_tenant() {
+async fn v2_a_tenant_path_binds_the_token_to_that_tenant() {
     let mode = Mode::TenantPath;
     let f = setup(mode).await;
     let app = test_app!(f, mode);
@@ -1142,8 +1143,9 @@ async fn mcp05_a_tenant_path_binds_the_token_to_that_tenant() {
     assert_eq!(body["error"], "invalid_request", "{body}");
 }
 
-/// **MCP-06.** An initial access token is single-use even when it is redeemed
-/// more than once before the first redemption has finished.
+/// **V3 (verification, no finding).** An initial access token is single-use even
+/// when it is redeemed more than once before the first redemption has
+/// finished.
 ///
 /// The interesting case is not "spend it twice in sequence" — that is
 /// `dynamic_registration_test`'s — but two redemptions in flight at once, which
@@ -1156,7 +1158,7 @@ async fn mcp05_a_tenant_path_binds_the_token_to_that_tenant() {
 /// implementation opens is exactly an `await` — the gap between reading the row
 /// and writing it back.
 #[actix_rt::test]
-async fn mcp06_an_initial_access_token_survives_concurrent_redemption() {
+async fn v3_an_initial_access_token_survives_concurrent_redemption() {
     let mode = Mode::Query;
     let f = setup(mode).await;
     let stub = mcp_stub(&mode.issuer(f.a.id)).await;

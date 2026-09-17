@@ -3954,6 +3954,30 @@ mod tests {
         );
     }
 
+    /// T21.5 — v65 adds one column to an existing table, and is held to the
+    /// same standard v64 is: additive DDL and nothing else. `option<string>`
+    /// is what an absent posture must be, so a tenant that has never
+    /// configured client ID metadata documents reads as `None` and inherits
+    /// the org baseline (I1), rather than being backfilled into a posture
+    /// nobody chose.
+    #[test]
+    fn v65_adds_the_cimd_column_and_backfills_nothing() {
+        assert!(
+            SCHEMA_V65.contains("oidc_cimd_json ON TABLE security_settings"),
+            "v65 must define the CIMD posture column"
+        );
+        assert!(
+            SCHEMA_V65.contains("TYPE option<string>"),
+            "v65's column must be optional: an unset posture is how a tenant inherits"
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE"] {
+            assert!(
+                !SCHEMA_V65.contains(forbidden),
+                "v65 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
     /// A version number is claimed once. W1 took 54; taking it twice would
     /// mean one of the two migrations never runs on an existing deployment.
     #[test]
@@ -3965,11 +3989,14 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&64),
-            "v64 is the newest migration (T21.4 — RFC 7591's provenance column, the \
-             unused-client stamp the sweeper reads, and the initial access token table). \
-             This assertion is a tripwire, not bookkeeping: bumping it is how a new \
-             migration is declared deliberate rather than merged in by accident."
+            Some(&65),
+            "v65 is the newest migration (T21.5 — the per-tenant client-metadata-document \
+             posture, one additive column on `security_settings`). This assertion is a \
+             tripwire, not bookkeeping: bumping it is how a new migration is declared \
+             deliberate rather than merged in by accident. It caught this phase doing \
+             exactly what it is for: T21.4 (v64) and T21.5 (v65) were written on branches \
+             neither of which could see the other, so the constant arrived stale on the \
+             branch that merged them."
         );
     }
 

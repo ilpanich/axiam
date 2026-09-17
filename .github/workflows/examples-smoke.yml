@@ -59,6 +59,8 @@ jobs:
           bash -n examples/b6-organization-scope/walkthrough.sh
           bash -n examples/b2-iot-device-quickstart/device-quickstart.sh
           bash -n examples/b5-rp-logout-app/smoke-test.sh
+          bash -n examples/b7-mcp-server/walkthrough.sh
+          bash -n examples/b7-mcp-server/smoke-test.sh
           bash -n scripts/e2e-bootstrap.sh
       - name: shellcheck
         run: |
@@ -66,6 +68,8 @@ jobs:
           shellcheck examples/b6-organization-scope/walkthrough.sh
           shellcheck examples/b2-iot-device-quickstart/device-quickstart.sh
           shellcheck examples/b5-rp-logout-app/smoke-test.sh
+          shellcheck examples/b7-mcp-server/walkthrough.sh
+          shellcheck examples/b7-mcp-server/smoke-test.sh
           shellcheck scripts/e2e-bootstrap.sh
 
   build-b3-mesh-delegation-grpc:
@@ -108,6 +112,23 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+  typecheck-b7-mcp-server:
+    name: Typecheck — b7-mcp-server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/b7-mcp-server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: examples/b7-mcp-server/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
   validate-workflow-and-compose-yaml:
     name: Validate — this workflow + the b3/b5 compose overrides
     runs-on: ubuntu-latest
@@ -132,6 +153,7 @@ jobs:
       - shellcheck-bash-examples
       - build-b3-mesh-delegation-grpc
       - typecheck-b5-rp-logout-app
+      - typecheck-b7-mcp-server
       - validate-workflow-and-compose-yaml
     env:
       AXIAM_URL: http://localhost:8090
@@ -148,10 +170,14 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-          cache-dependency-path: examples/b5-rp-logout-app/package-lock.json
+          cache-dependency-path: |
+            examples/b5-rp-logout-app/package-lock.json
+            examples/b7-mcp-server/package-lock.json
       # jq for the bash examples' JSON parsing; protobuf-compiler for b3's
-      # `cargo run` (tonic-prost-build shells out to a system `protoc`).
-      - run: sudo apt-get update && sudo apt-get install -y jq protobuf-compiler
+      # `cargo run` (tonic-prost-build shells out to a system `protoc`); python3
+      # for b7's throwaway CIMD publisher (ubuntu-latest ships it, listed for
+      # visibility).
+      - run: sudo apt-get update && sudo apt-get install -y jq protobuf-compiler python3
 
       # Two example-scoped overrides, each explained in its own header comment:
       #
@@ -237,6 +263,17 @@ jobs:
           # name resolve. Everything else the script touches stays on
           # localhost, because everything else is dialled from this runner.
           RP_BACKCHANNEL_URL: http://host.docker.internal:9999
+        run: ./smoke-test.sh
+
+      # walkthrough.sh builds the MCP server itself (npm ci && npm run
+      # build) and starts/stops it around each of the three registration
+      # modes it drives, so no separate build step is needed here — the
+      # smoke-test step below reuses the node_modules it installs.
+      - name: b7-mcp-server (walkthrough — MCP authorization handshake, all three registration modes)
+        run: ./examples/b7-mcp-server/walkthrough.sh
+
+      - name: b7-mcp-server (smoke test — the built server runs end to end)
+        working-directory: examples/b7-mcp-server
         run: ./smoke-test.sh
 
       # No general server-log dump on purpose. Each example prints its own

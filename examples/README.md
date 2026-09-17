@@ -18,6 +18,7 @@ called for these four specifically: B1, B2, B3, B5).
 | [`b3-mesh-delegation-grpc/`](b3-mesh-delegation-grpc/README.md) | OAuth2 Token Exchange (RFC 8693) delegation, end to end onto the gRPC `AuthorizationService` — the service-mesh scenario | Rust (own Cargo workspace) | `docs/api/token-exchange.md` |
 | [`b5-rp-logout-app/`](b5-rp-logout-app/README.md) | A relying-party app: OIDC login (authorization_code + PKCE, pushed through PAR), RP-Initiated Logout, Back-Channel Logout | TypeScript / Express | New — no RP example app existed anywhere in the repo before this |
 | [`b6-organization-scope/`](b6-organization-scope/README.md) | Organization-level access: one administrator creating two tenants and administering both with no grant written into either, the boundary that stops a tenant administrator doing the same, and the middle ground — an organization-level account whose role assignment names the tenants it reaches | Bash + curl (protocol-level, language-neutral) | [`docs/admin/organization-scope.md`](../docs/admin/organization-scope.md) |
+| [`b7-mcp-server/`](b7-mcp-server/README.md) | Fronting a Model Context Protocol server with AXIAM: the RFC 9728 protected-resource document and `WWW-Authenticate` challenge (a real MCP server, guarded), and the full 401 → discovery → registration → PKCE + `resource` → token → tool call handshake in each of pre-registered, RFC 7591 dynamic client registration and Client ID Metadata Document mode | TypeScript / `@modelcontextprotocol/sdk` server + Bash/curl walkthrough | [`docs/api/mcp.md`](../docs/api/mcp.md) |
 
 ## Running any of these
 
@@ -33,7 +34,7 @@ That seeds **two** administrators, because they are two different things:
 | | Lives in | Signs in with | Used by |
 |---|---|---|---|
 | `admin@axiam.dev` | the organization's own reserved scope | **no tenant** — the field is left blank | `b6-organization-scope` |
-| `tenant-admin@axiam.dev` | the `default` tenant | `default` as the tenant | `b1`, `b2`, `b3`, `b5` |
+| `tenant-admin@axiam.dev` | the `default` tenant | `default` as the tenant | `b1`, `b2`, `b3`, `b5`, `b7` |
 
 The super-admin administers the organization and every tenant in it; the
 tenant admin administers exactly `default`. Examples that work inside one
@@ -50,13 +51,14 @@ Each example's own README has the exact commands from there.
 ## CI
 
 [`.github/workflows/examples-smoke.yml`](../.github/workflows/examples-smoke.yml)
-runs four fast static-verification jobs on every PR touching this tree
-(shellcheck on the bash scripts — `b1`, `b2`, `b6`, `b5`'s `smoke-test.sh`
-and `scripts/e2e-bootstrap.sh` — `cargo build`/`fmt`/`clippy` on the Rust one,
-`tsc`/`npm run build` on the TypeScript one, YAML validation on the workflow
-and compose-override files themselves), then a docker-backed `runtime-smoke`
-job, gated on all four, that brings up the e2e stack and actually runs every
-example against it — see that file for the exact job and step names.
+runs fast static-verification jobs on every PR touching this tree (shellcheck
+on the bash scripts — `b1`, `b2`, `b6`, `b5`'s and `b7`'s `smoke-test.sh` and
+`walkthrough.sh`, and `scripts/e2e-bootstrap.sh` — `cargo build`/`fmt`/`clippy`
+on the Rust one, `tsc`/`npm run build` on the TypeScript ones, YAML validation
+on the workflow and compose-override files themselves), then a docker-backed
+`runtime-smoke` job, gated on all of them, that brings up the e2e stack and
+actually runs every example against it — see that file for the exact job and
+step names.
 
 ## Verification status of this tree
 

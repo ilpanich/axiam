@@ -672,50 +672,50 @@ Full specification, invariants, model assignment per task and the regression
 gate: [`mcp-authorization-server-plan.md`](mcp-authorization-server-plan.md).
 Every task is additive and opt-in; existing flows must stay byte-identical.
 
-### T21.1 — RFC 8414 well-known alias — Sonnet 5
+### T21.1 — RFC 8414 well-known alias — Sonnet 5 ✓ LANDED
 Serve `/.well-known/oauth-authorization-server` from the existing discovery handler; public-path and OpenAPI parity.
 
-**Commit** `feat(oauth2): serve RFC 8414 authorization-server metadata path`
+**Commit** `573373a` `feat(oauth2): serve RFC 8414 discovery alongside OIDC discovery (T21.1)`
 
-### T21.2 — Public clients and loopback redirects — Opus 5 (server), Sonnet 5 (admin UI)
+### T21.2 — Public clients and loopback redirects — Opus 5 (server), Sonnet 5 (admin UI) ✓ LANDED
 `token_endpoint_auth_method: none`, PKCE required at the token endpoint, RFC 8252 §7.3 port-agnostic loopback matching for registered loopback URIs only.
 
-**Commit** `feat(oauth2): public clients with PKCE and loopback redirect matching`
+**Commits** `0534af6` "feat(oauth2): public clients (`none`) and RFC 8252 loopback redirects (T21.2)" · `ed9e9f0` `feat(frontend): admin UI for public OAuth2 clients (T21.2)`
 
-### T21.3 — RFC 8707 resource indicators end to end — Opus 5
+### T21.3 — RFC 8707 resource indicators end to end — Opus 5 ✓ LANDED
 `allowed_resources` on clients; `resource` honoured on authorize, PAR, device and token; `aud` minted from it; AXIAM's own APIs keep refusing foreign audiences.
 
-**Commit** `feat(oauth2): RFC 8707 resource indicators with audience-bound access tokens`
+**Commit** `ffec785` `feat(oauth2): RFC 8707 resource indicators, end to end (T21.3)`
 
-### T21.4 — RFC 7591 dynamic client registration — Opus 5 (endpoint), Sonnet 5 (admin UI)
+### T21.4 — RFC 7591 dynamic client registration — Opus 5 (endpoint), Sonnet 5 (admin UI) ✓ LANDED (endpoint only; T4b admin UI not found on this branch — verify before closing the roadmap item)
 Per-tenant policy (disabled by default), `POST /oauth2/register`, abuse controls, forced consent for externally registered clients.
 
-**Commit** `feat(oauth2): RFC 7591 dynamic client registration behind a tenant policy`
+**Commit** `ff1919b` `feat(oauth2): RFC 7591 dynamic client registration (T21.4)`
 
-### T21.5 — OAuth Client ID Metadata Document — Opus 5
+### T21.5 — OAuth Client ID Metadata Document — Opus 5 ✓ LANDED (on this branch; not yet merged through its own PR)
 URL-shaped `client_id` resolved through an SSRF-guarded, cache-bounded fetch; per-tenant trust policy; VS Code and Claude Code flows.
 
-**Commit** `feat(oauth2): client ID metadata documents behind a tenant policy`
+**Commits** `0213087` `feat(oauth2): resolve a URL-shaped client_id from its metadata document (T21.5)` · `ddc1d2a` `docs(oauth2): client ID metadata documents — operator page, spec, contract (T21.5)`
 
-### T21.6 — Per-tenant path-based issuers — Opus 5
+### T21.6 — Per-tenant path-based issuers — Opus 5 ✓ LANDED
 Opt-in `{root}/t/{tenant}` issuer with RFC 8414 and OIDC Discovery path forms; no `tenant_id` query in the advertised endpoints.
 
-**Commit** `feat(oauth2): opt-in per-tenant path-based issuers`
+**Commit** `41aa36f` `feat(oauth2): per-tenant path issuers, opt-in (T21.6)`
 
-### T21.7 — Documentation, contract, website — Sonnet 5
+### T21.7 — Documentation, contract, website — Sonnet 5 ✓ LANDED (this task)
 `docs/api/mcp.md`, CONTRACT §10.1 audience note, token-exchange audience rewrite, website block.
 
-**Commit** `docs(mcp): fronting an MCP server with AXIAM`
+**Commit** `docs(mcp): fronting an MCP server with AXIAM, and the b7-mcp-server example` (this PR — `docs/api/mcp.md`, `examples/b7-mcp-server/`, the CONTRACT §10.1 row 6 sentence, the `oauth2.ts` website block; `docs/api/token-exchange.md#audience` was already rewritten by T21.3)
 
-### T21.8 — End-to-end MCP harness and security review — Opus 5
+### T21.8 — End-to-end MCP harness and security review — Opus 5 — not yet landed
 Integration test driving the MCP client sequence in both issuer modes; security review of the new surfaces; STRIDE model update.
 
 **Commit** `test(oauth2): end-to-end MCP authorization harness and security review`
 
-### T21.9 — SDK fan-out: MCP resource-server helpers — Opus 5 (contract §28, TypeScript reference, review), Sonnet 5 (ten ports)
+### T21.9 — SDK fan-out: MCP resource-server helpers — Opus 5 (contract §28, TypeScript reference, review), Sonnet 5 (ten ports) — §28 contract landed; TypeScript reference (T9b), the ten ports (T9c) and the cross-SDK review (T9d) not yet landed
 CONTRACT §28 (RFC 9728 document builder and route, `WWW-Authenticate` challenge, `resource_metadata_url` middleware option); TypeScript reference; ports in the other ten SDK repositories; cross-SDK conformance review. Every task also ships docs, the `examples/b7-mcp-server` entry and tests per the plan's §4.0.
 
-**Commit** `feat(sdk): CONTRACT §28 MCP resource-server helpers (contract 1.47)`
+**Commit** `63a19af` `docs(sdk-contract): §28 MCP resource-server helpers, contract 1.48 (T21.9)` — the contract text only; no SDK repository has implemented it yet (§28.10 lists every one of the ten ports as "not yet")
 
 ---
 

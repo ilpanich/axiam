@@ -377,6 +377,18 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "note",
         text: "The SDKs ship OIDC relying-party helpers — the redirect, the PKCE verifier, the callback exchange and the token store — so integrating a web application is not a matter of hand-rolling the flow. See [Client SDKs](#/docs/sdks).",
       },
+      { type: "h", id: "mcp-servers", text: "MCP servers" },
+      {
+        type: "p",
+        text: "AXIAM can front a Model Context Protocol server as its OAuth 2.0 authorization server — public clients with PKCE for desktop MCP clients (Claude Code, VS Code, MCP Inspector), RFC 8707 resource indicators so a token is addressed at the MCP server rather than at AXIAM, RFC 7591 dynamic client registration and Client ID Metadata Documents for clients nobody registered in advance, and an opt-in per-tenant issuer for a deployment fronting more than one tenant's MCP servers. Publishing the RFC 9728 protected-resource document and checking `aud` is the MCP server's own job — built with the SDK's §28 resource-server helpers — not anything AXIAM the authorization server exposes.",
+      },
+      {
+        type: "links",
+        links: [
+          { label: "Fronting an MCP server with AXIAM", href: "https://github.com/ilpanich/axiam/blob/main/docs/api/mcp.md", note: "the RFC 9728 document, the WWW-Authenticate challenge, SDK middleware configuration, tenant settings translated from Keycloak's guide, one worked example per registration mode" },
+          { label: "The runnable example", href: "https://github.com/ilpanich/axiam/tree/main/examples/b7-mcp-server", note: "a real MCP server, guarded, with a walkthrough script" },
+        ],
+      },
     ],
   },
 

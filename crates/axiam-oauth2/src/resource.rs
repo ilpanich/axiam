@@ -60,9 +60,14 @@
 
 use url::Url;
 
+/// The URI scheme AXIAM's own audiences live under (`axiam:user`,
+/// `axiam:m2m`). Reserved against use as a resource indicator — see
+/// [`ResourceError::ReservedAudience`].
+const RESERVED_AUDIENCE_SCHEME: &str = "axiam";
+
 /// Why a `resource` value is not usable (RFC 8707 §2).
 ///
-/// A type rather than a `bool` because the three refusals are different
+/// A type rather than a `bool` because the four refusals are different
 /// operator-facing problems and the registration API should be able to say
 /// which one it found. On the wire they all become `invalid_target`, which is
 /// the only code RFC 8707 defines for a target the server will not serve.
@@ -79,6 +84,24 @@ pub enum ResourceError {
     /// [`Self::NotAnAbsoluteUri`] because "you sent `resource=`" and "you sent
     /// something that is not a URI" are different mistakes.
     Empty,
+    /// The value is in AXIAM's own audience namespace (MCP-02).
+    ///
+    /// `axiam:user` and `axiam:m2m` are the two audiences AXIAM's own
+    /// extractors accept, and — because a scheme followed by a path is all an
+    /// absolute URI needs — they are also perfectly well-formed resource
+    /// indicators. Nothing else here would have refused them: the parser
+    /// deliberately admits any scheme, because `urn:` resources are legitimate
+    /// and an MCP server reached over loopback `http` during development is a
+    /// resource like any other.
+    ///
+    /// Admitting them collapses the boundary I3 is built out of. The sharpest
+    /// case is `client_credentials`, which mints `axiam:m2m` when no resource
+    /// is named: naming `axiam:user` as the resource makes the *same* grant
+    /// mint a token stamped with the user audience, which is the one claim the
+    /// user-facing extractors gate on. The whole `axiam` scheme is reserved
+    /// rather than the two literals, so that an audience added later is
+    /// covered without anybody having to remember this rule exists.
+    ReservedAudience,
 }
 
 impl ResourceError {
@@ -91,6 +114,10 @@ impl ResourceError {
             }
             Self::HasFragment => "resource must not contain a fragment (RFC 8707 section 2)",
             Self::Empty => "resource must not be empty",
+            Self::ReservedAudience => {
+                "the axiam scheme is reserved for AXIAM's own token audiences and cannot be \
+                 named as a resource; a resource server is identified by the URL it serves"
+            }
         }
     }
 }
@@ -121,6 +148,12 @@ pub fn normalise(raw: &str) -> Result<String, ResourceError> {
     let parsed = Url::parse(trimmed).map_err(|_| ResourceError::NotAnAbsoluteUri)?;
     if parsed.fragment().is_some() {
         return Err(ResourceError::HasFragment);
+    }
+    // MCP-02. Checked after parsing rather than on the raw string, so that the
+    // comparison is against the scheme `url` actually resolved (it lowercases
+    // it, so `AXIAM:user` cannot slip past a byte comparison on the input).
+    if parsed.scheme() == RESERVED_AUDIENCE_SCHEME {
+        return Err(ResourceError::ReservedAudience);
     }
     Ok(parsed.as_str().to_owned())
 }
@@ -350,6 +383,31 @@ mod tests {
     /// not "https URL", and an MCP server reached over `http` on a loopback
     /// interface during development is a resource like any other. The
     /// *transport* rule belongs to the deployment, not to this parser.
+    /// MCP-02 — the one scheme that is not a resource, whatever its syntax
+    /// says. Both audiences and both spellings, because `url` lowercases a
+    /// scheme and a check on the raw input would have missed the second.
+    #[test]
+    fn axiams_own_audiences_are_refused_as_resources() {
+        for raw in [
+            "axiam:user",
+            "axiam:m2m",
+            "AXIAM:user",
+            "axiam:anything-later",
+        ] {
+            assert_eq!(
+                normalise(raw),
+                Err(ResourceError::ReservedAudience),
+                "{raw} must not be usable as a resource indicator"
+            );
+        }
+        // And the refusal is a refusal everywhere the allow-list is consulted,
+        // including for a value somebody managed to store.
+        assert!(
+            !is_allowed(&["axiam:user".to_string()], "axiam:user"),
+            "a stored reserved value must not authorise itself either"
+        );
+    }
+
     #[test]
     fn any_absolute_uri_scheme_is_a_resource() {
         for raw in [

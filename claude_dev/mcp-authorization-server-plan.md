@@ -707,7 +707,7 @@ challenge that starts the MCP client's discovery. Same structure as
 [`sdk-oidc-sso-plan.md`](sdk-oidc-sso-plan.md): one normative amendment, one
 reference implementation, ten ports, one review.
 
-#### T9a — CONTRACT §28 "MCP resource-server helpers" (contract 1.47) — **Opus 5**
+#### T9a — CONTRACT §28 "MCP resource-server helpers" (contract 1.48) — **Opus 5**
 
 **What.** A new §28 in `sdks/CONTRACT.md`, in the register of §12 and §20:
 1. **Canonical operation set** (per-language naming map, as §12.2 does):
@@ -733,8 +733,15 @@ reference implementation, ten ports, one review.
 3. **Required tests, per SDK** (as §8b §"Required tests" does): document
    shape and validation negatives; challenge quoting; 401 with challenge; 403
    `insufficient_scope`; a token whose `aud` is not the resource refused.
-4. Version trailer bumped to 1.47 with the re-sync note for all eleven repos;
-   `sdks/openapi.json` regenerated from T1–T6.
+4. Version trailer bumped to **1.48** with the re-sync note for all eleven
+   repos, folding in every entry an earlier task recorded as "contract version
+   pending" (T21.3 did, deliberately, so that this task could carry it). The
+   number is 1.48 and not 1.47: T21.2 legitimately took 1.47 for its additive
+   `openapi.json` change, which this line predates.
+   `sdks/openapi.json` is regenerated only if the task's own change moves the
+   OpenAPI surface. §28 does not — it describes SDK behaviour, not a server
+   API — so T9a regenerates nothing, and "from T1–T6" is the later
+   regeneration T21.5 and T21.6 will each do for their own change.
 
 #### T9b — TypeScript reference implementation — **Opus 5**
 

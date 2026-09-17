@@ -338,6 +338,22 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("get", "GET", "/api/v1/oauth2-clients/{id}"),
             ("update", "PUT", "/api/v1/oauth2-clients/{id}"),
             ("delete", "DELETE", "/api/v1/oauth2-clients/{id}"),
+            # T21.4 — RFC 7591 initial access tokens. Management surface in the
+            # strongest sense: minting one is an administrative act, and an SDK
+            # that could not do it could not drive a tenant in
+            # `initial_access_token` mode at all.
+            #
+            # `POST /oauth2/register` is deliberately NOT here. It is a
+            # protocol endpoint an MCP client calls for itself, not one an
+            # administrator calls, and it is already excluded by the `oauth2`
+            # tag above. The SDKs guard MCP servers; MCP *clients* are Claude
+            # Code, VS Code and MCP Inspector, which implement registration
+            # themselves (plan §7, "MCP client helpers in the SDKs" — out of
+            # scope).
+            ("create_registration_token", "POST",
+             "/api/v1/oauth2-clients/registration-tokens"),
+            ("list_registration_tokens", "GET",
+             "/api/v1/oauth2-clients/registration-tokens"),
         ],
     },
     "federation": {

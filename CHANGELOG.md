@@ -79,6 +79,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `axiam:m2m`, so a token minted for another resource server is refused with
   `401` / `UNAUTHENTICATED` there (T21.3).
 
+- **RFC 7591 dynamic client registration.** `POST /oauth2/register?tenant_id=`
+  lets a client create itself, which is what MCP Inspector, Claude Code and
+  VS Code expect from an authorization server. **Off by default on every
+  tenant**: the new `dynamic_registration` tenant policy is `disabled` unless an
+  operator sets it, and the endpoint answers `403` until they do, so the path
+  exists and the feature does not. The two other modes are
+  `initial_access_token` (RFC 7591 §1.2's protected profile — a caller presents
+  a single-use token an administrator minted) and `anonymous` (the open
+  profile). A tenant on `disabled` also has no `registration_endpoint` in its
+  discovery document, which is therefore byte-identical to the one it served
+  before. See
+  [`docs/admin/dynamic-client-registration.md`](docs/admin/dynamic-client-registration.md)
+  (T21.4).
+
+- **A self-registered client cannot choose its own audiences (D3).** It
+  inherits the tenant's new `external_client_allowed_resources` list verbatim
+  as its `allowed_resources`, and AXIAM **refuses to store a policy** that
+  enables `anonymous` registration while that list is empty — an empty list
+  would leave a stranger's client able to obtain the `axiam:user` tokens
+  AXIAM's own APIs accept. The same list will be shared with Client ID Metadata
+  Documents (T21.4).
+
+- **A self-registered client always gets a consent screen (D4).** The first
+  authorization per end user for a client an administrator did not create goes
+  through the existing consent hop, whatever scopes it asked for, and the grant
+  is recorded through the ordinary OIDC-scope consent records — so the end user
+  withdraws it from the account page with no new control. The record covers the
+  scope set the user was shown, so a client that later asks for more re-prompts
+  (T21.4).
+
+- **`POST` / `GET /api/v1/oauth2-clients/registration-tokens`** — mint and list
+  the single-use, TTL-bounded initial access tokens `initial_access_token` mode
+  requires. The handle is shown once, carries no identity beyond its tenant,
+  and is refused for a tenant not in that mode. Gated on `oauth2_clients:create`
+  and `oauth2_clients:list` (T21.4).
+
+- **Abuse controls on the registration endpoint.** A per-IP rate limit
+  (`AXIAM__RATE_LIMIT__DCR_PER_MIN`, default **5/min** — the smallest in AXIAM,
+  because this is the only endpoint that writes for a caller holding no
+  credential), a per-tenant ceiling (`dcr_max_clients`, default 20), a
+  background sweep that deletes self-registered clients unused for
+  `dcr_unused_client_ttl_days` (default 30; `0` disables it) and reports itself
+  at `/health/jobs` as `dcr_unused_clients`, and an audit event for **every**
+  registration attempt, successful or not. The sweep never touches a client an
+  administrator created (T21.4).
+
+- **A `managed_by` discriminator on OAuth2 clients (D5).** `admin` for every
+  client that exists today and everything created through
+  `POST /api/v1/oauth2-clients`, `dcr` for a self-registered one. A client that
+  is not `admin` may never carry the `fapi2` profile, is always consent-gated,
+  and is the only kind the sweeper touches. It is set by the creating code path
+  and is absent from the update API — a registration's provenance is a fact
+  about how it came to exist (T21.4).
+
 ### Changed
 
 - **Token exchange reads `allowed_resources` for its `audience`/`resource`

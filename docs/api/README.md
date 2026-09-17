@@ -129,6 +129,17 @@ ephemeral-port rule for `http://127.0.0.1`, `http://[::1]` and
 `http://localhost` callbacks are in
 [`../admin/public-clients.md`](../admin/public-clients.md).
 
+## OAuth2 dynamic client registration
+
+An MCP client that was handed a URL and nothing else creates its own
+`client_id` at `POST /oauth2/register` (RFC 7591). **Off by default on every
+tenant**, in which case the endpoint answers `403` and the discovery document
+carries no `registration_endpoint`. The three modes, every policy field, the
+audience interlock that makes open registration safe to offer, the consent
+screen such a client always gets, and the ceiling, rate limit and sweeper that
+bound it are in
+[`../admin/dynamic-client-registration.md`](../admin/dynamic-client-registration.md).
+
 ## OAuth2 device flow
 
 Input-constrained clients (televisions, CLIs, headless commissioning) use the

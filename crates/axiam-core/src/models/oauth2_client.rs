@@ -109,6 +109,83 @@ impl AuthnRequestParamsMode {
     }
 }
 
+/// Who created a client registration (D5, T21.4).
+///
+/// The discriminator that separates a registration an administrator made from
+/// one that arrived over an open endpoint. Three things read it and each would
+/// otherwise have to infer provenance from something that is not provenance:
+///
+/// * `axiam_oauth2::fapi` refuses a FAPI profile on anything but
+///   [`Admin`](Self::Admin) (I5) — a client nobody vetted cannot be
+///   financial-grade;
+/// * the authorization endpoint forces a consent hop for every other value
+///   (D4) — an unrelated party gets a question put to the end user, whatever
+///   scopes it asked for;
+/// * the T21.4 sweeper deletes only [`Dcr`](Self::Dcr) rows, so an
+///   administrator's client is never swept however long it sits unused.
+///
+/// [`Admin`](Self::Admin) is the serde default and therefore what every row
+/// written before T21.4 decodes to, which is the truth: they were all created
+/// through `POST /oauth2-clients` by somebody holding
+/// `oauth2_clients:create`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagedBy {
+    /// Created through the authenticated admin API. Every client that existed
+    /// before T21.4.
+    #[default]
+    Admin,
+    /// Created through `POST /oauth2/register` (RFC 7591 dynamic client
+    /// registration).
+    Dcr,
+    /// Materialised from a Client ID Metadata Document (T5). Defined here
+    /// rather than added later so that the column, its `assert` and the
+    /// gates that read it land in one migration; nothing writes this value in
+    /// T21.4.
+    Cimd,
+}
+
+impl ManagedBy {
+    /// The stored/wire spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Dcr => "dcr",
+            Self::Cimd => "cimd",
+        }
+    }
+
+    /// Parse a stored/wire value. `None` for anything unrecognised — see
+    /// [`ClientProfile::from_wire`]. Failing closed matters more here than
+    /// anywhere else in this file: an unknown value degrading to `Admin` would
+    /// hand a self-registered client the consent exemption and the FAPI
+    /// eligibility of one an administrator created.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "admin" => Some(Self::Admin),
+            "dcr" => Some(Self::Dcr),
+            "cimd" => Some(Self::Cimd),
+            _ => None,
+        }
+    }
+
+    /// Whether this registration came from outside — a party AXIAM's operator
+    /// did not vet.
+    ///
+    /// Asked as one question rather than compared against two variants,
+    /// because every gate wants the same answer and a third external
+    /// mechanism must not need a third call site edited.
+    pub const fn is_external(self) -> bool {
+        !matches!(self, Self::Admin)
+    }
+}
+
+impl std::fmt::Display for ManagedBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// How a client proves its identity at the token endpoint (RFC 8705 §2,
 /// OIDC Core §9 naming).
 ///
@@ -451,6 +528,26 @@ pub struct OAuth2Client {
     /// (I2). A `resource` naming anything not on this list is `invalid_target`.
     #[serde(default)]
     pub allowed_resources: Vec<String>,
+    /// T21.4 / D5 — who created this registration. See [`ManagedBy`].
+    ///
+    /// `serde(default)` resolves every row written before schema v64 to
+    /// `admin`, which is what they are.
+    #[serde(default)]
+    pub managed_by: ManagedBy,
+    /// T21.4 — when this client last had an authorization code issued to it,
+    /// for the sweeper that deletes self-registered clients nobody uses.
+    ///
+    /// Written **only** for a client whose [`Self::managed_by`] is not
+    /// `admin`. That is not an optimisation, it is invariant I1 kept exact: an
+    /// administrator's client takes byte-for-byte the path it took before this
+    /// task, one repository call and no more, because nothing here has any
+    /// business stamping a row on its behalf.
+    ///
+    /// `None` on a swept-eligible client means "never authorized", and the
+    /// sweeper falls back to `created_at` — a registration made and abandoned
+    /// is exactly what the TTL is for.
+    #[serde(default)]
+    pub last_authorized_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -708,6 +805,15 @@ pub struct CreateOAuth2Client {
     /// and reproduces every registration that predates RFC 8707 support.
     #[serde(default)]
     pub allowed_resources: Vec<String>,
+    /// T21.4 / D5 — see [`OAuth2Client::managed_by`].
+    ///
+    /// Set by the creating code path, never by a request body: the admin
+    /// handler leaves it at `admin` and `POST /oauth2/register` sets `dcr`. It
+    /// is deliberately absent from [`UpdateOAuth2Client`] — a registration's
+    /// provenance is a fact about how it came to exist, and a field that could
+    /// be edited to `admin` would be a field that launders one.
+    #[serde(default)]
+    pub managed_by: ManagedBy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1487,6 +1593,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             allowed_resources: Vec::new(),
+            managed_by: ManagedBy::Admin,
+            last_authorized_at: None,
         }
     }
 
@@ -1514,6 +1622,7 @@ mod tests {
             authn_request_params: AuthnRequestParamsMode::Ignore,
             browser_sso: false,
             allowed_resources: Vec::new(),
+            managed_by: ManagedBy::Admin,
         }
     }
 

@@ -357,6 +357,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "rfc8707_resource_indicators",
         sql: SCHEMA_V63,
     },
+    Migration {
+        version: 64,
+        name: "dynamic_client_registration",
+        sql: SCHEMA_V64,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3446,9 +3451,142 @@ DEFINE FIELD IF NOT EXISTS resource ON TABLE oauth2_refresh_token TYPE option<st
 DEFINE FIELD IF NOT EXISTS resource ON TABLE device_grant TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v64 — T21.4 / RFC 7591: where a client registration came from
+// -----------------------------------------------------------------------
+//
+// Two columns on `oauth2_client` and one new table. Additive, no backfill, and
+// the only index is the one the new table's lookup key needs.
+//
+// **`oauth2_client.managed_by`.** `string DEFAULT "admin"` rather than
+// `option<string>`, and the default is the whole argument: every row written
+// before this migration *was* created by an administrator through
+// `POST /oauth2-clients`, so `admin` is not a placeholder, it is the fact.
+// Three gates read this column — the FAPI refusal (I5), the forced consent hop
+// (D4) and the sweeper — and each of them fails closed on an unparseable
+// value, which is why the column is never `NONE`: a `NONE` an author must
+// remember to coalesce is a `NONE` that eventually coalesces to `admin`, which
+// is the permissive direction.
+//
+// There is deliberately **no `ASSERT`** on the value. `ManagedBy::from_wire`
+// refuses anything it does not recognise and every reader fails closed on
+// that, so a database-level assertion would buy a second refusal at the cost
+// of making a future fourth provenance a schema migration rather than a code
+// change. (Contrast v50's tenant `kind`, where the assertion encodes an
+// invariant no code path re-derives.)
+//
+// **`oauth2_client.last_authorized_at`.** `option<datetime>`, because a client
+// that has never been authorized has never been authorized — and writing
+// `created_at` into it at migration time would tell the sweeper that every
+// existing row was used the moment this migration ran. Absent is the honest
+// value and the sweeper reads `created_at` when it finds one. Only
+// non-`admin` rows are ever stamped; see `OAuth2Client::last_authorized_at`.
+//
+// **`oauth2_registration_token`.** The RFC 7591 §1.2 initial access token. Two
+// indexes: the hash, unique, because it is the lookup key of an
+// unauthenticated request and a duplicate would be two credentials with one
+// name; and `expires_at`, because the sweeper reads a range of it. Nothing
+// here holds a plaintext handle — `token_hash` is a SHA-256 — and nothing
+// holds a scope or a resource: what a registration may ask for is the
+// tenant's policy at the time it is spent, not what was true when the token
+// was minted.
+const SCHEMA_V64: &str = "\
+DEFINE FIELD IF NOT EXISTS managed_by ON TABLE oauth2_client TYPE string DEFAULT 'admin';
+DEFINE FIELD IF NOT EXISTS last_authorized_at ON TABLE oauth2_client TYPE option<datetime>;
+DEFINE TABLE IF NOT EXISTS oauth2_registration_token SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE oauth2_registration_token TYPE string;
+DEFINE FIELD IF NOT EXISTS name ON TABLE oauth2_registration_token TYPE string;
+DEFINE FIELD IF NOT EXISTS token_hash ON TABLE oauth2_registration_token TYPE string;
+DEFINE FIELD IF NOT EXISTS created_by ON TABLE oauth2_registration_token TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE oauth2_registration_token TYPE datetime;
+DEFINE FIELD IF NOT EXISTS used_at ON TABLE oauth2_registration_token TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS used_by_client_id ON TABLE oauth2_registration_token TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE oauth2_registration_token TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_oauth2_registration_token_hash ON TABLE \
+    oauth2_registration_token FIELDS token_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_oauth2_registration_token_expiry ON TABLE \
+    oauth2_registration_token FIELDS expires_at;
+DEFINE FIELD IF NOT EXISTS oidc_dynamic_registration ON TABLE security_settings
+    TYPE option<string> DEFAULT 'disabled';
+DEFINE FIELD IF NOT EXISTS oidc_dcr_allowed_scopes ON TABLE security_settings
+    TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS oidc_dcr_allowed_redirect_hosts ON TABLE security_settings
+    TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS oidc_external_client_allowed_resources ON TABLE security_settings
+    TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS oidc_dcr_max_clients ON TABLE security_settings
+    TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS oidc_dcr_unused_client_ttl_days ON TABLE security_settings
+    TYPE option<int>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T21.4 — v64 adds two columns to an existing table and one new table,
+    /// and the things that would make it a behaviour change rather than an
+    /// addition are asserted absent: an `UPDATE` (a backfill of
+    /// `last_authorized_at` would tell the sweeper every existing client was
+    /// used today) and a `REMOVE`.
+    ///
+    /// The `managed_by` default is asserted by value rather than merely
+    /// present: `admin` is what makes every pre-T21.4 row keep its FAPI
+    /// eligibility, its consent exemption and its immunity from the sweeper,
+    /// and a default of anything else would quietly change all three.
+    #[test]
+    fn v64_defaults_every_existing_client_to_admin_and_backfills_nothing() {
+        for definition in [
+            "managed_by ON TABLE oauth2_client TYPE string DEFAULT 'admin'",
+            "last_authorized_at ON TABLE oauth2_client TYPE option<datetime>",
+            "DEFINE TABLE IF NOT EXISTS oauth2_registration_token SCHEMAFULL",
+            "token_hash ON TABLE oauth2_registration_token TYPE string",
+            "used_at ON TABLE oauth2_registration_token TYPE option<datetime>",
+            // Reserved and never written in this build — see the model. The
+            // column is defined so that RFC 7592 needs no migration, and
+            // `option<string>` is what an always-absent value must be.
+            "used_by_client_id ON TABLE oauth2_registration_token TYPE option<string>",
+        ] {
+            assert!(
+                SCHEMA_V64.contains(definition),
+                "v64 must define {definition}"
+            );
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DELETE"] {
+            assert!(
+                !SCHEMA_V64.contains(forbidden),
+                "v64 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// The registration token's handle is the lookup key of an
+    /// **unauthenticated** request, so two rows sharing one would be two
+    /// credentials with one name and the single-use CAS would spend whichever
+    /// the datastore happened to return.
+    #[test]
+    fn v64_makes_the_registration_token_hash_unique() {
+        assert!(
+            SCHEMA_V64.contains("idx_oauth2_registration_token_hash")
+                && SCHEMA_V64.contains("FIELDS token_hash UNIQUE"),
+            "the initial access token's hash must be uniquely indexed"
+        );
+    }
+
+    /// Nothing in the new table holds a secret or a policy. The handle is
+    /// stored as a hash, and what a registration may ask for is read from the
+    /// tenant's settings when the token is spent — never frozen into the token
+    /// at minting time, which would let a policy tightened yesterday be
+    /// bypassed by a token minted the day before.
+    #[test]
+    fn v64_stores_no_plaintext_handle_and_no_frozen_policy() {
+        for forbidden in ["token_plaintext", "scopes", "allowed_resources", "secret"] {
+            assert!(
+                !SCHEMA_V64.contains(&format!("{forbidden} ON TABLE oauth2_registration_token")),
+                "the initial access token must not carry {forbidden}"
+            );
+        }
+    }
 
     /// T21.3 — v63 adds one allow-list and three optional columns, and the
     /// things that would make it a behaviour change rather than an addition
@@ -3788,9 +3926,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&63),
-            "v63 is the newest migration (T21.3 — RFC 8707's client allow-list \
-             and the resource a grant was issued for). \
+            Some(&64),
+            "v64 is the newest migration (T21.4 — RFC 7591's provenance column, the \
+             unused-client stamp the sweeper reads, and the initial access token table). \
              This assertion is a tripwire, not bookkeeping: bumping it is how a new \
              migration is declared deliberate rather than merged in by accident."
         );

@@ -221,6 +221,11 @@ mod tests {
         assert!(is_public_path("/.well-known/openid-configuration"));
         assert!(is_public_path("/.well-known/oauth-authorization-server"));
         assert!(is_public_path("/oauth2/token"));
+        // T21.4 — RFC 7591 registration. Public in the middleware's sense:
+        // the caller is a client that does not exist yet, so there is nothing
+        // it could authenticate as. The tenant's policy decides whether the
+        // endpoint does anything.
+        assert!(is_public_path("/oauth2/register"));
         assert!(is_public_path("/api/docs/openapi.json")); // prefix match via /api/docs/*
         assert!(is_public_path("/api/v1/admin/bootstrap"));
     }
@@ -241,6 +246,13 @@ mod tests {
         assert!(!is_public_path("/api/v1/roles"));
         assert!(!is_public_path("/api/v1/permissions"));
         assert!(!is_public_path("/api/v1/settings"));
+        // T21.4 — the endpoint that MINTS an initial access token is an
+        // administrative one and must stay behind the middleware, even though
+        // the endpoint that SPENDS one does not. Asserted because the two live
+        // in one handler module and share a name.
+        assert!(!is_public_path(
+            "/api/v1/oauth2-clients/registration-tokens"
+        ));
     }
 
     // -----------------------------------------------------------------

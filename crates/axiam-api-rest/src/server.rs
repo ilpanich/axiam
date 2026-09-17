@@ -743,6 +743,43 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     .route(web::get().to(handlers::oauth2::end_session::<C>))
                     .route(web::post().to(handlers::oauth2::end_session::<C>)),
             )
+            // T21.4 / RFC 7591 §3.1 — dynamic client registration.
+            //
+            // Its own bucket, per-IP, and the smallest in the file. Unlike
+            // every other endpoint in this scope this one is unauthenticated
+            // AND it **writes**: each accepted request creates a client row
+            // that counts against the tenant's `dcr_max_clients`. The nearest
+            // neighbour is `/device_authorization` — unauthenticated and
+            // state-allocating — and this is the stricter case, because the
+            // state it allocates outlives the request. Never client-keyed: a
+            // registration has no client identity, obtaining one is the point.
+            //
+            // The route is mounted unconditionally, on every deployment. A
+            // tenant that has not enabled registration is answered `403` by
+            // the handler, so the path exists and the feature does not — which
+            // is the plan's item 2, and the reason it is phrased that way is
+            // that a route mounted only where a feature is on is a route a
+            // scanner can use to discover which tenants have it.
+            .service(
+                web::resource("/register")
+                    // A 16 KiB body limit, set explicitly because this route
+                    // is outside the `/api/v1` scope that carries one. Without
+                    // it the endpoint would inherit actix's 2 MiB default —
+                    // on the one route in AXIAM that accepts a JSON body from
+                    // a caller holding no credential. RFC 7591 §2 metadata is
+                    // a few hundred bytes; the largest legitimate member is an
+                    // inline `jwks`, which is a few kilobytes for a key set
+                    // nobody would call small. 16 KiB leaves room for that and
+                    // refuses a megabyte of anything else before the handler,
+                    // the policy read or the audit row exist.
+                    .app_data(web::JsonConfig::default().limit(16 * 1024))
+                    .wrap(build_governor(rate_limit_cfg.dcr_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_register",
+                        rate_limit_cfg.dcr_per_min,
+                    ))
+                    .route(web::post().to(handlers::dcr::register::<C>)),
+            )
             .route("/jwks", web::get().to(handlers::oauth2::jwks::<C>))
             // W6 / OIDC Core §5.3: the UserInfo endpoint MUST accept both
             // methods. Same shape as `/end_session` above — one resource, two
@@ -1323,6 +1360,15 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                 web::resource("/oauth2-clients")
                     .route(web::post().to(handlers::oauth2_clients::create::<C>))
                     .route(web::get().to(handlers::oauth2_clients::list::<C>)),
+            )
+            // T21.4 — RFC 7591 initial access tokens. **Before**
+            // `/oauth2-clients/{id}`, because actix matches in registration
+            // order and `registration-tokens` would otherwise be captured as
+            // an `{id}` that is not a UUID.
+            .service(
+                web::resource("/oauth2-clients/registration-tokens")
+                    .route(web::post().to(handlers::dcr::create_registration_token::<C>))
+                    .route(web::get().to(handlers::dcr::list_registration_tokens::<C>)),
             )
             .service(
                 web::resource("/oauth2-clients/{id}")

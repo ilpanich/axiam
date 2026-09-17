@@ -24,6 +24,11 @@ rule and why `localhost` and `127.0.0.1` are not interchangeable),
 (`allowed_resources`: the target services a client may mint tokens for, the
 `resource` parameter on each grant, why a refresh cannot re-address a token,
 and why such a token is refused by AXIAM's own endpoints),
+[Dynamic client registration](dynamic-client-registration.md)
+(`dynamic_registration`: letting an MCP client create itself over RFC 7591,
+the three modes, the D3 audience interlock that makes open registration safe,
+the forced consent screen, and the ceiling, rate limit and sweeper that bound
+it),
 [Standard-lane OIDC parameters](oidc-authn-parameters.md)
 (`authn_request_params`: making `prompt`, `max_age`, `acr_values` and
 `id_token_hint` mean what they say, the two ACR values, why `max_age=0`

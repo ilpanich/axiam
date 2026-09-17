@@ -3534,6 +3534,42 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-09 (contract version pending, T21.4)** — **non-breaking / additive.**
+  RFC 7591 dynamic client registration reaches `openapi.json`. **No version
+  number is taken here on purpose**, for the reason T21.3's entry below gives:
+  the MCP plan reserves 1.48 for T9a (§28), and 1.47 is taken. T9a folds both
+  entries into the version it publishes.
+
+  - `openapi.json` gains three paths — `POST /oauth2/register` (unauthenticated,
+    RFC 7591 §3.1) and `POST` / `GET /api/v1/oauth2-clients/registration-tokens`
+    (the initial access tokens §1.2's protected profile needs) — and the
+    schemas behind them. `management-registry.json` regenerates: the
+    `oauth2_clients` namespace gains `create_registration_token` and
+    `list_registration_tokens`, so the operation count moves by **two**.
+    `/oauth2/register` is **not** management surface and is excluded by the
+    existing `oauth2` tag exclusion — it is a protocol endpoint an MCP client
+    calls, not one an administrator does.
+  - **No SDK operation changes signature or behaviour**, and an SDK written
+    against 1.47 is conformant with no edit. The two management operations are
+    new surface an SDK MAY expose; nothing existing moves.
+  - **What an SDK MUST NOT infer from a `registration_endpoint` in discovery.**
+    Its presence says this *tenant* accepts self-registration; it says nothing
+    about whether the caller may register, since `initial_access_token` mode
+    answers `403` to a caller holding no handle. An SDK that offers
+    registration must treat a `403` with an `invalid_request` body as "not for
+    you" rather than as an error to retry. Its **absence** is not a failure
+    either: a deployment whose clients are all administrator-created publishes
+    no such member, which is the default.
+
+  The server change behind it is AXIAM Phase 21 T21.4
+  (`docs/admin/dynamic-client-registration.md`).
+
+  **Re-sync required** in all eleven SDK repositories — `axiam-rust-sdk`,
+  `axiam-typescript-sdk`, `axiam-python-sdk`, `axiam-java-sdk`,
+  `axiam-kotlin-sdk`, `axiam-csharp-sdk`, `axiam-php-sdk`, `axiam-go-sdk`,
+  `axiam-swift-sdk`, `axiam-c-sdk`, `axiam-cplusplus-sdk` — for the vendored
+  `CONTRACT.md` and `openapi.json`. `proto/` is unchanged.
+
 - **2026-09 (contract version pending, T21.3)** — **non-breaking / additive.**
   RFC 8707 resource indicators reach `openapi.json`. **No version number is
   taken here on purpose**: the MCP plan reserves 1.48 for T9a (§28), and a task

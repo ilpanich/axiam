@@ -536,6 +536,76 @@ Keycloak's guide translated to AXIAM settings, the sweeper.
 - `oauth2_client_test.rs` unchanged and green (admin creation path untouched).
 - I1, I5, I7, I9.
 
+**Amendments, recorded by the executing session (2026-09-17).** Four. None
+changed an existing test's expectation; each settles a question the task's
+text left open, and each is taken toward the answer that refuses more.
+
+1. **`dcr_allowed_scopes` may not name a GDPR-sensitive scope.** D4 forces a
+   consent hop for an external client, and W7 already forces one for `address`
+   and `phone`. Both record into the same namespace
+   (`oidc_scope_release:<client_id>`), and a DCR client holding `address`
+   would need *two* records with two different versions — so either the end
+   user answers two consent screens for one authorization, or one record is
+   made to stand for the other and the UserInfo gate
+   (`handlers/oauth2.rs::release_sensitive_claims`, which re-reads the
+   sensitive record on every call) silently releases nothing anyway. Neither
+   is a behaviour an operator could predict from the settings page.
+
+   The settings handler therefore refuses a `dcr_allowed_scopes` that contains
+   `address` or `phone`, naming W7. That is also the answer D3's reasoning
+   points at on its own: a party that registered itself, unauthenticated,
+   should not be able to *ask* for a postal address, whatever the tenant's
+   sensitive-scope switch says. The interlock is one line in the settings
+   validator and it removes a whole class of two-consent states from the
+   model.
+
+2. **"No authorization in N days" is a stamp, not an inference.**
+   `oauth2_client` gains `last_authorized_at: option<datetime>`, written by
+   `authorize.rs` when a code is issued **and only for a client whose
+   `managed_by` is not `admin`**. The alternatives were worse in both
+   directions: inferring from `updated_at` sweeps a client that was merely
+   edited, and inferring from live refresh tokens keeps a client alive for as
+   long as its longest-lived grant, which is the opposite of what a TTL is
+   for. Gating the write on `managed_by` is what keeps I1 exact — an
+   administrator's client takes byte-for-byte the path it took before this
+   task, one repository call and no more.
+
+3. **The D4 consent record shares W7's namespace and is distinguished by its
+   version.** `consent_type` stays `oidc_scope_release:<client_id>`, so
+   withdrawal through `DELETE /account/consents/oidc-scopes/{client_id}` — a
+   call that withdraws every version for a relying party — keeps working with
+   no change at all. The version is `client:` followed by the canonical,
+   space-joined scope set the user was shown. The prefix cannot collide with
+   W7's versions (`address`, `phone`, `address phone`), and putting the whole
+   scope set in it is what makes a DCR client that later asks for more
+   re-prompt rather than inherit — the same property W7's version already
+   buys, for the same reason.
+
+4. **One ordering change inside `grant_oidc_scope_consent`, recorded because
+   I1 is absolute and this is the one place the task touches it.** The handler
+   now reads the client **before** validating the body, because the client's
+   `managed_by` is what decides which of the two consent lanes the request is
+   in. For every request that names a client that exists — which is every
+   request any test makes, and every request the consent screen makes — the
+   response is unchanged, member for member. The single shape that differs is
+   an unknown `client_id` **together with** a body W7 would have rejected: that
+   used to be `400` (bad scopes) and is now `404` (no such client). Both are
+   refusals, no test covers it, and no caller can reach it without naming a
+   client that does not exist.
+
+   It is written down rather than worked around because the workaround does
+   not exist: the W7 body check and the D4 body check accept different scope
+   sets, so neither can run before the lane is known, and the lane is a column
+   on the client row. Flagged on the PR.
+
+5. **`registration_endpoint` is the only new discovery member, and it is
+   `Option`.** Item 6 says to advertise it per tenant. It is
+   `skip_serializing_if = "Option::is_none"` rather than an empty string, so a
+   tenant on the default policy receives a document with the member **absent**
+   — byte-identical to today's, which is what the maintainer's ruling of
+   2026-09-17 asks for and what `oidc_conformance.rs` asserts without
+   amendment.
+
 #### T4b — Admin surfaces — **Sonnet 5**
 
 **What.** Settings form fields for the T4a policy in the tenant settings page;

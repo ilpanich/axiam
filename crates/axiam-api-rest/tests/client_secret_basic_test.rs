@@ -191,6 +191,7 @@ async fn setup() -> Fixture {
         authn_request_params: AuthnRequestParamsMode::Ignore,
         browser_sso: false,
         allowed_resources: Vec::new(),
+        managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
     };
 
     let (basic, _) = client_repo.create(new_client("basic-rp")).await.unwrap();

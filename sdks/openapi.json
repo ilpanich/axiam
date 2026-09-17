@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta15",
-    "x-axiam-spec-digest": "sha256:de38f318f85abf70b7f2f2072cde87402727338d8944a53e3dfefba3f8fcb884"
+    "x-axiam-spec-digest": "sha256:769691a75aecdb081ced59c47de74b97e2cb374c88818d16d11f14c169bb3921"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4245,6 +4245,7 @@
                           "authn_request_params",
                           "browser_sso",
                           "allowed_resources",
+                          "managed_by",
                           "created_at",
                           "updated_at"
                         ],
@@ -4299,6 +4300,18 @@
                               "string",
                               "null"
                             ]
+                          },
+                          "last_authorized_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "date-time",
+                            "description": "T21.4 — when this client was last issued an authorization code, for the\nsweeper that deletes self-registered clients nobody uses.\n\nAlways absent for an `admin` client: the stamp is written only for a\nnon-`admin` one, so that an administrator's client takes exactly the\npath it took before T21.4 (I1). `null` on a self-registered client\nmeans it has never been authorized, and the sweeper reads `created_at`\ninstead."
+                          },
+                          "managed_by": {
+                            "$ref": "#/components/schemas/ManagedBy",
+                            "description": "T21.4 / D5 — who created this registration: `admin`, `dcr` or `cimd`.\n\nEchoed because an operator auditing a tenant needs to answer \"which of\nthese did we create?\" from this endpoint rather than from the database,\nand because three behaviours hang off it: a non-`admin` client may\nnever carry the FAPI profile, is always consent-gated, and is the only\nkind the unused-client sweeper touches.\n\nRead-only. There is no corresponding member on the update DTO: a\nregistration's provenance is a fact about how it came to exist, and a\nfield that could be edited to `admin` would be a field that launders\none."
                           },
                           "name": {
                             "type": "string"
@@ -4416,6 +4429,74 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/oauth2-clients/registration-tokens": {
+      "get": {
+        "tags": [
+          "oauth2-clients"
+        ],
+        "summary": "`GET /api/v1/oauth2-clients/registration-tokens`",
+        "description": "Metadata only — the handle is not stored, so it cannot be listed.",
+        "operationId": "list_registration_tokens",
+        "responses": {
+          "200": {
+            "description": "Outstanding and spent initial access tokens",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RegistrationTokenResponse"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "oauth2-clients"
+        ],
+        "summary": "`POST /api/v1/oauth2-clients/registration-tokens`",
+        "description": "Mints the single-use credential RFC 7591 §1.2's protected registration\nprofile requires. Gated on `oauth2_clients:create` rather than a permission\nof its own: a token minted here authorises exactly one registration, and a\nregistration is strictly less than what that permission already confers\n(an administrator holding it can create any client directly, with any\nscopes, any audiences and any profile). A separate permission would suggest\nthis is the more dangerous of the two, which it is not.",
+        "operationId": "create_registration_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRegistrationTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Token minted; the handle is returned once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateRegistrationTokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid lifetime or name, or this tenant is not in initial_access_token mode"
           }
         },
         "security": [
@@ -11258,6 +11339,68 @@
         }
       }
     },
+    "/oauth2/register": {
+      "post": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "`POST /oauth2/register` — RFC 7591 §3.1 dynamic client registration.",
+        "operationId": "register",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Client registered (secret, if any, shown once)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistrationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The metadata is not one this server will register",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DcrErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Dynamic registration is not enabled for this tenant, the initial access token was missing or unusable, or the tenant's client limit is reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DcrErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/oauth2/revocations": {
       "get": {
         "tags": [
@@ -13401,6 +13544,46 @@
           }
         }
       },
+      "CreateRegistrationTokenRequest": {
+        "type": "object",
+        "description": "Request body for [`create_registration_token`].",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "expires_in_hours": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Lifetime in hours. Defaults to 24 and is refused above 168 (a week) —\nsee `axiam_core::models::oauth2_registration_token`.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Operator-facing label, e.g. `\"mcp-inspector-demo\"`, so a tenant with\nseveral outstanding tokens can tell them apart."
+          }
+        }
+      },
+      "CreateRegistrationTokenResponse": {
+        "type": "object",
+        "description": "The one response that carries the handle.",
+        "required": [
+          "token",
+          "initial_access_token"
+        ],
+        "properties": {
+          "initial_access_token": {
+            "type": "string",
+            "description": "The plaintext handle, shown exactly once. Presented by the registering\nclient as `Authorization: Bearer <this>`."
+          },
+          "token": {
+            "$ref": "#/components/schemas/RegistrationTokenResponse",
+            "description": "The token's metadata."
+          }
+        }
+      },
       "CreateResource": {
         "type": "object",
         "required": [
@@ -13788,6 +13971,24 @@
           }
         }
       },
+      "DcrErrorResponse": {
+        "type": "object",
+        "description": "An RFC 7591 §3.2.2 error body.\n\nThe same two members the OAuth2 error responses elsewhere in this crate\ncarry, declared separately because RFC 7591 §3.2.2 defines its own code\nvocabulary (`invalid_redirect_uri`, `invalid_client_metadata`,\n`invalid_software_statement`) that has nothing to do with RFC 6749 §5.2's.",
+        "required": [
+          "error",
+          "error_description"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "RFC 7591 §3.2.2 error code."
+          },
+          "error_description": {
+            "type": "string",
+            "description": "Human-readable explanation."
+          }
+        }
+      },
       "DecideRequest": {
         "type": "object",
         "description": "`POST /api/v1/device/decide` — the user approves or refuses.",
@@ -13903,6 +14104,15 @@
             "description": "The same URI with the code pre-filled, for devices that can render a\nQR code. RFC 8628 §3.3.1 — optional, but it is the difference between\na user typing eight characters and scanning."
           }
         }
+      },
+      "DynamicRegistrationMode": {
+        "type": "string",
+        "description": "Whether, and on what terms, a client may register itself through\nRFC 7591 dynamic client registration (T21.4).\n\nThree values rather than a `bool` plus a second `bool`, because the middle\none is the whole point: a deployment that wants MCP Inspector to register\nitself during a demonstration and a deployment that wants Claude Code to\nregister itself in production want different things, and the difference is\nwhether an administrator handed out a credential first.\n\n[`Disabled`](Self::Disabled) is the serde default and the system default\n(I1). `POST /oauth2/register` exists on every deployment and answers `403`\non every one that has not chosen otherwise — the path is there, the feature\nis not, and a scanner learns nothing from the difference because there is\nnone to learn.",
+        "enum": [
+          "disabled",
+          "initial_access_token",
+          "anonymous"
+        ]
       },
       "EmailConfig": {
         "type": "object",
@@ -14981,6 +15191,15 @@
           }
         }
       },
+      "ManagedBy": {
+        "type": "string",
+        "description": "Who created a client registration (D5, T21.4).\n\nThe discriminator that separates a registration an administrator made from\none that arrived over an open endpoint. Three things read it and each would\notherwise have to infer provenance from something that is not provenance:\n\n* `axiam_oauth2::fapi` refuses a FAPI profile on anything but\n  [`Admin`](Self::Admin) (I5) — a client nobody vetted cannot be\n  financial-grade;\n* the authorization endpoint forces a consent hop for every other value\n  (D4) — an unrelated party gets a question put to the end user, whatever\n  scopes it asked for;\n* the T21.4 sweeper deletes only [`Dcr`](Self::Dcr) rows, so an\n  administrator's client is never swept however long it sits unused.\n\n[`Admin`](Self::Admin) is the serde default and therefore what every row\nwritten before T21.4 decodes to, which is the truth: they were all created\nthrough `POST /oauth2-clients` by somebody holding\n`oauth2_clients:create`.",
+        "enum": [
+          "admin",
+          "dcr",
+          "cimd"
+        ]
+      },
       "MdsRefreshOutcome": {
         "oneOf": [
           {
@@ -15674,6 +15893,7 @@
           "authn_request_params",
           "browser_sso",
           "allowed_resources",
+          "managed_by",
           "created_at",
           "updated_at"
         ],
@@ -15728,6 +15948,18 @@
               "string",
               "null"
             ]
+          },
+          "last_authorized_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "T21.4 — when this client was last issued an authorization code, for the\nsweeper that deletes self-registered clients nobody uses.\n\nAlways absent for an `admin` client: the stamp is written only for a\nnon-`admin` one, so that an administrator's client takes exactly the\npath it took before T21.4 (I1). `null` on a self-registered client\nmeans it has never been authorized, and the sweeper reads `created_at`\ninstead."
+          },
+          "managed_by": {
+            "$ref": "#/components/schemas/ManagedBy",
+            "description": "T21.4 / D5 — who created this registration: `admin`, `dcr` or `cimd`.\n\nEchoed because an operator auditing a tenant needs to answer \"which of\nthese did we create?\" from this endpoint rather than from the database,\nand because three behaviours hang off it: a non-`admin` client may\nnever carry the FAPI profile, is always consent-gated, and is the only\nkind the unused-client sweeper touches.\n\nRead-only. There is no corresponding member on the update DTO: a\nregistration's provenance is a fact about how it came to exist, and a\nfield that could be edited to `admin` would be a field that launders\none."
           },
           "name": {
             "type": "string"
@@ -16098,6 +16330,13 @@
             "type": "string",
             "description": "RFC 9126 §5 — B5. Advertised unconditionally because the endpoint is\nalways mounted."
           },
+          "registration_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7591 §2 / RFC 8414 §2 `registration_endpoint` — T21.4.\n\nPresent **only** when the tenant this document describes has dynamic\nclient registration enabled. That is the same per-tenant conditionality\nthe two sensitive-scope members already have, and I7 is why it is\nphrased that way rather than as a per-client one: this is a statement\nabout what the deployment will do for the tenant named in the request,\nnot about any client's posture.\n\n`Option` with `skip_serializing_if`, not an empty string, and the\ndistinction is load-bearing for I1: a tenant on the default policy\nreceives a document with the member **absent**, byte-identical to the\none served before T21.4. RFC 8414 §2 makes the member OPTIONAL and\ndefines no default, so absence is the truthful way to say \"this server\ndoes not register clients for you\" — where an empty or present-but-dead\nURL would be a value a conforming client would try."
+          },
           "request_parameter_supported": {
             "type": "boolean",
             "description": "OIDC Discovery §3 — X7 G12. `false`, and truthfully so: AXIAM accepts\nno request object by value (see `authorize::RequestObject` for why it\nnever will).\n\n`request_uri_parameter_supported` is deliberately **absent** rather\nthan `false`: its default is `true`, and that is the truthful answer —\nAXIAM does accept `request_uri`, for the PAR handles RFC 9126 defines.\nPublishing `false` would tell a conforming client not to use PAR."
@@ -16154,17 +16393,57 @@
       },
       "OidcPolicy": {
         "type": "object",
-        "description": "OpenID Connect surface controls (X7 G8, plan §4.6/§4.8).\n\nTwo settings that are not password rules, and are here because this is the\norg-baseline-plus-tenant-override surface every other per-tenant control\nlives on. They are also the two settings in this model that are *not* of\nthe same kind as each other, so it is worth saying which is which:\n\n* [`Self::sensitive_scopes_enabled`] **is** ordered. Releasing personal\n  data is the less-restrictive direction, so it is validated\n  disable-only — the mirror image of `mfa_enforced` — and a tenant can turn\n  its organization's decision off but never on.\n* [`Self::default_locale`] is **not** ordered, and no ordering is invented\n  for it. A language is a presentation preference; there is no sense in\n  which Italian is stricter than French. [`validate_tenant_override`]\n  therefore does not check it and [`clamp_overrides_to_org`] never clears\n  it. The model's rule is \"a tenant may only be more restrictive\", which\n  binds every field that *has* a restrictiveness; a field that has none\n  cannot violate it.",
+        "description": "OpenID Connect surface controls (X7 G8, plan §4.6/§4.8; T21.4).\n\nSettings that are not password rules, here because this is the\norg-baseline-plus-tenant-override surface every other per-tenant control\nlives on. They are not all of the same kind as each other, and which is\nwhich is the whole of what [`validate_tenant_override`] and\n[`clamp_overrides_to_org`] read, so it is set out rather than inferred.\n\n**Ordered** — a tenant may be stricter than its organization and never more\npermissive:\n\n* [`Self::sensitive_scopes_enabled`], validated **disable-only** — the\n  mirror image of `mfa_enforced`, because releasing personal data is the\n  less-restrictive direction, so a tenant can turn its organization's\n  decision off but never on.\n* [`Self::dynamic_registration`], on the ladder\n  `disabled` → `initial_access_token` → `anonymous`: a tenant may move down\n  it and never up.\n* [`Self::dcr_max_clients`] and [`Self::dcr_unused_client_ttl_days`], on the\n  ordinary `tenant <= org` rule — with the wrinkle that `0` on the second\n  means *never sweep*, which is the longest window of all and is handled by\n  [`dcr_ttl_strictness`].\n\n**Not ordered**, therefore never validated against the baseline and never\nclamped:\n\n* [`Self::default_locale`]. A language is a presentation preference; there\n  is no sense in which Italian is stricter than French.\n* [`Self::dcr_allowed_scopes`], [`Self::dcr_allowed_redirect_hosts`] and\n  [`Self::external_client_allowed_resources`]. Each names per-tenant\n  resources — *this* tenant's MCP servers, *this* tenant's callback hosts —\n  and there is no sense in which one such list is stricter than another. A\n  subset rule would force an organization to enumerate every tenant's\n  resource servers in its own baseline before any tenant could name one.\n\nThe model's rule is \"a tenant may only be more restrictive\", which binds\nevery field that *has* a restrictiveness; a field that has none cannot\nviolate it.\n\nOne cross-field interlock spans both groups and is checked on the resolved\npolicy rather than on either input: see [`validate_dcr_policy`].",
         "required": [
           "sensitive_scopes_enabled"
         ],
         "properties": {
+          "dcr_allowed_redirect_hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "T21.4 — hosts a self-registered client's `redirect_uris` may point at,\nas globs (`*.example.com`, or `*` for any). The loopback hosts\n(`127.0.0.1`, `[::1]`, `localhost`) are always allowed whatever this\nsays, because RFC 8252 §7.3 is how every desktop MCP client receives\nits callback and a tenant that forbade them would have turned\nregistration on for nobody."
+          },
+          "dcr_allowed_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "T21.4 — the scopes a self-registered client may ask for. A `scope` a\nregistration names that is not on this list is\n`invalid_client_metadata`; an empty list means a self-registered client\ngets no scopes at all, which is the honest default for a tenant that\nhas turned registration on without deciding what it grants.\n\nMay not contain `address` or `phone` — see this module's\n[`sensitive_scope_in_dcr_list`]."
+          },
+          "dcr_max_clients": {
+            "type": "integer",
+            "format": "int32",
+            "description": "T21.4 — how many `managed_by: dcr` clients this tenant may hold. See\n[`DEFAULT_DCR_MAX_CLIENTS`].",
+            "example": 20,
+            "minimum": 0
+          },
+          "dcr_unused_client_ttl_days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "T21.4 — how long a `managed_by: dcr` client survives without being\nauthorized. See [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`]. `0` disables\nthe sweep for this tenant, which an operator who prunes out of band\nmay legitimately want.",
+            "example": 30,
+            "minimum": 0
+          },
           "default_locale": {
             "type": [
               "string",
               "null"
             ],
             "description": "The BCP 47 tag the sign-in page falls back to when the relying party's\n`ui_locales` selects nothing (W5's chain, plan §4.6).\n\n`None` means \"no tenant preference\", which lands on the deployment\ndefault (`en`) — the behaviour every deployment had before this field\nexisted. A tag this build does not ship also lands there: the parse is\nexact rather than a language lookup, so a stored `fr-CA` reads as\n\"somebody wrote something this binary does not ship\" rather than as a\nguess at French.\n\nStored as a string rather than as the `Locale` enum because that enum\nlives in `axiam-oauth2`, four layers above this crate, and the crate\nlayering points inward."
+          },
+          "dynamic_registration": {
+            "type": "string",
+            "description": "T21.4 — whether a client may register itself (RFC 7591), and on what\nterms. `disabled` unless somebody says otherwise (I1).",
+            "example": "disabled"
+          },
+          "external_client_allowed_resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "**D3** — the audiences an externally registered client may address.\n\nThe single most important field on this policy, and the reason the\nsettings handler refuses `dynamic_registration: anonymous` while it is\nempty. A client an unrelated party registered cannot declare its own\n`allowed_resources`; it inherits this list verbatim, so what a stranger\ncan mint a token *for* is a decision the tenant took in advance rather\nthan one the registration request makes.\n\nEmpty means an externally registered client can obtain only today's\n`axiam:user` tokens — which AXIAM's own APIs accept. That is why the\ninterlock exists: the empty list is not a safe default for an *open*\nregistration endpoint, it is the most dangerous one.\n\nShared with T5 (CIMD), which inherits the same list for the same\nreason."
           },
           "sensitive_scopes_enabled": {
             "type": "boolean",
@@ -17396,6 +17675,208 @@
           }
         }
       },
+      "RegistrationRequest": {
+        "type": "object",
+        "description": "An RFC 7591 §2 client metadata document, as a registration request.\n\nOnly the members AXIAM can act on are fields. RFC 7591 §2 says a server\n\"MUST ignore any metadata parameters it does not understand\", which is what\n`serde` does with the rest — `client_uri`, `logo_uri`, `contacts`,\n`tos_uri`, `policy_uri` and the localised `client_name#xx` forms all arrive\nfrom MCP Inspector and are dropped. `software_statement` is the one\nunimplemented member that is **not** ignored: see\n[`DcrError::UnsupportedSoftwareStatement`].",
+        "properties": {
+          "client_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7591 §2 `client_name`. Shown to the end user on the consent screen\nD4 forces, so a registration that omits it gets a generated one rather\nthan an empty label."
+          },
+          "grant_types": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 7591 §2 `grant_types`. Defaults to `[\"authorization_code\"]`, as\n§2 specifies."
+          },
+          "jwks": {
+            "description": "RFC 7591 §2 `jwks` — an inline JWK Set, for `private_key_jwt`."
+          },
+          "jwks_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7591 §2 `jwks_uri`."
+          },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 7591 §2 `redirect_uris`. Required here, because every grant this\nendpoint issues is browser-driven."
+          },
+          "response_types": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 7591 §2 `response_types`. Defaults to `[\"code\"]`, as §2 specifies,\nand `code` is the only value AXIAM implements."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7591 §2 `scope`, space-delimited."
+          },
+          "software_statement": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7591 §2 `software_statement`. Refused rather than ignored."
+          },
+          "token_endpoint_auth_method": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7591 §2 `token_endpoint_auth_method`. Defaults to\n`client_secret_basic`, as §2 specifies — see\n[`resolve_auth_method`] for why the RFC's default is used here rather\nthan AXIAM's own."
+          }
+        }
+      },
+      "RegistrationResponse": {
+        "type": "object",
+        "description": "An RFC 7591 §3.2.1 registration response.\n\n`registration_access_token` and `registration_client_uri` are **absent**:\nRFC 7592's client configuration endpoint is deferred (the plan's item 4),\nand RFC 7591 §3.2.1 makes both OPTIONAL. Returning them would promise an\nendpoint that does not exist, which a conforming client would then try.",
+        "required": [
+          "client_id",
+          "client_id_issued_at",
+          "client_name",
+          "redirect_uris",
+          "grant_types",
+          "response_types",
+          "token_endpoint_auth_method",
+          "scope"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "description": "The issued `client_id`."
+          },
+          "client_id_issued_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "RFC 7591 §3.2.1 — when the `client_id` was issued, as a Unix timestamp."
+          },
+          "client_name": {
+            "type": "string",
+            "description": "The stored client name."
+          },
+          "client_secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The issued secret, shown exactly once.\n\nAbsent for a `none` registration, which is every MCP desktop client:\na public client is created with no secret at all, and sending `\"\"`\nwould read as a secret that happens to be empty."
+          },
+          "client_secret_expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "RFC 7591 §3.2.1 — `0` means the secret does not expire.\n\nPresent only when a secret was issued, as §3.2.1 requires (\"REQUIRED if\n`client_secret` is issued\"). AXIAM does not expire client secrets, so\nthe value is always `0`; a client that read a non-zero value here and\nplanned a rotation around it would be planning around a promise this\nserver does not make."
+          },
+          "grant_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The stored grant types."
+          },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The stored redirect URIs."
+          },
+          "response_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`[\"code\"]`, always."
+          },
+          "scope": {
+            "type": "string",
+            "description": "The stored scopes, space-delimited (RFC 7591 §2's encoding)."
+          },
+          "token_endpoint_auth_method": {
+            "type": "string",
+            "description": "The stored authentication method."
+          }
+        }
+      },
+      "RegistrationTokenResponse": {
+        "type": "object",
+        "description": "Metadata only. The handle exists in plaintext exactly once, in\n[`CreateRegistrationTokenResponse`].",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "created_by",
+          "expires_at",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Row creation time."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The administrator who minted it."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it stops being usable."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Row identity."
+          },
+          "name": {
+            "type": "string",
+            "description": "The operator-facing label."
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The tenant a registration on this token lands in."
+          },
+          "used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it was spent, if it was."
+          },
+          "used_by_client_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reserved; always absent in this build. See\n`axiam_core::models::oauth2_registration_token::OAuth2RegistrationToken::used_by_client_id`\n— the registration a token produced is recorded in the audit log, not\nhere."
+          }
+        }
+      },
       "RequestResetBody": {
         "type": "object",
         "description": "Body for the request-reset endpoint.\n\n`tenant_id` is optional (Open Question 1 / Assumption A4): the public\nforgot-password page has no prior tenant context, so it may instead\nsupply `org_slug`/`tenant_slug` (mirroring `handlers/auth.rs`'s\n`(Option<Uuid>, Option<&str>)` login pattern). Slug-resolution failure\nis enumeration-safe (D-05) — it funnels into the SAME uniform\n`{\"sent\": true}` response as an unknown account, never a distinct\nerror status.",
@@ -18389,6 +18870,30 @@
           "admin_notifications_enabled": {
             "type": "boolean"
           },
+          "dcr_allowed_redirect_hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dcr_allowed_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dcr_max_clients": {
+            "type": "integer",
+            "format": "int32",
+            "example": 20,
+            "minimum": 0
+          },
+          "dcr_unused_client_ttl_days": {
+            "type": "integer",
+            "format": "int32",
+            "example": 30,
+            "minimum": 0
+          },
           "default_cert_validity_days": {
             "type": "integer",
             "format": "int32",
@@ -18407,6 +18912,10 @@
             "example": 30,
             "minimum": 0
           },
+          "dynamic_registration": {
+            "type": "string",
+            "example": "disabled"
+          },
           "email_verification_grace_period_hours": {
             "type": "integer",
             "format": "int32",
@@ -18414,6 +18923,12 @@
           },
           "email_verification_required": {
             "type": "boolean"
+          },
+          "external_client_allowed_resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "hibp_check_enabled": {
             "type": "boolean"
@@ -18949,6 +19464,40 @@
               "null"
             ]
           },
+          "dcr_allowed_redirect_hosts": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "dcr_allowed_scopes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "dcr_max_clients": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "dcr_unused_client_ttl_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
           "default_cert_validity_days": {
             "type": [
               "integer",
@@ -18972,6 +19521,12 @@
             "format": "int32",
             "minimum": 0
           },
+          "dynamic_registration": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "email_verification_grace_period_hours": {
             "type": [
               "integer",
@@ -18985,6 +19540,15 @@
               "boolean",
               "null"
             ]
+          },
+          "external_client_allowed_resources": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           },
           "hibp_check_enabled": {
             "type": [

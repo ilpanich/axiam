@@ -199,6 +199,8 @@ pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_
 pub const ENV_END_SESSION_PER_MIN: &str = "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN";
 /// `AXIAM__RATE_LIMIT__PAR_PER_MIN` — B5.
 pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
+/// `AXIAM__RATE_LIMIT__DCR_PER_MIN` — T21.4, never preset.
+pub const ENV_DCR_PER_MIN: &str = "AXIAM__RATE_LIMIT__DCR_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN` — X2.
 pub const ENV_UMA_PERM_PER_MIN: &str = "AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN` — X2.
@@ -443,6 +445,25 @@ pub struct RateLimitConfig {
     /// the real defence there is that an unverifiable `id_token_hint` ends
     /// nothing at all.
     pub end_session_per_min: u32,
+    /// Max `POST /oauth2/register` requests per minute per IP (default: 5 —
+    /// T21.4). Deliberately **not** part of [`MachineLimitPreset`]: the preset
+    /// family sizes machine traffic from measured server capacity, and this
+    /// endpoint is not sized from capacity at all.
+    ///
+    /// Five per minute, which is the smallest limit in this file, and the
+    /// reasoning is the sharpest too. This is the only endpoint in AXIAM that
+    /// **writes on behalf of a caller holding no credential**, and every
+    /// accepted request allocates a row that counts against the tenant's
+    /// `dcr_max_clients`. So the thing being limited is not throughput, it is
+    /// an anonymous party's ability to fill a tenant's client table and to
+    /// probe the registration rules — and the honest traffic it has to
+    /// accommodate is one human running one MCP client through one
+    /// registration, once. Five leaves room for a retry and a mistyped
+    /// callback and nothing else.
+    ///
+    /// Per-IP, never client-keyed: a registration request has no client
+    /// identity by definition — obtaining one is what the call is for.
+    pub dcr_per_min: u32,
     /// Max `/scim/v2/*` requests per minute per IP (default: 600 — R3.1/B4).
     ///
     /// **One bucket for the whole `/scim/v2` surface**, reads and writes
@@ -557,6 +578,9 @@ impl Default for RateLimitConfig {
             uma_ticket_per_min: 120,
             par_per_min: 120,
             end_session_per_min: 30,
+            // T21.4 — see the field docs. The smallest limit here, because
+            // this is the only unauthenticated *write* endpoint.
+            dcr_per_min: 5,
             // --- R3.1/B4 SCIM: the REST administrative surface -------------
             // 600/min == the gRPC Admin family's absolute ceiling
             // (ADMIN_PER_SEC_DEFAULT 10/s), copied deliberately and for the
@@ -749,6 +773,7 @@ impl RateLimitConfig {
             "end_session_per_min must be >= 1"
         );
         assert!(self.scim_per_min >= 1, "scim_per_min must be >= 1");
+        assert!(self.dcr_per_min >= 1, "dcr_per_min must be >= 1");
         assert!(self.webauthn_per_min >= 1, "webauthn_per_min must be >= 1");
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
         // it is asserted rather than commented. `device_verify_per_min` gates

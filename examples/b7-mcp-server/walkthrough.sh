@@ -150,9 +150,10 @@ TENANT_ID=$(printf '%s' "${ADMIN_LOGIN_BODY}" | jq -r '.user.tenant_id')
 # step carries every other baseline value through untouched.
 # ---------------------------------------------------------------------------
 ORG_ID=$(api_expect GET "${ADMIN_JAR}" "" /api/v1/organizations "" 200 \
-  | jq -r --arg slug "${ORG_SLUG}" '.items[]? // .[] | select(.slug == $slug) | .id' | head -1)
-[ -n "${ORG_ID}" ] && [ "${ORG_ID}" != "null" ] \
-  || fail "could not resolve the organization id for slug ${ORG_SLUG}"
+  | jq -r --arg slug "${ORG_SLUG}" '.items[] | select(.slug == $slug) | .id' | head -1)
+if [ -z "${ORG_ID}" ] || [ "${ORG_ID}" = "null" ]; then
+  fail "could not resolve the organization id for slug ${ORG_SLUG}"
+fi
 
 log "raising the org baseline: anonymous registration, CIMD over plaintext loopback"
 ORG_BASELINE=$(api_expect GET "${ADMIN_JAR}" "" "/api/v1/organizations/${ORG_ID}/settings" "" 200 \

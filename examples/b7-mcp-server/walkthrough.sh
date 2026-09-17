@@ -133,6 +133,40 @@ rm -f "${ADMIN_LOGIN_HEADERS}"
 TENANT_ID=$(printf '%s' "${ADMIN_LOGIN_BODY}" | jq -r '.user.tenant_id')
 [ "${TENANT_ID}" != "null" ] || fail "login did not return a tenant_id"
 
+# ---------------------------------------------------------------------------
+# The organization baseline, raised once for both self-registration modes.
+#
+# A tenant may refuse a registration mode its organization allows; it may not
+# admit callers the organization does not (`validate_tenant_overrides` in
+# crates/axiam-core/src/models/settings.rs). Both modes below are more
+# permissive than the shipped baseline -- `dynamic_registration: disabled` and
+# CIMD off -- so each tenant PUT is refused with 400 until the org baseline
+# allows them. That refusal is the interlock working, not a bug: an operator
+# fronting an MCP server has to make this same decision at org level first.
+#
+# PUT /organizations/{id}/settings takes the flat SetOrgSettings shape while
+# GET returns SecuritySettings grouped by policy, so the groups are merged
+# back into one object rather than a body being hand-written -- that way this
+# step carries every other baseline value through untouched.
+# ---------------------------------------------------------------------------
+ORG_ID=$(api_expect GET "${ADMIN_JAR}" "" /api/v1/organizations "" 200 \
+  | jq -r --arg slug "${ORG_SLUG}" '.items[]? // .[] | select(.slug == $slug) | .id' | head -1)
+[ -n "${ORG_ID}" ] && [ "${ORG_ID}" != "null" ] \
+  || fail "could not resolve the organization id for slug ${ORG_SLUG}"
+
+log "raising the org baseline: anonymous registration, CIMD over plaintext loopback"
+ORG_BASELINE=$(api_expect GET "${ADMIN_JAR}" "" "/api/v1/organizations/${ORG_ID}/settings" "" 200 \
+  | jq -c --arg res "${MCP_RESOURCE}" '[.password, .mfa, .lockout, .token, .email, .certificate, .notification,
+            .opaque, .privacy, .webauthn, .oidc] | add
+           | .dynamic_registration = "anonymous"
+           | .external_client_allowed_resources = [$res]
+           | .cimd.enabled = true
+           | .cimd.allow_http = true
+           | .cimd.trusted_client_id_domains = ["127.0.0.1"]')
+api_expect PUT "${ADMIN_JAR}" "${ADMIN_CSRF}" "/api/v1/organizations/${ORG_ID}/settings" \
+  "${ORG_BASELINE}" 200 >/dev/null
+ok "org baseline permits what the tenant settings below ask for"
+
 log "creating a disposable end user"
 MCP_USERNAME="mcp-user-${RUN_ID}"
 MCP_EMAIL="mcp-user-${RUN_ID}@example.invalid"
@@ -412,7 +446,7 @@ JSON
   ok "I1 holds: both refused with ${url_status}"
 
   api_expect PUT "${ADMIN_JAR}" "${ADMIN_CSRF}" "/api/v1/tenants/${TENANT_ID}/settings" \
-    "{\"dcr_allowed_scopes\":[\"openid\",\"profile\",\"mcp:tools\"],\"external_client_allowed_resources\":[\"${MCP_RESOURCE}\"],\"cimd\":{\"enabled\":true,\"allow_http\":true,\"trusted_client_id_domains\":[\"127.0.0.1:${pub_port}\"],\"trusted_redirect_domains\":[],\"restrict_same_domain\":false,\"confidential_only\":false}}" \
+    "{\"dcr_allowed_scopes\":[\"openid\",\"profile\",\"mcp:tools\"],\"external_client_allowed_resources\":[\"${MCP_RESOURCE}\"],\"cimd\":{\"enabled\":true,\"allow_http\":true,\"trusted_client_id_domains\":[\"127.0.0.1\"],\"trusted_redirect_domains\":[],\"restrict_same_domain\":false,\"confidential_only\":false}}" \
     200 >/dev/null
 
   local port=51705 verifier challenge result status location

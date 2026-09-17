@@ -712,10 +712,18 @@ Integration test driving the MCP client sequence in both issuer modes; security 
 
 **Commit** `test(oauth2): end-to-end MCP authorization harness and security review`
 
-### T21.9 — SDK fan-out: MCP resource-server helpers — Opus 5 (contract §28, TypeScript reference, review), Sonnet 5 (ten ports) — §28 contract landed; TypeScript reference (T9b), the ten ports (T9c) and the cross-SDK review (T9d) not yet landed
+### T21.9 — SDK fan-out: MCP resource-server helpers — Opus 5 (contract §28, TypeScript reference, review), Sonnet 5 (ten ports) — complete
 CONTRACT §28 (RFC 9728 document builder and route, `WWW-Authenticate` challenge, `resource_metadata_url` middleware option); TypeScript reference; ports in the other ten SDK repositories; cross-SDK conformance review. Every task also ships docs, the `examples/b7-mcp-server` entry and tests per the plan's §4.0.
 
-**Commit** `63a19af` `docs(sdk-contract): §28 MCP resource-server helpers, contract 1.48 (T21.9)` — the contract text only; no SDK repository has implemented it yet (§28.10 lists every one of the ten ports as "not yet")
+**Commit** `63a19af` `docs(sdk-contract): §28 MCP resource-server helpers, contract 1.48 (T21.9)` — the contract text only, ahead of every port (T9a)
+
+**T9b / T9c — all eleven ports merged.** TypeScript is the reference
+(`axiam-typescript-sdk` #110); the ten ports are `axiam-rust-sdk` #109,
+`axiam-python-sdk` #83, `axiam-java-sdk` #98, `axiam-kotlin-sdk` #65,
+`axiam-csharp-sdk` #91, `axiam-php-sdk` #70, `axiam-go-sdk` #81,
+`axiam-swift-sdk` #63, `axiam-c-sdk` #62 and `axiam-cplusplus-sdk` #63.
+
+**Commit** `docs(sdk-contract): §28 cross-SDK conformance review, contract 1.49 (T21.9 T9d)` — all eleven ports read against §28 and against the reference; thirteen divergences recorded in §28.11 with no open row; six contract defects fixed; §28.10's posture table filled in from the merged code and moved to upstream maintenance. Evidence: [`claude_dev/sdk-mcp-helpers-conformance-review.md`](sdk-mcp-helpers-conformance-review.md). One follow-up, **F-28-01**, is open by design and blocked on Phase 21 merging: the eleven vendored `CONTRACT.md`/`openapi.json` copies are re-synced from `main` in one step afterwards, and the review explains why doing it from a phase branch is what left the eleven holding five distinct files.
 
 ---
 

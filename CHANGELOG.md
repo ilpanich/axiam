@@ -51,6 +51,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unnumbered, and all eleven SDK repositories must re-sync the vendored
   `CONTRACT.md` (T21.9).
 
+- **SDK contract §28.11 — the cross-SDK conformance review (contract 1.49).**
+  All eleven ports of §28 were read against the section and against the
+  TypeScript reference, and their thirteen divergences are recorded in a new
+  §28.11 with no open row; the evidence is
+  [`claude_dev/sdk-mcp-helpers-conformance-review.md`](claude_dev/sdk-mcp-helpers-conformance-review.md).
+  Contract 1.49 is non-breaking and clarifying — an SDK written against 1.48 is
+  conformant unedited. It fixes six places where §28 was wrong or silent: §28.3
+  rule 1 now binds the `Content-Type` **media type** rather than the header
+  verbatim, because Fastify appends a charset and offers no supported way not
+  to; §28.4 and §28.9 test 2 state that how the `error` parameter is typed is
+  the SDK's own choice and how the `invalid_grant` vector is discharged where a
+  closed type makes it unwritable; §28.5 rule 4 provides for a §11 helper that
+  receives a resolved identity rather than a request and so cannot tell "no
+  credential" from "credential rejected"; §28.7's C row gains the
+  `metadata_url` accessor §28.1 always required, reserves `MCPResourceMetadata`
+  as Go's returned type while stating that no other language needs the
+  accommodation, and records that "raises the SDK's `ValidationError`" is a
+  per-language mapping; and §28.10's posture table is now maintained upstream by
+  the review rather than edited by each port in its own vendored copy — the
+  instruction that left the eleven holding five distinct byte-states of one
+  document. The 1.49 trailer also states the vendoring rule 1.48 lacked: a
+  vendored artefact is re-synced from a **merged** `main`, never a phase branch,
+  and the `openapi.json` re-sync is deferred to one named follow-up recorded in
+  all eleven repositories. No AXIAM behaviour changes and no server API surface
+  moves (T21.9).
+
 - **Documentation and a runnable example for fronting an MCP server with
   AXIAM.** [`docs/api/mcp.md`](docs/api/mcp.md) ties together the pieces T21.1
   through T21.6 and T21.9 shipped separately: the RFC 9728 protected-resource

@@ -339,6 +339,15 @@ Everything an unrelated party can reach without a credential is bounded:
 | Unused-client sweep | 30 days | `dcr_unused_client_ttl_days` |
 | Audit | every attempt | — |
 
+**Both numbers govern client ID metadata documents too**, counted separately
+and against the same value: a tenant running both mechanisms gets
+`dcr_max_clients` self-registered clients *and* `dcr_max_clients` shadow rows,
+so neither can exhaust the other's allowance, and each is swept on
+`dcr_unused_client_ttl_days` under its own clock. They keep their `dcr_` names
+because dynamic registration defined them, which is the same convention
+`dcr_allowed_scopes` follows. See
+[client ID metadata documents](client-id-metadata-documents.md#cleaning-up).
+
 Five per minute is the smallest limit in AXIAM, and the reasoning is the
 sharpest: this is the only endpoint that writes on behalf of a caller holding
 no credential, and each accepted request allocates a row. The honest traffic it
@@ -356,11 +365,13 @@ is a place where strings are read by people.
 A background sweep, registered with the job runner behind
 [`GET /health/jobs`](../deployment/README.md), deletes `managed_by: dcr`
 clients that have not been authorized within their tenant's
-`dcr_unused_client_ttl_days`. A second sweep drops expired initial access
-tokens.
+`dcr_unused_client_ttl_days`. A sibling sweep does the same for
+`managed_by: cimd` rows on its own counter, and a third drops expired initial
+access tokens.
 
 ```bash
 curl https://id.example.com/health/jobs | jq '.jobs.dcr_unused_clients'
+curl https://id.example.com/health/jobs | jq '.jobs.cimd_unused_clients'
 ```
 
 What it will not touch:

@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta15",
-    "x-axiam-spec-digest": "sha256:548ddb07bf751f03c0fb0a50046e580113af2611a6a474c5af21ab3128bbd299"
+    "x-axiam-spec-digest": "sha256:45743915392ac572c0081544def42303238484d646df87e0fd10abb16bbf495d"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -16612,14 +16612,14 @@
           "dcr_max_clients": {
             "type": "integer",
             "format": "int32",
-            "description": "T21.4 — how many `managed_by: dcr` clients this tenant may hold. See\n[`DEFAULT_DCR_MAX_CLIENTS`].",
+            "description": "T21.4 — how many externally registered clients this tenant may hold.\nSee [`DEFAULT_DCR_MAX_CLIENTS`].\n\n**Counted once per mechanism, against the same number** (T21.8):\n`managed_by: dcr` rows and `managed_by: cimd` rows each have this many.\nSo a tenant running both cannot have shadow rows materialised from\ndocuments exhaust the allowance for self-registration, or the reverse.\nThe CIMD count is checked *before* the document is fetched, so a tenant\nat its ceiling is not an outbound amplifier either. It keeps its `dcr_`\nname because dynamic registration defined it, on the same precedent as\n[`Self::dcr_allowed_scopes`].",
             "example": 20,
             "minimum": 0
           },
           "dcr_unused_client_ttl_days": {
             "type": "integer",
             "format": "int32",
-            "description": "T21.4 — how long a `managed_by: dcr` client survives without being\nauthorized. See [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`]. `0` disables\nthe sweep for this tenant, which an operator who prunes out of band\nmay legitimately want.",
+            "description": "T21.4 — how long an externally registered client survives without\nbeing used. See [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`]. `0` disables\nthe sweep for this tenant, which an operator who prunes out of band\nmay legitimately want.\n\n**Two sweeps read it, over different clocks** (T21.8). A\n`managed_by: dcr` row is measured from its last authorization, falling\nback to when it was registered. A `managed_by: cimd` row is measured\nfrom the last time its document was *presented*, which every authorize,\ntoken and PAR request moves — so a document in daily use is never swept\nhowever old its registration is, and one nobody has presented since the\nwindow is, and re-materialises on the next request if it is still\npublished. Like the ceiling, it keeps its `dcr_` name.",
             "example": 30,
             "minimum": 0
           },

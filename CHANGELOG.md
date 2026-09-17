@@ -296,6 +296,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saved — and no released deployment can hold one, because CIMD itself ships in
   this same unreleased version.
 
+- **CIMD shadow rows are bounded by a quota and reclaimed by a sweep (MCP-04,
+  T21.8, #470).** A `managed_by: cimd` row counted against no ceiling and was
+  deleted by nothing, so a tenant whose trusted-publisher list named shared
+  hosting grew client rows without limit, one unauthenticated request each.
+  Three bounds, and no new setting or migration for any of them.
+  `dcr_max_clients` now caps CIMD rows too, **counted separately against the
+  same number** so neither mechanism can exhaust the other's allowance, and
+  checked *before* the document is fetched — a tenant at its ceiling must not
+  be an outbound amplifier either. The refusal is audited as
+  `oauth2.client_registration_refused` with `managed_by: cimd` and carries no
+  client-supplied string. `dcr_unused_client_ttl_days` now sweeps CIMD rows on
+  their own clock and their own `/health/jobs` counter
+  (`cimd_unused_clients`): the clock is the last time the document was
+  *presented*, which every authorize, token and PAR request moves, so a
+  document in daily use is never swept and one nobody has presented for a
+  month is — and re-materialises on the next request if it is still published,
+  which is what a cache should do. And the in-memory document cache now evicts
+  entries past their TTL and their 24-hour stale window on the insert path,
+  since a cache that is never evicted is not a cache. Both fields keep their
+  `dcr_` names because dynamic registration defined them, on the precedent
+  `dcr_allowed_scopes` set. Unreachable with `cimd.enabled` false, which is the
+  default.
+
 - **The `axiam` URI scheme is reserved and can no longer be named as a
   `resource` (MCP-02, T21.8).** AXIAM's own token audiences are spelled
   `axiam:user` and `axiam:m2m`, which are well-formed absolute URIs and were

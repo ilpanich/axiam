@@ -667,6 +667,12 @@ pub struct CachedDocument {
 ///    is the right way round: caching a refusal would let one bad minute at a
 ///    publisher lock its users out for the length of a TTL they did not
 ///    choose.
+/// 4. **Entries nobody can be served are evicted** (T21.8 / MCP-04), on the
+///    insert path, so a cache miss pays for it and a hit does not. An entry
+///    past its TTL *and* past [`STALE_WINDOW_SECS`] cannot be returned by
+///    either branch of [`ClientMetadataCache::get_or_fetch`], so dropping it
+///    changes no answer and keeps the map bounded by what is still live rather
+///    than by every URL a stranger has ever named.
 ///
 /// Per process, not per worker: it lives in `AppState` and is cloned (an `Arc`
 /// clone) into every actix worker, exactly as the JWKS cache is.
@@ -709,6 +715,27 @@ impl ClientMetadataCache {
         match fetch_document(client_id, policy).await {
             Ok((document, ttl_secs)) => {
                 let mut guard = self.0.write().await;
+                // T21.8 / MCP-04 — evict what can no longer be served before
+                // inserting. Without this the map grows by one entry per
+                // distinct trusted URL an unauthenticated caller can name and
+                // never shrinks, which is the same finding as the unswept
+                // shadow rows, in RAM: a cache that is never evicted is not a
+                // cache.
+                //
+                // On the insert path only, so a cache hit stays a read lock
+                // and the common request pays nothing. O(n) under the write
+                // lock, and n is bounded by the prune itself — an entry past
+                // its TTL *and* past the stale window can be served to
+                // nobody, by either branch of this function, so dropping it
+                // changes no answer. Not a per-tenant cap: the quota in
+                // `axiam-api-rest`'s `materialise_if_cimd` refuses before the
+                // fetch that would populate this map.
+                guard.retain(|_, entry| {
+                    entry.fetched_at
+                        + chrono::Duration::seconds(entry.ttl_secs as i64)
+                        + chrono::Duration::seconds(STALE_WINDOW_SECS)
+                        > now
+                });
                 guard.insert(
                     key,
                     CachedDocument {
@@ -766,6 +793,13 @@ impl ClientMetadataCache {
         guard
             .get(&(tenant_id, client_id.to_owned()))
             .map(|e| e.ttl_secs)
+    }
+
+    /// Test-only seam: how many entries the map holds, so a test can assert
+    /// the eviction happened rather than infer it from a hit or a miss.
+    #[doc(hidden)]
+    pub async fn len_for_test(&self) -> usize {
+        self.0.read().await.len()
     }
 }
 
@@ -1387,6 +1421,103 @@ mod tests {
             .await
             .expect("refetched");
         assert_eq!(refreshed.client_name.as_deref(), Some("Renamed Editor"));
+    }
+
+    /// Mount a document at a chosen path, so a test can hold several distinct
+    /// cache keys against one mock server. `serve` above pins `/mcp.json`,
+    /// which is right for every test that needs exactly one document.
+    async fn serve_at(server: &MockServer, doc_path: &str, id: &str) {
+        Mock::given(method("GET"))
+            .and(path(doc_path.to_owned()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(vscode_document(id))
+                    .insert_header("content-type", "application/json")
+                    .insert_header("cache-control", "max-age=600"),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// **T21.8 / MCP-04.** An entry nobody can be served is gone after the
+    /// next insert.
+    ///
+    /// Without this the map grows by one entry per distinct trusted URL an
+    /// unauthenticated caller can name and never shrinks. The eviction runs on
+    /// the insert path only, which is why another document has to be fetched
+    /// for a dead entry to disappear — and why a cache *hit* still costs only
+    /// a read lock.
+    ///
+    /// The boundary asserted is TTL **plus** the stale window: inside it the
+    /// entry is still servable by `get_or_fetch`'s failure branch, so evicting
+    /// it would change an answer. Past it, no branch can return it.
+    #[tokio::test]
+    async fn an_unservable_cache_entry_is_evicted_on_the_next_insert() {
+        let server = MockServer::start().await;
+        let tenant = Uuid::new_v4();
+        let policy = loopback_policy(&server);
+        let cache = ClientMetadataCache::new();
+
+        let url_of = |n: &str| {
+            let id = format!("{}/{n}.json", server.uri());
+            (id.clone(), Url::parse(&id).unwrap())
+        };
+        let (one_id, one) = url_of("one");
+        let (two_id, two) = url_of("two");
+        let (three_id, three) = url_of("three");
+        let (four_id, four) = url_of("four");
+
+        for (doc_path, id) in [
+            ("/one.json", &one_id),
+            ("/two.json", &two_id),
+            ("/three.json", &three_id),
+            ("/four.json", &four_id),
+        ] {
+            serve_at(&server, doc_path, id).await;
+        }
+
+        cache.get_or_fetch(tenant, &one, &policy).await.unwrap();
+
+        // A second, unrelated document. The first entry is still live, so both
+        // are held: the eviction drops what is dead, not what is merely old.
+        cache.get_or_fetch(tenant, &two, &policy).await.unwrap();
+        assert_eq!(
+            cache.len_for_test().await,
+            2,
+            "a live entry is not evicted by another document's fetch"
+        );
+
+        // Move the first entry past its TTL but *inside* the stale window. It
+        // is still servable, so it must survive.
+        assert!(
+            cache
+                .backdate_for_test(tenant, &one_id, 601 + STALE_WINDOW_SECS / 2)
+                .await
+        );
+        cache.get_or_fetch(tenant, &three, &policy).await.unwrap();
+        assert_eq!(
+            cache.len_for_test().await,
+            3,
+            "an entry inside the stale window can still be served and must not be evicted"
+        );
+
+        // Past the stale window: unservable by either branch, so gone.
+        assert!(
+            cache
+                .backdate_for_test(tenant, &one_id, STALE_WINDOW_SECS)
+                .await
+        );
+        cache.get_or_fetch(tenant, &four, &policy).await.unwrap();
+        assert_eq!(
+            cache.ttl_for_test(tenant, &one_id).await,
+            None,
+            "an entry past its TTL and its stale window is evicted on the next insert"
+        );
+        assert_eq!(
+            cache.len_for_test().await,
+            3,
+            "and the map shrank rather than only losing a lookup"
+        );
     }
 
     #[tokio::test]

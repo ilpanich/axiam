@@ -100,7 +100,82 @@ pub async fn materialise_if_cimd<C: Connection + Clone>(
         return;
     }
 
-    // 3-5. Validate the URL, fetch (cached, guarded, bounded) and validate the
+    // 3. The per-tenant ceiling, **before any fetch** — T21.8 / MCP-04.
+    //
+    // Asked here rather than after the resolve for two reasons. A tenant at
+    // quota should not be an outbound amplifier either: refusing after the
+    // fetch would mean a stranger at the ceiling still gets one outbound
+    // request per distinct URL they can name. And the row lookup this needs is
+    // one the function made anyway, a few lines down, to decide whether the
+    // materialisation is a first appearance or a refresh — so moving it up
+    // costs nothing and the count query runs only when there is no row.
+    //
+    // **A refresh never counts and never costs the query.** The quota bounds
+    // how many distinct documents a tenant holds, not how often they are
+    // presented.
+    //
+    // The ceiling is `dcr_max_clients`, counted separately for `cimd`, which
+    // is what the repository's own comment on `count_by_managed_by` asks for:
+    // "the quota is per mechanism, so … a CIMD shadow row materialised by a
+    // legitimate client cannot exhaust the allowance for self-registration".
+    // Two counts against one number honours that. Not a tenth CIMD field: the
+    // precedent is T21.5 amendment 4, where `dcr_allowed_scopes` governs both
+    // mechanisms and keeps its `dcr_` name because DCR defined it.
+    let existing = state
+        .oauth2_client_repo
+        .get_by_client_id(tenant_id, client_id)
+        .await
+        .ok();
+    if let Some(row) = &existing
+        && row.managed_by != ManagedBy::Cimd
+    {
+        tracing::warn!(
+            %tenant_id,
+            client_id,
+            managed_by = %row.managed_by,
+            "a client ID metadata document names a client_id this tenant already registered by \
+             another means; the existing registration stands and the document is ignored"
+        );
+        return;
+    }
+    if existing.is_none() {
+        let limit = u64::from(settings.oidc.dcr_max_clients);
+        let held = match state
+            .oauth2_client_repo
+            .count_by_managed_by(tenant_id, ManagedBy::Cimd)
+            .await
+        {
+            Ok(held) => held,
+            Err(e) => {
+                // Fail closed: an unreadable count must not be read as room,
+                // exactly as the DCR endpoint reads it.
+                tracing::error!(
+                    error = %e,
+                    %tenant_id,
+                    "could not count client ID metadata document rows; treating the tenant as \
+                     at quota"
+                );
+                limit
+            }
+        };
+        if held >= limit {
+            // `debug`, not `warn`, for the reason the resolve failure below
+            // gives: the input is chosen by an unauthenticated caller, so
+            // anything louder is a log-flooding primitive handed to a
+            // stranger. The audit row is the record an operator acts on.
+            tracing::debug!(
+                %tenant_id,
+                client_id,
+                held,
+                limit,
+                "a tenant is at its client ID metadata document ceiling; not fetching"
+            );
+            audit_quota_refusal(state, http_req, tenant_id).await;
+            return;
+        }
+    }
+
+    // 4-6. Validate the URL, fetch (cached, guarded, bounded) and validate the
     //      document.
     let validated = match cimd::resolve(
         &state.oauth2.cimd_cache,
@@ -127,28 +202,10 @@ pub async fn materialise_if_cimd<C: Connection + Clone>(
         }
     };
 
-    // Is this a first appearance or a refresh? Asked before the write, because
-    // it decides whether anything is audited — a client materialising for the
-    // first time is an event an operator wants to see, and a refresh every
-    // five minutes for as long as the client is in use is not.
-    let existing = state
-        .oauth2_client_repo
-        .get_by_client_id(tenant_id, client_id)
-        .await
-        .ok();
-    if let Some(row) = &existing
-        && row.managed_by != ManagedBy::Cimd
-    {
-        tracing::warn!(
-            %tenant_id,
-            client_id,
-            managed_by = %row.managed_by,
-            "a client ID metadata document names a client_id this tenant already registered by \
-             another means; the existing registration stands and the document is ignored"
-        );
-        return;
-    }
-
+    // `existing` was read above, before the fetch, because the quota needed
+    // it. It also decides whether anything is audited — a client materialising
+    // for the first time is an event an operator wants to see, and a refresh
+    // every five minutes for as long as the client is in use is not.
     match state
         .oauth2_client_repo
         .upsert_cimd_client(client_id, validated.create)
@@ -165,6 +222,46 @@ pub async fn materialise_if_cimd<C: Connection + Clone>(
                  written; the request will be refused as an unknown client"
             );
         }
+    }
+}
+
+/// Record a refusal because the tenant is at its CIMD ceiling (T21.8 / MCP-04).
+///
+/// The same shape as T21.4a's registration refusal — the action, the
+/// `managed_by`, the error code, the caller's IP — so one audit filter shows
+/// both mechanisms' refusals side by side. And the same discipline about what
+/// it carries: **no client-supplied string**, not even the `client_id`, which
+/// on this path is a URL a stranger chose and an audit viewer is a place where
+/// attacker-controlled strings are read by people. The count and the ceiling
+/// are AXIAM's own numbers and are what an operator needs to act on.
+async fn audit_quota_refusal<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &actix_web::HttpRequest,
+    tenant_id: Uuid,
+) {
+    if let Err(e) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::System,
+            action: "oauth2.client_registration_refused".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Failure,
+            ip_address: crate::extractors::client_info::client_ip(http_req),
+            metadata: Some(serde_json::json!({
+                "managed_by": ManagedBy::Cimd.as_str(),
+                "error": "client_quota_exhausted",
+            })),
+        })
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            %tenant_id,
+            "could not record a refused client ID metadata document materialisation; the \
+             request is unaffected"
+        );
     }
 }
 

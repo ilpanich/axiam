@@ -790,6 +790,23 @@ async fn backdate_client(
         .expect("backdate check");
 }
 
+/// Move a row's `updated_at` back by `days`, which `backdate_client` does not
+/// touch because the `dcr` clock does not read it. The `cimd` clock does — it
+/// is the stamp every resolve moves — so its tests need to set it.
+async fn backdate_updated_at(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    client_id: &str,
+    days: i64,
+) {
+    db.query("UPDATE oauth2_client SET updated_at = $when WHERE client_id = $client_id")
+        .bind(("when", Utc::now() - chrono::Duration::days(days)))
+        .bind(("client_id", client_id.to_string()))
+        .await
+        .expect("backdate updated_at")
+        .check()
+        .expect("backdate updated_at check");
+}
+
 /// Create one client with the given provenance and return its `client_id`.
 async fn seed_client(
     db: &Surreal<surrealdb::engine::local::Db>,
@@ -934,6 +951,197 @@ async fn dcr_sweep_removes_an_unused_client_and_leaves_an_admin_one() {
         "an administrator's client is never swept, however long it sits unused: somebody \
          decided it should exist"
     );
+}
+
+/// **T21.8 / MCP-04.** The `cimd` sweep removes a shadow row nobody has
+/// presented, keeps one that was presented recently, and never touches an
+/// administrator's client.
+///
+/// The clock is the difference from the `dcr` arm: a `cimd` row's `updated_at`
+/// moves on **every resolve**, because `materialise_if_cimd` upserts after
+/// each one and the upsert's `UPDATE` sets it. So a document presented once a
+/// day is never due under a 30-day TTL, however old its `created_at` is —
+/// which is what makes eviction-on-last-seen consistent with T21.4's argument
+/// that a shadow row is a cache, rather than a contradiction of it.
+#[tokio::test]
+async fn cimd_sweep_removes_an_unpresented_row_and_keeps_a_fresh_one() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let db = setup_db().await;
+    let tenant_id = seed_tenant_with_ttl(&db, "cimd-sweep", 30).await;
+
+    let stale = seed_client(&db, tenant_id, "stale-cimd", ManagedBy::Cimd).await;
+    let presented = seed_client(&db, tenant_id, "presented-cimd", ManagedBy::Cimd).await;
+    let admin = seed_client(&db, tenant_id, "admin-url", ManagedBy::Admin).await;
+
+    // Everything is ancient by `created_at` and by `last_authorized_at`...
+    for client_id in [&stale, &presented, &admin] {
+        backdate_client(&db, client_id, 60, false).await;
+        backdate_updated_at(&db, client_id, 60).await;
+    }
+    // ...except that one row was resolved an hour ago, which is the only stamp
+    // a CIMD refresh moves.
+    backdate_updated_at(&db, &presented, 0).await;
+
+    let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
+    let removed = axiam_server::cleanup::sweep_unused_cimd_clients(
+        &client_repo,
+        &axiam_db::SurrealTenantRepository::new(db.clone()),
+        &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 1, "exactly the one unpresented shadow row");
+
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &stale)
+            .await
+            .is_err(),
+        "a shadow row nobody has presented past the TTL is swept; it re-materialises on the \
+         next request if the document is still published, which is what a cache should do"
+    );
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &presented)
+            .await
+            .is_ok(),
+        "updated_at moves on every resolve, so a document presented today is not due however \
+         old its created_at is"
+    );
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &admin)
+            .await
+            .is_ok(),
+        "an administrator's client is never swept by either arm"
+    );
+
+    // And the `dcr` arm leaves `cimd` rows alone: one `managed_by` per call,
+    // so the two health counters mean what they say.
+    let tenant_id = seed_tenant_with_ttl(&db, "arm-isolation", 30).await;
+    let lonely = seed_client(&db, tenant_id, "lonely-cimd", ManagedBy::Cimd).await;
+    backdate_client(&db, &lonely, 60, false).await;
+    backdate_updated_at(&db, &lonely, 60).await;
+    let removed = axiam_server::cleanup::sweep_unused_dcr_clients(
+        &client_repo,
+        &axiam_db::SurrealTenantRepository::new(db.clone()),
+        &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 0, "the dcr arm lists dcr rows and nothing else");
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &lonely)
+            .await
+            .is_ok()
+    );
+}
+
+/// The `cimd` sweep honours `0` as "never sweep" too, and a tenant that never
+/// enabled CIMD has nothing to list — which is the I1 shape: the same one
+/// indexed query per interval the `dcr` sweep already makes, over an empty set.
+#[tokio::test]
+async fn a_zero_ttl_sweeps_no_cimd_rows_either() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let db = setup_db().await;
+    let tenant_id = seed_tenant_with_ttl(&db, "cimd-never", 0).await;
+    let ancient = seed_client(&db, tenant_id, "ancient-cimd", ManagedBy::Cimd).await;
+    backdate_client(&db, &ancient, 3650, false).await;
+    backdate_updated_at(&db, &ancient, 3650).await;
+
+    let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
+    let removed = axiam_server::cleanup::sweep_unused_cimd_clients(
+        &client_repo,
+        &axiam_db::SurrealTenantRepository::new(db.clone()),
+        &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 0);
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &ancient)
+            .await
+            .is_ok()
+    );
+}
+
+/// The predicate's table, read against a real row rather than through a
+/// sweep, because the clock choice is the part of #470 worth asserting
+/// directly: which of the three stamps wins decides whether a document
+/// somebody is still using gets deleted.
+#[tokio::test]
+async fn the_cimd_clock_reads_the_latest_of_the_three_stamps() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+    use axiam_server::cleanup::{cimd_client_is_due_for_sweep, cimd_client_last_seen};
+
+    let db = setup_db().await;
+    let tenant_id = seed_tenant_with_ttl(&db, "clock", 30).await;
+    let client_id = seed_client(&db, tenant_id, "clock-cimd", ManagedBy::Cimd).await;
+
+    let now = Utc::now();
+    let read = |db: Surreal<surrealdb::engine::local::Db>, id: String| {
+        let repo = axiam_db::SurrealOAuth2ClientRepository::new(db);
+        async move { repo.get_by_client_id(tenant_id, &id).await.expect("row") }
+    };
+
+    // Everything ancient: due. This is the row #470 is about — materialised
+    // once by a stranger and never presented again.
+    backdate_client(&db, &client_id, 400, true).await;
+    backdate_updated_at(&db, &client_id, 400).await;
+    let dead = read(db.clone(), client_id.clone()).await;
+    assert!(cimd_client_is_due_for_sweep(&dead, 30, now));
+    // `0` is never due, in this arm as in the other.
+    assert!(!cimd_client_is_due_for_sweep(&dead, 0, now));
+
+    // `updated_at` alone is enough to keep it, and that is the whole reason
+    // #470 needs no migration: a resolve moves this stamp, and a resolve
+    // happens on every authorize, token and PAR presentation — including one
+    // served from the in-memory document cache with no fetch at all.
+    backdate_updated_at(&db, &client_id, 1).await;
+    let refreshed = read(db.clone(), client_id.clone()).await;
+    assert!(
+        !cimd_client_is_due_for_sweep(&refreshed, 30, now),
+        "a document presented yesterday is not due, whatever created_at says"
+    );
+    assert!(
+        cimd_client_last_seen(&refreshed) > now - chrono::Duration::days(2),
+        "the clock reads the latest of the three, not the earliest"
+    );
+
+    // `last_authorized_at` is read beside it, because `touch_last_authorized`
+    // guards on `managed_by != 'admin'` rather than `== 'dcr'` and therefore
+    // stamps cimd rows too. With `updated_at` ancient again, an authorization
+    // two days ago still keeps the row.
+    backdate_updated_at(&db, &client_id, 400).await;
+    backdate_client(&db, &client_id, 400, false).await;
+    db.query("UPDATE oauth2_client SET last_authorized_at = $when WHERE client_id = $client_id")
+        .bind(("when", now - chrono::Duration::days(2)))
+        .bind(("client_id", client_id.clone()))
+        .await
+        .expect("touch")
+        .check()
+        .expect("touch check");
+    // `backdate_client` moved `created_at`, so re-set `updated_at` after it.
+    backdate_updated_at(&db, &client_id, 400).await;
+    let authorized = read(db.clone(), client_id.clone()).await;
+    assert!(
+        !cimd_client_is_due_for_sweep(&authorized, 30, now),
+        "an authorization two days ago keeps the row even with updated_at ancient"
+    );
+
+    // And the repository is what it says it is: this row is `cimd`, so the
+    // table above is about the arm it belongs to.
+    assert_eq!(authorized.managed_by, ManagedBy::Cimd);
 }
 
 /// `0` means "never sweep", which is the explicit opt-out for a deployment

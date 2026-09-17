@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SDK contract §28 — MCP resource-server helpers (contract 1.48).** The
+  eleven SDKs gain a specified surface for the resource-server half of the MCP
+  authorization handshake: build and validate the RFC 9728 protected-resource
+  metadata document, serve it unauthenticated at the path RFC 9728 §3.1 derives
+  from the resource identifier, and build the RFC 6750 `WWW-Authenticate`
+  challenge. One new middleware option, `resource_metadata_url`, attaches that
+  challenge to the 401s the guard already emits and to the one class of 403
+  where a named scope was missing; with the option unset a guard is
+  byte-for-byte what it was, which §28.9 makes a required regression. Setting
+  it makes the §10.1 row 6 audience check mandatory — a resource server that
+  announces itself must check that a token was minted for it. No AXIAM
+  behaviour changes: AXIAM is the authorization server and implements none of
+  §28. Contract 1.48 also folds in the `openapi.json` entry T21.3 recorded
+  unnumbered, and all eleven SDK repositories must re-sync the vendored
+  `CONTRACT.md` (T21.9).
+
 - **`GET /.well-known/oauth-authorization-server`** (T21.1) — the RFC 8414
   authorization-server metadata path, serving the same document as
   `/.well-known/openid-configuration` with the same optional `?tenant_id=`.

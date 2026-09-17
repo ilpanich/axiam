@@ -314,10 +314,10 @@ export const REFERENCE_PAGES: DocPage[] = [
         type: "p",
         text: "A release ships the surface it derives from the spec it vendors: tagging an SDK re-vendors the contract, the OpenAPI document and the management registry, then regenerates that SDK's §27 management surface from them and stages exactly what the generator wrote. A missing generator stops the release rather than tagging a tree the SDK's own drift-check would reject.",
       },
-      { type: "h", id: "recent", text: "What moved in contract 1.40–1.46" },
+      { type: "h", id: "recent", text: "What moved in contract 1.40–1.48" },
       {
         type: "p",
-        text: `The vendored contract is at **${CONTRACT_VERSION}**. Seven amendments since 1.39, of which three changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`, and 1.45, whose fan-out merged in all eleven repositories on 2026-09-13. 1.46 is documentation only and was re-vendored by all eleven without a code change.`,
+        text: `This repository's contract is at **${CONTRACT_VERSION}**. Nine amendments since 1.39, of which three changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`, and 1.45, whose fan-out merged in all eleven repositories on 2026-09-13. 1.46 is documentation only and was re-vendored by all eleven without a code change. **1.47 and 1.48 have not been re-vendored yet** — the eleven still carry 1.46, and neither amendment obliges them to change code: an SDK written against 1.46 is conformant against both.`,
       },
       {
         type: "table",
@@ -358,6 +358,16 @@ export const REFERENCE_PAGES: DocPage[] = [
             "1.46",
             `[§26.2 rule 3](${contractLink("26.2")}) now states **both forms** a spent-\`request_uri\` refusal can take: delivered directly as \`invalid_request\` when the request named no registered \`redirect_uri\`, or redirected to the relying party as \`error=invalid_request_uri\` with the request's own \`state\` when it did. Rule 2 is unchanged and is what keeps this additive — an SDK's authorization URL carries exactly \`client_id\` and \`request_uri\`, so the direct form is the only one it can reach. An SDK written against 1.45 is conformant against 1.46 with no edit.`,
             "no — vendored by all eleven",
+          ],
+          [
+            "1.47",
+            "`token_endpoint_auth_methods_supported` gains `none`, and `openapi.json` gains the `none` enum value on the OAuth2-client schemas with `client_secret` becoming optional on the creation response — absent, never empty, for a client registered as public. An advertised method is a statement about the deployment, not an instruction to a client: an SDK configured with a secret keeps sending it.",
+            "no — re-sync pending",
+          ],
+          [
+            "1.48",
+            `[§28](${contractLink("28")}) — the MCP resource-server helpers. An SDK guarding an MCP server can publish its RFC 9728 protected-resource metadata document, serve it unauthenticated at the path RFC 9728 §3.1 derives from the resource, and attach an RFC 6750 \`WWW-Authenticate\` challenge to the 401s its guard already emits — the three things that start an MCP client's discovery. **SHOULD-level and off by default**: with the \`resource_metadata_url\` option unset a guard is byte-for-byte what it was, which [§28.9](${contractLink("28.9")}) makes a required regression. Setting it makes the [§10.1](${contractLink("10.1")}) row 6 audience check mandatory, because a resource server that announces itself must check that a token was minted for it. The same version folds in the RFC 8707 \`openapi.json\` additions T21.3 recorded unnumbered for it to carry.`,
+            "**yes, when ported** — no SDK implements it yet",
           ],
         ],
       },

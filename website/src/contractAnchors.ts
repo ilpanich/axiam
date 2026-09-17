@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.46";
+export const CONTRACT_VERSION = "1.48";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -37,6 +37,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "25": "#§25-account-lifecycle-and-mfa-enrolment-w2",
  "26": "#§26-pushed-authorization-requests-rfc-9126",
  "27": "#§27-management-api-m1",
+ "28": "#§28-mcp-resource-server-helpers-rfc-9728",
  "1.1": "#§11-grpc-only-operations",
  "3a": "#§3a-resource-server-middleware-csrf-inbound",
  "5.1": "#§51-organization-context-required-for-login-and-refresh",
@@ -176,7 +177,18 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "27.9": "#§279-required-tests",
  "27.10": "#§2710-per-sdk-posture",
  "27.12": "#§2712-tenantsdelete-requires-a-fresh-audit-export-contract-133",
- "27.11": "#§2711-model-additions-contract-131"
+ "27.11": "#§2711-model-additions-contract-131",
+ "28.0": "#§280-the-division-of-labour",
+ "28.1": "#§281-canonical-operation-set",
+ "28.2": "#§282-the-document-and-its-validation-normative",
+ "28.3": "#§283-serving-the-document-normative",
+ "28.4": "#§284-the-challenge-normative",
+ "28.5": "#§285-the-resource_metadata_url-middleware-option-normative",
+ "28.6": "#§286-what-§28-does-not-change",
+ "28.7": "#§287-per-language-naming-map",
+ "28.8": "#§288-sensitivet-applicability",
+ "28.9": "#§289-required-tests",
+ "28.10": "#§2810-per-sdk-posture"
 };
 
 /**

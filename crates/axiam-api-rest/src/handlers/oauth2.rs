@@ -1173,6 +1173,14 @@ pub async fn authorize<C: Connection + Clone>(
         Err(response) => return *response,
     };
 
+    // T21.5 — a `client_id` that is a URL may be a client this tenant has
+    // never seen. Here, before anything looks the client up, so that everything
+    // below acts on an ordinary row: two `starts_with` calls for every
+    // authorization request AXIAM has ever served, and a fetch only for a
+    // tenant that has enabled the mechanism. It returns nothing and cannot
+    // refuse the request — see `crate::cimd`.
+    crate::cimd::materialise_if_cimd(&state, &http_req, user.tenant_id, &q.client_id).await;
+
     // X7 G12 (plan §4.10). Classify request objects FIRST, before the PAR
     // branch below: a `request_uri` that is not a PAR handle would otherwise
     // fall into `par_service.consume` and come back as a generic
@@ -1893,6 +1901,15 @@ async fn token_inner<C: Connection + Clone>(
             // ones under it.
             Err(e) => build_oauth2_error_response(&e),
         };
+    }
+
+    // T21.5 — before client authentication, for the reason the authorize
+    // endpoint calls it before the client lookup: what follows must act on an
+    // ordinary row. Placed after the device-code branch because RFC 8628's
+    // grant authenticates no client at all and carries no `client_id` worth
+    // resolving.
+    if let Some(client_id) = form.client_id.as_deref() {
+        crate::cimd::materialise_if_cimd(&state, &req, tenant_id, client_id).await;
     }
 
     // SEC-096: ONE context construction and ONE DPoP verification, ahead of
@@ -2973,6 +2990,10 @@ async fn discovery_document<C: Connection + Clone>(
             .map(|s| axiam_oauth2::oidc::TenantCapabilities {
                 sensitive_scopes_enabled: s.oidc.sensitive_scopes_enabled,
                 dynamic_registration_enabled: s.oidc.dynamic_registration.is_enabled(),
+                // T21.5 — the third row the `TenantCapabilities` struct was
+                // built to hold, resolved from the same one settings read for
+                // the same reason: one document, one tenant.
+                cimd_enabled: s.oidc.cimd.enabled,
             })
             // A settings read that fails advertises less rather than more.
             // A relying party told a scope exists and then refused it has a
@@ -5025,6 +5046,9 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
                 .into(),
         ));
     }
+
+    // T21.5 — before client authentication, as at the token endpoint.
+    crate::cimd::materialise_if_cimd(&state, &http_req, tenant_id, &req.client_id).await;
 
     // One client-authentication path in the codebase, shared with the token
     // endpoint, rather than a second one to keep correct — and since SEC-093

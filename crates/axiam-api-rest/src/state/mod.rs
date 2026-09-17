@@ -80,6 +80,7 @@ use axiam_federation::oidc::OidcFederationService;
 #[cfg(feature = "saml")]
 use axiam_federation::saml::SamlFederationService;
 use axiam_oauth2::authorize::AuthorizeService;
+use axiam_oauth2::cimd::ClientMetadataCache;
 use axiam_oauth2::device_service::DeviceAuthorizationService;
 use axiam_oauth2::jwks_cache::{
     JwksCache as Oauth2JwksCache, JwksCacheConfig as Oauth2JwksCacheConfig,
@@ -789,6 +790,9 @@ impl<C: Connection + Clone> AppState<C> {
                 proof_replay_repo,
                 oauth2_jwks_cache: Arc::new(Oauth2JwksCache::new()),
                 oauth2_jwks_cache_config: Oauth2JwksCacheConfig::default(),
+                // T21.5 — empty; it fills only for a tenant that enables
+                // client ID metadata documents.
+                cimd_cache: axiam_oauth2::cimd::ClientMetadataCache::new(),
             },
             federation: bundles::FederationState {
                 federation_config_repo: federation_config_repo.clone(),

@@ -1311,6 +1311,39 @@ pub trait OAuth2ClientRepository: Send + Sync {
         managed_by: ManagedBy,
     ) -> impl Future<Output = AxiamResult<Vec<OAuth2Client>>> + Send;
 
+    /// Create or refresh the **shadow row** of a client whose `client_id` is
+    /// the URL of its metadata document (T21.5, CIMD).
+    ///
+    /// # Why this is not `create`
+    ///
+    /// [`Self::create`] mints the `client_id`. A CIMD client's `client_id` is
+    /// not AXIAM's to mint: it *is* the URL the document was fetched from,
+    /// because that URL is the client's identity under
+    /// `draft-ietf-oauth-client-id-metadata-document`. And the row is
+    /// refreshed on every successful fetch rather than created once, so the
+    /// operation is an upsert by `(tenant_id, client_id)` — the pair the
+    /// table's unique index already keys on.
+    ///
+    /// # What an implementation MUST guarantee
+    ///
+    /// * **A row whose `managed_by` is not `cimd` is never modified.** An
+    ///   administrator's client whose `client_id` happens to be a URL keeps
+    ///   its registration, its secret and its profile, whatever any document
+    ///   at that URL says. An implementation that cannot make that guarantee
+    ///   must return an error rather than write.
+    /// * **No secret is ever minted.** A CIMD client authenticates with
+    ///   `none` or `private_key_jwt`; a shared secret cannot exist for a
+    ///   client whose registration is a public document.
+    /// * `created_at` survives a refresh; `updated_at` moves.
+    ///
+    /// Returns the row as stored, so the caller acts on what was written
+    /// rather than on what it asked for.
+    fn upsert_cimd_client(
+        &self,
+        client_id: &str,
+        input: CreateOAuth2Client,
+    ) -> impl Future<Output = AxiamResult<OAuth2Client>> + Send;
+
     /// Stamp `last_authorized_at` (T21.4).
     ///
     /// Called **only** for a client whose `managed_by` is not `admin` — see

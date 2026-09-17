@@ -3,6 +3,7 @@
 pub mod acr;
 pub mod authn_params;
 pub mod authorize;
+pub mod cimd;
 pub mod claims_request;
 pub mod client_secret_basic;
 pub mod dcr;

@@ -41,6 +41,10 @@ axiam-federation = { workspace = true, default-features = false }
 reqwest = { workspace = true }
 
 [dev-dependencies]
+# T21.5 — the CIMD tests serve client metadata documents from a loopback mock
+# server, the same way `axiam-federation`'s OIDC tests serve a JWKS. Same
+# version as every other crate in the workspace that uses it.
+wiremock = "0.6"
 # X4 external-exchange unit tests mint an Ed25519 keypair for the AuthConfig
 # under test, the same way every other crate's token tests do.
 rcgen = { workspace = true }

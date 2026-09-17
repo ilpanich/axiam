@@ -468,6 +468,13 @@ mod tests {
             async fn create(&self, _: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
                 unreachable!("peek must not touch the client registration")
             }
+            async fn upsert_cimd_client(
+                &self,
+                _: &str,
+                _: CreateOAuth2Client,
+            ) -> AxiamResult<OAuth2Client> {
+                unreachable!("peek must not touch the client registration")
+            }
             async fn get_by_id(&self, _: Uuid, _: Uuid) -> AxiamResult<OAuth2Client> {
                 unreachable!("peek must not touch the client registration")
             }

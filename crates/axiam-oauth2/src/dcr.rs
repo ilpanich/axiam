@@ -577,6 +577,7 @@ mod tests {
             dcr_allowed_scopes: vec!["openid".into(), "profile".into()],
             dcr_allowed_redirect_hosts: Vec::new(),
             external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+            cimd: d.cimd.clone(),
             dcr_max_clients: d.dcr_max_clients,
             dcr_unused_client_ttl_days: d.dcr_unused_client_ttl_days,
         };

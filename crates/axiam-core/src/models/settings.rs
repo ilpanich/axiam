@@ -374,6 +374,15 @@ pub struct OidcPolicy {
     #[serde(default = "default_dcr_unused_client_ttl_days")]
     #[schema(example = 30)]
     pub dcr_unused_client_ttl_days: u32,
+    /// T21.5 — whether a URL-shaped `client_id` is resolved by fetching the
+    /// document it names, and on what terms. See [`CimdPolicy`]; off unless
+    /// somebody turns it on (I1).
+    ///
+    /// Nested, and therefore inherited or overridden **whole**: the fields are
+    /// terms of one decision, and a half-merged posture is one neither the
+    /// organization nor the tenant wrote.
+    #[serde(default)]
+    pub cimd: CimdPolicy,
 }
 
 /// See [`DEFAULT_DCR_MAX_CLIENTS`]. A function because `serde(default = ..)`
@@ -484,6 +493,339 @@ pub fn sensitive_scope_in_dcr_list(scopes: &[String]) -> Option<&str> {
         .iter()
         .find(|s| matches!(s.trim(), "address" | "phone"))
         .map(String::as_str)
+}
+
+// -----------------------------------------------------------------------
+// Client ID Metadata Documents (T21.5)
+// -----------------------------------------------------------------------
+
+/// The shortest cache lifetime a tenant may give a client metadata document,
+/// in seconds.
+///
+/// A bound rather than a preference. The document is fetched from a URL an
+/// **unauthenticated** caller chooses, so the cache lifetime is what stands
+/// between one authorization request and one outbound HTTP request: a tenant
+/// that set it to zero would have turned its authorization endpoint into a
+/// request amplifier pointed at whatever host is on its trusted list. Sixty
+/// seconds is the floor; the shipped default is five minutes.
+pub const CIMD_MIN_CACHE_FLOOR_SECS: u64 = 60;
+
+/// The longest cache lifetime a tenant may give a client metadata document,
+/// in seconds (seven days).
+///
+/// The other end of the same control. A cached document is a *live client
+/// registration* that nobody at this deployment created, so the ceiling is the
+/// longest a stranger may pin one for after taking their document down. Seven
+/// days is an upper bound on the tenant's own `max_cache_secs`, whose shipped
+/// default is three.
+pub const CIMD_MAX_CACHE_CEILING_SECS: u64 = 604_800;
+
+/// The largest `max_metadata_bytes` a tenant may configure (64 KiB).
+///
+/// An unbounded read of an attacker-chosen URL is a memory-exhaustion
+/// primitive, and a tenant-configurable cap with no ceiling is an unbounded
+/// read with extra steps. A client metadata document that does not fit in
+/// 64 KiB is not a client metadata document; the shipped default is 5 000
+/// bytes, which is the draft's own suggestion and roughly ten times what a
+/// real one weighs.
+pub const CIMD_MAX_METADATA_BYTES_CEILING: u64 = 65_536;
+
+/// The shipped cache bounds and size cap. See [`CimdPolicy`].
+pub const DEFAULT_CIMD_MIN_CACHE_SECS: u64 = 300;
+/// See [`DEFAULT_CIMD_MIN_CACHE_SECS`].
+pub const DEFAULT_CIMD_MAX_CACHE_SECS: u64 = 259_200;
+/// See [`DEFAULT_CIMD_MIN_CACHE_SECS`].
+pub const DEFAULT_CIMD_MAX_METADATA_BYTES: u64 = 5_000;
+
+/// Whether, and on what terms, a `client_id` that is a URL is resolved by
+/// fetching the document it names (T21.5,
+/// `draft-ietf-oauth-client-id-metadata-document`).
+///
+/// # Why this is one nested policy rather than nine fields
+///
+/// Every field here is a term of a single decision — *do we fetch a stranger's
+/// URL and make a client out of what comes back* — and none of them means
+/// anything without [`Self::enabled`]. A tenant that states a CIMD posture
+/// states all of it; a tenant that states none inherits its organization's
+/// whole posture rather than half of one, which is the only merge that cannot
+/// produce a combination neither party wrote.
+///
+/// # The two fields that can widen, and the seven that cannot
+///
+/// [`Self::enabled`] and [`Self::allow_http`] are **ordered**: a tenant may
+/// turn either off but never on, exactly as `dynamic_registration` may only
+/// move down its ladder. Everything else names *this tenant's* domains or
+/// *this tenant's* bounds, and there is no sense in which one tenant's list of
+/// trusted publishers is stricter than another's — the same argument
+/// [`OidcPolicy`] already makes for `dcr_allowed_redirect_hosts`.
+///
+/// # Every bound here is a security control
+///
+/// [`Self::max_metadata_bytes`], [`Self::min_cache_secs`] and
+/// [`Self::max_cache_secs`] are not tuning knobs. They are, respectively, the
+/// ceiling on a read from an attacker-chosen URL, the floor under how often
+/// that read may be repeated, and the ceiling on how long its result may be
+/// trusted. Each is clamped again in code against the three constants above,
+/// so a settings row written by hand cannot lift them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CimdPolicy {
+    /// **Off unless somebody turns it on** (I1). With this `false`, a
+    /// URL-shaped `client_id` is exactly today's unknown client: nothing is
+    /// fetched, nothing is materialised, and the ordinary repository lookup
+    /// answers as it always has.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Permit an `http://` `client_id` and an `http://` fetch.
+    ///
+    /// **Development only, and it does more than its name says.** AXIAM's
+    /// shared SSRF guard couples the scheme rule to the address rule — the
+    /// same seam that lets an integration test point a fetch at a loopback
+    /// mock server — so a tenant that allows `http` also allows the first hop
+    /// to resolve to a private address. Redirect hops are validated strictly
+    /// whatever this says, and a public deployment that sets it has removed
+    /// the control that makes `169.254.169.254` unreachable.
+    #[serde(default)]
+    pub allow_http: bool,
+    /// The hosts whose documents this tenant will fetch at all, as globs
+    /// (`*.example.com`, or `*` for any).
+    ///
+    /// **An empty list resolves nothing**, and enabling CIMD while it is empty
+    /// is refused — see [`validate_cimd_policy`]. That is a deliberate
+    /// departure from "a URL is a client identifier, so any URL will do": the
+    /// fetch is triggered by an unauthenticated request naming the URL, so an
+    /// unrestricted list is a request-forgery primitive offered to strangers,
+    /// bounded only by the SSRF guard's address rules. Naming the publishers a
+    /// tenant actually fronts costs one settings field and removes the class.
+    #[serde(default)]
+    pub trusted_client_id_domains: Vec<String>,
+    /// The hosts a document's `redirect_uris` may point at, as globs.
+    ///
+    /// The loopback hosts (`127.0.0.1`, `[::1]`, `localhost`) are always
+    /// allowed, because RFC 8252 §7.3 is how every desktop MCP client receives
+    /// its callback — so an empty list is not a refusal of everything, it is
+    /// "loopback only", which is exactly the Claude Code and VS Code profile.
+    #[serde(default)]
+    pub trusted_redirect_domains: Vec<String>,
+    /// Require every `redirect_uris` host in the document to equal the host of
+    /// the `client_id` URL itself.
+    ///
+    /// **On by default**, because the document says who the client is and a
+    /// redirect to somewhere else is the one thing a stolen or mirrored
+    /// document would want to change. It is turned **off** for the desktop MCP
+    /// clients, whose callbacks are on loopback and therefore can never share
+    /// a host with a `https://` `client_id`; `docs/admin/client-id-metadata-documents.md`
+    /// says so and says why.
+    #[serde(default = "default_true")]
+    pub restrict_same_domain: bool,
+    /// Refuse a document whose `token_endpoint_auth_method` is `none`.
+    ///
+    /// Off by default, because `none` is what every MCP desktop client is. A
+    /// tenant that turns it on accepts only `private_key_jwt` documents, which
+    /// is the posture for a deployment whose CIMD clients are servers rather
+    /// than desktops.
+    #[serde(default)]
+    pub confidential_only: bool,
+    /// The floor under a document's cache lifetime, in seconds. Clamped to
+    /// [`CIMD_MIN_CACHE_FLOOR_SECS`].
+    #[serde(default = "default_cimd_min_cache_secs")]
+    #[schema(example = 300)]
+    pub min_cache_secs: u64,
+    /// The ceiling on a document's cache lifetime, in seconds. Clamped to
+    /// [`CIMD_MAX_CACHE_CEILING_SECS`].
+    #[serde(default = "default_cimd_max_cache_secs")]
+    #[schema(example = 259_200)]
+    pub max_cache_secs: u64,
+    /// The hard cap on how many bytes of a document are read, before it is
+    /// parsed. Clamped to [`CIMD_MAX_METADATA_BYTES_CEILING`].
+    #[serde(default = "default_cimd_max_metadata_bytes")]
+    #[schema(example = 5_000)]
+    pub max_metadata_bytes: u64,
+}
+
+impl Default for CimdPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_http: false,
+            trusted_client_id_domains: Vec::new(),
+            trusted_redirect_domains: Vec::new(),
+            restrict_same_domain: true,
+            confidential_only: false,
+            min_cache_secs: DEFAULT_CIMD_MIN_CACHE_SECS,
+            max_cache_secs: DEFAULT_CIMD_MAX_CACHE_SECS,
+            max_metadata_bytes: DEFAULT_CIMD_MAX_METADATA_BYTES,
+        }
+    }
+}
+
+impl CimdPolicy {
+    /// The cache lifetime to give a document that advertised `advertised`
+    /// seconds, or that advertised nothing (`None`).
+    ///
+    /// Clamped twice: once to this tenant's own bounds, and once to the
+    /// deployment constants, so neither a hostile `Cache-Control` nor a
+    /// hand-edited settings row can push it out of range. A document that
+    /// advertises nothing gets the floor rather than the ceiling — the least
+    /// trust for the least information.
+    pub fn clamp_cache_secs(&self, advertised: Option<u64>) -> u64 {
+        let floor = self.min_cache_secs.max(CIMD_MIN_CACHE_FLOOR_SECS);
+        let ceiling = self
+            .max_cache_secs
+            .min(CIMD_MAX_CACHE_CEILING_SECS)
+            .max(floor);
+        advertised.unwrap_or(floor).clamp(floor, ceiling)
+    }
+
+    /// The byte cap to read this tenant's documents with, clamped to
+    /// [`CIMD_MAX_METADATA_BYTES_CEILING`]. Zero is read as the shipped
+    /// default rather than as "read nothing", which no operator means.
+    pub fn effective_max_metadata_bytes(&self) -> usize {
+        let raw = if self.max_metadata_bytes == 0 {
+            DEFAULT_CIMD_MAX_METADATA_BYTES
+        } else {
+            self.max_metadata_bytes
+        };
+        usize::try_from(raw.min(CIMD_MAX_METADATA_BYTES_CEILING))
+            .unwrap_or(DEFAULT_CIMD_MAX_METADATA_BYTES as usize)
+    }
+}
+
+/// `serde(default)` cannot name a literal `true`.
+fn default_true() -> bool {
+    true
+}
+
+/// See [`DEFAULT_CIMD_MIN_CACHE_SECS`], and [`default_dcr_max_clients`] for
+/// why these are functions.
+fn default_cimd_min_cache_secs() -> u64 {
+    DEFAULT_CIMD_MIN_CACHE_SECS
+}
+
+/// See [`DEFAULT_CIMD_MAX_CACHE_SECS`].
+fn default_cimd_max_cache_secs() -> u64 {
+    DEFAULT_CIMD_MAX_CACHE_SECS
+}
+
+/// See [`DEFAULT_CIMD_MAX_METADATA_BYTES`].
+fn default_cimd_max_metadata_bytes() -> u64 {
+    DEFAULT_CIMD_MAX_METADATA_BYTES
+}
+
+/// Everything wrong with a resolved CIMD policy, as operator sentences
+/// (T21.5).
+///
+/// A function of the **effective** policy, for the reason
+/// [`validate_dcr_policy`] gives: a tenant that enables CIMD while inheriting
+/// an empty resource list from its organization is precisely the state the
+/// first interlock exists to refuse.
+///
+/// # The two interlocks
+///
+/// **D3.** Enabling CIMD with an empty
+/// [`OidcPolicy::external_client_allowed_resources`] is refused, word for word
+/// the reasoning `dynamic_registration: anonymous` is refused for: a client
+/// materialised from a stranger's document inherits that list as its
+/// `allowed_resources`, and an empty list leaves it able to obtain only the
+/// `axiam:user` tokens AXIAM's own APIs accept.
+///
+/// **The trusted-publisher list.** Enabling CIMD with an empty
+/// [`CimdPolicy::trusted_client_id_domains`] is refused, because the fetch is
+/// reachable by an unauthenticated caller who chooses the URL.
+///
+/// The rest are range checks, and they are here rather than left to the
+/// clamping accessors so that an operator who writes an impossible bound is
+/// told, rather than quietly given a different one.
+pub fn validate_cimd_policy(oidc: &OidcPolicy) -> Vec<String> {
+    let mut violations = Vec::new();
+    let cimd = &oidc.cimd;
+
+    if !cimd.enabled {
+        // Nothing below can be reached by a request, so nothing below is
+        // refused. A tenant may stage a CIMD policy before turning it on.
+        return violations;
+    }
+
+    if oidc.external_client_allowed_resources.is_empty() {
+        violations.push(
+            "cimd.enabled: client ID metadata documents cannot be enabled while \
+             external_client_allowed_resources is empty (D3). A client materialised from a \
+             stranger's document inherits that list as its allowed_resources, and an empty \
+             list leaves it able to obtain only the axiam:user tokens AXIAM's own APIs \
+             accept. Name the MCP servers this tenant fronts first"
+                .into(),
+        );
+    }
+
+    if cimd.trusted_client_id_domains.is_empty() {
+        violations.push(
+            "cimd.trusted_client_id_domains: client ID metadata documents cannot be enabled \
+             with no trusted publisher domain. The document is fetched because an \
+             unauthenticated request named its URL, so an unrestricted list is an outbound \
+             fetch a stranger chooses the target of. Name the hosts whose documents this \
+             tenant accepts (globs are allowed: *.example.com)"
+                .into(),
+        );
+    }
+
+    // A host glob, not a URL. `host_glob_matches` answers `false` for an entry
+    // carrying a scheme, a path or a port, so a tenant that typed one would
+    // have a trusted list that silently matches nothing — fail-closed, but
+    // indistinguishable from a working list until somebody tries to sign in.
+    for (field, entries) in [
+        ("cimd.trusted_client_id_domains", &cimd.trusted_client_id_domains),
+        ("cimd.trusted_redirect_domains", &cimd.trusted_redirect_domains),
+    ] {
+        for entry in entries {
+            let e = entry.trim();
+            if e.is_empty()
+                || e.contains("://")
+                || e.contains('/')
+                || e.contains(':')
+                || e.split_whitespace().count() != 1
+            {
+                violations.push(format!(
+                    "{field}: {entry:?} is not a host pattern. Write a host (mcp.example.com), \
+                     a leftmost-label wildcard (*.example.com) or * — not a URL, a path or a \
+                     host:port"
+                ));
+            }
+        }
+    }
+
+    if cimd.min_cache_secs < CIMD_MIN_CACHE_FLOOR_SECS {
+        violations.push(format!(
+            "cimd.min_cache_secs ({}) must be >= {CIMD_MIN_CACHE_FLOOR_SECS}: the cache \
+             lifetime is what stands between one authorization request and one outbound \
+             fetch",
+            cimd.min_cache_secs,
+        ));
+    }
+
+    if cimd.max_cache_secs > CIMD_MAX_CACHE_CEILING_SECS {
+        violations.push(format!(
+            "cimd.max_cache_secs ({}) must be <= {CIMD_MAX_CACHE_CEILING_SECS}: a cached \
+             document is a live client registration nobody here created",
+            cimd.max_cache_secs,
+        ));
+    }
+
+    if cimd.min_cache_secs > cimd.max_cache_secs {
+        violations.push(format!(
+            "cimd.min_cache_secs ({}) must be <= cimd.max_cache_secs ({})",
+            cimd.min_cache_secs, cimd.max_cache_secs,
+        ));
+    }
+
+    if cimd.max_metadata_bytes == 0 || cimd.max_metadata_bytes > CIMD_MAX_METADATA_BYTES_CEILING {
+        violations.push(format!(
+            "cimd.max_metadata_bytes ({}) must be between 1 and \
+             {CIMD_MAX_METADATA_BYTES_CEILING}: an unbounded read of an attacker-chosen URL \
+             is a memory-exhaustion primitive",
+            cimd.max_metadata_bytes,
+        ));
+    }
+
+    violations
 }
 
 // -----------------------------------------------------------------------
@@ -604,6 +946,9 @@ pub struct TenantSettingsOverride {
     pub external_client_allowed_resources: Option<Vec<String>>,
     pub dcr_max_clients: Option<u32>,
     pub dcr_unused_client_ttl_days: Option<u32>,
+    /// T21.5 — the whole CIMD posture, or nothing. Only `enabled` and
+    /// `allow_http` are ordered against the organization's; see [`CimdPolicy`].
+    pub cimd: Option<CimdPolicy>,
 }
 
 impl TenantSettingsOverride {
@@ -695,6 +1040,11 @@ pub struct SetOrgSettings {
     #[serde(default = "default_dcr_unused_client_ttl_days")]
     #[schema(example = 30)]
     pub dcr_unused_client_ttl_days: u32,
+    /// T21.5 — defaulted, so an API client written before this task lands on
+    /// `enabled: false`, which is what every deployment did before client ID
+    /// metadata documents existed (I1).
+    #[serde(default)]
+    pub cimd: CimdPolicy,
 }
 
 /// The erasure grace window a deployment gets when nothing says otherwise.
@@ -783,6 +1133,11 @@ pub fn system_defaults() -> SetOrgSettings {
         external_client_allowed_resources: Vec::new(),
         dcr_max_clients: DEFAULT_DCR_MAX_CLIENTS,
         dcr_unused_client_ttl_days: DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
+        // T21.5 — a URL-shaped `client_id` is an unknown client, which is what
+        // it was before this task existed (I1). The bounds carry their shipped
+        // values rather than zero so that turning the switch on is one
+        // decision rather than four.
+        cimd: CimdPolicy::default(),
     }
 }
 
@@ -849,7 +1204,7 @@ pub fn validate_org_settings(input: &SetOrgSettings) -> AxiamResult<()> {
     // resolves to. An organization baseline reaches every tenant that has not
     // overridden it, so a baseline naming `anonymous` with no resources is the
     // same open door as a tenant one; see `validate_dcr_policy`.
-    violations.extend(validate_dcr_policy(&OidcPolicy {
+    let oidc = OidcPolicy {
         sensitive_scopes_enabled: input.sensitive_scopes_enabled,
         default_locale: input.default_locale.clone(),
         dynamic_registration: input.dynamic_registration,
@@ -858,7 +1213,13 @@ pub fn validate_org_settings(input: &SetOrgSettings) -> AxiamResult<()> {
         external_client_allowed_resources: input.external_client_allowed_resources.clone(),
         dcr_max_clients: input.dcr_max_clients,
         dcr_unused_client_ttl_days: input.dcr_unused_client_ttl_days,
-    }));
+        cimd: input.cimd.clone(),
+    };
+    violations.extend(validate_dcr_policy(&oidc));
+    // T21.5 — the same argument, for the mechanism that reaches further: a
+    // baseline that enables CIMD with no resource list and no trusted
+    // publisher opens it for every tenant that has not overridden it.
+    violations.extend(validate_cimd_policy(&oidc));
 
     if violations.is_empty() {
         Ok(())
@@ -1014,6 +1375,14 @@ pub fn effective_settings(
             dcr_unused_client_ttl_days: tenant_override
                 .dcr_unused_client_ttl_days
                 .unwrap_or(org.oidc.dcr_unused_client_ttl_days),
+            // T21.5 — whole or nothing, for the reason `CimdPolicy`'s own
+            // documentation gives: a per-field merge could produce a posture
+            // neither party wrote — this tenant's trusted publishers under the
+            // organization's `enabled`, say.
+            cimd: tenant_override
+                .cimd
+                .clone()
+                .unwrap_or_else(|| org.oidc.cimd.clone()),
         },
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -1248,6 +1617,15 @@ pub fn clamp_overrides_to_org(
     }) {
         overrides.dcr_unused_client_ttl_days = None;
         cleared.push("dcr_unused_client_ttl_days");
+    }
+    // T21.5 — the posture is overridden whole, so it is cleared whole: a
+    // tenant CIMD block that turns on what the organization turned off is
+    // dropped in favour of the baseline rather than half-kept.
+    if overrides.cimd.as_ref().is_some_and(|c| {
+        (c.enabled && !org.oidc.cimd.enabled) || (c.allow_http && !org.oidc.cimd.allow_http)
+    }) {
+        overrides.cimd = None;
+        cleared.push("cimd");
     }
 
     cleared
@@ -1533,6 +1911,28 @@ pub fn validate_tenant_override(
         ));
     }
 
+    // T21.5 — the two halves of the CIMD posture that can *widen*. Everything
+    // else on `CimdPolicy` names this tenant's own publishers, callbacks and
+    // bounds, and is unordered for the reason the three DCR lists are.
+    if let Some(cimd) = &overrides.cimd {
+        if cimd.enabled && !org.oidc.cimd.enabled {
+            violations.push(
+                "cimd.enabled: cannot enable client ID metadata documents at tenant level \
+                 when disabled at org level (materialising a client from a stranger's \
+                 document is a decision taken where the outbound fetch is paid for)"
+                    .into(),
+            );
+        }
+        if cimd.allow_http && !org.oidc.cimd.allow_http {
+            violations.push(
+                "cimd.allow_http: cannot allow plaintext metadata fetches at tenant level \
+                 when the org baseline forbids them; the same seam also admits private \
+                 addresses on the first hop"
+                    .into(),
+            );
+        }
+    }
+
     if !violations.is_empty() {
         return Err(AxiamError::Validation {
             message: format!(
@@ -1570,6 +1970,10 @@ pub fn validate_tenant_override(
     // inheriting an empty resource list from its organization is exactly the
     // state the interlock exists to refuse.
     cross.extend(validate_dcr_policy(&merged.oidc));
+    // T21.5 — the D3 interlock and the trusted-publisher refusal, on the
+    // policy the tenant will actually run under. A tenant that enables CIMD
+    // while inheriting an empty resource list is exactly what this refuses.
+    cross.extend(validate_cimd_policy(&merged.oidc));
 
     if merged.lockout.max_lockout_duration_secs < merged.lockout.lockout_duration_secs {
         cross.push(format!(
@@ -1785,6 +2189,15 @@ pub fn diff_against_org(
             org.oidc.dcr_unused_client_ttl_days,
             tenant.oidc.dcr_unused_client_ttl_days
         ),
+        // T21.5 — compared and carried whole, as it is merged whole. A tenant
+        // whose CIMD posture differs from the baseline in one field overrides
+        // all nine, which is the only diff that round-trips through
+        // `effective_settings`.
+        cimd: if tenant.oidc.cimd != org.oidc.cimd {
+            Some(tenant.oidc.cimd.clone())
+        } else {
+            None
+        },
         default_locale: if tenant.oidc.default_locale != org.oidc.default_locale {
             tenant.oidc.default_locale.clone()
         } else {
@@ -1854,6 +2267,7 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
             external_client_allowed_resources: input.external_client_allowed_resources.clone(),
             dcr_max_clients: input.dcr_max_clients,
             dcr_unused_client_ttl_days: input.dcr_unused_client_ttl_days,
+            cimd: input.cimd.clone(),
         },
         created_at: now,
         updated_at: now,
@@ -3310,4 +3724,357 @@ mod tests {
 
         assert!(clamp_overrides_to_org(&org, &mut overrides).is_empty());
     }
+
+    // -------------------------------------------------------------------
+    // T21.5 — client ID metadata documents
+    // -------------------------------------------------------------------
+
+    /// I1, at the settings layer: a deployment that changes nothing resolves
+    /// no URL-shaped `client_id`, and the shipped policy is internally
+    /// consistent so nothing an existing deployment writes starts failing.
+    #[test]
+    fn cimd_is_off_and_consistent_by_default() {
+        let d = system_defaults();
+        assert!(!d.cimd.enabled);
+        assert!(!d.cimd.allow_http);
+        assert!(d.cimd.trusted_client_id_domains.is_empty());
+        assert!(d.cimd.restrict_same_domain, "the stricter default");
+        assert_eq!(d.cimd.min_cache_secs, DEFAULT_CIMD_MIN_CACHE_SECS);
+        assert_eq!(d.cimd.max_cache_secs, DEFAULT_CIMD_MAX_CACHE_SECS);
+        assert_eq!(d.cimd.max_metadata_bytes, DEFAULT_CIMD_MAX_METADATA_BYTES);
+        assert!(validate_org_settings(&d).is_ok());
+    }
+
+    /// A staged posture — every field set, `enabled` still false — is not
+    /// validated, so an operator can prepare one before turning it on.
+    #[test]
+    fn a_disabled_cimd_policy_is_not_validated() {
+        assert!(
+            validate_org_settings(&SetOrgSettings {
+                cimd: CimdPolicy {
+                    enabled: false,
+                    min_cache_secs: 1,
+                    max_metadata_bytes: 0,
+                    ..CimdPolicy::default()
+                },
+                ..system_defaults()
+            })
+            .is_ok()
+        );
+    }
+
+    /// The D3 interlock, for the second external mechanism. Same control,
+    /// same reason as `anonymous_registration_needs_at_least_one_audience`.
+    #[test]
+    fn enabling_cimd_needs_at_least_one_audience() {
+        let base = SetOrgSettings {
+            cimd: CimdPolicy {
+                enabled: true,
+                trusted_client_id_domains: vec!["*.example.com".into()],
+                ..CimdPolicy::default()
+            },
+            external_client_allowed_resources: Vec::new(),
+            ..system_defaults()
+        };
+        let err = validate_org_settings(&base)
+            .expect_err("cimd with no audiences must be refused")
+            .to_string();
+        assert!(err.contains("D3"), "{err}");
+        assert!(err.contains("external_client_allowed_resources"), "{err}");
+
+        assert!(
+            validate_org_settings(&SetOrgSettings {
+                external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+                ..base
+            })
+            .is_ok()
+        );
+    }
+
+    /// The second interlock, which is AXIAM's own: the fetch is reachable by
+    /// an unauthenticated caller who chooses the URL, so the publishers are
+    /// named in advance or the mechanism does not turn on.
+    #[test]
+    fn enabling_cimd_needs_at_least_one_trusted_publisher() {
+        let err = validate_org_settings(&SetOrgSettings {
+            cimd: CimdPolicy {
+                enabled: true,
+                trusted_client_id_domains: Vec::new(),
+                ..CimdPolicy::default()
+            },
+            external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+            ..system_defaults()
+        })
+        .expect_err("cimd with no trusted publisher must be refused")
+        .to_string();
+        assert!(err.contains("trusted_client_id_domains"), "{err}");
+    }
+
+    /// Each bound is refused outside its range, rather than silently clamped:
+    /// an operator who writes an impossible bound is told.
+    #[test]
+    fn every_cimd_bound_is_refused_out_of_range() {
+        let enabled = |cimd: CimdPolicy| SetOrgSettings {
+            cimd,
+            external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+            ..system_defaults()
+        };
+        let base = CimdPolicy {
+            enabled: true,
+            trusted_client_id_domains: vec!["*.example.com".into()],
+            ..CimdPolicy::default()
+        };
+
+        for (cimd, needle) in [
+            (
+                CimdPolicy {
+                    min_cache_secs: 5,
+                    ..base.clone()
+                },
+                "min_cache_secs",
+            ),
+            (
+                CimdPolicy {
+                    max_cache_secs: CIMD_MAX_CACHE_CEILING_SECS + 1,
+                    ..base.clone()
+                },
+                "max_cache_secs",
+            ),
+            (
+                CimdPolicy {
+                    min_cache_secs: 4_000,
+                    max_cache_secs: 1_000,
+                    ..base.clone()
+                },
+                "min_cache_secs",
+            ),
+            (
+                CimdPolicy {
+                    max_metadata_bytes: 0,
+                    ..base.clone()
+                },
+                "max_metadata_bytes",
+            ),
+            (
+                CimdPolicy {
+                    max_metadata_bytes: CIMD_MAX_METADATA_BYTES_CEILING + 1,
+                    ..base.clone()
+                },
+                "max_metadata_bytes",
+            ),
+            (
+                CimdPolicy {
+                    trusted_client_id_domains: vec!["https://example.com/mcp.json".into()],
+                    ..base.clone()
+                },
+                "trusted_client_id_domains",
+            ),
+            (
+                CimdPolicy {
+                    trusted_redirect_domains: vec!["example.com:8443".into()],
+                    ..base.clone()
+                },
+                "trusted_redirect_domains",
+            ),
+        ] {
+            let err = validate_org_settings(&enabled(cimd))
+                .expect_err("out-of-range bound must be refused")
+                .to_string();
+            assert!(err.contains(needle), "the refusal must name {needle}: {err}");
+        }
+    }
+
+    /// The clamping accessors are the second line: whatever is stored, what
+    /// the fetch path uses is inside the deployment's own range.
+    #[test]
+    fn the_clamping_accessors_bound_a_hand_edited_row() {
+        let wild = CimdPolicy {
+            min_cache_secs: 0,
+            max_cache_secs: u64::MAX,
+            max_metadata_bytes: u64::MAX,
+            ..CimdPolicy::default()
+        };
+        assert_eq!(wild.clamp_cache_secs(Some(1)), CIMD_MIN_CACHE_FLOOR_SECS);
+        assert_eq!(wild.clamp_cache_secs(None), CIMD_MIN_CACHE_FLOOR_SECS);
+        assert_eq!(
+            wild.clamp_cache_secs(Some(u64::MAX)),
+            CIMD_MAX_CACHE_CEILING_SECS
+        );
+        assert_eq!(
+            wild.effective_max_metadata_bytes() as u64,
+            CIMD_MAX_METADATA_BYTES_CEILING
+        );
+
+        // A publisher's own value inside the range is honoured.
+        let ordinary = CimdPolicy::default();
+        assert_eq!(ordinary.clamp_cache_secs(Some(1_800)), 1_800);
+    }
+
+    /// The two halves of the posture that can widen are ordered against the
+    /// organization's; the other seven are not.
+    #[test]
+    fn a_tenant_may_not_enable_cimd_its_organization_disabled() {
+        let org = settings_from_org_input(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &SetOrgSettings {
+                external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+                ..system_defaults()
+            },
+        );
+        let tenant_on = TenantSettingsOverride {
+            cimd: Some(CimdPolicy {
+                enabled: true,
+                trusted_client_id_domains: vec!["*.example.com".into()],
+                ..CimdPolicy::default()
+            }),
+            ..Default::default()
+        };
+        let err = validate_tenant_override(&org, &tenant_on)
+            .expect_err("a tenant may not enable what the org disabled")
+            .to_string();
+        assert!(err.contains("cimd.enabled"), "{err}");
+
+        // And the clamp drops the whole block rather than half-keeping it.
+        let mut clamped = tenant_on.clone();
+        let cleared = clamp_overrides_to_org(&org, &mut clamped);
+        assert!(cleared.contains(&"cimd"), "{cleared:?}");
+        assert!(clamped.cimd.is_none());
+    }
+
+    /// The same, for the flag that also opens the SSRF guard's address rule.
+    #[test]
+    fn a_tenant_may_not_allow_http_its_organization_forbade() {
+        let org = settings_from_org_input(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &SetOrgSettings {
+                external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+                cimd: CimdPolicy {
+                    enabled: true,
+                    allow_http: false,
+                    trusted_client_id_domains: vec!["*.example.com".into()],
+                    ..CimdPolicy::default()
+                },
+                ..system_defaults()
+            },
+        );
+        let err = validate_tenant_override(
+            &org,
+            &TenantSettingsOverride {
+                cimd: Some(CimdPolicy {
+                    enabled: true,
+                    allow_http: true,
+                    trusted_client_id_domains: vec!["*.example.com".into()],
+                    ..CimdPolicy::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect_err("a tenant may not allow http the org forbade")
+        .to_string();
+        assert!(err.contains("cimd.allow_http"), "{err}");
+    }
+
+    /// A tenant may narrow freely: its own publishers, its own bounds, and
+    /// the mechanism turned off entirely.
+    #[test]
+    fn a_tenant_may_state_a_stricter_cimd_posture() {
+        let org = settings_from_org_input(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &SetOrgSettings {
+                external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+                cimd: CimdPolicy {
+                    enabled: true,
+                    trusted_client_id_domains: vec!["*".into()],
+                    ..CimdPolicy::default()
+                },
+                ..system_defaults()
+            },
+        );
+        for candidate in [
+            CimdPolicy {
+                enabled: false,
+                ..CimdPolicy::default()
+            },
+            CimdPolicy {
+                enabled: true,
+                confidential_only: true,
+                trusted_client_id_domains: vec!["mcp.example.com".into()],
+                max_metadata_bytes: 2_000,
+                ..CimdPolicy::default()
+            },
+        ] {
+            assert!(
+                validate_tenant_override(
+                    &org,
+                    &TenantSettingsOverride {
+                        cimd: Some(candidate.clone()),
+                        ..Default::default()
+                    }
+                )
+                .is_ok(),
+                "{candidate:?} is stricter and must be accepted"
+            );
+        }
+    }
+
+    /// The posture merges whole, and round-trips through the diff: a tenant
+    /// that differs in one field overrides all nine.
+    #[test]
+    fn the_cimd_posture_merges_and_diffs_whole() {
+        let org = settings_from_org_input(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &SetOrgSettings {
+                external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+                cimd: CimdPolicy {
+                    enabled: true,
+                    trusted_client_id_domains: vec!["*".into()],
+                    ..CimdPolicy::default()
+                },
+                ..system_defaults()
+            },
+        );
+        let tenant_id = Uuid::new_v4();
+
+        // No override: the organization's posture, verbatim.
+        let inherited = effective_settings(
+            &org,
+            &TenantSettingsOverride::default(),
+            tenant_id,
+            Uuid::new_v4(),
+        );
+        assert_eq!(inherited.oidc.cimd, org.oidc.cimd);
+
+        // An override: the tenant's posture, verbatim, and the diff recovers it.
+        let own = CimdPolicy {
+            enabled: true,
+            trusted_client_id_domains: vec!["mcp.example.com".into()],
+            confidential_only: true,
+            ..CimdPolicy::default()
+        };
+        let merged = effective_settings(
+            &org,
+            &TenantSettingsOverride {
+                cimd: Some(own.clone()),
+                ..Default::default()
+            },
+            tenant_id,
+            Uuid::new_v4(),
+        );
+        assert_eq!(merged.oidc.cimd, own);
+        assert_eq!(diff_against_org(&org, &merged).cimd, Some(own));
+    }
+
+    /// A settings row written before T21.5 decodes to the closed posture.
+    #[test]
+    fn a_cimd_policy_missing_every_member_decodes_to_the_default() {
+        let decoded: CimdPolicy = serde_json::from_value(serde_json::json!({})).expect("decodes");
+        assert_eq!(decoded, CimdPolicy::default());
+        assert!(!decoded.enabled);
+        assert!(decoded.restrict_same_domain);
+    }
+
 }

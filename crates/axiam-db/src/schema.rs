@@ -362,6 +362,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "dynamic_client_registration",
         sql: SCHEMA_V64,
     },
+    Migration {
+        version: 65,
+        name: "client_id_metadata_documents",
+        sql: SCHEMA_V65,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3518,6 +3523,40 @@ DEFINE FIELD IF NOT EXISTS oidc_dcr_max_clients ON TABLE security_settings
     TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS oidc_dcr_unused_client_ttl_days ON TABLE security_settings
     TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v65 — T21.5 / CIMD: the per-tenant client-metadata-document posture
+// -----------------------------------------------------------------------
+//
+// **One column, on `security_settings`, and nothing anywhere else.**
+//
+// `oidc_cimd_json` carries a JSON-encoded `CimdPolicy`: nine fields that are
+// terms of one decision — whether a `client_id` that is a URL is resolved by
+// fetching the document it names, from which publishers, over which scheme,
+// with which cache bounds and which size cap. They are written together, read
+// together and inherited together, and a tenant states the whole posture or
+// none of it, so nine columns would have been nine chances for a row to hold a
+// combination no operator wrote. `overrides_json` on the same table is the
+// established precedent for a structure stored as JSON where nothing queries
+// its parts, and nothing queries these.
+//
+// `option<string>`, and absent reads as `CimdPolicy::default()`, whose
+// `enabled` is `false` — so every row written before this migration says
+// exactly what it meant: this tenant does not resolve client ID metadata
+// documents (I1). An *unparseable* value reads the same way and is logged; see
+// `decode_cimd`.
+//
+// **No column on `oauth2_client`.** A CIMD client is materialised into the
+// ordinary client table as a `managed_by: cimd` row — v64's column, whose
+// third value was defined there precisely so that this task would add no
+// enum, no assertion and no migration to that table. What refreshes the row is
+// the document, and what remembers the document is an in-process cache, not a
+// column: a cached registration that outlived a restart would be a
+// registration nobody here created and nobody here could see expire.
+const SCHEMA_V65: &str = "\
+DEFINE FIELD IF NOT EXISTS oidc_cimd_json ON TABLE security_settings
+    TYPE option<string>;
 ";
 
 #[cfg(test)]

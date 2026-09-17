@@ -473,6 +473,138 @@ describe("OAuth2ClientsPage", () => {
     ).toBeChecked();
   });
 
+  // ─── T21.2 — public clients (token_endpoint_auth_method: none) ────────────
+
+  it("I1/I4 — defaults the auth method to client_secret_post, never to none", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByLabelText("Token Endpoint Authentication")
+    ).toHaveValue("client_secret_post");
+  });
+
+  it("offers Public client (no secret) as an auth method option", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    const select = within(dialog).getByLabelText(
+      "Token Endpoint Authentication"
+    ) as HTMLSelectElement;
+    expect(
+      within(select).getByRole("option", { name: "Public client (no secret)" })
+    ).toBeInTheDocument();
+  });
+
+  it("registers a public client with no secret and skips the secret-reveal modal", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    apiMock.post.mockResolvedValue(
+      // T21.2 — the response the server actually sends for a public client:
+      // client_secret is omitted entirely, not "".
+      res({
+        id: "c-pub",
+        client_id: "client-public-1",
+        name: "Public App",
+        redirect_uris: ["http://127.0.0.1/callback"],
+        grant_types: ["authorization_code", "refresh_token"],
+        scopes: ["openid"],
+        created_at: "t",
+      })
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Public App");
+    fireEvent.change(within(dialog).getByLabelText("Redirect URIs (one per line)"), {
+      target: { value: "http://127.0.0.1/callback" },
+    });
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "refresh_token" }));
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "none"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/oauth2-clients",
+        expect.objectContaining({ token_endpoint_auth_method: "none" })
+      )
+    );
+    // No secret was returned, so there is nothing to acknowledge.
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("refuses a public client registered for client_credentials", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Public CC");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "none"
+    );
+    await userEvent.click(
+      within(dialog).getByRole("checkbox", { name: "client_credentials" })
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    expect(
+      await screen.findByText(/may not be registered for the client_credentials grant/)
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("I4 — refuses moving a confidential client to public by editing it", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Web App" })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "none"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+
+    expect(
+      await screen.findByText(/token_endpoint_auth_method cannot be changed/)
+    ).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("I4 — refuses moving a public client to confidential by editing it", async () => {
+    apiMock.get.mockResolvedValue(
+      res([
+        {
+          ...clients[0],
+          id: "c-pub",
+          name: "Public App",
+          token_endpoint_auth_method: "none",
+        },
+      ])
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Public App" })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Token Endpoint Authentication"),
+      "client_secret_post"
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+
+    expect(
+      await screen.findByText(/token_endpoint_auth_method cannot be changed/)
+    ).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
   it("deletes a client after confirmation", async () => {
     apiMock.get.mockResolvedValue(res(clients));
     apiMock.delete.mockResolvedValue(res(undefined));

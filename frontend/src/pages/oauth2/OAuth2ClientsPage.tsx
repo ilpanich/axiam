@@ -53,6 +53,9 @@ const AUTH_METHOD_LABELS: Record<string, string> = {
   tls_client_auth: "mTLS (PKI)",
   self_signed_tls_client_auth: "mTLS (self-signed)",
   private_key_jwt: "Private Key JWT",
+  // T21.2 — a public client: no secret is minted, none is shown, and none may
+  // ever be presented at the token endpoint.
+  none: "Public client (no secret)",
 };
 
 const PROFILE_LABELS: Record<string, string> = {
@@ -316,6 +319,16 @@ function PostureFields({
             </option>
           ))}
         </select>
+        {method === "none" && (
+          <p className="text-xs text-muted-foreground">
+            No secret is generated and none may be presented at the token
+            endpoint — for a desktop app, CLI, or single-page app that cannot
+            keep one. PKCE is required, and this client cannot hold the{" "}
+            <code>client_credentials</code> or token-exchange grants. This
+            choice cannot be changed after the client is created; register a
+            new client to switch.
+          </p>
+        )}
       </div>
 
       {/* RFC 8705 §2.1.2 — exactly one of the three may be set. */}
@@ -779,9 +792,16 @@ export function OAuth2ClientsPage() {
       void queryClient.invalidateQueries({ queryKey: ["oauth2-clients"] });
       setCreateOpen(false);
       createForm.reset();
-      setRevealedClientId(resp.client_id);
-      setRevealedSecret(resp.client_secret);
-      setSecretModalOpen(true);
+      // T21.2 — a public client's creation response carries no client_secret
+      // at all (not ""), because there is nothing to show: it never presents
+      // one, and the token endpoint refuses one if it did. Checking for
+      // `undefined` rather than falsiness is the point — see
+      // CreateOAuth2ClientResponse.client_secret.
+      if (resp.client_secret !== undefined) {
+        setRevealedClientId(resp.client_id);
+        setRevealedSecret(resp.client_secret);
+        setSecretModalOpen(true);
+      }
     },
     onError: (err: unknown) => {
       createForm.setError(
@@ -807,8 +827,11 @@ export function OAuth2ClientsPage() {
     );
     // The backend runs the authoritative check and would refuse this with a
     // 400 anyway — running it here names the unmet constraint while the form
-    // is still open. See validateClientPosture.
-    const postureError = validateClientPosture(posture);
+    // is still open. See validateClientPosture. No existingMethod: a client
+    // being created has no prior registration to cross the public line from.
+    const postureError = validateClientPosture(posture, {
+      grantTypes: createForm.grantTypes,
+    });
     if (postureError) {
       createForm.setError(postureError);
       return;
@@ -865,7 +888,14 @@ export function OAuth2ClientsPage() {
       return;
     }
     const posture = posturePayload(editForm.posture, editForm.thumbprintsRaw);
-    const postureError = validateClientPosture(posture);
+    // T21.2 I4 — existingMethod is the client's currently-stored method, not
+    // the form's (possibly already-edited) draft, so a patch that tries to
+    // cross the public/confidential line is caught the same way the backend
+    // catches it: against what is actually registered.
+    const postureError = validateClientPosture(posture, {
+      grantTypes: editForm.grantTypes,
+      existingMethod: editClient.token_endpoint_auth_method ?? "client_secret_post",
+    });
     if (postureError) {
       editForm.setError(postureError);
       return;

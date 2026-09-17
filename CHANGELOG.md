@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /.well-known/oauth-authorization-server`** (T21.1) — the RFC 8414
+  authorization-server metadata path, serving the same document as
+  `/.well-known/openid-configuration` with the same optional `?tenant_id=`.
+  No flag: the alias is always on, since it publishes nothing the OIDC path
+  does not already publish. MCP clients probe this path first and several
+  client libraries never fall back to the OIDC one.
+
 ## [1.0.0-beta15] - 2026-09-15
 
 ### Added

@@ -219,6 +219,7 @@ mod tests {
         // access-token credential check (the access cookie is gone post-expiry).
         assert!(is_public_path("/api/v1/auth/refresh"));
         assert!(is_public_path("/.well-known/openid-configuration"));
+        assert!(is_public_path("/.well-known/oauth-authorization-server"));
         assert!(is_public_path("/oauth2/token"));
         assert!(is_public_path("/api/docs/openapi.json")); // prefix match via /api/docs/*
         assert!(is_public_path("/api/v1/admin/bootstrap"));

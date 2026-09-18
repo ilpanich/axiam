@@ -303,6 +303,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`/oauth2/authorize` throughput regression since T21.4.** The
+  external-consent gate read the client row a second time on every
+  authorization, only to learn its `managed_by`. That cost about 19% of
+  throughput (609/s to 495/s, p95 113 ms to 156 ms). The value can never
+  change for a `(tenant, client_id)`, so it is now served from a bounded 60 s
+  cache. Missing clients are not cached, and the service still validates the
+  client from a fresh read.
+
 - **Saving the organization settings page reset nine OIDC policy fields
   (#477).** The frontend's `SetOrgSettings` carried no OIDC keys, so every save
   from the organization Settings tab omitted `sensitive_scopes_enabled`,

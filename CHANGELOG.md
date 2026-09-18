@@ -349,6 +349,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The DCR initial access token is now `Sensitive<T>` in every SDK (contract
+  1.50).** `oauth2_clients.create_registration_token` returns
+  `initial_access_token`, a one-time bearer credential, but T21.4 never added it
+  to the management registry's curated secret table. So all eleven SDK
+  generators emitted it as a plain string that appeared in debug and `toString`
+  output. The registry now marks it, CONTRACT.md §27.5 lists it (fifteen
+  operations), and the SDKs pick it up on their 1.50 re-sync. The wire format
+  is unchanged. Only the SDK-side type moves, which is source-breaking for a
+  caller that reads the field.
+
 - **`cimd.trusted_client_id_domains` no longer accepts `*` (MCP-03, T21.8,
   #469).** Enabling client ID metadata documents with an *empty*
   trusted-publisher list was already refused, because the fetch is triggered by

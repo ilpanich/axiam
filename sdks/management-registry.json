@@ -2980,7 +2980,9 @@
             "kind": "object",
             "schema": "CreateRegistrationTokenResponse"
           },
-          "sensitive_response_fields": [],
+          "sensitive_response_fields": [
+            "initial_access_token"
+          ],
           "sensitive_request_fields": [],
           "update_style": null,
           "authenticated": true,

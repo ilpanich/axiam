@@ -501,6 +501,7 @@ SENSITIVE_FIELDS: frozenset[tuple[str, str]] = frozenset({
     ("ImportCaCertificateRequest", "private_key_pem"),
     ("GeneratedPgpKey", "private_key_armored"),
     ("CreateScimTokenResponse", "provisioning_token"),
+    ("CreateRegistrationTokenResponse", "initial_access_token"),
     ("CreateUserRequest", "password"),
     ("CreateWebhookRequest", "secret"),
     ("UpdateWebhookRequest", "secret"),

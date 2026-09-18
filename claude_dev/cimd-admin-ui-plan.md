@@ -1,9 +1,9 @@
 # Plan — the CIMD policy has no admin UI, and the organization page erases it
 
 **Date:** 2026-09-18
-**Validated against:** `main` @ `0bc7cb1` (Phase 21 merged; the #469–#472 fix plan committed, not yet executed)
+**Validated against:** `main` @ `320ef53` (Phase 21 merged; #469–#472 fixed by PR [#475](https://github.com/ilpanich/axiam/pull/475) and PR [#476](https://github.com/ilpanich/axiam/pull/476), both merged 2026-09-17)
 **Origin:** [`issues-469-472-fix-plan.md`](issues-469-472-fix-plan.md) §1 fact 3 and §10, which record the gap and defer it here.
-**Issue:** to be filed against T21.5 by the executing session — see §7 for the title and body. Search first: the session executing the #469–#472 plan was also told to file it.
+**Issue:** [#477](https://github.com/ilpanich/axiam/issues/477), filed by the #476 session. It records findings B and D below and rates them "not urgent". It does **not** record finding A, which is the urgent one; §7 says what to add to it.
 **Verdict: this is two defects, not one gap, and the second is worse than the first.** The CIMD posture cannot be set from the admin UI at either level (the gap the fix plan named). Separately, and found while sizing that gap, **every save of the organization settings page silently resets the organization's DCR and CIMD posture to the defaults**, and the tenant overrides beneath it are then cleared by the baseline clamp. The reset is fixed first, in its own commit, because it is the only item here that destroys a working configuration.
 
 | # | Finding | Kind | Decision | Effort | Touches backend? |
@@ -33,18 +33,23 @@ Six facts, each with the line that shows it.
    sends it verbatim (`:1133`).
 2. **The backend defaults what is absent and replaces the row.** Every one of
    those fields on the backend `SetOrgSettings` is `#[serde(default)]`
-   (`crates/axiam-core/src/models/settings.rs:1034–1053`); `set_org_settings`
+   (`crates/axiam-core/src/models/settings.rs:1161–1189`); `set_org_settings`
    (`handlers/settings.rs:341`) builds the row from the input and stores it.
    There is no merge with the existing row, by design — the frontend type's
    comment on `webauthn_user_verification` states the rule and its
    consequence exactly: "omitting it from a save would silently relax an
    organization that had set `required` — with nothing in the response to say
-   so." That comment was written for one field and is now true of eight.
+   so." That comment was written for one field and is now true of nine: the
+   seven Phase 21 fields, plus `sensitive_scopes_enabled` and `default_locale`
+   (`:1161`, `:1164`), which predate Phase 21, have no admin UI either, and
+   have been reset by every organization save since W7 shipped — so the W7
+   sensitive-scope switch has the same defect, and finding A's fix carries
+   those two through as well.
 3. **The clamp then clears the tenants.** After an organization write,
    `clamp_overrides_to_org` (`handlers/settings.rs:252`) drops any tenant
    override more permissive than the new baseline — including a whole
    `cimd` posture whose `enabled` the organization no longer has
-   (`settings.rs:1630`). So one save of, say, a password-history count on the
+   (`settings.rs:1770`). So one save of, say, a password-history count on the
    organization page turns CIMD off org-wide **and** discards every tenant's
    stated posture. Nothing in the response says so.
 4. **The tenant DCR card cannot enable DCR.** `dynamic_registration` is ordered
@@ -59,7 +64,7 @@ Six facts, each with the line that shows it.
    block; leaving it unchecked inherits the whole block" — and builds a sparse
    `TenantSettingsOverride` from checked groups only (`overrideFromForm`,
    `:156`). That is exactly the semantics of `Option<CimdPolicy>` on the
-   backend override (`settings.rs:957`) and of T21.5 amendment 3 ("a tenant
+   backend override (`settings.rs:1093`) and of T21.5 amendment 3 ("a tenant
    states its whole CIMD posture or none of it"). A CIMD group needs no new
    model. The same panel today has no DCR group, so saving any group from it
    also drops a tenant's DCR override set through `SettingsPage` — the same
@@ -106,7 +111,7 @@ Two ways to fix it, and the client-side one is right:
 | Item | Where |
 |---|---|
 | `SetOrgSettings` type + `flattenOrgSettings` | `frontend/src/services/organizations.ts:214`, `:259` |
-| `OidcPolicy` type gains `cimd?: CimdPolicy`; new `CimdPolicy` type and `DEFAULT_CIMD_POLICY` mirroring `CimdPolicy::default()` (`settings.rs:647`) | `frontend/src/services/settings.ts:100` |
+| `OidcPolicy` type gains `cimd?: CimdPolicy`; new `CimdPolicy` type and `DEFAULT_CIMD_POLICY` mirroring `CimdPolicy::default()` (`settings.rs:723`) | `frontend/src/services/settings.ts:100` |
 | `computeIsDirty` / `shouldSeedForm` (`settingsForm.ts`) — no change if they compare the whole object; verify | `frontend/src/pages/organizations/settingsForm.ts` |
 | Test: with `oidc` present in the GET, saving the password section sends the DCR and CIMD values **unchanged**; with `oidc` absent, sends the defaults | `OrganizationDetailPage.component.test.tsx` (payload assertions at `:240` are the style) |
 | CHANGELOG | `[Unreleased]` → `Fixed`, one line, naming the eight fields |
@@ -148,20 +153,24 @@ DCR fields, which should move out of `SettingsPage.tsx` into a sibling
   and nothing else; an empty publisher list and default bounds are true but
   invite an operator to read significance into a policy that does nothing.
 - **`validateCimdPolicy`** in `services/settings.ts`, the client-side mirror
-  of `validate_cimd_policy` (`settings.rs:738`), in the server's words, exactly
+  of `validate_cimd_policy` (`settings.rs:816`), in the server's words, exactly
   as `validateDcrPolicy` (`settings.ts:236`) mirrors `validate_dcr_policy`.
   Only when `enabled`:
   1. D3 — empty `external_client_allowed_resources` (the message at
-     `settings.rs:749`);
-  2. empty `trusted_client_id_domains` (`:759`);
+     `settings.rs:826`);
+  2. empty `trusted_client_id_domains` (`:837`);
   3. entry shape — a URL, path, `host:port` or whitespace in either list
-     (`:795`);
-  4. the three range checks (`:802–830`);
-  5. **after #469 lands:** `*` or a single-label wildcard in
-     `trusted_client_id_domains`. This is why §6 sequences this plan after
-     PR A of the fix plan: the mirror must quote the message that PR
-     writes. If this must ship first, omit item 5 and add it as one line and
-     one test case when #469 merges — do not invent the message.
+     (`:930`);
+  4. the three range checks (`:937` onward);
+  5. #469's refusal (`:876–896`, merged in PR #476): `*` "matches every
+     host", and a single-label wildcard (`*.com`) "is a wildcard over a whole
+     top-level domain", in `trusted_client_id_domains` only — the message is
+     "`cimd.trusted_client_id_domains: <entry> <offence>, which is the posture
+     an empty list is refused for. The document is fetched because an
+     unauthenticated request named its URL, so the list has to name a
+     publisher: a host (mcp.example.com) or a wildcard over one
+     (*.example.com)`". `trusted_redirect_domains` keeps `*`, and the two
+     lists' placeholder text differs accordingly (`:912`, `:918`).
   Every refusal is a `role="alert"` block under the field it names, as the D3
   block is (`:441`), and the Save button is disabled while any is present.
 
@@ -171,7 +180,7 @@ Mounted on three surfaces:
 |---|---|---|---|
 | `OrganizationDetailPage` → `SettingsTab`, new section "Client ID metadata documents" after "WebAuthn" (`:1507`) | Organization baseline | `SetOrgSettings.cimd` (whole object, required) | This is where `enabled` and `allow_http` can be turned **on**; the section's intro says so, because the tenant surfaces can only turn them off |
 | `SettingsPage`, new card after "Dynamic Client Registration" (`:1196`) | Tenant, own override | `TenantSettingsOverride.cimd` | Sends the whole posture (the page already sends every field it shows — `SettingsPage.test.tsx:500`) |
-| `SecurityOverridePanel`, new group "Client ID metadata documents" | Tenant, set by the org admin | `TenantSettingsOverride.cimd`, present only when the group is checked | Group checked → the whole posture; unchecked → the key is absent and the tenant inherits (fact 5). The ordering rule is shown, not enforced client-side: `enabled` and `allow_http` render disabled with "your organization has this off" when the baseline has them false, matching the server's `cimd.enabled: cannot enable … at tenant level` refusal (`settings.rs:1926`) |
+| `SecurityOverridePanel`, new group "Client ID metadata documents" | Tenant, set by the org admin | `TenantSettingsOverride.cimd`, present only when the group is checked | Group checked → the whole posture; unchecked → the key is absent and the tenant inherits (fact 5). The ordering rule is shown, not enforced client-side: `enabled` and `allow_http` render disabled with "your organization has this off" when the baseline has them false, matching the server's `cimd.enabled: cannot enable … at tenant level` refusal (`settings.rs:2062`) |
 
 ### Cost
 
@@ -198,11 +207,20 @@ tab would let an operator enable CIMD — which needs `external_client_allowed_r
 a DCR-card field — and not DCR, which is the same list. The D3 alert already
 in `DcrPolicyFields` (`:441`) fires on the organization baseline exactly as
 it does on the tenant override, because `validate_dcr_policy` runs at both
-doors (`settings.rs:1224`, `:1978`).
+doors (`settings.rs:1360`, `:2114`).
 
-**Cost:** the mount, one test that the organization PUT carries an edited
-`dynamic_registration`, and one sentence in `dynamic-client-registration.md`
-§"Enabling it". The `SecurityOverridePanel` gets a "Dynamic client
+While the component is open: PR #476 widened `dcr_max_clients` and
+`dcr_unused_client_ttl_days` to bound `managed_by: cimd` rows as well, and
+added a fixed one-hour sweep for a never-authorized `anonymous` registration.
+The matrix row on `main` says the card's help text reflects this; it does not
+— `SettingsPage.tsx` on `main` contains no mention of CIMD, and the TTL's help
+still reads "A self-registered client with no authorization for this many days
+is deleted" (`:480`). Update both help texts in this commit, in the operator
+page's words (`docs/admin/dynamic-client-registration.md` §"Abuse controls").
+
+**Cost:** the mount, the two help texts, one test that the organization PUT
+carries an edited `dynamic_registration`, and one sentence in
+`dynamic-client-registration.md` §"Enabling it". The `SecurityOverridePanel` gets a "Dynamic client
 registration" group in the same commit, for the reason fact 5 gives: without
 it, an org admin saving any group on a tenant drops that tenant's DCR
 override. That is finding A's shape at the tenant level and is closed the
@@ -262,10 +280,9 @@ One PR, four commits, in this order:
    `Added` line.
 4. **Finding D** — the matrix row and header sentence.
 
-**Sequence after PR A of [`issues-469-472-fix-plan.md`](issues-469-472-fix-plan.md)**
-so that item 5 of `validateCimdPolicy` quotes the message #469 writes. Branch
-from `main` once that PR has merged; if the maintainer wants this first,
-§2 says what to leave out.
+Branch from `main` at or after `320ef53`: PR #476 is merged, so item 5 of
+`validateCimdPolicy` quotes a message that exists. Nothing here waits on
+anything.
 
 The gate is the frontend half of `ci.yml` plus the two invariant scripts the
 matrix touches:
@@ -282,53 +299,48 @@ No cargo command is needed: nothing under `crates/` changes. If a session
 finds itself editing a Rust file for this plan, it has left the plan.
 
 Feature branch, signed commits, PR opened by the agent on behalf of the
-maintainer, referencing the issue §7 files; closed on merge, not before.
+maintainer, referencing #477; closed on merge, not before.
 
 ---
 
-## 7. The issue to file
+## 7. What #477 records, and what to add to it
 
-Search `is:issue T21.5 admin UI` before filing; the session executing the
-#469–#472 plan was told to file this too, and two issues for one gap is worse
-than none.
+[#477](https://github.com/ilpanich/axiam/issues/477) is finding B and finding
+D, written well: the nine fields as security controls, both interlocks and
+#469's wildcard refusal named for mirroring, the `allow_http` warning, the
+matrix row, and the observation that the coverage gate keys on handler modules
+and so could not have noticed. It closes with "not urgent, and why": CIMD is
+off by default and no deployment has a posture it did not write on purpose.
 
-**Title:** T21.5: the CIMD policy has no admin UI, and the organization
-settings page resets DCR and CIMD on every save
+That reasoning is right for B and D and wrong for the issue as a whole,
+because the issue does not know about finding A. A posture written on purpose
+through the API is erased by the next unrelated save on the organization page,
+and so is every tenant's, and so — since W7 — is the sensitive-scope switch.
+That is not operability; it is a working security configuration turned off
+with no trace. Before opening the PR, the executing session posts **one
+comment on #477** stating finding A with §0 facts 1–3 and the line references
+above, and says the PR will fix it first. No second issue: one gap, one
+thread, and the PR references #477 alone.
 
-**Body:**
+Two things in #477 this plan answers differently, so the PR says so:
 
-> Found while planning the fixes for #469–#472 (`claude_dev/issues-469-472-fix-plan.md`
-> §1 fact 3). Plan: `claude_dev/cimd-admin-ui-plan.md`.
->
-> **Two defects.**
->
-> 1. The organization settings page's save builds `SetOrgSettings` without
->    `dynamic_registration`, the three DCR lists, the two DCR numbers, or
->    `cimd` (`frontend/src/services/organizations.ts:214`, `:259`). Every one is
->    `#[serde(default)]` on the backend and the row is replaced, so any save
->    from that page turns DCR and CIMD off org-wide, and
->    `clamp_overrides_to_org` then clears every tenant's stated CIMD posture.
->    Silent; nothing in the response says so.
-> 2. The CIMD posture (nine fields, two interlocked) has no card anywhere:
->    not the tenant settings page, not the organization tab, not the org
->    admin's per-tenant override panel. The two refusals that make CIMD safe
->    are met only as a `400` after a `curl`. Adjacent: the T21.4b DCR card is
->    tenant-only and tighten-only, so DCR cannot be *enabled* from the UI
->    either.
->
-> **Severity:** the first is a bug (a working security posture is switched
-> off by an unrelated edit); the second is the T4b-shaped task T21.5 did not
-> get. Frontend-only; no API, schema or spec change.
+- #477 asks "whatever change to `check-frontend-coverage.py` stops the next
+  feature in this shape from being invisible". §4 argues for the row and
+  against widening the script.
+- #477 proposes the card on the tenant settings page, after T21.4b's
+  precedent. §2 puts it on three surfaces, and §0 fact 4 says why the tenant
+  page alone cannot enable anything.
 
 ---
 
 ## 8. Records to update in the PR
 
-- `claude_dev/issues-469-472-fix-plan.md` §1 fact 3 and §10: add the issue
-  number and a pointer here, so the two plans agree.
+- `claude_dev/issues-469-472-fix-plan.md` §10: its last paragraph says the gap
+  "should be filed"; it is #477, and a pointer here, so the two plans agree.
 - `claude_dev/frontend-coverage-matrix.md`: the `cimd` row (§4) and the `dcr`
-  row's notes, which should now name the organization tab and the override
-  panel as surfaces.
+  row's notes, which should name the organization tab and the override panel
+  as surfaces and stop claiming the help text already describes the widened
+  fields (§3).
 - `claude_dev/mcp-authorization-server-plan.md` §9: one item, "T5 had no
   admin-surface sub-task, and the organization settings form was never
   extended for T4a's or T5's fields; both were found after the phase closed."

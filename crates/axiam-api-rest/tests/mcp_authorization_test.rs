@@ -72,8 +72,8 @@ use axiam_core::repository::{
     OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealOrganizationRepository, SurrealSettingsRepository, SurrealTenantRepository,
-    SurrealUserRepository,
+    SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealSettingsRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1654,4 +1654,221 @@ async fn an_ipv6_loopback_registration_takes_the_port_allowance() {
              receive a code against an IPv6 registration: {location}"
         );
     }
+}
+
+/// **MCP-04 (#470).** A tenant at its CIMD ceiling is refused **before any
+/// fetch**, and the refusal is audited.
+///
+/// Two properties, and the first is the one that makes the ordering matter.
+/// `dcr_max_clients` bounds how many distinct documents a tenant holds; a
+/// tenant at the ceiling that still fetched would be an outbound amplifier
+/// pointed at its own publisher, one request per distinct URL a stranger can
+/// name. So the count is asked before the resolve, and this asserts it the
+/// only way that cannot be faked: by counting what the publisher received.
+///
+/// The second is that a **refresh** of a document already held never counts
+/// and never costs the query — the quota is about how many documents a tenant
+/// holds, not how often they are presented.
+#[actix_rt::test]
+async fn mcp04_a_cimd_tenant_at_quota_is_refused_before_any_fetch() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let mode = Mode::Query;
+    let f = setup(mode).await;
+    let stub = mcp_stub(&mode.issuer(f.a.id)).await;
+
+    // One publisher serving as many documents as the test asks for, each on
+    // its own path and therefore its own `client_id`.
+    let publisher = MockServer::start().await;
+    let quota = 3u32;
+    let doc = |n: u32| format!("{}/client-{n}.json", publisher.uri());
+    for n in 0..=quota {
+        let id = doc(n);
+        Mock::given(method("GET"))
+            .and(path(format!("/client-{n}.json")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "client_id": id,
+                        "client_name": format!("Editor {n}"),
+                        "redirect_uris": [LOOPBACK_CALLBACK],
+                        "grant_types": ["authorization_code"],
+                        "response_types": ["code"],
+                        "token_endpoint_auth_method": "none",
+                        "scope": "openid",
+                    }))
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&publisher)
+            .await;
+    }
+
+    set_org_settings(
+        &f,
+        SetOrgSettings {
+            dcr_max_clients: quota,
+            ..cimd_policy(&stub.resource, &host_of(&doc(0)))
+        },
+    )
+    .await;
+    let app = test_app!(f, mode);
+
+    // Fill the quota. Each authorize is enough to materialise: the
+    // authorization need not complete for the shadow row to be written.
+    for n in 0..quota {
+        let uri = mode.endpoint(
+            f.a.id,
+            "authorize",
+            &format!(
+                "response_type=code&client_id={}&redirect_uri={}&scope=openid\
+                 &code_challenge={}&code_challenge_method=S256",
+                enc(&doc(n)),
+                enc(LOOPBACK_CALLBACK),
+                pkce_challenge(VERIFIER)
+            ),
+        );
+        let _ = get_as_user(&app, &uri, &f.a.token).await;
+    }
+
+    let client_repo = SurrealOAuth2ClientRepository::new(f.db.clone());
+    assert_eq!(
+        client_repo
+            .count_by_managed_by(f.a.id, ManagedBy::Cimd)
+            .await
+            .expect("count"),
+        u64::from(quota),
+        "the quota is full, which is the precondition and not the finding"
+    );
+    let fetches_before = publisher.received_requests().await.expect("recorded").len();
+
+    // The N+1th distinct document. It must not be materialised, and — the
+    // point of the ordering — it must not be fetched either.
+    let over = doc(quota);
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256",
+            enc(&over),
+            enc(LOOPBACK_CALLBACK),
+            pkce_challenge(VERIFIER)
+        ),
+    );
+    let _ = get_as_user(&app, &uri, &f.a.token).await;
+
+    assert!(
+        client_repo.get_by_client_id(f.a.id, &over).await.is_err(),
+        "the N+1th document must not become a client"
+    );
+    assert_eq!(
+        publisher.received_requests().await.expect("recorded").len(),
+        fetches_before,
+        "MCP-04: a tenant at quota is refused BEFORE the fetch, so it cannot be used as an \
+         outbound amplifier one request per URL at a time"
+    );
+
+    // The refusal is audited, in T21.4a's shape, carrying no client-supplied
+    // string — the `client_id` here is a URL a stranger chose and an audit
+    // viewer is where attacker-controlled strings are read by people.
+    let audited =
+        f.db.query(
+            "SELECT * FROM audit_log WHERE action = 'oauth2.client_registration_refused' \
+             AND metadata.managed_by = 'cimd'",
+        )
+        .await
+        .expect("query")
+        .take::<Vec<Value>>(0)
+        .expect("rows");
+    assert!(
+        !audited.is_empty(),
+        "the endpoint is unauthenticated, so the audit log is the only record a stranger \
+         reached it"
+    );
+    let row = &audited[0];
+    assert_eq!(row["metadata"]["error"], "client_quota_exhausted", "{row}");
+    assert!(
+        row["metadata"].get("client_id").is_none(),
+        "no client-supplied string in an audit row: {row}"
+    );
+
+    // A refresh of a document already held is unaffected: still resolved,
+    // still refreshed, and it never consults the quota.
+    let held = doc(0);
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256",
+            enc(&held),
+            enc(LOOPBACK_CALLBACK),
+            pkce_challenge(VERIFIER)
+        ),
+    );
+    let _ = get_as_user(&app, &uri, &f.a.token).await;
+    assert!(
+        client_repo.get_by_client_id(f.a.id, &held).await.is_ok(),
+        "a tenant at quota keeps refreshing the documents it already holds"
+    );
+}
+
+/// **I1 for #470.** A tenant with CIMD off counts nothing and fetches nothing,
+/// because the quota lives behind the `cimd.enabled` check that was already
+/// there.
+#[actix_rt::test]
+async fn mcp04_a_tenant_with_cimd_off_is_byte_for_byte_unchanged() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let mode = Mode::Query;
+    let f = setup(mode).await;
+    let stub = mcp_stub(&mode.issuer(f.a.id)).await;
+
+    let publisher = MockServer::start().await;
+    let client_id = format!("{}/client.json", publisher.uri());
+    Mock::given(method("GET"))
+        .and(path("/client.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "client_id": client_id,
+            "redirect_uris": [LOOPBACK_CALLBACK],
+            "token_endpoint_auth_method": "none",
+        })))
+        .mount(&publisher)
+        .await;
+
+    // `dcr_policy`, not `cimd_policy`: CIMD stays off, which is the default.
+    set_org_settings(&f, dcr_policy(&stub.resource)).await;
+    let app = test_app!(f, mode);
+
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256",
+            enc(&client_id),
+            enc(LOOPBACK_CALLBACK),
+            pkce_challenge(VERIFIER)
+        ),
+    );
+    let _ = get_as_user(&app, &uri, &f.a.token).await;
+
+    assert!(
+        publisher
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty(),
+        "with cimd.enabled false a URL-shaped client_id is today's unknown client and nothing \
+         is fetched"
+    );
+    assert_eq!(
+        SurrealOAuth2ClientRepository::new(f.db.clone())
+            .count_by_managed_by(f.a.id, ManagedBy::Cimd)
+            .await
+            .expect("count"),
+        0
+    );
 }

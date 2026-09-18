@@ -306,6 +306,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`cimd.trusted_client_id_domains` no longer accepts `*` (MCP-03, T21.8,
+  #469).** Enabling client ID metadata documents with an *empty*
+  trusted-publisher list was already refused, because the fetch is triggered by
+  an unauthenticated request that names the URL and no second control bounds
+  which host a caller may name — AXIAM's SSRF guard bounds addresses, not
+  hosts. `["*"]` produced the same posture and was admitted, so the refusal had
+  a one-character bypass and the validator's own entry-shape message
+  recommended the spelling that produced it. `*` is now refused, and so is a
+  wildcard over a whole top-level domain (`*.com`, `*.io`), which is the same
+  posture spelled longer. It is a floor rather than a public-suffix check:
+  `*.github.io` still passes, because trusting shared hosting is a decision an
+  operator may reasonably make and what bounds it is the per-tenant quota, not
+  this rule. `*` remains valid in `cimd.trusted_redirect_domains`, whose
+  entries are not fetch targets. Enforced at both settings doors. Validation
+  runs on write, so a stored `*` keeps working until that settings row is next
+  saved — and no released deployment can hold one, because CIMD itself ships in
+  this same unreleased version.
+
+- **A registration nobody authorized is reclaimed in an hour, not thirty days
+  (MCP-05, T21.8, #471).** In `anonymous` mode `dcr_max_clients` (default 20)
+  is a storage bound *and* an availability budget, and one unauthenticated
+  stranger could spend all of it in about four minutes at the endpoint's
+  five-a-minute rate limit — then hold it for `dcr_unused_client_ttl_days`,
+  30 days by default, because one TTL served two situations with nothing in
+  common. The 30-day window is sized for a client somebody uses monthly; a
+  client registered and never authorized is not that client, and every MCP
+  client this phase serves authorizes within seconds of registering because
+  registration is the first step of the same flow. The sweeper now measures a
+  `managed_by: dcr` row with no `last_authorized_at`, in a tenant whose
+  effective mode is `anonymous`, against **one hour** from `created_at`. It
+  does not apply in `initial_access_token` or `disabled` mode — there the row
+  exists because an administrator minted a handle, and an operator who does
+  that on Friday should not find the registration gone on Monday — it does not
+  touch a client that has completed a flow, and it is not switched off by
+  `dcr_unused_client_ttl_days: 0`, which is a decision about clients somebody
+  uses. The hour is a constant, not a tenant setting: making it one needs a new
+  `security_settings` column and therefore a schema migration, which is the
+  maintainer's call rather than this change's, and the constant's own
+  documentation says what promoting it would cost. `docs/admin/dynamic-client-registration.md`
+  now also gives the reason to prefer `initial_access_token` that matters most
+  — its quota cannot be spent by somebody with no credential. A per-IP share of
+  the quota remains the accepted residual.
+
+- **CIMD shadow rows are bounded by a quota and reclaimed by a sweep (MCP-04,
+  T21.8, #470).** A `managed_by: cimd` row counted against no ceiling and was
+  deleted by nothing, so a tenant whose trusted-publisher list named shared
+  hosting grew client rows without limit, one unauthenticated request each.
+  Three bounds, and no new setting or migration for any of them.
+  `dcr_max_clients` now caps CIMD rows too, **counted separately against the
+  same number** so neither mechanism can exhaust the other's allowance, and
+  checked *before* the document is fetched — a tenant at its ceiling must not
+  be an outbound amplifier either. The refusal is audited as
+  `oauth2.client_registration_refused` with `managed_by: cimd` and carries no
+  client-supplied string. `dcr_unused_client_ttl_days` now sweeps CIMD rows on
+  their own clock and their own `/health/jobs` counter
+  (`cimd_unused_clients`): the clock is the last time the document was
+  *presented*, which every authorize, token and PAR request moves, so a
+  document in daily use is never swept and one nobody has presented for a
+  month is — and re-materialises on the next request if it is still published,
+  which is what a cache should do. And the in-memory document cache now evicts
+  entries past their TTL and their 24-hour stale window on the insert path,
+  since a cache that is never evicted is not a cache. Both fields keep their
+  `dcr_` names because dynamic registration defined them, on the precedent
+  `dcr_allowed_scopes` set. Unreachable with `cimd.enabled` false, which is the
+  default.
+
 - **The `axiam` URI scheme is reserved and can no longer be named as a
   `resource` (MCP-02, T21.8).** AXIAM's own token audiences are spelled
   `axiam:user` and `axiam:m2m`, which are well-formed absolute URIs and were

@@ -248,6 +248,55 @@ pub const DEFAULT_DCR_MAX_CLIENTS: u32 = 20;
 /// touches `managed_by: dcr` rows — see `OAuth2Client::managed_by`.
 pub const DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS: u32 = 30;
 
+/// How long a self-registered client that was **never authorized** survives,
+/// in seconds (T21.8 / MCP-05). One hour.
+///
+/// # Why a second clock at all
+///
+/// [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`] is sized, in its own doc comment,
+/// for "a client somebody uses monthly". A client registered and never
+/// authorized is not that client: every MCP client Phase 21 exists to serve —
+/// Inspector, Claude Code, VS Code — authorizes within seconds of registering,
+/// because registration is the first step of the same flow. A never-authorized
+/// row that is an hour old is either abandoned or hostile.
+///
+/// One TTL was serving two situations that have nothing in common, and that is
+/// what made [`OidcPolicy::dcr_max_clients`] an *availability* budget as well
+/// as a storage one: in `anonymous` mode a stranger could fill the quota in
+/// about four minutes and hold it for thirty days. The sweeper could always
+/// tell the two situations apart with no new data, because the row carries
+/// `last_authorized_at: None` — so the fix is a second clock rather than a
+/// bigger quota.
+///
+/// # Why a constant rather than a tenant setting
+///
+/// **Every other sweep window in AXIAM is a tenant setting, and this one
+/// should be too.** The owner of the decision is the tenant, not the
+/// datastore, which is the argument the sweeper's own doc comment makes about
+/// [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`]; and this is the one sweep that
+/// deletes rows created by strangers, so it is the last window an operator
+/// should be unable to see or change. The T21.8 fix plan's §4 recommends the
+/// field for exactly those reasons and this constant is its stated fallback.
+///
+/// What the plan got wrong is the cost. Its §4 recorded "no migration —
+/// `OidcPolicy` lives in the settings JSON; a missing key deserialises to the
+/// default". That is true of [`OidcPolicy::cimd`], which is one
+/// `oidc_cimd_json` column, and of the tenant override, which is
+/// `overrides_json`. It is **not** true of `OidcPolicy`'s scalars: they are
+/// individual columns on a `SCHEMAFULL` `security_settings` table
+/// (`oidc_dcr_max_clients`, `oidc_dcr_unused_client_ttl_days`, both added by
+/// migration v64), so a fifth DCR number is a `DEFINE FIELD`, a migration
+/// v66 and a bump to the schema tripwire.
+///
+/// The field is therefore the maintainer's call and not this task's, and it is
+/// one migration rather than one line away. Everything else about it is
+/// already written here: the value, the mode gate, the sweeper's predicate and
+/// its tests are identical either way, so promoting the constant to
+/// `OidcPolicy::dcr_unauthorized_client_ttl_secs` is v66, eight mirrored
+/// sites, an ordering map, a range check, the admin card and a spec
+/// regeneration — and no change at all to the behaviour below.
+pub const DCR_UNAUTHORIZED_CLIENT_TTL_SECS: u32 = 3_600;
+
 /// OpenID Connect surface controls (X7 G8, plan §4.6/§4.8; T21.4).
 ///
 /// Settings that are not password rules, here because this is the
@@ -362,15 +411,33 @@ pub struct OidcPolicy {
     /// reason.
     #[serde(default)]
     pub external_client_allowed_resources: Vec<String>,
-    /// T21.4 — how many `managed_by: dcr` clients this tenant may hold. See
-    /// [`DEFAULT_DCR_MAX_CLIENTS`].
+    /// T21.4 — how many externally registered clients this tenant may hold.
+    /// See [`DEFAULT_DCR_MAX_CLIENTS`].
+    ///
+    /// **Counted once per mechanism, against the same number** (T21.8):
+    /// `managed_by: dcr` rows and `managed_by: cimd` rows each have this many.
+    /// So a tenant running both cannot have shadow rows materialised from
+    /// documents exhaust the allowance for self-registration, or the reverse.
+    /// The CIMD count is checked *before* the document is fetched, so a tenant
+    /// at its ceiling is not an outbound amplifier either. It keeps its `dcr_`
+    /// name because dynamic registration defined it, on the same precedent as
+    /// [`Self::dcr_allowed_scopes`].
     #[serde(default = "default_dcr_max_clients")]
     #[schema(example = 20)]
     pub dcr_max_clients: u32,
-    /// T21.4 — how long a `managed_by: dcr` client survives without being
-    /// authorized. See [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`]. `0` disables
+    /// T21.4 — how long an externally registered client survives without
+    /// being used. See [`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`]. `0` disables
     /// the sweep for this tenant, which an operator who prunes out of band
     /// may legitimately want.
+    ///
+    /// **Two sweeps read it, over different clocks** (T21.8). A
+    /// `managed_by: dcr` row is measured from its last authorization, falling
+    /// back to when it was registered. A `managed_by: cimd` row is measured
+    /// from the last time its document was *presented*, which every authorize,
+    /// token and PAR request moves — so a document in daily use is never swept
+    /// however old its registration is, and one nobody has presented since the
+    /// window is, and re-materialises on the next request if it is still
+    /// published. Like the ceiling, it keeps its `dcr_` name.
     #[serde(default = "default_dcr_unused_client_ttl_days")]
     #[schema(example = 30)]
     pub dcr_unused_client_ttl_days: u32,
@@ -587,7 +654,8 @@ pub struct CimdPolicy {
     #[serde(default)]
     pub allow_http: bool,
     /// The hosts whose documents this tenant will fetch at all, as globs
-    /// (`*.example.com`, or `*` for any).
+    /// (`mcp.example.com`, or `*.example.com` for every host under one
+    /// domain).
     ///
     /// **An empty list resolves nothing**, and enabling CIMD while it is empty
     /// is refused — see [`validate_cimd_policy`]. That is a deliberate
@@ -596,6 +664,16 @@ pub struct CimdPolicy {
     /// unrestricted list is a request-forgery primitive offered to strangers,
     /// bounded only by the SSRF guard's address rules. Naming the publishers a
     /// tenant actually fronts costs one settings field and removes the class.
+    ///
+    /// **`*` is refused here, and so is a wildcard over a whole top-level
+    /// domain** (`*.com`): both are the posture the empty list is refused for,
+    /// spelled differently, and a control with no second control behind it
+    /// cannot have a one-character bypass and still be the control. It is a
+    /// floor and not a public-suffix check — `*.github.io` passes, and
+    /// trusting shared hosting stays the operator's decision, bounded by the
+    /// per-tenant quota rather than by this field. `*` remains valid in
+    /// [`CimdPolicy::trusted_redirect_domains`], whose entries are not fetch
+    /// targets.
     #[serde(default)]
     pub trusted_client_id_domains: Vec<String>,
     /// The hosts a document's `redirect_uris` may point at, as globs.
@@ -767,18 +845,77 @@ pub fn validate_cimd_policy(oidc: &OidcPolicy) -> Vec<String> {
         );
     }
 
+    // ...and the same refusal, for the spellings that mean the same thing.
+    //
+    // T21.8 / MCP-03. The refusal above was worth having for one reason: an
+    // unrestricted trusted-publisher list is a request-forgery primitive
+    // offered to strangers **and there is no second control that does that
+    // job** — the SSRF guard bounds which addresses a fetch may reach, not
+    // which hosts a caller may name. A control with no second control behind
+    // it cannot have a one-character bypass and still be the control, and
+    // `["*"]` was exactly that: refused as `[]`, admitted as `["*"]`, with the
+    // validator's own entry-shape message forty lines down recommending the
+    // spelling that produced it.
+    //
+    // A single-label wildcard suffix goes with it. `*.com` is `*` for one
+    // top-level domain, spelled longer, and the honest statement of the
+    // finding is "the list must name a publisher" rather than "the list must
+    // not contain one particular character".
+    //
+    // **It is a floor, and it is stated as one.** This is not a public-suffix
+    // check: `*.github.io` still passes, and so does `*.pages.dev`. Trusting
+    // shared hosting remains the operator's decision to make, and what bounds
+    // it is the per-tenant quota and the sweep, not this condition. If the
+    // narrower fix is wanted — refuse `*` and nothing else — deleting the
+    // `labels` arm below is one line and no test depends on it.
+    //
+    // `trusted_redirect_domains` keeps `*`, because those entries are not
+    // fetch targets: they bound where a *document* may point a browser, the
+    // loopback three are allowed whatever the list says, and an empty list is
+    // a working posture there rather than a refusal.
+    for entry in &cimd.trusted_client_id_domains {
+        let e = entry.trim();
+        let offence = if e == "*" {
+            Some("matches every host")
+        } else if let Some(suffix) = e.strip_prefix("*.")
+            && !suffix.contains('*')
+            && !suffix.is_empty()
+            && suffix.split('.').count() == 1
+        {
+            Some("is a wildcard over a whole top-level domain")
+        } else {
+            None
+        };
+        if let Some(offence) = offence {
+            violations.push(format!(
+                "cimd.trusted_client_id_domains: {entry:?} {offence}, which is the posture an \
+                 empty list is refused for. The document is fetched because an \
+                 unauthenticated request named its URL, so the list has to name a publisher: \
+                 a host (mcp.example.com) or a wildcard over one (*.example.com)"
+            ));
+        }
+    }
+
     // A host glob, not a URL. `host_glob_matches` answers `false` for an entry
     // carrying a scheme, a path or a port, so a tenant that typed one would
     // have a trusted list that silently matches nothing — fail-closed, but
     // indistinguishable from a working list until somebody tries to sign in.
-    for (field, entries) in [
+    //
+    // The two fields get different advice, because `*` is valid in one of them
+    // and refused in the other (above). Offering it here for
+    // `trusted_client_id_domains` is what made the empty-list refusal
+    // self-defeating in the first place.
+    for (field, entries, forms) in [
         (
             "cimd.trusted_client_id_domains",
             &cimd.trusted_client_id_domains,
+            "Write a host (mcp.example.com) or a leftmost-label wildcard over one \
+             (*.example.com)",
         ),
         (
             "cimd.trusted_redirect_domains",
             &cimd.trusted_redirect_domains,
+            "Write a host (app.example.com), a leftmost-label wildcard (*.example.com) or *",
         ),
     ] {
         for entry in entries {
@@ -790,9 +927,8 @@ pub fn validate_cimd_policy(oidc: &OidcPolicy) -> Vec<String> {
                 || e.split_whitespace().count() != 1
             {
                 violations.push(format!(
-                    "{field}: {entry:?} is not a host pattern. Write a host (mcp.example.com), \
-                     a leftmost-label wildcard (*.example.com) or * — not a URL, a path or a \
-                     host:port"
+                    "{field}: {entry:?} is not a host pattern. {forms} — not a URL, a path or \
+                     a host:port"
                 ));
             }
         }
@@ -3816,6 +3952,116 @@ mod tests {
         assert!(err.contains("trusted_client_id_domains"), "{err}");
     }
 
+    /// **T21.8 / MCP-03.** A trusted-publisher list that names every host is
+    /// refused, at both settings doors, in every spelling that means it.
+    ///
+    /// The empty list is refused because an unrestricted trusted-publisher
+    /// list is a request-forgery primitive offered to strangers and no second
+    /// control does that job. `["*"]` produced that posture and was admitted,
+    /// so the refusal had a one-character bypass and was not the control it
+    /// claimed to be. `["*.com"]` is the same posture over one top-level
+    /// domain.
+    #[test]
+    fn a_wildcard_trusted_publisher_is_refused() {
+        let wide = |entries: Vec<String>| CimdPolicy {
+            enabled: true,
+            trusted_client_id_domains: entries,
+            ..CimdPolicy::default()
+        };
+        let resources = vec!["https://mcp.example.com/mcp".into()];
+
+        for entry in ["*", " * ", "*.com", "*.io", "*.LOCALHOST"] {
+            // Door 1: the organization baseline.
+            let err = validate_org_settings(&SetOrgSettings {
+                cimd: wide(vec![entry.into()]),
+                external_client_allowed_resources: resources.clone(),
+                ..system_defaults()
+            })
+            .expect_err("a wildcard publisher must be refused at the org door")
+            .to_string();
+            assert!(
+                err.contains("trusted_client_id_domains"),
+                "the refusal must name the field for {entry:?}: {err}"
+            );
+
+            // Door 2: a tenant override, validated on the merged policy. The
+            // organization here is a legal, narrow posture, so a refusal can
+            // only come from the tenant's own entry.
+            let org = settings_from_org_input(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &SetOrgSettings {
+                    cimd: wide(vec!["*.example.com".into()]),
+                    external_client_allowed_resources: resources.clone(),
+                    ..system_defaults()
+                },
+            );
+            let err = validate_tenant_override(
+                &org,
+                &TenantSettingsOverride {
+                    cimd: Some(wide(vec![entry.into()])),
+                    ..Default::default()
+                },
+            )
+            .expect_err("a wildcard publisher must be refused at the tenant door")
+            .to_string();
+            assert!(
+                err.contains("trusted_client_id_domains"),
+                "the tenant door must refuse {entry:?} too: {err}"
+            );
+        }
+
+        // What still passes, and must: naming a publisher, and naming one that
+        // happens to be shared hosting. This is a floor, not a public-suffix
+        // check — `*.github.io` is the operator's decision to make, bounded by
+        // the per-tenant quota rather than by this condition.
+        for entry in ["mcp.example.com", "*.example.com", "*.github.io", "*.co.uk"] {
+            assert!(
+                validate_org_settings(&SetOrgSettings {
+                    cimd: wide(vec![entry.into()]),
+                    external_client_allowed_resources: resources.clone(),
+                    ..system_defaults()
+                })
+                .is_ok(),
+                "{entry:?} names a publisher and must be accepted"
+            );
+        }
+
+        // And `*` keeps working where it was never the finding: a redirect
+        // domain is not a fetch target, the loopback three are allowed
+        // whatever the list says, and an empty list is a working posture.
+        assert!(
+            validate_org_settings(&SetOrgSettings {
+                cimd: CimdPolicy {
+                    enabled: true,
+                    trusted_client_id_domains: vec!["*.example.com".into()],
+                    trusted_redirect_domains: vec!["*".into()],
+                    ..CimdPolicy::default()
+                },
+                external_client_allowed_resources: resources.clone(),
+                ..system_defaults()
+            })
+            .is_ok(),
+            "* is still valid for trusted_redirect_domains"
+        );
+
+        // I1: with CIMD off the condition is unreachable, so a staged posture
+        // carrying `*` is stored as it was before T21.8. The validator returns
+        // before the trusted-publisher rules are read at all.
+        assert!(
+            validate_org_settings(&SetOrgSettings {
+                cimd: CimdPolicy {
+                    trusted_client_id_domains: vec!["*".into()],
+                    ..CimdPolicy::default()
+                },
+                external_client_allowed_resources: resources,
+                ..system_defaults()
+            })
+            .is_ok(),
+            "a disabled CIMD policy is not validated: nothing on the request path reads it"
+        );
+    }
+
     /// Each bound is refused outside its range, rather than silently clamped:
     /// an operator who writes an impossible bound is told.
     #[test]
@@ -3996,7 +4242,11 @@ mod tests {
                 external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
                 cimd: CimdPolicy {
                     enabled: true,
-                    trusted_client_id_domains: vec!["*".into()],
+                    // A wide-but-legal fixture. `["*"]` read more naturally
+                    // here and was what this test used until T21.8 refused it
+                    // (MCP-03); neither assertion in this test is about the
+                    // value, only about a tenant being able to narrow from it.
+                    trusted_client_id_domains: vec!["*.example.com".into()],
                     ..CimdPolicy::default()
                 },
                 ..system_defaults()
@@ -4040,7 +4290,11 @@ mod tests {
                 external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
                 cimd: CimdPolicy {
                     enabled: true,
-                    trusted_client_id_domains: vec!["*".into()],
+                    // A wide-but-legal fixture. `["*"]` read more naturally
+                    // here and was what this test used until T21.8 refused it
+                    // (MCP-03); neither assertion in this test is about the
+                    // value, only about a tenant being able to narrow from it.
+                    trusted_client_id_domains: vec!["*.example.com".into()],
                     ..CimdPolicy::default()
                 },
                 ..system_defaults()

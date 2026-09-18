@@ -20,6 +20,7 @@ use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::gdpr::CreateErasureProof;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
+use axiam_core::models::settings::{DCR_UNAUTHORIZED_CLIENT_TTL_SECS, DynamicRegistrationMode};
 use axiam_core::repository::{
     AccountDeletionRepository, AmqpNonceRepository, AssertionReplayRepository, AuditLogFilter,
     AuditLogRepository, ConsentRepository, ErasureProofRepository, ExportJobRepository,
@@ -123,37 +124,215 @@ pub struct CleanupTask<C: Connection> {
 /// worth testing directly.
 ///
 /// The clock it reads is `last_authorized_at` when the client has ever been
-/// authorized and `created_at` when it has not. The second case is what the
-/// TTL is really for: a registration made once by a tool nobody kept.
+/// authorized and `created_at` when it has not.
 ///
-/// `ttl_days == 0` is never due. Zero means "never sweep", which an operator
-/// who prunes out of band may legitimately want, and reading it as "sweep
-/// everything immediately" would delete a tenant's whole client table on the
-/// next tick.
+/// `DcrSweepWindow::days == 0` is never due. Zero means "never sweep", which
+/// an operator who prunes out of band may legitimately want, and reading it as
+/// "sweep everything immediately" would delete a tenant's whole client table
+/// on the next tick.
+///
+/// # The second clock (T21.8 / MCP-05)
+///
+/// A row that has **never** been authorized, in a tenant whose effective
+/// `dynamic_registration` is `anonymous`, is measured against
+/// [`axiam_core::models::settings::DCR_UNAUTHORIZED_CLIENT_TTL_SECS`] instead
+/// — an hour. That constant's own documentation says why it is a constant and
+/// what promoting it to a tenant setting would cost.
+///
+/// Those two conditions are the whole of the change, and each is load-bearing.
+///
+/// **Never authorized.** The thirty-day window is sized, in
+/// `DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`'s own doc comment, for "a client
+/// somebody uses monthly". A client registered and never authorized is not
+/// that client: every MCP client this phase exists to serve authorizes within
+/// seconds of registering, because registration is the first step of the same
+/// flow. One TTL served two situations that have nothing in common, which is
+/// what made `dcr_max_clients` an availability budget a stranger could spend
+/// for a month. The sweeper could always tell the two apart — the row carries
+/// `last_authorized_at: None` — so the fix is a second clock, not a bigger
+/// quota.
+///
+/// **`anonymous` only.** In `initial_access_token` mode the row exists because
+/// an administrator minted a handle for it and somebody redeemed it. There is
+/// no unauthenticated exposure to bound, and the thirty-day clock is the right
+/// one: an operator who hands somebody a registration token on Friday should
+/// not find the registration gone on Monday.
+///
+/// Every tenant on `disabled` or `initial_access_token` — which is every
+/// tenant that did not opt into `anonymous` behind D3 — takes byte for byte
+/// the path it took before T21.8.
 pub fn dcr_client_is_due_for_sweep(
     client: &axiam_core::models::oauth2_client::OAuth2Client,
-    ttl_days: u32,
+    ttl: DcrSweepWindow,
     now: chrono::DateTime<Utc>,
 ) -> bool {
-    if ttl_days == 0 {
+    if client.last_authorized_at.is_none() && ttl.mode == DynamicRegistrationMode::Anonymous {
+        return now - client.created_at
+            > chrono::Duration::seconds(i64::from(DCR_UNAUTHORIZED_CLIENT_TTL_SECS));
+    }
+    if ttl.days == 0 {
         return false;
     }
-    let last_seen = client.last_authorized_at.unwrap_or(client.created_at);
-    now - last_seen > chrono::Duration::days(i64::from(ttl_days))
+    now - dcr_client_last_seen(client) > chrono::Duration::days(i64::from(ttl.days))
 }
 
-/// Delete `managed_by: dcr` clients that have not been authorized within their
-/// tenant's `dcr_unused_client_ttl_days` (T21.4).
+/// Everything the sweep needs from one tenant's settings.
+///
+/// A struct rather than the `Option<u32>` the per-tenant cache used to hold,
+/// because T21.8's second clock is selected by the tenant's registration
+/// mode, and two values read from one settings row should travel together
+/// rather than as two parallel maps that can disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DcrSweepWindow {
+    /// `dcr_unused_client_ttl_days`. `0` never sweeps.
+    pub days: u32,
+    /// The tenant's effective registration mode, which decides whether the
+    /// second clock applies at all. Only `anonymous` has the exposure the
+    /// second clock bounds; see [`dcr_client_is_due_for_sweep`].
+    pub mode: DynamicRegistrationMode,
+}
+
+/// When a `dcr` row was last any use to anybody.
+pub fn dcr_client_last_seen(
+    client: &axiam_core::models::oauth2_client::OAuth2Client,
+) -> chrono::DateTime<Utc> {
+    client.last_authorized_at.unwrap_or(client.created_at)
+}
+
+/// When a `cimd` row was last any use to anybody — T21.8 / MCP-04.
+///
+/// `max(updated_at, last_authorized_at, created_at)`, and each of the three is
+/// load-bearing.
+///
+/// **`updated_at` is the one that matters**, and it is already the stamp
+/// #470 proposed adding a column for. `materialise_if_cimd` calls
+/// `upsert_cimd_client` after *every* successful resolve, and a resolve
+/// returns from the in-memory document cache on a hit — so the upsert runs
+/// whether or not a fetch happened, on authorize, on token and on PAR. The
+/// `UPDATE` arm sets `updated_at = time::now()`. A `cimd` row's `updated_at`
+/// is therefore "last presented", with a resolution of one request, and no
+/// migration is needed to read it.
+///
+/// `last_authorized_at` is read beside it because `touch_last_authorized`
+/// guards on `managed_by != 'admin'` rather than `== 'dcr'`, so it is stamped
+/// on `cimd` rows too. Taking the maximum of the three cannot pick a stamp
+/// older than the row's real last use, whichever of them the write path
+/// happened to move.
+pub fn cimd_client_last_seen(
+    client: &axiam_core::models::oauth2_client::OAuth2Client,
+) -> chrono::DateTime<Utc> {
+    client
+        .updated_at
+        .max(client.last_authorized_at.unwrap_or(client.created_at))
+        .max(client.created_at)
+}
+
+/// Whether a `cimd` shadow row has gone unseen for longer than its tenant's
+/// TTL (T21.8 / MCP-04).
+///
+/// Shares `dcr_unused_client_ttl_days` with the `dcr` sweep, on T21.5
+/// amendment 4's precedent: `dcr_allowed_scopes` governs both mechanisms and
+/// keeps its `dcr_` name because DCR defined it. A tenth CIMD field would cost
+/// a spec change, an ordering decision, a range check and a rewrite of the
+/// test that asserts the posture overrides all nine — for a number the
+/// operator has already chosen once.
+///
+/// `0` is never due, for the same reason it is not in the `dcr` arm.
+/// The second clock does **not** apply here, and that is deliberate: a `cimd`
+/// row is never "registered and never authorized" in the sense T21.8's window
+/// is about. It exists because somebody presented a document AXIAM fetched, so
+/// it has been used once by definition, and `updated_at` moves every time it
+/// is used again. What bounds a stranger materialising rows is the quota
+/// checked before the fetch, not a shorter window.
+pub fn cimd_client_is_due_for_sweep(
+    client: &axiam_core::models::oauth2_client::OAuth2Client,
+    ttl: DcrSweepWindow,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    if ttl.days == 0 {
+        return false;
+    }
+    now - cimd_client_last_seen(client) > chrono::Duration::days(i64::from(ttl.days))
+}
+
+/// The `dcr` arm of [`sweep_unused_external_clients`], kept as a named entry
+/// point because T21.4's tests and the task method both call it that.
+pub async fn sweep_unused_dcr_clients<CR, TR, SR>(
+    client_repo: &CR,
+    tenant_repo: &TR,
+    settings_repo: &SR,
+    now: chrono::DateTime<Utc>,
+) -> Result<u64, AxiamError>
+where
+    CR: axiam_core::repository::OAuth2ClientRepository,
+    TR: TenantRepository,
+    SR: axiam_core::repository::SettingsRepository,
+{
+    sweep_unused_external_clients(
+        client_repo,
+        tenant_repo,
+        settings_repo,
+        axiam_core::models::oauth2_client::ManagedBy::Dcr,
+        now,
+    )
+    .await
+}
+
+/// The `cimd` arm of [`sweep_unused_external_clients`] (T21.8 / MCP-04).
+pub async fn sweep_unused_cimd_clients<CR, TR, SR>(
+    client_repo: &CR,
+    tenant_repo: &TR,
+    settings_repo: &SR,
+    now: chrono::DateTime<Utc>,
+) -> Result<u64, AxiamError>
+where
+    CR: axiam_core::repository::OAuth2ClientRepository,
+    TR: TenantRepository,
+    SR: axiam_core::repository::SettingsRepository,
+{
+    sweep_unused_external_clients(
+        client_repo,
+        tenant_repo,
+        settings_repo,
+        axiam_core::models::oauth2_client::ManagedBy::Cimd,
+        now,
+    )
+    .await
+}
+
+/// Delete externally registered clients that have gone unseen for longer than
+/// their tenant's `dcr_unused_client_ttl_days` (T21.4, widened to `cimd` by
+/// T21.8 / MCP-04).
+///
+/// One `managed_by` per call, so `/health/jobs` can distinguish the two
+/// sweeps: they delete different things for different reasons and an operator
+/// debugging one should not have to read the other's counter.
 ///
 /// # What it will not touch
 ///
-/// Only `dcr`. Not `admin` — an administrator's client is never swept, however
-/// long it sits unused, because somebody decided it should exist and nothing
-/// here is entitled to reverse that. Not `cimd` either: a CIMD shadow row is a
-/// cache of a document the client publishes, so deleting it would be
-/// re-materialised on the next request and the TTL would mean nothing. The
-/// repository query filters on the value rather than on "not admin", so a
-/// fourth provenance added later is opted **in** by somebody writing it down.
+/// Never `admin`. An administrator's client is never swept, however long it
+/// sits unused, because somebody decided it should exist and nothing here is
+/// entitled to reverse that. The repository query filters on the value rather
+/// than on "not admin", so a fourth provenance added later is opted **in** by
+/// somebody writing it down.
+///
+/// # Why `cimd` is swept now, when T21.4 argued it should not be
+///
+/// T21.4's reasoning, which this function used to carry: a CIMD shadow row is
+/// a cache of a document the client publishes, so deleting it would be
+/// re-materialised on the next request and the TTL would mean nothing.
+///
+/// That is right about TTL semantics and says nothing about storage, which is
+/// what MCP-04 is about: a cache that is never evicted is not a cache. An
+/// inert row is still a row — listed on the OAuth2 clients page, counted in
+/// every `list_all_by_managed_by` this function runs, and a permanent write a
+/// stranger made at the cost of one unauthenticated request. And eviction on
+/// last-seen is *consistent* with the old argument rather than against it: a
+/// row deleted while its document is still published is re-materialised on the
+/// next request, which is exactly what a cache should do. What it must not do
+/// is delete a row that is still in use, which is what
+/// [`cimd_client_last_seen`] is for — every resolve moves `updated_at`, so a
+/// document presented once a day is never due under a 30-day TTL.
 ///
 /// # Per-tenant TTL, resolved per row
 ///
@@ -170,10 +349,11 @@ pub fn dcr_client_is_due_for_sweep(
 ///
 /// A tenant whose settings cannot be read is skipped: the fail-closed
 /// direction for a sweep that **deletes** is to delete nothing.
-pub async fn sweep_unused_dcr_clients<CR, TR, SR>(
+pub async fn sweep_unused_external_clients<CR, TR, SR>(
     client_repo: &CR,
     tenant_repo: &TR,
     settings_repo: &SR,
+    managed_by: axiam_core::models::oauth2_client::ManagedBy,
     now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError>
 where
@@ -184,17 +364,31 @@ where
     use axiam_core::models::oauth2_client::ManagedBy;
     use axiam_core::repository::SettingsRepository;
 
-    let clients = client_repo.list_all_by_managed_by(ManagedBy::Dcr).await?;
+    type DuePredicate = fn(
+        &axiam_core::models::oauth2_client::OAuth2Client,
+        DcrSweepWindow,
+        chrono::DateTime<Utc>,
+    ) -> bool;
+    let (job, is_due): (&str, DuePredicate) = match managed_by {
+        ManagedBy::Dcr => ("dcr_unused_clients", dcr_client_is_due_for_sweep),
+        ManagedBy::Cimd => ("cimd_unused_clients", cimd_client_is_due_for_sweep),
+        // An administrator's client is never swept. Answered here rather than
+        // by trusting every caller, because the argument for it is a security
+        // one and belongs next to the query.
+        ManagedBy::Admin => return Ok(0),
+    };
+
+    let clients = client_repo.list_all_by_managed_by(managed_by).await?;
     if clients.is_empty() {
         return Ok(0);
     }
 
-    let mut ttl_by_tenant: std::collections::HashMap<Uuid, Option<u32>> =
+    let mut ttl_by_tenant: std::collections::HashMap<Uuid, Option<DcrSweepWindow>> =
         std::collections::HashMap::new();
     let mut removed = 0u64;
 
     for client in clients {
-        let ttl_days = match ttl_by_tenant.get(&client.tenant_id) {
+        let ttl = match ttl_by_tenant.get(&client.tenant_id) {
             Some(cached) => *cached,
             None => {
                 let resolved = match tenant_repo.get_by_id(client.tenant_id).await {
@@ -205,7 +399,10 @@ where
                     )
                     .await
                     .ok()
-                    .map(|s| s.oidc.dcr_unused_client_ttl_days),
+                    .map(|s| DcrSweepWindow {
+                        days: s.oidc.dcr_unused_client_ttl_days,
+                        mode: s.oidc.dynamic_registration,
+                    }),
                     Err(_) => None,
                 };
                 ttl_by_tenant.insert(client.tenant_id, resolved);
@@ -213,10 +410,10 @@ where
             }
         };
         // `None` is an unreadable tenant or an unreadable settings row.
-        let Some(ttl_days) = ttl_days else {
+        let Some(ttl) = ttl else {
             continue;
         };
-        if !dcr_client_is_due_for_sweep(&client, ttl_days, now) {
+        if !is_due(&client, ttl, now) {
             continue;
         }
 
@@ -224,19 +421,22 @@ where
             // One failure must not stop the sweep: the next row may be a
             // different tenant entirely.
             tracing::warn!(
+                job,
                 error = %e,
                 client_id = %client.client_id,
-                "could not delete an unused self-registered client"
+                "could not delete an unused externally registered client"
             );
             continue;
         }
         removed += 1;
         tracing::info!(
-            job = "dcr_unused_clients",
+            job,
             tenant_id = %client.tenant_id,
             client_id = %client.client_id,
-            ttl_days,
-            "deleted a self-registered client that has not been authorized within its \
+            ttl_days = ttl.days,
+            ever_authorized = client.last_authorized_at.is_some(),
+            mode = %ttl.mode,
+            "deleted an externally registered client that has gone unseen within its \
              tenant's TTL"
         );
     }
@@ -523,6 +723,20 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         tracing::Level::INFO,
                     );
 
+                    // T21.8 / MCP-04 — the same for CIMD shadow rows, on its
+                    // own counter rather than folded into the one above: the
+                    // two sweeps delete different things for different reasons
+                    // and an operator debugging either should not have to read
+                    // the other's number. INFO for the `dcr` sweep's reason —
+                    // it destroys a registration a client depends on, even if
+                    // that client re-materialises it on its next request.
+                    Self::record(
+                        &self.job_health,
+                        "cimd_unused_clients",
+                        self.sweep_unused_cimd_clients().await,
+                        tracing::Level::INFO,
+                    );
+
                     // T21.4 — drop expired initial access tokens, spent or
                     // not. DEBUG: an expired token authorises nothing, and
                     // the evidence a spent one carried is in the audit log,
@@ -663,6 +877,18 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// a sweep that **deletes** is to delete nothing.
     async fn sweep_unused_dcr_clients(&self) -> Result<u64, AxiamError> {
         sweep_unused_dcr_clients(
+            self.oauth2_client_repo.as_ref(),
+            self.tenant_repo.as_ref(),
+            self.settings_repo.as_ref(),
+            Utc::now(),
+        )
+        .await
+    }
+
+    /// T21.8 / MCP-04 — the same sweep over `cimd` shadow rows, on its own
+    /// health counter.
+    async fn sweep_unused_cimd_clients(&self) -> Result<u64, AxiamError> {
+        sweep_unused_cimd_clients(
             self.oauth2_client_repo.as_ref(),
             self.tenant_repo.as_ref(),
             self.settings_repo.as_ref(),

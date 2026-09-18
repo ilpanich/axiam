@@ -109,11 +109,26 @@ general-purpose matcher:
 * `*.example.com` — any host with at least one label before `example.com`. It
   does **not** match `example.com` itself, and it does **not** match
   `evil-example.com`: the match lands on a label boundary, not on a suffix.
-* `*` — any host.
+* `*` — any host. **Refused for `cimd.trusted_client_id_domains`, admitted for
+  `cimd.trusted_redirect_domains`.** So is a wildcard over a whole top-level
+  domain (`*.com`, `*.io`), which is the same posture spelled longer. The
+  trusted-publisher list is what decides whose server AXIAM will make an
+  outbound request to on an unauthenticated caller's word, an empty list is
+  refused for that reason, and a control with a one-character bypass is not
+  the control. A redirect domain is not a fetch target: it bounds where a
+  document may point a browser, the loopback hosts are allowed whatever the
+  list says, and an empty list there means "loopback only" rather than
+  "nothing".
 * Anything else containing `*` matches nothing at all.
 
 An entry that is a URL, a path or a `host:port` is **refused at the settings
 page** rather than silently matching nothing.
+
+The wildcard refusal is a **floor, not a public-suffix check.**
+`*.github.io`, `*.pages.dev` and any other shared-hosting domain still pass,
+because a tenant fronting hobbyist MCP tools may reasonably trust one and
+nothing here should second-guess that. What bounds shared hosting is the
+per-tenant quota and the sweep below, not this rule.
 
 ---
 
@@ -278,6 +293,8 @@ that sentence, and none of them is a tuning knob.
 | The request timeout | A publisher that accepts the connection and never answers. |
 | `cimd.min_cache_secs` | One outbound fetch per authorization request. A document is read once per TTL, not once per sign-in. |
 | `cimd.max_cache_secs` | A stranger pinning a live client registration at your deployment forever after taking their document down. |
+| `dcr_max_clients` | How many distinct documents this tenant holds at once. Counted separately from your self-registered clients and against the same number, so neither mechanism can exhaust the other's allowance — and checked **before the fetch**, so a tenant at its ceiling is not an outbound amplifier either. A refresh of a document you already hold never counts. |
+| `dcr_unused_client_ttl_days` | A shadow row outliving its use. See [Cleaning up](#cleaning-up). |
 
 What none of them stops is a caller naming **many different URLs on a host you
 have trusted**: each new path is a cache miss and therefore one fetch. The
@@ -285,8 +302,9 @@ bound there is the per-IP rate limit on the endpoint the request arrived at
 (`AXIAM__RATE_LIMIT__TOKEN_PER_MIN` and its siblings, see
 [rate-limit sizing](../deployment/rate-limit-sizing.md)) and the fact that the
 host is one you chose. It is an amplifier pointed at *your publisher*, not a
-way into your network — but it is a reason to name specific hosts rather than
-`*`.
+way into your network — and AXIAM refuses `*` (and `*.com`) in
+`cimd.trusted_client_id_domains` for exactly this reason, so the list always
+names a publisher you chose.
 
 A cached document survives a publisher outage for up to 24 hours past its TTL
 (the same stale-while-revalidate window AXIAM gives a federated identity
@@ -306,14 +324,33 @@ deployment and nowhere else.
 
 ## Cleaning up
 
-There is no sweeper for `cimd` rows and there deliberately is not: unlike a
-self-registered client, a CIMD client's registration is not a row somebody
-created once, it is a file that either still exists or does not. A shadow row
-whose document has been withdrawn stops working within a day of its TTL
-expiring, whatever the row says. To retire one immediately, delete it through
-the admin API, or remove the publisher from
-`cimd.trusted_client_id_domains` — the second also stops it being recreated by
-the next request.
+`cimd` rows are swept on `dcr_unused_client_ttl_days` (30 days by default,
+`0` to disable), reported at `GET /health/jobs` under **`cimd_unused_clients`**
+— its own counter beside `dcr_unused_clients`, because the two sweeps delete
+different things for different reasons.
+
+**The clock is last presented, not last registered.** Every authorize, token
+and PAR request that resolves a document refreshes its row, including one
+served from AXIAM's in-memory document cache with no outbound fetch at all. So
+a document in daily use is never swept however old its registration is, and
+one nobody has presented for a month is — and if that document is still
+published, the next request materialises it again.
+
+That last property is why the sweep is *consistent* with what a CIMD row is
+rather than at odds with it. An earlier version of this page argued there
+should be no sweeper: unlike a self-registered client, a CIMD client's
+registration is not a row somebody created once, it is a file that either still
+exists or does not, and a row whose document has been withdrawn stops working
+within a day of its TTL expiring whatever the row says. All of that is true,
+and all of it is about TTL semantics rather than about storage — and a cache
+that is never evicted is not a cache. An inert row is still listed on the
+OAuth2 clients page, still counted in every sweep, and still a permanent write
+a stranger made at the cost of one unauthenticated request. Deleting one and
+letting the next request bring it back is exactly what a cache should do.
+
+To retire a row immediately, delete it through the admin API, or remove the
+publisher from `cimd.trusted_client_id_domains` — the second also stops it
+being recreated by the next request.
 
 Setting `cimd.enabled` back to `false` stops every URL-shaped `client_id`
 resolving immediately. It does not delete the rows already materialised; those

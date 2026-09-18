@@ -12,7 +12,7 @@ order the work should be done.
 
 | Issue | Finding | Severity as filed | Decision | Effort | Touches generated artifacts? |
 |---|---|---|---|---|---|
-| [#469](https://github.com/ilpanich/axiam/issues/469) | MCP-03 — `trusted_client_id_domains` refuses `[]` and admits `*` | Medium | **Fix now.** One condition in the validator that already holds the empty-list refusal | Small | No |
+| [#469](https://github.com/ilpanich/axiam/issues/469) | MCP-03 — `trusted_client_id_domains` refuses `[]` and admits `*` | Medium | **Fix now.** One condition in the validator that already holds the empty-list refusal | Small | Yes — the field's doc comment is a spec `description` (fact 5, corrected) |
 | [#470](https://github.com/ilpanich/axiam/issues/470) | MCP-04 — `cimd` shadow rows have no quota and no sweep | Medium | **Fix now**, and it needs **no migration**: the row is upserted on every resolve, so `updated_at` is already the last-seen stamp the issue asks to add | Medium | Yes (a doc comment on a `ToSchema` field) |
 | [#471](https://github.com/ilpanich/axiam/issues/471) | MCP-05 — a stranger fills `dcr_max_clients` in four minutes and holds it for thirty days | Medium | **Fix now**, as a second clock on the sweeper. The per-IP quota share is **not now**, and the condition that would change that is named | Medium–Large: it is a settings field, which is the most expensive kind of change this repo has | Yes (new field, spec + registry + SDK re-sync) |
 | [#472](https://github.com/ilpanich/axiam/issues/472) | MCP-01 — six error paths compare `redirect_uri` exactly | Low | **Fix now.** Mechanical, own commit, inverts one test deliberately | Small | No |
@@ -83,19 +83,55 @@ sections below can refer to them.
    `the_cimd_posture_merges_and_diffs_whole`) and will need a different
    fixture; neither asserts anything about `*`.
 5. **Doc comments on settings fields are in the OpenAPI spec.** `dcr_max_clients`'s
-   description in `sdks/openapi.json:16615` is its Rust doc comment verbatim.
+   description in `sdks/openapi.json` is its Rust doc comment verbatim.
    Any change to a doc comment on `OidcPolicy`, `SetOrgSettings` or
    `TenantSettingsOverride` is a spec change and trips `sdk-openapi-drift.yml`
    and, one step later, the registry digest in Architecture Invariants. #470
-   and #471 both change such a comment; #469 changes one on `CimdPolicy`,
+   and #471 both change such a comment; ~~#469 changes one on `CimdPolicy`,
    whose fields currently carry no description in the spec (`:12811`), so the
-   regeneration is expected to be a no-op there but must be run to prove it.
+   regeneration is expected to be a no-op there but must be run to prove
+   it.~~ **The second half of this is wrong — see the verification note
+   below.**
 6. **The IPv6 loopback bug is in exactly one place.** `validate_redirect_uris`
    (`handlers/oauth2_clients.rs:408`) compares `host_str()` against `::1`; the
    `url` crate returns `[::1]`. The CIMD document validator already tests both
    spellings (`crates/axiam-oauth2/src/cimd.rs:630`), the DCR host allow-list
    is spelled `[::1]` (`dcr.rs:82`), and the matcher's arm is tested. One
    comparison, shared by the admin endpoint and the DCR endpoint.
+
+### Verification against `main` @ `0bc7cb1`, implementation session 2026-09-17
+
+The brief for the implementing session was to verify each of the six facts
+before relying on it. Five hold as written. Fact 5's second half does not, and
+it makes #469 more expensive than the table at the top of this document says.
+
+| Fact | State | Evidence |
+|---|---|---|
+| 1 — a shadow row is written on every resolve | **Holds** | `materialise_if_cimd` calls `upsert_cimd_client` after every `Ok` from `cimd::resolve` (`crates/axiam-api-rest/src/cimd.rs:150`); `get_or_fetch`'s first branch returns a cached document with no HTTP (`crates/axiam-oauth2/src/cimd.rs:700`); the `UPDATE` arm sets `updated_at = time::now()` and does not name `last_authorized_at` (`crates/axiam-db/src/repository/oauth2_client.rs:513`). The three call sites are `handlers/oauth2.rs:1182`, `:1912`, `:5051`, as recorded. |
+| 2 — `last_authorized_at` is stamped on `cimd` rows | **Holds** | `touch_last_authorized`'s `WHERE` carries `AND managed_by != 'admin'` (`oauth2_client.rs:1041`). |
+| 3 — there is no admin UI for the CIMD policy | **Holds** | `frontend/src/services/settings.ts` and `frontend/src/pages/settings/SettingsPage.tsx` contain no occurrence of `cimd`. (The string does appear in `services/oauth2clients.ts` and `pages/oauth2/OAuth2ClientsPage.tsx`, which render a *client's* `managed_by` — not the policy, and not a refusal to mirror.) |
+| 4 — both settings doors run the same validator | **Holds** | `validate_cimd_policy` is called from `settings.rs:1228` and `settings.rs:1982`. Both `*`-fixtured tests are where the fact says (`:3991`, `:4035`). |
+| 5 — doc comments on settings fields are in the spec | **First half holds; second half is false** | `OidcPolicy.dcr_max_clients`'s description is its doc comment verbatim, so #470's and #471's regeneration stands. But **every one of `CimdPolicy`'s nine fields carries a description**, `trusted_client_id_domains` among them at `sdks/openapi.json:12811` — the very line the fact cites as carrying none. |
+| 6 — the IPv6 loopback bug is in one place | **Holds** | `validate_redirect_uris` compares `host == "::1"` (`handlers/oauth2_clients.rs:408`); nothing else in the crate compares a bare `::1`. |
+
+**What fact 5 changes.** #469 edits the doc comment on
+`CimdPolicy::trusted_client_id_domains` (§2's fix, fourth bullet), and that
+comment is a spec `description`. So the #469 commit is a generated-artifact
+commit after all: `sdks/openapi.json` changes, and because
+`gen-management-registry.py` copies `info.x-axiam-spec-digest` out of the spec
+(`scripts/gen-management-registry.py:819`) and the digest is a SHA-256 over the
+whole document, `sdks/management-registry.json` changes with it. The summary
+table's "Touches generated artifacts? No" for #469 is wrong; §2's cost table
+said "regenerate to prove a no-op … expected unchanged", and it is not a no-op.
+Both are corrected below.
+
+Nothing else moves. The §8 split already puts #469 in the PR that carries the
+regeneration block, so the decision it was arguing for — three Mediums on one
+branch, one regeneration — is if anything better supported: all three commits
+now need the spec, not two. The only practical consequence is that the #469
+commit must carry the regenerated pair with it, which means PR A's first
+commit is the one that needs `protobuf-compiler` and the swagger placeholder,
+not its second.
 
 One further thing the review did not name, which belongs with #470: the
 in-memory `ClientMetadataCache` (`cimd.rs:674`) is a `HashMap<(Uuid, String), _>`
@@ -105,6 +141,14 @@ number of distinct trusted URLs a caller can name — and the same fix.
 ---
 
 ## 2. Issue #469 — the trusted-publisher interlock admits `*` (MCP-03, T-276)
+
+> **Landed** as `0a273ec`, first commit of PR A. The section is accurate as
+> written and every bullet of its fix is in the commit, including the
+> single-label wildcard floor it flags as deletable in one line. The one
+> correction is in its cost table, already applied above: the regeneration was
+> not the no-op fact 5 predicted, because `CimdPolicy`'s fields *do* carry spec
+> descriptions, so this commit carries a regenerated `sdks/openapi.json` and
+> `sdks/management-registry.json`.
 
 ### The leave-it case
 
@@ -173,7 +217,7 @@ CHANGELOG line rather than adding a startup check.
 | New `AXIAM__*` key | no | — |
 | Handler module / coverage-matrix row | no | — |
 | Schema / migration | no | — |
-| OpenAPI + registry | regenerate to prove a no-op (fact 5); expected unchanged | `sdks/openapi.json`, `sdks/management-registry.json` |
+| OpenAPI + registry | **yes** — the doc comment on `CimdPolicy::trusted_client_id_domains` is a spec `description` (`sdks/openapi.json:12811`), and the registry copies the spec digest, so both move (fact 5 as corrected; the fact as written predicted a no-op) | `sdks/openapi.json`, `sdks/management-registry.json` |
 | Tests | new: `a_wildcard_trusted_publisher_is_refused` (both `*` and `*.com`, at both doors); re-fixture two existing tests to `*.example.com` | `settings.rs` tests |
 | Docs | glob-syntax list at `docs/admin/client-id-metadata-documents.md:112` gains "refused for `trusted_client_id_domains`, admitted for `trusted_redirect_domains`"; the "name specific hosts rather than `*`" sentence at `:289` becomes "AXIAM refuses `*`" | one page |
 | CHANGELOG | one line under `[Unreleased]` → `Security` | `CHANGELOG.md` |
@@ -188,6 +232,17 @@ all — this is a settings-write refusal. Additive and opt-in by construction.
 ---
 
 ## 3. Issue #470 — `cimd` rows have no quota and no sweep (MCP-04, T-275)
+
+> **Landed** as `0b216c6`, second commit of PR A, in all three parts and with
+> no migration — fact 1 held exactly as written and `updated_at` needed no
+> column beside it. Two notes for a reader following the section. The quota's
+> row lookup replaces the one `materialise_if_cimd` already made further down
+> to decide whether to audit, rather than adding a query, which is why moving
+> it ahead of the resolve costs nothing. And `sweep_unused_dcr_clients` is kept
+> as a named wrapper over the generalised `sweep_unused_external_clients`, so
+> the three T21.4 sweep tests are untouched: the section's "generalise over the
+> provenance it lists and the clock it reads" is done without changing any
+> existing call.
 
 ### Severity after #469
 
@@ -300,6 +355,59 @@ express.
 ---
 
 ## 4. Issue #471 — quota exhaustion denies registration for a month (MCP-05, T-272)
+
+> **Landed** as the third commit of PR A, **in the constant variant this
+> section names as its fallback**, not the field it recommends. The reason is a
+> second wrong cost, found the same way fact 5 was and recorded here with its
+> evidence.
+>
+> The cost table below says: *Schema / migration — **no** — `OidcPolicy` lives
+> in the settings JSON; a missing key deserialises to the default.* That is
+> true of two things and not of the one this section needs. `OidcPolicy::cimd`
+> is one `oidc_cimd_json` column, and a tenant override is `overrides_json`, so
+> both tolerate a new key. **`OidcPolicy`'s scalars are individual columns on a
+> `SCHEMAFULL` `security_settings` table** —
+> `crates/axiam-db/src/schema.rs:919` defines the table `SCHEMAFULL`, and
+> `oidc_dcr_max_clients` and `oidc_dcr_unused_client_ttl_days` are
+> `DEFINE FIELD` statements added by migration v64 (`schema.rs:3522`, `:3524`),
+> read through `StoredDcrColumns` and written by name in
+> `crates/axiam-db/src/repository/settings.rs:438`. A fifth DCR number is
+> therefore a `DEFINE FIELD`, a **migration v66** and a bump to the tripwire at
+> `schema.rs:3992`.
+>
+> The implementing brief's constraints are explicit that there is to be no
+> migration and that the tripwire stays at 65 — and this section already names
+> the variant that satisfies them: *"a constant with the same value and the
+> same mode gate, which removes every row below marked 'field only'; the
+> sweeper logic and its tests are identical either way."* That is what landed.
+> `DCR_UNAUTHORIZED_CLIENT_TTL_SECS` is a documented `pub const` in
+> `axiam-core`'s settings module beside the other DCR defaults, the mode gate
+> is exactly as specified, and the sweeper's predicate and its whole test table
+> are the ones this section describes.
+>
+> **The field remains the right answer and the recommendation stands.** Its
+> argument — every other sweep window in this file is a tenant setting, and
+> this is the one sweep that deletes rows strangers created, so it should not
+> be the first window an operator cannot see — is untouched by any of the
+> above. What changed is only the price: it is **one migration away, not one
+> line away**, so it is the maintainer's call and not an implementing session's
+> to make against a stated constraint. Everything else it needs is already
+> written: the value, the mode gate, the predicate, the range, the strictness
+> ordering and the operator documentation. Promoting it is v66, the eight
+> mirrored sites this section lists, the second `*_strictness` map, the range
+> check, the admin card and one spec regeneration — and **no change at all to
+> the behaviour that landed**, which is the property that makes deferring it
+> safe. The constant's own doc comment carries this paragraph so that whoever
+> picks it up finds it at the code rather than here.
+>
+> Two smaller notes. The spec regeneration this section calls unavoidable "even
+> in the constant variant" is in fact a no-op there: nothing in the constant
+> variant touches a `ToSchema` type or a doc comment on one, and
+> `--dump-openapi` was diffed against the committed spec to prove it.
+> `dcr_unused_client_ttl_days`'s description did move, but in the **#470**
+> commit and for #470's reason. And the frontend rows — the card, the types,
+> the card test — are all "field only" and are therefore absent, which is why
+> this PR touches no frontend file at all.
 
 ### The leave-it case
 

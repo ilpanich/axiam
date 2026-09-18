@@ -30,6 +30,18 @@ RFC 7591 §1.2 calls the second and third the *protected* and *open* profiles.
 The difference is whether an administrator has already decided that a
 particular registration should happen.
 
+**The reason to prefer `initial_access_token` that matters most:** its
+`dcr_max_clients` allowance cannot be spent by somebody with no credential.
+In `anonymous` mode the ceiling is a storage bound *and* an availability
+budget, and one stranger can spend all of it — twenty registrations at five
+requests a minute is about four minutes' work, after which a legitimate
+client's registration is refused. Every attempt is rate-limited and audited,
+so the flood is noisy and attributable, and AXIAM reclaims the slots within
+the hour ([the sweeper](#the-sweeper)) rather than within the month. But a
+mode where the caller has to hold a handle an administrator minted has no
+such exposure at all, and if quota exhaustion is a risk you are carrying,
+switching modes removes it rather than bounding it.
+
 ---
 
 ## Every policy field
@@ -45,7 +57,7 @@ organization-baseline-plus-tenant-override chain (see
 | `dcr_allowed_redirect_hosts` | `[]` | Hosts a self-registered `redirect_uri` may point at, as globs. The loopback hosts are **always** allowed — see [Redirect hosts](#redirect-hosts). |
 | `external_client_allowed_resources` | `[]` | **D3.** The audiences a self-registered client may address (RFC 8707 `resource`). See the warning below. |
 | `dcr_max_clients` | `20` | How many self-registered clients this tenant may hold. The 21st registration is `403`. |
-| `dcr_unused_client_ttl_days` | `30` | How long a self-registered client survives without being authorized. `0` disables the sweep for this tenant. |
+| `dcr_unused_client_ttl_days` | `30` | How long a self-registered client survives without being *used*. `0` disables the sweep for this tenant. A registration that was never authorized at all, in `anonymous` mode, is on a much shorter clock — see [the sweeper](#the-sweeper). |
 
 Three of them are **ordered** against the organization baseline, so a tenant
 may be stricter than its organization and never more permissive:
@@ -330,7 +342,17 @@ Everything an unrelated party can reach without a credential is bounded:
 | Per-IP rate limit | 5 requests/minute | `AXIAM__RATE_LIMIT__DCR_PER_MIN` |
 | Clients per tenant | 20 | `dcr_max_clients` |
 | Unused-client sweep | 30 days | `dcr_unused_client_ttl_days` |
+| Never-authorized sweep (`anonymous` only) | 1 hour | not configurable — see [the sweeper](#the-sweeper) |
 | Audit | every attempt | — |
+
+**Both numbers govern client ID metadata documents too**, counted separately
+and against the same value: a tenant running both mechanisms gets
+`dcr_max_clients` self-registered clients *and* `dcr_max_clients` shadow rows,
+so neither can exhaust the other's allowance, and each is swept on
+`dcr_unused_client_ttl_days` under its own clock. They keep their `dcr_` names
+because dynamic registration defined them, which is the same convention
+`dcr_allowed_scopes` follows. See
+[client ID metadata documents](client-id-metadata-documents.md#cleaning-up).
 
 Five per minute is the smallest limit in AXIAM, and the reasoning is the
 sharpest: this is the only endpoint that writes on behalf of a caller holding
@@ -349,11 +371,13 @@ is a place where strings are read by people.
 A background sweep, registered with the job runner behind
 [`GET /health/jobs`](../deployment/README.md), deletes `managed_by: dcr`
 clients that have not been authorized within their tenant's
-`dcr_unused_client_ttl_days`. A second sweep drops expired initial access
-tokens.
+`dcr_unused_client_ttl_days`. A sibling sweep does the same for
+`managed_by: cimd` rows on its own counter, and a third drops expired initial
+access tokens.
 
 ```bash
 curl https://id.example.com/health/jobs | jq '.jobs.dcr_unused_clients'
+curl https://id.example.com/health/jobs | jq '.jobs.cimd_unused_clients'
 ```
 
 What it will not touch:
@@ -367,11 +391,50 @@ What it will not touch:
 
 The clock it reads is `last_authorized_at` — stamped when the client is issued
 an authorization code — falling back to `created_at` for a client that has
-never been authorized. That second case is what the TTL is really for: a
-registration made once by a tool nobody kept.
+never been authorized.
+
+### The second clock: never authorized, in `anonymous` mode
+
+A registration that has **never** been authorized, in a tenant whose effective
+mode is `anonymous`, is measured against **one hour** from `created_at`
+instead of against `dcr_unused_client_ttl_days`.
+
+The thirty-day default is sized for a client somebody uses monthly. A client
+registered and never authorized is not that client: every MCP client this
+exists to serve — Inspector, Claude Code, VS Code — authorizes within seconds
+of registering, because registration is the first step of the same flow. One
+TTL was serving two situations with nothing in common, and that is what made
+`dcr_max_clients` an availability budget a stranger could hold for a month.
+An hour-old registration nobody has authorized is either abandoned or hostile,
+and AXIAM can tell it apart from a quiet-but-real client with no extra
+bookkeeping, because the row carries no `last_authorized_at`.
+
+Three things it deliberately does not do.
+
+- **It does not apply in `initial_access_token` mode.** There the row exists
+  because an administrator minted a handle and somebody redeemed it; there is
+  no unauthenticated exposure to bound, and an operator who hands somebody a
+  registration token on Friday should not find the registration gone on
+  Monday. Nor in `disabled` mode, where such rows are leftovers from a mode
+  the tenant has since turned off.
+- **It does not read a client that completed a flow.** Authorize once and the
+  client is on the thirty-day window like any other, whatever mode the tenant
+  is in.
+- **It is not switched off by `dcr_unused_client_ttl_days: 0`.** That value is
+  a decision about how long a client somebody *uses* is kept, and a
+  registration nobody has ever authorized is not that client. An operator who
+  prunes out of band still gets the hour on the one sweep that deletes rows
+  strangers created.
+
+The hour is a constant rather than a tenant setting, which is the one place
+this file describes a sweep window an operator cannot change. The reasoning,
+and what changing it would cost, is on
+`axiam_core::models::settings::DCR_UNAUTHORIZED_CLIENT_TTL_SECS`.
 
 A swept client's users see their MCP client ask to register again, which it
-does automatically. If that is disruptive, raise the TTL.
+does automatically. If that is disruptive, raise the TTL — and note that a
+client reaching the second clock has not completed an authorization, so there
+are no users to disrupt.
 
 ---
 

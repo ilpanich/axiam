@@ -790,6 +790,23 @@ async fn backdate_client(
         .expect("backdate check");
 }
 
+/// Move a row's `updated_at` back by `days`, which `backdate_client` does not
+/// touch because the `dcr` clock does not read it. The `cimd` clock does — it
+/// is the stamp every resolve moves — so its tests need to set it.
+async fn backdate_updated_at(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    client_id: &str,
+    days: i64,
+) {
+    db.query("UPDATE oauth2_client SET updated_at = $when WHERE client_id = $client_id")
+        .bind(("when", Utc::now() - chrono::Duration::days(days)))
+        .bind(("client_id", client_id.to_string()))
+        .await
+        .expect("backdate updated_at")
+        .check()
+        .expect("backdate updated_at check");
+}
+
 /// Create one client with the given provenance and return its `client_id`.
 async fn seed_client(
     db: &Surreal<surrealdb::engine::local::Db>,
@@ -827,6 +844,53 @@ async fn seed_client(
         .await
         .expect("seed client");
     client.client_id
+}
+
+/// The same, plus a registration mode — T21.8's second clock is gated on it.
+///
+/// `anonymous` needs `external_client_allowed_resources` non-empty or the
+/// baseline is refused (D3), which is the interlock T21.4a added and this
+/// helper has to satisfy rather than work around.
+async fn seed_tenant_with_mode(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    slug: &str,
+    ttl_days: u32,
+    mode: axiam_core::models::settings::DynamicRegistrationMode,
+) -> Uuid {
+    use axiam_core::repository::{
+        OrganizationRepository as _, SettingsRepository as _, TenantRepository as _,
+    };
+    let org = axiam_db::SurrealOrganizationRepository::new(db.clone())
+        .create(axiam_core::models::organization::CreateOrganization {
+            name: format!("org {slug}"),
+            slug: format!("org-{slug}"),
+            metadata: None,
+        })
+        .await
+        .expect("org");
+    let tenant = axiam_db::SurrealTenantRepository::new(db.clone())
+        .create(axiam_core::models::tenant::CreateTenant {
+            organization_id: org.id,
+            kind: axiam_core::models::tenant::TenantKind::Standard,
+            name: format!("tenant {slug}"),
+            slug: format!("tenant-{slug}"),
+            metadata: None,
+        })
+        .await
+        .expect("tenant");
+    axiam_db::SurrealSettingsRepository::new(db.clone())
+        .set_org_settings(
+            org.id,
+            axiam_core::models::settings::SetOrgSettings {
+                dcr_unused_client_ttl_days: ttl_days,
+                dynamic_registration: mode,
+                external_client_allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+                ..axiam_core::models::settings::system_defaults()
+            },
+        )
+        .await
+        .expect("org settings");
+    tenant.id
 }
 
 /// Create an organization and a tenant, and write the organization baseline.
@@ -936,6 +1000,207 @@ async fn dcr_sweep_removes_an_unused_client_and_leaves_an_admin_one() {
     );
 }
 
+/// **T21.8 / MCP-04.** The `cimd` sweep removes a shadow row nobody has
+/// presented, keeps one that was presented recently, and never touches an
+/// administrator's client.
+///
+/// The clock is the difference from the `dcr` arm: a `cimd` row's `updated_at`
+/// moves on **every resolve**, because `materialise_if_cimd` upserts after
+/// each one and the upsert's `UPDATE` sets it. So a document presented once a
+/// day is never due under a 30-day TTL, however old its `created_at` is —
+/// which is what makes eviction-on-last-seen consistent with T21.4's argument
+/// that a shadow row is a cache, rather than a contradiction of it.
+#[tokio::test]
+async fn cimd_sweep_removes_an_unpresented_row_and_keeps_a_fresh_one() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let db = setup_db().await;
+    let tenant_id = seed_tenant_with_ttl(&db, "cimd-sweep", 30).await;
+
+    let stale = seed_client(&db, tenant_id, "stale-cimd", ManagedBy::Cimd).await;
+    let presented = seed_client(&db, tenant_id, "presented-cimd", ManagedBy::Cimd).await;
+    let admin = seed_client(&db, tenant_id, "admin-url", ManagedBy::Admin).await;
+
+    // Everything is ancient by `created_at` and by `last_authorized_at`...
+    for client_id in [&stale, &presented, &admin] {
+        backdate_client(&db, client_id, 60, false).await;
+        backdate_updated_at(&db, client_id, 60).await;
+    }
+    // ...except that one row was resolved an hour ago, which is the only stamp
+    // a CIMD refresh moves.
+    backdate_updated_at(&db, &presented, 0).await;
+
+    let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
+    let removed = axiam_server::cleanup::sweep_unused_cimd_clients(
+        &client_repo,
+        &axiam_db::SurrealTenantRepository::new(db.clone()),
+        &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 1, "exactly the one unpresented shadow row");
+
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &stale)
+            .await
+            .is_err(),
+        "a shadow row nobody has presented past the TTL is swept; it re-materialises on the \
+         next request if the document is still published, which is what a cache should do"
+    );
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &presented)
+            .await
+            .is_ok(),
+        "updated_at moves on every resolve, so a document presented today is not due however \
+         old its created_at is"
+    );
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &admin)
+            .await
+            .is_ok(),
+        "an administrator's client is never swept by either arm"
+    );
+
+    // And the `dcr` arm leaves `cimd` rows alone: one `managed_by` per call,
+    // so the two health counters mean what they say.
+    let tenant_id = seed_tenant_with_ttl(&db, "arm-isolation", 30).await;
+    let lonely = seed_client(&db, tenant_id, "lonely-cimd", ManagedBy::Cimd).await;
+    backdate_client(&db, &lonely, 60, false).await;
+    backdate_updated_at(&db, &lonely, 60).await;
+    let removed = axiam_server::cleanup::sweep_unused_dcr_clients(
+        &client_repo,
+        &axiam_db::SurrealTenantRepository::new(db.clone()),
+        &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 0, "the dcr arm lists dcr rows and nothing else");
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &lonely)
+            .await
+            .is_ok()
+    );
+}
+
+/// The `cimd` sweep honours `0` as "never sweep" too, and a tenant that never
+/// enabled CIMD has nothing to list — which is the I1 shape: the same one
+/// indexed query per interval the `dcr` sweep already makes, over an empty set.
+#[tokio::test]
+async fn a_zero_ttl_sweeps_no_cimd_rows_either() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let db = setup_db().await;
+    let tenant_id = seed_tenant_with_ttl(&db, "cimd-never", 0).await;
+    let ancient = seed_client(&db, tenant_id, "ancient-cimd", ManagedBy::Cimd).await;
+    backdate_client(&db, &ancient, 3650, false).await;
+    backdate_updated_at(&db, &ancient, 3650).await;
+
+    let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
+    let removed = axiam_server::cleanup::sweep_unused_cimd_clients(
+        &client_repo,
+        &axiam_db::SurrealTenantRepository::new(db.clone()),
+        &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 0);
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &ancient)
+            .await
+            .is_ok()
+    );
+}
+
+/// The predicate's table, read against a real row rather than through a
+/// sweep, because the clock choice is the part of #470 worth asserting
+/// directly: which of the three stamps wins decides whether a document
+/// somebody is still using gets deleted.
+#[tokio::test]
+async fn the_cimd_clock_reads_the_latest_of_the_three_stamps() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::models::settings::DynamicRegistrationMode;
+    use axiam_core::repository::OAuth2ClientRepository as _;
+    use axiam_server::cleanup::{
+        DcrSweepWindow, cimd_client_is_due_for_sweep, cimd_client_last_seen,
+    };
+
+    let db = setup_db().await;
+    let tenant_id = seed_tenant_with_ttl(&db, "clock", 30).await;
+    let client_id = seed_client(&db, tenant_id, "clock-cimd", ManagedBy::Cimd).await;
+
+    let now = Utc::now();
+    let read = |db: Surreal<surrealdb::engine::local::Db>, id: String| {
+        let repo = axiam_db::SurrealOAuth2ClientRepository::new(db);
+        async move { repo.get_by_client_id(tenant_id, &id).await.expect("row") }
+    };
+
+    // Everything ancient: due. This is the row #470 is about — materialised
+    // once by a stranger and never presented again.
+    backdate_client(&db, &client_id, 400, true).await;
+    backdate_updated_at(&db, &client_id, 400).await;
+    let dead = read(db.clone(), client_id.clone()).await;
+    let window = |days| DcrSweepWindow {
+        days,
+        // The mode is irrelevant to the `cimd` arm — T21.8's second clock does
+        // not apply to a row that exists because a document was presented —
+        // and `anonymous` is passed here precisely to assert that.
+        mode: DynamicRegistrationMode::Anonymous,
+    };
+    assert!(cimd_client_is_due_for_sweep(&dead, window(30), now));
+    // `0` is never due, in this arm as in the other.
+    assert!(!cimd_client_is_due_for_sweep(&dead, window(0), now));
+
+    // `updated_at` alone is enough to keep it, and that is the whole reason
+    // #470 needs no migration: a resolve moves this stamp, and a resolve
+    // happens on every authorize, token and PAR presentation — including one
+    // served from the in-memory document cache with no fetch at all.
+    backdate_updated_at(&db, &client_id, 1).await;
+    let refreshed = read(db.clone(), client_id.clone()).await;
+    assert!(
+        !cimd_client_is_due_for_sweep(&refreshed, window(30), now),
+        "a document presented yesterday is not due, whatever created_at says"
+    );
+    assert!(
+        cimd_client_last_seen(&refreshed) > now - chrono::Duration::days(2),
+        "the clock reads the latest of the three, not the earliest"
+    );
+
+    // `last_authorized_at` is read beside it, because `touch_last_authorized`
+    // guards on `managed_by != 'admin'` rather than `== 'dcr'` and therefore
+    // stamps cimd rows too. With `updated_at` ancient again, an authorization
+    // two days ago still keeps the row.
+    backdate_updated_at(&db, &client_id, 400).await;
+    backdate_client(&db, &client_id, 400, false).await;
+    db.query("UPDATE oauth2_client SET last_authorized_at = $when WHERE client_id = $client_id")
+        .bind(("when", now - chrono::Duration::days(2)))
+        .bind(("client_id", client_id.clone()))
+        .await
+        .expect("touch")
+        .check()
+        .expect("touch check");
+    // `backdate_client` moved `created_at`, so re-set `updated_at` after it.
+    backdate_updated_at(&db, &client_id, 400).await;
+    let authorized = read(db.clone(), client_id.clone()).await;
+    assert!(
+        !cimd_client_is_due_for_sweep(&authorized, window(30), now),
+        "an authorization two days ago keeps the row even with updated_at ancient"
+    );
+
+    // And the repository is what it says it is: this row is `cimd`, so the
+    // table above is about the arm it belongs to.
+    assert_eq!(authorized.managed_by, ManagedBy::Cimd);
+}
+
 /// `0` means "never sweep", which is the explicit opt-out for a deployment
 /// that prunes out of band. Read the other way round — "sweep everything
 /// immediately" — it would delete a tenant's whole client table on the next
@@ -1001,10 +1266,18 @@ async fn the_ttl_is_resolved_per_tenant() {
 
 /// The decision function on its own, at the boundary, where an off-by-one
 /// would be a client swept a day early or kept a day late.
+///
+/// Every case here runs in `initial_access_token` mode, which is how this
+/// table keeps meaning exactly what it meant before T21.8: that mode has no
+/// unauthenticated exposure, so the second clock does not apply and the days
+/// TTL governs both situations as it always did. The `anonymous` arm is the
+/// test below. No assertion in this one changed — only the shape of the
+/// argument the predicate takes.
 #[test]
 fn the_sweep_decision_reads_last_authorized_then_created() {
     use axiam_core::models::oauth2_client::{ManagedBy, OAuth2Client};
-    use axiam_server::cleanup::dcr_client_is_due_for_sweep;
+    use axiam_core::models::settings::DynamicRegistrationMode;
+    use axiam_server::cleanup::{DcrSweepWindow, dcr_client_is_due_for_sweep};
 
     let now = Utc::now();
     let client = |created_days: i64, authorized_days: Option<i64>| OAuth2Client {
@@ -1039,20 +1312,307 @@ fn the_sweep_decision_reads_last_authorized_then_created() {
         updated_at: now,
     };
 
+    let window = |days| DcrSweepWindow {
+        days,
+        mode: DynamicRegistrationMode::InitialAccessToken,
+    };
+
     // Never authorized: `created_at` is the clock.
-    assert!(dcr_client_is_due_for_sweep(&client(31, None), 30, now));
-    assert!(!dcr_client_is_due_for_sweep(&client(29, None), 30, now));
+    assert!(dcr_client_is_due_for_sweep(
+        &client(31, None),
+        window(30),
+        now
+    ));
+    assert!(!dcr_client_is_due_for_sweep(
+        &client(29, None),
+        window(30),
+        now
+    ));
     // Authorized: `last_authorized_at` wins, however old the registration is.
     assert!(!dcr_client_is_due_for_sweep(
         &client(3650, Some(1)),
-        30,
+        window(30),
         now
     ));
     assert!(dcr_client_is_due_for_sweep(
         &client(3650, Some(31)),
-        30,
+        window(30),
         now
     ));
     // Zero is never.
-    assert!(!dcr_client_is_due_for_sweep(&client(3650, None), 0, now));
+    assert!(!dcr_client_is_due_for_sweep(
+        &client(3650, None),
+        window(0),
+        now
+    ));
+}
+
+/// **MCP-05 (#471).** The second clock's table: a never-authorized
+/// registration in `anonymous` mode is due in an hour, and nothing else
+/// changes.
+///
+/// One quota served two situations that have nothing in common — "registered
+/// and abandoned" and "used once, gone quiet" — and the thirty-day default is
+/// sized for the second. So in `anonymous` mode, which is the only mode where
+/// a stranger can create the row at all, a registration nobody has authorized
+/// is measured against `DCR_UNAUTHORIZED_CLIENT_TTL_SECS` instead. What that
+/// turns a quota-exhaustion attack into is an hour of denial rather than a
+/// month of it, at the same cost to the attacker.
+#[test]
+fn the_second_clock_reads_never_authorized_in_anonymous_mode_only() {
+    use axiam_core::models::oauth2_client::{ManagedBy, OAuth2Client};
+    use axiam_core::models::settings::{DCR_UNAUTHORIZED_CLIENT_TTL_SECS, DynamicRegistrationMode};
+    use axiam_server::cleanup::{DcrSweepWindow, dcr_client_is_due_for_sweep};
+
+    let now = Utc::now();
+    let row = |age_secs: i64, authorized_days: Option<i64>| OAuth2Client {
+        id: Uuid::new_v4(),
+        tenant_id: Uuid::new_v4(),
+        client_id: "c".into(),
+        client_secret_hash: String::new(),
+        name: "c".into(),
+        redirect_uris: Vec::new(),
+        grant_types: Vec::new(),
+        scopes: Vec::new(),
+        post_logout_redirect_uris: Vec::new(),
+        backchannel_logout_uri: None,
+        require_par: false,
+        profile: Default::default(),
+        token_endpoint_auth_method: Default::default(),
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        self_signed_tls_client_auth_thumbprints: Vec::new(),
+        tls_client_certificate_bound_access_tokens: false,
+        jwks: None,
+        jwks_uri: None,
+        dpop_bound_access_tokens: false,
+        dpop_require_nonce: false,
+        authn_request_params: Default::default(),
+        browser_sso: false,
+        allowed_resources: Vec::new(),
+        managed_by: ManagedBy::Dcr,
+        last_authorized_at: authorized_days.map(|d| now - chrono::Duration::days(d)),
+        created_at: now - chrono::Duration::seconds(age_secs),
+        updated_at: now,
+    };
+    let hour = i64::from(DCR_UNAUTHORIZED_CLIENT_TTL_SECS);
+    let window = |mode| DcrSweepWindow { days: 30, mode };
+    use DynamicRegistrationMode::{Anonymous, Disabled, InitialAccessToken};
+
+    // Never authorized + anonymous + past the hour → due. This is the row the
+    // issue is about: created by a stranger, never used, holding a slot.
+    assert!(dcr_client_is_due_for_sweep(
+        &row(hour + 60, None),
+        window(Anonymous),
+        now
+    ));
+    // ...and inside the hour it is not. The floor on the window exists so that
+    // a client which registers, shows a consent screen and waits for somebody
+    // to read it is never swept mid-flow.
+    assert!(!dcr_client_is_due_for_sweep(
+        &row(hour - 60, None),
+        window(Anonymous),
+        now
+    ));
+
+    // Never authorized + initial_access_token → the days clock, so an
+    // hour-old row is kept. An operator who hands somebody a registration
+    // token on Friday should not find the registration gone on Monday.
+    assert!(!dcr_client_is_due_for_sweep(
+        &row(hour + 60, None),
+        window(InitialAccessToken),
+        now
+    ));
+    // Nor under `disabled`, where the row is a leftover from a mode the tenant
+    // has since turned off.
+    assert!(!dcr_client_is_due_for_sweep(
+        &row(hour + 60, None),
+        window(Disabled),
+        now
+    ));
+    // But the days clock still reaches it eventually, in every mode.
+    for mode in [Anonymous, InitialAccessToken, Disabled] {
+        assert!(
+            dcr_client_is_due_for_sweep(&row(31 * 24 * 3600, None), window(mode), now),
+            "the days TTL still applies in {mode}"
+        );
+    }
+
+    // Authorized two hours ago + anonymous → not due. The second clock reads
+    // `last_authorized_at: None` and nothing else, so a client that completed
+    // a flow is on the thirty-day window like any other.
+    assert!(!dcr_client_is_due_for_sweep(
+        &row(hour * 10, Some(0)),
+        window(Anonymous),
+        now
+    ));
+
+    // `days: 0` — "never sweep" — does not disable the second clock, and that
+    // is deliberate: `0` is a decision about how long a client somebody *uses*
+    // is kept, and a row nobody has ever authorized is not that client. An
+    // operator who prunes out of band still gets the hour on the one sweep
+    // that deletes rows strangers created.
+    assert!(dcr_client_is_due_for_sweep(
+        &row(hour + 60, None),
+        DcrSweepWindow {
+            days: 0,
+            mode: Anonymous
+        },
+        now
+    ));
+    assert!(!dcr_client_is_due_for_sweep(
+        &row(3650 * 24 * 3600, Some(3650)),
+        DcrSweepWindow {
+            days: 0,
+            mode: Anonymous
+        },
+        now
+    ));
+}
+
+/// **MCP-05 (#471), end to end.** Twenty anonymous registrations, one of them
+/// authorized; an hour and a minute later nineteen are gone and the one that
+/// completed a flow is not.
+///
+/// This is the shape the issue describes: `dcr_max_clients` defaults to twenty,
+/// the endpoint's rate limit is five a minute, so a stranger fills the quota in
+/// about four minutes — and before T21.8 held it for thirty days, because one
+/// TTL served both "registered and abandoned" and "used once, gone quiet". The
+/// second clock does not make the attack more expensive; it makes the denial an
+/// hour long instead of a month, which is the half of the fix that was worth
+/// having. The other half is documentation, and it is on the operator page.
+#[tokio::test]
+async fn the_second_clock_reclaims_a_quota_filled_by_a_stranger() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::models::settings::{DCR_UNAUTHORIZED_CLIENT_TTL_SECS, DynamicRegistrationMode};
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let db = setup_db().await;
+    let tenant_id =
+        seed_tenant_with_mode(&db, "flood", 30, DynamicRegistrationMode::Anonymous).await;
+
+    // Twenty registrations, as an unauthenticated caller would leave them:
+    // `last_authorized_at` is NONE on every one.
+    let mut registered = Vec::new();
+    for n in 0..20 {
+        registered.push(seed_client(&db, tenant_id, &format!("flood-{n}"), ManagedBy::Dcr).await);
+    }
+    // One of them belongs to somebody who actually signed in.
+    let genuine = registered[7].clone();
+    db.query("UPDATE oauth2_client SET last_authorized_at = $when WHERE client_id = $client_id")
+        .bind(("when", Utc::now()))
+        .bind(("client_id", genuine.clone()))
+        .await
+        .expect("touch")
+        .check()
+        .expect("touch check");
+    // And an administrator's client in the same tenant, which must survive
+    // whatever happens: somebody decided it should exist.
+    let admin = seed_client(&db, tenant_id, "flood-admin", ManagedBy::Admin).await;
+
+    let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
+    let tenant_repo = axiam_db::SurrealTenantRepository::new(db.clone());
+    let settings_repo = axiam_db::SurrealSettingsRepository::new(db.clone());
+
+    // Right now, nothing is due: the flood is minutes old.
+    let removed = axiam_server::cleanup::sweep_unused_dcr_clients(
+        &client_repo,
+        &tenant_repo,
+        &settings_repo,
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 0, "a fresh registration is never due");
+
+    // Advance the clock past the window rather than the rows past the clock,
+    // so the assertion is about the sweeper's arithmetic and not about a
+    // fixture's backdating.
+    let later = Utc::now()
+        + chrono::Duration::seconds(i64::from(DCR_UNAUTHORIZED_CLIENT_TTL_SECS))
+        + chrono::Duration::minutes(1);
+    let removed = axiam_server::cleanup::sweep_unused_dcr_clients(
+        &client_repo,
+        &tenant_repo,
+        &settings_repo,
+        later,
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(
+        removed, 19,
+        "nineteen never-authorized anonymous registrations are reclaimed an hour later, not \
+         thirty days later"
+    );
+
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &genuine)
+            .await
+            .is_ok(),
+        "the one client somebody actually authorized is on the thirty-day clock like any other"
+    );
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &admin)
+            .await
+            .is_ok(),
+        "an administrator's client is never swept"
+    );
+    assert_eq!(
+        client_repo
+            .count_by_managed_by(tenant_id, ManagedBy::Dcr)
+            .await
+            .expect("count"),
+        1,
+        "the quota is available again"
+    );
+}
+
+/// **I1 for #471.** The same flood in `initial_access_token` mode is untouched
+/// an hour later, because that mode has no unauthenticated exposure to bound.
+///
+/// This is the invariant the mode gate exists for, stated as a test rather than
+/// as a comment: an operator who mints a registration handle on Friday must not
+/// find the registration gone on Monday, and a tenant that never opted into
+/// `anonymous` behind D3 takes byte for byte the path it took before T21.8.
+#[tokio::test]
+async fn the_second_clock_does_not_touch_an_initial_access_token_tenant() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::models::settings::{DCR_UNAUTHORIZED_CLIENT_TTL_SECS, DynamicRegistrationMode};
+    use axiam_core::repository::OAuth2ClientRepository as _;
+
+    let db = setup_db().await;
+    let tenant_id = seed_tenant_with_mode(
+        &db,
+        "handled",
+        30,
+        DynamicRegistrationMode::InitialAccessToken,
+    )
+    .await;
+    let minted = seed_client(&db, tenant_id, "minted", ManagedBy::Dcr).await;
+
+    let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
+    let later = Utc::now()
+        + chrono::Duration::seconds(i64::from(DCR_UNAUTHORIZED_CLIENT_TTL_SECS))
+        + chrono::Duration::days(1);
+    let removed = axiam_server::cleanup::sweep_unused_dcr_clients(
+        &client_repo,
+        &axiam_db::SurrealTenantRepository::new(db.clone()),
+        &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        later,
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(
+        removed, 0,
+        "a registration an administrator authorised by minting a handle is on the days clock"
+    );
+    assert!(
+        client_repo
+            .get_by_client_id(tenant_id, &minted)
+            .await
+            .is_ok()
+    );
 }

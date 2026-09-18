@@ -17,6 +17,7 @@ import type {
   CaCertificate,
   SecuritySettings,
 } from "@/services/organizations";
+import { DEFAULT_CIMD_POLICY } from "@/services/settings";
 
 const org: Organization = {
   id: "o1",
@@ -108,6 +109,36 @@ const settings: SecuritySettings = {
   },
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
+};
+
+/**
+ * The same organization with a Phase 21 posture written through the API — the
+ * state finding A destroyed. Every value here differs from the server's own
+ * default, so a payload assertion cannot pass by coincidence.
+ */
+const settingsWithOidc: SecuritySettings = {
+  ...settings,
+  oidc: {
+    sensitive_scopes_enabled: true,
+    default_locale: "it",
+    dynamic_registration: "anonymous",
+    dcr_allowed_scopes: ["openid", "profile"],
+    dcr_allowed_redirect_hosts: ["*.example.com"],
+    external_client_allowed_resources: ["https://mcp.example.com/mcp"],
+    dcr_max_clients: 5,
+    dcr_unused_client_ttl_days: 7,
+    cimd: {
+      enabled: true,
+      allow_http: false,
+      trusted_client_id_domains: ["mcp.example.com"],
+      trusted_redirect_domains: [],
+      restrict_same_domain: false,
+      confidential_only: false,
+      min_cache_secs: 600,
+      max_cache_secs: 86_400,
+      max_metadata_bytes: 4_000,
+    },
+  },
 };
 
 /**
@@ -577,6 +608,68 @@ describe("OrganizationDetailPage — settings tab", () => {
         opaque_mode: "optional",
         opaque_suite: "ristretto255_sha512",
         opaque_ksf: "argon2id",
+      })
+    );
+  });
+
+  // Finding A. The frontend's SetOrgSettings had no OIDC keys, so every save
+  // from this form omitted nine `#[serde(default)]` fields — and this PUT
+  // replaces the whole row, then clamps every tenant against what it wrote. So
+  // editing a password rule turned dynamic client registration and client ID
+  // metadata documents off org-wide and discarded each tenant's own posture,
+  // with nothing in the response to say so. Same shape as the OPAQUE bug
+  // above, seven fields wider and with a cascade behind it.
+  it("carries the loaded OIDC policy through a save that never touches it", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settingsWithOidc });
+    apiMock.put.mockResolvedValue(res(settingsWithOidc));
+    await goToSettings();
+    const minLen = await screen.findByLabelText("Minimum length");
+    fireEvent.change(minLen, { target: { value: "10" } });
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put).toHaveBeenCalledWith(
+      URLS.settings,
+      expect.objectContaining({
+        min_length: 10,
+        sensitive_scopes_enabled: true,
+        default_locale: "it",
+        dynamic_registration: "anonymous",
+        dcr_allowed_scopes: ["openid", "profile"],
+        dcr_allowed_redirect_hosts: ["*.example.com"],
+        external_client_allowed_resources: ["https://mcp.example.com/mcp"],
+        dcr_max_clients: 5,
+        dcr_unused_client_ttl_days: 7,
+        cimd: settingsWithOidc.oidc!.cimd,
+      })
+    );
+  });
+
+  // The other half: a settings row written before the OIDC block carries no
+  // `oidc` at all, and an `undefined` in the body would be dropped and land
+  // back on the server's default anyway. Going through `readOidcPolicy` sends
+  // that default explicitly, so what the form writes is never a surprise.
+  it("sends the server's own defaults when the response carries no OIDC block", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    apiMock.put.mockResolvedValue(res(settings));
+    await goToSettings();
+    const minLen = await screen.findByLabelText("Minimum length");
+    fireEvent.change(minLen, { target: { value: "10" } });
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put).toHaveBeenCalledWith(
+      URLS.settings,
+      expect.objectContaining({
+        sensitive_scopes_enabled: false,
+        default_locale: null,
+        dynamic_registration: "disabled",
+        dcr_allowed_scopes: [],
+        dcr_allowed_redirect_hosts: [],
+        external_client_allowed_resources: [],
+        dcr_max_clients: 20,
+        dcr_unused_client_ttl_days: 30,
+        cimd: DEFAULT_CIMD_POLICY,
       })
     );
   });

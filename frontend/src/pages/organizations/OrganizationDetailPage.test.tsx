@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { shouldSeedForm, computeIsDirty } from "./settingsForm";
 import type { SetOrgSettings } from "@/services/organizations";
+import { DEFAULT_CIMD_POLICY } from "@/services/settings";
 
 // D-19 regression guard: SettingsTab must seed `form` from `settings` only
 // on the first successful load per mount, and must track dirtiness so a
@@ -34,6 +35,15 @@ const baseSettings: SetOrgSettings = {
   opaque_ksf: "argon2id",
   deletion_grace_period_days: 30,
   webauthn_user_verification: "preferred",
+  sensitive_scopes_enabled: false,
+  default_locale: null,
+  dynamic_registration: "disabled",
+  dcr_allowed_scopes: [],
+  dcr_allowed_redirect_hosts: [],
+  external_client_allowed_resources: [],
+  dcr_max_clients: 20,
+  dcr_unused_client_ttl_days: 30,
+  cimd: DEFAULT_CIMD_POLICY,
 };
 
 describe("shouldSeedForm (init-once guard)", () => {
@@ -83,5 +93,32 @@ describe("computeIsDirty", () => {
   it("returns to clean when every field matches the snapshot again", () => {
     const editedBack: SetOrgSettings = { ...baseSettings };
     expect(computeIsDirty(editedBack, baseSettings)).toBe(false);
+  });
+
+  // The OIDC block put arrays and one nested object into a shape that had been
+  // scalars throughout. Under reference equality a list the user typed into and
+  // emptied again would stay dirty for the rest of the session, holding the
+  // navigate-away guard open over no edit at all.
+  it("flips true for an edited OIDC list, and back to clean when it is restored", () => {
+    const edited: SetOrgSettings = {
+      ...baseSettings,
+      dcr_allowed_scopes: ["openid"],
+    };
+    expect(computeIsDirty(edited, baseSettings)).toBe(true);
+    const restored: SetOrgSettings = { ...baseSettings, dcr_allowed_scopes: [] };
+    expect(computeIsDirty(restored, baseSettings)).toBe(false);
+  });
+
+  it("flips true for an edited CIMD posture, and back to clean when it is restored", () => {
+    const edited: SetOrgSettings = {
+      ...baseSettings,
+      cimd: { ...DEFAULT_CIMD_POLICY, enabled: true },
+    };
+    expect(computeIsDirty(edited, baseSettings)).toBe(true);
+    const restored: SetOrgSettings = {
+      ...baseSettings,
+      cimd: { ...DEFAULT_CIMD_POLICY },
+    };
+    expect(computeIsDirty(restored, baseSettings)).toBe(false);
   });
 });

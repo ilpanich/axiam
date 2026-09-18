@@ -278,6 +278,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Saving the organization settings page reset nine OIDC policy fields
+  (#477).** The frontend's `SetOrgSettings` carried no OIDC keys, so every save
+  from the organization Settings tab omitted `sensitive_scopes_enabled`,
+  `default_locale`, `dynamic_registration`, `dcr_allowed_scopes`,
+  `dcr_allowed_redirect_hosts`, `external_client_allowed_resources`,
+  `dcr_max_clients`, `dcr_unused_client_ttl_days` and the whole `cimd` posture.
+  Each is `#[serde(default)]` on the backend and `PUT
+  /organizations/{id}/settings` replaces the whole row, so an administrator
+  editing a password rule turned dynamic client registration and client ID
+  metadata documents off across the organization — and the baseline clamp that
+  runs after the write then dropped every tenant's own posture for being more
+  permissive than a baseline that had just been reset. Nothing in the response
+  said so. The same defect had reached `sensitive_scopes_enabled` and
+  `default_locale` since W7 shipped. The organization form now round-trips all
+  nine from the GET, with the server's own defaults when the response carries
+  no `oidc` block. No API, schema or settings-field change: the write shape was
+  short of the contract it already had.
+
 - **`http://[::1]/…` can be registered as a redirect URI (T21.8).** The
   structural validator both registration endpoints share compared the parsed
   host against `::1`, while a URL parser returns an IPv6 literal *with* its

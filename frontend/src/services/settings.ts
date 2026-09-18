@@ -90,14 +90,68 @@ export type DynamicRegistrationMode =
   | "anonymous";
 
 /**
- * T21.4 — the dynamic-client-registration fields of `OidcPolicy`. Only the
- * fields this task's admin surfaces read or write; `sensitive_scopes_enabled`
- * and `default_locale` predate T21.4 and have no admin UI yet, so they are
- * left out of this type rather than modelled and ignored.
+ * T21.5 — whether, and on what terms, a `client_id` that is a URL is resolved
+ * by fetching the document it names
+ * (`draft-ietf-oauth-client-id-metadata-document`).
+ *
+ * The posture is **whole**: a tenant either accepts its organization's CIMD
+ * policy or states its own in full. There is no per-field merge on the
+ * backend (`Option<CimdPolicy>` on `TenantSettingsOverride`) and there is none
+ * here, because a half-merged posture — this tenant's trusted publishers under
+ * the organization's `enabled` — is one neither party wrote.
+ *
+ * Source: `crates/axiam-core/src/models/settings.rs` (`CimdPolicy`).
+ */
+export interface CimdPolicy {
+  /** Ordered against the org baseline: a tenant may turn it off, never on. */
+  enabled: boolean;
+  /**
+   * Ordered like `enabled`. Does more than its name says: the shared SSRF
+   * guard couples the scheme rule to the address rule, so a tenant that allows
+   * `http` also allows the first hop to resolve to a private address.
+   */
+  allow_http: boolean;
+  /** Refused empty while `enabled`, and refused `*` or `*.<tld>` — see `validateCimdPolicy`. */
+  trusted_client_id_domains: string[];
+  /** Loopback is always allowed, so empty means "loopback only". `*` is valid here. */
+  trusted_redirect_domains: string[];
+  restrict_same_domain: boolean;
+  confidential_only: boolean;
+  min_cache_secs: number;
+  max_cache_secs: number;
+  max_metadata_bytes: number;
+}
+
+/** T21.5 defaults, mirroring `impl Default for CimdPolicy`. */
+export const DEFAULT_CIMD_POLICY: CimdPolicy = {
+  enabled: false,
+  allow_http: false,
+  trusted_client_id_domains: [],
+  trusted_redirect_domains: [],
+  restrict_same_domain: true,
+  confidential_only: false,
+  min_cache_secs: 300,
+  max_cache_secs: 259_200,
+  max_metadata_bytes: 5_000,
+};
+
+/**
+ * The OIDC policy block of `SecuritySettings`, in full.
+ *
+ * Every field here is `#[serde(default)]` on the backend's `SetOrgSettings`,
+ * and `PUT /organizations/{id}/settings` replaces the whole row — so a write
+ * shape that omits one resets it. This type therefore models **all** of them,
+ * including `sensitive_scopes_enabled` and `default_locale`, which predate
+ * T21.4 and still have no form control: a field with no UI still has to make
+ * the round trip, or the save turns it off.
  *
  * Source: `crates/axiam-core/src/models/settings.rs` (`OidcPolicy`).
  */
 export interface OidcPolicy {
+  /** W7 — whether `address` and `phone` may be released at all. */
+  sensitive_scopes_enabled?: boolean;
+  /** The tenant's preferred UI locale, or `null` for none. */
+  default_locale?: string | null;
   dynamic_registration: DynamicRegistrationMode;
   /** May not contain `address` or `phone` — see `validateDcrPolicy`. */
   dcr_allowed_scopes: string[];
@@ -106,11 +160,44 @@ export interface OidcPolicy {
   external_client_allowed_resources: string[];
   dcr_max_clients: number;
   dcr_unused_client_ttl_days: number;
+  /** T21.5 — absent on a server older than the field; falls back to the default posture. */
+  cimd?: CimdPolicy;
 }
 
 /** T21.4 defaults, mirroring `DEFAULT_DCR_MAX_CLIENTS` / `DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`. */
 export const DEFAULT_DCR_MAX_CLIENTS = 20;
 export const DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS = 30;
+
+/**
+ * Read the OIDC policy out of a settings response, filling in the server's own
+ * defaults for anything the response omits.
+ *
+ * The sibling of `readOpaquePolicy`, and it exists for the same reason: a
+ * settings row written before these fields has no `oidc` block, and an
+ * `undefined` in a write shape is dropped from the JSON body and lands back on
+ * the backend's `#[serde(default)]` — which for `cimd.enabled`,
+ * `dynamic_registration` and `sensitive_scopes_enabled` means *off*. Going
+ * through the guard makes the fallback the value that server would itself
+ * apply, and makes it visible here rather than implicit in the wire format.
+ */
+export function readOidcPolicy(s: {
+  oidc?: OidcPolicy;
+}): Required<OidcPolicy> {
+  const o = s.oidc;
+  return {
+    sensitive_scopes_enabled: o?.sensitive_scopes_enabled ?? false,
+    default_locale: o?.default_locale ?? null,
+    dynamic_registration: o?.dynamic_registration ?? "disabled",
+    dcr_allowed_scopes: o?.dcr_allowed_scopes ?? [],
+    dcr_allowed_redirect_hosts: o?.dcr_allowed_redirect_hosts ?? [],
+    external_client_allowed_resources:
+      o?.external_client_allowed_resources ?? [],
+    dcr_max_clients: o?.dcr_max_clients ?? DEFAULT_DCR_MAX_CLIENTS,
+    dcr_unused_client_ttl_days:
+      o?.dcr_unused_client_ttl_days ?? DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
+    cimd: o?.cimd ?? DEFAULT_CIMD_POLICY,
+  };
+}
 
 /** Fully-resolved security settings (nested) — GET /api/v1/settings. */
 export interface SecuritySettings {

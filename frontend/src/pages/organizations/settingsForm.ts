@@ -31,11 +31,26 @@ export function shouldSeedForm(
  *
  * Used to derive `isDirty` — true means the form has in-progress edits that
  * would be lost by a re-seed, a browser refresh, or in-app navigation away.
+ *
+ * Identity is the right test for the scalar fields, and was the only test
+ * needed while every field was one. The OIDC block is not: `dcr_allowed_scopes`
+ * is an array and `cimd` is an object, and every edit of either produces a new
+ * reference — so a user who typed a host and deleted it again would stay
+ * flagged dirty forever under `!==`. Structural comparison for the two
+ * non-scalar kinds, identity for the rest.
  */
 export function computeIsDirty(
   current: SetOrgSettings,
   snapshot: SetOrgSettings
 ): boolean {
   const keys = Object.keys(snapshot) as (keyof SetOrgSettings)[];
-  return keys.some((key) => current[key] !== snapshot[key]);
+  return keys.some((key) => !valuesEqual(current[key], snapshot[key]));
+}
+
+/** Identity, falling back to structural equality for arrays and objects. */
+function valuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  if (typeof a !== "object" || typeof b !== "object") return false;
+  return JSON.stringify(a) === JSON.stringify(b);
 }

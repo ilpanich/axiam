@@ -2506,6 +2506,10 @@ async fn main() -> std::io::Result<()> {
         // an immutable field — cache it rather than pay a round trip per
         // refresh (see axiam_api_rest::tenant_org_cache).
         tenant_org_cache: Arc::new(Default::default()),
+        // The authorize path reads a client once more only to learn
+        // `managed_by`, which never changes for a `client_id` — cache it
+        // (see axiam_api_rest::client_managed_by_cache).
+        client_managed_by_cache: Arc::new(Default::default()),
         user_repo: user_repo.clone(),
         group_repo: group_repo.clone(),
         role_repo: role_repo.clone(),

@@ -17,6 +17,9 @@ import {
   MAX_DELETION_GRACE_PERIOD_DAYS,
 } from "@/services/organizations";
 import { shouldSeedForm, computeIsDirty } from "./settingsForm";
+import { validateCimdPolicy } from "@/services/settings";
+import { CimdPolicyFields } from "@/pages/settings/cimdPolicy";
+import { DcrPolicyFields } from "@/pages/settings/dcrPolicy";
 import { OpaquePolicyFields } from "@/components/OpaquePolicyFields";
 import type { WebauthnUserVerification } from "@/services/organizations";
 import { getApiErrorMessage } from "@/lib/apiError";
@@ -1143,6 +1146,15 @@ function SettingsTab({
   }
 
   const merged = form;
+  // T21.5 — every CIMD refusal is rendered under the field it names by
+  // `CimdPolicyFields`; this is what stops the form sending one. Both
+  // interlocks and all three bounds are hard 400s at this door too
+  // (`validate_org_settings` runs the same validator).
+  const cimdRefused =
+    validateCimdPolicy({
+      external_client_allowed_resources: merged.external_client_allowed_resources,
+      cimd: merged.cimd,
+    }).length > 0;
 
   return (
     <div role="tabpanel" id="tabpanel-settings" aria-labelledby="tab-settings">
@@ -1541,13 +1553,80 @@ function SettingsTab({
           </div>
         </div>
 
+        {/* Dynamic client registration (T21.4) — the same card the tenant
+            settings page renders. It is mounted here because
+            `dynamic_registration` is tighten-only against this baseline: a
+            tenant may move down the ladder and never up, so without this
+            section nothing in the admin console could put an organization on a
+            rung above `disabled`, and its card could only ever turn things off.
+            `validate_dcr_policy` runs at both doors, so the D3 alert inside
+            fires here exactly as it does there. */}
+        <div className="glass-card space-y-4">
+          <div className="space-y-1">
+            <h3 className="text-base font-semibold text-foreground">
+              Dynamic client registration
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              The baseline every tenant in this organization inherits. A tenant
+              may tighten it — move down the ladder, shorten a sweep, shrink a
+              quota — and never loosen it, so a mode set to{" "}
+              <strong>Disabled</strong> here is disabled everywhere.
+            </p>
+          </div>
+          <DcrPolicyFields
+            value={{
+              dynamic_registration: merged.dynamic_registration,
+              dcr_allowed_scopes: merged.dcr_allowed_scopes,
+              dcr_allowed_redirect_hosts: merged.dcr_allowed_redirect_hosts,
+              external_client_allowed_resources:
+                merged.external_client_allowed_resources,
+              dcr_max_clients: merged.dcr_max_clients,
+              dcr_unused_client_ttl_days: merged.dcr_unused_client_ttl_days,
+            }}
+            onChange={(patch) =>
+              setForm((prev) => (prev ? { ...prev, ...patch } : prev))
+            }
+          />
+        </div>
+
+        {/* Client ID metadata documents (T21.5) — the organization baseline,
+            and the only surface in the console where `enabled` and
+            `allow_http` can be turned ON. Both are ordered: a tenant may turn
+            either off and never on. `external_client_allowed_resources`, which
+            the D3 interlock is stated against, is the list edited in the
+            section above — one list serving both mechanisms. */}
+        <div className="glass-card space-y-4">
+          <div className="space-y-1">
+            <h3 className="text-base font-semibold text-foreground">
+              Client ID metadata documents
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              The one mechanism in AXIAM that makes an outbound request on an
+              unauthenticated caller&rsquo;s word. This is where it is turned
+              on: a tenant may state a stricter posture of its own, but it
+              cannot enable this or allow plaintext fetches if the organization
+              has not. The posture is inherited and overridden{" "}
+              <strong>whole</strong> — a tenant states all of it or none of it.
+            </p>
+          </div>
+          <CimdPolicyFields
+            idPrefix="org"
+            value={merged.cimd}
+            externalResources={merged.external_client_allowed_resources}
+            onChange={(cimd) => setField("cimd", cimd)}
+          />
+        </div>
+
         {saveError && <p className="text-sm text-destructive">{saveError}</p>}
         {saveSuccess && (
           <p className="text-sm text-cyan-400">Settings saved successfully.</p>
         )}
 
         <div className="flex items-center gap-3">
-          <Button type="submit" disabled={updateMutation.isPending}>
+          <Button
+            type="submit"
+            disabled={updateMutation.isPending || cimdRefused}
+          >
             {updateMutation.isPending ? (
               <>
                 <Loader2 size={14} className="animate-spin" />

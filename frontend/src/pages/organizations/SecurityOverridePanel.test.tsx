@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiMock, res } from "@/test/apiMock";
 
@@ -634,5 +634,164 @@ describe("TenantSecurityOverridePanel — every group", () => {
     expect(
       screen.getByRole("checkbox", { name: /Override password policy/ })
     ).toBeChecked();
+  });
+});
+
+// ─── T21.4 / T21.5 — the two Phase 21 groups ───────────────────────────────
+
+/**
+ * The effective view a tenant fronting one MCP publisher gets. Every value
+ * differs from the server's default, so a payload assertion cannot pass by
+ * coincidence.
+ */
+const effectiveWithOidc = {
+  ...effective,
+  oidc: {
+    dynamic_registration: "initial_access_token",
+    dcr_allowed_scopes: ["openid", "profile"],
+    dcr_allowed_redirect_hosts: ["*.example.com"],
+    external_client_allowed_resources: ["https://mcp.example.com/mcp"],
+    dcr_max_clients: 5,
+    dcr_unused_client_ttl_days: 7,
+    cimd: {
+      enabled: true,
+      allow_http: false,
+      trusted_client_id_domains: ["mcp.example.com"],
+      trusted_redirect_domains: [],
+      restrict_same_domain: false,
+      confidential_only: false,
+      min_cache_secs: 600,
+      max_cache_secs: 86_400,
+      max_metadata_bytes: 4_000,
+    },
+  },
+};
+
+function mockGetsWithOidc(override: unknown | { notFound: true }) {
+  apiMock.get.mockImplementation((url: string) => {
+    if (url === "/api/v1/settings") return res(effectiveWithOidc);
+    if (url === "/api/v1/tenants/t1/settings") {
+      if (override && (override as { notFound?: true }).notFound) {
+        return Promise.reject({ response: { status: 404 } });
+      }
+      return res(override);
+    }
+    return res({});
+  });
+}
+
+describe("TenantSecurityOverridePanel — dynamic registration and CIMD", () => {
+  it("offers both groups, un-overridden, when the tenant inherits everything", async () => {
+    mockGetsWithOidc({ notFound: true });
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+
+    for (const name of [
+      /Override dynamic client registration/,
+      /Override client ID metadata documents/,
+    ]) {
+      expect(await screen.findByRole("checkbox", { name })).not.toBeChecked();
+    }
+  });
+
+  // The defect this closes: before the two groups existed, saving *any* group
+  // from this panel sent a payload with no `dcr_*` and no `cimd` key — and this
+  // endpoint replaces the override row whole, so an org admin tightening a
+  // password rule discarded whatever registration posture the tenant had set
+  // from its own settings page. Finding A's shape, one level down.
+  it("sends no dcr_* or cimd key while both groups are unchecked", async () => {
+    mockGetsWithOidc({ notFound: true });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Override password policy/ })
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const sent = apiMock.put.mock.calls[0][1] as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("cimd");
+    expect(sent).not.toHaveProperty("dynamic_registration");
+    expect(sent).not.toHaveProperty("external_client_allowed_resources");
+  });
+
+  it("sends the whole CIMD posture under one key when its group is checked", async () => {
+    mockGetsWithOidc({ notFound: true });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", {
+        name: /Override client ID metadata documents/,
+      })
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put).toHaveBeenCalledWith("/api/v1/tenants/t1/settings", {
+      cimd: effectiveWithOidc.oidc.cimd,
+    });
+  });
+
+  it("sends all six DCR fields when that group is checked", async () => {
+    mockGetsWithOidc({ notFound: true });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", {
+        name: /Override dynamic client registration/,
+      })
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put).toHaveBeenCalledWith("/api/v1/tenants/t1/settings", {
+      dynamic_registration: "initial_access_token",
+      dcr_allowed_scopes: ["openid", "profile"],
+      dcr_allowed_redirect_hosts: ["*.example.com"],
+      external_client_allowed_resources: ["https://mcp.example.com/mcp"],
+      dcr_max_clients: 5,
+      dcr_unused_client_ttl_days: 7,
+    });
+  });
+
+  it("re-checks the groups a stored override already touches", async () => {
+    mockGetsWithOidc({ cimd: effectiveWithOidc.oidc.cimd, dcr_max_clients: 3 });
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+
+    expect(
+      await screen.findByRole("checkbox", {
+        name: /Override client ID metadata documents/,
+      })
+    ).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", {
+        name: /Override dynamic client registration/,
+      })
+    ).toBeChecked();
+  });
+
+  it("blocks the save while the overridden posture carries a refusal", async () => {
+    mockGetsWithOidc({ notFound: true });
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", {
+        name: /Override client ID metadata documents/,
+      })
+    );
+    fireEvent.change(
+      screen.getByLabelText("Trusted publisher domains (one per line)"),
+      { target: { value: "*" } }
+    );
+
+    expect(
+      await screen.findByText(/"\*" matches every host/)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Save Overrides" })
+    ).toBeDisabled();
+    expect(apiMock.put).not.toHaveBeenCalled();
   });
 });

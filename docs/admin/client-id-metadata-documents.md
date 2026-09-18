@@ -76,6 +76,22 @@ All nine live on the tenant's OIDC policy under `cimd`, resolved through the
 ordinary organization-baseline-plus-tenant-override chain (see
 [`docs/admin/organization-scope.md`](organization-scope.md)).
 
+They are editable from three places in the admin console, and which one you
+want follows from the two ordering rules below. The **organization Settings
+tab** (Organizations → an organization → Settings → *Client ID metadata
+documents*) edits the baseline, and is the **only** surface that can turn
+`cimd.enabled` or `cimd.allow_http` on — neither tenant surface can, because
+neither may widen what the organization set. The **tenant settings page**
+(Settings → *Client ID Metadata Documents*) states the signed-in tenant's own
+posture, and the **per-tenant security overrides panel** (Organizations → a
+tenant → *Override client ID metadata documents*) lets an organization
+administrator state one on a tenant's behalf. Both tenant surfaces take the
+posture over whole: checked means this tenant's nine fields, unchecked means it
+inherits the organization's nine and keeps following them. Every refusal in
+[The two interlocks](#the-two-interlocks) and every bound below is mirrored in
+the form, in the words the API answers with, so a posture that would be refused
+cannot be saved from any of the three.
+
 | Field | Default | What it does |
 | --- | --- | --- |
 | `cimd.enabled` | `false` | Whether a URL-shaped `client_id` is resolved at all. |

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Admin UI for client ID metadata documents, and for the DCR baseline
+  (#477).** The CIMD posture — nine fields, every one a security control by the
+  policy's own doc comment — was settable only through the settings API. It now
+  has a card on three surfaces: the organization Settings tab, which is the
+  only place `cimd.enabled` and `cimd.allow_http` can be turned **on**, because
+  both are ordered and no tenant may widen them; the tenant settings page; and
+  the organization administrator's per-tenant override panel, where the posture
+  is taken over whole or inherited whole, exactly as `Option<CimdPolicy>` models
+  it. Both interlocks and all three bounds are mirrored client-side in the
+  server's own words — CIMD cannot be enabled while
+  `external_client_allowed_resources` is empty (D3) or while
+  `cimd.trusted_client_id_domains` is, and that list refuses `*` and a wildcard
+  over a whole top-level domain — each rendered under the field it names and
+  each blocking the save, so an operator meets the refusal in the form rather
+  than in a `400` body. The Dynamic Client Registration card is mounted on the
+  organization tab for the same reason: `dynamic_registration` is tighten-only
+  against a baseline that defaults to `disabled`, so until now nothing in the
+  console could raise it. The per-tenant override panel gains a dynamic
+  registration group with it, without which saving any other group discarded a
+  tenant's registration policy. Its two counters' help text now says what T21.8
+  made true: both govern `managed_by: cimd` rows as well, and a never-authorized
+  `anonymous` registration is swept after one hour whatever the TTL says.
+  Default (`enabled: false`) tenants see none of it — a badge reading
+  **Disabled** and nothing else.
+
 - **Client ID metadata documents (CIMD).** A tenant can accept a `client_id`
   that is an `https` URL and fetch the JSON document published there as the
   client's registration — `draft-ietf-oauth-client-id-metadata-document`, the
@@ -277,6 +302,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than producing issuers no client can resolve (T21.6).
 
 ### Fixed
+
+- **Saving the organization settings page reset nine OIDC policy fields
+  (#477).** The frontend's `SetOrgSettings` carried no OIDC keys, so every save
+  from the organization Settings tab omitted `sensitive_scopes_enabled`,
+  `default_locale`, `dynamic_registration`, `dcr_allowed_scopes`,
+  `dcr_allowed_redirect_hosts`, `external_client_allowed_resources`,
+  `dcr_max_clients`, `dcr_unused_client_ttl_days` and the whole `cimd` posture.
+  Each is `#[serde(default)]` on the backend and `PUT
+  /organizations/{id}/settings` replaces the whole row, so an administrator
+  editing a password rule turned dynamic client registration and client ID
+  metadata documents off across the organization — and the baseline clamp that
+  runs after the write then dropped every tenant's own posture for being more
+  permissive than a baseline that had just been reset. Nothing in the response
+  said so. The same defect had reached `sensitive_scopes_enabled` and
+  `default_locale` since W7 shipped. The organization form now round-trips all
+  nine from the GET, with the server's own defaults when the response carries
+  no `oidc` block. No API, schema or settings-field change: the write shape was
+  short of the contract it already had.
 
 - **`http://[::1]/…` can be registered as a redirect URI (T21.8).** The
   structural validator both registration endpoints share compared the parsed

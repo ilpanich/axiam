@@ -77,6 +77,46 @@ Six facts, each with the line that shows it.
    event the CIMD materialisation writes (`AuditLogsPage.tsx:48`). No new
    endpoint, no new event, no new badge set.
 
+### Verification against `main` @ `1c56009`, implementation session 2026-09-18
+
+The brief for the implementing session was to verify each of the six facts
+before relying on it. **All six hold.** Three line references drifted by a
+line or two, and three statements elsewhere in the plan did not survive
+contact; both are recorded here rather than silently corrected, so the next
+reader can tell what was checked from what was assumed.
+
+| Fact | State | Evidence |
+|---|---|---|
+| 1 — the organization form drops the Phase 21 fields | **Holds** | `SetOrgSettings` at `organizations.ts:214` and `flattenOrgSettings` at `:259`; neither mentions `cimd`, `dcr_`, `dynamic_registration`, `external_client_allowed_resources`, `sensitive_scopes_enabled` or `default_locale` (`grep`, zero hits in the file). `SettingsTab` opens at `OrganizationDetailPage.tsx:1011`, its "the FULL flat SetOrgSettings" comment is at `:1027`, and `updateMutation.mutate(form)` is at `:1133`. |
+| 2 — the backend defaults what is absent and replaces the row | **Holds** | Every field of the backend `SetOrgSettings` (opens `settings.rs:1109`) in the cited `1161–1189` range carries `#[serde(default)]`. Two line references are off by two: `sensitive_scopes_enabled` is the field at `:1163` and `default_locale` at `:1166`; `:1161` and `:1164` are their `#[serde(default)]` attributes. `set_org_settings` is at `handlers/settings.rs:341` and stores the row it built. |
+| 3 — the clamp then clears the tenants | **Holds** | `reconcile_tenant_overrides` calls `clamp_overrides_to_org` at `handlers/settings.rs:252`; the function is defined at `settings.rs:1559` and its CIMD arm sets `overrides.cimd = None` at `:1770`, exactly as cited. |
+| 4 — the tenant DCR card cannot enable DCR | **Holds** | "a tenant may move down it and never up" is the doc comment at `settings.ts:84`; the organization default is `disabled` and the organization page had no DCR fields (fact 1). |
+| 5 — the override panel is group-based and fits a whole posture | **Holds** | `overrideFromForm` at `SecurityOverridePanel.tsx:156` builds a sparse payload from checked groups only, and had neither a DCR nor a CIMD group. |
+| 6 — everything else the UI needs exists | **Holds** | The frontend `OidcPolicy` opens at `settings.ts:100` and omitted `cimd`; `OAuth2ClientsPage.tsx:155` and `:161` carry the `cimd` badge and its caption, and `:683` the read-only detail; `AuditLogsPage.tsx:48` is `DCR_AUDIT_ACTIONS`. |
+
+**Three things the plan itself got wrong, corrected in the implementation.**
+
+1. **§1's cost table says the `Fixed` line should name "the eight fields".**
+   There are **nine** — the six DCR fields, `cimd`, `sensitive_scopes_enabled`
+   and `default_locale` — which is the count §0 fact 2 gives two paragraphs
+   earlier. The CHANGELOG names nine.
+2. **§2's surface table says the override panel should render `enabled` and
+   `allow_http` disabled when "the baseline has them false".** It cannot: the
+   organization baseline is not readable from any tenant surface —
+   `GET /api/v1/settings` returns only the merged result, which is the whole
+   reason the OPAQUE control on that page warns rather than blocks. The panel's
+   own header comment states the convention ("the panel states the direction
+   next to each control and lets the server be the one that refuses"), and §5
+   of this plan states it too ("No client-side enforcement of the *ordering*
+   rules"). The table cell is the outlier and loses: the ordering rule is shown
+   next to both switches on every tenant surface, and the server refuses.
+3. **§2's cost table lists `services/settings.test.ts` as if it existed.** It
+   did not — `validateDcrPolicy` is covered only through `SettingsPage.test.tsx`
+   — so the file was created for `validateCimdPolicy`'s table. Every expected
+   string in it was checked mechanically against the Rust literals in
+   `validate_cimd_policy`, with the line continuations resolved, rather than
+   transcribed by eye.
+
 ---
 
 ## 1. Finding A — the organization save resets DCR and CIMD

@@ -530,3 +530,271 @@ describe("SettingsPage — T21.4 dynamic client registration", () => {
     });
   });
 });
+
+// ─── T21.5 — client ID metadata documents ──────────────────────────────────
+
+/** A tenant that has a CIMD posture, and the audiences D3 requires for one. */
+const cimdSettings = {
+  ...settings,
+  oidc: {
+    dynamic_registration: "disabled",
+    dcr_allowed_scopes: [],
+    dcr_allowed_redirect_hosts: [],
+    external_client_allowed_resources: ["https://mcp.example.com/mcp"],
+    dcr_max_clients: 20,
+    dcr_unused_client_ttl_days: 30,
+    cimd: {
+      enabled: true,
+      allow_http: false,
+      trusted_client_id_domains: ["mcp.example.com"],
+      trusted_redirect_domains: [],
+      restrict_same_domain: false,
+      confidential_only: false,
+      min_cache_secs: 600,
+      max_cache_secs: 86_400,
+      max_metadata_bytes: 4_000,
+    },
+  },
+};
+
+const ENABLE_CIMD =
+  "Resolve a URL-shaped client_id by fetching the document it names";
+
+describe("SettingsPage — T21.5 client ID metadata documents", () => {
+  // I1 — mandatory, and the same rule DcrPolicySummary follows: on the default
+  // posture the read view says only that it is off. An empty publisher list and
+  // the shipped bounds are true but invite significance into a policy that does
+  // nothing.
+  it("I1 — shows only 'Disabled' in view mode on the default posture", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await screen.findByText("Client ID Metadata Documents");
+
+    const label = screen.getByText("Client ID metadata documents");
+    expect(within(label.parentElement!).getByText("Disabled")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Trusted publisher domains:/)
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Cache floor")).not.toBeInTheDocument();
+    expect(screen.queryByText("Document read cap")).not.toBeInTheDocument();
+  });
+
+  it("renders the effective posture in view mode once it is enabled", async () => {
+    apiMock.get.mockResolvedValue(res(cimdSettings));
+    renderWithProviders(<SettingsPage />);
+    await screen.findByText("Client ID Metadata Documents");
+
+    expect(screen.getByText("mcp.example.com")).toBeInTheDocument();
+    expect(screen.getByText("600 seconds")).toBeInTheDocument();
+    expect(screen.getByText("4000 bytes")).toBeInTheDocument();
+    expect(screen.getByText(/loopback always allowed/)).toBeInTheDocument();
+  });
+
+  it("pre-fills the CIMD edit fields from the loaded posture", async () => {
+    apiMock.get.mockResolvedValue(res(cimdSettings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+
+    expect(screen.getByLabelText(ENABLE_CIMD)).toBeChecked();
+    expect(
+      screen.getByLabelText("Trusted publisher domains (one per line)")
+    ).toHaveValue("mcp.example.com");
+    expect(screen.getByLabelText("Cache floor (seconds)")).toHaveValue(600);
+    expect(screen.getByLabelText("Document read cap (bytes)")).toHaveValue(4000);
+    expect(
+      screen.getByLabelText(
+        "Require a document's redirect hosts to match the client_id's host"
+      )
+    ).not.toBeChecked();
+  });
+
+  it("D3 — refuses enabling while the allowed-audiences list is empty", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.click(screen.getByLabelText(ENABLE_CIMD));
+
+    expect(
+      await screen.findByText(
+        /cimd\.enabled: client ID metadata documents cannot be enabled while external_client_allowed_resources is empty \(D3\)/
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save Settings" })).toBeDisabled();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("refuses enabling with no trusted publisher domain", async () => {
+    apiMock.get.mockResolvedValue(
+      res({
+        ...cimdSettings,
+        oidc: {
+          ...cimdSettings.oidc,
+          cimd: { ...cimdSettings.oidc.cimd, enabled: false },
+        },
+      })
+    );
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    fireEvent.change(
+      screen.getByLabelText("Trusted publisher domains (one per line)"),
+      { target: { value: "" } }
+    );
+    await userEvent.click(screen.getByLabelText(ENABLE_CIMD));
+
+    expect(
+      await screen.findByText(
+        /cannot be enabled with no trusted publisher domain/
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save Settings" })).toBeDisabled();
+  });
+
+  // MCP-03 (#469). `*` is refused for the publishers and admitted for the
+  // redirects, which is a distinction worth showing at the point of typing.
+  it("refuses `*` as a trusted publisher domain, in the server's words", async () => {
+    apiMock.get.mockResolvedValue(res(cimdSettings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    fireEvent.change(
+      screen.getByLabelText("Trusted publisher domains (one per line)"),
+      { target: { value: "*" } }
+    );
+
+    expect(
+      await screen.findByText(
+        /cimd\.trusted_client_id_domains: "\*" matches every host, which is the posture an empty list is refused for/
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save Settings" })).toBeDisabled();
+  });
+
+  it("refuses a wildcard over a whole top-level domain", async () => {
+    apiMock.get.mockResolvedValue(res(cimdSettings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    fireEvent.change(
+      screen.getByLabelText("Trusted publisher domains (one per line)"),
+      { target: { value: "*.com" } }
+    );
+
+    expect(
+      await screen.findByText(
+        /"\*\.com" is a wildcard over a whole top-level domain/
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("admits `*` as a trusted redirect domain", async () => {
+    apiMock.get.mockResolvedValue(res(cimdSettings));
+    apiMock.put.mockResolvedValue(res(cimdSettings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    fireEvent.change(
+      screen.getByLabelText("Trusted redirect domains (one per line)"),
+      { target: { value: "*" } }
+    );
+
+    expect(screen.getByRole("button", { name: "Save Settings" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+  });
+
+  it("refuses a publisher entry that is a URL rather than a host pattern", async () => {
+    apiMock.get.mockResolvedValue(res(cimdSettings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    fireEvent.change(
+      screen.getByLabelText("Trusted publisher domains (one per line)"),
+      { target: { value: "https://mcp.example.com" } }
+    );
+
+    expect(
+      await screen.findByText(
+        /"https:\/\/mcp\.example\.com" is not a host pattern/
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("refuses a cache floor below the deployment floor", async () => {
+    apiMock.get.mockResolvedValue(res(cimdSettings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    fireEvent.change(screen.getByLabelText("Cache floor (seconds)"), {
+      target: { value: "30" },
+    });
+
+    expect(
+      await screen.findByText(/cimd\.min_cache_secs \(30\) must be >= 60/)
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save Settings" })).toBeDisabled();
+  });
+
+  it("refuses a zero read cap", async () => {
+    apiMock.get.mockResolvedValue(res(cimdSettings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    fireEvent.change(screen.getByLabelText("Document read cap (bytes)"), {
+      target: { value: "0" },
+    });
+
+    expect(
+      await screen.findByText(
+        /cimd\.max_metadata_bytes \(0\) must be between 1 and 65536/
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("sends the whole nine-field posture as part of the tenant override", async () => {
+    apiMock.get.mockResolvedValue(res(cimdSettings));
+    apiMock.put.mockResolvedValue(res(cimdSettings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+
+    await userEvent.click(
+      screen.getByLabelText("Refuse a document whose token_endpoint_auth_method is none")
+    );
+    fireEvent.change(
+      screen.getByLabelText("Trusted redirect domains (one per line)"),
+      { target: { value: "app.example.com" } }
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const [, body] = apiMock.put.mock.calls[0];
+    expect(body).toMatchObject({
+      cimd: {
+        enabled: true,
+        allow_http: false,
+        trusted_client_id_domains: ["mcp.example.com"],
+        trusted_redirect_domains: ["app.example.com"],
+        restrict_same_domain: false,
+        confidential_only: true,
+        min_cache_secs: 600,
+        max_cache_secs: 86_400,
+        max_metadata_bytes: 4_000,
+      },
+    });
+  });
+
+  // The server returns early while `enabled` is false, so a tenant may stage a
+  // posture before turning it on. A mirror that refused here would refuse a
+  // save the server accepts — the one direction it must never fail in.
+  it("saves a staged posture that is invalid but not enabled", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    fireEvent.change(
+      screen.getByLabelText("Trusted publisher domains (one per line)"),
+      { target: { value: "*" } }
+    );
+
+    expect(screen.getByRole("button", { name: "Save Settings" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const [, body] = apiMock.put.mock.calls[0];
+    expect(body).toMatchObject({
+      cimd: { enabled: false, trusted_client_id_domains: ["*"] },
+    });
+  });
+});

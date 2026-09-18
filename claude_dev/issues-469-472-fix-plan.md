@@ -573,7 +573,7 @@ own message says so.
 | Tests | the inversion above; a second case for the `request_uri` path (`:4554`) since the harness pins only `:1452` today; `oauth2_conformance.rs` and `par_test.rs` unchanged and green |
 | Docs | `docs/admin/public-clients.md`'s port rule gains one sentence: errors are redirected under the same rule |
 | CHANGELOG | one line under `[Unreleased]` → `Fixed` |
-| Records | T-280 → Closed; register count; review §0; plan §9 item 12 needs no edit (it already records the defect as an error-path one) |
+| Records | T-280 → Closed; register count; review §0; plan §9 item 13 needs no edit (it already records the defect as an error-path one; it was item 12 before #477 inserted one at 8) |
 
 ### I1
 
@@ -761,8 +761,8 @@ nobody bumped the tripwire.
 - `claude_dev/security-review-mcp-2026-09-17.md` §0: the four rows' state
   column, in MCP-02's form (`Closed — <commit>`); §7 gains a line that the
   MCP-06 refusal is now pinned, if PR B adds the test.
-- `claude_dev/mcp-authorization-server-plan.md` §9: no edit. Item 12 already
-  records the defect correctly.
+- `claude_dev/mcp-authorization-server-plan.md` §9: no edit. Item 13 already
+  records the defect correctly (numbered 12 until #477 inserted an item at 8).
 - `CHANGELOG.md` `[Unreleased]`: four `Security`/`Fixed` lines, one per
   issue, each naming the setting that gates it or saying it is ungated.
 - `docs/admin/client-id-metadata-documents.md`, `docs/admin/dynamic-client-registration.md`,
@@ -776,3 +776,11 @@ them security controls by the struct's own doc comment — is settable only
 through the API. That is the T4b-shaped task the phase skipped, and it should
 be filed against T21.5 as its own issue rather than folded into PR A, which
 has enough frontend surface in #471 already.
+
+> **Filed as [#477](https://github.com/ilpanich/axiam/issues/477)**, and
+> planned in [`cimd-admin-ui-plan.md`](cimd-admin-ui-plan.md), which sizes the
+> gap and finds a second, worse defect while doing it: every save of the
+> organization settings page reset the DCR and CIMD posture to the defaults,
+> and the baseline clamp then cleared the tenants'. Fact 3 is therefore not
+> only a missing form — it is a posture that could be written through the API
+> and erased by an unrelated click. Both are closed in the PR for #477.

@@ -7,6 +7,12 @@ import {
   type OpaquePolicy,
   type OpaqueSuite,
 } from "@/services/opaquePolicy";
+import {
+  readOidcPolicy,
+  type CimdPolicy,
+  type DynamicRegistrationMode,
+  type OidcPolicy,
+} from "@/services/settings";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -206,6 +212,12 @@ export interface SecuritySettings {
   privacy?: PrivacyPolicy;
   /** Absent on a server older than the field; callers fall back to `preferred`. */
   webauthn?: WebauthnPolicy;
+  /**
+   * T21.4/T21.5 — dynamic client registration and client ID metadata
+   * documents. Absent on a server older than the block; callers go through
+   * `readOidcPolicy`, which applies the same defaults that server would.
+   */
+  oidc?: OidcPolicy;
   created_at: string;
   updated_at: string;
 }
@@ -253,6 +265,26 @@ export interface SetOrgSettings {
   // omitting it from a save would silently relax an organization that had set
   // `required` — with nothing in the response to say so.
   webauthn_user_verification: WebauthnUserVerification;
+  // OIDC. The comment above was written for one field and is true of all nine
+  // below: every one is `#[serde(default)]` on the backend's `SetOrgSettings`,
+  // this PUT replaces the whole row, and `reconcile_tenant_overrides` then
+  // clamps every tenant against the row that was just written. So a save that
+  // omitted them turned dynamic registration and client ID metadata documents
+  // off org-wide *and* discarded every tenant's stated posture — triggered by
+  // editing a password rule, with nothing in the response to say so.
+  //
+  // `sensitive_scopes_enabled` and `default_locale` have no form control on
+  // this page and are carried through unedited. A field with no UI still has
+  // to make the round trip.
+  sensitive_scopes_enabled: boolean;
+  default_locale: string | null;
+  dynamic_registration: DynamicRegistrationMode;
+  dcr_allowed_scopes: string[];
+  dcr_allowed_redirect_hosts: string[];
+  external_client_allowed_resources: string[];
+  dcr_max_clients: number;
+  dcr_unused_client_ttl_days: number;
+  cimd: CimdPolicy;
 }
 
 /** Flatten a nested SecuritySettings into the flat SetOrgSettings input. */
@@ -293,6 +325,11 @@ export function flattenOrgSettings(s: SecuritySettings): SetOrgSettings {
     // `webauthn`, and the fallback is the value that server would itself apply.
     webauthn_user_verification:
       s.webauthn?.webauthn_user_verification ?? DEFAULT_WEBAUTHN_USER_VERIFICATION,
+    // And once more for the OIDC block, where the guard matters most: nine
+    // fields, seven of them Phase 21 security controls, all defaulted server-
+    // side. `readOidcPolicy` returns every one of them, so what the form sends
+    // back is what the GET reported rather than the defaults.
+    ...readOidcPolicy(s),
   };
 }
 

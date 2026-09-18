@@ -12,6 +12,8 @@ import { DataTable } from "@/components/DataTable";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Input } from "@/components/ui/input";
 import { ToggleField } from "@/components/shared";
+import { CimdPolicyFields } from "@/pages/settings/cimdPolicy";
+import { DEFAULT_CIMD_POLICY } from "@/services/settings";
 
 /**
  * C3 — axe-core smoke run over the main surfaces.
@@ -171,6 +173,33 @@ describe("a11y smoke — design-system components", () => {
   it("ToggleField", async () => {
     const { container } = renderWithProviders(
       <ToggleField id="enabled" label="Enable webhooks" checked onChange={() => {}} />,
+    );
+    await expectNoViolations(container);
+  });
+
+  /**
+   * T21.5. The card this covers is the densest control group in the console —
+   * four switches, two list editors and three bounded numbers — and it is
+   * mounted on three surfaces, so a label that came undone would come undone
+   * three times. Rendered in the state that shows every refusal at once, since
+   * an alert with no accessible name is the failure mode worth catching: on the
+   * default posture the card renders no alert at all.
+   */
+  it("CimdPolicyFields with every refusal showing", async () => {
+    const { container } = renderWithProviders(
+      <CimdPolicyFields
+        idPrefix="a11y"
+        value={{
+          ...DEFAULT_CIMD_POLICY,
+          enabled: true,
+          trusted_client_id_domains: ["*"],
+          trusted_redirect_domains: ["https://app.example.com"],
+          min_cache_secs: 1,
+          max_metadata_bytes: 0,
+        }}
+        externalResources={[]}
+        onChange={() => {}}
+      />,
     );
     await expectNoViolations(container);
   });

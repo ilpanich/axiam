@@ -16,12 +16,16 @@ import {
   CheckCircle2,
   ChevronRight,
   UserPlus,
+  Globe,
 } from "lucide-react";
 import {
   settingsService,
+  validateCimdPolicy,
   validateDcrPolicy,
+  DEFAULT_CIMD_POLICY,
   DEFAULT_DCR_MAX_CLIENTS,
   DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
+  type CimdPolicy,
   type SecuritySettings,
   type TenantSettingsOverride,
   type WebauthnUserVerification,
@@ -44,8 +48,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
+import { BooleanDisplay, NumberDisplay } from "./policyFields";
+import { DcrPolicyFields, DcrPolicySummary } from "./dcrPolicy";
+import { CimdPolicyFields, CimdPolicySummary } from "./cimdPolicy";
 
 // ─── Flat editable view-model (minutes where presented as minutes) ────────────
 // The backend stores token/lockout/mfa durations in SECONDS. We present the
@@ -90,14 +95,11 @@ interface SettingsForm {
   external_client_allowed_resources: string[];
   dcr_max_clients: number;
   dcr_unused_client_ttl_days: number;
-}
-
-/** `"a\nb\n  \nc"` → `["a", "b", "c"]` — one entry per non-blank line. */
-function parseLines(raw: string): string[] {
-  return raw
-    .split("\n")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  // T21.5 — the CIMD posture, whole. Not flattened into the form the way every
+  // other block is, because the backend models it as one object and overrides
+  // it as one object; splitting it here and rejoining it on save would be the
+  // per-field merge the policy exists to refuse.
+  cimd: CimdPolicy;
 }
 
 /**
@@ -161,6 +163,9 @@ function toForm(s: SecuritySettings): SettingsForm {
     dcr_max_clients: s.oidc?.dcr_max_clients ?? DEFAULT_DCR_MAX_CLIENTS,
     dcr_unused_client_ttl_days:
       s.oidc?.dcr_unused_client_ttl_days ?? DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
+    // T21.5 — same fallback, same reason: a server older than the field sends
+    // no `cimd`, and the shipped default is `enabled: false`.
+    cimd: s.oidc?.cimd ?? DEFAULT_CIMD_POLICY,
   };
 }
 
@@ -193,6 +198,7 @@ function toOverride(f: SettingsForm): TenantSettingsOverride {
     external_client_allowed_resources: f.external_client_allowed_resources,
     dcr_max_clients: f.dcr_max_clients,
     dcr_unused_client_ttl_days: f.dcr_unused_client_ttl_days,
+    cimd: f.cimd,
   };
 }
 
@@ -237,315 +243,6 @@ function ToggleField({
         )}
       </div>
     </label>
-  );
-}
-
-// ─── Display helpers ─────────────────────────────────────────────────────────
-
-interface NumberDisplayProps {
-  label: string;
-  value: number;
-  unit?: string;
-}
-
-function NumberDisplay({ label, value, unit }: NumberDisplayProps) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground uppercase tracking-wide mb-0.5">
-        {label}
-      </p>
-      <p className="text-sm text-foreground font-medium">
-        {value}
-        {unit ? ` ${unit}` : ""}
-      </p>
-    </div>
-  );
-}
-
-interface BooleanDisplayProps {
-  label: string;
-  enabled: boolean;
-}
-
-function BooleanDisplay({ label, enabled }: BooleanDisplayProps) {
-  return (
-    <div className="flex items-center gap-2">
-      <p className="text-xs text-muted-foreground uppercase tracking-wide">
-        {label}
-      </p>
-      <Badge variant={enabled ? "default" : "secondary"}>
-        {enabled ? "Enabled" : "Disabled"}
-      </Badge>
-    </div>
-  );
-}
-
-// ─── T21.4 — Dynamic Client Registration fields ────────────────────────────
-
-interface DcrPolicyValue {
-  dynamic_registration: DynamicRegistrationMode;
-  dcr_allowed_scopes: string[];
-  dcr_allowed_redirect_hosts: string[];
-  external_client_allowed_resources: string[];
-  dcr_max_clients: number;
-  dcr_unused_client_ttl_days: number;
-}
-
-const DYNAMIC_REGISTRATION_LABELS: Record<DynamicRegistrationMode, string> = {
-  disabled: "Disabled — no self-registered client may exist",
-  initial_access_token: "Initial access token — requires an administrator-minted credential",
-  anonymous: "Anonymous — open to anybody who can reach the endpoint",
-};
-
-const DYNAMIC_REGISTRATION_HELP: Record<DynamicRegistrationMode, string> = {
-  disabled:
-    "Every client is an administrator's decision. What every AXIAM deployment does today.",
-  initial_access_token:
-    "RFC 7591 §1.2's \"protected\" profile: the endpoint is open, the act is not. Mint a " +
-    "single-use credential from the OAuth2 Clients page and hand it to the registering client.",
-  anonymous:
-    "RFC 7591 §1.2's \"open\" profile — the one MCP Inspector, Claude Code and VS Code use. " +
-    "Refused while Allowed audiences is empty (D3, below).",
-};
-
-/**
- * Edit-mode fields for the T21.4 policy.
- *
- * `dcr_allowed_scopes`, `dcr_allowed_redirect_hosts` and
- * `external_client_allowed_resources` are free-text lists rather than
- * checkbox groups — unlike `OAUTH2_SCOPES` on the OAuth2 Clients page, this
- * policy is not bounded to a fixed catalog (a redirect host glob or a
- * resource URL is never one of a known few), so a textarea is the only
- * faithful editor, matching the "one per line" convention `redirect_uris` and
- * `allowed_resources` already use there.
- */
-function DcrPolicyFields({
-  value,
-  onChange,
-}: {
-  value: DcrPolicyValue;
-  onChange: (patch: Partial<DcrPolicyValue>) => void;
-}) {
-  const d3Empty =
-    value.dynamic_registration === "anonymous" &&
-    value.external_client_allowed_resources.length === 0;
-
-  return (
-    <div className="space-y-4">
-      <div className="space-y-2">
-        <Label htmlFor="dcr-mode">Self-registration mode</Label>
-        <select
-          id="dcr-mode"
-          className="w-full rounded border border-white/20 bg-transparent px-3 py-2 text-sm"
-          value={value.dynamic_registration}
-          onChange={(e) =>
-            onChange({
-              dynamic_registration: e.target.value as DynamicRegistrationMode,
-            })
-          }
-        >
-          <option value="disabled">{DYNAMIC_REGISTRATION_LABELS.disabled}</option>
-          <option value="initial_access_token">
-            {DYNAMIC_REGISTRATION_LABELS.initial_access_token}
-          </option>
-          <option value="anonymous">{DYNAMIC_REGISTRATION_LABELS.anonymous}</option>
-        </select>
-        <p className="text-xs text-muted-foreground">
-          {DYNAMIC_REGISTRATION_HELP[value.dynamic_registration]}
-        </p>
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="dcr-allowed-scopes">Allowed scopes</Label>
-        <Textarea
-          id="dcr-allowed-scopes"
-          value={value.dcr_allowed_scopes.join("\n")}
-          onChange={(e) =>
-            onChange({ dcr_allowed_scopes: parseLines(e.target.value) })
-          }
-          placeholder={"openid\nprofile\nemail"}
-          rows={3}
-          className="font-mono"
-          aria-label="Allowed scopes (one per line)"
-        />
-        <p className="text-xs text-muted-foreground">
-          Scopes a self-registered client may ask for. One per line; empty
-          means it gets none.{" "}
-          <strong>
-            <code>address</code> and <code>phone</code> may never appear
-            here
-          </strong>{" "}
-          — both release personal data under a per-client consent record
-          (W7), and a self-registered client already carries a forced consent
-          record of its own (D4); two records in one namespace is a state
-          this policy refuses to create. Register a client that needs them
-          through <code>POST /oauth2-clients</code> instead.
-        </p>
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="dcr-allowed-redirect-hosts">
-          Allowed redirect hosts
-        </Label>
-        <Textarea
-          id="dcr-allowed-redirect-hosts"
-          value={value.dcr_allowed_redirect_hosts.join("\n")}
-          onChange={(e) =>
-            onChange({
-              dcr_allowed_redirect_hosts: parseLines(e.target.value),
-            })
-          }
-          placeholder={"mcp.example.com\n*.example.com"}
-          rows={2}
-          className="font-mono"
-          aria-label="Allowed redirect hosts (one per line)"
-        />
-        <p className="text-xs text-muted-foreground">
-          Host globs a self-registered <code>redirect_uri</code> may point at
-          (<code>*.example.com</code>, or <code>*</code> for any). Empty is
-          fine: <code>127.0.0.1</code>, <code>localhost</code> and{" "}
-          <code>[::1]</code> are always allowed regardless, since RFC 8252
-          §7.3 loopback callbacks are how every desktop MCP client receives
-          its callback.
-        </p>
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="dcr-allowed-resources">
-          Allowed audiences (resource servers)
-        </Label>
-        <Textarea
-          id="dcr-allowed-resources"
-          value={value.external_client_allowed_resources.join("\n")}
-          onChange={(e) =>
-            onChange({
-              external_client_allowed_resources: parseLines(e.target.value),
-            })
-          }
-          placeholder="https://mcp.example.com/mcp"
-          rows={2}
-          className="font-mono"
-          aria-label="Allowed audiences (one per line)"
-        />
-        <p className="text-xs text-muted-foreground">
-          <strong>D3.</strong> The MCP servers (or other resource servers)
-          this tenant fronts. A self-registered client cannot choose its own
-          audiences — it inherits this list verbatim, so what a stranger can
-          mint a token <em>for</em> is decided here, in advance, rather than
-          by the registration request.
-        </p>
-        {d3Empty && (
-          <p
-            role="alert"
-            className="flex items-center gap-2 p-2.5 rounded-md bg-destructive/10 border border-destructive/30 text-destructive text-xs"
-          >
-            <AlertCircle size={14} className="shrink-0" aria-hidden="true" />
-            Anonymous registration cannot be saved while this list is empty:
-            an empty list would leave a self-registered client able to obtain
-            only the <code>axiam:user</code> tokens AXIAM's own APIs accept —
-            an unauthenticated endpoint that mints clients able to ask for
-            tokens against AXIAM itself. Name the MCP servers this tenant
-            fronts first.
-          </p>
-        )}
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-2">
-          <Label htmlFor="dcr-max-clients">Max self-registered clients</Label>
-          <Input
-            id="dcr-max-clients"
-            type="number"
-            min={1}
-            value={value.dcr_max_clients}
-            onChange={(e) =>
-              onChange({ dcr_max_clients: Number(e.target.value) })
-            }
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="dcr-unused-ttl">
-            Unused-client sweep (days)
-          </Label>
-          <Input
-            id="dcr-unused-ttl"
-            type="number"
-            min={0}
-            value={value.dcr_unused_client_ttl_days}
-            onChange={(e) =>
-              onChange({ dcr_unused_client_ttl_days: Number(e.target.value) })
-            }
-          />
-          <p className="text-xs text-muted-foreground">
-            A self-registered client with no authorization for this many days
-            is deleted. <code>0</code> disables the sweep for this tenant.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Read-mode summary. **I1** — while `dynamic_registration` is `disabled`
- * (the default), nothing beyond that fact is shown: an empty scopes/hosts
- * list and default counters would still be true, but rendering them invites
- * an operator to read significance into a policy that does nothing.
- */
-function DcrPolicySummary({ value }: { value: DcrPolicyValue }) {
-  if (value.dynamic_registration === "disabled") {
-    return (
-      <div className="flex items-center gap-2">
-        <p className="text-xs text-muted-foreground uppercase tracking-wide">
-          Self-registration
-        </p>
-        <Badge variant="secondary">Disabled</Badge>
-      </div>
-    );
-  }
-
-  const listOrNone = (items: string[]) =>
-    items.length > 0 ? items.join(", ") : "none configured";
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <p className="text-xs text-muted-foreground uppercase tracking-wide">
-          Self-registration
-        </p>
-        <Badge>{DYNAMIC_REGISTRATION_LABELS[value.dynamic_registration]}</Badge>
-      </div>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <NumberDisplay
-          label="Max self-registered clients"
-          value={value.dcr_max_clients}
-        />
-        <NumberDisplay
-          label="Unused-client sweep"
-          value={value.dcr_unused_client_ttl_days}
-          unit={value.dcr_unused_client_ttl_days === 0 ? "(disabled)" : "days"}
-        />
-      </div>
-      <div className="space-y-2 text-sm">
-        <p>
-          <span className="text-muted-foreground">Allowed scopes: </span>
-          {listOrNone(value.dcr_allowed_scopes)}
-        </p>
-        <p>
-          <span className="text-muted-foreground">
-            Allowed redirect hosts:{" "}
-          </span>
-          <span>{listOrNone(value.dcr_allowed_redirect_hosts)}</span>
-          <span className="text-muted-foreground"> (loopback always allowed)</span>
-        </p>
-        <p>
-          <span className="text-muted-foreground">
-            Allowed audiences (D3):{" "}
-          </span>
-          {listOrNone(value.external_client_allowed_resources)}
-        </p>
-      </div>
-    </div>
   );
 }
 
@@ -623,6 +320,18 @@ export function SettingsPage() {
       setFeedback({ type: "error", message: dcrError });
       return;
     }
+    // T21.5 — the same class of refusal, and the same handling: both CIMD
+    // interlocks and every bound are hard 400s server-side. The card already
+    // renders each one under the field it names; this is the second door, so a
+    // save cannot slip past a refusal the operator scrolled away from.
+    const cimdErrors = validateCimdPolicy({
+      external_client_allowed_resources: form.external_client_allowed_resources,
+      cimd: form.cimd,
+    });
+    if (cimdErrors.length > 0) {
+      setFeedback({ type: "error", message: cimdErrors[0].message });
+      return;
+    }
     updateMutation.mutate(toOverride(form));
   }
 
@@ -668,6 +377,15 @@ export function SettingsPage() {
   }
 
   const data = form;
+  // T21.5 — every CIMD refusal is already rendered under the field it names, so
+  // the button that would send them is disabled rather than left to fail. The
+  // DCR card keeps its save-time refusal: its two interlocks were shipped that
+  // way and their tests pin it.
+  const cimdRefused =
+    validateCimdPolicy({
+      external_client_allowed_resources: data.external_client_allowed_resources,
+      cimd: data.cimd,
+    }).length > 0;
   // The advisory compares against the *loaded effective* policy, which is the
   // only thing this endpoint exposes — the org baseline is not readable here.
   const effectiveOpaque = readOpaquePolicy(settings);
@@ -1234,12 +952,52 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* ── Client ID metadata documents (T21.5) ───────────────────────── */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <Globe size={18} className="text-primary" aria-hidden="true" />
+            <CardTitle className="text-base">
+              Client ID Metadata Documents
+            </CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground mb-4">
+            Accept a <code>client_id</code> that is an <code>https</code> URL
+            and fetch the JSON document published there as the client&rsquo;s
+            registration — how a desktop MCP client is the same client at every
+            deployment it talks to, with nothing registered in advance. Off by
+            default: a URL-shaped <code>client_id</code> is then an unknown
+            client and nothing is fetched. This tenant inherits its
+            organization&rsquo;s posture whole and may only tighten it.
+          </p>
+          {editing ? (
+            <CimdPolicyFields
+              idPrefix="tenant"
+              value={data.cimd}
+              externalResources={data.external_client_allowed_resources}
+              onChange={(cimd) => setField("cimd", cimd)}
+              orderingNote={
+                <>
+                  A tenant may turn this <em>off</em>, never on: enabling it is
+                  a decision taken where the outbound fetch is paid for, so the
+                  organization baseline has to have it on first.
+                </>
+              }
+            />
+          ) : (
+            <CimdPolicySummary value={data.cimd} />
+          )}
+        </CardContent>
+      </Card>
+
       {/* ── Action bar (edit mode) ─────────────────────────────────────── */}
       {editing && (
         <div className="flex gap-3 pt-2">
           <Button
             onClick={handleSave}
-            disabled={updateMutation.isPending}
+            disabled={updateMutation.isPending || cimdRefused}
             size="sm"
           >
             {updateMutation.isPending ? (

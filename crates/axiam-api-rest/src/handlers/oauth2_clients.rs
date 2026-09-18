@@ -404,11 +404,22 @@ pub(crate) fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiErro
                 "redirect_uri must be an absolute URL with a host: {uri}"
             ))
         })?;
-        // Allow http for localhost/loopback only, require HTTPS otherwise
-        let is_localhost = host == "localhost" || host == "127.0.0.1" || host == "::1";
+        // Allow http for localhost/loopback only, require HTTPS otherwise.
+        //
+        // `[::1]`, with the brackets, is what `Url::host_str` returns for an
+        // IPv6 literal — the bare `::1` this line compared against until T21.8
+        // is a spelling no parser produces, so the IPv6 arm was unreachable and
+        // `http://[::1]/callback` was refused by both registration endpoints
+        // while the error message named it as allowed. The rest of the stack
+        // always spelled it with brackets: the redirect matcher's loopback arm
+        // (`axiam_oauth2::redirect_uri`), the DCR host allow-list
+        // (`axiam_oauth2::dcr::ALWAYS_ALLOWED_REDIRECT_HOSTS`) and the CIMD
+        // document validator all do, and all are tested on it. RFC 8252 §7.3
+        // lists the IPv6 loopback beside `127.0.0.1`.
+        let is_localhost = host == "localhost" || host == "127.0.0.1" || host == "[::1]";
         if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_localhost) {
             return Err(validation_err(format!(
-                "redirect_uri must use https (http is only allowed for localhost/127.0.0.1/::1): {uri}"
+                "redirect_uri must use https (http is only allowed for localhost/127.0.0.1/[::1]): {uri}"
             )));
         }
         // RFC 6749 §3.1.2: redirect URIs must not include a fragment

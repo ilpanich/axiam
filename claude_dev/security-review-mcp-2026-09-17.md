@@ -28,8 +28,8 @@ in tenant isolation" deserves to know what was tried.
 | **MCP-03** | `cimd.trusted_client_id_domains` refuses the empty list and accepts `*`, which means the same thing. The interlock T21.5 added to remove the "stranger chooses the fetch target" class is defeated by one character. | Medium | **Filed** — [#469](https://github.com/ilpanich/axiam/issues/469) |
 | **MCP-04** | `managed_by: cimd` shadow rows are bounded by no quota and swept by nothing. A tenant whose trusted publisher list names shared hosting grows client rows without limit. | Medium | **Filed** — [#470](https://github.com/ilpanich/axiam/issues/470) |
 | **MCP-05** | In `anonymous` mode a stranger can fill `dcr_max_clients` (default 20) in about four minutes and deny registration to legitimate clients for `dcr_unused_client_ttl_days` (default 30). | Medium | **Filed** — [#471](https://github.com/ilpanich/axiam/issues/471) |
-| **MCP-01** | A refusal raised *before* the redirect matcher runs is answered directly rather than redirected, so a desktop client on an ephemeral loopback port never learns its authorization failed. Fail-closed; an interoperability defect, not a vulnerability. | Low | **Filed** — [#472](https://github.com/ilpanich/axiam/issues/472) |
-| **MCP-06** | The "no `tenant_id` on a tenant path" check matches the raw query string, where the extractor that consumes it matches the percent-decoded one. | Informational | **Accepted** |
+| **MCP-01** | A refusal raised *before* the redirect matcher runs is answered directly rather than redirected, so a desktop client on an ephemeral loopback port never learns its authorization failed. Fail-closed; an interoperability defect, not a vulnerability. | Low | **Closed** — `b8bc508` ([#472](https://github.com/ilpanich/axiam/issues/472)) |
+| **MCP-06** | The "no `tenant_id` on a tenant path" check matches the raw query string, where the extractor that consumes it matches the percent-decoded one. | Informational | **Accepted** — pinned by a test as of `#472` |
 
 | ID | Verified, no finding |
 |---|---|
@@ -39,6 +39,15 @@ in tenant isolation" deserves to know what was tried.
 
 **Nothing here blocks the phase.** MCP-02 was the only finding that reached
 past an invariant, and it is closed.
+
+**Remediation, 2026-09-17.** All four filed findings were decided and planned in
+[`issues-469-472-fix-plan.md`](issues-469-472-fix-plan.md) and fixed. MCP-01
+closed first, on its own branch, because it shares no file with the other
+three; the state column above carries each commit. Two things the remediation
+found that this document had slightly wrong are recorded where they belong:
+§7's note on what MCP-06's acceptance rests on, below, and the fix plan's §1
+verification note, which corrects a claim about which doc comments reach the
+OpenAPI spec.
 
 ---
 
@@ -400,6 +409,23 @@ decoder in front of a security check, which is the thing `redirect_uri.rs` and
 `resource.rs` both argue against at length, to buy a better error message on a
 request that is already refused. If it is ever fixed, the argument for it should
 be the message and not the security.
+
+**The refusal is now pinned** (#472,
+`mcp06_a_percent_encoded_tenant_id_on_a_tenant_path_is_still_refused`). What
+the acceptance rests on is the extractor's field type and a dependency's
+duplicate-field behaviour, neither of which is a property of the guard — so
+nothing the guard's own tests cover would notice if either changed, and no case
+in the crate sent the encoded spelling. The test changes no behaviour and
+deliberately does not pin the error *code*, which would pin the half of this
+finding the acceptance leaves alone.
+
+One correction to the paragraph above, found in writing that test. "The request
+is refused with a `400`" is true only of a request that carries a credential:
+authentication is refused before the query is deserialised, so a stranger
+sending `tenant%5Fid=` gets a `401` and never reaches the extractor at all. The
+acceptance is unaffected — the request is refused either way, and the `401` is
+if anything the better answer — but the mechanism it names is observable only
+behind a credential, and the test asserts both.
 
 ---
 

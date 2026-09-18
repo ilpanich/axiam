@@ -465,6 +465,69 @@ async fn create_oauth2_client_allows_http_localhost() {
     }
 }
 
+/// `http://[::1]/…` registers, which until T21.8 it could not.
+///
+/// `validate_redirect_uris` compared the parsed host against the bare `::1`
+/// while `Url::host_str` returns an IPv6 literal with its brackets, so the
+/// IPv6 loopback arm was unreachable and the refusal named `::1` as allowed in
+/// the same breath. Every other loopback comparison in the stack — the redirect
+/// matcher, the DCR host allow-list, the CIMD document validator — spells it
+/// `[::1]`.
+///
+/// Both spellings of the presented URI are exercised, because a client may
+/// write the literal either way and `Url` normalises to the bracketed form.
+#[actix_rt::test]
+async fn create_oauth2_client_allows_http_ipv6_loopback() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    for uri in ["http://[::1]/callback", "http://[::1]:49152/callback"] {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/oauth2-clients")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(serde_json::json!({
+                "name": "IPv6 Dev Client",
+                "redirect_uris": [uri],
+                "grant_types": ["authorization_code"],
+                "scopes": []
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            201,
+            "RFC 8252 §7.3 lists the IPv6 loopback beside 127.0.0.1: {uri}"
+        );
+    }
+
+    // And the widening is one host, not "IPv6". A routable literal over `http`
+    // is refused exactly as `http://example.com` is.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Routable IPv6 Client",
+            "redirect_uris": ["http://[2001:db8::1]/callback"],
+            "grant_types": ["authorization_code"],
+            "scopes": []
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "only the loopback literal takes the http allowance"
+    );
+}
+
 #[actix_rt::test]
 async fn create_oauth2_client_rejects_invalid_grant_type() {
     let (db, org_id, tenant_id) = setup_db().await;

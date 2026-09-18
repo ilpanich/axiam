@@ -16,12 +16,16 @@ import {
   CheckCircle2,
   ChevronRight,
   UserPlus,
+  Globe,
 } from "lucide-react";
 import {
   settingsService,
+  validateCimdPolicy,
   validateDcrPolicy,
+  DEFAULT_CIMD_POLICY,
   DEFAULT_DCR_MAX_CLIENTS,
   DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
+  type CimdPolicy,
   type SecuritySettings,
   type TenantSettingsOverride,
   type WebauthnUserVerification,
@@ -46,6 +50,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { BooleanDisplay, NumberDisplay } from "./policyFields";
 import { DcrPolicyFields, DcrPolicySummary } from "./dcrPolicy";
+import { CimdPolicyFields, CimdPolicySummary } from "./cimdPolicy";
 
 // ─── Flat editable view-model (minutes where presented as minutes) ────────────
 // The backend stores token/lockout/mfa durations in SECONDS. We present the
@@ -90,6 +95,11 @@ interface SettingsForm {
   external_client_allowed_resources: string[];
   dcr_max_clients: number;
   dcr_unused_client_ttl_days: number;
+  // T21.5 — the CIMD posture, whole. Not flattened into the form the way every
+  // other block is, because the backend models it as one object and overrides
+  // it as one object; splitting it here and rejoining it on save would be the
+  // per-field merge the policy exists to refuse.
+  cimd: CimdPolicy;
 }
 
 /**
@@ -153,6 +163,9 @@ function toForm(s: SecuritySettings): SettingsForm {
     dcr_max_clients: s.oidc?.dcr_max_clients ?? DEFAULT_DCR_MAX_CLIENTS,
     dcr_unused_client_ttl_days:
       s.oidc?.dcr_unused_client_ttl_days ?? DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
+    // T21.5 — same fallback, same reason: a server older than the field sends
+    // no `cimd`, and the shipped default is `enabled: false`.
+    cimd: s.oidc?.cimd ?? DEFAULT_CIMD_POLICY,
   };
 }
 
@@ -185,6 +198,7 @@ function toOverride(f: SettingsForm): TenantSettingsOverride {
     external_client_allowed_resources: f.external_client_allowed_resources,
     dcr_max_clients: f.dcr_max_clients,
     dcr_unused_client_ttl_days: f.dcr_unused_client_ttl_days,
+    cimd: f.cimd,
   };
 }
 
@@ -306,6 +320,18 @@ export function SettingsPage() {
       setFeedback({ type: "error", message: dcrError });
       return;
     }
+    // T21.5 — the same class of refusal, and the same handling: both CIMD
+    // interlocks and every bound are hard 400s server-side. The card already
+    // renders each one under the field it names; this is the second door, so a
+    // save cannot slip past a refusal the operator scrolled away from.
+    const cimdErrors = validateCimdPolicy({
+      external_client_allowed_resources: form.external_client_allowed_resources,
+      cimd: form.cimd,
+    });
+    if (cimdErrors.length > 0) {
+      setFeedback({ type: "error", message: cimdErrors[0].message });
+      return;
+    }
     updateMutation.mutate(toOverride(form));
   }
 
@@ -351,6 +377,15 @@ export function SettingsPage() {
   }
 
   const data = form;
+  // T21.5 — every CIMD refusal is already rendered under the field it names, so
+  // the button that would send them is disabled rather than left to fail. The
+  // DCR card keeps its save-time refusal: its two interlocks were shipped that
+  // way and their tests pin it.
+  const cimdRefused =
+    validateCimdPolicy({
+      external_client_allowed_resources: data.external_client_allowed_resources,
+      cimd: data.cimd,
+    }).length > 0;
   // The advisory compares against the *loaded effective* policy, which is the
   // only thing this endpoint exposes — the org baseline is not readable here.
   const effectiveOpaque = readOpaquePolicy(settings);
@@ -917,12 +952,52 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* ── Client ID metadata documents (T21.5) ───────────────────────── */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <Globe size={18} className="text-primary" aria-hidden="true" />
+            <CardTitle className="text-base">
+              Client ID Metadata Documents
+            </CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground mb-4">
+            Accept a <code>client_id</code> that is an <code>https</code> URL
+            and fetch the JSON document published there as the client&rsquo;s
+            registration — how a desktop MCP client is the same client at every
+            deployment it talks to, with nothing registered in advance. Off by
+            default: a URL-shaped <code>client_id</code> is then an unknown
+            client and nothing is fetched. This tenant inherits its
+            organization&rsquo;s posture whole and may only tighten it.
+          </p>
+          {editing ? (
+            <CimdPolicyFields
+              idPrefix="tenant"
+              value={data.cimd}
+              externalResources={data.external_client_allowed_resources}
+              onChange={(cimd) => setField("cimd", cimd)}
+              orderingNote={
+                <>
+                  A tenant may turn this <em>off</em>, never on: enabling it is
+                  a decision taken where the outbound fetch is paid for, so the
+                  organization baseline has to have it on first.
+                </>
+              }
+            />
+          ) : (
+            <CimdPolicySummary value={data.cimd} />
+          )}
+        </CardContent>
+      </Card>
+
       {/* ── Action bar (edit mode) ─────────────────────────────────────── */}
       {editing && (
         <div className="flex gap-3 pt-2">
           <Button
             onClick={handleSave}
-            disabled={updateMutation.isPending}
+            disabled={updateMutation.isPending || cimdRefused}
             size="sm"
           >
             {updateMutation.isPending ? (

@@ -189,6 +189,13 @@ export function DcrPolicyFields({
               onChange({ dcr_max_clients: Number(e.target.value) })
             }
           />
+          <p className="text-xs text-muted-foreground">
+            <strong>Governs client ID metadata documents too</strong>, counted
+            separately and against the same value: a tenant running both
+            mechanisms gets this many self-registered clients{" "}
+            <em>and</em> this many CIMD shadow rows, so neither can exhaust the
+            other&rsquo;s allowance.
+          </p>
         </div>
         <div className="space-y-2">
           <Label htmlFor="dcr-unused-ttl">
@@ -205,7 +212,12 @@ export function DcrPolicyFields({
           />
           <p className="text-xs text-muted-foreground">
             A self-registered client with no authorization for this many days
-            is deleted. <code>0</code> disables the sweep for this tenant.
+            is deleted, and a <code>managed_by: cimd</code> shadow row is swept
+            against the same value under its own clock and health counter.{" "}
+            <code>0</code> disables both sweeps for this tenant. A registration
+            in <code>anonymous</code> mode that has <em>never</em> been
+            authorized is measured against one hour from creation instead —
+            fixed, and not switched off by <code>0</code>.
           </p>
         </div>
       </div>

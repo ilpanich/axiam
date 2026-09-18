@@ -674,6 +674,81 @@ describe("OrganizationDetailPage — settings tab", () => {
     );
   });
 
+  // Finding C. The DCR card shipped only on the tenant settings page, where
+  // `dynamic_registration` is tighten-only against a baseline that defaults to
+  // `disabled` — so before this section existed, nothing in the console could
+  // put an organization on a rung above `disabled` and the tenant card could
+  // only ever turn things off.
+  it("edits the organization's dynamic-registration baseline and sends it", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settingsWithOidc });
+    apiMock.put.mockResolvedValue(res(settingsWithOidc));
+    await goToSettings();
+
+    const mode = await screen.findByLabelText("Self-registration mode");
+    expect(mode).toHaveValue("anonymous");
+    await userEvent.selectOptions(mode, "initial_access_token");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        URLS.settings,
+        expect.objectContaining({
+          dynamic_registration: "initial_access_token",
+          external_client_allowed_resources: ["https://mcp.example.com/mcp"],
+        })
+      )
+    );
+  });
+
+  it("edits the organization's CIMD posture and sends it whole", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settingsWithOidc });
+    apiMock.put.mockResolvedValue(res(settingsWithOidc));
+    await goToSettings();
+
+    const publishers = await screen.findByLabelText(
+      "Trusted publisher domains (one per line)"
+    );
+    expect(publishers).toHaveValue("mcp.example.com");
+    fireEvent.change(publishers, {
+      target: { value: "mcp.example.com\n*.partner.example" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        URLS.settings,
+        expect.objectContaining({
+          cimd: {
+            ...settingsWithOidc.oidc!.cimd,
+            trusted_client_id_domains: [
+              "mcp.example.com",
+              "*.partner.example",
+            ],
+          },
+        })
+      )
+    );
+  });
+
+  // This is the only surface in the console where `enabled` can be turned on,
+  // so it is also the only one where the D3 interlock is met on the way in
+  // rather than in a 400 body.
+  it("blocks the save while the organization posture carries a refusal", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settingsWithOidc });
+    await goToSettings();
+
+    fireEvent.change(
+      await screen.findByLabelText("Trusted publisher domains (one per line)"),
+      { target: { value: "*" } }
+    );
+
+    expect(
+      await screen.findByText(/"\*" matches every host/)
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save Settings" })).toBeDisabled();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
   it("seeds the OPAQUE selects from the loaded baseline", async () => {
     routeGet({ [URLS.org]: org, [URLS.settings]: settings });
     await goToSettings();

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Admin UI for client ID metadata documents, and for the DCR baseline
+  (#477).** The CIMD posture — nine fields, every one a security control by the
+  policy's own doc comment — was settable only through the settings API. It now
+  has a card on three surfaces: the organization Settings tab, which is the
+  only place `cimd.enabled` and `cimd.allow_http` can be turned **on**, because
+  both are ordered and no tenant may widen them; the tenant settings page; and
+  the organization administrator's per-tenant override panel, where the posture
+  is taken over whole or inherited whole, exactly as `Option<CimdPolicy>` models
+  it. Both interlocks and all three bounds are mirrored client-side in the
+  server's own words — CIMD cannot be enabled while
+  `external_client_allowed_resources` is empty (D3) or while
+  `cimd.trusted_client_id_domains` is, and that list refuses `*` and a wildcard
+  over a whole top-level domain — each rendered under the field it names and
+  each blocking the save, so an operator meets the refusal in the form rather
+  than in a `400` body. The Dynamic Client Registration card is mounted on the
+  organization tab for the same reason: `dynamic_registration` is tighten-only
+  against a baseline that defaults to `disabled`, so until now nothing in the
+  console could raise it. The per-tenant override panel gains a dynamic
+  registration group with it, without which saving any other group discarded a
+  tenant's registration policy. Its two counters' help text now says what T21.8
+  made true: both govern `managed_by: cimd` rows as well, and a never-authorized
+  `anonymous` registration is swept after one hour whatever the TTL says.
+  Default (`enabled: false`) tenants see none of it — a badge reading
+  **Disabled** and nothing else.
+
 - **Client ID metadata documents (CIMD).** A tenant can accept a `client_id`
   that is an `https` URL and fetch the JSON document published there as the
   client's registration — `draft-ietf-oauth-client-id-metadata-document`, the

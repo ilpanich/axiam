@@ -3,9 +3,15 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Trash2 } from "lucide-react";
 
 import {
+  readOidcPolicy,
   settingsService,
+  validateCimdPolicy,
+  type CimdPolicy,
+  type DynamicRegistrationMode,
   type TenantSettingsOverride,
 } from "@/services/settings";
+import { CimdPolicyFields } from "@/pages/settings/cimdPolicy";
+import { DcrPolicyFields } from "@/pages/settings/dcrPolicy";
 import {
   MAX_DELETION_GRACE_PERIOD_DAYS,
   type SecuritySettings,
@@ -44,6 +50,8 @@ interface OverrideGroups {
   notification: boolean;
   opaque: boolean;
   privacy: boolean;
+  dcr: boolean;
+  cimd: boolean;
 }
 
 const NO_GROUPS: OverrideGroups = {
@@ -56,6 +64,8 @@ const NO_GROUPS: OverrideGroups = {
   notification: false,
   opaque: false,
   privacy: false,
+  dcr: false,
+  cimd: false,
 };
 
 /** The panel's editable state — flat, seconds where the backend uses seconds. */
@@ -82,6 +92,15 @@ interface FormState {
   admin_notifications_enabled: boolean;
   opaque: OpaquePolicy;
   deletion_grace_period_days: number;
+  // T21.4 — the six dynamic-registration fields, flat like the backend's.
+  dynamic_registration: DynamicRegistrationMode;
+  dcr_allowed_scopes: string[];
+  dcr_allowed_redirect_hosts: string[];
+  external_client_allowed_resources: string[];
+  dcr_max_clients: number;
+  dcr_unused_client_ttl_days: number;
+  // T21.5 — the CIMD posture, whole, because that is how it is overridden.
+  cimd: CimdPolicy;
 }
 
 /** Seed the form from the effective settings, so an un-overridden group opens
@@ -112,6 +131,10 @@ function formFromEffective(s: SecuritySettings): FormState {
     opaque: readOpaquePolicy(s),
     deletion_grace_period_days:
       s.privacy?.deletion_grace_period_days ?? 30,
+    // The OIDC block through the same guard `flattenOrgSettings` uses: a server
+    // older than the fields sends no `oidc`, and the fallback is the value that
+    // server would itself apply.
+    ...readOidcPolicy(s),
   };
 }
 
@@ -149,6 +172,15 @@ function groupsFromOverride(o: TenantSettingsOverride): OverrideGroups {
       o.opaque_suite !== undefined ||
       o.opaque_ksf !== undefined,
     privacy: o.deletion_grace_period_days !== undefined,
+    dcr:
+      o.dynamic_registration !== undefined ||
+      o.dcr_allowed_scopes !== undefined ||
+      o.dcr_allowed_redirect_hosts !== undefined ||
+      o.external_client_allowed_resources !== undefined ||
+      o.dcr_max_clients !== undefined ||
+      o.dcr_unused_client_ttl_days !== undefined,
+    // One key, because the posture is one object: `Option<CimdPolicy>`.
+    cimd: o.cimd !== undefined,
   };
 }
 
@@ -200,6 +232,18 @@ function overrideFromForm(
   }
   if (groups.privacy) {
     out.deletion_grace_period_days = form.deletion_grace_period_days;
+  }
+  if (groups.dcr) {
+    out.dynamic_registration = form.dynamic_registration;
+    out.dcr_allowed_scopes = form.dcr_allowed_scopes;
+    out.dcr_allowed_redirect_hosts = form.dcr_allowed_redirect_hosts;
+    out.external_client_allowed_resources =
+      form.external_client_allowed_resources;
+    out.dcr_max_clients = form.dcr_max_clients;
+    out.dcr_unused_client_ttl_days = form.dcr_unused_client_ttl_days;
+  }
+  if (groups.cimd) {
+    out.cimd = form.cimd;
   }
   return out;
 }
@@ -416,6 +460,16 @@ export function TenantSecurityOverridePanel({
       </div>
     );
   }
+
+  // T21.5 — the card renders each refusal under the field it names; this is
+  // what stops the form sending one. Only when the group is checked: an
+  // inherited posture is the organization's problem, not this panel's.
+  const cimdRefused =
+    groups.cimd &&
+    validateCimdPolicy({
+      external_client_allowed_resources: form.external_client_allowed_resources,
+      cimd: form.cimd,
+    }).length > 0;
 
   return (
     <div className="glass-card max-w-2xl">
@@ -704,6 +758,79 @@ export function TenantSecurityOverridePanel({
               />
             </div>
           )}
+
+          {/* Dynamic client registration (T21.4). This group exists for the
+              reason every other one does, and for one more: without it, an
+              org admin saving *any* group here would send a payload with no
+              `dcr_*` keys, and this endpoint replaces the override row whole —
+              silently discarding a DCR policy the tenant had set from its own
+              settings page. */}
+          <GroupToggle
+            label="Override dynamic client registration"
+            checked={groups.dcr}
+            onChange={(v) => setGroups((g) => ({ ...g, dcr: v }))}
+          />
+          {groups.dcr && (
+            <div className="ml-6 space-y-3">
+              <DcrPolicyFields
+                value={{
+                  dynamic_registration: form.dynamic_registration,
+                  dcr_allowed_scopes: form.dcr_allowed_scopes,
+                  dcr_allowed_redirect_hosts: form.dcr_allowed_redirect_hosts,
+                  external_client_allowed_resources:
+                    form.external_client_allowed_resources,
+                  dcr_max_clients: form.dcr_max_clients,
+                  dcr_unused_client_ttl_days: form.dcr_unused_client_ttl_days,
+                }}
+                onChange={(patch) =>
+                  setForm((prev) => (prev ? { ...prev, ...patch } : prev))
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Tighten-only: the mode may move down the ladder
+                (anonymous &rarr; initial access token &rarr; disabled) and
+                never up, and the two counters may be lowered and not raised.
+                The three lists replace the organization&rsquo;s rather than
+                being ordered against it.
+              </p>
+            </div>
+          )}
+
+          {/* Client ID metadata documents (T21.5). Checked takes over the whole
+              posture, unchecked inherits the whole posture — which is exactly
+              `Option<CimdPolicy>` on the backend override, so this group needs
+              no model the server does not already have. */}
+          <GroupToggle
+            label="Override client ID metadata documents"
+            checked={groups.cimd}
+            onChange={(v) => setGroups((g) => ({ ...g, cimd: v }))}
+          />
+          {groups.cimd && (
+            <div className="ml-6 space-y-3">
+              <CimdPolicyFields
+                idPrefix="tso"
+                value={form.cimd}
+                externalResources={form.external_client_allowed_resources}
+                onChange={(v) => setField("cimd", v)}
+                orderingNote={
+                  <>
+                    Tighten-only: this tenant may turn it <em>off</em>, never
+                    on. Enabling it is a decision taken where the outbound fetch
+                    is paid for, so the organization baseline has to have it on
+                    first — and the server refuses the save, naming the field,
+                    if it does not.
+                  </>
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                The posture is taken over <strong>whole</strong>. Leaving this
+                unchecked inherits the organization&rsquo;s whole posture and
+                keeps following it as the baseline changes; there is no
+                per-field merge, because a posture half of each is one neither
+                party wrote.
+              </p>
+            </div>
+          )}
         </fieldset>
 
         {error && (
@@ -719,7 +846,10 @@ export function TenantSecurityOverridePanel({
 
         {canWrite && (
           <div className="flex items-center gap-2">
-            <Button type="submit" disabled={saveMutation.isPending}>
+            <Button
+              type="submit"
+              disabled={saveMutation.isPending || cimdRefused}
+            >
               {saveMutation.isPending && (
                 <Loader2 size={14} className="animate-spin" />
               )}

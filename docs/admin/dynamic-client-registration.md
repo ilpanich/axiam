@@ -115,6 +115,16 @@ an administrator should create through `POST /api/v1/oauth2-clients`.
 
 ## Enabling it
 
+From the admin console: Organizations → an organization → Settings →
+*Dynamic client registration*. That is the baseline, and it is the only surface
+that can raise the mode — the ladder is tighten-only, so a tenant may move down
+it and never up, and an organization left on `disabled` keeps every tenant
+there. A tenant states its own mode from Settings → *Dynamic Client
+Registration*, or an organization administrator states one on its behalf from
+Organizations → a tenant → *Override dynamic client registration*.
+
+Or through the API:
+
 ```bash
 curl -X PUT "https://id.example.com/api/v1/organizations/$ORG_ID/settings" \
   -H "Authorization: Bearer $ADMIN_TOKEN" \

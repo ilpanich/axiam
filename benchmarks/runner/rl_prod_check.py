@@ -189,6 +189,13 @@ ENDPOINTS = {
         "POST /api/v1/auth/mfa/* (applies to enroll, confirm, verify and the two setup/* routes)",
     ),
     "par_per_min": (None, "POST /oauth2/par (pushed authorization requests, RFC 9126)"),
+    # T21.4. Unmeasured by decision, not by omission: every accepted request
+    # writes a client row that counts against the tenant's `dcr_max_clients`
+    # and outlives the run, and a flood from one IP (the whole k6 fleet) meets
+    # this 5/min bucket and then the cap — so a closed-loop cell would measure
+    # the limiter and the cap, not registration. docs/methodology.md §3 has the
+    # full reasoning, beside the CIMD omission.
+    "dcr_per_min": (None, "POST /oauth2/register (RFC 7591 dynamic client registration)"),
     "end_session_per_min": (None, "GET|POST /oauth2/end_session (OIDC RP-initiated logout)"),
     # The six /auth/webauthn/* routes carried NO limiter until alpha38, so this
     # family could not appear here even as "not checked" — a knob that does not
@@ -247,6 +254,8 @@ def read_configured_defaults():
                   # alpha38: the five families that had no row at all. Same
                   # extraction; they were simply never asked for.
                   "par_per_min", "end_session_per_min",
+                  # T21.4 dynamic client registration; `scenario=None` above.
+                  "dcr_per_min",
                   # The seventeenth family, added with the limiter that closed
                   # the unlimited /auth/webauthn/* surface.
                   "webauthn_per_min"):

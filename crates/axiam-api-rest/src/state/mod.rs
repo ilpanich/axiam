@@ -295,6 +295,11 @@ pub struct AppState<C: Connection + Clone> {
     /// field. See [`crate::tenant_org_cache`] for why caching this — and only
     /// this — is safe.
     pub tenant_org_cache: Arc<crate::tenant_org_cache::TenantOrgCache>,
+    /// `(tenant_id, client_id) -> managed_by`, so `/oauth2/authorize` stops
+    /// paying a second client read per request just to learn whether the
+    /// external-consent gate applies. See [`crate::client_managed_by_cache`]
+    /// for why that field — and only that field — is safe to remember.
+    pub client_managed_by_cache: Arc<crate::client_managed_by_cache::ClientManagedByCache>,
     pub user_repo: SurrealUserRepository<C>,
     pub group_repo: SurrealGroupRepository<C>,
     pub role_repo: SurrealRoleRepository<C>,
@@ -691,6 +696,7 @@ impl<C: Connection + Clone> AppState<C> {
             org_repo: SurrealOrganizationRepository::new(db.clone()),
             tenant_repo,
             tenant_org_cache: Arc::new(Default::default()),
+            client_managed_by_cache: Arc::new(Default::default()),
             user_repo: user_repo.clone(),
             group_repo: SurrealGroupRepository::new(db.clone()),
             role_repo: SurrealRoleRepository::new(db.clone()),

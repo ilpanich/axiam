@@ -32,8 +32,8 @@
 //      (`POST /oauth2/token`) inside one iteration, so the cell's throughput
 //      figure would describe neither endpoint.
 //   2. The `authorization_code` **redemption** deserves its own cell rather
-//      than a half of this one. It is a named follow-up in
-//      `VERIFICATION-2026-09-11.md`, not an oversight.
+//      than a half of this one. It was a named follow-up in
+//      `VERIFICATION-2026-09-11.md` and is now `oauth2_code_pkce.js`.
 //
 // An unredeemed code is a row with a short TTL, cleaned up by the server's own
 // expiry sweep (`crates/axiam-server/src/cleanup.rs`) exactly as an abandoned
@@ -48,7 +48,7 @@
 // at this endpoint — it is verified at redemption, which this cell does not
 // do — so it would add k6-side SHA-256 work to the load generator and change
 // nothing on the server. A PKCE-verifying cell belongs with the redemption
-// cell, where the verification actually happens.
+// cell, where the verification actually happens — `oauth2_code_pkce.js`.
 //
 // # Authentication: a bearer token, not the browser login hop
 //

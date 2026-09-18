@@ -14,10 +14,10 @@
 #   * cargo-audit reads Cargo.lock, which records optional dependencies whether
 #     or not any feature activates them, so it still reports them.
 #
-# Two advisories fall in that gap today — RUSTSEC-2023-0089 (atomic-polyfill) and
-# RUSTSEC-2026-0235 (rkyv). Both are lockfile artifacts: `cargo tree -i <crate>
-# --target all --all-features` prints "nothing to print" for each. They are
-# suppressed for cargo-audit, which needs it, and NOT here, which does not —
+# One advisory falls in that gap today — RUSTSEC-2023-0089 (atomic-polyfill). It is
+# a lockfile artifact: `cargo tree -i <crate> --target all --all-features` prints
+# "nothing to print" for it. It is suppressed for cargo-audit, which needs it, and
+# NOT here, which does not —
 # cargo-deny reports an unmatched ignore as `advisory-not-detected`, and this job
 # runs with `-D advisory-not-detected` so a suppression that has stopped applying
 # fails CI instead of accumulating.
@@ -39,13 +39,6 @@
 #   embassy). It sits in Cargo.lock but is not in the resolved graph: `cargo tree -i
 #   atomic-polyfill --target all --all-features` prints "nothing to print". Maintenance
 #   notice, no CVE. Review: 2026-09-04. Drop when it leaves Cargo.lock.
-# audit-only: RUSTSEC-2026-0235 — rkyv 0.7.46, insufficient archive validation (OOB read
-#   via Rc/Arc). NEVER COMPILED INTO ANY AXIAM ARTIFACT: rkyv is an `optional = true`
-#   dependency of rust_decimal behind that crate's `rkyv` feature, and nothing in the
-#   AXIAM graph enables it — `cargo tree -i rkyv --target all --all-features` prints
-#   "nothing to print". A Cargo.lock artifact, not a reachable vulnerability. Review:
-#   2026-09-04. Re-verify with that command if rust_decimal's feature defaults change;
-#   drop this entry if rust_decimal moves to rkyv >=0.8.17.
 ignore = [
     # RUSTSEC-2023-0071: Marvin Attack — potential RSA key recovery through timing sidechannels.
     # Affects rsa 0.9.x via pgp 0.19.x (axiam-pki) and jsonwebtoken 10.x (surrealdb-core).

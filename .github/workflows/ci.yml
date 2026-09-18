@@ -264,11 +264,6 @@ jobs:
       #   RUSTSEC-2023-0089 — atomic-polyfill unmaintained. AUDIT-ONLY: 1.0.3 sits in Cargo.lock
       #     but is not in the resolved graph at all — `cargo tree -i atomic-polyfill --target all
       #     --all-features` prints "nothing to print". Maintenance notice, no CVE.
-      #   RUSTSEC-2026-0235 — rkyv OOB read. AUDIT-ONLY, and NOT COMPILED INTO ANY AXIAM ARTIFACT:
-      #     rkyv is an `optional = true` dependency of rust_decimal behind that crate's `rkyv`
-      #     feature, and nothing in our graph enables it. `cargo tree -i rkyv --target all
-      #     --all-features` prints "nothing to print". A lockfile artifact rather than a reachable
-      #     vulnerability. Re-verify with that command if rust_decimal's feature defaults change.
       #   RUSTSEC-2026-0258 — h2 unbounded empty DATA frames (DoS). THIS ONE IS REACHABLE, unlike
       #     every entry above, and is ignored only because no fix exists to take. Two copies of h2
       #     resolve: the 0.4.x copy (reqwest/tonic/hyper) IS patched — Cargo.lock pins 0.4.16 — but
@@ -285,7 +280,7 @@ jobs:
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0235,RUSTSEC-2026-0258
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258
 
       # --- cargo deny (advisories + licenses + bans + sources) ---
       # `-D advisory-not-detected` promotes cargo-deny's "this ignore matched

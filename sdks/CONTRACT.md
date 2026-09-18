@@ -3547,6 +3547,40 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-09 (contract 1.50)** — **security fix; source-breaking for one field.**
+  T21.4 added `oauth2_clients.create_registration_token`, whose response carries
+  `initial_access_token` — the plaintext RFC 7591 §1.2 bearer a registering client
+  presents, returned **once** and never retrievable, exactly like
+  `scim_tokens.create`'s `provisioning_token`. It was never added to the registry's
+  curated `(schema, field)` table, so `management-registry.json` published
+  `sensitive_response_fields: []` for it and all eleven generators emitted a bare
+  string: the one-time credential appeared in every model's debug/`toString`
+  rendering, the leak §7 rule 1 and §27.5 exist to prevent. It was found during the
+  F-28-01 re-sync, by the Java port's generator review.
+
+  - **§27.5** gains the row, so the table lists **fifteen** operations, and rule 3's
+    "once" list names the operation. `scripts/gen-management-registry.py`'s
+    `SENSITIVE_FIELDS` gains `("CreateRegistrationTokenResponse",
+    "initial_access_token")`; `management-registry.json` regenerates with exactly
+    that one change. `openapi.json` and `proto/` are **unchanged**: the wire shape
+    is the same, only the SDK-side type moves.
+  - **Source-breaking for a caller that reads the field.** In an SDK whose §27
+    surface already shipped the operation, `initial_access_token` changes from the
+    plain string type to `Sensitive<T>`, and reading it now takes the language's
+    explicit reveal (§7). That is the point of the change; an SDK MUST NOT keep a
+    plain-string accessor alongside it for compatibility, since the plain accessor
+    is precisely the leak. Nothing else on the surface moves.
+  - The three unnumbered T21.4 / T21.5 / T21.6 entries below predate 1.49 and were
+    published as part of its text; every SDK re-synced to 1.49 already carries them.
+    1.50 does not alter them.
+
+  **Re-sync required for 1.50** in all eleven SDK repositories —
+  `axiam-rust-sdk`, `axiam-typescript-sdk`, `axiam-python-sdk`,
+  `axiam-java-sdk`, `axiam-kotlin-sdk`, `axiam-csharp-sdk`, `axiam-php-sdk`,
+  `axiam-go-sdk`, `axiam-swift-sdk`, `axiam-c-sdk`, `axiam-cplusplus-sdk` — for
+  the vendored `CONTRACT.md` and `management-registry.json`, regenerating the §27
+  surface in the same commit, from a **merged** `main` (the 1.49 rule).
+
 - **2026-09 (§28 cross-SDK conformance review, contract 1.49)** —
   **non-breaking / clarifying.** No new operation, no signature change, no
   vocabulary change. Contract 1.48's §28 was implemented independently in
@@ -7138,7 +7172,7 @@ synchronous and asynchronous twins ships them for all 147 operations or for none
 
 ### §27.5 `Sensitive<T>` applicability
 
-Fourteen operations carry secret material. The registry names them and the exact fields,
+Fifteen operations carry secret material. The registry names them and the exact fields,
 under `sensitive_request_fields` / `sensitive_response_fields`, so this is a generated
 property of the surface rather than a list somebody remembers to update.
 
@@ -7158,6 +7192,7 @@ property of the surface rather than a list somebody remembers to update.
 | `federation.create_config` | request | `client_secret` | The upstream IdP's client secret. |
 | `federation.update_config` | request | `client_secret` | As above. |
 | `scim_tokens.create` | response | `provisioning_token` | The plaintext provisioning handle. Shown once, never retrievable. |
+| `oauth2_clients.create_registration_token` | response | `initial_access_token` | The RFC 7591 §1.2 initial access token a registering client presents as `Authorization: Bearer`. Shown once, never retrievable; `list_registration_tokens` returns metadata only. (contract 1.50) |
 
 **`certificates.sign_csr` (contract 1.45) is deliberately absent from this table.** Its
 response is a plain `Certificate`, with no `private_key_pem` field and no other sensitive
@@ -7183,7 +7218,8 @@ applied to a case where the omission is total rather than field-by-field.
    SDK annoying enough to fight gets unwrapped everywhere, which is how the real secrets
    end up bare. This is why the registry curates `(schema, field)` pairs.
 3. The **once** in the table is literal. `service_accounts.create`,
-   `oauth2_clients.create`, `scim_tokens.create`, `certificates.generate`,
+   `oauth2_clients.create`, `oauth2_clients.create_registration_token`,
+   `scim_tokens.create`, `certificates.generate`,
    `ca_certificates.generate`, `ca_certificates.generate_signing_ca` and
    `pgp_keys.generate` return material that no subsequent `get` will ever return again.
    An SDK MUST document that at each call site — a caller who discards the result because
@@ -7365,7 +7401,7 @@ this section.
   serialize — with a field omitted.
 
 **Secrets**
-- Each of the fourteen §27.5 fields is `Sensitive<T>`, and its value does not appear in
+- Each of the fifteen §27.5 fields is `Sensitive<T>`, and its value does not appear in
   the object's debug/stringified rendering — scan the serialized output for the fixture
   value rather than asserting the type.
 - A one-time-reveal response and the corresponding `get` differ: the `get` projection has

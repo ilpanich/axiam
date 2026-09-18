@@ -56,7 +56,9 @@ Each cell produces one **result record** (JSON) under `results/`.
 | `authz_check_grpc.js`           | Low-latency authorization decision             | gRPC          | AXIAM-only*  |
 | `authz_batch_grpc.js`           | Batch authorization decision                    | gRPC          | AXIAM-only*  |
 | `oauth2_revoke.js`              | Token revocation (RFC 7009)                    | HTTP/OAuth2   | AXIAM-only*  |
-| `oauth2_authorize.js`           | OIDC authorization request, code issued (RFC 6749 §4.1.1) | HTTP/OIDC | AXIAM-only*§ |
+| `oauth2_authorize.js`           | OIDC authorization request, code issued (RFC 6749 §4.1.1) | HTTP/OIDC | AXIAM-only* |
+| `oauth2_code_pkce.js`           | Code redemption by a public client: PKCE S256 + RFC 8707 resource | HTTP/OAuth2 | AXIAM-only* |
+| `oauth2_discovery.js`           | RFC 8414 authorization-server metadata, tenant-described | HTTP | AXIAM-only* |
 | `device_authorization.js`       | Device grant, authorization request (RFC 8628) | HTTP/OAuth2   | AXIAM-only*  |
 | `device_verify.js`              | Device grant, user-code lookup                 | HTTP/REST     | AXIAM-only*  |
 | `device_flow_poll.js`           | Device grant, token polling (`authorization_pending`) | HTTP/OAuth2 | AXIAM-only* |
@@ -68,7 +70,7 @@ Each cell produces one **result record** (JSON) under `results/`.
 | `grpc_infra.js`                 | Reflection + health (unauthenticated surface)  | gRPC          | AXIAM-only*  |
 | `authz_nested_rest.js`          | Nested-resource decision at depth N            | HTTP/REST     | Sweep rung‡  |
 | `authz_nested_grpc.js`          | Nested-resource decision at depth N            | gRPC          | Sweep rung‡  |
-| `scim_provisioning.js`          | SCIM 2.0 provisioning (RFC 7644)               | HTTP/SCIM     | Pending§     |
+| `scim_provisioning.js`          | SCIM 2.0 provisioning (RFC 7644)               | HTTP/SCIM     | AXIAM-only*  |
 | `oauth2_client_credentials_reactor_hook.js` | Token issuance with a `token.pre_issue` reactor | HTTP/OAuth2 | Pending§ |
 | `zitadel_userinfo_grpc.js`      | Identity read (`AuthService/GetMyUser`)        | gRPC          | Zitadel-only†|
 
@@ -122,12 +124,38 @@ Two distinct reasons live under this mark, and the difference matters when
 reading one: either the deployment cannot satisfy the scenario's contract yet
 (`oauth2_client_credentials_reactor_hook.js` — nothing answers the reactor
 queue), or it can and the scenario has simply never been executed against a
-live server (`scim_provisioning.js`, `oauth2_authorize.js` — both checked
-statically against the real handlers, neither run). The second kind is closed by
-one supervised run, not by code. Each file's header carries its own blocker;
+live server. The second kind is closed by one supervised run, not by code —
+`scim_provisioning.js` and `oauth2_authorize.js` left this list that way on
+2026-09-11. Each file's header carries its own blocker;
 `run-benchmark.sh`'s `PENDING_SCENARIOS` is the list. A pending scenario is
 removed from that list in the same commit that closes the LAST thing it was
 pending on, never the first.
+
+Two T21 (MCP authorization) endpoints were considered and deliberately **not**
+given cells; `oauth2_discovery.js` and `oauth2_code_pkce.js` cover the rest of
+that track.
+
+* **Dynamic client registration** (`POST /oauth2/register`, RFC 7591). Every
+  accepted request is a *write that outlives the run*: a client row counted
+  against the tenant's `dcr_max_clients`, reclaimed only by the cleanup sweep
+  an hour later. The route sits behind its own per-IP bucket, `dcr_per_min`,
+  shipped at **5/min** and not lifted by the bench compose — and the entire k6
+  fleet is one IP. A closed-loop cell would therefore measure the limiter for
+  the first second, the `dcr_max_clients` refusal for the rest, and leave a
+  table of rows behind; neither number is registration's cost. The endpoint
+  also answers `403` unless the tenant has enabled registration, which the seed
+  does not. `rl_prod_check.py` lists `dcr_per_min` with no scenario so the gap
+  is counted rather than invisible.
+* **Client ID Metadata Documents** (URL-shaped `client_id`s, T21.5). Resolving
+  one means AXIAM fetching an `https` document through its SSRF guard from a
+  host on the tenant's trusted-publisher list (an empty list is refused, and so
+  is a wildcard). The bench stack has no such publisher, so a cell needs new
+  compose infrastructure — a TLS-serving document host reachable from the
+  server container and trusted by it — before it can run at all. Once warm, the
+  process-wide document cache answers most requests, so the steady state such a
+  cell would measure is a cache hit plus a shadow-client lookup; the cold fetch
+  is the interesting cost, and a closed loop cannot hold the cache cold.
+  Deferred until that infrastructure exists.
 
 A comparable gRPC "introspect" scenario was considered and deliberately
 **not** added: Zitadel's `session.v2.SessionService` (`GetSession`,

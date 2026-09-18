@@ -4,6 +4,7 @@
 pub mod authz;
 pub mod backchannel_logout;
 pub mod cimd;
+pub mod client_managed_by_cache;
 pub mod config;
 pub mod error;
 pub mod extractors;

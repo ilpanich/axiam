@@ -1038,38 +1038,33 @@ async fn resolve_sensitive_scopes<C: Connection + Clone>(
 /// consent hop.
 ///
 /// Returns `NotApplicable` for a client an administrator created, which is
-/// every client in every deployment today and is the whole of I1 for this
-/// gate: the function reads one row it was going to read anyway (the client is
-/// looked up again inside `AuthorizeService`, so this is one extra read on the
-/// authorization path — see below) and returns before touching the consent
-/// repository.
+/// every client in most deployments and is the whole of I1 for this gate: the
+/// function learns the client's `managed_by` and returns before touching the
+/// consent repository.
 ///
 /// # The cost, measured rather than assumed
 ///
-/// This adds **one** indexed read by `client_id` to every authorization
-/// request, including those from administrators' clients, which never need the
-/// answer. That is a real cost and it was weighed rather than missed:
+/// Learning `managed_by` is an indexed read by `client_id` — a read
+/// `AuthorizeService` repeats for its own validation. It is not avoidable at
+/// this boundary: the service owns the client lookup and this handler owns
+/// the consent repository, and the decision needs both. Passing a consent
+/// repository into the service would put a repository into a crate whose
+/// whole design is that it decides and does not fetch (see
+/// `crate::sensitive`'s module docs), and returning early from the service so
+/// the handler could resolve and re-call would run every validation twice.
 ///
-/// * It is not avoidable at this boundary. `AuthorizeService` owns the client
-///   lookup and this handler owns the consent repository, and the decision
-///   needs both. Passing a consent repository into the service would put a
-///   repository into a crate whose whole design is that it decides and does
-///   not fetch (see `crate::sensitive`'s module docs), and returning early
-///   from the service so the handler could resolve and re-call would mean
-///   running every validation twice.
-/// * `/oauth2/authorize` is a **browser-interactive** endpoint: one request per
-///   user sign-in, not a machine path. The reads AXIAM caches rather than
-///   repeats — `tenant_org_cache`, for one immutable field — are on the
-///   refresh-rotation and authz-check paths, which run per API call. This one
-///   is not in that class, and a `client_id`-indexed read beside a code write
-///   is not where an authorization request spends its time.
-/// * The **consent** read, which is the more expensive of the two, still
-///   happens only for a client that is actually external: this function
-///   returns before it for every `admin` row.
+/// The read was first shipped uncached, on the argument that a
+/// browser-interactive endpoint would not feel one more round trip. The
+/// 2026-09-18 benchmark A/B refuted that: `oauth2_authorize` lost ~19% of its
+/// throughput to it. So the answer now comes from
+/// [`crate::client_managed_by_cache`] after the first read — safe because
+/// `managed_by` can never change for a `(tenant_id, client_id)`; the module
+/// docs give the argument. Only the one field is cached; the service's own
+/// read of the client, which validates everything that *can* change, is
+/// untouched.
 ///
-/// If a future profile shows otherwise, the cache to add is the same shape as
-/// `tenant_org_cache` — `client_id -> managed_by` is immutable for a row's
-/// lifetime, because the field is absent from the update API on purpose.
+/// The **consent** read, which is the more expensive of the two, still
+/// happens only for a client that is actually external.
 ///
 /// # Both reads fail closed, in the recoverable direction
 ///
@@ -1088,16 +1083,26 @@ async fn resolve_external_consent<C: Connection + Clone>(
 ) -> axiam_oauth2::external_consent::Requested {
     use axiam_oauth2::external_consent::Requested;
 
-    let Ok(client) = axiam_core::repository::OAuth2ClientRepository::get_by_client_id(
-        &state.oauth2_client_repo,
-        tenant_id,
-        client_id,
-    )
-    .await
-    else {
-        return Requested::NotApplicable;
+    let managed_by = match state.client_managed_by_cache.get(tenant_id, client_id) {
+        Some(managed_by) => managed_by,
+        None => {
+            let Ok(client) = axiam_core::repository::OAuth2ClientRepository::get_by_client_id(
+                &state.oauth2_client_repo,
+                tenant_id,
+                client_id,
+            )
+            .await
+            else {
+                // Not cached: a missing client is never remembered.
+                return Requested::NotApplicable;
+            };
+            state
+                .client_managed_by_cache
+                .insert(tenant_id, client_id, client.managed_by);
+            client.managed_by
+        }
     };
-    if !axiam_oauth2::external_consent::applies_to(client.managed_by) {
+    if !axiam_oauth2::external_consent::applies_to(managed_by) {
         return Requested::NotApplicable;
     }
 

@@ -1373,30 +1373,47 @@ next phase's plan should be written against this list.
    the reason F-28-01 exists. A phase that fans out to eleven repositories needs
    one re-sync step at its end, from a merged `main`.
 
+8. **No task owned the admin surface for T4a's or T5's settings fields, and
+   §4.0 did not ask for one.** Item 1 names "frontend tests for T2b and T4b",
+   so a task with an explicit admin-UI sub-task got a form and the others did
+   not: T5 shipped nine security controls settable only through the API, and
+   the organization settings form was never extended for T4a's six fields or
+   T5's `cimd` at all. The second half was the expensive one — the frontend's
+   `SetOrgSettings` omits what it does not model, that PUT replaces the whole
+   row, and `reconcile_tenant_overrides` clamps every tenant against what was
+   written, so an unrelated save on the organization page turned both
+   mechanisms off org-wide and discarded every tenant's posture. Neither was
+   caught by a gate: `check-frontend-coverage.py` keys on handler modules and
+   the CIMD resolver is not one. Both found after the phase closed, filed as
+   [#477](https://github.com/ilpanich/axiam/issues/477) and planned in
+   [`cimd-admin-ui-plan.md`](cimd-admin-ui-plan.md). A settings field is not
+   done when the server validates it; it is done when an operator can read
+   what it currently is.
+
 **Environment facts the plan asserted and got wrong.**
 
-8. **"There is no Docker daemon."** Carried into three documents. `dockerd`
+9. **"There is no Docker daemon."** Carried into three documents. `dockerd`
    starts; what fails is the pull, because the registry's blob CDN is refused by
    the egress policy. T8 established this. The half-truth cost at least one
    session an hour.
-9. **`protoc` is absent**, so any command that builds `axiam-server` — including
+10. **`protoc` is absent**, so any command that builds `axiam-server` — including
    regenerating the spec — dies partway. Not in the plan at all; added to
    `CLAUDE.md` during wave 1.
-10. **`docs/api/openapi.json` is a symlink** to `sdks/openapi.json`. Sessions
+11. **`docs/api/openapi.json` is a symlink** to `sdks/openapi.json`. Sessions
     treated it as a second file to keep in step.
 
 **Predictions the plan made that the evidence overturned.**
 
-11. **§1 argued the FAPI risk was irreducibly circumstantial** — that a
+12. **§1 argued the FAPI risk was irreducibly circumstantial** — that a
     conformance check "may single out `none`". No check singles out anything:
     the condition counts only the values it *requires*. The answer was available
     by reading the suite's source all along, and T8 read it. The caution was
     right; the claim that it could not be resolved without a run was not.
-12. **T8's brief predicted an open redirect in the loopback matcher.** The
+13. **T8's brief predicted an open redirect in the loopback matcher.** The
     matcher is sound. The defect (MCP-01, #472) is in six *error* paths that
     never adopted it, and it is an interoperability defect, not a vulnerability.
     Right area, wrong reason.
-13. **T9c's Go port predicted that seven other single-namespace languages would
+14. **T9c's Go port predicted that seven other single-namespace languages would
     hit its naming collision.** T9d checked all seven; none does. A plausible
     generalisation from one data point, recorded as fact in a PR description,
     and false.

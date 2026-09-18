@@ -21,6 +21,41 @@ failure: a row consumed but claimable by nobody is a burned credential.
 
 ---
 
+## surrealdb 3.2.4 / surrealdb-core 3.2.4 / surrealkv 0.21.4
+
+**Taken:** 2026-09-18, for the dependency update in PR #481 (`8fc27c243`). It moved
+the workspace's `surrealkv` from 0.21.3 to 0.21.4, and `surrealdb` / `surrealdb-core`
+stayed at 3.2.4.
+**Host:** Linux x86_64, 12 vCPU, embedded engines, multi-threaded tokio, otherwise
+idle. Each `surrealkv` run used its own fresh `PROBE_DIR`, as CI does.
+**Probe commit:** the one that re-pinned this lockfile.
+
+| Datastore      | Mechanism | Rounds × racers | Rounds with >1 winner | Rounds with 0 winners | Attempts the engine aborted |
+|----------------|-----------|-----------------|-----------------------|-----------------------|-----------------------------|
+| `kv-surrealkv` | `tx`      | 5000 × 8        | **0**                 | 0                     | 34 732 / 40 000 (87%)       |
+| `kv-surrealkv` | `nonce`   | 5000 × 8        | **0**                 | 0                     | 0 / 40 000                  |
+| `kv-mem`       | `tx`      | 1200 × 8        | **3**                 | 0                     | 8 115 / 9 600 (85%)         |
+| `kv-mem`       | `nonce`   | 1200 × 8        | **10**                | 0                     | 0 / 9 600                   |
+
+`rocksdb` was not re-measured. It is not part of the CI gate, and the bump does
+not touch it.
+
+### What changed against surrealkv 0.21.3
+
+Nothing in the property AXIAM depends on. `surrealkv` is still at zero double
+winners and zero burned rounds over 40 000 contended attempts in both shapes. Its
+`tx` abort rate went from 57% to 87%. That reads as the host (12 vCPU against 4
+for the 0.21.3 row), because more racers actually run in parallel and so collide
+more often. It does not read as an engine change: the abort rate is the engine
+*arbitrating*, and a higher rate on a wider host is the expected direction.
+`kv-mem` still leaks in both shapes. `tx` gave 3 rounds in 1200, below the 12 and
+23 recorded earlier. `nonce` gave 10, above the earlier 3 and 6. The two moving in
+opposite directions is the same bounce at this sample size that the 3.2.3
+comparison describes, and it is not a trend. `kv-mem` remains excluded from CI,
+per the README's canonical-falsifier note.
+
+---
+
 ## surrealdb 3.2.4 / surrealdb-core 3.2.4 / surrealkv 0.21.3
 
 **Taken:** 2026-08-13, for X6 (the change that closed #302).

@@ -4,7 +4,8 @@
 # then write a seed env file the runner sources:
 #
 #   .seed/<target>.seed.env   (BENCH_ORG_ID, BENCH_TENANT_ID, BENCH_CLIENT_ID,
-#                              BENCH_CLIENT_SECRET, BENCH_USERNAME, BENCH_PASSWORD)
+#                              BENCH_CLIENT_SECRET, BENCH_USERNAME, BENCH_PASSWORD,
+#                              and for axiam BENCH_MCP_CLIENT_ID/BENCH_MCP_RESOURCE)
 #
 # `.seed/` (NOT `results/`) holds this file because it contains client secrets
 # and the bench user's password — `results/` is the tree we publish/share, and
@@ -71,6 +72,11 @@ export BENCH_USERNAME=$BENCH_USERNAME
 export BENCH_PASSWORD='$BENCH_PASSWORD'
 export BENCH_CLIENT_ID=${CLIENT_ID:-bench-client}
 export BENCH_CLIENT_SECRET='${CLIENT_SECRET:-}'
+# AXIAM-only: the public, MCP-shaped client oauth2_code_pkce.js redeems codes as
+# (see seed_axiam_mcp_client). Empty for keycloak/zitadel, and empty when the
+# server refused to register it — that scenario's setup() then says so.
+export BENCH_MCP_CLIENT_ID=${MCP_CLIENT_ID:-}
+export BENCH_MCP_RESOURCE='${MCP_RESOURCE:-}'
 export BENCH_SUBJECT_ID=${BENCH_SUBJECT_ID:-}
 export BENCH_RESOURCE_ID=${BENCH_RESOURCE_ID:-}
 # Zitadel-only: token audience (project id) + a separate resource-server (API
@@ -90,6 +96,60 @@ export BENCH_ZITADEL_SESSION_PAT='${ZITADEL_SESSION_PAT:-}'
 EOF
   chmod 600 "$SEED_ENV"
   echo "[seed] wrote $SEED_ENV"
+}
+
+# The PUBLIC, MCP-shaped client scenarios/oauth2_code_pkce.js redeems codes
+# as (T21.2/T21.3): `token_endpoint_auth_method: none`, a port-less loopback
+# redirect URI (RFC 8252 §7.3 lets the scenario present any port), and one
+# RFC 8707 resource in `allowed_resources`. Called from seed_axiam, whose
+# `api`/`api_checked`/`create_or_find` it uses — bash resolves those at call
+# time, and seed_axiam defines them before calling this.
+#
+# Idempotent across re-seeds, unlike the confidential client above (which is
+# POSTed afresh every seed because its secret is only readable at creation). A
+# public client has no secret to lose, so FIND FIRST by name, create only if
+# absent, then PUT the spec onto whichever row was found — the same "make the
+# fixture true, don't assume it" rule as the user activation: a row left by an
+# older seed with a different resource or redirect converges instead of being
+# trusted. `token_endpoint_auth_method` is create-only (the update handler
+# refuses a public/confidential switch), so it is asserted on the read-back
+# instead of re-sent.
+#
+# SOFT on failure, deliberately unlike every other fixture here: a server that
+# predates T21.2 refuses `none` outright, and failing the whole seed for it
+# would take every other cell down with this one. The exports stay empty and
+# oauth2_code_pkce.js's setup() fails that ONE cell, naming the cause.
+seed_axiam_mcp_client() {
+  MCP_CLIENT_ID=""; MCP_RESOURCE=""
+  local want_resource="${BENCH_MCP_RESOURCE:-https://mcp.bench.invalid/mcp}"
+  local spec db_id resp method
+  # `.invalid` (RFC 2606) so the audience can never name a host anybody
+  # serves; nothing fetches it — RFC 8707 resources are compared, not resolved.
+  spec=$(jq -cn --arg r "$want_resource" \
+    '{redirect_uris:["http://127.0.0.1/callback"],grant_types:["authorization_code"],scopes:["openid"],allowed_resources:[$r]}')
+  echo "[seed/axiam] creating/updating public MCP-shaped client bench-mcp-client (none + loopback + resource $want_resource)"
+  db_id=$(create_or_find /api/v1/oauth2-clients \
+    "$(jq -c '. + {name:"bench-mcp-client",token_endpoint_auth_method:"none"}' <<<"$spec")" \
+    name bench-mcp-client)
+  if [ -z "$db_id" ]; then
+    echo "[seed/axiam] WARN: could not create/find bench-mcp-client — oauth2_code_pkce.js will fail its setup()" >&2
+    return 0
+  fi
+  resp=$(api_checked PUT "/api/v1/oauth2-clients/$db_id" "$spec" || true)
+  method=$(jq -r '.token_endpoint_auth_method // empty' <<<"$resp" 2>/dev/null || true)
+  if [ "$method" != "none" ]; then
+    echo "[seed/axiam] WARN: bench-mcp-client ($db_id) is not a public client (token_endpoint_auth_method='$method'); delete it and re-seed — oauth2_code_pkce.js will fail its setup(). Response: $resp" >&2
+    return 0
+  fi
+  MCP_CLIENT_ID=$(jq -r '.client_id // empty' <<<"$resp")
+  # Export the STORED form: the server keeps the RFC 3986 §6.2.2-normalised
+  # resource and mints exactly that string as `aud`, which the scenario's
+  # setup() compares byte for byte.
+  MCP_RESOURCE=$(jq -r '.allowed_resources[0] // empty' <<<"$resp")
+  if [ -z "$MCP_CLIENT_ID" ] || [ -z "$MCP_RESOURCE" ]; then
+    echo "[seed/axiam] WARN: bench-mcp-client read-back is incomplete — oauth2_code_pkce.js will fail its setup(). Response: $resp" >&2
+    MCP_CLIENT_ID=""; MCP_RESOURCE=""
+  fi
 }
 
 # Read one cookie value out of a curl Netscape cookie jar. Field 6 is the name,
@@ -527,6 +587,8 @@ seed_axiam() {
   if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
     echo "[seed/axiam] client creation failed: $CLIENT_RESP"; exit 1
   fi
+
+  seed_axiam_mcp_client
 
   # Export the authz fixtures the scenarios/SDK benches need.
   BENCH_SUBJECT_ID="$USER_ID"

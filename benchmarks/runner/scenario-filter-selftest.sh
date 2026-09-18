@@ -73,6 +73,10 @@ check_skip keycloak authz_check_rest     authz_check_rest  "AXIAM-only scenario"
 # that; only the filter list can, which is why these are asserted here.
 check_skip keycloak opaque_login_start    opaque_login_start    "AXIAM-only scenario"
 check_skip zitadel  opaque_register_start opaque_register_start "AXIAM-only scenario"
+# The two T21 cells. oauth2_discovery's adapter method exists on the axiam
+# adapter alone, and oauth2_code_pkce drives an AXIAM-only authorize leg.
+check_skip keycloak oauth2_discovery      oauth2_discovery      "AXIAM-only scenario"
+check_skip zitadel  oauth2_code_pkce      oauth2_code_pkce      "AXIAM-only scenario"
 # The already-correct spelling must behave identically — normalization is
 # idempotent, not a second code path.
 check_skip axiam    oauth2_client_credentials_reactor_hook.js \

@@ -447,6 +447,12 @@ CLAMP_SENSITIVE_SCENARIOS = {
     # /api/v1/auth/login. Listed for the same reason its sibling is.
     "opaque_login_start",
     "opaque_register_start",
+    # T21: the public client's authorization_code redemption is a
+    # POST /oauth2/token, inside the same `oauth2_token` RateLimitShared wrap
+    # as oauth2_client_credentials. Its unmeasured /oauth2/authorize leg is not
+    # wrapped, and oauth2_discovery (/.well-known/*) is not wrapped at all, so
+    # neither of those belongs here.
+    "oauth2_code_pkce",
 }
 
 

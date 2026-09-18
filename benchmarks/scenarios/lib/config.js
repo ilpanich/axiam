@@ -46,6 +46,14 @@ export const cfg = {
   password: str('BENCH_PASSWORD', 'Bench@User123!'),
   clientId: str('BENCH_CLIENT_ID', 'bench-client'),
   clientSecret: str('BENCH_CLIENT_SECRET', 'bench-secret'),
+  // AXIAM-only (oauth2_code_pkce.js): the PUBLIC client runner/seed.sh
+  // registers in the shape an MCP client takes — `token_endpoint_auth_method:
+  // none`, a loopback redirect URI, one RFC 8707 resource in
+  // `allowed_resources`. No defaults on purpose: a seed env written before this
+  // client existed leaves both empty, and the scenario's setup() fails naming
+  // the re-seed rather than measuring a client that is not there.
+  mcpClientId: str('BENCH_MCP_CLIENT_ID', ''),
+  mcpResource: str('BENCH_MCP_RESOURCE', ''),
   // Zitadel-only: the machine-user token is minted with this project in its
   // audience so it can be introspected, and introspection authenticates as a
   // dedicated resource-server (API app) rather than the machine user (Zitadel

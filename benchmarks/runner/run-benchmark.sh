@@ -242,7 +242,13 @@ fi
 # "this product has no such endpoint". That is exactly the confusion this list
 # exists to prevent, and it is why a capability gap belongs here rather than in
 # a scenario-side guard.
-AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js oauth2_authorize.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js scim_provisioning.js oauth2_client_credentials_reactor_hook.js authz_nested_grpc.js opaque_login_start.js opaque_register_start.js"
+#
+# The T21 MCP-authorization track added two. oauth2_code_pkce.js redeems codes
+# minted by a bearer-authenticated /oauth2/authorize, which neither competitor
+# offers (same reason as oauth2_authorize.js). oauth2_discovery.js is AXIAM-only
+# for now rather than by nature: its header explains why no competitor adapter
+# exists yet, and what adding one takes.
+AXIAM_ONLY_SCENARIOS="authz_check_grpc.js authz_batch_grpc.js authz_check_rest.js authz_batch_rest.js userinfo_grpc.js grpc_admin_validate.js grpc_infra.js oauth2_revoke.js oauth2_authorize.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js scim_provisioning.js oauth2_client_credentials_reactor_hook.js authz_nested_grpc.js opaque_login_start.js opaque_register_start.js oauth2_discovery.js oauth2_code_pkce.js"
 
 # D4: Zitadel's gRPC identity scenario (AuthService/GetMyUser, the gRPC
 # counterpart of userinfo.js — see scenarios/zitadel_userinfo_grpc.js and
@@ -261,7 +267,12 @@ ZITADEL_ONLY_SCENARIOS="zitadel_userinfo_grpc.js"
 # R5.2's six additions all mint or spend a token against the seeded client
 # (device_authorization.js/device_flow_poll.js use client_id only, per RFC
 # 8628's public-client design, but still need the client seeded to exist).
-OAUTH2_SCENARIOS="oauth2_client_credentials.js oauth2_client_credentials_reactor_hook.js token_introspection.js token_refresh.js userinfo.js oauth2_revoke.js oauth2_authorize.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js"
+#
+# oauth2_code_pkce.js redeems as the PUBLIC client seed.sh registers beside the
+# confidential one; it is gated here with the rest of the OAuth2 set because
+# the same seed provisions both. oauth2_discovery.js is NOT here, for the
+# reason jwks_fetch is not: it needs a tenant, never a client.
+OAUTH2_SCENARIOS="oauth2_client_credentials.js oauth2_client_credentials_reactor_hook.js token_introspection.js token_refresh.js userinfo.js oauth2_revoke.js oauth2_authorize.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js oauth2_code_pkce.js"
 skip_oauth2() {
   [ "${BENCH_SKIP_OAUTH2:-0}" = "1" ] && return 0
   [ "$TARGET" = "axiam" ] && [ -z "${BENCH_CLIENT_SECRET:-}" ] && return 0

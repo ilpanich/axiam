@@ -162,6 +162,24 @@ const axiam = {
   jwks() {
     return { method: 'GET', url: `${baseUrl()}/oauth2/jwks?tenant_id=${cfg.tenantId}`, expect: 200 };
   },
+  // RFC 8414 authorization-server metadata (T21.1) — driven by
+  // oauth2_discovery.js. AXIAM-only for now: defined on this adapter alone,
+  // and oauth2_discovery.js is in AXIAM_ONLY_SCENARIOS. That file's header
+  // says why, and what promoting it to a head-to-head cell would take (one
+  // method per competitor adapter, here).
+  //
+  // `?tenant_id=` is what makes the server describe a tenant, and describing a
+  // tenant is the per-request work: without it (and with no
+  // AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID, which the bench compose does not
+  // set) the handler serves the deployment-wide document without touching the
+  // database.
+  authorizationServerMetadata() {
+    return {
+      method: 'GET',
+      url: `${baseUrl()}/.well-known/oauth-authorization-server?tenant_id=${cfg.tenantId}`,
+      expect: 200,
+    };
+  },
   userinfo(accessToken) {
     return {
       method: 'GET',

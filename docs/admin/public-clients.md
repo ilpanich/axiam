@@ -192,6 +192,17 @@ and fragment must still be identical to what was registered:
 | `http://127.0.0.1/callback` | `http://127.0.0.2:51703/callback` | **refused** |
 | `https://localhost/callback` | `https://localhost:8443/callback` | **refused** — `https` keeps exact matching |
 
+**Errors are redirected under the same rule.** An authorization request that is
+refused before AXIAM has looked the registration up — a missing
+`response_type`, a `request_uri` that is unknown, expired or already spent — is
+reported to the presented `redirect_uri` on exactly the terms above, so a
+client waiting on port 51703 reads `error=invalid_request` there rather than
+watching a page it cannot see. Until this release those six refusals compared
+the presented URI exactly while the success path applied §7.3, which left a
+desktop client's loopback listener waiting for a callback that never came. An
+unregistered or absent `redirect_uri` is still answered in place, and still is
+not somewhere a refusal may be sent.
+
 ### `localhost` and `127.0.0.1` are not interchangeable
 
 They are different hosts and each matches only itself. RFC 8252 §8.3 prefers

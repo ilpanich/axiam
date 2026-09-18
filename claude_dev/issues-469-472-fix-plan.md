@@ -512,6 +512,12 @@ it takes today. Additive and opt-in.
 
 ## 5. Issue #472 — six error paths compare `redirect_uri` exactly (MCP-01, T-280)
 
+> **Landed** as `b8bc508` on `claude/fix-472-loopback-errors`. The section is
+> accurate as written, with one correction: it lists six sites and calls four of
+> them match arms in `resolve_authorize_principal`, which is right, but the
+> line numbers have moved with the comment rewrites. The test inversion went
+> exactly as §5 describes.
+
 ### The leave-it case
 
 Fail-closed in the direction that matters: no error is ever redirected to a
@@ -583,6 +589,12 @@ flag because the widening is already gated by what the client registered.
 
 ## 6. The IPv6 loopback gap — `http://[::1]/…` cannot be registered
 
+> **Landed** as `7ab890d`, its own commit on the same branch, flagged on the PR
+> as §6 requires. One thing §6 did not anticipate: the harness test it asks for
+> — "a subsequent authorize on `http://[::1]:49999/cb` is matched" — has to
+> drive the D4 consent hop before a code appears, because an externally
+> registered client asks the end user first. The test does.
+
 ### Decision: same PR as #472, its own commit, flagged
 
 The brief asks whether this belongs here or stays separate. It belongs here,
@@ -619,6 +631,13 @@ first time the matcher's `[::1]` arm is reached end to end. One line under
 ---
 
 ## 7. MCP-06 — the tenant-path guard reads the raw query string
+
+> **Pinned** in the third commit of the #472 PR, as §7's first bullet asks, and
+> still accepted. Writing the test corrected one clause of the review: the
+> `400` §7 quotes needs a credential to be reached, because authentication is
+> refused before the query is deserialised. An unauthenticated
+> `tenant%5Fid=` gets a `401`. The acceptance is unaffected and the test pins
+> both refusals; the review's §7 now says so.
 
 **Agree with the acceptance.** The review's reasoning has two parts and both
 hold on `main`: the request is refused either way (the middleware appends

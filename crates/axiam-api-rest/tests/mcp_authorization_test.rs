@@ -1140,6 +1140,83 @@ async fn v2_a_tenant_path_binds_the_token_to_that_tenant() {
     assert_eq!(body["error"], "invalid_request", "{body}");
 }
 
+/// **MCP-06, pinned rather than fixed.** A percent-encoded `tenant_id` key on a
+/// tenant path is still refused.
+///
+/// The guard in `middleware/tenant_path.rs` matches the **raw** query string,
+/// while the extractor downstream matches the **percent-decoded** one, so
+/// `tenant%5Fid=` decodes to the key `tenant_id` and the guard does not see it.
+/// The 2026-09-17 review accepted that: the request is refused anyway, because
+/// the middleware appends `&tenant_id={path tenant}` and the extractor then
+/// sees two pairs decoding to one non-sequence field, which `serde_urlencoded`
+/// answers `duplicate field`. Putting a percent-decoder in front of a security
+/// check to buy a better error message on a request that is already refused is
+/// the thing `redirect_uri.rs` and `resource.rs` argue against at length.
+///
+/// **What this test is for.** The acceptance rests on the extractor's field
+/// type and on a dependency's duplicate-field behaviour, not on the guard —
+/// which is to say on nothing the guard's own tests would notice. No case in
+/// the crate sent the encoded spelling. This pins the refusal so that a change
+/// to the extractor, or to how `serde_urlencoded` answers a duplicate, cannot
+/// silently turn an accepted informational into an open Medium. It changes no
+/// behaviour and asserts no particular *code*: a `400` either way is the
+/// property that matters, and pinning the message would pin the half of this
+/// the review deliberately left alone.
+///
+/// The reopen conditions are in the review's §7 and in the T21.8 fix plan's §7:
+/// a handler under `/t/{tenant_id}` that reads the parameter through anything
+/// other than a non-sequence `serde_urlencoded` field, or the scope widening to
+/// `/api/v1`. Either turns the second `400` into no `400`.
+#[actix_rt::test]
+async fn mcp06_a_percent_encoded_tenant_id_on_a_tenant_path_is_still_refused() {
+    let mode = Mode::TenantPath;
+    let f = setup(mode).await;
+    let app = test_app!(f, mode);
+
+    // The control: the guard sees this spelling and refuses it itself.
+    let (status, body) = get_json(
+        &app,
+        &format!("/t/{}/oauth2/authorize?tenant_id={}", f.a.id, f.b.id),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        body["error"], "invalid_request",
+        "the guard's own refusal, for contrast: {body}"
+    );
+
+    // `tenant%5Fid` is `tenant_id` once decoded. The guard's raw-string match
+    // misses it; the extractor refuses it anyway.
+    for spelling in ["tenant%5Fid", "tenant%5fid"] {
+        let path = format!("/t/{}/oauth2/authorize?{spelling}={}", f.a.id, f.b.id);
+
+        // With a credential, this is the refusal the review's acceptance rests
+        // on: the middleware has appended `&tenant_id={path tenant}`, the
+        // extractor sees two pairs decoding to one non-sequence field, and
+        // `serde_urlencoded` answers `duplicate field`.
+        let (status, _, body) = get_as_user(&app, &path, &f.a.token).await;
+        assert_eq!(
+            status, 400,
+            "MCP-06: {spelling} on a tenant path must be refused by the extractor's \
+             duplicate-field answer. If this starts returning anything else, the acceptance \
+             recorded in security-review-mcp-2026-09-17.md §7 no longer holds and the guard \
+             needs to decode after all: {body}"
+        );
+
+        // Without one, the refusal comes earlier and is a 401. Worth pinning
+        // beside the 400 because it is the shape a stranger actually gets, and
+        // because it is the reason the guard's own `400` is not what a
+        // first reading of §7 predicts here: authentication is refused before
+        // the query is ever deserialised, so the extractor's answer needs a
+        // credential to be observable at all.
+        let (status, body) = get_json(&app, &path).await;
+        assert_eq!(
+            status, 401,
+            "{spelling} with no credential is refused before the query is read: {body}"
+        );
+    }
+}
+
 /// **V3 (verification, no finding).** An initial access token is single-use even
 /// when it is redeemed more than once before the first redemption has
 /// finished.
@@ -1291,22 +1368,29 @@ async fn mcp02_a_builtin_audience_is_refused_as_a_resource() {
     );
 }
 
-/// **MCP-01.** A loopback client on an ephemeral port gets its *codes*
-/// redirected and its *errors* rendered.
+/// **MCP-01, fixed (#472).** A loopback client on an ephemeral port gets its
+/// *codes* and its *errors* redirected alike.
 ///
-/// The success path compares the presented `redirect_uri` with
-/// `any_redirect_uri_matches`, which applies RFC 8252 §7.3's port allowance.
-/// Five error paths in `handlers/oauth2.rs` still compare with `==`. The
-/// direction is fail-closed — no error is ever redirected to a URI that was not
-/// registered — so this is an interoperability defect rather than a
-/// vulnerability, and it lands on exactly the client family this phase exists
-/// to serve: the desktop client's loopback listener waits for a callback that
-/// never arrives.
+/// This test is the inverted form of the one T21.8 filed. That one asserted
+/// `status != 302` and said in its own failure message that the six `==`
+/// comparisons in `handlers/oauth2.rs` should be brought into line with
+/// `any_redirect_uri_matches` and the assertion turned around. #472 did the
+/// first half, so this does the second.
 ///
-/// Asserted as the behaviour it has today. Filed, not fixed — the fix touches
-/// five call sites in a file no other part of this task changes.
+/// What the assertion now pins: an authorization refusal raised *before* the
+/// matcher runs — here `response_type` omitted entirely — is redirected to the
+/// ephemeral port the desktop client is actually listening on, under the same
+/// RFC 8252 §7.3 allowance the success path has applied since T21.2a. The
+/// direction was always fail-closed: no error was ever redirected to a URI
+/// that was not registered, and none is now. What changed is that a URI which
+/// *is* registered, read the way RFC 8252 reads it, is no longer treated as
+/// unregistered on six paths and registered on all the others.
+///
+/// The second half is unchanged from the filed test: a refusal raised *after*
+/// the matcher has run was already redirected correctly, and is the contrast
+/// that made the finding Low rather than a functional break.
 #[actix_rt::test]
-async fn mcp01_an_error_is_not_redirected_to_an_ephemeral_loopback_port() {
+async fn mcp01_an_error_is_redirected_to_an_ephemeral_loopback_port() {
     let mode = Mode::Query;
     let f = setup(mode).await;
     let stub = mcp_stub(&mode.issuer(f.a.id)).await;
@@ -1330,10 +1414,10 @@ async fn mcp01_an_error_is_not_redirected_to_an_ephemeral_loopback_port() {
     let client_id = registered["client_id"].as_str().unwrap().to_owned();
     let callback = "http://127.0.0.1:49999/callback";
 
-    // `response_type` omitted entirely. This is the refusal that reaches
-    // `handlers/oauth2.rs`'s `redirect_uris.contains(candidate)` — one of the
-    // five sites that still compare exactly — rather than the shared matcher
-    // the success path and `unsupported_response_type` both use.
+    // `response_type` omitted entirely. This is the refusal that reaches the
+    // site that used to read `redirect_uris.contains(candidate)` — one of the
+    // six that compared exactly — and now reads the shared matcher the success
+    // path and `unsupported_response_type` have always used.
     let uri = mode.endpoint(
         f.a.id,
         "authorize",
@@ -1346,18 +1430,26 @@ async fn mcp01_an_error_is_not_redirected_to_an_ephemeral_loopback_port() {
         ),
     );
     let (status, location, body) = get_as_user(&app, &uri, &f.a.token).await;
-    assert_ne!(
+    assert_eq!(
         status, 302,
-        "MCP-01: the error is answered directly rather than redirected to the ephemeral port. \
-         If this starts failing, the five `==` comparisons in handlers/oauth2.rs have been \
-         brought into line with the matcher and this test should assert the redirect instead: \
-         {location:?} {body}"
+        "#472: a pre-matcher refusal is redirected to the ephemeral port the desktop client \
+         registered a port-less loopback URI for: {location:?} {body}"
+    );
+    let location = location.expect("a 302 carries a Location");
+    assert!(
+        location.starts_with(callback),
+        "the refusal goes to the presented ephemeral port, not to the registered port-less \
+         form: {location}"
+    );
+    assert!(
+        location.contains("error=invalid_request"),
+        "a missing response_type is reported as invalid_request (RFC 6749 §4.1.2.1): {location}"
     );
 
-    // The contrast that makes the finding precise, and the reason it is Low
-    // rather than a functional break: a refusal raised *after* the matcher has
-    // run is redirected correctly, so only the handful of pre-matcher refusals
-    // are affected.
+    // The contrast that made the finding Low rather than a functional break,
+    // kept because it is the half of the behaviour #472 did *not* change: a
+    // refusal raised *after* the matcher has run was already redirected
+    // correctly. The two arms now answer alike, which is the whole of the fix.
     let uri = mode.endpoint(
         f.a.id,
         "authorize",
@@ -1375,6 +1467,193 @@ async fn mcp01_an_error_is_not_redirected_to_an_ephemeral_loopback_port() {
         location.as_deref().is_some_and(|l| l.starts_with(callback)),
         "an unsupported_response_type IS redirected to the ephemeral port: {location:?}"
     );
+}
+
+/// **MCP-01, the `request_uri` arm (#472).**
+///
+/// The harness pinned one of the six sites — the one a missing `response_type`
+/// reaches. This pins a second, `refuse_request_uri_to_client`, which is the
+/// site furthest from the first: a different function, a different refusal,
+/// and the one a PAR client hits when its handle is unknown, expired or
+/// already spent. A desktop MCP client that pushes and then presents a dead
+/// handle is a real shape — a handle lives sixty seconds — and before #472 it
+/// got a rendered page on an ephemeral port that nothing was reading.
+///
+/// The `redirect_uri` is never taken from the pushed copy here: resolving the
+/// handle is the thing that just failed. It comes from the query string and
+/// survives only because the registration vouches for it, which is exactly
+/// what makes the matcher the right comparison and not a widening.
+#[actix_rt::test]
+async fn mcp01_a_dead_request_uri_is_reported_to_an_ephemeral_loopback_port() {
+    let mode = Mode::Query;
+    let f = setup(mode).await;
+    let stub = mcp_stub(&mode.issuer(f.a.id)).await;
+    set_org_settings(&f, dcr_policy(&stub.resource)).await;
+    let app = test_app!(f, mode);
+
+    let (status, registered) = post_json(
+        &app,
+        &mode.endpoint(f.a.id, "register", ""),
+        json!({
+            "client_name": "desktop client",
+            "redirect_uris": [LOOPBACK_CALLBACK],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "scope": "openid",
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{registered}");
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+    let callback = "http://127.0.0.1:49999/callback";
+
+    // A handle this server never issued. `consume` refuses it, and the refusal
+    // is reported to the client because the query's `redirect_uri` matches the
+    // registration under RFC 8252 §7.3.
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "client_id={}&redirect_uri={}&request_uri={}",
+            enc(&client_id),
+            enc(callback),
+            enc("urn:ietf:params:oauth:request_uri:00000000000000000000000000000000")
+        ),
+    );
+    let (status, location, body) = get_as_user(&app, &uri, &f.a.token).await;
+    assert_eq!(
+        status, 302,
+        "#472: a dead request_uri is reported to the ephemeral port: {location:?} {body}"
+    );
+    let location = location.expect("a 302 carries a Location");
+    assert!(
+        location.starts_with(callback),
+        "reported to the presented port, not the registered port-less form: {location}"
+    );
+    assert!(
+        location.contains("error="),
+        "the redirect carries an OAuth2 error (RFC 6749 §4.1.2.1): {location}"
+    );
+
+    // And the other half of the same rule, unchanged by #472: a `redirect_uri`
+    // the client did not register is still not a place a refusal may be sent,
+    // however loopback-shaped it is. The port allowance widens a registration
+    // by a port and by nothing else — not by a path.
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "client_id={}&redirect_uri={}&request_uri={}",
+            enc(&client_id),
+            enc("http://127.0.0.1:49999/somewhere-else"),
+            enc("urn:ietf:params:oauth:request_uri:00000000000000000000000000000000")
+        ),
+    );
+    let (status, location, _) = get_as_user(&app, &uri, &f.a.token).await;
+    assert_ne!(
+        status, 302,
+        "an unregistered path is answered in place, not redirected: {location:?}"
+    );
+}
+
+/// The matcher's `[::1]` arm, reached end to end for the first time.
+///
+/// `redirect_uri.rs` has accepted `[::1]` as a loopback host since T21.2a and
+/// has a unit test for it, but no URI with that host could be *registered*:
+/// `validate_redirect_uris` compared against the bare `::1`, which no URL
+/// parser produces. So the arm was live code nothing could reach. With the
+/// registration side fixed, this drives the whole path — register a port-less
+/// IPv6 loopback URI through `/oauth2/register`, then present an ephemeral
+/// port against it at the authorization endpoint and get a code back.
+#[actix_rt::test]
+async fn an_ipv6_loopback_registration_takes_the_port_allowance() {
+    let mode = Mode::Query;
+    let f = setup(mode).await;
+    let stub = mcp_stub(&mode.issuer(f.a.id)).await;
+    set_org_settings(&f, dcr_policy(&stub.resource)).await;
+    let app = test_app!(f, mode);
+
+    let (status, registered) = post_json(
+        &app,
+        &mode.endpoint(f.a.id, "register", ""),
+        json!({
+            "client_name": "ipv6 desktop client",
+            "redirect_uris": ["http://[::1]/callback"],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "scope": "openid",
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 201,
+        "an IPv6 loopback redirect URI registers (T21.8): {registered}"
+    );
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+
+    let callback = "http://[::1]:49152/callback";
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256",
+            enc(&client_id),
+            enc(callback),
+            pkce_challenge(VERIFIER)
+        ),
+    );
+
+    // D4 first — an externally registered client asks the end user before it
+    // gets a code, so the matcher's answer is only visible after consent.
+    let (status, location, body) = get_as_user(&app, &uri, &f.a.token).await;
+    assert_eq!(status, 302, "{location:?} {body}");
+    assert!(
+        location.is_some_and(|l| l.contains("consent")),
+        "D4: the consent hop comes first"
+    );
+    let (status, body) = post_as_user(
+        &app,
+        "/api/v1/account/consents/oidc-scopes",
+        &f.a.token,
+        json!({ "client_id": client_id, "scopes": ["openid"] }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, location, body) = get_as_user(&app, &uri, &f.a.token).await;
+    assert_eq!(status, 302, "{location:?} {body}");
+    let location = location.expect("a 302 carries a Location");
+    assert!(
+        location.starts_with(callback) && location.contains("code="),
+        "the ephemeral IPv6 port takes the RFC 8252 §7.3 allowance: {location}"
+    );
+
+    // The allowance is still a port and nothing else: the three loopback hosts
+    // are not interchangeable, so the IPv4 literal does not match this
+    // registration.
+    let uri = mode.endpoint(
+        f.a.id,
+        "authorize",
+        &format!(
+            "response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256",
+            enc(&client_id),
+            enc("http://127.0.0.1:49152/callback"),
+            pkce_challenge(VERIFIER)
+        ),
+    );
+    let (status, location, _) = get_as_user(&app, &uri, &f.a.token).await;
+    if status == 302 {
+        let location = location.unwrap_or_default();
+        assert!(
+            !location.starts_with("http://127.0.0.1"),
+            "[::1] and 127.0.0.1 are different hosts and the IPv4 literal must never \
+             receive a code against an IPv6 registration: {location}"
+        );
+    }
 }
 
 /// **MCP-04 (#470).** A tenant at its CIMD ceiling is refused **before any

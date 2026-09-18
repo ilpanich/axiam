@@ -18,6 +18,7 @@ use axiam_oauth2::mtls::PresentedCertificate;
 use axiam_oauth2::oidc::{
     JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document_for,
 };
+use axiam_oauth2::redirect_uri::any_redirect_uri_matches;
 use axiam_oauth2::token::{
     CLIENT_AUTH_FAILED, IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest,
     TokenRequestContext, TokenResponse,
@@ -524,9 +525,11 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     //
     // Delivered by redirect on the same terms as every other authorization
     // error (RFC 6749 §4.1.2.1): only to a `redirect_uri` this client
-    // registered, compared exactly, with the request's own `state`. An
-    // unregistered or absent one is answered directly, because a refusal is
-    // still not a licence to send a browser somewhere the client never named.
+    // registered — as `any_redirect_uri_matches` reads "registered", so a
+    // desktop client's ephemeral loopback port is one — with the request's own
+    // `state`. An unregistered or absent one is answered directly, because a
+    // refusal is still not a licence to send a browser somewhere the client
+    // never named.
     if axiam_oauth2::login_hop::user_declined(q.user_declined.as_deref()) {
         let refusal = OAuth2Error::AccessDenied(
             "the end user declined the authorization request at the sign-in page".into(),
@@ -562,7 +565,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         };
 
         return Err(Box::new(match redirect_uri {
-            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => {
+            Some(uri) if any_redirect_uri_matches(&client.redirect_uris, uri) => {
                 build_error_redirect(uri, &refusal, echo_state, &issuer_config(http_req, state))
             }
             _ => authorize_error_response(http_req, &refusal),
@@ -656,16 +659,25 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         );
         audit_prompt_none(state, http_req, tenant_id, &q.client_id, Some(&refusal)).await;
         // RFC 6749 §4.1.2.1: an error is redirected only to a
-        // `redirect_uri` this client registered. Exact match, the same
-        // comparison `AuthorizeService::authorize` makes — an unregistered
-        // or absent one is answered directly instead.
+        // `redirect_uri` this client registered, and "registered" means what
+        // `any_redirect_uri_matches` means by it — string equality, plus RFC
+        // 8252 §7.3's port allowance for a registered `http` loopback URI.
+        // The same comparison `AuthorizeService::authorize` makes, which is
+        // the point: until T21.8 this arm compared exactly while authorize
+        // used the matcher, so a desktop client that registered
+        // `http://127.0.0.1/callback` and listened on an ephemeral port got
+        // its successes redirected and its refusals rendered as a page it
+        // could not read. An unregistered or absent URI is still answered
+        // directly.
         return Err(Box::new(match q.redirect_uri.as_deref() {
-            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => build_error_redirect(
-                uri,
-                &refusal,
-                q.state.as_deref(),
-                &issuer_config(http_req, state),
-            ),
+            Some(uri) if any_redirect_uri_matches(&client.redirect_uris, uri) => {
+                build_error_redirect(
+                    uri,
+                    &refusal,
+                    q.state.as_deref(),
+                    &issuer_config(http_req, state),
+                )
+            }
             _ => authorize_error_response(http_req, &refusal),
         }));
     }
@@ -719,10 +731,12 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     //
     // The refusal follows RFC 6749 §4.1.2.1 exactly as the `prompt=none` arm
     // above does, and for the same reason: an error goes back to a
-    // `redirect_uri` only when the client registered that exact URI, because
-    // an unvalidated one is an open redirect. Anything else is answered in
-    // place, which is also the error page a certification reviewer is asked to
-    // see for `oidcc-response-type-missing`.
+    // `redirect_uri` only when the client registered it, as
+    // `any_redirect_uri_matches` decides "registered", because an unvalidated
+    // one is an open redirect. Anything else is answered in place, which is
+    // also the error page a certification reviewer is asked to see for
+    // `oidcc-response-type-missing` — unchanged, because that module registers
+    // an `https` URI and the matcher is string equality for those.
     if q.request_uri.is_none() && q.response_type.as_deref() != Some("code") {
         let refusal = match q.response_type.as_deref() {
             None | Some("") => {
@@ -731,12 +745,14 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             Some(_) => OAuth2Error::UnsupportedResponseType,
         };
         return Err(Box::new(match q.redirect_uri.as_deref() {
-            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => build_error_redirect(
-                uri,
-                &refusal,
-                q.state.as_deref(),
-                &issuer_config(http_req, state),
-            ),
+            Some(uri) if any_redirect_uri_matches(&client.redirect_uris, uri) => {
+                build_error_redirect(
+                    uri,
+                    &refusal,
+                    q.state.as_deref(),
+                    &issuer_config(http_req, state),
+                )
+            }
             _ => authorize_error_response(http_req, &refusal),
         }));
     }
@@ -782,18 +798,20 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     {
         // RFC 6749 §4.1.2.1, answered exactly as the `prompt=none` arm above
         // does: redirected only to a `redirect_uri` this client registered,
-        // compared exactly, and answered directly otherwise. The pushed copy's
-        // `redirect_uri` is not available and must not be — resolving it is the
-        // thing that just failed.
+        // compared by `any_redirect_uri_matches`, and answered directly
+        // otherwise. The pushed copy's `redirect_uri` is not available and
+        // must not be — resolving it is the thing that just failed.
         let reported = request_uri_error_for_client(&refusal);
         let reported = reported.as_ref().unwrap_or(&refusal);
         return Err(Box::new(match q.redirect_uri.as_deref() {
-            Some(uri) if client.redirect_uris.iter().any(|r| r == uri) => build_error_redirect(
-                uri,
-                reported,
-                q.state.as_deref(),
-                &issuer_config(http_req, state),
-            ),
+            Some(uri) if any_redirect_uri_matches(&client.redirect_uris, uri) => {
+                build_error_redirect(
+                    uri,
+                    reported,
+                    q.state.as_deref(),
+                    &issuer_config(http_req, state),
+                )
+            }
             // Rendered for the person, with the wording `ParService` produced.
             // The OIDC code above is what a *relying party* can act on; a page
             // saying `invalid_request_uri` to somebody who did not send the
@@ -1449,7 +1467,7 @@ pub async fn authorize<C: Connection + Clone>(
                         .get_by_client_id(user.tenant_id, &q.client_id)
                         .await
                         .ok()
-                        .filter(|client| client.redirect_uris.contains(candidate))
+                        .filter(|client| any_redirect_uri_matches(&client.redirect_uris, candidate))
                         .map(|_| candidate.clone()),
                     None => None,
                 };
@@ -4551,7 +4569,7 @@ async fn refuse_request_uri_to_client<C: Connection + Clone>(
     else {
         return authorize_error_response(http_req, e);
     };
-    if client.redirect_uris.iter().any(|r| r == uri) {
+    if any_redirect_uri_matches(&client.redirect_uris, uri) {
         let mapped = request_uri_error_for_client(e);
         build_error_redirect(
             uri,

@@ -289,15 +289,8 @@ Allowing them adds no reach: a loopback URI is reachable only from the machine
 the user is sitting at. The [public-clients](public-clients.md) page has the
 port rule.
 
-> **`http://[::1]/…` cannot be registered today**, through this endpoint or
-> through `POST /api/v1/oauth2-clients`. The redirect-URI matcher treats
-> `[::1]` as a loopback host, but the structural validator both endpoints share
-> compares the parsed host against `::1` while a URL parser returns an IPv6
-> literal *with* its brackets — so the IPv6 arm is unreachable. This is a
-> pre-existing gap rather than a dynamic-registration one, and it is left alone
-> here because closing it would make a registration that is refused today
-> succeed. Nothing in MCP depends on it: Claude Code registers `localhost` and
-> VS Code registers `127.0.0.1`.
+`http://[::1]/…` registers too, and the three loopback hosts are
+interchangeable nowhere else: each matches only itself at request time.
 
 ### Error codes
 

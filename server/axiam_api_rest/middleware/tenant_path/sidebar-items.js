@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["binding_of","minting_config"],"struct":["TenantPathBinding","TenantPathScope","TenantPathScopeService"]};

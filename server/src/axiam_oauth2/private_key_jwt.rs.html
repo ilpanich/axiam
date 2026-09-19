@@ -1124,126 +1124,129 @@
 <a href=#1124 id=1124 data-nosnippet>1124</a>            browser_sso: <span class="bool-val">false</span>,
 <a href=#1125 id=1125 data-nosnippet>1125</a>            created_at: Utc::now(),
 <a href=#1126 id=1126 data-nosnippet>1126</a>            updated_at: Utc::now(),
-<a href=#1127 id=1127 data-nosnippet>1127</a>        }
-<a href=#1128 id=1128 data-nosnippet>1128</a>    }
-<a href=#1129 id=1129 data-nosnippet>1129</a>
-<a href=#1130 id=1130 data-nosnippet>1130</a>    <span class="attr">#[test]
-<a href=#1131 id=1131 data-nosnippet>1131</a>    </span><span class="kw">fn </span>an_inline_jwks_resolves_to_its_keys() {
-<a href=#1132 id=1132 data-nosnippet>1132</a>        <span class="kw">let </span>key = ed25519_key(<span class="prelude-val">Some</span>(<span class="string">"k1"</span>));
-<a href=#1133 id=1133 data-nosnippet>1133</a>        <span class="kw">let </span>doc = serde_json::to_string(<span class="kw-2">&amp;</span>jwks(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>key])).unwrap();
-<a href=#1134 id=1134 data-nosnippet>1134</a>        <span class="kw">match </span>key_source_of(<span class="kw-2">&amp;</span>client_with(<span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>doc), <span class="prelude-val">None</span>)) {
-<a href=#1135 id=1135 data-nosnippet>1135</a>            ClientKeySource::Inline(set) =&gt; <span class="macro">assert_eq!</span>(set.keys.len(), <span class="number">1</span>),
-<a href=#1136 id=1136 data-nosnippet>1136</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected an inline key set, got {other:?}"</span>),
-<a href=#1137 id=1137 data-nosnippet>1137</a>        }
-<a href=#1138 id=1138 data-nosnippet>1138</a>    }
-<a href=#1139 id=1139 data-nosnippet>1139</a>
-<a href=#1140 id=1140 data-nosnippet>1140</a>    <span class="attr">#[test]
-<a href=#1141 id=1141 data-nosnippet>1141</a>    </span><span class="kw">fn </span>a_jwks_uri_resolves_to_a_remote_source() {
-<a href=#1142 id=1142 data-nosnippet>1142</a>        <span class="macro">assert_eq!</span>(
-<a href=#1143 id=1143 data-nosnippet>1143</a>            key_source_of(<span class="kw-2">&amp;</span>client_with(<span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(<span class="string">"https://rp.example/jwks.json"</span>))),
-<a href=#1144 id=1144 data-nosnippet>1144</a>            ClientKeySource::Remote(<span class="string">"https://rp.example/jwks.json"</span>.into())
-<a href=#1145 id=1145 data-nosnippet>1145</a>        );
-<a href=#1146 id=1146 data-nosnippet>1146</a>    }
-<a href=#1147 id=1147 data-nosnippet>1147</a>
-<a href=#1148 id=1148 data-nosnippet>1148</a>    <span class="doccomment">/// A broken key document is an ordinary authentication failure, not a
-<a href=#1149 id=1149 data-nosnippet>1149</a>    /// distinguishable one — see [`key_source_of`]'s docs.
-<a href=#1150 id=1150 data-nosnippet>1150</a>    </span><span class="attr">#[test]
-<a href=#1151 id=1151 data-nosnippet>1151</a>    </span><span class="kw">fn </span>a_malformed_inline_jwks_is_no_keys_rather_than_an_error() {
-<a href=#1152 id=1152 data-nosnippet>1152</a>        <span class="macro">assert_eq!</span>(
-<a href=#1153 id=1153 data-nosnippet>1153</a>            key_source_of(<span class="kw-2">&amp;</span>client_with(<span class="prelude-val">Some</span>(<span class="string">"{not json"</span>), <span class="prelude-val">None</span>)),
-<a href=#1154 id=1154 data-nosnippet>1154</a>            ClientKeySource::None
-<a href=#1155 id=1155 data-nosnippet>1155</a>        );
-<a href=#1156 id=1156 data-nosnippet>1156</a>        <span class="macro">assert_eq!</span>(
-<a href=#1157 id=1157 data-nosnippet>1157</a>            key_source_of(<span class="kw-2">&amp;</span>client_with(<span class="prelude-val">None</span>, <span class="prelude-val">None</span>)),
-<a href=#1158 id=1158 data-nosnippet>1158</a>            ClientKeySource::None
-<a href=#1159 id=1159 data-nosnippet>1159</a>        );
-<a href=#1160 id=1160 data-nosnippet>1160</a>        <span class="comment">// Blank is absent, matching `count_jwks_sources`'s emptiness rule.
-<a href=#1161 id=1161 data-nosnippet>1161</a>        </span><span class="macro">assert_eq!</span>(
-<a href=#1162 id=1162 data-nosnippet>1162</a>            key_source_of(<span class="kw-2">&amp;</span>client_with(<span class="prelude-val">Some</span>(<span class="string">"   "</span>), <span class="prelude-val">Some</span>(<span class="string">"  "</span>))),
-<a href=#1163 id=1163 data-nosnippet>1163</a>            ClientKeySource::None
-<a href=#1164 id=1164 data-nosnippet>1164</a>        );
-<a href=#1165 id=1165 data-nosnippet>1165</a>    }
-<a href=#1166 id=1166 data-nosnippet>1166</a>}
-<a href=#1167 id=1167 data-nosnippet>1167</a>
-<a href=#1168 id=1168 data-nosnippet>1168</a><span class="doccomment">/// The `client_id` an assertion *claims*, read before anything is verified.
-<a href=#1169 id=1169 data-nosnippet>1169</a>///
-<a href=#1170 id=1170 data-nosnippet>1170</a>/// # Why reading an unverified JWT here is not a hole
-<a href=#1171 id=1171 data-nosnippet>1171</a>///
-<a href=#1172 id=1172 data-nosnippet>1172</a>/// RFC 7521 §4.2 makes `client_id` optional when a client authenticates with an
-<a href=#1173 id=1173 data-nosnippet>1173</a>/// assertion, and OIDC Core §9 makes the assertion's `sub` the client's
-<a href=#1174 id=1174 data-nosnippet>1174</a>/// identifier. So when the body carries no `client_id` there is exactly one
-<a href=#1175 id=1175 data-nosnippet>1175</a>/// place left to learn which client row to load, and it is inside a token
-<a href=#1176 id=1176 data-nosnippet>1176</a>/// nobody has checked yet.
-<a href=#1177 id=1177 data-nosnippet>1177</a>///
-<a href=#1178 id=1178 data-nosnippet>1178</a>/// That is safe because of what happens next and only because of it: the row
-<a href=#1179 id=1179 data-nosnippet>1179</a>/// this names is loaded, and [`verify_client_assertion`] then verifies the
-<a href=#1180 id=1180 data-nosnippet>1180</a>/// signature **against that row's registered key** and re-checks that `iss` and
-<a href=#1181 id=1181 data-nosnippet>1181</a>/// `sub` equal that client id. An attacker who writes somebody else's client id
-<a href=#1182 id=1182 data-nosnippet>1182</a>/// into a `sub` has chosen which public key their forgery will be checked
-<a href=#1183 id=1183 data-nosnippet>1183</a>/// against, and it will not be theirs. The value is a routing hint, never a
-<a href=#1184 id=1184 data-nosnippet>1184</a>/// credential.
-<a href=#1185 id=1185 data-nosnippet>1185</a>///
-<a href=#1186 id=1186 data-nosnippet>1186</a>/// The one thing this must not do is grow a second use. It is deliberately not
-<a href=#1187 id=1187 data-nosnippet>1187</a>/// exposed as "the client id of an assertion" — nothing downstream may treat
-<a href=#1188 id=1188 data-nosnippet>1188</a>/// the result as established, and `verify_client_assertion` remains the only
-<a href=#1189 id=1189 data-nosnippet>1189</a>/// function that decides whose assertion this is.
-<a href=#1190 id=1190 data-nosnippet>1190</a>///
-<a href=#1191 id=1191 data-nosnippet>1191</a>/// `None` for anything that is not a JWT with a string `sub`: three
-<a href=#1192 id=1192 data-nosnippet>1192</a>/// dot-separated parts, a base64url payload, an object with a `sub`. A caller
-<a href=#1193 id=1193 data-nosnippet>1193</a>/// receiving `None` is in exactly the position it was in before — no client id
-<a href=#1194 id=1194 data-nosnippet>1194</a>/// from anywhere — and answers as it always did.
-<a href=#1195 id=1195 data-nosnippet>1195</a></span><span class="attr">#[must_use]
-<a href=#1196 id=1196 data-nosnippet>1196</a></span><span class="kw">pub fn </span>unverified_client_id(assertion: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
-<a href=#1197 id=1197 data-nosnippet>1197</a>    <span class="kw">use </span>base64::Engine <span class="kw">as _</span>;
-<a href=#1198 id=1198 data-nosnippet>1198</a>
-<a href=#1199 id=1199 data-nosnippet>1199</a>    <span class="kw">let </span>payload = assertion.split(<span class="string">'.'</span>).nth(<span class="number">1</span>)<span class="question-mark">?</span>;
-<a href=#1200 id=1200 data-nosnippet>1200</a>    <span class="kw">let </span>bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-<a href=#1201 id=1201 data-nosnippet>1201</a>        .decode(payload)
-<a href=#1202 id=1202 data-nosnippet>1202</a>        .ok()<span class="question-mark">?</span>;
-<a href=#1203 id=1203 data-nosnippet>1203</a>    <span class="kw">let </span>value: serde_json::Value = serde_json::from_slice(<span class="kw-2">&amp;</span>bytes).ok()<span class="question-mark">?</span>;
-<a href=#1204 id=1204 data-nosnippet>1204</a>    <span class="kw">let </span>sub = value.get(<span class="string">"sub"</span>)<span class="question-mark">?</span>.as_str()<span class="question-mark">?</span>;
-<a href=#1205 id=1205 data-nosnippet>1205</a>    (!sub.is_empty()).then(|| sub.to_owned())
-<a href=#1206 id=1206 data-nosnippet>1206</a>}
-<a href=#1207 id=1207 data-nosnippet>1207</a>
-<a href=#1208 id=1208 data-nosnippet>1208</a><span class="attr">#[cfg(test)]
-<a href=#1209 id=1209 data-nosnippet>1209</a></span><span class="kw">mod </span>unverified_client_id_tests {
-<a href=#1210 id=1210 data-nosnippet>1210</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#1211 id=1211 data-nosnippet>1211</a>
-<a href=#1212 id=1212 data-nosnippet>1212</a>    <span class="kw">fn </span>jwt_with(payload: <span class="kw-2">&amp;</span>serde_json::Value) -&gt; String {
-<a href=#1213 id=1213 data-nosnippet>1213</a>        <span class="kw">use </span>base64::Engine <span class="kw">as _</span>;
-<a href=#1214 id=1214 data-nosnippet>1214</a>        <span class="kw">let </span>b64 = |v: <span class="kw-2">&amp;</span>[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
-<a href=#1215 id=1215 data-nosnippet>1215</a>        <span class="macro">format!</span>(
-<a href=#1216 id=1216 data-nosnippet>1216</a>            <span class="string">"{}.{}.{}"</span>,
-<a href=#1217 id=1217 data-nosnippet>1217</a>            b64(<span class="string">br#"{"alg":"RS256","typ":"JWT"}"#</span>),
-<a href=#1218 id=1218 data-nosnippet>1218</a>            b64(payload.to_string().as_bytes()),
-<a href=#1219 id=1219 data-nosnippet>1219</a>            b64(<span class="string">b"not-a-real-signature"</span>),
-<a href=#1220 id=1220 data-nosnippet>1220</a>        )
-<a href=#1221 id=1221 data-nosnippet>1221</a>    }
-<a href=#1222 id=1222 data-nosnippet>1222</a>
-<a href=#1223 id=1223 data-nosnippet>1223</a>    <span class="attr">#[test]
-<a href=#1224 id=1224 data-nosnippet>1224</a>    </span><span class="kw">fn </span>it_reads_the_sub_and_nothing_else() {
-<a href=#1225 id=1225 data-nosnippet>1225</a>        <span class="kw">let </span>jwt = jwt_with(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({<span class="string">"iss"</span>: <span class="string">"oa_other"</span>, <span class="string">"sub"</span>: <span class="string">"oa_me"</span>}));
-<a href=#1226 id=1226 data-nosnippet>1226</a>        <span class="macro">assert_eq!</span>(unverified_client_id(<span class="kw-2">&amp;</span>jwt).as_deref(), <span class="prelude-val">Some</span>(<span class="string">"oa_me"</span>));
-<a href=#1227 id=1227 data-nosnippet>1227</a>    }
-<a href=#1228 id=1228 data-nosnippet>1228</a>
-<a href=#1229 id=1229 data-nosnippet>1229</a>    <span class="doccomment">/// Every shape that is not "a JWT with a string `sub`" answers `None`, so a
-<a href=#1230 id=1230 data-nosnippet>1230</a>    /// caller can treat the absence of a client id uniformly rather than
-<a href=#1231 id=1231 data-nosnippet>1231</a>    /// discovering a new failure mode per malformed input.
-<a href=#1232 id=1232 data-nosnippet>1232</a>    </span><span class="attr">#[test]
-<a href=#1233 id=1233 data-nosnippet>1233</a>    </span><span class="kw">fn </span>anything_else_is_no_client_id() {
-<a href=#1234 id=1234 data-nosnippet>1234</a>        <span class="kw">use </span>base64::Engine <span class="kw">as _</span>;
-<a href=#1235 id=1235 data-nosnippet>1235</a>        <span class="kw">let </span>b64 = |v: <span class="kw-2">&amp;</span>[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
-<a href=#1236 id=1236 data-nosnippet>1236</a>        <span class="kw">for </span>bad <span class="kw">in </span>[
-<a href=#1237 id=1237 data-nosnippet>1237</a>            String::new(),
-<a href=#1238 id=1238 data-nosnippet>1238</a>            <span class="string">"not-a-jwt"</span>.to_owned(),
-<a href=#1239 id=1239 data-nosnippet>1239</a>            <span class="string">"only.two"</span>.to_owned(),
-<a href=#1240 id=1240 data-nosnippet>1240</a>            <span class="macro">format!</span>(<span class="string">"{}.{}.{}"</span>, b64(<span class="string">b"{}"</span>), b64(<span class="string">b"not base64 json"</span>), b64(<span class="string">b"s"</span>)),
-<a href=#1241 id=1241 data-nosnippet>1241</a>            jwt_with(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({<span class="string">"iss"</span>: <span class="string">"oa_me"</span>})),
-<a href=#1242 id=1242 data-nosnippet>1242</a>            jwt_with(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({<span class="string">"sub"</span>: <span class="number">42</span>})),
-<a href=#1243 id=1243 data-nosnippet>1243</a>            jwt_with(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({<span class="string">"sub"</span>: <span class="string">""</span>})),
-<a href=#1244 id=1244 data-nosnippet>1244</a>        ] {
-<a href=#1245 id=1245 data-nosnippet>1245</a>            <span class="macro">assert_eq!</span>(unverified_client_id(<span class="kw-2">&amp;</span>bad), <span class="prelude-val">None</span>, <span class="string">"input: {bad}"</span>);
-<a href=#1246 id=1246 data-nosnippet>1246</a>        }
-<a href=#1247 id=1247 data-nosnippet>1247</a>    }
-<a href=#1248 id=1248 data-nosnippet>1248</a>}
+<a href=#1127 id=1127 data-nosnippet>1127</a>            allowed_resources: Vec::new(),
+<a href=#1128 id=1128 data-nosnippet>1128</a>            managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+<a href=#1129 id=1129 data-nosnippet>1129</a>            last_authorized_at: <span class="prelude-val">None</span>,
+<a href=#1130 id=1130 data-nosnippet>1130</a>        }
+<a href=#1131 id=1131 data-nosnippet>1131</a>    }
+<a href=#1132 id=1132 data-nosnippet>1132</a>
+<a href=#1133 id=1133 data-nosnippet>1133</a>    <span class="attr">#[test]
+<a href=#1134 id=1134 data-nosnippet>1134</a>    </span><span class="kw">fn </span>an_inline_jwks_resolves_to_its_keys() {
+<a href=#1135 id=1135 data-nosnippet>1135</a>        <span class="kw">let </span>key = ed25519_key(<span class="prelude-val">Some</span>(<span class="string">"k1"</span>));
+<a href=#1136 id=1136 data-nosnippet>1136</a>        <span class="kw">let </span>doc = serde_json::to_string(<span class="kw-2">&amp;</span>jwks(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>key])).unwrap();
+<a href=#1137 id=1137 data-nosnippet>1137</a>        <span class="kw">match </span>key_source_of(<span class="kw-2">&amp;</span>client_with(<span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>doc), <span class="prelude-val">None</span>)) {
+<a href=#1138 id=1138 data-nosnippet>1138</a>            ClientKeySource::Inline(set) =&gt; <span class="macro">assert_eq!</span>(set.keys.len(), <span class="number">1</span>),
+<a href=#1139 id=1139 data-nosnippet>1139</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected an inline key set, got {other:?}"</span>),
+<a href=#1140 id=1140 data-nosnippet>1140</a>        }
+<a href=#1141 id=1141 data-nosnippet>1141</a>    }
+<a href=#1142 id=1142 data-nosnippet>1142</a>
+<a href=#1143 id=1143 data-nosnippet>1143</a>    <span class="attr">#[test]
+<a href=#1144 id=1144 data-nosnippet>1144</a>    </span><span class="kw">fn </span>a_jwks_uri_resolves_to_a_remote_source() {
+<a href=#1145 id=1145 data-nosnippet>1145</a>        <span class="macro">assert_eq!</span>(
+<a href=#1146 id=1146 data-nosnippet>1146</a>            key_source_of(<span class="kw-2">&amp;</span>client_with(<span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(<span class="string">"https://rp.example/jwks.json"</span>))),
+<a href=#1147 id=1147 data-nosnippet>1147</a>            ClientKeySource::Remote(<span class="string">"https://rp.example/jwks.json"</span>.into())
+<a href=#1148 id=1148 data-nosnippet>1148</a>        );
+<a href=#1149 id=1149 data-nosnippet>1149</a>    }
+<a href=#1150 id=1150 data-nosnippet>1150</a>
+<a href=#1151 id=1151 data-nosnippet>1151</a>    <span class="doccomment">/// A broken key document is an ordinary authentication failure, not a
+<a href=#1152 id=1152 data-nosnippet>1152</a>    /// distinguishable one — see [`key_source_of`]'s docs.
+<a href=#1153 id=1153 data-nosnippet>1153</a>    </span><span class="attr">#[test]
+<a href=#1154 id=1154 data-nosnippet>1154</a>    </span><span class="kw">fn </span>a_malformed_inline_jwks_is_no_keys_rather_than_an_error() {
+<a href=#1155 id=1155 data-nosnippet>1155</a>        <span class="macro">assert_eq!</span>(
+<a href=#1156 id=1156 data-nosnippet>1156</a>            key_source_of(<span class="kw-2">&amp;</span>client_with(<span class="prelude-val">Some</span>(<span class="string">"{not json"</span>), <span class="prelude-val">None</span>)),
+<a href=#1157 id=1157 data-nosnippet>1157</a>            ClientKeySource::None
+<a href=#1158 id=1158 data-nosnippet>1158</a>        );
+<a href=#1159 id=1159 data-nosnippet>1159</a>        <span class="macro">assert_eq!</span>(
+<a href=#1160 id=1160 data-nosnippet>1160</a>            key_source_of(<span class="kw-2">&amp;</span>client_with(<span class="prelude-val">None</span>, <span class="prelude-val">None</span>)),
+<a href=#1161 id=1161 data-nosnippet>1161</a>            ClientKeySource::None
+<a href=#1162 id=1162 data-nosnippet>1162</a>        );
+<a href=#1163 id=1163 data-nosnippet>1163</a>        <span class="comment">// Blank is absent, matching `count_jwks_sources`'s emptiness rule.
+<a href=#1164 id=1164 data-nosnippet>1164</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#1165 id=1165 data-nosnippet>1165</a>            key_source_of(<span class="kw-2">&amp;</span>client_with(<span class="prelude-val">Some</span>(<span class="string">"   "</span>), <span class="prelude-val">Some</span>(<span class="string">"  "</span>))),
+<a href=#1166 id=1166 data-nosnippet>1166</a>            ClientKeySource::None
+<a href=#1167 id=1167 data-nosnippet>1167</a>        );
+<a href=#1168 id=1168 data-nosnippet>1168</a>    }
+<a href=#1169 id=1169 data-nosnippet>1169</a>}
+<a href=#1170 id=1170 data-nosnippet>1170</a>
+<a href=#1171 id=1171 data-nosnippet>1171</a><span class="doccomment">/// The `client_id` an assertion *claims*, read before anything is verified.
+<a href=#1172 id=1172 data-nosnippet>1172</a>///
+<a href=#1173 id=1173 data-nosnippet>1173</a>/// # Why reading an unverified JWT here is not a hole
+<a href=#1174 id=1174 data-nosnippet>1174</a>///
+<a href=#1175 id=1175 data-nosnippet>1175</a>/// RFC 7521 §4.2 makes `client_id` optional when a client authenticates with an
+<a href=#1176 id=1176 data-nosnippet>1176</a>/// assertion, and OIDC Core §9 makes the assertion's `sub` the client's
+<a href=#1177 id=1177 data-nosnippet>1177</a>/// identifier. So when the body carries no `client_id` there is exactly one
+<a href=#1178 id=1178 data-nosnippet>1178</a>/// place left to learn which client row to load, and it is inside a token
+<a href=#1179 id=1179 data-nosnippet>1179</a>/// nobody has checked yet.
+<a href=#1180 id=1180 data-nosnippet>1180</a>///
+<a href=#1181 id=1181 data-nosnippet>1181</a>/// That is safe because of what happens next and only because of it: the row
+<a href=#1182 id=1182 data-nosnippet>1182</a>/// this names is loaded, and [`verify_client_assertion`] then verifies the
+<a href=#1183 id=1183 data-nosnippet>1183</a>/// signature **against that row's registered key** and re-checks that `iss` and
+<a href=#1184 id=1184 data-nosnippet>1184</a>/// `sub` equal that client id. An attacker who writes somebody else's client id
+<a href=#1185 id=1185 data-nosnippet>1185</a>/// into a `sub` has chosen which public key their forgery will be checked
+<a href=#1186 id=1186 data-nosnippet>1186</a>/// against, and it will not be theirs. The value is a routing hint, never a
+<a href=#1187 id=1187 data-nosnippet>1187</a>/// credential.
+<a href=#1188 id=1188 data-nosnippet>1188</a>///
+<a href=#1189 id=1189 data-nosnippet>1189</a>/// The one thing this must not do is grow a second use. It is deliberately not
+<a href=#1190 id=1190 data-nosnippet>1190</a>/// exposed as "the client id of an assertion" — nothing downstream may treat
+<a href=#1191 id=1191 data-nosnippet>1191</a>/// the result as established, and `verify_client_assertion` remains the only
+<a href=#1192 id=1192 data-nosnippet>1192</a>/// function that decides whose assertion this is.
+<a href=#1193 id=1193 data-nosnippet>1193</a>///
+<a href=#1194 id=1194 data-nosnippet>1194</a>/// `None` for anything that is not a JWT with a string `sub`: three
+<a href=#1195 id=1195 data-nosnippet>1195</a>/// dot-separated parts, a base64url payload, an object with a `sub`. A caller
+<a href=#1196 id=1196 data-nosnippet>1196</a>/// receiving `None` is in exactly the position it was in before — no client id
+<a href=#1197 id=1197 data-nosnippet>1197</a>/// from anywhere — and answers as it always did.
+<a href=#1198 id=1198 data-nosnippet>1198</a></span><span class="attr">#[must_use]
+<a href=#1199 id=1199 data-nosnippet>1199</a></span><span class="kw">pub fn </span>unverified_client_id(assertion: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#1200 id=1200 data-nosnippet>1200</a>    <span class="kw">use </span>base64::Engine <span class="kw">as _</span>;
+<a href=#1201 id=1201 data-nosnippet>1201</a>
+<a href=#1202 id=1202 data-nosnippet>1202</a>    <span class="kw">let </span>payload = assertion.split(<span class="string">'.'</span>).nth(<span class="number">1</span>)<span class="question-mark">?</span>;
+<a href=#1203 id=1203 data-nosnippet>1203</a>    <span class="kw">let </span>bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+<a href=#1204 id=1204 data-nosnippet>1204</a>        .decode(payload)
+<a href=#1205 id=1205 data-nosnippet>1205</a>        .ok()<span class="question-mark">?</span>;
+<a href=#1206 id=1206 data-nosnippet>1206</a>    <span class="kw">let </span>value: serde_json::Value = serde_json::from_slice(<span class="kw-2">&amp;</span>bytes).ok()<span class="question-mark">?</span>;
+<a href=#1207 id=1207 data-nosnippet>1207</a>    <span class="kw">let </span>sub = value.get(<span class="string">"sub"</span>)<span class="question-mark">?</span>.as_str()<span class="question-mark">?</span>;
+<a href=#1208 id=1208 data-nosnippet>1208</a>    (!sub.is_empty()).then(|| sub.to_owned())
+<a href=#1209 id=1209 data-nosnippet>1209</a>}
+<a href=#1210 id=1210 data-nosnippet>1210</a>
+<a href=#1211 id=1211 data-nosnippet>1211</a><span class="attr">#[cfg(test)]
+<a href=#1212 id=1212 data-nosnippet>1212</a></span><span class="kw">mod </span>unverified_client_id_tests {
+<a href=#1213 id=1213 data-nosnippet>1213</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#1214 id=1214 data-nosnippet>1214</a>
+<a href=#1215 id=1215 data-nosnippet>1215</a>    <span class="kw">fn </span>jwt_with(payload: <span class="kw-2">&amp;</span>serde_json::Value) -&gt; String {
+<a href=#1216 id=1216 data-nosnippet>1216</a>        <span class="kw">use </span>base64::Engine <span class="kw">as _</span>;
+<a href=#1217 id=1217 data-nosnippet>1217</a>        <span class="kw">let </span>b64 = |v: <span class="kw-2">&amp;</span>[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+<a href=#1218 id=1218 data-nosnippet>1218</a>        <span class="macro">format!</span>(
+<a href=#1219 id=1219 data-nosnippet>1219</a>            <span class="string">"{}.{}.{}"</span>,
+<a href=#1220 id=1220 data-nosnippet>1220</a>            b64(<span class="string">br#"{"alg":"RS256","typ":"JWT"}"#</span>),
+<a href=#1221 id=1221 data-nosnippet>1221</a>            b64(payload.to_string().as_bytes()),
+<a href=#1222 id=1222 data-nosnippet>1222</a>            b64(<span class="string">b"not-a-real-signature"</span>),
+<a href=#1223 id=1223 data-nosnippet>1223</a>        )
+<a href=#1224 id=1224 data-nosnippet>1224</a>    }
+<a href=#1225 id=1225 data-nosnippet>1225</a>
+<a href=#1226 id=1226 data-nosnippet>1226</a>    <span class="attr">#[test]
+<a href=#1227 id=1227 data-nosnippet>1227</a>    </span><span class="kw">fn </span>it_reads_the_sub_and_nothing_else() {
+<a href=#1228 id=1228 data-nosnippet>1228</a>        <span class="kw">let </span>jwt = jwt_with(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({<span class="string">"iss"</span>: <span class="string">"oa_other"</span>, <span class="string">"sub"</span>: <span class="string">"oa_me"</span>}));
+<a href=#1229 id=1229 data-nosnippet>1229</a>        <span class="macro">assert_eq!</span>(unverified_client_id(<span class="kw-2">&amp;</span>jwt).as_deref(), <span class="prelude-val">Some</span>(<span class="string">"oa_me"</span>));
+<a href=#1230 id=1230 data-nosnippet>1230</a>    }
+<a href=#1231 id=1231 data-nosnippet>1231</a>
+<a href=#1232 id=1232 data-nosnippet>1232</a>    <span class="doccomment">/// Every shape that is not "a JWT with a string `sub`" answers `None`, so a
+<a href=#1233 id=1233 data-nosnippet>1233</a>    /// caller can treat the absence of a client id uniformly rather than
+<a href=#1234 id=1234 data-nosnippet>1234</a>    /// discovering a new failure mode per malformed input.
+<a href=#1235 id=1235 data-nosnippet>1235</a>    </span><span class="attr">#[test]
+<a href=#1236 id=1236 data-nosnippet>1236</a>    </span><span class="kw">fn </span>anything_else_is_no_client_id() {
+<a href=#1237 id=1237 data-nosnippet>1237</a>        <span class="kw">use </span>base64::Engine <span class="kw">as _</span>;
+<a href=#1238 id=1238 data-nosnippet>1238</a>        <span class="kw">let </span>b64 = |v: <span class="kw-2">&amp;</span>[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+<a href=#1239 id=1239 data-nosnippet>1239</a>        <span class="kw">for </span>bad <span class="kw">in </span>[
+<a href=#1240 id=1240 data-nosnippet>1240</a>            String::new(),
+<a href=#1241 id=1241 data-nosnippet>1241</a>            <span class="string">"not-a-jwt"</span>.to_owned(),
+<a href=#1242 id=1242 data-nosnippet>1242</a>            <span class="string">"only.two"</span>.to_owned(),
+<a href=#1243 id=1243 data-nosnippet>1243</a>            <span class="macro">format!</span>(<span class="string">"{}.{}.{}"</span>, b64(<span class="string">b"{}"</span>), b64(<span class="string">b"not base64 json"</span>), b64(<span class="string">b"s"</span>)),
+<a href=#1244 id=1244 data-nosnippet>1244</a>            jwt_with(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({<span class="string">"iss"</span>: <span class="string">"oa_me"</span>})),
+<a href=#1245 id=1245 data-nosnippet>1245</a>            jwt_with(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({<span class="string">"sub"</span>: <span class="number">42</span>})),
+<a href=#1246 id=1246 data-nosnippet>1246</a>            jwt_with(<span class="kw-2">&amp;</span><span class="macro">serde_json::json!</span>({<span class="string">"sub"</span>: <span class="string">""</span>})),
+<a href=#1247 id=1247 data-nosnippet>1247</a>        ] {
+<a href=#1248 id=1248 data-nosnippet>1248</a>            <span class="macro">assert_eq!</span>(unverified_client_id(<span class="kw-2">&amp;</span>bad), <span class="prelude-val">None</span>, <span class="string">"input: {bad}"</span>);
+<a href=#1249 id=1249 data-nosnippet>1249</a>        }
+<a href=#1250 id=1250 data-nosnippet>1250</a>    }
+<a href=#1251 id=1251 data-nosnippet>1251</a>}
 </code></pre></div></section></main></body></html>

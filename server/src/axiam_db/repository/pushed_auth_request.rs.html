@@ -114,271 +114,281 @@
 <a href=#114 id=114 data-nosnippet>114</a>    /// no key.
 <a href=#115 id=115 data-nosnippet>115</a>    </span><span class="attr">#[surreal(default)]
 <a href=#116 id=116 data-nosnippet>116</a>    </span>dpop_jkt: <span class="prelude-ty">Option</span>&lt;String&gt;,
-<a href=#117 id=117 data-nosnippet>117</a>}
-<a href=#118 id=118 data-nosnippet>118</a>
-<a href=#119 id=119 data-nosnippet>119</a><span class="kw">impl </span>From&lt;PushedAuthParams&gt; <span class="kw">for </span>PushedAuthParamsRow {
-<a href=#120 id=120 data-nosnippet>120</a>    <span class="kw">fn </span>from(p: PushedAuthParams) -&gt; <span class="self">Self </span>{
-<a href=#121 id=121 data-nosnippet>121</a>        <span class="self">Self </span>{
-<a href=#122 id=122 data-nosnippet>122</a>            response_type: p.response_type,
-<a href=#123 id=123 data-nosnippet>123</a>            redirect_uri: p.redirect_uri,
-<a href=#124 id=124 data-nosnippet>124</a>            scope: p.scope,
-<a href=#125 id=125 data-nosnippet>125</a>            state: p.state,
-<a href=#126 id=126 data-nosnippet>126</a>            code_challenge: p.code_challenge,
-<a href=#127 id=127 data-nosnippet>127</a>            code_challenge_method: p.code_challenge_method,
-<a href=#128 id=128 data-nosnippet>128</a>            nonce: p.nonce,
-<a href=#129 id=129 data-nosnippet>129</a>            prompt: p.prompt,
-<a href=#130 id=130 data-nosnippet>130</a>            max_age: p.max_age,
-<a href=#131 id=131 data-nosnippet>131</a>            acr_values: p.acr_values,
-<a href=#132 id=132 data-nosnippet>132</a>            claims: p.claims,
-<a href=#133 id=133 data-nosnippet>133</a>            id_token_hint: p.id_token_hint,
-<a href=#134 id=134 data-nosnippet>134</a>            login_hint: p.login_hint,
-<a href=#135 id=135 data-nosnippet>135</a>            display: p.display,
-<a href=#136 id=136 data-nosnippet>136</a>            ui_locales: p.ui_locales,
-<a href=#137 id=137 data-nosnippet>137</a>            claims_locales: p.claims_locales,
-<a href=#138 id=138 data-nosnippet>138</a>            dpop_jkt: p.dpop_jkt,
-<a href=#139 id=139 data-nosnippet>139</a>        }
-<a href=#140 id=140 data-nosnippet>140</a>    }
-<a href=#141 id=141 data-nosnippet>141</a>}
-<a href=#142 id=142 data-nosnippet>142</a>
-<a href=#143 id=143 data-nosnippet>143</a><span class="kw">impl </span>From&lt;PushedAuthParamsRow&gt; <span class="kw">for </span>PushedAuthParams {
-<a href=#144 id=144 data-nosnippet>144</a>    <span class="kw">fn </span>from(p: PushedAuthParamsRow) -&gt; <span class="self">Self </span>{
-<a href=#145 id=145 data-nosnippet>145</a>        <span class="self">Self </span>{
-<a href=#146 id=146 data-nosnippet>146</a>            response_type: p.response_type,
-<a href=#147 id=147 data-nosnippet>147</a>            redirect_uri: p.redirect_uri,
-<a href=#148 id=148 data-nosnippet>148</a>            scope: p.scope,
-<a href=#149 id=149 data-nosnippet>149</a>            state: p.state,
-<a href=#150 id=150 data-nosnippet>150</a>            code_challenge: p.code_challenge,
-<a href=#151 id=151 data-nosnippet>151</a>            code_challenge_method: p.code_challenge_method,
-<a href=#152 id=152 data-nosnippet>152</a>            nonce: p.nonce,
-<a href=#153 id=153 data-nosnippet>153</a>            prompt: p.prompt,
-<a href=#154 id=154 data-nosnippet>154</a>            max_age: p.max_age,
-<a href=#155 id=155 data-nosnippet>155</a>            acr_values: p.acr_values,
-<a href=#156 id=156 data-nosnippet>156</a>            claims: p.claims,
-<a href=#157 id=157 data-nosnippet>157</a>            id_token_hint: p.id_token_hint,
-<a href=#158 id=158 data-nosnippet>158</a>            login_hint: p.login_hint,
-<a href=#159 id=159 data-nosnippet>159</a>            display: p.display,
-<a href=#160 id=160 data-nosnippet>160</a>            ui_locales: p.ui_locales,
-<a href=#161 id=161 data-nosnippet>161</a>            claims_locales: p.claims_locales,
-<a href=#162 id=162 data-nosnippet>162</a>            dpop_jkt: p.dpop_jkt,
-<a href=#163 id=163 data-nosnippet>163</a>        }
-<a href=#164 id=164 data-nosnippet>164</a>    }
-<a href=#165 id=165 data-nosnippet>165</a>}
-<a href=#166 id=166 data-nosnippet>166</a>
-<a href=#167 id=167 data-nosnippet>167</a><span class="kw">impl </span>PushedAuthRequestRow {
-<a href=#168 id=168 data-nosnippet>168</a>    <span class="kw">fn </span>try_into_request(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;PushedAuthRequest, DbError&gt; {
-<a href=#169 id=169 data-nosnippet>169</a>        <span class="kw">let </span>id = Uuid::parse_str(<span class="kw-2">&amp;</span><span class="self">self</span>.record_id)
-<a href=#170 id=170 data-nosnippet>170</a>            .map_err(|e| DbError::Migration(<span class="macro">format!</span>(<span class="string">"invalid pushed request UUID: {e}"</span>)))<span class="question-mark">?</span>;
-<a href=#171 id=171 data-nosnippet>171</a>        <span class="kw">let </span>tenant_id = Uuid::parse_str(<span class="kw-2">&amp;</span><span class="self">self</span>.tenant_id)
-<a href=#172 id=172 data-nosnippet>172</a>            .map_err(|e| DbError::Migration(<span class="macro">format!</span>(<span class="string">"invalid tenant UUID: {e}"</span>)))<span class="question-mark">?</span>;
-<a href=#173 id=173 data-nosnippet>173</a>        <span class="prelude-val">Ok</span>(PushedAuthRequest {
-<a href=#174 id=174 data-nosnippet>174</a>            id,
-<a href=#175 id=175 data-nosnippet>175</a>            tenant_id,
-<a href=#176 id=176 data-nosnippet>176</a>            client_id: <span class="self">self</span>.client_id,
-<a href=#177 id=177 data-nosnippet>177</a>            request_uri_hash: <span class="self">self</span>.request_uri_hash,
-<a href=#178 id=178 data-nosnippet>178</a>            params: <span class="self">self</span>.params.into(),
-<a href=#179 id=179 data-nosnippet>179</a>            consumed: <span class="self">self</span>.consumed,
-<a href=#180 id=180 data-nosnippet>180</a>            expires_at: <span class="self">self</span>.expires_at,
-<a href=#181 id=181 data-nosnippet>181</a>            created_at: <span class="self">self</span>.created_at,
-<a href=#182 id=182 data-nosnippet>182</a>        })
-<a href=#183 id=183 data-nosnippet>183</a>    }
-<a href=#184 id=184 data-nosnippet>184</a>}
-<a href=#185 id=185 data-nosnippet>185</a>
-<a href=#186 id=186 data-nosnippet>186</a><span class="doccomment">/// SurrealDB implementation of the pushed-authorization-request repository.
-<a href=#187 id=187 data-nosnippet>187</a></span><span class="attr">#[derive(Clone)]
-<a href=#188 id=188 data-nosnippet>188</a></span><span class="kw">pub struct </span>SurrealPushedAuthRequestRepository&lt;C: Connection&gt; {
-<a href=#189 id=189 data-nosnippet>189</a>    db: DbHandle&lt;C&gt;,
-<a href=#190 id=190 data-nosnippet>190</a>}
-<a href=#191 id=191 data-nosnippet>191</a>
-<a href=#192 id=192 data-nosnippet>192</a><span class="kw">impl</span>&lt;C: Connection&gt; SurrealPushedAuthRequestRepository&lt;C&gt; {
-<a href=#193 id=193 data-nosnippet>193</a>    <span class="kw">pub fn </span>new(db: <span class="kw">impl </span>Into&lt;DbHandle&lt;C&gt;&gt;) -&gt; <span class="self">Self </span>{
-<a href=#194 id=194 data-nosnippet>194</a>        <span class="self">Self </span>{ db: db.into() }
-<a href=#195 id=195 data-nosnippet>195</a>    }
-<a href=#196 id=196 data-nosnippet>196</a>}
-<a href=#197 id=197 data-nosnippet>197</a>
-<a href=#198 id=198 data-nosnippet>198</a><span class="kw">impl</span>&lt;C: Connection&gt; PushedAuthRequestRepository <span class="kw">for </span>SurrealPushedAuthRequestRepository&lt;C&gt; {
-<a href=#199 id=199 data-nosnippet>199</a>    <span class="kw">async fn </span>create(<span class="kw-2">&amp;</span><span class="self">self</span>, input: CreatePushedAuthRequest) -&gt; AxiamResult&lt;PushedAuthRequest&gt; {
-<a href=#200 id=200 data-nosnippet>200</a>        <span class="kw">let </span>id = new_id();
-<a href=#201 id=201 data-nosnippet>201</a>        <span class="kw">let </span>params: PushedAuthParamsRow = input.params.into();
-<a href=#202 id=202 data-nosnippet>202</a>
-<a href=#203 id=203 data-nosnippet>203</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#204 id=204 data-nosnippet>204</a>            </span>.db
-<a href=#205 id=205 data-nosnippet>205</a>            .current()
-<a href=#206 id=206 data-nosnippet>206</a>            .query(<span class="macro">format!</span>(
-<a href=#207 id=207 data-nosnippet>207</a>                <span class="string">"LET $created = (CREATE type::record('pushed_auth_request', $id) SET \
-<a href=#208 id=208 data-nosnippet>208</a>                     tenant_id = $tenant_id, \
-<a href=#209 id=209 data-nosnippet>209</a>                     client_id = $client_id, \
-<a href=#210 id=210 data-nosnippet>210</a>                     request_uri_hash = $hash, \
-<a href=#211 id=211 data-nosnippet>211</a>                     params = $params, \
-<a href=#212 id=212 data-nosnippet>212</a>                     consumed = false, \
-<a href=#213 id=213 data-nosnippet>213</a>                     expires_at = $expires_at); \
-<a href=#214 id=214 data-nosnippet>214</a>                 SELECT {SELECT_FIELDS} FROM $created"
-<a href=#215 id=215 data-nosnippet>215</a>            </span>))
-<a href=#216 id=216 data-nosnippet>216</a>            .bind((<span class="string">"id"</span>, id.to_string()))
-<a href=#217 id=217 data-nosnippet>217</a>            .bind((<span class="string">"tenant_id"</span>, input.tenant_id.to_string()))
-<a href=#218 id=218 data-nosnippet>218</a>            .bind((<span class="string">"client_id"</span>, input.client_id))
-<a href=#219 id=219 data-nosnippet>219</a>            .bind((<span class="string">"hash"</span>, input.request_uri_hash))
-<a href=#220 id=220 data-nosnippet>220</a>            .bind((<span class="string">"params"</span>, params))
-<a href=#221 id=221 data-nosnippet>221</a>            .bind((<span class="string">"expires_at"</span>, input.expires_at))
-<a href=#222 id=222 data-nosnippet>222</a>            .<span class="kw">await
-<a href=#223 id=223 data-nosnippet>223</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#224 id=224 data-nosnippet>224</a>
-<a href=#225 id=225 data-nosnippet>225</a>        <span class="kw">let </span>rows: Vec&lt;PushedAuthRequestRow&gt; = result.take(<span class="number">1</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#226 id=226 data-nosnippet>226</a>        rows.into_iter()
-<a href=#227 id=227 data-nosnippet>227</a>            .next()
-<a href=#228 id=228 data-nosnippet>228</a>            .ok_or_else(|| DbError::Migration(<span class="string">"pushed_auth_request insert returned no row"</span>.into()))<span class="question-mark">?
-<a href=#229 id=229 data-nosnippet>229</a>            </span>.try_into_request()
-<a href=#230 id=230 data-nosnippet>230</a>            .map_err(Into::into)
-<a href=#231 id=231 data-nosnippet>231</a>    }
-<a href=#232 id=232 data-nosnippet>232</a>
-<a href=#233 id=233 data-nosnippet>233</a>    <span class="kw">async fn </span>consume(
-<a href=#234 id=234 data-nosnippet>234</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#235 id=235 data-nosnippet>235</a>        tenant_id: Uuid,
-<a href=#236 id=236 data-nosnippet>236</a>        request_uri_hash: <span class="kw-2">&amp;</span>str,
-<a href=#237 id=237 data-nosnippet>237</a>    ) -&gt; AxiamResult&lt;<span class="prelude-ty">Option</span>&lt;PushedAuthRequest&gt;&gt; {
-<a href=#238 id=238 data-nosnippet>238</a>        <span class="comment">// `RETURN BEFORE` yields the pre-transition row. Marking `consumed`
-<a href=#239 id=239 data-nosnippet>239</a>        // rather than deleting keeps "already used" distinguishable from
-<a href=#240 id=240 data-nosnippet>240</a>        // "never existed" in an audit trail, even though both answer
-<a href=#241 id=241 data-nosnippet>241</a>        // `invalid_request` on the wire.
-<a href=#242 id=242 data-nosnippet>242</a>        //
-<a href=#243 id=243 data-nosnippet>243</a>        // Two layers, in two queries (X6/#302 — see the module header).
-<a href=#244 id=244 data-nosnippet>244</a>        //
-<a href=#245 id=245 data-nosnippet>245</a>        // Layer 1, here: the guarded `UPDATE` inside an explicit transaction,
-<a href=#246 id=246 data-nosnippet>246</a>        // so two concurrent authorize requests conflict on one key and the
-<a href=#247 id=247 data-nosnippet>247</a>        // deployed engine aborts the loser. `consumed = false` stays in the
-<a href=#248 id=248 data-nosnippet>248</a>        // clause — it is what makes a later, non-concurrent replay match
-<a href=#249 id=249 data-nosnippet>249</a>        // nothing.
-<a href=#250 id=250 data-nosnippet>250</a>        //
-<a href=#251 id=251 data-nosnippet>251</a>        // Layer 2, in the SEPARATE query below: the per-attempt nonce read back
-<a href=#252 id=252 data-nosnippet>252</a>        // after this transaction has committed, never folded into it (inside a
-<a href=#253 id=253 data-nosnippet>253</a>        // transaction every racer sees its own write and believes it won —
-<a href=#254 id=254 data-nosnippet>254</a>        // `SCHEMA_V31`).
-<a href=#255 id=255 data-nosnippet>255</a>        </span><span class="kw">let </span>nonce = new_id().to_string();
-<a href=#256 id=256 data-nosnippet>256</a>        <span class="kw">let </span>result = <span class="self">self
-<a href=#257 id=257 data-nosnippet>257</a>            </span>.db
-<a href=#258 id=258 data-nosnippet>258</a>            .current()
-<a href=#259 id=259 data-nosnippet>259</a>            .query(<span class="macro">format!</span>(
-<a href=#260 id=260 data-nosnippet>260</a>                <span class="string">"BEGIN TRANSACTION; \
-<a href=#261 id=261 data-nosnippet>261</a>                 LET $before = (UPDATE pushed_auth_request \
-<a href=#262 id=262 data-nosnippet>262</a>                     SET consumed = true, redemption_id = $nonce \
-<a href=#263 id=263 data-nosnippet>263</a>                     WHERE tenant_id = $tenant_id AND request_uri_hash = $hash \
-<a href=#264 id=264 data-nosnippet>264</a>                     AND consumed = false AND expires_at &gt; time::now() \
-<a href=#265 id=265 data-nosnippet>265</a>                     RETURN BEFORE); \
-<a href=#266 id=266 data-nosnippet>266</a>                 SELECT {SELECT_FIELDS} FROM $before; \
-<a href=#267 id=267 data-nosnippet>267</a>                 COMMIT TRANSACTION"
-<a href=#268 id=268 data-nosnippet>268</a>            </span>))
-<a href=#269 id=269 data-nosnippet>269</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#270 id=270 data-nosnippet>270</a>            .bind((<span class="string">"hash"</span>, request_uri_hash.to_string()))
-<a href=#271 id=271 data-nosnippet>271</a>            .bind((<span class="string">"nonce"</span>, nonce.clone()))
-<a href=#272 id=272 data-nosnippet>272</a>            .<span class="kw">await</span>;
-<a href=#273 id=273 data-nosnippet>273</a>
-<a href=#274 id=274 data-nosnippet>274</a>        <span class="comment">// A loser's abort is this method's "someone else consumed it" answer,
-<a href=#275 id=275 data-nosnippet>275</a>        // not a server fault.
-<a href=#276 id=276 data-nosnippet>276</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="kw">match </span>result {
-<a href=#277 id=277 data-nosnippet>277</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
-<a href=#278 id=278 data-nosnippet>278</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#279 id=279 data-nosnippet>279</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#280 id=280 data-nosnippet>280</a>        };
-<a href=#281 id=281 data-nosnippet>281</a>
-<a href=#282 id=282 data-nosnippet>282</a>        <span class="comment">// BEGIN=0, LET=1, SELECT=2, COMMIT=3.
-<a href=#283 id=283 data-nosnippet>283</a>        </span><span class="kw">let </span>rows: Vec&lt;PushedAuthRequestRow&gt; = <span class="kw">match </span>result.take::&lt;Vec&lt;PushedAuthRequestRow&gt;&gt;(<span class="number">2</span>) {
-<a href=#284 id=284 data-nosnippet>284</a>            <span class="prelude-val">Ok</span>(rows) =&gt; rows,
-<a href=#285 id=285 data-nosnippet>285</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#286 id=286 data-nosnippet>286</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#287 id=287 data-nosnippet>287</a>        };
-<a href=#288 id=288 data-nosnippet>288</a>        <span class="kw">if </span>rows.is_empty() {
-<a href=#289 id=289 data-nosnippet>289</a>            <span class="comment">// Unknown, already consumed, or expired. Nothing was written.
-<a href=#290 id=290 data-nosnippet>290</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#291 id=291 data-nosnippet>291</a>        }
-<a href=#292 id=292 data-nosnippet>292</a>
-<a href=#293 id=293 data-nosnippet>293</a>        <span class="comment">// Layer 2: outside, and after, the transaction above.
-<a href=#294 id=294 data-nosnippet>294</a>        </span><span class="kw">let </span>stored = <span class="self">self
-<a href=#295 id=295 data-nosnippet>295</a>            </span>.db
-<a href=#296 id=296 data-nosnippet>296</a>            .current()
-<a href=#297 id=297 data-nosnippet>297</a>            .query(
-<a href=#298 id=298 data-nosnippet>298</a>                <span class="string">"SELECT VALUE redemption_id FROM pushed_auth_request \
-<a href=#299 id=299 data-nosnippet>299</a>                 WHERE tenant_id = $tenant_id AND request_uri_hash = $hash LIMIT 1"</span>,
-<a href=#300 id=300 data-nosnippet>300</a>            )
-<a href=#301 id=301 data-nosnippet>301</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#302 id=302 data-nosnippet>302</a>            .bind((<span class="string">"hash"</span>, request_uri_hash.to_string()))
-<a href=#303 id=303 data-nosnippet>303</a>            .<span class="kw">await</span>;
-<a href=#304 id=304 data-nosnippet>304</a>        <span class="kw">let </span><span class="kw-2">mut </span>stored = <span class="kw">match </span>stored {
-<a href=#305 id=305 data-nosnippet>305</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
-<a href=#306 id=306 data-nosnippet>306</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#307 id=307 data-nosnippet>307</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#308 id=308 data-nosnippet>308</a>        };
-<a href=#309 id=309 data-nosnippet>309</a>        <span class="kw">let </span>stored: Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt; = <span class="kw">match </span>stored.take::&lt;Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt;&gt;(<span class="number">0</span>) {
-<a href=#310 id=310 data-nosnippet>310</a>            <span class="prelude-val">Ok</span>(v) =&gt; v,
-<a href=#311 id=311 data-nosnippet>311</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#312 id=312 data-nosnippet>312</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#313 id=313 data-nosnippet>313</a>        };
-<a href=#314 id=314 data-nosnippet>314</a>        <span class="kw">if </span>stored.into_iter().flatten().next().as_deref() != <span class="prelude-val">Some</span>(nonce.as_str()) {
-<a href=#315 id=315 data-nosnippet>315</a>            <span class="comment">// Our write landed but another authorize request's landed after it.
-<a href=#316 id=316 data-nosnippet>316</a>            // That one holds the consumption; this one must not replay it.
-<a href=#317 id=317 data-nosnippet>317</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#318 id=318 data-nosnippet>318</a>        }
-<a href=#319 id=319 data-nosnippet>319</a>
-<a href=#320 id=320 data-nosnippet>320</a>        rows.into_iter()
-<a href=#321 id=321 data-nosnippet>321</a>            .next()
-<a href=#322 id=322 data-nosnippet>322</a>            .map(PushedAuthRequestRow::try_into_request)
-<a href=#323 id=323 data-nosnippet>323</a>            .transpose()
-<a href=#324 id=324 data-nosnippet>324</a>            .map_err(Into::into)
-<a href=#325 id=325 data-nosnippet>325</a>    }
-<a href=#326 id=326 data-nosnippet>326</a>
-<a href=#327 id=327 data-nosnippet>327</a>    <span class="kw">async fn </span>find_unconsumed(
-<a href=#328 id=328 data-nosnippet>328</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#329 id=329 data-nosnippet>329</a>        tenant_id: Uuid,
-<a href=#330 id=330 data-nosnippet>330</a>        request_uri_hash: <span class="kw-2">&amp;</span>str,
-<a href=#331 id=331 data-nosnippet>331</a>    ) -&gt; AxiamResult&lt;<span class="prelude-ty">Option</span>&lt;PushedAuthRequest&gt;&gt; {
-<a href=#332 id=332 data-nosnippet>332</a>        <span class="comment">// `consume`'s guard clause with the write removed, spelled out rather
-<a href=#333 id=333 data-nosnippet>333</a>        // than shared with it: the two statements must stay identical in what
-<a href=#334 id=334 data-nosnippet>334</a>        // they consider spendable, and the one that matters carries a
-<a href=#335 id=335 data-nosnippet>335</a>        // transaction and a nonce this one deliberately has neither of.
-<a href=#336 id=336 data-nosnippet>336</a>        //
-<a href=#337 id=337 data-nosnippet>337</a>        // No transaction, because there is nothing to serialize — this writes
-<a href=#338 id=338 data-nosnippet>338</a>        // nothing, and a read that raced a concurrent `consume` is answered by
-<a href=#339 id=339 data-nosnippet>339</a>        // that `consume` failing, not by this one having been careful. No
-<a href=#340 id=340 data-nosnippet>340</a>        // `LIMIT`, because `(tenant_id, request_uri_hash)` names at most one
-<a href=#341 id=341 data-nosnippet>341</a>        // row and a second would be a defect worth seeing rather than hiding.
-<a href=#342 id=342 data-nosnippet>342</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#343 id=343 data-nosnippet>343</a>            </span>.db
-<a href=#344 id=344 data-nosnippet>344</a>            .current()
-<a href=#345 id=345 data-nosnippet>345</a>            .query(<span class="macro">format!</span>(
-<a href=#346 id=346 data-nosnippet>346</a>                <span class="string">"SELECT {SELECT_FIELDS} FROM pushed_auth_request \
-<a href=#347 id=347 data-nosnippet>347</a>                 WHERE tenant_id = $tenant_id AND request_uri_hash = $hash \
-<a href=#348 id=348 data-nosnippet>348</a>                 AND consumed = false AND expires_at &gt; time::now()"
-<a href=#349 id=349 data-nosnippet>349</a>            </span>))
-<a href=#350 id=350 data-nosnippet>350</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#351 id=351 data-nosnippet>351</a>            .bind((<span class="string">"hash"</span>, request_uri_hash.to_string()))
-<a href=#352 id=352 data-nosnippet>352</a>            .<span class="kw">await
-<a href=#353 id=353 data-nosnippet>353</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#354 id=354 data-nosnippet>354</a>
-<a href=#355 id=355 data-nosnippet>355</a>        <span class="kw">let </span>rows: Vec&lt;PushedAuthRequestRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#356 id=356 data-nosnippet>356</a>        rows.into_iter()
-<a href=#357 id=357 data-nosnippet>357</a>            .next()
-<a href=#358 id=358 data-nosnippet>358</a>            .map(PushedAuthRequestRow::try_into_request)
-<a href=#359 id=359 data-nosnippet>359</a>            .transpose()
-<a href=#360 id=360 data-nosnippet>360</a>            .map_err(Into::into)
-<a href=#361 id=361 data-nosnippet>361</a>    }
-<a href=#362 id=362 data-nosnippet>362</a>
-<a href=#363 id=363 data-nosnippet>363</a>    <span class="kw">async fn </span>cleanup_expired(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid) -&gt; AxiamResult&lt;u64&gt; {
-<a href=#364 id=364 data-nosnippet>364</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#365 id=365 data-nosnippet>365</a>            </span>.db
-<a href=#366 id=366 data-nosnippet>366</a>            .current()
-<a href=#367 id=367 data-nosnippet>367</a>            .query(
-<a href=#368 id=368 data-nosnippet>368</a>                <span class="string">"SELECT count() AS c FROM (DELETE pushed_auth_request \
-<a href=#369 id=369 data-nosnippet>369</a>                 WHERE tenant_id = $tenant_id AND expires_at &lt;= time::now() \
-<a href=#370 id=370 data-nosnippet>370</a>                 RETURN BEFORE) GROUP ALL"</span>,
-<a href=#371 id=371 data-nosnippet>371</a>            )
-<a href=#372 id=372 data-nosnippet>372</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#373 id=373 data-nosnippet>373</a>            .<span class="kw">await
-<a href=#374 id=374 data-nosnippet>374</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#375 id=375 data-nosnippet>375</a>
-<a href=#376 id=376 data-nosnippet>376</a>        <span class="attr">#[derive(Debug, SurrealValue)]
-<a href=#377 id=377 data-nosnippet>377</a>        </span><span class="kw">struct </span>CountRow {
-<a href=#378 id=378 data-nosnippet>378</a>            c: i64,
-<a href=#379 id=379 data-nosnippet>379</a>        }
-<a href=#380 id=380 data-nosnippet>380</a>        <span class="kw">let </span>rows: Vec&lt;CountRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#381 id=381 data-nosnippet>381</a>        <span class="prelude-val">Ok</span>(rows.first().map(|r| r.c.max(<span class="number">0</span>) <span class="kw">as </span>u64).unwrap_or(<span class="number">0</span>))
-<a href=#382 id=382 data-nosnippet>382</a>    }
-<a href=#383 id=383 data-nosnippet>383</a>}
+<a href=#117 id=117 data-nosnippet>117</a>    <span class="doccomment">/// T21.3 / RFC 8707 — the resource the pushed request named.
+<a href=#118 id=118 data-nosnippet>118</a>    ///
+<a href=#119 id=119 data-nosnippet>119</a>    /// No migration, for the reason `dpop_jkt` above needs none: `params` is
+<a href=#120 id=120 data-nosnippet>120</a>    /// `TYPE object FLEXIBLE`, so a new key inside it needs no `DEFINE FIELD`.
+<a href=#121 id=121 data-nosnippet>121</a>    /// `#[surreal(default)]` carries a row pushed before the field existed,
+<a href=#122 id=122 data-nosnippet>122</a>    /// and such a row named no resource.
+<a href=#123 id=123 data-nosnippet>123</a>    </span><span class="attr">#[surreal(default)]
+<a href=#124 id=124 data-nosnippet>124</a>    </span>resource: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#125 id=125 data-nosnippet>125</a>}
+<a href=#126 id=126 data-nosnippet>126</a>
+<a href=#127 id=127 data-nosnippet>127</a><span class="kw">impl </span>From&lt;PushedAuthParams&gt; <span class="kw">for </span>PushedAuthParamsRow {
+<a href=#128 id=128 data-nosnippet>128</a>    <span class="kw">fn </span>from(p: PushedAuthParams) -&gt; <span class="self">Self </span>{
+<a href=#129 id=129 data-nosnippet>129</a>        <span class="self">Self </span>{
+<a href=#130 id=130 data-nosnippet>130</a>            response_type: p.response_type,
+<a href=#131 id=131 data-nosnippet>131</a>            redirect_uri: p.redirect_uri,
+<a href=#132 id=132 data-nosnippet>132</a>            scope: p.scope,
+<a href=#133 id=133 data-nosnippet>133</a>            state: p.state,
+<a href=#134 id=134 data-nosnippet>134</a>            code_challenge: p.code_challenge,
+<a href=#135 id=135 data-nosnippet>135</a>            code_challenge_method: p.code_challenge_method,
+<a href=#136 id=136 data-nosnippet>136</a>            nonce: p.nonce,
+<a href=#137 id=137 data-nosnippet>137</a>            prompt: p.prompt,
+<a href=#138 id=138 data-nosnippet>138</a>            max_age: p.max_age,
+<a href=#139 id=139 data-nosnippet>139</a>            acr_values: p.acr_values,
+<a href=#140 id=140 data-nosnippet>140</a>            claims: p.claims,
+<a href=#141 id=141 data-nosnippet>141</a>            id_token_hint: p.id_token_hint,
+<a href=#142 id=142 data-nosnippet>142</a>            login_hint: p.login_hint,
+<a href=#143 id=143 data-nosnippet>143</a>            display: p.display,
+<a href=#144 id=144 data-nosnippet>144</a>            ui_locales: p.ui_locales,
+<a href=#145 id=145 data-nosnippet>145</a>            claims_locales: p.claims_locales,
+<a href=#146 id=146 data-nosnippet>146</a>            dpop_jkt: p.dpop_jkt,
+<a href=#147 id=147 data-nosnippet>147</a>            resource: p.resource,
+<a href=#148 id=148 data-nosnippet>148</a>        }
+<a href=#149 id=149 data-nosnippet>149</a>    }
+<a href=#150 id=150 data-nosnippet>150</a>}
+<a href=#151 id=151 data-nosnippet>151</a>
+<a href=#152 id=152 data-nosnippet>152</a><span class="kw">impl </span>From&lt;PushedAuthParamsRow&gt; <span class="kw">for </span>PushedAuthParams {
+<a href=#153 id=153 data-nosnippet>153</a>    <span class="kw">fn </span>from(p: PushedAuthParamsRow) -&gt; <span class="self">Self </span>{
+<a href=#154 id=154 data-nosnippet>154</a>        <span class="self">Self </span>{
+<a href=#155 id=155 data-nosnippet>155</a>            response_type: p.response_type,
+<a href=#156 id=156 data-nosnippet>156</a>            redirect_uri: p.redirect_uri,
+<a href=#157 id=157 data-nosnippet>157</a>            scope: p.scope,
+<a href=#158 id=158 data-nosnippet>158</a>            state: p.state,
+<a href=#159 id=159 data-nosnippet>159</a>            code_challenge: p.code_challenge,
+<a href=#160 id=160 data-nosnippet>160</a>            code_challenge_method: p.code_challenge_method,
+<a href=#161 id=161 data-nosnippet>161</a>            nonce: p.nonce,
+<a href=#162 id=162 data-nosnippet>162</a>            prompt: p.prompt,
+<a href=#163 id=163 data-nosnippet>163</a>            max_age: p.max_age,
+<a href=#164 id=164 data-nosnippet>164</a>            acr_values: p.acr_values,
+<a href=#165 id=165 data-nosnippet>165</a>            claims: p.claims,
+<a href=#166 id=166 data-nosnippet>166</a>            id_token_hint: p.id_token_hint,
+<a href=#167 id=167 data-nosnippet>167</a>            login_hint: p.login_hint,
+<a href=#168 id=168 data-nosnippet>168</a>            display: p.display,
+<a href=#169 id=169 data-nosnippet>169</a>            ui_locales: p.ui_locales,
+<a href=#170 id=170 data-nosnippet>170</a>            claims_locales: p.claims_locales,
+<a href=#171 id=171 data-nosnippet>171</a>            dpop_jkt: p.dpop_jkt,
+<a href=#172 id=172 data-nosnippet>172</a>            resource: p.resource,
+<a href=#173 id=173 data-nosnippet>173</a>        }
+<a href=#174 id=174 data-nosnippet>174</a>    }
+<a href=#175 id=175 data-nosnippet>175</a>}
+<a href=#176 id=176 data-nosnippet>176</a>
+<a href=#177 id=177 data-nosnippet>177</a><span class="kw">impl </span>PushedAuthRequestRow {
+<a href=#178 id=178 data-nosnippet>178</a>    <span class="kw">fn </span>try_into_request(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;PushedAuthRequest, DbError&gt; {
+<a href=#179 id=179 data-nosnippet>179</a>        <span class="kw">let </span>id = Uuid::parse_str(<span class="kw-2">&amp;</span><span class="self">self</span>.record_id)
+<a href=#180 id=180 data-nosnippet>180</a>            .map_err(|e| DbError::Migration(<span class="macro">format!</span>(<span class="string">"invalid pushed request UUID: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#181 id=181 data-nosnippet>181</a>        <span class="kw">let </span>tenant_id = Uuid::parse_str(<span class="kw-2">&amp;</span><span class="self">self</span>.tenant_id)
+<a href=#182 id=182 data-nosnippet>182</a>            .map_err(|e| DbError::Migration(<span class="macro">format!</span>(<span class="string">"invalid tenant UUID: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#183 id=183 data-nosnippet>183</a>        <span class="prelude-val">Ok</span>(PushedAuthRequest {
+<a href=#184 id=184 data-nosnippet>184</a>            id,
+<a href=#185 id=185 data-nosnippet>185</a>            tenant_id,
+<a href=#186 id=186 data-nosnippet>186</a>            client_id: <span class="self">self</span>.client_id,
+<a href=#187 id=187 data-nosnippet>187</a>            request_uri_hash: <span class="self">self</span>.request_uri_hash,
+<a href=#188 id=188 data-nosnippet>188</a>            params: <span class="self">self</span>.params.into(),
+<a href=#189 id=189 data-nosnippet>189</a>            consumed: <span class="self">self</span>.consumed,
+<a href=#190 id=190 data-nosnippet>190</a>            expires_at: <span class="self">self</span>.expires_at,
+<a href=#191 id=191 data-nosnippet>191</a>            created_at: <span class="self">self</span>.created_at,
+<a href=#192 id=192 data-nosnippet>192</a>        })
+<a href=#193 id=193 data-nosnippet>193</a>    }
+<a href=#194 id=194 data-nosnippet>194</a>}
+<a href=#195 id=195 data-nosnippet>195</a>
+<a href=#196 id=196 data-nosnippet>196</a><span class="doccomment">/// SurrealDB implementation of the pushed-authorization-request repository.
+<a href=#197 id=197 data-nosnippet>197</a></span><span class="attr">#[derive(Clone)]
+<a href=#198 id=198 data-nosnippet>198</a></span><span class="kw">pub struct </span>SurrealPushedAuthRequestRepository&lt;C: Connection&gt; {
+<a href=#199 id=199 data-nosnippet>199</a>    db: DbHandle&lt;C&gt;,
+<a href=#200 id=200 data-nosnippet>200</a>}
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a><span class="kw">impl</span>&lt;C: Connection&gt; SurrealPushedAuthRequestRepository&lt;C&gt; {
+<a href=#203 id=203 data-nosnippet>203</a>    <span class="kw">pub fn </span>new(db: <span class="kw">impl </span>Into&lt;DbHandle&lt;C&gt;&gt;) -&gt; <span class="self">Self </span>{
+<a href=#204 id=204 data-nosnippet>204</a>        <span class="self">Self </span>{ db: db.into() }
+<a href=#205 id=205 data-nosnippet>205</a>    }
+<a href=#206 id=206 data-nosnippet>206</a>}
+<a href=#207 id=207 data-nosnippet>207</a>
+<a href=#208 id=208 data-nosnippet>208</a><span class="kw">impl</span>&lt;C: Connection&gt; PushedAuthRequestRepository <span class="kw">for </span>SurrealPushedAuthRequestRepository&lt;C&gt; {
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="kw">async fn </span>create(<span class="kw-2">&amp;</span><span class="self">self</span>, input: CreatePushedAuthRequest) -&gt; AxiamResult&lt;PushedAuthRequest&gt; {
+<a href=#210 id=210 data-nosnippet>210</a>        <span class="kw">let </span>id = new_id();
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="kw">let </span>params: PushedAuthParamsRow = input.params.into();
+<a href=#212 id=212 data-nosnippet>212</a>
+<a href=#213 id=213 data-nosnippet>213</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#214 id=214 data-nosnippet>214</a>            </span>.db
+<a href=#215 id=215 data-nosnippet>215</a>            .current()
+<a href=#216 id=216 data-nosnippet>216</a>            .query(<span class="macro">format!</span>(
+<a href=#217 id=217 data-nosnippet>217</a>                <span class="string">"LET $created = (CREATE type::record('pushed_auth_request', $id) SET \
+<a href=#218 id=218 data-nosnippet>218</a>                     tenant_id = $tenant_id, \
+<a href=#219 id=219 data-nosnippet>219</a>                     client_id = $client_id, \
+<a href=#220 id=220 data-nosnippet>220</a>                     request_uri_hash = $hash, \
+<a href=#221 id=221 data-nosnippet>221</a>                     params = $params, \
+<a href=#222 id=222 data-nosnippet>222</a>                     consumed = false, \
+<a href=#223 id=223 data-nosnippet>223</a>                     expires_at = $expires_at); \
+<a href=#224 id=224 data-nosnippet>224</a>                 SELECT {SELECT_FIELDS} FROM $created"
+<a href=#225 id=225 data-nosnippet>225</a>            </span>))
+<a href=#226 id=226 data-nosnippet>226</a>            .bind((<span class="string">"id"</span>, id.to_string()))
+<a href=#227 id=227 data-nosnippet>227</a>            .bind((<span class="string">"tenant_id"</span>, input.tenant_id.to_string()))
+<a href=#228 id=228 data-nosnippet>228</a>            .bind((<span class="string">"client_id"</span>, input.client_id))
+<a href=#229 id=229 data-nosnippet>229</a>            .bind((<span class="string">"hash"</span>, input.request_uri_hash))
+<a href=#230 id=230 data-nosnippet>230</a>            .bind((<span class="string">"params"</span>, params))
+<a href=#231 id=231 data-nosnippet>231</a>            .bind((<span class="string">"expires_at"</span>, input.expires_at))
+<a href=#232 id=232 data-nosnippet>232</a>            .<span class="kw">await
+<a href=#233 id=233 data-nosnippet>233</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#234 id=234 data-nosnippet>234</a>
+<a href=#235 id=235 data-nosnippet>235</a>        <span class="kw">let </span>rows: Vec&lt;PushedAuthRequestRow&gt; = result.take(<span class="number">1</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#236 id=236 data-nosnippet>236</a>        rows.into_iter()
+<a href=#237 id=237 data-nosnippet>237</a>            .next()
+<a href=#238 id=238 data-nosnippet>238</a>            .ok_or_else(|| DbError::Migration(<span class="string">"pushed_auth_request insert returned no row"</span>.into()))<span class="question-mark">?
+<a href=#239 id=239 data-nosnippet>239</a>            </span>.try_into_request()
+<a href=#240 id=240 data-nosnippet>240</a>            .map_err(Into::into)
+<a href=#241 id=241 data-nosnippet>241</a>    }
+<a href=#242 id=242 data-nosnippet>242</a>
+<a href=#243 id=243 data-nosnippet>243</a>    <span class="kw">async fn </span>consume(
+<a href=#244 id=244 data-nosnippet>244</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#245 id=245 data-nosnippet>245</a>        tenant_id: Uuid,
+<a href=#246 id=246 data-nosnippet>246</a>        request_uri_hash: <span class="kw-2">&amp;</span>str,
+<a href=#247 id=247 data-nosnippet>247</a>    ) -&gt; AxiamResult&lt;<span class="prelude-ty">Option</span>&lt;PushedAuthRequest&gt;&gt; {
+<a href=#248 id=248 data-nosnippet>248</a>        <span class="comment">// `RETURN BEFORE` yields the pre-transition row. Marking `consumed`
+<a href=#249 id=249 data-nosnippet>249</a>        // rather than deleting keeps "already used" distinguishable from
+<a href=#250 id=250 data-nosnippet>250</a>        // "never existed" in an audit trail, even though both answer
+<a href=#251 id=251 data-nosnippet>251</a>        // `invalid_request` on the wire.
+<a href=#252 id=252 data-nosnippet>252</a>        //
+<a href=#253 id=253 data-nosnippet>253</a>        // Two layers, in two queries (X6/#302 — see the module header).
+<a href=#254 id=254 data-nosnippet>254</a>        //
+<a href=#255 id=255 data-nosnippet>255</a>        // Layer 1, here: the guarded `UPDATE` inside an explicit transaction,
+<a href=#256 id=256 data-nosnippet>256</a>        // so two concurrent authorize requests conflict on one key and the
+<a href=#257 id=257 data-nosnippet>257</a>        // deployed engine aborts the loser. `consumed = false` stays in the
+<a href=#258 id=258 data-nosnippet>258</a>        // clause — it is what makes a later, non-concurrent replay match
+<a href=#259 id=259 data-nosnippet>259</a>        // nothing.
+<a href=#260 id=260 data-nosnippet>260</a>        //
+<a href=#261 id=261 data-nosnippet>261</a>        // Layer 2, in the SEPARATE query below: the per-attempt nonce read back
+<a href=#262 id=262 data-nosnippet>262</a>        // after this transaction has committed, never folded into it (inside a
+<a href=#263 id=263 data-nosnippet>263</a>        // transaction every racer sees its own write and believes it won —
+<a href=#264 id=264 data-nosnippet>264</a>        // `SCHEMA_V31`).
+<a href=#265 id=265 data-nosnippet>265</a>        </span><span class="kw">let </span>nonce = new_id().to_string();
+<a href=#266 id=266 data-nosnippet>266</a>        <span class="kw">let </span>result = <span class="self">self
+<a href=#267 id=267 data-nosnippet>267</a>            </span>.db
+<a href=#268 id=268 data-nosnippet>268</a>            .current()
+<a href=#269 id=269 data-nosnippet>269</a>            .query(<span class="macro">format!</span>(
+<a href=#270 id=270 data-nosnippet>270</a>                <span class="string">"BEGIN TRANSACTION; \
+<a href=#271 id=271 data-nosnippet>271</a>                 LET $before = (UPDATE pushed_auth_request \
+<a href=#272 id=272 data-nosnippet>272</a>                     SET consumed = true, redemption_id = $nonce \
+<a href=#273 id=273 data-nosnippet>273</a>                     WHERE tenant_id = $tenant_id AND request_uri_hash = $hash \
+<a href=#274 id=274 data-nosnippet>274</a>                     AND consumed = false AND expires_at &gt; time::now() \
+<a href=#275 id=275 data-nosnippet>275</a>                     RETURN BEFORE); \
+<a href=#276 id=276 data-nosnippet>276</a>                 SELECT {SELECT_FIELDS} FROM $before; \
+<a href=#277 id=277 data-nosnippet>277</a>                 COMMIT TRANSACTION"
+<a href=#278 id=278 data-nosnippet>278</a>            </span>))
+<a href=#279 id=279 data-nosnippet>279</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#280 id=280 data-nosnippet>280</a>            .bind((<span class="string">"hash"</span>, request_uri_hash.to_string()))
+<a href=#281 id=281 data-nosnippet>281</a>            .bind((<span class="string">"nonce"</span>, nonce.clone()))
+<a href=#282 id=282 data-nosnippet>282</a>            .<span class="kw">await</span>;
+<a href=#283 id=283 data-nosnippet>283</a>
+<a href=#284 id=284 data-nosnippet>284</a>        <span class="comment">// A loser's abort is this method's "someone else consumed it" answer,
+<a href=#285 id=285 data-nosnippet>285</a>        // not a server fault.
+<a href=#286 id=286 data-nosnippet>286</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="kw">match </span>result {
+<a href=#287 id=287 data-nosnippet>287</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
+<a href=#288 id=288 data-nosnippet>288</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#289 id=289 data-nosnippet>289</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
+<a href=#290 id=290 data-nosnippet>290</a>        };
+<a href=#291 id=291 data-nosnippet>291</a>
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="comment">// BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+<a href=#293 id=293 data-nosnippet>293</a>        </span><span class="kw">let </span>rows: Vec&lt;PushedAuthRequestRow&gt; = <span class="kw">match </span>result.take::&lt;Vec&lt;PushedAuthRequestRow&gt;&gt;(<span class="number">2</span>) {
+<a href=#294 id=294 data-nosnippet>294</a>            <span class="prelude-val">Ok</span>(rows) =&gt; rows,
+<a href=#295 id=295 data-nosnippet>295</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#296 id=296 data-nosnippet>296</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
+<a href=#297 id=297 data-nosnippet>297</a>        };
+<a href=#298 id=298 data-nosnippet>298</a>        <span class="kw">if </span>rows.is_empty() {
+<a href=#299 id=299 data-nosnippet>299</a>            <span class="comment">// Unknown, already consumed, or expired. Nothing was written.
+<a href=#300 id=300 data-nosnippet>300</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#301 id=301 data-nosnippet>301</a>        }
+<a href=#302 id=302 data-nosnippet>302</a>
+<a href=#303 id=303 data-nosnippet>303</a>        <span class="comment">// Layer 2: outside, and after, the transaction above.
+<a href=#304 id=304 data-nosnippet>304</a>        </span><span class="kw">let </span>stored = <span class="self">self
+<a href=#305 id=305 data-nosnippet>305</a>            </span>.db
+<a href=#306 id=306 data-nosnippet>306</a>            .current()
+<a href=#307 id=307 data-nosnippet>307</a>            .query(
+<a href=#308 id=308 data-nosnippet>308</a>                <span class="string">"SELECT VALUE redemption_id FROM pushed_auth_request \
+<a href=#309 id=309 data-nosnippet>309</a>                 WHERE tenant_id = $tenant_id AND request_uri_hash = $hash LIMIT 1"</span>,
+<a href=#310 id=310 data-nosnippet>310</a>            )
+<a href=#311 id=311 data-nosnippet>311</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#312 id=312 data-nosnippet>312</a>            .bind((<span class="string">"hash"</span>, request_uri_hash.to_string()))
+<a href=#313 id=313 data-nosnippet>313</a>            .<span class="kw">await</span>;
+<a href=#314 id=314 data-nosnippet>314</a>        <span class="kw">let </span><span class="kw-2">mut </span>stored = <span class="kw">match </span>stored {
+<a href=#315 id=315 data-nosnippet>315</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
+<a href=#316 id=316 data-nosnippet>316</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#317 id=317 data-nosnippet>317</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
+<a href=#318 id=318 data-nosnippet>318</a>        };
+<a href=#319 id=319 data-nosnippet>319</a>        <span class="kw">let </span>stored: Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt; = <span class="kw">match </span>stored.take::&lt;Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt;&gt;(<span class="number">0</span>) {
+<a href=#320 id=320 data-nosnippet>320</a>            <span class="prelude-val">Ok</span>(v) =&gt; v,
+<a href=#321 id=321 data-nosnippet>321</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#322 id=322 data-nosnippet>322</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
+<a href=#323 id=323 data-nosnippet>323</a>        };
+<a href=#324 id=324 data-nosnippet>324</a>        <span class="kw">if </span>stored.into_iter().flatten().next().as_deref() != <span class="prelude-val">Some</span>(nonce.as_str()) {
+<a href=#325 id=325 data-nosnippet>325</a>            <span class="comment">// Our write landed but another authorize request's landed after it.
+<a href=#326 id=326 data-nosnippet>326</a>            // That one holds the consumption; this one must not replay it.
+<a href=#327 id=327 data-nosnippet>327</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#328 id=328 data-nosnippet>328</a>        }
+<a href=#329 id=329 data-nosnippet>329</a>
+<a href=#330 id=330 data-nosnippet>330</a>        rows.into_iter()
+<a href=#331 id=331 data-nosnippet>331</a>            .next()
+<a href=#332 id=332 data-nosnippet>332</a>            .map(PushedAuthRequestRow::try_into_request)
+<a href=#333 id=333 data-nosnippet>333</a>            .transpose()
+<a href=#334 id=334 data-nosnippet>334</a>            .map_err(Into::into)
+<a href=#335 id=335 data-nosnippet>335</a>    }
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a>    <span class="kw">async fn </span>find_unconsumed(
+<a href=#338 id=338 data-nosnippet>338</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#339 id=339 data-nosnippet>339</a>        tenant_id: Uuid,
+<a href=#340 id=340 data-nosnippet>340</a>        request_uri_hash: <span class="kw-2">&amp;</span>str,
+<a href=#341 id=341 data-nosnippet>341</a>    ) -&gt; AxiamResult&lt;<span class="prelude-ty">Option</span>&lt;PushedAuthRequest&gt;&gt; {
+<a href=#342 id=342 data-nosnippet>342</a>        <span class="comment">// `consume`'s guard clause with the write removed, spelled out rather
+<a href=#343 id=343 data-nosnippet>343</a>        // than shared with it: the two statements must stay identical in what
+<a href=#344 id=344 data-nosnippet>344</a>        // they consider spendable, and the one that matters carries a
+<a href=#345 id=345 data-nosnippet>345</a>        // transaction and a nonce this one deliberately has neither of.
+<a href=#346 id=346 data-nosnippet>346</a>        //
+<a href=#347 id=347 data-nosnippet>347</a>        // No transaction, because there is nothing to serialize — this writes
+<a href=#348 id=348 data-nosnippet>348</a>        // nothing, and a read that raced a concurrent `consume` is answered by
+<a href=#349 id=349 data-nosnippet>349</a>        // that `consume` failing, not by this one having been careful. No
+<a href=#350 id=350 data-nosnippet>350</a>        // `LIMIT`, because `(tenant_id, request_uri_hash)` names at most one
+<a href=#351 id=351 data-nosnippet>351</a>        // row and a second would be a defect worth seeing rather than hiding.
+<a href=#352 id=352 data-nosnippet>352</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#353 id=353 data-nosnippet>353</a>            </span>.db
+<a href=#354 id=354 data-nosnippet>354</a>            .current()
+<a href=#355 id=355 data-nosnippet>355</a>            .query(<span class="macro">format!</span>(
+<a href=#356 id=356 data-nosnippet>356</a>                <span class="string">"SELECT {SELECT_FIELDS} FROM pushed_auth_request \
+<a href=#357 id=357 data-nosnippet>357</a>                 WHERE tenant_id = $tenant_id AND request_uri_hash = $hash \
+<a href=#358 id=358 data-nosnippet>358</a>                 AND consumed = false AND expires_at &gt; time::now()"
+<a href=#359 id=359 data-nosnippet>359</a>            </span>))
+<a href=#360 id=360 data-nosnippet>360</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#361 id=361 data-nosnippet>361</a>            .bind((<span class="string">"hash"</span>, request_uri_hash.to_string()))
+<a href=#362 id=362 data-nosnippet>362</a>            .<span class="kw">await
+<a href=#363 id=363 data-nosnippet>363</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#364 id=364 data-nosnippet>364</a>
+<a href=#365 id=365 data-nosnippet>365</a>        <span class="kw">let </span>rows: Vec&lt;PushedAuthRequestRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#366 id=366 data-nosnippet>366</a>        rows.into_iter()
+<a href=#367 id=367 data-nosnippet>367</a>            .next()
+<a href=#368 id=368 data-nosnippet>368</a>            .map(PushedAuthRequestRow::try_into_request)
+<a href=#369 id=369 data-nosnippet>369</a>            .transpose()
+<a href=#370 id=370 data-nosnippet>370</a>            .map_err(Into::into)
+<a href=#371 id=371 data-nosnippet>371</a>    }
+<a href=#372 id=372 data-nosnippet>372</a>
+<a href=#373 id=373 data-nosnippet>373</a>    <span class="kw">async fn </span>cleanup_expired(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#375 id=375 data-nosnippet>375</a>            </span>.db
+<a href=#376 id=376 data-nosnippet>376</a>            .current()
+<a href=#377 id=377 data-nosnippet>377</a>            .query(
+<a href=#378 id=378 data-nosnippet>378</a>                <span class="string">"SELECT count() AS c FROM (DELETE pushed_auth_request \
+<a href=#379 id=379 data-nosnippet>379</a>                 WHERE tenant_id = $tenant_id AND expires_at &lt;= time::now() \
+<a href=#380 id=380 data-nosnippet>380</a>                 RETURN BEFORE) GROUP ALL"</span>,
+<a href=#381 id=381 data-nosnippet>381</a>            )
+<a href=#382 id=382 data-nosnippet>382</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#383 id=383 data-nosnippet>383</a>            .<span class="kw">await
+<a href=#384 id=384 data-nosnippet>384</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#385 id=385 data-nosnippet>385</a>
+<a href=#386 id=386 data-nosnippet>386</a>        <span class="attr">#[derive(Debug, SurrealValue)]
+<a href=#387 id=387 data-nosnippet>387</a>        </span><span class="kw">struct </span>CountRow {
+<a href=#388 id=388 data-nosnippet>388</a>            c: i64,
+<a href=#389 id=389 data-nosnippet>389</a>        }
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="kw">let </span>rows: Vec&lt;CountRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#391 id=391 data-nosnippet>391</a>        <span class="prelude-val">Ok</span>(rows.first().map(|r| r.c.max(<span class="number">0</span>) <span class="kw">as </span>u64).unwrap_or(<span class="number">0</span>))
+<a href=#392 id=392 data-nosnippet>392</a>    }
+<a href=#393 id=393 data-nosnippet>393</a>}
 </code></pre></div></section></main></body></html>

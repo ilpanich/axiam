@@ -1,0 +1,39 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Redirect-URI matching (T21.2)."><title>axiam_oauth2::redirect_uri - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module redirect_uri</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-beta16</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module redirect_<wbr>uri</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-a-function-and-not-veccontains" title="Why a function and not `Vec::contains`">Why a function and not <code>Vec::contains</code></a></li><li><a href="#the-three-hosts-and-why-they-are-not-interchangeable" title="The three hosts, and why they are not interchangeable">The three hosts, and why they are not interchangeable</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>redirect_<wbr>uri</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/redirect_uri.rs.html#1-285">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Redirect-URI matching (T21.2).</p>
+<p>One function, <a href="fn.redirect_uri_matches.html" title="fn axiam_oauth2::redirect_uri::redirect_uri_matches"><code>redirect_uri_matches</code></a>, used by every place that asks
+whether a presented <code>redirect_uri</code> is one this client registered: the
+authorization endpoint, the PAR endpoint, and — through them — the
+authorization code, which stores what was presented rather than what was
+registered.</p>
+<h2 id="why-a-function-and-not-veccontains"><a class="doc-anchor" href="#why-a-function-and-not-veccontains">§</a>Why a function and not <code>Vec::contains</code></h2>
+<p>Until T21.2 the question was answered by <code>client.redirect_uris.contains()</code>,
+a byte-for-byte string comparison, everywhere. That is exactly right for
+every URI a server or a mobile app registers, and it is unimplementable for
+the one client family AXIAM did not serve: a desktop application that
+listens on <code>http://127.0.0.1:{a port the operating system chose}/callback</code>.
+The port is not knowable at registration time, so RFC 8252 §7.3 says the
+authorization server</p>
+<blockquote>
+<p>MUST allow any port to be specified at the time of the request for
+loopback IP redirect URIs, to accommodate clients that obtain an
+available ephemeral port from the operating system at the time of the
+request.</p>
+</blockquote>
+<p>This module is that allowance and nothing else. Everything outside the
+loopback case keeps the old comparison, byte for byte — including the
+degenerate cases (an unparseable registered URI, a trailing slash, a
+percent-encoding difference), which is why the non-loopback path compares
+the <em>strings</em> rather than the parsed URLs. Normalising them would be a
+behaviour change for every existing client, which is precisely what I1
+forbids, and a redirect matcher is the last place to introduce one: the
+comparison is what stands between an authorization code and an attacker’s
+server.</p>
+<h2 id="the-three-hosts-and-why-they-are-not-interchangeable"><a class="doc-anchor" href="#the-three-hosts-and-why-they-are-not-interchangeable">§</a>The three hosts, and why they are not interchangeable</h2>
+<p><code>127.0.0.1</code>, <code>[::1]</code> and <code>localhost</code> each match only themselves. RFC 8252
+§8.3 recommends the literal IP forms over the name — <code>localhost</code> resolves
+through a resolver an attacker may influence — but it does not forbid the
+name, and the two desktop clients this work exists for disagree: VS Code
+registers <code>http://127.0.0.1/…</code> and Claude Code registers
+<code>http://localhost/…</code>. Treating them as one would silently widen every
+registration to a host the operator did not write down, so each client
+registers what it actually uses and gets exactly that.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.any_redirect_uri_matches.html" title="fn axiam_oauth2::redirect_uri::any_redirect_uri_matches">any_<wbr>redirect_<wbr>uri_<wbr>matches</a></dt><dd>Whether any of <code>registered</code> matches <code>presented</code>.</dd><dt><a class="fn" href="fn.redirect_uri_matches.html" title="fn axiam_oauth2::redirect_uri::redirect_uri_matches">redirect_<wbr>uri_<wbr>matches</a></dt><dd>Whether <code>presented</code> is the registered redirect URI <code>registered</code>.</dd></dl></section></div></main></body></html>

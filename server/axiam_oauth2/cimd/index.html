@@ -1,0 +1,74 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Client ID Metadata Documents — a `client_id` that is a URL (T21.5)."><title>axiam_oauth2::cimd - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module cimd</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-beta16</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module cimd</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-draft-revision-this-implements" title="The draft revision this implements">The draft revision this implements</a></li><li><a href="#what-this-module-is-and-what-it-is-not" title="What this module is, and what it is not">What this module is, and what it is not</a></li><li><a href="#why-every-failure-is-the-same-failure" title="Why every failure is the same failure">Why every failure is the same failure</a></li><li><a href="#the-threat-this-module-exists-inside" title="The threat this module exists inside">The threat this module exists inside</a></li><li><a href="#what-a-document-may-not-decide" title="What a document may not decide">What a document may not decide</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>cimd</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/cimd.rs.html#1-1751">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Client ID Metadata Documents — a <code>client_id</code> that is a URL (T21.5).</p>
+<p>Implements <code>draft-ietf-oauth-client-id-metadata-document</code>: a client
+identifies itself with an <code>https</code> URL, and the authorization server fetches
+that URL to learn the client’s metadata instead of holding a registration
+an administrator created. It is how Claude Code, VS Code and the MCP
+Inspector can be <em>the same client</em> at every AXIAM deployment they ever talk
+to, with nothing registered anywhere in advance.</p>
+<h2 id="the-draft-revision-this-implements"><a class="doc-anchor" href="#the-draft-revision-this-implements">§</a>The draft revision this implements</h2>
+<p><strong>Not pinned to a numbered revision, deliberately, and this is a departure
+from the plan’s instruction.</strong> The executing environment’s egress proxy
+refuses <code>datatracker.ietf.org</code> and <code>ietf.org</code> (HTTP 403 on CONNECT), so the
+revision current on 2026-09-17 could not be read, and a number written from
+memory would be a claim this code cannot support. What is implemented is
+the draft’s stable core — the URL rules, the document shape, and the
+metadata members RFC 7591 §2 already defines — cross-checked against
+Keycloak’s <code>cimd</code> feature, whose validation list the plan names as the
+reference behaviour. <code>docs/admin/client-id-metadata-documents.md</code> says the
+same thing in the same words, and T7 or T8, from an environment with
+egress, should replace both with the revision and re-read the diff.</p>
+<h2 id="what-this-module-is-and-what-it-is-not"><a class="doc-anchor" href="#what-this-module-is-and-what-it-is-not">§</a>What this module is, and what it is not</h2>
+<p>It is a <strong>pure decision</strong> plus one <strong>cache</strong>. It decides whether a
+<code>client_id</code> may be resolved at all, fetches the document behind the shared
+SSRF guard, decides whether what came back is a client AXIAM will admit,
+and produces the <code>CreateOAuth2Client</code> that a caller materialises. It holds
+no repository, writes nothing, and answers every failure with one enum the
+caller turns into today’s “unknown client”.</p>
+<h2 id="why-every-failure-is-the-same-failure"><a class="doc-anchor" href="#why-every-failure-is-the-same-failure">§</a>Why every failure is the same failure</h2>
+<p><a href="enum.CimdError.html" title="enum axiam_oauth2::cimd::CimdError"><code>CimdError</code></a> is rich for the logs and invisible on the wire. A caller that
+cannot resolve a URL-shaped <code>client_id</code> does not materialise a row, so the
+ordinary repository lookup runs and answers exactly what it answers today
+for a <code>client_id</code> nobody registered. That is invariant I1 for the tenant
+that has CIMD off, and it is also what stops this mechanism becoming a
+probe: a stranger cannot learn from the response whether their document was
+unreachable, oversize, malformed, refused by a domain rule or refused by
+the SSRF guard.</p>
+<h2 id="the-threat-this-module-exists-inside"><a class="doc-anchor" href="#the-threat-this-module-exists-inside">§</a>The threat this module exists inside</h2>
+<p>An unauthenticated request names a URL and AXIAM fetches it. Every bound
+here is therefore a security control rather than a tuning knob, and each is
+owned by something that has already been reviewed:</p>
+<div><table><thead><tr><th>Bound</th><th>Owned by</th></tr></thead><tbody>
+<tr><td>Which hosts may be fetched at all</td><td><code>CimdPolicy::trusted_client_id_domains</code>, empty refused at the settings layer</td></tr>
+<tr><td>Private/loopback addresses, IPv4-mapped IPv6, DNS rebinding</td><td><code>axiam_pki::ssrf</code> (SEC-054, SEC-094): resolve, canonicalise, validate, <strong>pin</strong></td></tr>
+<tr><td>Redirect following</td><td>the same guard: automatic redirects off, every hop re-validated, <code>MAX_HOPS</code></td></tr>
+<tr><td>Plaintext <code>http</code></td><td>the same guard, plus <a href="../../axiam_core/models/settings/struct.CimdPolicy.html#structfield.allow_http" title="field axiam_core::models::settings::CimdPolicy::allow_http"><code>CimdPolicy::allow_http</code></a></td></tr>
+<tr><td>Response size</td><td><code>CimdPolicy::max_metadata_bytes</code>, applied as a <strong>streaming</strong> cap</td></tr>
+<tr><td>Request time</td><td>the guard’s per-request client timeout</td></tr>
+<tr><td>How often a fetch may repeat</td><td><code>CimdPolicy::min_cache_secs</code></td></tr>
+<tr><td>How long a stranger may pin a client</td><td><code>CimdPolicy::max_cache_secs</code></td></tr>
+</tbody></table>
+</div>
+<p>No address classification, no redirect policy and no connection building
+happens in this file. It was written once, reviewed once
+(<code>claude_dev/security-review-f4bis-2026-08-15.md</code> §3), and fixed once; a
+second copy here would be a second thing to get SEC-094 wrong in.</p>
+<h2 id="what-a-document-may-not-decide"><a class="doc-anchor" href="#what-a-document-may-not-decide">§</a>What a document may not decide</h2>
+<p>The same four things a self-registered client may not decide, for the same
+reasons, and one more:</p>
+<div><table><thead><tr><th>The document may name</th><th>It is decided by</th></tr></thead><tbody>
+<tr><td><code>redirect_uris</code></td><td>the document, within <code>cimd.trusted_redirect_domains</code></td></tr>
+<tr><td><code>scope</code></td><td>the document, within <code>dcr_allowed_scopes</code></td></tr>
+<tr><td><code>grant_types</code></td><td>the document, within <code>{authorization_code, refresh_token}</code></td></tr>
+<tr><td><code>token_endpoint_auth_method</code></td><td>the document, within <code>{none, private_key_jwt}</code></td></tr>
+<tr><td><strong>audiences</strong> (<code>allowed_resources</code>)</td><td><strong>the tenant, always</strong> (D3)</td></tr>
+<tr><td><strong>profile</strong></td><td><strong>forced to <code>standard</code></strong> (I5)</td></tr>
+<tr><td><strong>provenance</strong> (<code>managed_by</code>)</td><td><strong>forced to <code>cimd</code></strong> (D5)</td></tr>
+<tr><td><strong>consent</strong></td><td><strong>forced on</strong> (D4)</td></tr>
+<tr><td><strong>a shared secret</strong></td><td><strong>cannot exist</strong> — the registration is a public document</td></tr>
+</tbody></table>
+</div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CachedDocument.html" title="struct axiam_oauth2::cimd::CachedDocument">Cached<wbr>Document</a></dt><dd>One cached document.</dd><dt><a class="struct" href="struct.ClientMetadataCache.html" title="struct axiam_oauth2::cimd::ClientMetadataCache">Client<wbr>Metadata<wbr>Cache</a></dt><dd>Process-wide client-metadata-document cache, keyed by
+<code>(tenant_id, client_id URL)</code>.</dd><dt><a class="struct" href="struct.ClientMetadataDocument.html" title="struct axiam_oauth2::cimd::ClientMetadataDocument">Client<wbr>Metadata<wbr>Document</a></dt><dd>A client metadata document, as fetched.</dd><dt><a class="struct" href="struct.ValidatedCimdClient.html" title="struct axiam_oauth2::cimd::ValidatedCimdClient">Validated<wbr>Cimd<wbr>Client</a></dt><dd>A document that passed every check, ready to be materialised.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CimdError.html" title="enum axiam_oauth2::cimd::CimdError">Cimd<wbr>Error</a></dt><dd>Why a URL-shaped <code>client_id</code> did not become a client.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.CIMD_AUTH_METHODS.html" title="constant axiam_oauth2::cimd::CIMD_AUTH_METHODS">CIMD_<wbr>AUTH_<wbr>METHODS</a></dt><dd>The <code>token_endpoint_auth_method</code> values a metadata document may name.</dd><dt><a class="constant" href="constant.STALE_WINDOW_SECS.html" title="constant axiam_oauth2::cimd::STALE_WINDOW_SECS">STALE_<wbr>WINDOW_<wbr>SECS</a></dt><dd>How long past its TTL a cached document may still be served when the
+publisher is unreachable (24 hours).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.looks_like_url.html" title="fn axiam_oauth2::cimd::looks_like_url">looks_<wbr>like_<wbr>url</a></dt><dd>Whether a <code>client_id</code> is shaped like an absolute URL at all.</dd><dt><a class="fn" href="fn.resolve.html" title="fn axiam_oauth2::cimd::resolve">resolve</a></dt><dd>Decide whether a <code>client_id</code> is a CIMD client at all, and if so produce the
+row it becomes.</dd><dt><a class="fn" href="fn.validate.html" title="fn axiam_oauth2::cimd::validate">validate</a></dt><dd>Validate a fetched document against the <code>client_id</code> it claims to describe
+and the tenant’s policy, and produce the row it becomes.</dd><dt><a class="fn" href="fn.validate_client_id_url.html" title="fn axiam_oauth2::cimd::validate_client_id_url">validate_<wbr>client_<wbr>id_<wbr>url</a></dt><dd>Validate a <code>client_id</code> as a metadata document URL, against the tenant’s
+policy.</dd></dl></section></div></main></body></html>

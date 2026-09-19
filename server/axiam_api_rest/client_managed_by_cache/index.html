@@ -1,0 +1,39 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Tiny TTL cache for the `(tenant_id, client_id) -&#62; managed_by` mapping."><title>axiam_api_rest::client_managed_by_cache - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module client_managed_by_cache</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.0.0-beta16</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module client_<wbr>managed_<wbr>by_<wbr>cache</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-this-exists" title="Why this exists">Why this exists</a></li><li><a href="#why-caching-this-is-safe" title="Why caching this is safe">Why caching this is safe</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>api_<wbr>rest</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_api_rest</a></div><h1>Module <span>client_<wbr>managed_<wbr>by_<wbr>cache</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_api_rest/client_managed_by_cache.rs.html#1-204">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Tiny TTL cache for the <code>(tenant_id, client_id) -&gt; managed_by</code> mapping.</p>
+<h2 id="why-this-exists"><a class="doc-anchor" href="#why-this-exists">§</a>Why this exists</h2>
+<p>T21.4 made <code>/oauth2/authorize</code> ask one question before it authorizes:
+is this client externally registered (DCR or CIMD), so that the end user’s
+consent must be on record? Answering it costs a <code>client_id</code>-indexed read of
+the client row — a read <code>AuthorizeService</code> repeats a moment later for its
+own validation, and whose answer is discarded for every client an
+administrator created, which is every client in most deployments.</p>
+<p><code>resolve_external_consent</code> (<code>handlers/oauth2.rs</code>) argued that read was
+affordable and named this cache as the remedy “if a future profile shows
+otherwise”. The 2026-09-18 A/B did: <code>oauth2_authorize</code> fell from 609/s to
+495/s (p95 113 ms → 156 ms) between the pre-T21 image and <code>main</code>, with the
+dependency update ruled out by a third image. On the HTTP engine one extra
+serialized round trip per authorization is exactly that shape.</p>
+<h2 id="why-caching-this-is-safe"><a class="doc-anchor" href="#why-caching-this-is-safe">§</a>Why caching <em>this</em> is safe</h2>
+<p><code>managed_by</code> is absent from the client update API on purpose, so it cannot
+change for a row. It also cannot change <strong>across</strong> rows for one
+<code>(tenant_id, client_id)</code>, which is the stronger property a cache keyed by
+<code>client_id</code> needs:</p>
+<ul>
+<li><code>admin</code> and <code>dcr</code> rows get a server-generated, 128-bit random
+<code>client_id</code> — never chosen by a caller, never reused.</li>
+<li><code>cimd</code> rows are keyed by the metadata document URL, and
+<code>upsert_cimd_client</code> refuses to take over a <code>client_id</code> that already
+names a row it does not own.</li>
+</ul>
+<p>So a <code>client_id</code> that once named an <code>admin</code> client can never later name an
+external one — the direction that would matter, since a stale <code>admin</code>
+answer would skip the consent gate. Deletion is the only transition, and a
+deleted client fails inside <code>AuthorizeService</code> whatever this cache says.
+The TTL is therefore not a staleness mechanism; like <code>tenant_org_cache</code>’s,
+it bounds how long a deleted client is remembered and keeps churn from
+growing the map.</p>
+<p>What this cache deliberately does <strong>not</strong> hold: negative answers. A lookup
+that finds no client is never recorded, so the map only ever contains
+<code>client_id</code>s that exist in the datastore, and a caller cannot grow it by
+inventing identifiers. It never holds the client itself either — secrets,
+redirect URIs and grant types are validated from a fresh read, every time.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ClientManagedByCache.html" title="struct axiam_api_rest::client_managed_by_cache::ClientManagedByCache">Client<wbr>Managed<wbr>ByCache</a></dt><dd>Process-wide <code>(tenant_id, client_id) -&gt; managed_by</code> cache.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_TTL.html" title="constant axiam_api_rest::client_managed_by_cache::DEFAULT_TTL">DEFAULT_<wbr>TTL</a></dt><dd>How long an answer is served from memory before it is re-read.</dd></dl></section></div></main></body></html>

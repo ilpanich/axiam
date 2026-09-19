@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ResourceError"],"fn":["is_allowed","normalise","normalise_registration","resolve_bound","resolve_requested"]};

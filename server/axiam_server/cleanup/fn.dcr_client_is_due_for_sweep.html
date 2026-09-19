@@ -1,0 +1,41 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Whether a self-registered client is due to be swept (T21.4)."><title>dcr_client_is_due_for_sweep in axiam_server::cleanup - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_server" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">dcr_client_is_due_for_sweep</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_server/index.html">axiam_<wbr>server</a><span class="version">1.0.0-beta16</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">dcr_<wbr>client_<wbr>is_<wbr>due_<wbr>for_<wbr>sweep</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-second-clock-t218--mcp-05" title="The second clock (T21.8 / MCP-05)">The second clock (T21.8 / MCP-05)</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In axiam_<wbr>server::<wbr>cleanup</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_server</a>::<wbr><a href="index.html">cleanup</a></div><h1>Function <span class="fn">dcr_<wbr>client_<wbr>is_<wbr>due_<wbr>for_<wbr>sweep</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_server/cleanup.rs.html#164-177">Source</a> </span></div><pre class="rust item-decl"><code>pub fn dcr_client_is_due_for_sweep(
+    client: &amp;<a class="struct" href="../../axiam_core/models/oauth2_client/struct.OAuth2Client.html" title="struct axiam_core::models::oauth2_client::OAuth2Client">OAuth2Client</a>,
+    ttl: <a class="struct" href="struct.DcrSweepWindow.html" title="struct axiam_server::cleanup::DcrSweepWindow">DcrSweepWindow</a>,
+    now: <a class="struct" href="https://docs.rs/chrono/latest/chrono/datetime/struct.DateTime.html" title="struct chrono::datetime::DateTime">DateTime</a>&lt;<a class="struct" href="https://docs.rs/chrono/latest/chrono/offset/utc/struct.Utc.html" title="struct chrono::offset::utc::Utc">Utc</a>&gt;,
+) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.bool.html">bool</a></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Whether a self-registered client is due to be swept (T21.4).</p>
+<p>A free function, and public, for the reason <a href="fn.run_erasure_pipeline.html" title="fn axiam_server::cleanup::run_erasure_pipeline"><code>run_erasure_pipeline</code></a> is
+one: the loop that calls it is awkward to construct in a test, and the
+decision it makes — <em>delete somebody’s client registration</em> — is the part
+worth testing directly.</p>
+<p>The clock it reads is <code>last_authorized_at</code> when the client has ever been
+authorized and <code>created_at</code> when it has not.</p>
+<p><code>DcrSweepWindow::days == 0</code> is never due. Zero means “never sweep”, which
+an operator who prunes out of band may legitimately want, and reading it as
+“sweep everything immediately” would delete a tenant’s whole client table
+on the next tick.</p>
+<h2 id="the-second-clock-t218--mcp-05"><a class="doc-anchor" href="#the-second-clock-t218--mcp-05">§</a>The second clock (T21.8 / MCP-05)</h2>
+<p>A row that has <strong>never</strong> been authorized, in a tenant whose effective
+<code>dynamic_registration</code> is <code>anonymous</code>, is measured against
+<a href="../../axiam_core/models/settings/constant.DCR_UNAUTHORIZED_CLIENT_TTL_SECS.html" title="constant axiam_core::models::settings::DCR_UNAUTHORIZED_CLIENT_TTL_SECS"><code>axiam_core::models::settings::DCR_UNAUTHORIZED_CLIENT_TTL_SECS</code></a> instead
+— an hour. That constant’s own documentation says why it is a constant and
+what promoting it to a tenant setting would cost.</p>
+<p>Those two conditions are the whole of the change, and each is load-bearing.</p>
+<p><strong>Never authorized.</strong> The thirty-day window is sized, in
+<code>DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS</code>’s own doc comment, for “a client
+somebody uses monthly”. A client registered and never authorized is not
+that client: every MCP client this phase exists to serve authorizes within
+seconds of registering, because registration is the first step of the same
+flow. One TTL served two situations that have nothing in common, which is
+what made <code>dcr_max_clients</code> an availability budget a stranger could spend
+for a month. The sweeper could always tell the two apart — the row carries
+<code>last_authorized_at: None</code> — so the fix is a second clock, not a bigger
+quota.</p>
+<p><strong><code>anonymous</code> only.</strong> In <code>initial_access_token</code> mode the row exists because
+an administrator minted a handle for it and somebody redeemed it. There is
+no unauthenticated exposure to bound, and the thirty-day clock is the right
+one: an operator who hands somebody a registration token on Friday should
+not find the registration gone on Monday.</p>
+<p>Every tenant on <code>disabled</code> or <code>initial_access_token</code> — which is every
+tenant that did not opt into <code>anonymous</code> behind D3 — takes byte for byte
+the path it took before T21.8.</p>
+</div></details></section></div></main></body></html>

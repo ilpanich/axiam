@@ -804,201 +804,242 @@
 <a href=#804 id=804 data-nosnippet>804</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
 <a href=#805 id=805 data-nosnippet>805</a>    <span class="kw">let </span>body = body.into_inner();
 <a href=#806 id=806 data-nosnippet>806</a>
-<a href=#807 id=807 data-nosnippet>807</a>    <span class="comment">// Only the sensitive scopes, and in canonical order. `requested` filters
-<a href=#808 id=808 data-nosnippet>808</a>    // and orders in one step, so a body naming `openid` yields an empty set
-<a href=#809 id=809 data-nosnippet>809</a>    // and is refused below rather than silently recorded.
-<a href=#810 id=810 data-nosnippet>810</a>    </span><span class="kw">let </span>wanted = axiam_oauth2::sensitive::requested(<span class="kw-2">&amp;</span>body.scopes);
-<a href=#811 id=811 data-nosnippet>811</a>    <span class="kw">if </span>wanted.is_empty() || wanted.len() != body.scopes.len() {
-<a href=#812 id=812 data-nosnippet>812</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError::from(AxiamError::Validation {
-<a href=#813 id=813 data-nosnippet>813</a>            message: <span class="macro">format!</span>(
-<a href=#814 id=814 data-nosnippet>814</a>                <span class="string">"consent may be recorded only for the scopes {}, and for nothing else"</span>,
-<a href=#815 id=815 data-nosnippet>815</a>                axiam_oauth2::sensitive::SENSITIVE_SCOPES.join(<span class="string">", "</span>)
-<a href=#816 id=816 data-nosnippet>816</a>            ),
-<a href=#817 id=817 data-nosnippet>817</a>        }));
-<a href=#818 id=818 data-nosnippet>818</a>    }
-<a href=#819 id=819 data-nosnippet>819</a>
-<a href=#820 id=820 data-nosnippet>820</a>    <span class="kw">let </span>client = axiam_core::repository::OAuth2ClientRepository::get_by_client_id(
-<a href=#821 id=821 data-nosnippet>821</a>        <span class="kw-2">&amp;</span>state.oauth2_client_repo,
-<a href=#822 id=822 data-nosnippet>822</a>        user.principal_tenant_id,
-<a href=#823 id=823 data-nosnippet>823</a>        <span class="kw-2">&amp;</span>body.client_id,
-<a href=#824 id=824 data-nosnippet>824</a>    )
-<a href=#825 id=825 data-nosnippet>825</a>    .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#826 id=826 data-nosnippet>826</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(missing) = wanted
-<a href=#827 id=827 data-nosnippet>827</a>        .iter()
-<a href=#828 id=828 data-nosnippet>828</a>        .find(|s| !client.scopes.iter().any(|r| r == <span class="kw-2">*</span>s))
-<a href=#829 id=829 data-nosnippet>829</a>    {
-<a href=#830 id=830 data-nosnippet>830</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError::from(AxiamError::Validation {
-<a href=#831 id=831 data-nosnippet>831</a>            message: <span class="macro">format!</span>(
-<a href=#832 id=832 data-nosnippet>832</a>                <span class="string">"this client has no {missing} scope registered, so consenting to release it \
-<a href=#833 id=833 data-nosnippet>833</a>                 would authorise nothing"
-<a href=#834 id=834 data-nosnippet>834</a>            </span>),
-<a href=#835 id=835 data-nosnippet>835</a>        }));
-<a href=#836 id=836 data-nosnippet>836</a>    }
-<a href=#837 id=837 data-nosnippet>837</a>
-<a href=#838 id=838 data-nosnippet>838</a>    <span class="kw">let </span>tenant = state
-<a href=#839 id=839 data-nosnippet>839</a>        .tenant_repo
-<a href=#840 id=840 data-nosnippet>840</a>        .get_by_id(user.principal_tenant_id)
-<a href=#841 id=841 data-nosnippet>841</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#842 id=842 data-nosnippet>842</a>    <span class="kw">let </span>settings = axiam_core::repository::SettingsRepository::get_effective_settings(
-<a href=#843 id=843 data-nosnippet>843</a>        <span class="kw-2">&amp;</span>state.settings_repo,
-<a href=#844 id=844 data-nosnippet>844</a>        tenant.organization_id,
-<a href=#845 id=845 data-nosnippet>845</a>        user.principal_tenant_id,
-<a href=#846 id=846 data-nosnippet>846</a>    )
-<a href=#847 id=847 data-nosnippet>847</a>    .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#848 id=848 data-nosnippet>848</a>    <span class="kw">if </span>!settings.oidc.sensitive_scopes_enabled {
-<a href=#849 id=849 data-nosnippet>849</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError::from(AxiamError::Validation {
-<a href=#850 id=850 data-nosnippet>850</a>            message: <span class="string">"the address and phone scopes are not enabled for this tenant"</span>.into(),
-<a href=#851 id=851 data-nosnippet>851</a>        }));
-<a href=#852 id=852 data-nosnippet>852</a>    }
-<a href=#853 id=853 data-nosnippet>853</a>
-<a href=#854 id=854 data-nosnippet>854</a>    <span class="kw">let </span>consent_type = axiam_oauth2::sensitive::consent_type(<span class="kw-2">&amp;</span>body.client_id);
-<a href=#855 id=855 data-nosnippet>855</a>    <span class="kw">let </span>version = axiam_oauth2::sensitive::consent_version(<span class="kw-2">&amp;</span>wanted);
-<a href=#856 id=856 data-nosnippet>856</a>
-<a href=#857 id=857 data-nosnippet>857</a>    <span class="comment">// Idempotence, checked rather than relying on the unique index's error:
-<a href=#858 id=858 data-nosnippet>858</a>    // a second grant is the same grant, and answering it with a conflict
-<a href=#859 id=859 data-nosnippet>859</a>    // would make a double-submitted consent screen look broken.
-<a href=#860 id=860 data-nosnippet>860</a>    </span><span class="kw">let </span>already = axiam_core::repository::ConsentRepository::list_by_user(
-<a href=#861 id=861 data-nosnippet>861</a>        <span class="kw-2">&amp;</span>state.gdpr.consent_repo,
-<a href=#862 id=862 data-nosnippet>862</a>        user.principal_tenant_id,
-<a href=#863 id=863 data-nosnippet>863</a>        user.user_id,
-<a href=#864 id=864 data-nosnippet>864</a>    )
-<a href=#865 id=865 data-nosnippet>865</a>    .<span class="kw">await</span><span class="question-mark">?
-<a href=#866 id=866 data-nosnippet>866</a>    </span>.into_iter()
-<a href=#867 id=867 data-nosnippet>867</a>    .any(|c| c.consent_type == consent_type &amp;&amp; c.version == version);
-<a href=#868 id=868 data-nosnippet>868</a>
-<a href=#869 id=869 data-nosnippet>869</a>    <span class="kw">if </span>!already {
-<a href=#870 id=870 data-nosnippet>870</a>        axiam_core::repository::ConsentRepository::create(
-<a href=#871 id=871 data-nosnippet>871</a>            <span class="kw-2">&amp;</span>state.gdpr.consent_repo,
-<a href=#872 id=872 data-nosnippet>872</a>            axiam_core::models::gdpr::CreateConsent {
-<a href=#873 id=873 data-nosnippet>873</a>                tenant_id: user.principal_tenant_id,
-<a href=#874 id=874 data-nosnippet>874</a>                user_id: user.user_id,
-<a href=#875 id=875 data-nosnippet>875</a>                consent_type: consent_type.clone(),
-<a href=#876 id=876 data-nosnippet>876</a>                version: version.clone(),
-<a href=#877 id=877 data-nosnippet>877</a>                ip_address: <span class="kw">crate</span>::extractors::client_info::client_ip(<span class="kw-2">&amp;</span>http_req),
-<a href=#878 id=878 data-nosnippet>878</a>                user_agent: <span class="kw">crate</span>::extractors::client_info::user_agent(<span class="kw-2">&amp;</span>http_req),
-<a href=#879 id=879 data-nosnippet>879</a>            },
-<a href=#880 id=880 data-nosnippet>880</a>        )
-<a href=#881 id=881 data-nosnippet>881</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#882 id=882 data-nosnippet>882</a>
-<a href=#883 id=883 data-nosnippet>883</a>        <span class="comment">// Art. 7(1) proof lives in two places on purpose: the record, which is
-<a href=#884 id=884 data-nosnippet>884</a>        // live state and can be withdrawn, and the audit log, which is
-<a href=#885 id=885 data-nosnippet>885</a>        // append-only and cannot. Scope *names*, never the values they would
-<a href=#886 id=886 data-nosnippet>886</a>        // release.
-<a href=#887 id=887 data-nosnippet>887</a>        </span>audit_consent(
-<a href=#888 id=888 data-nosnippet>888</a>            <span class="kw-2">&amp;</span>state,
-<a href=#889 id=889 data-nosnippet>889</a>            <span class="kw-2">&amp;</span>http_req,
-<a href=#890 id=890 data-nosnippet>890</a>            <span class="kw-2">&amp;</span>user,
-<a href=#891 id=891 data-nosnippet>891</a>            <span class="string">"gdpr.oidc_scope_consent_granted"</span>,
-<a href=#892 id=892 data-nosnippet>892</a>            <span class="kw-2">&amp;</span>body.client_id,
-<a href=#893 id=893 data-nosnippet>893</a>            <span class="kw-2">&amp;</span>version,
-<a href=#894 id=894 data-nosnippet>894</a>        )
-<a href=#895 id=895 data-nosnippet>895</a>        .<span class="kw">await</span>;
-<a href=#896 id=896 data-nosnippet>896</a>    }
+<a href=#807 id=807 data-nosnippet>807</a>    <span class="comment">// The client must exist in the caller's tenant whichever gate this
+<a href=#808 id=808 data-nosnippet>808</a>    // consent is for. Read first, because it is what decides which gate it is.
+<a href=#809 id=809 data-nosnippet>809</a>    </span><span class="kw">let </span>client = axiam_core::repository::OAuth2ClientRepository::get_by_client_id(
+<a href=#810 id=810 data-nosnippet>810</a>        <span class="kw-2">&amp;</span>state.oauth2_client_repo,
+<a href=#811 id=811 data-nosnippet>811</a>        user.principal_tenant_id,
+<a href=#812 id=812 data-nosnippet>812</a>        <span class="kw-2">&amp;</span>body.client_id,
+<a href=#813 id=813 data-nosnippet>813</a>    )
+<a href=#814 id=814 data-nosnippet>814</a>    .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#815 id=815 data-nosnippet>815</a>
+<a href=#816 id=816 data-nosnippet>816</a>    <span class="comment">// T21.4 / D4 — the external-client lane.
+<a href=#817 id=817 data-nosnippet>817</a>    //
+<a href=#818 id=818 data-nosnippet>818</a>    // For a client an administrator did not create, the consent being recorded
+<a href=#819 id=819 data-nosnippet>819</a>    // is not "you may release my address", it is "this application may act as
+<a href=#820 id=820 data-nosnippet>820</a>    // me". It therefore covers the **whole** requested scope set rather than
+<a href=#821 id=821 data-nosnippet>821</a>    // the sensitive subset, and its version carries a prefix so the two kinds
+<a href=#822 id=822 data-nosnippet>822</a>    // of record can share one `consent_type` — which is what makes
+<a href=#823 id=823 data-nosnippet>823</a>    // `DELETE /account/consents/oidc-scopes/{client_id}` withdraw both with no
+<a href=#824 id=824 data-nosnippet>824</a>    // new control. See `axiam_oauth2::external_consent`.
+<a href=#825 id=825 data-nosnippet>825</a>    //
+<a href=#826 id=826 data-nosnippet>826</a>    // The two lanes never overlap: the settings layer refuses `address` and
+<a href=#827 id=827 data-nosnippet>827</a>    // `phone` in `dcr_allowed_scopes`, so a self-registered client cannot hold
+<a href=#828 id=828 data-nosnippet>828</a>    // a scope the W7 lane governs.
+<a href=#829 id=829 data-nosnippet>829</a>    </span><span class="kw">let </span>(consent_type, version) = <span class="kw">if </span>axiam_oauth2::external_consent::applies_to(client.managed_by) {
+<a href=#830 id=830 data-nosnippet>830</a>        <span class="comment">// Every scope must be registered on the client, for the reason the
+<a href=#831 id=831 data-nosnippet>831</a>        // W7 lane checks the same thing: a consent recorded for a scope
+<a href=#832 id=832 data-nosnippet>832</a>        // the client could never be authorised for authorises nothing and
+<a href=#833 id=833 data-nosnippet>833</a>        // will never match at the authorization endpoint.
+<a href=#834 id=834 data-nosnippet>834</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(missing) = body
+<a href=#835 id=835 data-nosnippet>835</a>            .scopes
+<a href=#836 id=836 data-nosnippet>836</a>            .iter()
+<a href=#837 id=837 data-nosnippet>837</a>            .find(|s| !client.scopes.iter().any(|r| r == <span class="kw-2">*</span>s))
+<a href=#838 id=838 data-nosnippet>838</a>        {
+<a href=#839 id=839 data-nosnippet>839</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError::from(AxiamError::Validation {
+<a href=#840 id=840 data-nosnippet>840</a>                message: <span class="macro">format!</span>(
+<a href=#841 id=841 data-nosnippet>841</a>                    <span class="string">"this client has no {missing} scope registered, so consenting to it \
+<a href=#842 id=842 data-nosnippet>842</a>                         would authorise nothing"
+<a href=#843 id=843 data-nosnippet>843</a>                </span>),
+<a href=#844 id=844 data-nosnippet>844</a>            }));
+<a href=#845 id=845 data-nosnippet>845</a>        }
+<a href=#846 id=846 data-nosnippet>846</a>        (
+<a href=#847 id=847 data-nosnippet>847</a>            axiam_oauth2::external_consent::consent_type(<span class="kw-2">&amp;</span>body.client_id),
+<a href=#848 id=848 data-nosnippet>848</a>            axiam_oauth2::external_consent::version(<span class="kw-2">&amp;</span>body.scopes),
+<a href=#849 id=849 data-nosnippet>849</a>        )
+<a href=#850 id=850 data-nosnippet>850</a>    } <span class="kw">else </span>{
+<a href=#851 id=851 data-nosnippet>851</a>        <span class="comment">// W7's lane, unchanged. Only the sensitive scopes, and in
+<a href=#852 id=852 data-nosnippet>852</a>        // canonical order: `requested` filters and orders in one step, so
+<a href=#853 id=853 data-nosnippet>853</a>        // a body naming `openid` yields an empty set and is refused here
+<a href=#854 id=854 data-nosnippet>854</a>        // rather than silently recorded.
+<a href=#855 id=855 data-nosnippet>855</a>        </span><span class="kw">let </span>wanted = axiam_oauth2::sensitive::requested(<span class="kw-2">&amp;</span>body.scopes);
+<a href=#856 id=856 data-nosnippet>856</a>        <span class="kw">if </span>wanted.is_empty() || wanted.len() != body.scopes.len() {
+<a href=#857 id=857 data-nosnippet>857</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError::from(AxiamError::Validation {
+<a href=#858 id=858 data-nosnippet>858</a>                message: <span class="macro">format!</span>(
+<a href=#859 id=859 data-nosnippet>859</a>                    <span class="string">"consent may be recorded only for the scopes {}, and for nothing else"</span>,
+<a href=#860 id=860 data-nosnippet>860</a>                    axiam_oauth2::sensitive::SENSITIVE_SCOPES.join(<span class="string">", "</span>)
+<a href=#861 id=861 data-nosnippet>861</a>                ),
+<a href=#862 id=862 data-nosnippet>862</a>            }));
+<a href=#863 id=863 data-nosnippet>863</a>        }
+<a href=#864 id=864 data-nosnippet>864</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(missing) = wanted
+<a href=#865 id=865 data-nosnippet>865</a>            .iter()
+<a href=#866 id=866 data-nosnippet>866</a>            .find(|s| !client.scopes.iter().any(|r| r == <span class="kw-2">*</span>s))
+<a href=#867 id=867 data-nosnippet>867</a>        {
+<a href=#868 id=868 data-nosnippet>868</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError::from(AxiamError::Validation {
+<a href=#869 id=869 data-nosnippet>869</a>                message: <span class="macro">format!</span>(
+<a href=#870 id=870 data-nosnippet>870</a>                    <span class="string">"this client has no {missing} scope registered, so consenting to \
+<a href=#871 id=871 data-nosnippet>871</a>                         release it would authorise nothing"
+<a href=#872 id=872 data-nosnippet>872</a>                </span>),
+<a href=#873 id=873 data-nosnippet>873</a>            }));
+<a href=#874 id=874 data-nosnippet>874</a>        }
+<a href=#875 id=875 data-nosnippet>875</a>
+<a href=#876 id=876 data-nosnippet>876</a>        <span class="kw">let </span>tenant = state
+<a href=#877 id=877 data-nosnippet>877</a>            .tenant_repo
+<a href=#878 id=878 data-nosnippet>878</a>            .get_by_id(user.principal_tenant_id)
+<a href=#879 id=879 data-nosnippet>879</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#880 id=880 data-nosnippet>880</a>        <span class="kw">let </span>settings = axiam_core::repository::SettingsRepository::get_effective_settings(
+<a href=#881 id=881 data-nosnippet>881</a>            <span class="kw-2">&amp;</span>state.settings_repo,
+<a href=#882 id=882 data-nosnippet>882</a>            tenant.organization_id,
+<a href=#883 id=883 data-nosnippet>883</a>            user.principal_tenant_id,
+<a href=#884 id=884 data-nosnippet>884</a>        )
+<a href=#885 id=885 data-nosnippet>885</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#886 id=886 data-nosnippet>886</a>        <span class="kw">if </span>!settings.oidc.sensitive_scopes_enabled {
+<a href=#887 id=887 data-nosnippet>887</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError::from(AxiamError::Validation {
+<a href=#888 id=888 data-nosnippet>888</a>                message: <span class="string">"the address and phone scopes are not enabled for this tenant"</span>.into(),
+<a href=#889 id=889 data-nosnippet>889</a>            }));
+<a href=#890 id=890 data-nosnippet>890</a>        }
+<a href=#891 id=891 data-nosnippet>891</a>
+<a href=#892 id=892 data-nosnippet>892</a>        (
+<a href=#893 id=893 data-nosnippet>893</a>            axiam_oauth2::sensitive::consent_type(<span class="kw-2">&amp;</span>body.client_id),
+<a href=#894 id=894 data-nosnippet>894</a>            axiam_oauth2::sensitive::consent_version(<span class="kw-2">&amp;</span>wanted),
+<a href=#895 id=895 data-nosnippet>895</a>        )
+<a href=#896 id=896 data-nosnippet>896</a>    };
 <a href=#897 id=897 data-nosnippet>897</a>
-<a href=#898 id=898 data-nosnippet>898</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(<span class="macro">serde_json::json!</span>({
-<a href=#899 id=899 data-nosnippet>899</a>        <span class="string">"consent_type"</span>: consent_type,
-<a href=#900 id=900 data-nosnippet>900</a>        <span class="string">"version"</span>: version,
-<a href=#901 id=901 data-nosnippet>901</a>    })))
-<a href=#902 id=902 data-nosnippet>902</a>}
-<a href=#903 id=903 data-nosnippet>903</a>
-<a href=#904 id=904 data-nosnippet>904</a><span class="doccomment">/// `DELETE /api/v1/account/consents/oidc-scopes/{client_id}` — withdraw.
-<a href=#905 id=905 data-nosnippet>905</a>///
-<a href=#906 id=906 data-nosnippet>906</a>/// Art. 7(3): as easy to withdraw as to give. One call, no grace period, no
-<a href=#907 id=907 data-nosnippet>907</a>/// confirmation step, and it takes effect on the **next UserInfo call with the
-<a href=#908 id=908 data-nosnippet>908</a>/// token the relying party already holds** — not on the next token. That is
-<a href=#909 id=909 data-nosnippet>909</a>/// the property T8.4 asserts, and it is why the release gate re-reads the
-<a href=#910 id=910 data-nosnippet>910</a>/// record on every call rather than trusting the one taken at authorization.
-<a href=#911 id=911 data-nosnippet>911</a>///
-<a href=#912 id=912 data-nosnippet>912</a>/// Withdraws every scope set consented to for this relying party, not one of
-<a href=#913 id=913 data-nosnippet>913</a>/// them: a subject saying "stop giving my address to this app" does not mean
-<a href=#914 id=914 data-nosnippet>914</a>/// "stop giving it under the two-scope record but carry on under the
-<a href=#915 id=915 data-nosnippet>915</a>/// one-scope one".
-<a href=#916 id=916 data-nosnippet>916</a>///
-<a href=#917 id=917 data-nosnippet>917</a>/// Answers `200` whether or not anything was there, and says how many records
-<a href=#918 id=918 data-nosnippet>918</a>/// went. A subject who withdraws twice is not told off, and an attacker who
-<a href=#919 id=919 data-nosnippet>919</a>/// guesses `client_id`s learns nothing from the status code — though they
-<a href=#920 id=920 data-nosnippet>920</a>/// would have to be the subject to ask at all.
-<a href=#921 id=921 data-nosnippet>921</a></span><span class="attr">#[utoipa::path(
-<a href=#922 id=922 data-nosnippet>922</a>    delete,
-<a href=#923 id=923 data-nosnippet>923</a>    path = <span class="string">"/api/v1/account/consents/oidc-scopes/{client_id}"</span>,
-<a href=#924 id=924 data-nosnippet>924</a>    tag = <span class="string">"gdpr"</span>,
-<a href=#925 id=925 data-nosnippet>925</a>    params((<span class="string">"client_id" </span>= String, Path, description = <span class="string">"The relying party to stop releasing to"</span>)),
-<a href=#926 id=926 data-nosnippet>926</a>    responses(
-<a href=#927 id=927 data-nosnippet>927</a>        (status = <span class="number">200</span>, description = <span class="string">"Consent withdrawn (or there was none)"</span>),
-<a href=#928 id=928 data-nosnippet>928</a>        (status = <span class="number">401</span>, description = <span class="string">"Not authenticated"</span>),
-<a href=#929 id=929 data-nosnippet>929</a>    ),
-<a href=#930 id=930 data-nosnippet>930</a>    security((<span class="string">"bearer" </span>= []</span>))
-<a href=#931 id=931 data-nosnippet>931</a>)]
-<a href=#932 id=932 data-nosnippet>932</a><span class="kw">pub async fn </span>withdraw_oidc_scope_consent&lt;C: Connection + Clone&gt;(
-<a href=#933 id=933 data-nosnippet>933</a>    http_req: actix_web::HttpRequest,
-<a href=#934 id=934 data-nosnippet>934</a>    user: AuthenticatedUser,
-<a href=#935 id=935 data-nosnippet>935</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#936 id=936 data-nosnippet>936</a>    path: web::Path&lt;String&gt;,
-<a href=#937 id=937 data-nosnippet>937</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#938 id=938 data-nosnippet>938</a>    <span class="kw">let </span>client_id = path.into_inner();
-<a href=#939 id=939 data-nosnippet>939</a>    <span class="kw">let </span>consent_type = axiam_oauth2::sensitive::consent_type(<span class="kw-2">&amp;</span>client_id);
-<a href=#940 id=940 data-nosnippet>940</a>
-<a href=#941 id=941 data-nosnippet>941</a>    <span class="kw">let </span>removed = axiam_core::repository::ConsentRepository::withdraw(
-<a href=#942 id=942 data-nosnippet>942</a>        <span class="kw-2">&amp;</span>state.gdpr.consent_repo,
-<a href=#943 id=943 data-nosnippet>943</a>        user.principal_tenant_id,
-<a href=#944 id=944 data-nosnippet>944</a>        user.user_id,
-<a href=#945 id=945 data-nosnippet>945</a>        <span class="kw-2">&amp;</span>consent_type,
-<a href=#946 id=946 data-nosnippet>946</a>    )
-<a href=#947 id=947 data-nosnippet>947</a>    .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#948 id=948 data-nosnippet>948</a>
-<a href=#949 id=949 data-nosnippet>949</a>    <span class="kw">if </span>removed &gt; <span class="number">0 </span>{
-<a href=#950 id=950 data-nosnippet>950</a>        audit_consent(
-<a href=#951 id=951 data-nosnippet>951</a>            <span class="kw-2">&amp;</span>state,
-<a href=#952 id=952 data-nosnippet>952</a>            <span class="kw-2">&amp;</span>http_req,
-<a href=#953 id=953 data-nosnippet>953</a>            <span class="kw-2">&amp;</span>user,
-<a href=#954 id=954 data-nosnippet>954</a>            <span class="string">"gdpr.oidc_scope_consent_withdrawn"</span>,
-<a href=#955 id=955 data-nosnippet>955</a>            <span class="kw-2">&amp;</span>client_id,
-<a href=#956 id=956 data-nosnippet>956</a>            <span class="string">""</span>,
-<a href=#957 id=957 data-nosnippet>957</a>        )
-<a href=#958 id=958 data-nosnippet>958</a>        .<span class="kw">await</span>;
-<a href=#959 id=959 data-nosnippet>959</a>    }
-<a href=#960 id=960 data-nosnippet>960</a>
-<a href=#961 id=961 data-nosnippet>961</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(<span class="macro">serde_json::json!</span>({ <span class="string">"withdrawn"</span>: removed })))
-<a href=#962 id=962 data-nosnippet>962</a>}
-<a href=#963 id=963 data-nosnippet>963</a>
-<a href=#964 id=964 data-nosnippet>964</a><span class="doccomment">/// Record a consent grant or withdrawal in the append-only log.
-<a href=#965 id=965 data-nosnippet>965</a>///
-<a href=#966 id=966 data-nosnippet>966</a>/// Carries the relying party and the scope *names*, and no claim values —
-<a href=#967 id=967 data-nosnippet>967</a>/// there are none to carry at this point, and there will not be any at this
-<a href=#968 id=968 data-nosnippet>968</a>/// point in a future version either. Failure is logged and swallowed: refusing
-<a href=#969 id=969 data-nosnippet>969</a>/// a withdrawal because the audit store is unavailable would make Art. 7(3)
-<a href=#970 id=970 data-nosnippet>970</a>/// conditional on infrastructure.
-<a href=#971 id=971 data-nosnippet>971</a></span><span class="kw">async fn </span>audit_consent&lt;C: Connection + Clone&gt;(
-<a href=#972 id=972 data-nosnippet>972</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
-<a href=#973 id=973 data-nosnippet>973</a>    http_req: <span class="kw-2">&amp;</span>actix_web::HttpRequest,
-<a href=#974 id=974 data-nosnippet>974</a>    user: <span class="kw-2">&amp;</span>AuthenticatedUser,
-<a href=#975 id=975 data-nosnippet>975</a>    action: <span class="kw-2">&amp;</span>str,
-<a href=#976 id=976 data-nosnippet>976</a>    client_id: <span class="kw-2">&amp;</span>str,
-<a href=#977 id=977 data-nosnippet>977</a>    scopes: <span class="kw-2">&amp;</span>str,
-<a href=#978 id=978 data-nosnippet>978</a>) {
-<a href=#979 id=979 data-nosnippet>979</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = state
-<a href=#980 id=980 data-nosnippet>980</a>        .audit_repo
-<a href=#981 id=981 data-nosnippet>981</a>        .append(CreateAuditLogEntry {
-<a href=#982 id=982 data-nosnippet>982</a>            tenant_id: user.principal_tenant_id,
-<a href=#983 id=983 data-nosnippet>983</a>            actor_id: user.user_id,
-<a href=#984 id=984 data-nosnippet>984</a>            actor_type: ActorType::User,
-<a href=#985 id=985 data-nosnippet>985</a>            action: action.to_string(),
-<a href=#986 id=986 data-nosnippet>986</a>            resource_id: <span class="prelude-val">None</span>,
-<a href=#987 id=987 data-nosnippet>987</a>            outcome: AuditOutcome::Success,
-<a href=#988 id=988 data-nosnippet>988</a>            ip_address: <span class="kw">crate</span>::extractors::client_info::client_ip(http_req),
-<a href=#989 id=989 data-nosnippet>989</a>            metadata: <span class="prelude-val">Some</span>(<span class="macro">serde_json::json!</span>({
-<a href=#990 id=990 data-nosnippet>990</a>                <span class="string">"client_id"</span>: client_id,
-<a href=#991 id=991 data-nosnippet>991</a>                <span class="string">"scopes"</span>: scopes,
-<a href=#992 id=992 data-nosnippet>992</a>            })),
-<a href=#993 id=993 data-nosnippet>993</a>        })
-<a href=#994 id=994 data-nosnippet>994</a>        .<span class="kw">await
-<a href=#995 id=995 data-nosnippet>995</a>    </span>{
-<a href=#996 id=996 data-nosnippet>996</a>        <span class="macro">tracing::error!</span>(
-<a href=#997 id=997 data-nosnippet>997</a>            error = %e,
-<a href=#998 id=998 data-nosnippet>998</a>            user_id = %user.user_id,
-<a href=#999 id=999 data-nosnippet>999</a>            %action,
-<a href=#1000 id=1000 data-nosnippet>1000</a>            <span class="string">"could not record a consent change; the change itself stands"
-<a href=#1001 id=1001 data-nosnippet>1001</a>        </span>);
-<a href=#1002 id=1002 data-nosnippet>1002</a>    }
+<a href=#898 id=898 data-nosnippet>898</a>    <span class="comment">// Idempotence, checked rather than relying on the unique index's error:
+<a href=#899 id=899 data-nosnippet>899</a>    // a second grant is the same grant, and answering it with a conflict
+<a href=#900 id=900 data-nosnippet>900</a>    // would make a double-submitted consent screen look broken.
+<a href=#901 id=901 data-nosnippet>901</a>    </span><span class="kw">let </span>already = axiam_core::repository::ConsentRepository::list_by_user(
+<a href=#902 id=902 data-nosnippet>902</a>        <span class="kw-2">&amp;</span>state.gdpr.consent_repo,
+<a href=#903 id=903 data-nosnippet>903</a>        user.principal_tenant_id,
+<a href=#904 id=904 data-nosnippet>904</a>        user.user_id,
+<a href=#905 id=905 data-nosnippet>905</a>    )
+<a href=#906 id=906 data-nosnippet>906</a>    .<span class="kw">await</span><span class="question-mark">?
+<a href=#907 id=907 data-nosnippet>907</a>    </span>.into_iter()
+<a href=#908 id=908 data-nosnippet>908</a>    .any(|c| c.consent_type == consent_type &amp;&amp; c.version == version);
+<a href=#909 id=909 data-nosnippet>909</a>
+<a href=#910 id=910 data-nosnippet>910</a>    <span class="kw">if </span>!already {
+<a href=#911 id=911 data-nosnippet>911</a>        axiam_core::repository::ConsentRepository::create(
+<a href=#912 id=912 data-nosnippet>912</a>            <span class="kw-2">&amp;</span>state.gdpr.consent_repo,
+<a href=#913 id=913 data-nosnippet>913</a>            axiam_core::models::gdpr::CreateConsent {
+<a href=#914 id=914 data-nosnippet>914</a>                tenant_id: user.principal_tenant_id,
+<a href=#915 id=915 data-nosnippet>915</a>                user_id: user.user_id,
+<a href=#916 id=916 data-nosnippet>916</a>                consent_type: consent_type.clone(),
+<a href=#917 id=917 data-nosnippet>917</a>                version: version.clone(),
+<a href=#918 id=918 data-nosnippet>918</a>                ip_address: <span class="kw">crate</span>::extractors::client_info::client_ip(<span class="kw-2">&amp;</span>http_req),
+<a href=#919 id=919 data-nosnippet>919</a>                user_agent: <span class="kw">crate</span>::extractors::client_info::user_agent(<span class="kw-2">&amp;</span>http_req),
+<a href=#920 id=920 data-nosnippet>920</a>            },
+<a href=#921 id=921 data-nosnippet>921</a>        )
+<a href=#922 id=922 data-nosnippet>922</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#923 id=923 data-nosnippet>923</a>
+<a href=#924 id=924 data-nosnippet>924</a>        <span class="comment">// Art. 7(1) proof lives in two places on purpose: the record, which is
+<a href=#925 id=925 data-nosnippet>925</a>        // live state and can be withdrawn, and the audit log, which is
+<a href=#926 id=926 data-nosnippet>926</a>        // append-only and cannot. Scope *names*, never the values they would
+<a href=#927 id=927 data-nosnippet>927</a>        // release.
+<a href=#928 id=928 data-nosnippet>928</a>        </span>audit_consent(
+<a href=#929 id=929 data-nosnippet>929</a>            <span class="kw-2">&amp;</span>state,
+<a href=#930 id=930 data-nosnippet>930</a>            <span class="kw-2">&amp;</span>http_req,
+<a href=#931 id=931 data-nosnippet>931</a>            <span class="kw-2">&amp;</span>user,
+<a href=#932 id=932 data-nosnippet>932</a>            <span class="string">"gdpr.oidc_scope_consent_granted"</span>,
+<a href=#933 id=933 data-nosnippet>933</a>            <span class="kw-2">&amp;</span>body.client_id,
+<a href=#934 id=934 data-nosnippet>934</a>            <span class="kw-2">&amp;</span>version,
+<a href=#935 id=935 data-nosnippet>935</a>        )
+<a href=#936 id=936 data-nosnippet>936</a>        .<span class="kw">await</span>;
+<a href=#937 id=937 data-nosnippet>937</a>    }
+<a href=#938 id=938 data-nosnippet>938</a>
+<a href=#939 id=939 data-nosnippet>939</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(<span class="macro">serde_json::json!</span>({
+<a href=#940 id=940 data-nosnippet>940</a>        <span class="string">"consent_type"</span>: consent_type,
+<a href=#941 id=941 data-nosnippet>941</a>        <span class="string">"version"</span>: version,
+<a href=#942 id=942 data-nosnippet>942</a>    })))
+<a href=#943 id=943 data-nosnippet>943</a>}
+<a href=#944 id=944 data-nosnippet>944</a>
+<a href=#945 id=945 data-nosnippet>945</a><span class="doccomment">/// `DELETE /api/v1/account/consents/oidc-scopes/{client_id}` — withdraw.
+<a href=#946 id=946 data-nosnippet>946</a>///
+<a href=#947 id=947 data-nosnippet>947</a>/// Art. 7(3): as easy to withdraw as to give. One call, no grace period, no
+<a href=#948 id=948 data-nosnippet>948</a>/// confirmation step, and it takes effect on the **next UserInfo call with the
+<a href=#949 id=949 data-nosnippet>949</a>/// token the relying party already holds** — not on the next token. That is
+<a href=#950 id=950 data-nosnippet>950</a>/// the property T8.4 asserts, and it is why the release gate re-reads the
+<a href=#951 id=951 data-nosnippet>951</a>/// record on every call rather than trusting the one taken at authorization.
+<a href=#952 id=952 data-nosnippet>952</a>///
+<a href=#953 id=953 data-nosnippet>953</a>/// Withdraws every scope set consented to for this relying party, not one of
+<a href=#954 id=954 data-nosnippet>954</a>/// them: a subject saying "stop giving my address to this app" does not mean
+<a href=#955 id=955 data-nosnippet>955</a>/// "stop giving it under the two-scope record but carry on under the
+<a href=#956 id=956 data-nosnippet>956</a>/// one-scope one".
+<a href=#957 id=957 data-nosnippet>957</a>///
+<a href=#958 id=958 data-nosnippet>958</a>/// Answers `200` whether or not anything was there, and says how many records
+<a href=#959 id=959 data-nosnippet>959</a>/// went. A subject who withdraws twice is not told off, and an attacker who
+<a href=#960 id=960 data-nosnippet>960</a>/// guesses `client_id`s learns nothing from the status code — though they
+<a href=#961 id=961 data-nosnippet>961</a>/// would have to be the subject to ask at all.
+<a href=#962 id=962 data-nosnippet>962</a></span><span class="attr">#[utoipa::path(
+<a href=#963 id=963 data-nosnippet>963</a>    delete,
+<a href=#964 id=964 data-nosnippet>964</a>    path = <span class="string">"/api/v1/account/consents/oidc-scopes/{client_id}"</span>,
+<a href=#965 id=965 data-nosnippet>965</a>    tag = <span class="string">"gdpr"</span>,
+<a href=#966 id=966 data-nosnippet>966</a>    params((<span class="string">"client_id" </span>= String, Path, description = <span class="string">"The relying party to stop releasing to"</span>)),
+<a href=#967 id=967 data-nosnippet>967</a>    responses(
+<a href=#968 id=968 data-nosnippet>968</a>        (status = <span class="number">200</span>, description = <span class="string">"Consent withdrawn (or there was none)"</span>),
+<a href=#969 id=969 data-nosnippet>969</a>        (status = <span class="number">401</span>, description = <span class="string">"Not authenticated"</span>),
+<a href=#970 id=970 data-nosnippet>970</a>    ),
+<a href=#971 id=971 data-nosnippet>971</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#972 id=972 data-nosnippet>972</a>)]
+<a href=#973 id=973 data-nosnippet>973</a><span class="kw">pub async fn </span>withdraw_oidc_scope_consent&lt;C: Connection + Clone&gt;(
+<a href=#974 id=974 data-nosnippet>974</a>    http_req: actix_web::HttpRequest,
+<a href=#975 id=975 data-nosnippet>975</a>    user: AuthenticatedUser,
+<a href=#976 id=976 data-nosnippet>976</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#977 id=977 data-nosnippet>977</a>    path: web::Path&lt;String&gt;,
+<a href=#978 id=978 data-nosnippet>978</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#979 id=979 data-nosnippet>979</a>    <span class="kw">let </span>client_id = path.into_inner();
+<a href=#980 id=980 data-nosnippet>980</a>    <span class="kw">let </span>consent_type = axiam_oauth2::sensitive::consent_type(<span class="kw-2">&amp;</span>client_id);
+<a href=#981 id=981 data-nosnippet>981</a>
+<a href=#982 id=982 data-nosnippet>982</a>    <span class="kw">let </span>removed = axiam_core::repository::ConsentRepository::withdraw(
+<a href=#983 id=983 data-nosnippet>983</a>        <span class="kw-2">&amp;</span>state.gdpr.consent_repo,
+<a href=#984 id=984 data-nosnippet>984</a>        user.principal_tenant_id,
+<a href=#985 id=985 data-nosnippet>985</a>        user.user_id,
+<a href=#986 id=986 data-nosnippet>986</a>        <span class="kw-2">&amp;</span>consent_type,
+<a href=#987 id=987 data-nosnippet>987</a>    )
+<a href=#988 id=988 data-nosnippet>988</a>    .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#989 id=989 data-nosnippet>989</a>
+<a href=#990 id=990 data-nosnippet>990</a>    <span class="kw">if </span>removed &gt; <span class="number">0 </span>{
+<a href=#991 id=991 data-nosnippet>991</a>        audit_consent(
+<a href=#992 id=992 data-nosnippet>992</a>            <span class="kw-2">&amp;</span>state,
+<a href=#993 id=993 data-nosnippet>993</a>            <span class="kw-2">&amp;</span>http_req,
+<a href=#994 id=994 data-nosnippet>994</a>            <span class="kw-2">&amp;</span>user,
+<a href=#995 id=995 data-nosnippet>995</a>            <span class="string">"gdpr.oidc_scope_consent_withdrawn"</span>,
+<a href=#996 id=996 data-nosnippet>996</a>            <span class="kw-2">&amp;</span>client_id,
+<a href=#997 id=997 data-nosnippet>997</a>            <span class="string">""</span>,
+<a href=#998 id=998 data-nosnippet>998</a>        )
+<a href=#999 id=999 data-nosnippet>999</a>        .<span class="kw">await</span>;
+<a href=#1000 id=1000 data-nosnippet>1000</a>    }
+<a href=#1001 id=1001 data-nosnippet>1001</a>
+<a href=#1002 id=1002 data-nosnippet>1002</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(<span class="macro">serde_json::json!</span>({ <span class="string">"withdrawn"</span>: removed })))
 <a href=#1003 id=1003 data-nosnippet>1003</a>}
+<a href=#1004 id=1004 data-nosnippet>1004</a>
+<a href=#1005 id=1005 data-nosnippet>1005</a><span class="doccomment">/// Record a consent grant or withdrawal in the append-only log.
+<a href=#1006 id=1006 data-nosnippet>1006</a>///
+<a href=#1007 id=1007 data-nosnippet>1007</a>/// Carries the relying party and the scope *names*, and no claim values —
+<a href=#1008 id=1008 data-nosnippet>1008</a>/// there are none to carry at this point, and there will not be any at this
+<a href=#1009 id=1009 data-nosnippet>1009</a>/// point in a future version either. Failure is logged and swallowed: refusing
+<a href=#1010 id=1010 data-nosnippet>1010</a>/// a withdrawal because the audit store is unavailable would make Art. 7(3)
+<a href=#1011 id=1011 data-nosnippet>1011</a>/// conditional on infrastructure.
+<a href=#1012 id=1012 data-nosnippet>1012</a></span><span class="kw">async fn </span>audit_consent&lt;C: Connection + Clone&gt;(
+<a href=#1013 id=1013 data-nosnippet>1013</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#1014 id=1014 data-nosnippet>1014</a>    http_req: <span class="kw-2">&amp;</span>actix_web::HttpRequest,
+<a href=#1015 id=1015 data-nosnippet>1015</a>    user: <span class="kw-2">&amp;</span>AuthenticatedUser,
+<a href=#1016 id=1016 data-nosnippet>1016</a>    action: <span class="kw-2">&amp;</span>str,
+<a href=#1017 id=1017 data-nosnippet>1017</a>    client_id: <span class="kw-2">&amp;</span>str,
+<a href=#1018 id=1018 data-nosnippet>1018</a>    scopes: <span class="kw-2">&amp;</span>str,
+<a href=#1019 id=1019 data-nosnippet>1019</a>) {
+<a href=#1020 id=1020 data-nosnippet>1020</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = state
+<a href=#1021 id=1021 data-nosnippet>1021</a>        .audit_repo
+<a href=#1022 id=1022 data-nosnippet>1022</a>        .append(CreateAuditLogEntry {
+<a href=#1023 id=1023 data-nosnippet>1023</a>            tenant_id: user.principal_tenant_id,
+<a href=#1024 id=1024 data-nosnippet>1024</a>            actor_id: user.user_id,
+<a href=#1025 id=1025 data-nosnippet>1025</a>            actor_type: ActorType::User,
+<a href=#1026 id=1026 data-nosnippet>1026</a>            action: action.to_string(),
+<a href=#1027 id=1027 data-nosnippet>1027</a>            resource_id: <span class="prelude-val">None</span>,
+<a href=#1028 id=1028 data-nosnippet>1028</a>            outcome: AuditOutcome::Success,
+<a href=#1029 id=1029 data-nosnippet>1029</a>            ip_address: <span class="kw">crate</span>::extractors::client_info::client_ip(http_req),
+<a href=#1030 id=1030 data-nosnippet>1030</a>            metadata: <span class="prelude-val">Some</span>(<span class="macro">serde_json::json!</span>({
+<a href=#1031 id=1031 data-nosnippet>1031</a>                <span class="string">"client_id"</span>: client_id,
+<a href=#1032 id=1032 data-nosnippet>1032</a>                <span class="string">"scopes"</span>: scopes,
+<a href=#1033 id=1033 data-nosnippet>1033</a>            })),
+<a href=#1034 id=1034 data-nosnippet>1034</a>        })
+<a href=#1035 id=1035 data-nosnippet>1035</a>        .<span class="kw">await
+<a href=#1036 id=1036 data-nosnippet>1036</a>    </span>{
+<a href=#1037 id=1037 data-nosnippet>1037</a>        <span class="macro">tracing::error!</span>(
+<a href=#1038 id=1038 data-nosnippet>1038</a>            error = %e,
+<a href=#1039 id=1039 data-nosnippet>1039</a>            user_id = %user.user_id,
+<a href=#1040 id=1040 data-nosnippet>1040</a>            %action,
+<a href=#1041 id=1041 data-nosnippet>1041</a>            <span class="string">"could not record a consent change; the change itself stands"
+<a href=#1042 id=1042 data-nosnippet>1042</a>        </span>);
+<a href=#1043 id=1043 data-nosnippet>1043</a>    }
+<a href=#1044 id=1044 data-nosnippet>1044</a>}
 </code></pre></div></section></main></body></html>

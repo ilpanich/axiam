@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="T21.6 — the `/t/{tenant_id}` per-tenant issuer scope. The `/t/{tenant_id}` scope: per-tenant path issuers (T21.6)."><title>axiam_api_rest::middleware::tenant_path - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module tenant_path</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.0.0-beta16</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module tenant_<wbr>path</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-the-middleware-does-and-why-it-is-a-middleware-at-all" title="What the middleware does, and why it is a middleware at all">What the middleware does, and why it is a middleware at all</a></li><li><a href="#the-two-refusals-and-why-both-are-fail-closed" title="The two refusals, and why both are fail-closed">The two refusals, and why both are fail-closed</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>api_<wbr>rest::<wbr>middleware</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_rest</a>::<wbr><a href="../index.html">middleware</a></div><h1>Module <span>tenant_<wbr>path</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_rest/middleware/tenant_path.rs.html#1-301">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>T21.6 — the <code>/t/{tenant_id}</code> per-tenant issuer scope.
+The <code>/t/{tenant_id}</code> scope: per-tenant path issuers (T21.6).</p>
+<p>RFC 8414 §2 forbids a query component in an issuer identifier, so AXIAM’s
+<code>{root}</code> plus <code>?tenant_id=</code> cannot be published as the issuer of one tenant.
+An MCP server naming AXIAM in its RFC 9728 <code>authorization_servers</code> therefore
+had no way to point a client at anything but the deployment’s default
+tenant. <code>{root}/t/{tenant_id}</code> is an issuer a client can turn into a
+discovery URL by the RFC 8414 §3 rule with no query at all.</p>
+<p>The whole feature is opt-in
+(<code>AXIAM__AUTH__TENANT_ISSUER_PATHS</code>, [<code>AuthConfig::tenant_issuer_paths</code>]).
+With it unset this scope is not mounted, so nothing in this module runs.</p>
+<h2 id="what-the-middleware-does-and-why-it-is-a-middleware-at-all"><a class="doc-anchor" href="#what-the-middleware-does-and-why-it-is-a-middleware-at-all">§</a>What the middleware does, and why it is a middleware at all</h2>
+<p>Every OAuth2 handler already resolves its tenant from a <code>tenant_id</code> query
+parameter — the token, revocation, introspection, device-authorization, PAR
+and end-session endpoints all require one, and <code>/oauth2/authorize</code> needs one
+for any request without a principal. So the tenant path does not need new
+handlers; it needs the tenant the <em>path</em> named to arrive where the handlers
+already look. This middleware rewrites the request’s query string to carry
+it, and the eleven handlers underneath are the same functions serving
+<code>/oauth2/…</code>, byte for byte.</p>
+<p>It also records a [<code>TenantPathBinding</code>] in the request’s extensions. Two
+things read it:</p>
+<ul>
+<li>the four places that <strong>stamp</strong> an <code>iss</code> — the access token, the ID token,
+the logout token and the RFC 9207 authorization-response parameter — so
+that all four say <code>{root}/t/{tenant_id}</code>, which is what the discovery
+document the client read says and what OIDC Core §2 requires them to
+match;</li>
+<li><a href="crate::extractors::AuthenticatedUser"><code>AuthenticatedUser</code></a>, which refuses
+a principal whose tenant is not the tenant the path named.</li>
+</ul>
+<h2 id="the-two-refusals-and-why-both-are-fail-closed"><a class="doc-anchor" href="#the-two-refusals-and-why-both-are-fail-closed">§</a>The two refusals, and why both are fail-closed</h2>
+<p><strong>A tenant segment that is not a UUID</strong> is <code>invalid_request</code>, decided from
+the path alone with no repository read. Nothing is normalised and nothing is
+looked up, so <code>/t/../oauth2/token</code> and <code>/t/%2e%2e/oauth2/token</code> are refused
+for the same reason a typo is: they are not a UUID.</p>
+<p><strong>A <code>tenant_id</code> query parameter on a tenant path</strong> is <code>invalid_request</code>,
+whether or not it agrees with the path. Two tenant selectors on one request
+is exactly the shape a confused-deputy bug takes — one component reads the
+path, another reads the query, and they answer differently — and the cheapest
+way to have no such bug is to have no such request. A client that followed
+the tenant discovery document never sends one: every endpoint URL in it is
+bare, which is the point of the path form.</p>
+<p>Note what is deliberately <em>not</em> checked here: whether the tenant exists.
+Discovery is public and unauthenticated, and a <code>404</code> for an unknown tenant
+id would make this scope a tenant-enumeration oracle. An unknown tenant gets
+exactly what <code>?tenant_id=&lt;unknown&gt;</code> gets today — whatever the handler
+underneath answers, which for every credential-taking endpoint is
+<code>invalid_client</code>.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.TenantPathBinding.html" title="struct axiam_api_rest::middleware::tenant_path::TenantPathBinding">Tenant<wbr>Path<wbr>Binding</a></dt><dd>The tenant a request arrived under, and the issuer it therefore mints with.</dd><dt><a class="struct" href="struct.TenantPathScope.html" title="struct axiam_api_rest::middleware::tenant_path::TenantPathScope">Tenant<wbr>Path<wbr>Scope</a></dt><dd>Wrap the <code>/t/{tenant_id}</code> scope with this (T21.6).</dd><dt><a class="struct" href="struct.TenantPathScopeService.html" title="struct axiam_api_rest::middleware::tenant_path::TenantPathScopeService">Tenant<wbr>Path<wbr>Scope<wbr>Service</a></dt><dd>The running half of <a href="struct.TenantPathScope.html" title="struct axiam_api_rest::middleware::tenant_path::TenantPathScope"><code>TenantPathScope</code></a>.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.binding_of.html" title="fn axiam_api_rest::middleware::tenant_path::binding_of">binding_<wbr>of</a></dt><dd>The tenant binding of a request, if it arrived on a tenant path.</dd><dt><a class="fn" href="fn.minting_config.html" title="fn axiam_api_rest::middleware::tenant_path::minting_config">minting_<wbr>config</a></dt><dd>The config a request mints its tokens under.</dd></dl></section></div></main></body></html>

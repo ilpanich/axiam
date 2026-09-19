@@ -1,0 +1,41 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="How long a self-registered client that was never authorized survives, in seconds (T21.8 / MCP-05). One hour."><title>DCR_UNAUTHORIZED_CLIENT_TTL_SECS in axiam_core::models::settings - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc constant"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">DCR_UNAUTHORIZED_CLIENT_TTL_SECS</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_core/index.html">axiam_<wbr>core</a><span class="version">1.0.0-beta16</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">DCR_<wbr>UNAUTHORIZED_<wbr>CLIENT_<wbr>TTL_<wbr>SECS</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-a-second-clock-at-all" title="Why a second clock at all">Why a second clock at all</a></li><li><a href="#why-a-constant-rather-than-a-tenant-setting" title="Why a constant rather than a tenant setting">Why a constant rather than a tenant setting</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In axiam_<wbr>core::<wbr>models::<wbr>settings</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_core</a>::<wbr><a href="../index.html">models</a>::<wbr><a href="index.html">settings</a></div><h1>Constant <span class="constant">DCR_<wbr>UNAUTHORIZED_<wbr>CLIENT_<wbr>TTL_<wbr>SECS</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_core/models/settings.rs.html#298">Source</a> </span></div><pre class="rust item-decl"><code>pub const DCR_UNAUTHORIZED_CLIENT_TTL_SECS: <a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.u32.html">u32</a> = 3_600;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>How long a self-registered client that was <strong>never authorized</strong> survives,
+in seconds (T21.8 / MCP-05). One hour.</p>
+<h2 id="why-a-second-clock-at-all"><a class="doc-anchor" href="#why-a-second-clock-at-all">§</a>Why a second clock at all</h2>
+<p><a href="constant.DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS.html" title="constant axiam_core::models::settings::DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS"><code>DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS</code></a> is sized, in its own doc comment,
+for “a client somebody uses monthly”. A client registered and never
+authorized is not that client: every MCP client Phase 21 exists to serve —
+Inspector, Claude Code, VS Code — authorizes within seconds of registering,
+because registration is the first step of the same flow. A never-authorized
+row that is an hour old is either abandoned or hostile.</p>
+<p>One TTL was serving two situations that have nothing in common, and that is
+what made <a href="struct.OidcPolicy.html#structfield.dcr_max_clients" title="field axiam_core::models::settings::OidcPolicy::dcr_max_clients"><code>OidcPolicy::dcr_max_clients</code></a> an <em>availability</em> budget as well
+as a storage one: in <code>anonymous</code> mode a stranger could fill the quota in
+about four minutes and hold it for thirty days. The sweeper could always
+tell the two situations apart with no new data, because the row carries
+<code>last_authorized_at: None</code> — so the fix is a second clock rather than a
+bigger quota.</p>
+<h2 id="why-a-constant-rather-than-a-tenant-setting"><a class="doc-anchor" href="#why-a-constant-rather-than-a-tenant-setting">§</a>Why a constant rather than a tenant setting</h2>
+<p><strong>Every other sweep window in AXIAM is a tenant setting, and this one
+should be too.</strong> The owner of the decision is the tenant, not the
+datastore, which is the argument the sweeper’s own doc comment makes about
+<a href="constant.DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS.html" title="constant axiam_core::models::settings::DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS"><code>DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS</code></a>; and this is the one sweep that
+deletes rows created by strangers, so it is the last window an operator
+should be unable to see or change. The T21.8 fix plan’s §4 recommends the
+field for exactly those reasons and this constant is its stated fallback.</p>
+<p>What the plan got wrong is the cost. Its §4 recorded “no migration —
+<code>OidcPolicy</code> lives in the settings JSON; a missing key deserialises to the
+default”. That is true of <a href="struct.OidcPolicy.html#structfield.cimd" title="field axiam_core::models::settings::OidcPolicy::cimd"><code>OidcPolicy::cimd</code></a>, which is one
+<code>oidc_cimd_json</code> column, and of the tenant override, which is
+<code>overrides_json</code>. It is <strong>not</strong> true of <code>OidcPolicy</code>’s scalars: they are
+individual columns on a <code>SCHEMAFULL</code> <code>security_settings</code> table
+(<code>oidc_dcr_max_clients</code>, <code>oidc_dcr_unused_client_ttl_days</code>, both added by
+migration v64), so a fifth DCR number is a <code>DEFINE FIELD</code>, a migration
+v66 and a bump to the schema tripwire.</p>
+<p>The field is therefore the maintainer’s call and not this task’s, and it is
+one migration rather than one line away. Everything else about it is
+already written here: the value, the mode gate, the sweeper’s predicate and
+its tests are identical either way, so promoting the constant to
+<code>OidcPolicy::dcr_unauthorized_client_ttl_secs</code> is v66, eight mirrored
+sites, an ordering map, a range check, the admin card and a spec
+regeneration — and no change at all to the behaviour below.</p>
+</div></details></section></div></main></body></html>

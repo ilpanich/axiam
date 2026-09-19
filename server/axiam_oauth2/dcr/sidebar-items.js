@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DCR_AUTH_METHODS","DCR_GRANT_TYPES"],"enum":["DcrError"],"fn":["gate","host_glob_matches","redirect_host_is_allowed","validate"],"struct":["RegistrationRequest","RegistrationResponse","ValidatedRegistration"]};

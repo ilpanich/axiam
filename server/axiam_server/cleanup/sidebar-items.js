@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["run_erasure_pipeline"],"struct":["CleanupTask"]};
+window.SIDEBAR_ITEMS = {"fn":["cimd_client_is_due_for_sweep","cimd_client_last_seen","dcr_client_is_due_for_sweep","dcr_client_last_seen","run_erasure_pipeline","sweep_unused_cimd_clients","sweep_unused_dcr_clients","sweep_unused_external_clients"],"struct":["CleanupTask","DcrSweepWindow"]};

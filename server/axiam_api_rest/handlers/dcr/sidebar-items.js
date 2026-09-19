@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_registration_token","list_registration_tokens","register"],"struct":["CreateRegistrationTokenRequest","CreateRegistrationTokenResponse","DcrErrorResponse","RegistrationTokenResponse"]};

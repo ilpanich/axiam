@@ -1,0 +1,29 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Resolve the `resource` a token request carries against the one the grant is already bound to."><title>resolve_bound in axiam_oauth2::resource - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">resolve_bound</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-beta16</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In axiam_<wbr>oauth2::<wbr>resource</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a>::<wbr><a href="index.html">resource</a></div><h1>Function <span class="fn">resolve_<wbr>bound</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/resource.rs.html#263-285">Source</a> </span></div><pre class="rust item-decl"><code>pub fn resolve_bound(
+    bound: <a class="enum" href="https://doc.rust-lang.org/1.98.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;&amp;<a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.str.html">str</a>&gt;,
+    presented: <a class="enum" href="https://doc.rust-lang.org/1.98.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;&amp;<a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.str.html">str</a>&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.98.1/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="enum" href="https://doc.rust-lang.org/1.98.1/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.98.1/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>&gt;, <a class="enum" href="../error/enum.OAuth2Error.html" title="enum axiam_oauth2::error::OAuth2Error">OAuth2Error</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Resolve the <code>resource</code> a token request carries against the one the grant is
+already bound to.</p>
+<p>The <strong>redemption</strong> gate, used wherever a credential minted earlier is spent:
+the <code>authorization_code</code>, <code>refresh_token</code> and <code>device_code</code> grants. Its rule
+is one sentence — <em>a grant’s audience is decided when the grant is made</em> —
+and the three cases fall out of it:</p>
+<ul>
+<li>The request repeats the bound value, or omits it → the bound value.</li>
+<li>The request names a different value → <code>invalid_target</code>.</li>
+<li>The grant is bound to nothing and the request names something →
+<code>invalid_target</code>.</li>
+</ul>
+<p>The third case is the one worth spelling out, because it is the one that
+looks harmless. A refresh token issued for <code>axiam:user</code> represents a
+consent the end user gave to a client acting <em>as them at AXIAM</em>; letting a
+refresh add <code>resource=https://mcp.example.com</code> would mint a token for a
+service the end user was never asked about, fifteen minutes after they
+stopped watching. <strong>A token cannot be widened by refreshing it</strong>, and it
+cannot be widened by redeeming a code either — which is why this function
+never consults the client’s allow-list. The allow-list was consulted when
+the grant was made; consulting it again here would let a registration
+edited in the meantime change what an outstanding grant means.</p>
+<p>Comparison is by normalised form, so a client that pushes
+<code>https://mcp.example.com:443/mcp</code> and redeems with
+<code>https://mcp.example.com/mcp</code> is repeating its value, not changing it.</p>
+</div></details></section></div></main></body></html>

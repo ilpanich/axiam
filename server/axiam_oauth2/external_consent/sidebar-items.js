@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["VERSION_PREFIX"],"enum":["Decision","Refusal","Requested"],"fn":["applies_to","consent_type","decide","version"]};

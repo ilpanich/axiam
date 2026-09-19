@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CIMD_AUTH_METHODS","STALE_WINDOW_SECS"],"enum":["CimdError"],"fn":["looks_like_url","resolve","validate","validate_client_id_url"],"struct":["CachedDocument","ClientMetadataCache","ClientMetadataDocument","ValidatedCimdClient"]};

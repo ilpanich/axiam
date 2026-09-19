@@ -1,0 +1,52 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="RFC 8707 resource indicators (T21.3)."><title>axiam_oauth2::resource - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module resource</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.0.0-beta16</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module resource</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-a-resource-is" title="What a resource is">What a resource is</a></li><li><a href="#why-comparison-is-normalised-and-never-prefixed" title="Why comparison is normalised and never prefixed">Why comparison is normalised and never prefixed</a></li><li><a href="#the-one-622-rule-that-is-deliberately-not-applied" title="The one §6.2.2 rule that is deliberately not applied">The one §6.2.2 rule that is deliberately not applied</a></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>oauth2</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_oauth2</a></div><h1>Module <span>resource</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_oauth2/resource.rs.html#1-533">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>RFC 8707 resource indicators (T21.3).</p>
+<p>One question, asked in five places: <em>may this client name this target
+service, and what is the audience if it may?</em> The authorization endpoint,
+the PAR endpoint, the device-authorization endpoint and the token endpoint
+all ask it, and they must all get the same answer — a <code>resource</code> accepted
+at <code>/oauth2/par</code> and refused at <code>/oauth2/authorize</code> would hand the user
+agent a <code>request_uri</code> standing for a request that cannot complete, which is
+the failure <a href="../redirect_uri/index.html" title="mod axiam_oauth2::redirect_uri"><code>crate::redirect_uri</code></a> was written to avoid on the URI side.</p>
+<h2 id="what-a-resource-is"><a class="doc-anchor" href="#what-a-resource-is">§</a>What a resource is</h2>
+<p>RFC 8707 §2:</p>
+<blockquote>
+<p>The parameter value is an absolute URI … The <code>resource</code> URI MUST NOT
+include a fragment component. It SHOULD NOT include a query component,
+but it MUST be a valid URI.</p>
+</blockquote>
+<p>So: absolute (a scheme and, for the hierarchical schemes clients actually
+use, an authority), no fragment. A query is permitted and kept, because the
+RFC only discourages it and a deployment that has one has one.</p>
+<h2 id="why-comparison-is-normalised-and-never-prefixed"><a class="doc-anchor" href="#why-comparison-is-normalised-and-never-prefixed">§</a>Why comparison is normalised and never prefixed</h2>
+<p>The registered list is an allow-list of audiences, and a token’s <code>aud</code> is
+what a resource server checks to decide the token is for <em>it</em>. A prefix
+match would make <code>https://mcp.example.com</code> authorise
+<code>https://mcp.example.com.attacker.test</code> — the audience equivalent of the
+open redirect that exact <code>redirect_uri</code> matching exists to prevent (T-52) —
+so there is no prefix rule here and there must never be one.</p>
+<p>What there is instead is RFC 3986 §6.2.2 <strong>syntax-based normalisation</strong>,
+and only that: case normalisation of the scheme and host (§6.2.2.1), and
+removal of a default port and of dot segments (§6.2.2.3, §6.2.3). Those are
+transformations RFC 3986 declares produce an <em>equivalent</em> URI, so applying
+them compares what two strings mean rather than how they were typed.</p>
+<p>Nothing scheme-based is done — no trailing-slash forgiveness on a non-empty
+path, no case folding of the path, no <code>https://host</code> to <code>https://host/</code>
+guess beyond the RFC’s own empty-path rule. Those would widen an
+allow-list on a deployment’s behalf, and an allow-list widened by the
+server is one the operator cannot audit from what they wrote down.</p>
+<h2 id="the-one-622-rule-that-is-deliberately-not-applied"><a class="doc-anchor" href="#the-one-622-rule-that-is-deliberately-not-applied">§</a>The one §6.2.2 rule that is deliberately not applied</h2>
+<p>§6.2.2.2 says a percent-encoded <strong>unreserved</strong> character should be decoded,
+so <code>/%6Dcp</code> and <code>/mcp</code> are the same path. The <code>url</code> crate does not do this
+in the path component, and this module does not add it, for the reason
+<a href="../redirect_uri/index.html" title="mod axiam_oauth2::redirect_uri"><code>crate::redirect_uri</code></a> gives about normalising comparisons: a hand-rolled
+decoder in front of a security check is a place for a decoder bug to become
+an authorisation bug, and this one would be re-deriving a rule the URL
+parser already had an opinion about.</p>
+<p>Skipping it fails <strong>closed</strong>. <code>/%6Dcp</code> and <code>/mcp</code> stay two resources, so a
+client asking for one when the other is registered is refused; no request
+is admitted that would not have been. The cost is an operator who registers
+a needlessly-encoded URI and finds their client refused — which the
+read-back of the stored, normalised list makes visible at registration
+time, because the stored string is the one that will be compared.</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ResourceError.html" title="enum axiam_oauth2::resource::ResourceError">Resource<wbr>Error</a></dt><dd>Why a <code>resource</code> value is not usable (RFC 8707 §2).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.is_allowed.html" title="fn axiam_oauth2::resource::is_allowed">is_<wbr>allowed</a></dt><dd>Whether <code>presented</code> is one of the resources <code>allowed</code> names.</dd><dt><a class="fn" href="fn.normalise.html" title="fn axiam_oauth2::resource::normalise">normalise</a></dt><dd>Normalise <code>raw</code> under RFC 3986 §6.2.2, or say why it is not a resource.</dd><dt><a class="fn" href="fn.normalise_registration.html" title="fn axiam_oauth2::resource::normalise_registration">normalise_<wbr>registration</a></dt><dd>Validate a list destined for <code>OAuth2Client::allowed_resources</code>, returning
+the normalised list to store.</dd><dt><a class="fn" href="fn.resolve_bound.html" title="fn axiam_oauth2::resource::resolve_bound">resolve_<wbr>bound</a></dt><dd>Resolve the <code>resource</code> a token request carries against the one the grant is
+already bound to.</dd><dt><a class="fn" href="fn.resolve_requested.html" title="fn axiam_oauth2::resource::resolve_requested">resolve_<wbr>requested</a></dt><dd>Resolve the <code>resource</code> a request carries against a client’s allow-list.</dd></dl></section></div></main></body></html>

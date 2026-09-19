@@ -32,651 +32,929 @@
 <a href=#32 id=32 data-nosnippet>32</a>    }
 <a href=#33 id=33 data-nosnippet>33</a>}
 <a href=#34 id=34 data-nosnippet>34</a>
-<a href=#35 id=35 data-nosnippet>35</a><span class="doccomment">/// Configuration for the authentication service.
-<a href=#36 id=36 data-nosnippet>36</a></span><span class="attr">#[derive(Debug, Clone, Deserialize)]
-<a href=#37 id=37 data-nosnippet>37</a>#[serde(default)]
-<a href=#38 id=38 data-nosnippet>38</a></span><span class="kw">pub struct </span>AuthConfig {
-<a href=#39 id=39 data-nosnippet>39</a>    <span class="doccomment">/// PEM-encoded Ed25519 private key for JWT signing.
-<a href=#40 id=40 data-nosnippet>40</a>    </span><span class="kw">pub </span>jwt_private_key_pem: String,
-<a href=#41 id=41 data-nosnippet>41</a>    <span class="doccomment">/// PEM-encoded Ed25519 public key for JWT verification.
-<a href=#42 id=42 data-nosnippet>42</a>    </span><span class="kw">pub </span>jwt_public_key_pem: String,
-<a href=#43 id=43 data-nosnippet>43</a>    <span class="doccomment">/// Trust an `X-Client-Certificate` request header as proof of device
-<a href=#44 id=44 data-nosnippet>44</a>    /// identity when the connection carries no TLS-verified client
-<a href=#45 id=45 data-nosnippet>45</a>    /// certificate. Default **`false`**.
-<a href=#46 id=46 data-nosnippet>46</a>    ///
-<a href=#47 id=47 data-nosnippet>47</a>    /// # Why this is off by default
-<a href=#48 id=48 data-nosnippet>48</a>    ///
-<a href=#49 id=49 data-nosnippet>49</a>    /// The header carries a PEM certificate, and a certificate is public data.
-<a href=#50 id=50 data-nosnippet>50</a>    /// `DeviceAuthService::authenticate` checks the fingerprint, the status,
-<a href=#51 id=51 data-nosnippet>51</a>    /// the expiry and the chain up to the tenant or organization CA — every one
-<a href=#52 id=52 data-nosnippet>52</a>    /// of which a *copy* of an enrolled device's certificate also satisfies.
-<a href=#53 id=53 data-nosnippet>53</a>    /// Nothing in that path proves the sender holds the private key, because
-<a href=#54 id=54 data-nosnippet>54</a>    /// nothing can: possession is proven by the TLS handshake, and on this path
-<a href=#55 id=55 data-nosnippet>55</a>    /// there was no handshake to prove it in.
-<a href=#56 id=56 data-nosnippet>56</a>    ///
-<a href=#57 id=57 data-nosnippet>57</a>    /// That is sound only while the header cannot originate with the client —
-<a href=#58 id=58 data-nosnippet>58</a>    /// i.e. a reverse proxy performs the mTLS handshake itself and
-<a href=#59 id=59 data-nosnippet>59</a>    /// unconditionally overwrites the header on every request it forwards.
-<a href=#60 id=60 data-nosnippet>60</a>    /// It stops being sound the moment the server is reachable by anything but
-<a href=#61 id=61 data-nosnippet>61</a>    /// that proxy, where anyone holding a copy of a device certificate
-<a href=#62 id=62 data-nosnippet>62</a>    /// authenticates as that device.
-<a href=#63 id=63 data-nosnippet>63</a>    ///
-<a href=#64 id=64 data-nosnippet>64</a>    /// Native mTLS is unaffected and always preferred: when rustls verified a
-<a href=#65 id=65 data-nosnippet>65</a>    /// client certificate on the connection, that certificate is authoritative
-<a href=#66 id=66 data-nosnippet>66</a>    /// and this setting is not consulted.
-<a href=#67 id=67 data-nosnippet>67</a>    ///
-<a href=#68 id=68 data-nosnippet>68</a>    /// Set it to `true` only if all of the following hold, and say so in your
-<a href=#69 id=69 data-nosnippet>69</a>    /// runbook:
+<a href=#35 id=35 data-nosnippet>35</a><span class="doccomment">/// The path segment that separates a deployment's root issuer from a tenant
+<a href=#36 id=36 data-nosnippet>36</a>/// identifier under the T21.6 per-tenant issuer form: `{root}/t/{tenant_id}`.
+<a href=#37 id=37 data-nosnippet>37</a>///
+<a href=#38 id=38 data-nosnippet>38</a>/// One constant rather than three string literals, because the value appears
+<a href=#39 id=39 data-nosnippet>39</a>/// in an issuer this module builds, in the routes `axiam-api-rest` mounts and
+<a href=#40 id=40 data-nosnippet>40</a>/// in the `PUBLIC_PATHS` entries that must agree with them. A deployment that
+<a href=#41 id=41 data-nosnippet>41</a>/// built issuers with one spelling and routed the other would publish a
+<a href=#42 id=42 data-nosnippet>42</a>/// discovery document naming endpoints it does not serve.
+<a href=#43 id=43 data-nosnippet>43</a>///
+<a href=#44 id=44 data-nosnippet>44</a>/// `/t/` rather than `/tenants/` or `/realms/`: it is short enough that the
+<a href=#45 id=45 data-nosnippet>45</a>/// three RFC 8414 §3 discovery forms stay readable, and it collides with no
+<a href=#46 id=46 data-nosnippet>46</a>/// path AXIAM already serves.
+<a href=#47 id=47 data-nosnippet>47</a></span><span class="kw">pub const </span>TENANT_PATH_PREFIX: <span class="kw-2">&amp;</span>str = <span class="string">"/t/"</span>;
+<a href=#48 id=48 data-nosnippet>48</a>
+<a href=#49 id=49 data-nosnippet>49</a><span class="doccomment">/// Configuration for the authentication service.
+<a href=#50 id=50 data-nosnippet>50</a></span><span class="attr">#[derive(Debug, Clone, Deserialize)]
+<a href=#51 id=51 data-nosnippet>51</a>#[serde(default)]
+<a href=#52 id=52 data-nosnippet>52</a></span><span class="kw">pub struct </span>AuthConfig {
+<a href=#53 id=53 data-nosnippet>53</a>    <span class="doccomment">/// PEM-encoded Ed25519 private key for JWT signing.
+<a href=#54 id=54 data-nosnippet>54</a>    </span><span class="kw">pub </span>jwt_private_key_pem: String,
+<a href=#55 id=55 data-nosnippet>55</a>    <span class="doccomment">/// PEM-encoded Ed25519 public key for JWT verification.
+<a href=#56 id=56 data-nosnippet>56</a>    </span><span class="kw">pub </span>jwt_public_key_pem: String,
+<a href=#57 id=57 data-nosnippet>57</a>    <span class="doccomment">/// Trust an `X-Client-Certificate` request header as proof of device
+<a href=#58 id=58 data-nosnippet>58</a>    /// identity when the connection carries no TLS-verified client
+<a href=#59 id=59 data-nosnippet>59</a>    /// certificate. Default **`false`**.
+<a href=#60 id=60 data-nosnippet>60</a>    ///
+<a href=#61 id=61 data-nosnippet>61</a>    /// # Why this is off by default
+<a href=#62 id=62 data-nosnippet>62</a>    ///
+<a href=#63 id=63 data-nosnippet>63</a>    /// The header carries a PEM certificate, and a certificate is public data.
+<a href=#64 id=64 data-nosnippet>64</a>    /// `DeviceAuthService::authenticate` checks the fingerprint, the status,
+<a href=#65 id=65 data-nosnippet>65</a>    /// the expiry and the chain up to the tenant or organization CA — every one
+<a href=#66 id=66 data-nosnippet>66</a>    /// of which a *copy* of an enrolled device's certificate also satisfies.
+<a href=#67 id=67 data-nosnippet>67</a>    /// Nothing in that path proves the sender holds the private key, because
+<a href=#68 id=68 data-nosnippet>68</a>    /// nothing can: possession is proven by the TLS handshake, and on this path
+<a href=#69 id=69 data-nosnippet>69</a>    /// there was no handshake to prove it in.
 <a href=#70 id=70 data-nosnippet>70</a>    ///
-<a href=#71 id=71 data-nosnippet>71</a>    /// 1. TLS (and the client-certificate handshake) terminates at a proxy you
-<a href=#72 id=72 data-nosnippet>72</a>    ///    operate;
-<a href=#73 id=73 data-nosnippet>73</a>    /// 2. that proxy sets `X-Client-Certificate` from the certificate **it**
-<a href=#74 id=74 data-nosnippet>74</a>    ///    verified, on every request, overwriting anything the client sent;
-<a href=#75 id=75 data-nosnippet>75</a>    /// 3. nothing else can reach this server's listener.
-<a href=#76 id=76 data-nosnippet>76</a>    </span><span class="kw">pub </span>trust_forwarded_client_cert: bool,
-<a href=#77 id=77 data-nosnippet>77</a>    <span class="doccomment">/// Access token lifetime in seconds (default: 900 = 15 minutes).
-<a href=#78 id=78 data-nosnippet>78</a>    </span><span class="kw">pub </span>access_token_lifetime_secs: u64,
-<a href=#79 id=79 data-nosnippet>79</a>    <span class="doccomment">/// Refresh token lifetime in seconds (default: 2_592_000 = 30 days).
-<a href=#80 id=80 data-nosnippet>80</a>    </span><span class="kw">pub </span>refresh_token_lifetime_secs: u64,
-<a href=#81 id=81 data-nosnippet>81</a>    <span class="doccomment">/// Authorization code lifetime in seconds (default: 600 = 10 minutes).
-<a href=#82 id=82 data-nosnippet>82</a>    </span><span class="kw">pub </span>auth_code_lifetime_secs: u64,
-<a href=#83 id=83 data-nosnippet>83</a>    <span class="doccomment">/// JWT issuer (`iss` claim).
-<a href=#84 id=84 data-nosnippet>84</a>    </span><span class="kw">pub </span>jwt_issuer: String,
-<a href=#85 id=85 data-nosnippet>85</a>    <span class="doccomment">/// OIDC issuer base URL (e.g. "https://auth.example.com"). Used for
-<a href=#86 id=86 data-nosnippet>86</a>    /// OIDC discovery endpoint URLs. Falls back to `jwt_issuer` if unset.
-<a href=#87 id=87 data-nosnippet>87</a>    </span><span class="kw">pub </span>oauth2_issuer_url: String,
-<a href=#88 id=88 data-nosnippet>88</a>    <span class="doccomment">/// Base URL of the listener that performs the mutual-TLS handshake, when
-<a href=#89 id=89 data-nosnippet>89</a>    /// that is a different host or port from
-<a href=#90 id=90 data-nosnippet>90</a>    /// [`effective_issuer`](Self::effective_issuer)
-<a href=#91 id=91 data-nosnippet>91</a>    /// (`AXIAM__AUTH__OAUTH2_MTLS_BASE_URL`). Empty by default.
-<a href=#92 id=92 data-nosnippet>92</a>    ///
-<a href=#93 id=93 data-nosnippet>93</a>    /// Setting it makes the discovery document carry RFC 8705 §5
-<a href=#94 id=94 data-nosnippet>94</a>    /// `mtls_endpoint_aliases`; leaving it empty omits the member entirely,
-<a href=#95 id=95 data-nosnippet>95</a>    /// which is what the RFC asks of a server with nothing to alias.
-<a href=#96 id=96 data-nosnippet>96</a>    ///
-<a href=#97 id=97 data-nosnippet>97</a>    /// # Why a separate URL is needed at all
-<a href=#98 id=98 data-nosnippet>98</a>    ///
-<a href=#99 id=99 data-nosnippet>99</a>    /// A TLS listener decides whether to request a client certificate during
-<a href=#100 id=100 data-nosnippet>100</a>    /// the handshake, before it has seen a single byte of HTTP. So "ask for a
-<a href=#101 id=101 data-nosnippet>101</a>    /// certificate on `/oauth2/token` but not on `/oauth2/authorize`" is not a
-<a href=#102 id=102 data-nosnippet>102</a>    /// thing a listener can do — the choice is per-listener, and a deployment
-<a href=#103 id=103 data-nosnippet>103</a>    /// that wants both a browser-facing authorization endpoint and a
-<a href=#104 id=104 data-nosnippet>104</a>    /// certificate-authenticated token endpoint has to run two of them.
-<a href=#105 id=105 data-nosnippet>105</a>    ///
-<a href=#106 id=106 data-nosnippet>106</a>    /// Which leaves the client with a question metadata alone could not answer
-<a href=#107 id=107 data-nosnippet>107</a>    /// before RFC 8705 §5: the discovery document names one `token_endpoint`,
-<a href=#108 id=108 data-nosnippet>108</a>    /// and a client doing mTLS needs the *other* one. The aliases are that
-<a href=#109 id=109 data-nosnippet>109</a>    /// answer — the same endpoints, re-based on the host that will ask for a
-<a href=#110 id=110 data-nosnippet>110</a>    /// certificate.
-<a href=#111 id=111 data-nosnippet>111</a>    ///
-<a href=#112 id=112 data-nosnippet>112</a>    /// # When to leave it empty
-<a href=#113 id=113 data-nosnippet>113</a>    ///
-<a href=#114 id=114 data-nosnippet>114</a>    /// Two deployments should, and neither is unusual:
-<a href=#115 id=115 data-nosnippet>115</a>    ///
-<a href=#116 id=116 data-nosnippet>116</a>    /// - **`client_auth = optional` on a single listener.** rustls requests a
-<a href=#117 id=117 data-nosnippet>117</a>    ///   certificate and accepts a connection without one, so the conventional
-<a href=#118 id=118 data-nosnippet>118</a>    ///   endpoints already serve both populations and there is no second URL
-<a href=#119 id=119 data-nosnippet>119</a>    ///   to point at. This is the shape `scripts/e2e-mtls-native-check.sh`
-<a href=#120 id=120 data-nosnippet>120</a>    ///   exercises.
-<a href=#121 id=121 data-nosnippet>121</a>    /// - **`client_auth = required` on a single listener.** Every endpoint is
-<a href=#122 id=122 data-nosnippet>122</a>    ///   already behind the handshake; an alias would name the URL the client
-<a href=#123 id=123 data-nosnippet>123</a>    ///   is using.
-<a href=#124 id=124 data-nosnippet>124</a>    ///
-<a href=#125 id=125 data-nosnippet>125</a>    /// Set it only when mTLS genuinely terminates somewhere else — typically a
-<a href=#126 id=126 data-nosnippet>126</a>    /// second proxy hostname such as `https://mtls.iam.example.com` in front of
-<a href=#127 id=127 data-nosnippet>127</a>    /// the same server.
-<a href=#128 id=128 data-nosnippet>128</a>    ///
-<a href=#129 id=129 data-nosnippet>129</a>    /// # What it must be
-<a href=#130 id=130 data-nosnippet>130</a>    ///
-<a href=#131 id=131 data-nosnippet>131</a>    /// An absolute URL, validated where the document is built. A value that is
-<a href=#132 id=132 data-nosnippet>132</a>    /// not parseable fails the discovery request rather than being dropped:
-<a href=#133 id=133 data-nosnippet>133</a>    /// silently omitting the aliases would send an mTLS client to the
-<a href=#134 id=134 data-nosnippet>134</a>    /// conventional endpoints, which is the one outcome this setting exists to
-<a href=#135 id=135 data-nosnippet>135</a>    /// prevent.
-<a href=#136 id=136 data-nosnippet>136</a>    </span><span class="kw">pub </span>oauth2_mtls_base_url: String,
-<a href=#137 id=137 data-nosnippet>137</a>    <span class="doccomment">/// The tenant a discovery document describes when the caller named none
-<a href=#138 id=138 data-nosnippet>138</a>    /// (`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`). Empty by default.
-<a href=#139 id=139 data-nosnippet>139</a>    ///
-<a href=#140 id=140 data-nosnippet>140</a>    /// # What it fixes
-<a href=#141 id=141 data-nosnippet>141</a>    ///
-<a href=#142 id=142 data-nosnippet>142</a>    /// Every OAuth2 endpoint that authenticates a *client* — token, PAR,
-<a href=#143 id=143 data-nosnippet>143</a>    /// introspection, revocation, device authorization, end-session — takes a
-<a href=#144 id=144 data-nosnippet>144</a>    /// **required** `tenant_id` query parameter, and `/oauth2/authorize` needs
-<a href=#145 id=145 data-nosnippet>145</a>    /// one for any request without a principal, which is every browser. The
-<a href=#146 id=146 data-nosnippet>146</a>    /// discovery document published none of them, so a relying party that did
-<a href=#147 id=147 data-nosnippet>147</a>    /// exactly what OIDC Discovery tells it to do — read the document, use the
-<a href=#148 id=148 data-nosnippet>148</a>    /// URLs — got `400 missing field tenant_id` at the token endpoint. The
-<a href=#149 id=149 data-nosnippet>149</a>    /// first OpenID Foundation conformance run could not complete a single
-<a href=#150 id=150 data-nosnippet>150</a>    /// authorization for this reason.
-<a href=#151 id=151 data-nosnippet>151</a>    ///
-<a href=#152 id=152 data-nosnippet>152</a>    /// Setting this makes the **bare** document publish endpoint URLs carrying
-<a href=#153 id=153 data-nosnippet>153</a>    /// the tenant, which is the deployment shape an OP is certified as: one
-<a href=#154 id=154 data-nosnippet>154</a>    /// issuer, one tenant. A document fetched with an explicit `?tenant_id=`
-<a href=#155 id=155 data-nosnippet>155</a>    /// carries that tenant instead, and this value is not consulted.
-<a href=#156 id=156 data-nosnippet>156</a>    ///
-<a href=#157 id=157 data-nosnippet>157</a>    /// # What it does NOT do
-<a href=#158 id=158 data-nosnippet>158</a>    ///
-<a href=#159 id=159 data-nosnippet>159</a>    /// It changes no endpoint's behaviour. A request that arrives without
-<a href=#160 id=160 data-nosnippet>160</a>    /// `tenant_id` is refused exactly as it is today — this is a statement in a
-<a href=#161 id=161 data-nosnippet>161</a>    /// document, not a fallback in a handler. That distinction is deliberate:
-<a href=#162 id=162 data-nosnippet>162</a>    /// a default applied at the endpoint would silently give an
-<a href=#163 id=163 data-nosnippet>163</a>    /// unparameterised request a tenant, and on a multi-tenant authorization
-<a href=#164 id=164 data-nosnippet>164</a>    /// server the tenant is the isolation boundary. Leaving it empty is
-<a href=#165 id=165 data-nosnippet>165</a>    /// therefore safe and is the correct setting for a deployment that serves
-<a href=#166 id=166 data-nosnippet>166</a>    /// many tenants from one issuer.
-<a href=#167 id=167 data-nosnippet>167</a>    </span><span class="kw">pub </span>oauth2_default_tenant_id: String,
-<a href=#168 id=168 data-nosnippet>168</a>    <span class="doccomment">/// T-39/T-143 — whether this deployment publishes
-<a href=#169 id=169 data-nosnippet>169</a>    /// `GET /oauth2/revocations`.
+<a href=#71 id=71 data-nosnippet>71</a>    /// That is sound only while the header cannot originate with the client —
+<a href=#72 id=72 data-nosnippet>72</a>    /// i.e. a reverse proxy performs the mTLS handshake itself and
+<a href=#73 id=73 data-nosnippet>73</a>    /// unconditionally overwrites the header on every request it forwards.
+<a href=#74 id=74 data-nosnippet>74</a>    /// It stops being sound the moment the server is reachable by anything but
+<a href=#75 id=75 data-nosnippet>75</a>    /// that proxy, where anyone holding a copy of a device certificate
+<a href=#76 id=76 data-nosnippet>76</a>    /// authenticates as that device.
+<a href=#77 id=77 data-nosnippet>77</a>    ///
+<a href=#78 id=78 data-nosnippet>78</a>    /// Native mTLS is unaffected and always preferred: when rustls verified a
+<a href=#79 id=79 data-nosnippet>79</a>    /// client certificate on the connection, that certificate is authoritative
+<a href=#80 id=80 data-nosnippet>80</a>    /// and this setting is not consulted.
+<a href=#81 id=81 data-nosnippet>81</a>    ///
+<a href=#82 id=82 data-nosnippet>82</a>    /// Set it to `true` only if all of the following hold, and say so in your
+<a href=#83 id=83 data-nosnippet>83</a>    /// runbook:
+<a href=#84 id=84 data-nosnippet>84</a>    ///
+<a href=#85 id=85 data-nosnippet>85</a>    /// 1. TLS (and the client-certificate handshake) terminates at a proxy you
+<a href=#86 id=86 data-nosnippet>86</a>    ///    operate;
+<a href=#87 id=87 data-nosnippet>87</a>    /// 2. that proxy sets `X-Client-Certificate` from the certificate **it**
+<a href=#88 id=88 data-nosnippet>88</a>    ///    verified, on every request, overwriting anything the client sent;
+<a href=#89 id=89 data-nosnippet>89</a>    /// 3. nothing else can reach this server's listener.
+<a href=#90 id=90 data-nosnippet>90</a>    </span><span class="kw">pub </span>trust_forwarded_client_cert: bool,
+<a href=#91 id=91 data-nosnippet>91</a>    <span class="doccomment">/// Access token lifetime in seconds (default: 900 = 15 minutes).
+<a href=#92 id=92 data-nosnippet>92</a>    </span><span class="kw">pub </span>access_token_lifetime_secs: u64,
+<a href=#93 id=93 data-nosnippet>93</a>    <span class="doccomment">/// Refresh token lifetime in seconds (default: 2_592_000 = 30 days).
+<a href=#94 id=94 data-nosnippet>94</a>    </span><span class="kw">pub </span>refresh_token_lifetime_secs: u64,
+<a href=#95 id=95 data-nosnippet>95</a>    <span class="doccomment">/// Authorization code lifetime in seconds (default: 600 = 10 minutes).
+<a href=#96 id=96 data-nosnippet>96</a>    </span><span class="kw">pub </span>auth_code_lifetime_secs: u64,
+<a href=#97 id=97 data-nosnippet>97</a>    <span class="doccomment">/// JWT issuer (`iss` claim).
+<a href=#98 id=98 data-nosnippet>98</a>    </span><span class="kw">pub </span>jwt_issuer: String,
+<a href=#99 id=99 data-nosnippet>99</a>    <span class="doccomment">/// OIDC issuer base URL (e.g. "https://auth.example.com"). Used for
+<a href=#100 id=100 data-nosnippet>100</a>    /// OIDC discovery endpoint URLs. Falls back to `jwt_issuer` if unset.
+<a href=#101 id=101 data-nosnippet>101</a>    </span><span class="kw">pub </span>oauth2_issuer_url: String,
+<a href=#102 id=102 data-nosnippet>102</a>    <span class="doccomment">/// Base URL of the listener that performs the mutual-TLS handshake, when
+<a href=#103 id=103 data-nosnippet>103</a>    /// that is a different host or port from
+<a href=#104 id=104 data-nosnippet>104</a>    /// [`effective_issuer`](Self::effective_issuer)
+<a href=#105 id=105 data-nosnippet>105</a>    /// (`AXIAM__AUTH__OAUTH2_MTLS_BASE_URL`). Empty by default.
+<a href=#106 id=106 data-nosnippet>106</a>    ///
+<a href=#107 id=107 data-nosnippet>107</a>    /// Setting it makes the discovery document carry RFC 8705 §5
+<a href=#108 id=108 data-nosnippet>108</a>    /// `mtls_endpoint_aliases`; leaving it empty omits the member entirely,
+<a href=#109 id=109 data-nosnippet>109</a>    /// which is what the RFC asks of a server with nothing to alias.
+<a href=#110 id=110 data-nosnippet>110</a>    ///
+<a href=#111 id=111 data-nosnippet>111</a>    /// # Why a separate URL is needed at all
+<a href=#112 id=112 data-nosnippet>112</a>    ///
+<a href=#113 id=113 data-nosnippet>113</a>    /// A TLS listener decides whether to request a client certificate during
+<a href=#114 id=114 data-nosnippet>114</a>    /// the handshake, before it has seen a single byte of HTTP. So "ask for a
+<a href=#115 id=115 data-nosnippet>115</a>    /// certificate on `/oauth2/token` but not on `/oauth2/authorize`" is not a
+<a href=#116 id=116 data-nosnippet>116</a>    /// thing a listener can do — the choice is per-listener, and a deployment
+<a href=#117 id=117 data-nosnippet>117</a>    /// that wants both a browser-facing authorization endpoint and a
+<a href=#118 id=118 data-nosnippet>118</a>    /// certificate-authenticated token endpoint has to run two of them.
+<a href=#119 id=119 data-nosnippet>119</a>    ///
+<a href=#120 id=120 data-nosnippet>120</a>    /// Which leaves the client with a question metadata alone could not answer
+<a href=#121 id=121 data-nosnippet>121</a>    /// before RFC 8705 §5: the discovery document names one `token_endpoint`,
+<a href=#122 id=122 data-nosnippet>122</a>    /// and a client doing mTLS needs the *other* one. The aliases are that
+<a href=#123 id=123 data-nosnippet>123</a>    /// answer — the same endpoints, re-based on the host that will ask for a
+<a href=#124 id=124 data-nosnippet>124</a>    /// certificate.
+<a href=#125 id=125 data-nosnippet>125</a>    ///
+<a href=#126 id=126 data-nosnippet>126</a>    /// # When to leave it empty
+<a href=#127 id=127 data-nosnippet>127</a>    ///
+<a href=#128 id=128 data-nosnippet>128</a>    /// Two deployments should, and neither is unusual:
+<a href=#129 id=129 data-nosnippet>129</a>    ///
+<a href=#130 id=130 data-nosnippet>130</a>    /// - **`client_auth = optional` on a single listener.** rustls requests a
+<a href=#131 id=131 data-nosnippet>131</a>    ///   certificate and accepts a connection without one, so the conventional
+<a href=#132 id=132 data-nosnippet>132</a>    ///   endpoints already serve both populations and there is no second URL
+<a href=#133 id=133 data-nosnippet>133</a>    ///   to point at. This is the shape `scripts/e2e-mtls-native-check.sh`
+<a href=#134 id=134 data-nosnippet>134</a>    ///   exercises.
+<a href=#135 id=135 data-nosnippet>135</a>    /// - **`client_auth = required` on a single listener.** Every endpoint is
+<a href=#136 id=136 data-nosnippet>136</a>    ///   already behind the handshake; an alias would name the URL the client
+<a href=#137 id=137 data-nosnippet>137</a>    ///   is using.
+<a href=#138 id=138 data-nosnippet>138</a>    ///
+<a href=#139 id=139 data-nosnippet>139</a>    /// Set it only when mTLS genuinely terminates somewhere else — typically a
+<a href=#140 id=140 data-nosnippet>140</a>    /// second proxy hostname such as `https://mtls.iam.example.com` in front of
+<a href=#141 id=141 data-nosnippet>141</a>    /// the same server.
+<a href=#142 id=142 data-nosnippet>142</a>    ///
+<a href=#143 id=143 data-nosnippet>143</a>    /// # What it must be
+<a href=#144 id=144 data-nosnippet>144</a>    ///
+<a href=#145 id=145 data-nosnippet>145</a>    /// An absolute URL, validated where the document is built. A value that is
+<a href=#146 id=146 data-nosnippet>146</a>    /// not parseable fails the discovery request rather than being dropped:
+<a href=#147 id=147 data-nosnippet>147</a>    /// silently omitting the aliases would send an mTLS client to the
+<a href=#148 id=148 data-nosnippet>148</a>    /// conventional endpoints, which is the one outcome this setting exists to
+<a href=#149 id=149 data-nosnippet>149</a>    /// prevent.
+<a href=#150 id=150 data-nosnippet>150</a>    </span><span class="kw">pub </span>oauth2_mtls_base_url: String,
+<a href=#151 id=151 data-nosnippet>151</a>    <span class="doccomment">/// The tenant a discovery document describes when the caller named none
+<a href=#152 id=152 data-nosnippet>152</a>    /// (`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`). Empty by default.
+<a href=#153 id=153 data-nosnippet>153</a>    ///
+<a href=#154 id=154 data-nosnippet>154</a>    /// # What it fixes
+<a href=#155 id=155 data-nosnippet>155</a>    ///
+<a href=#156 id=156 data-nosnippet>156</a>    /// Every OAuth2 endpoint that authenticates a *client* — token, PAR,
+<a href=#157 id=157 data-nosnippet>157</a>    /// introspection, revocation, device authorization, end-session — takes a
+<a href=#158 id=158 data-nosnippet>158</a>    /// **required** `tenant_id` query parameter, and `/oauth2/authorize` needs
+<a href=#159 id=159 data-nosnippet>159</a>    /// one for any request without a principal, which is every browser. The
+<a href=#160 id=160 data-nosnippet>160</a>    /// discovery document published none of them, so a relying party that did
+<a href=#161 id=161 data-nosnippet>161</a>    /// exactly what OIDC Discovery tells it to do — read the document, use the
+<a href=#162 id=162 data-nosnippet>162</a>    /// URLs — got `400 missing field tenant_id` at the token endpoint. The
+<a href=#163 id=163 data-nosnippet>163</a>    /// first OpenID Foundation conformance run could not complete a single
+<a href=#164 id=164 data-nosnippet>164</a>    /// authorization for this reason.
+<a href=#165 id=165 data-nosnippet>165</a>    ///
+<a href=#166 id=166 data-nosnippet>166</a>    /// Setting this makes the **bare** document publish endpoint URLs carrying
+<a href=#167 id=167 data-nosnippet>167</a>    /// the tenant, which is the deployment shape an OP is certified as: one
+<a href=#168 id=168 data-nosnippet>168</a>    /// issuer, one tenant. A document fetched with an explicit `?tenant_id=`
+<a href=#169 id=169 data-nosnippet>169</a>    /// carries that tenant instead, and this value is not consulted.
 <a href=#170 id=170 data-nosnippet>170</a>    ///
-<a href=#171 id=171 data-nosnippet>171</a>    /// `AXIAM__AUTH__REVOCATION_FEED_ENABLED`, default `false`. With it off the
-<a href=#172 id=172 data-nosnippet>172</a>    /// route is not mounted and no `revoked_session` row is written, so the
-<a href=#173 id=173 data-nosnippet>173</a>    /// deployment is byte-identical to one built before the feed existed.
-<a href=#174 id=174 data-nosnippet>174</a>    ///
-<a href=#175 id=175 data-nosnippet>175</a>    /// The feed narrows the window in which a revoked session's access token
-<a href=#176 id=176 data-nosnippet>176</a>    /// still verifies — from one token lifetime to one poll interval — for an
-<a href=#177 id=177 data-nosnippet>177</a>    /// SDK guard that opts into polling it. It is never a control: a guard
-<a href=#178 id=178 data-nosnippet>178</a>    /// that cannot fetch it behaves exactly as it does today, and the token
-<a href=#179 id=179 data-nosnippet>179</a>    /// itself still decides.
-<a href=#180 id=180 data-nosnippet>180</a>    </span><span class="attr">#[serde(default)]
-<a href=#181 id=181 data-nosnippet>181</a>    </span><span class="kw">pub </span>revocation_feed_enabled: bool,
-<a href=#182 id=182 data-nosnippet>182</a>    <span class="doccomment">/// Extra browser origins this deployment will hand a **federation SSO
-<a href=#183 id=183 data-nosnippet>183</a>    /// handoff code** to (`AXIAM__AUTH__SSO_SPA_ORIGINS`; a list, set the same
-<a href=#184 id=184 data-nosnippet>184</a>    /// way as `AXIAM__SERVER__CORS_ALLOWED_ORIGINS`).
-<a href=#185 id=185 data-nosnippet>185</a>    ///
-<a href=#186 id=186 data-nosnippet>186</a>    /// # Why this exists
-<a href=#187 id=187 data-nosnippet>187</a>    ///
-<a href=#188 id=188 data-nosnippet>188</a>    /// SAML and Apple return by cross-site form POST, so the session cookies
-<a href=#189 id=189 data-nosnippet>189</a>    /// cannot be set on that response. AXIAM instead mints a single-use handoff
-<a href=#190 id=190 data-nosnippet>190</a>    /// code and redirects the browser to the SPA with it — and that code is a
-<a href=#191 id=191 data-nosnippet>191</a>    /// bearer credential for a session. The redirect target therefore may not
-<a href=#192 id=192 data-nosnippet>192</a>    /// be whatever the caller of the *unauthenticated* login-start endpoint
-<a href=#193 id=193 data-nosnippet>193</a>    /// asked for: on those two protocols the identity provider never sees the
-<a href=#194 id=194 data-nosnippet>194</a>    /// SPA `redirect_uri`, so its own registered-redirect allowlist is not
-<a href=#195 id=195 data-nosnippet>195</a>    /// there to reject an attacker's host.
-<a href=#196 id=196 data-nosnippet>196</a>    ///
-<a href=#197 id=197 data-nosnippet>197</a>    /// The default is empty, which means **the origin of
-<a href=#198 id=198 data-nosnippet>198</a>    /// [`effective_issuer`](Self::effective_issuer) only**. That is the right
-<a href=#199 id=199 data-nosnippet>199</a>    /// default rather than a restrictive one: the endpoint a SAML IdP or Apple
-<a href=#200 id=200 data-nosnippet>200</a>    /// posts to is itself built from `effective_issuer`, so a deployment whose
-<a href=#201 id=201 data-nosnippet>201</a>    /// SPA is served from that origin — the shape `docker/nginx.conf` and the
-<a href=#202 id=202 data-nosnippet>202</a>    /// deployment guides describe, and the only shape in which
-<a href=#203 id=203 data-nosnippet>203</a>    /// `SameSite=Strict` session cookies work same-origin — needs no entry
-<a href=#204 id=204 data-nosnippet>204</a>    /// here at all.
-<a href=#205 id=205 data-nosnippet>205</a>    ///
-<a href=#206 id=206 data-nosnippet>206</a>    /// Set it when the SPA is served from a different host than the API (for
-<a href=#207 id=207 data-nosnippet>207</a>    /// example `https://app.example.com` against `https://api.example.com`).
-<a href=#208 id=208 data-nosnippet>208</a>    /// Values are compared as **origins**: scheme, host and port, with the path
-<a href=#209 id=209 data-nosnippet>209</a>    /// ignored — so `https://app.example.com` does not admit
-<a href=#210 id=210 data-nosnippet>210</a>    /// `https://app.example.com:8443`.
-<a href=#211 id=211 data-nosnippet>211</a>    ///
-<a href=#212 id=212 data-nosnippet>212</a>    /// # Since R-3: all four flows, not two
-<a href=#213 id=213 data-nosnippet>213</a>    ///
-<a href=#214 id=214 data-nosnippet>214</a>    /// This used to have no effect on the OIDC and OAuth2 flows, whose
-<a href=#215 id=215 data-nosnippet>215</a>    /// `redirect_uri` is registered at the provider and checked there. It now
-<a href=#216 id=216 data-nosnippet>216</a>    /// governs those two as well. The provider's check is a real control, but
-<a href=#217 id=217 data-nosnippet>217</a>    /// only as strict as each provider's registration hygiene — several accept
-<a href=#218 id=218 data-nosnippet>218</a>    /// wildcard or prefix registrations — and it is not a control AXIAM owns or
-<a href=#219 id=219 data-nosnippet>219</a>    /// can inspect; it stays as a second, independent layer behind this one.
-<a href=#220 id=220 data-nosnippet>220</a>    ///
-<a href=#221 id=221 data-nosnippet>221</a>    /// **This is the one thing R-3 can break.** A deployment whose SPA lives on
-<a href=#222 id=222 data-nosnippet>222</a>    /// an origin other than the issuer's, signing in through OIDC or OAuth2
-<a href=#223 id=223 data-nosnippet>223</a>    /// providers, worked without this variable and now needs it — the same
-<a href=#224 id=224 data-nosnippet>224</a>    /// requirement the SAML and Apple flows have imposed since beta08. The
-<a href=#225 id=225 data-nosnippet>225</a>    /// shipped same-origin topology needs nothing. The `400` names this
-<a href=#226 id=226 data-nosnippet>226</a>    /// variable, so the failure says what to set.
-<a href=#227 id=227 data-nosnippet>227</a>    </span><span class="kw">pub </span>sso_spa_origins: Vec&lt;String&gt;,
-<a href=#228 id=228 data-nosnippet>228</a>    <span class="doccomment">/// Optional pepper prepended to passwords before Argon2id verification.
-<a href=#229 id=229 data-nosnippet>229</a>    /// Wrapped in `SecretString` so `Debug`/logging never leaks it by
-<a href=#230 id=230 data-nosnippet>230</a>    /// accident (SECHRD-12) — exposed only via `.expose_secret()` at the
-<a href=#231 id=231 data-nosnippet>231</a>    /// `&amp;str` boundary where a pepper value is consumed.
-<a href=#232 id=232 data-nosnippet>232</a>    </span><span class="kw">pub </span>pepper: <span class="prelude-ty">Option</span>&lt;SecretString&gt;,
-<a href=#233 id=233 data-nosnippet>233</a>    <span class="doccomment">/// Previous pepper, kept **verify-only** while a pepper rotation drains
-<a href=#234 id=234 data-nosnippet>234</a>    /// (`AXIAM__AUTH__PEPPER_PREVIOUS`, §13.4 observation 3).
-<a href=#235 id=235 data-nosnippet>235</a>    ///
-<a href=#236 id=236 data-nosnippet>236</a>    /// Client-secret hashes are keyed by the pepper, and the `v2.hs256$` tag
-<a href=#237 id=237 data-nosnippet>237</a>    /// versions the *algorithm*, not the *key* — so without this, rotating
-<a href=#238 id=238 data-nosnippet>238</a>    /// `AXIAM__AUTH__PEPPER` permanently invalidates **every** client secret and
-<a href=#239 id=239 data-nosnippet>239</a>    /// every service account and OAuth2 client has to be re-issued in lockstep
-<a href=#240 id=240 data-nosnippet>240</a>    /// with the restart.
-<a href=#241 id=241 data-nosnippet>241</a>    ///
-<a href=#242 id=242 data-nosnippet>242</a>    /// Set this to the outgoing value for the duration of a rotation. Secrets
-<a href=#243 id=243 data-nosnippet>243</a>    /// hashed under it still verify, and each one is transparently rewritten
-<a href=#244 id=244 data-nosnippet>244</a>    /// under the new pepper the first time its owner authenticates, so the
-<a href=#245 id=245 data-nosnippet>245</a>    /// rotation drains itself. Unset it once the fleet has drained; nothing is
-<a href=#246 id=246 data-nosnippet>246</a>    /// ever *written* under this key.
-<a href=#247 id=247 data-nosnippet>247</a>    ///
-<a href=#248 id=248 data-nosnippet>248</a>    /// It does **not** apply to Argon2id password peppering, which has its own
-<a href=#249 id=249 data-nosnippet>249</a>    /// migration story — only to client-secret hashing.
-<a href=#250 id=250 data-nosnippet>250</a>    </span><span class="kw">pub </span>pepper_previous: <span class="prelude-ty">Option</span>&lt;SecretString&gt;,
-<a href=#251 id=251 data-nosnippet>251</a>    <span class="doccomment">/// Minimum password length for policy enforcement.
-<a href=#252 id=252 data-nosnippet>252</a>    </span><span class="kw">pub </span>min_password_length: usize,
-<a href=#253 id=253 data-nosnippet>253</a>    <span class="doccomment">/// 256-bit AES-GCM key for encrypting TOTP secrets at rest.
-<a href=#254 id=254 data-nosnippet>254</a>    /// `None` disables MFA enrollment. Set programmatically (not from config files).
-<a href=#255 id=255 data-nosnippet>255</a>    </span><span class="attr">#[serde(skip)]
-<a href=#256 id=256 data-nosnippet>256</a>    </span><span class="kw">pub </span>mfa_encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
-<a href=#257 id=257 data-nosnippet>257</a>    <span class="doccomment">/// 256-bit AES-GCM key for encrypting federation client secrets at rest.
-<a href=#258 id=258 data-nosnippet>258</a>    /// `None` means federation config create/update will fail at runtime.
-<a href=#259 id=259 data-nosnippet>259</a>    /// Set programmatically from `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` (not from
-<a href=#260 id=260 data-nosnippet>260</a>    /// config files). Federation is optional — absence is warned, not fatal.
-<a href=#261 id=261 data-nosnippet>261</a>    </span><span class="attr">#[serde(skip)]
-<a href=#262 id=262 data-nosnippet>262</a>    </span><span class="kw">pub </span>federation_encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
-<a href=#263 id=263 data-nosnippet>263</a>    <span class="doccomment">/// 256-bit AES-GCM key that seals an OPAQUE exchange's server state
-<a href=#264 id=264 data-nosnippet>264</a>    /// between its two messages, on both the login and the registration path.
-<a href=#265 id=265 data-nosnippet>265</a>    ///
-<a href=#266 id=266 data-nosnippet>266</a>    /// `None` means the OPAQUE endpoints answer `503`, whatever the org or
-<a href=#267 id=267 data-nosnippet>267</a>    /// tenant policy says. That is deliberate: silently falling back to
-<a href=#268 id=268 data-nosnippet>268</a>    /// password login when the key is missing would turn a misconfiguration
-<a href=#269 id=269 data-nosnippet>269</a>    /// into an undetectable downgrade of a security control an operator
-<a href=#270 id=270 data-nosnippet>270</a>    /// believes is on.
-<a href=#271 id=271 data-nosnippet>271</a>    ///
-<a href=#272 id=272 data-nosnippet>272</a>    /// Deliberately its own key rather than a reuse of
-<a href=#273 id=273 data-nosnippet>273</a>    /// [`Self::mfa_encryption_key`]: the two rotate on different schedules, and
-<a href=#274 id=274 data-nosnippet>274</a>    /// sharing one would couple an OPAQUE outage to an unrelated TOTP
-<a href=#275 id=275 data-nosnippet>275</a>    /// rotation. Set from `AXIAM__AUTH__OPAQUE_SESSION_KEY` (not from config
-<a href=#276 id=276 data-nosnippet>276</a>    /// files).
-<a href=#277 id=277 data-nosnippet>277</a>    ///
-<a href=#278 id=278 data-nosnippet>278</a>    /// Rotating this is cheap — it invalidates exchanges in flight and nothing
-<a href=#279 id=279 data-nosnippet>279</a>    /// else. Contrast [`Self::opaque_setup_key`], which is the expensive one.
-<a href=#280 id=280 data-nosnippet>280</a>    </span><span class="attr">#[serde(skip)]
-<a href=#281 id=281 data-nosnippet>281</a>    </span><span class="kw">pub </span>opaque_session_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
-<a href=#282 id=282 data-nosnippet>282</a>    <span class="doccomment">/// 256-bit AES-GCM key that encrypts each tenant's OPAQUE server key
-<a href=#283 id=283 data-nosnippet>283</a>    /// material — the OPRF seed and the long-term AKE key pair — at rest.
-<a href=#284 id=284 data-nosnippet>284</a>    ///
-<a href=#285 id=285 data-nosnippet>285</a>    /// `None` means the OPAQUE endpoints answer `503`, for the same reason as
-<a href=#286 id=286 data-nosnippet>286</a>    /// above.
-<a href=#287 id=287 data-nosnippet>287</a>    ///
-<a href=#288 id=288 data-nosnippet>288</a>    /// This is a **separate key from [`Self::opaque_session_key`] on purpose**,
-<a href=#289 id=289 data-nosnippet>289</a>    /// and the reason is what rotating each one costs. The session key seals
-<a href=#290 id=290 data-nosnippet>290</a>    /// 120 seconds of in-flight state and can be rotated on any schedule.
-<a href=#291 id=291 data-nosnippet>291</a>    /// This key protects data at rest: rotating it means re-encrypting every
-<a href=#292 id=292 data-nosnippet>292</a>    /// `opaque_server_setup` row, and **losing** it means every registration
-<a href=#293 id=293 data-nosnippet>293</a>    /// record in every tenant becomes unopenable and the whole estate needs a
-<a href=#294 id=294 data-nosnippet>294</a>    /// password reset. Sharing one key would put the cheap rotation and the
-<a href=#295 id=295 data-nosnippet>295</a>    /// catastrophic one on the same schedule, which is how an operator ends up
-<a href=#296 id=296 data-nosnippet>296</a>    /// doing neither. Set from `AXIAM__AUTH__OPAQUE_SETUP_KEY`.
-<a href=#297 id=297 data-nosnippet>297</a>    </span><span class="attr">#[serde(skip)]
-<a href=#298 id=298 data-nosnippet>298</a>    </span><span class="kw">pub </span>opaque_setup_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
-<a href=#299 id=299 data-nosnippet>299</a>    <span class="doccomment">/// When `true`, access tokens decoded without an `aud` claim are treated as
-<a href=#300 id=300 data-nosnippet>300</a>    /// `axiam:user`. Enables a back-compat window during the Phase 4 rollout
-<a href=#301 id=301 data-nosnippet>301</a>    /// while pre-Phase-4 tokens are still circulating. Default: `true`.
-<a href=#302 id=302 data-nosnippet>302</a>    </span><span class="attr">#[serde(default = <span class="string">"default_true"</span>)]
-<a href=#303 id=303 data-nosnippet>303</a>    </span><span class="kw">pub </span>allow_missing_aud_as_user: bool,
-<a href=#304 id=304 data-nosnippet>304</a>    <span class="doccomment">/// When `true` (default), all auth cookies are marked `Secure` and are
-<a href=#305 id=305 data-nosnippet>305</a>    /// therefore sent only over HTTPS. Set `AXIAM__AUTH__COOKIE_SECURE=false`
-<a href=#306 id=306 data-nosnippet>306</a>    /// **only** in local HTTP development (e.g. http://localhost) — **never**
-<a href=#307 id=307 data-nosnippet>307</a>    /// in production or staging (D-18).
-<a href=#308 id=308 data-nosnippet>308</a>    </span><span class="attr">#[serde(default = <span class="string">"default_true"</span>)]
-<a href=#309 id=309 data-nosnippet>309</a>    </span><span class="kw">pub </span>cookie_secure: bool,
-<a href=#310 id=310 data-nosnippet>310</a>    <span class="doccomment">/// MFA challenge token lifetime in seconds (default: 300 = 5 minutes).
-<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="kw">pub </span>mfa_challenge_lifetime_secs: u64,
-<a href=#312 id=312 data-nosnippet>312</a>    <span class="doccomment">/// Issuer name shown in authenticator apps.
-<a href=#313 id=313 data-nosnippet>313</a>    </span><span class="kw">pub </span>totp_issuer: String,
-<a href=#314 id=314 data-nosnippet>314</a>    <span class="doccomment">/// Max consecutive failed login attempts before lockout (default: 5).
-<a href=#315 id=315 data-nosnippet>315</a>    </span><span class="kw">pub </span>max_failed_login_attempts: u32,
-<a href=#316 id=316 data-nosnippet>316</a>    <span class="doccomment">/// Initial lockout duration in seconds (default: 900 = 15 min).
-<a href=#317 id=317 data-nosnippet>317</a>    </span><span class="kw">pub </span>lockout_duration_secs: u64,
-<a href=#318 id=318 data-nosnippet>318</a>    <span class="doccomment">/// Exponential backoff multiplier for repeated lockouts (default: 2.0).
-<a href=#319 id=319 data-nosnippet>319</a>    </span><span class="kw">pub </span>lockout_backoff_multiplier: f64,
-<a href=#320 id=320 data-nosnippet>320</a>    <span class="doccomment">/// Maximum lockout duration in seconds (default: 3600 = 1 hour).
-<a href=#321 id=321 data-nosnippet>321</a>    </span><span class="kw">pub </span>max_lockout_duration_secs: u64,
-<a href=#322 id=322 data-nosnippet>322</a>    <span class="doccomment">/// Grace period in hours during which PendingVerification users
-<a href=#323 id=323 data-nosnippet>323</a>    /// can still log in (default: 24). Set to 0 to disable.
-<a href=#324 id=324 data-nosnippet>324</a>    </span><span class="kw">pub </span>email_verification_grace_period_hours: u32,
-<a href=#325 id=325 data-nosnippet>325</a>    <span class="doccomment">/// Password reset token expiry in hours (default: 1).
-<a href=#326 id=326 data-nosnippet>326</a>    </span><span class="kw">pub </span>password_reset_token_expiry_hours: u32,
-<a href=#327 id=327 data-nosnippet>327</a>    <span class="doccomment">/// WebAuthn Relying Party ID (typically the domain name,
-<a href=#328 id=328 data-nosnippet>328</a>    /// e.g. "auth.example.com").
-<a href=#329 id=329 data-nosnippet>329</a>    </span><span class="kw">pub </span>webauthn_rp_id: String,
-<a href=#330 id=330 data-nosnippet>330</a>    <span class="doccomment">/// WebAuthn Relying Party origin
-<a href=#331 id=331 data-nosnippet>331</a>    /// (e.g. "https://auth.example.com").
-<a href=#332 id=332 data-nosnippet>332</a>    </span><span class="kw">pub </span>webauthn_rp_origin: String,
-<a href=#333 id=333 data-nosnippet>333</a>    <span class="doccomment">/// WebAuthn Relying Party display name.
-<a href=#334 id=334 data-nosnippet>334</a>    </span><span class="kw">pub </span>webauthn_rp_name: String,
-<a href=#335 id=335 data-nosnippet>335</a>    <span class="doccomment">/// CQ-B14: Pre-parsed Ed25519 signing key. Populated once at startup via
-<a href=#336 id=336 data-nosnippet>336</a>    /// `resolve_keys()`. When `Some`, token-issue functions skip PEM re-parsing.
-<a href=#337 id=337 data-nosnippet>337</a>    /// When `None`, they fall back to parsing from `jwt_private_key_pem`.
-<a href=#338 id=338 data-nosnippet>338</a>    </span><span class="attr">#[serde(skip)]
-<a href=#339 id=339 data-nosnippet>339</a>    </span><span class="kw">pub </span>jwt_encoding_key: <span class="prelude-ty">Option</span>&lt;Arc&lt;EncodingKey&gt;&gt;,
-<a href=#340 id=340 data-nosnippet>340</a>    <span class="doccomment">/// CQ-B14: Pre-parsed Ed25519 verification key. Populated once at startup via
-<a href=#341 id=341 data-nosnippet>341</a>    /// `resolve_keys()`. When `Some`, token-verify functions skip PEM re-parsing.
-<a href=#342 id=342 data-nosnippet>342</a>    /// When `None`, they fall back to parsing from `jwt_public_key_pem`.
-<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="attr">#[serde(skip)]
-<a href=#344 id=344 data-nosnippet>344</a>    </span><span class="kw">pub </span>jwt_decoding_key: <span class="prelude-ty">Option</span>&lt;Arc&lt;DecodingKey&gt;&gt;,
-<a href=#345 id=345 data-nosnippet>345</a>    <span class="doccomment">/// PERF-01: Consecutive HIBP failures/timeouts before the process-wide
-<a href=#346 id=346 data-nosnippet>346</a>    /// `HibpBreaker` trips open (default: 5). Overridable via
-<a href=#347 id=347 data-nosnippet>347</a>    /// `AXIAM__AUTH__HIBP_BREAKER_THRESHOLD`.
-<a href=#348 id=348 data-nosnippet>348</a>    </span><span class="kw">pub </span>hibp_breaker_threshold: u32,
-<a href=#349 id=349 data-nosnippet>349</a>    <span class="doccomment">/// PERF-01: Cooldown in seconds the `HibpBreaker` stays open before
-<a href=#350 id=350 data-nosnippet>350</a>    /// allowing a half-open probe request (default: 30). Overridable via
-<a href=#351 id=351 data-nosnippet>351</a>    /// `AXIAM__AUTH__HIBP_BREAKER_COOLDOWN_SECS`.
-<a href=#352 id=352 data-nosnippet>352</a>    </span><span class="kw">pub </span>hibp_breaker_cooldown_secs: u64,
-<a href=#353 id=353 data-nosnippet>353</a>    <span class="doccomment">/// B1: Maximum number of Argon2id hash/verify operations allowed to run
-<a href=#354 id=354 data-nosnippet>354</a>    /// concurrently, enforced by the process-wide `crypto_semaphore` shared
-<a href=#355 id=355 data-nosnippet>355</a>    /// across the login, password-change, password-reset and PKI crypto paths.
-<a href=#356 id=356 data-nosnippet>356</a>    ///
-<a href=#357 id=357 data-nosnippet>357</a>    /// Each in-flight Argon2id operation allocates a ~19 MiB memory arena
-<a href=#358 id=358 data-nosnippet>358</a>    /// (OWASP params m=19456), so unbounded concurrency is an unauthenticated
-<a href=#359 id=359 data-nosnippet>359</a>    /// memory-DoS vector: the login benchmark pegged 2 cores and reached
-<a href=#360 id=360 data-nosnippet>360</a>    /// ~970 MiB RSS ≈ 50 concurrent × 19 MiB arenas, against a 1024 MiB
-<a href=#361 id=361 data-nosnippet>361</a>    /// container cap. This permit count bounds peak concurrent arenas.
-<a href=#362 id=362 data-nosnippet>362</a>    ///
-<a href=#363 id=363 data-nosnippet>363</a>    /// `0` means "auto" and resolves to `min(available_parallelism, 4)` at
-<a href=#364 id=364 data-nosnippet>364</a>    /// semaphore-construction time (see [`AuthConfig::resolved_max_concurrent_hashes`]).
-<a href=#365 id=365 data-nosnippet>365</a>    /// Override via `AXIAM__AUTH__MAX_CONCURRENT_HASHES`.
-<a href=#366 id=366 data-nosnippet>366</a>    </span><span class="kw">pub </span>max_concurrent_hashes: usize,
-<a href=#367 id=367 data-nosnippet>367</a>    <span class="doccomment">/// B1: How long (in seconds) a request waits to acquire a crypto-hash
-<a href=#368 id=368 data-nosnippet>368</a>    /// permit before giving up and returning a `ServiceUnavailable` (HTTP 503)
-<a href=#369 id=369 data-nosnippet>369</a>    /// backpressure error, instead of queueing unboundedly and adding to
-<a href=#370 id=370 data-nosnippet>370</a>    /// tail latency. Default: 5. Override via
-<a href=#371 id=371 data-nosnippet>371</a>    /// `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS`.
-<a href=#372 id=372 data-nosnippet>372</a>    </span><span class="kw">pub </span>hash_acquire_timeout_secs: u64,
-<a href=#373 id=373 data-nosnippet>373</a>    <span class="doccomment">/// I6: TTL, in seconds, of the process-local **session-validation cache**.
-<a href=#374 id=374 data-nosnippet>374</a>    ///
-<a href=#375 id=375 data-nosnippet>375</a>    /// `0` (the default) disables the cache entirely — every authenticated
-<a href=#376 id=376 data-nosnippet>376</a>    /// request performs its own SurrealDB read to confirm the session behind the
-<a href=#377 id=377 data-nosnippet>377</a>    /// access token's `jti` still exists (D-15 / REQ-7). A non-zero value lets
-<a href=#378 id=378 data-nosnippet>378</a>    /// repeated requests inside the window reuse the last positive answer.
-<a href=#379 id=379 data-nosnippet>379</a>    ///
-<a href=#380 id=380 data-nosnippet>380</a>    /// Override via `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`.
-<a href=#381 id=381 data-nosnippet>381</a>    ///
-<a href=#382 id=382 data-nosnippet>382</a>    /// # What it buys and what it costs
-<a href=#383 id=383 data-nosnippet>383</a>    ///
-<a href=#384 id=384 data-nosnippet>384</a>    /// The read it removes is the reason the D7 decision cache helped gRPC
-<a href=#385 id=385 data-nosnippet>385</a>    /// authorization checks 13.1× but REST checks only 5% in benchmark run 4:
-<a href=#386 id=386 data-nosnippet>386</a>    /// the decision cache elides the *authorization* round-trips, this one
-<a href=#387 id=387 data-nosnippet>387</a>    /// elides the *authentication* round-trip, and the gRPC surface never had
-<a href=#388 id=388 data-nosnippet>388</a>    /// the latter.
-<a href=#389 id=389 data-nosnippet>389</a>    ///
-<a href=#390 id=390 data-nosnippet>390</a>    /// The cost is a bounded revocation window. Every session-deleting path in
-<a href=#391 id=391 data-nosnippet>391</a>    /// `SurrealSessionRepository` invalidates the cache in the same call, so on
-<a href=#392 id=392 data-nosnippet>392</a>    /// a **single replica** a logout takes effect immediately. Across **two or
-<a href=#393 id=393 data-nosnippet>393</a>    /// more replicas** there is no invalidation channel, so a session revoked on
-<a href=#394 id=394 data-nosnippet>394</a>    /// replica A stays acceptable on replicas B…N for at most this many
-<a href=#395 id=395 data-nosnippet>395</a>    /// seconds — the same trade-off, and the same reasoning, as
-<a href=#396 id=396 data-nosnippet>396</a>    /// `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Session *expiry* is not
-<a href=#397 id=397 data-nosnippet>397</a>    /// affected: cached entries carry the row's own `expires_at` and are
-<a href=#398 id=398 data-nosnippet>398</a>    /// rejected exactly on time regardless of the TTL.
-<a href=#399 id=399 data-nosnippet>399</a>    ///
-<a href=#400 id=400 data-nosnippet>400</a>    /// Suggested starting point when enabling: `5`, matching the decision
-<a href=#401 id=401 data-nosnippet>401</a>    /// cache's default.
-<a href=#402 id=402 data-nosnippet>402</a>    </span><span class="kw">pub </span>session_validation_cache_ttl_secs: u64,
-<a href=#403 id=403 data-nosnippet>403</a>}
-<a href=#404 id=404 data-nosnippet>404</a>
-<a href=#405 id=405 data-nosnippet>405</a><span class="kw">impl </span>AuthConfig {
-<a href=#406 id=406 data-nosnippet>406</a>    <span class="doccomment">/// Effective issuer for JWT `iss` claims and OIDC discovery.
-<a href=#407 id=407 data-nosnippet>407</a>    ///
-<a href=#408 id=408 data-nosnippet>408</a>    /// Returns `oauth2_issuer_url` when set, falling back to
-<a href=#409 id=409 data-nosnippet>409</a>    /// `jwt_issuer`. Trailing slashes are stripped so that the
-<a href=#410 id=410 data-nosnippet>410</a>    /// OIDC discovery `issuer` exactly matches token `iss` claims
-<a href=#411 id=411 data-nosnippet>411</a>    /// (OIDC Core §2 requires an exact string match).
-<a href=#412 id=412 data-nosnippet>412</a>    </span><span class="kw">pub fn </span>effective_issuer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>str {
-<a href=#413 id=413 data-nosnippet>413</a>        <span class="kw">if </span><span class="self">self</span>.oauth2_issuer_url.is_empty() {
-<a href=#414 id=414 data-nosnippet>414</a>            <span class="self">self</span>.jwt_issuer.trim_end_matches(<span class="string">'/'</span>)
-<a href=#415 id=415 data-nosnippet>415</a>        } <span class="kw">else </span>{
-<a href=#416 id=416 data-nosnippet>416</a>            <span class="self">self</span>.oauth2_issuer_url.trim_end_matches(<span class="string">'/'</span>)
-<a href=#417 id=417 data-nosnippet>417</a>        }
-<a href=#418 id=418 data-nosnippet>418</a>    }
-<a href=#419 id=419 data-nosnippet>419</a>
-<a href=#420 id=420 data-nosnippet>420</a>    <span class="doccomment">/// The mTLS listener's base URL, or `None` when this deployment has no
-<a href=#421 id=421 data-nosnippet>421</a>    /// separate one (RFC 8705 §5).
-<a href=#422 id=422 data-nosnippet>422</a>    ///
-<a href=#423 id=423 data-nosnippet>423</a>    /// Trailing slashes are stripped for the same reason
-<a href=#424 id=424 data-nosnippet>424</a>    /// [`effective_issuer`](Self::effective_issuer) strips them: the value is
-<a href=#425 id=425 data-nosnippet>425</a>    /// concatenated with endpoint paths, and `https://host//oauth2/token` is a
-<a href=#426 id=426 data-nosnippet>426</a>    /// different URL from the one the operator meant.
-<a href=#427 id=427 data-nosnippet>427</a>    ///
-<a href=#428 id=428 data-nosnippet>428</a>    /// A value that is entirely whitespace answers `None` rather than `Some("")`
-<a href=#429 id=429 data-nosnippet>429</a>    /// — an empty alias base would produce relative alias URLs, which RFC 8705
-<a href=#430 id=430 data-nosnippet>430</a>    /// §5 does not permit and no client would resolve the way the operator
-<a href=#431 id=431 data-nosnippet>431</a>    /// intended.
-<a href=#432 id=432 data-nosnippet>432</a>    /// The configured default tenant, when one is set and parses as a UUID.
-<a href=#433 id=433 data-nosnippet>433</a>    ///
-<a href=#434 id=434 data-nosnippet>434</a>    /// An unparseable value is treated as unset rather than as an error: this
-<a href=#435 id=435 data-nosnippet>435</a>    /// is consulted while building a *public, unauthenticated* document, and a
-<a href=#436 id=436 data-nosnippet>436</a>    /// deployment whose operator fat-fingered the UUID should serve the
-<a href=#437 id=437 data-nosnippet>437</a>    /// document it served before the setting existed rather than 500 for every
-<a href=#438 id=438 data-nosnippet>438</a>    /// relying party. The mis-set value is visible in the document by its
-<a href=#439 id=439 data-nosnippet>439</a>    /// absence, and `mtls_base_url` takes the opposite view for the opposite
-<a href=#440 id=440 data-nosnippet>440</a>    /// reason — a bad alias actively misdirects a client, a missing tenant only
-<a href=#441 id=441 data-nosnippet>441</a>    /// fails to help one.
-<a href=#442 id=442 data-nosnippet>442</a>    </span><span class="attr">#[must_use]
-<a href=#443 id=443 data-nosnippet>443</a>    </span><span class="kw">pub fn </span>default_tenant_id(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;uuid::Uuid&gt; {
-<a href=#444 id=444 data-nosnippet>444</a>        <span class="kw">let </span>trimmed = <span class="self">self</span>.oauth2_default_tenant_id.trim();
-<a href=#445 id=445 data-nosnippet>445</a>        <span class="kw">if </span>trimmed.is_empty() {
-<a href=#446 id=446 data-nosnippet>446</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
-<a href=#447 id=447 data-nosnippet>447</a>        }
-<a href=#448 id=448 data-nosnippet>448</a>        uuid::Uuid::parse_str(trimmed).ok()
-<a href=#449 id=449 data-nosnippet>449</a>    }
-<a href=#450 id=450 data-nosnippet>450</a>
-<a href=#451 id=451 data-nosnippet>451</a>    <span class="doccomment">/// Whether [`Self::default_tenant_id`] is silently discarding a value the
-<a href=#452 id=452 data-nosnippet>452</a>    /// operator set (T-244, R-1…R-8).
-<a href=#453 id=453 data-nosnippet>453</a>    ///
-<a href=#454 id=454 data-nosnippet>454</a>    /// Treating an unparseable value as unset is right and stays — a public,
-<a href=#455 id=455 data-nosnippet>455</a>    /// unauthenticated document should not `500` for every relying party
-<a href=#456 id=456 data-nosnippet>456</a>    /// because somebody fat-fingered a UUID — but the operator was never told,
-<a href=#457 id=457 data-nosnippet>457</a>    /// so the deployment concluded the setting does not work. This answers
-<a href=#458 id=458 data-nosnippet>458</a>    /// `Some` exactly when a non-empty value failed to parse, and the caller
-<a href=#459 id=459 data-nosnippet>459</a>    /// logs it **once at boot**.
-<a href=#460 id=460 data-nosnippet>460</a>    ///
-<a href=#461 id=461 data-nosnippet>461</a>    /// # Why not on the request path
+<a href=#171 id=171 data-nosnippet>171</a>    /// # What it does NOT do
+<a href=#172 id=172 data-nosnippet>172</a>    ///
+<a href=#173 id=173 data-nosnippet>173</a>    /// It changes no endpoint's behaviour. A request that arrives without
+<a href=#174 id=174 data-nosnippet>174</a>    /// `tenant_id` is refused exactly as it is today — this is a statement in a
+<a href=#175 id=175 data-nosnippet>175</a>    /// document, not a fallback in a handler. That distinction is deliberate:
+<a href=#176 id=176 data-nosnippet>176</a>    /// a default applied at the endpoint would silently give an
+<a href=#177 id=177 data-nosnippet>177</a>    /// unparameterised request a tenant, and on a multi-tenant authorization
+<a href=#178 id=178 data-nosnippet>178</a>    /// server the tenant is the isolation boundary. Leaving it empty is
+<a href=#179 id=179 data-nosnippet>179</a>    /// therefore safe and is the correct setting for a deployment that serves
+<a href=#180 id=180 data-nosnippet>180</a>    /// many tenants from one issuer.
+<a href=#181 id=181 data-nosnippet>181</a>    </span><span class="kw">pub </span>oauth2_default_tenant_id: String,
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="doccomment">/// T21.6 — whether this deployment serves the per-tenant **path** issuer
+<a href=#183 id=183 data-nosnippet>183</a>    /// form `{root}/t/{tenant_id}` (`AXIAM__AUTH__TENANT_ISSUER_PATHS`).
+<a href=#184 id=184 data-nosnippet>184</a>    ///
+<a href=#185 id=185 data-nosnippet>185</a>    /// `false` by default, and with it false nothing about this deployment
+<a href=#186 id=186 data-nosnippet>186</a>    /// changes: the `/t/{tenant_id}` scope and the three tenant discovery
+<a href=#187 id=187 data-nosnippet>187</a>    /// routes are not mounted, no token can carry a tenant issuer, and
+<a href=#188 id=188 data-nosnippet>188</a>    /// [`Self::accepts_issuer`] answers exactly what the pinned-issuer check
+<a href=#189 id=189 data-nosnippet>189</a>    /// answered before this field existed.
+<a href=#190 id=190 data-nosnippet>190</a>    ///
+<a href=#191 id=191 data-nosnippet>191</a>    /// # What it is for
+<a href=#192 id=192 data-nosnippet>192</a>    ///
+<a href=#193 id=193 data-nosnippet>193</a>    /// RFC 8414 §2 forbids a query component in an issuer identifier, so the
+<a href=#194 id=194 data-nosnippet>194</a>    /// deployment-wide issuer plus `?tenant_id=` cannot be published as the
+<a href=#195 id=195 data-nosnippet>195</a>    /// issuer of one tenant. An MCP server naming AXIAM in its RFC 9728
+<a href=#196 id=196 data-nosnippet>196</a>    /// `authorization_servers` therefore has no way to point a client at
+<a href=#197 id=197 data-nosnippet>197</a>    /// anything but the default tenant. The path form is an issuer a client
+<a href=#198 id=198 data-nosnippet>198</a>    /// can turn into a discovery URL by the RFC 8414 §3 rule with no query at
+<a href=#199 id=199 data-nosnippet>199</a>    /// all.
+<a href=#200 id=200 data-nosnippet>200</a>    ///
+<a href=#201 id=201 data-nosnippet>201</a>    /// The tenant path is **derived, never configured**: a deployment sets a
+<a href=#202 id=202 data-nosnippet>202</a>    /// root issuer, and `{root}/t/{tenant_id}` follows from it.
+<a href=#203 id=203 data-nosnippet>203</a>    </span><span class="kw">pub </span>tenant_issuer_paths: bool,
+<a href=#204 id=204 data-nosnippet>204</a>    <span class="doccomment">/// T21.6 — the issuer the **current request** arrived under, when it
+<a href=#205 id=205 data-nosnippet>205</a>    /// arrived on a per-tenant path.
+<a href=#206 id=206 data-nosnippet>206</a>    ///
+<a href=#207 id=207 data-nosnippet>207</a>    /// `None` on every request that is not on a `/t/{tenant_id}` path, which
+<a href=#208 id=208 data-nosnippet>208</a>    /// is every request on a deployment with [`Self::tenant_issuer_paths`]
+<a href=#209 id=209 data-nosnippet>209</a>    /// off. It is set only by cloning a deployment config through
+<a href=#210 id=210 data-nosnippet>210</a>    /// [`Self::for_tenant_path`], never by configuration — hence `serde(skip)`:
+<a href=#211 id=211 data-nosnippet>211</a>    /// an operator cannot set a per-request value from the environment, and an
+<a href=#212 id=212 data-nosnippet>212</a>    /// environment that appeared to offer one would be offering a way to
+<a href=#213 id=213 data-nosnippet>213</a>    /// forge `iss`.
+<a href=#214 id=214 data-nosnippet>214</a>    ///
+<a href=#215 id=215 data-nosnippet>215</a>    /// [`Self::effective_issuer`] answers this when it is set, which is what
+<a href=#216 id=216 data-nosnippet>216</a>    /// makes every `iss` a request mints — access token, ID token, logout
+<a href=#217 id=217 data-nosnippet>217</a>    /// token, the RFC 9207 response parameter — the tenant issuer without any
+<a href=#218 id=218 data-nosnippet>218</a>    /// of the four minting sites learning that tenant paths exist.
+<a href=#219 id=219 data-nosnippet>219</a>    /// [`Self::root_issuer`] answers the deployment's issuer regardless, and
+<a href=#220 id=220 data-nosnippet>220</a>    /// is what every **validation** decision reads.
+<a href=#221 id=221 data-nosnippet>221</a>    </span><span class="attr">#[serde(skip)]
+<a href=#222 id=222 data-nosnippet>222</a>    </span><span class="kw">pub </span>request_issuer: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#223 id=223 data-nosnippet>223</a>    <span class="doccomment">/// T-39/T-143 — whether this deployment publishes
+<a href=#224 id=224 data-nosnippet>224</a>    /// `GET /oauth2/revocations`.
+<a href=#225 id=225 data-nosnippet>225</a>    ///
+<a href=#226 id=226 data-nosnippet>226</a>    /// `AXIAM__AUTH__REVOCATION_FEED_ENABLED`, default `false`. With it off the
+<a href=#227 id=227 data-nosnippet>227</a>    /// route is not mounted and no `revoked_session` row is written, so the
+<a href=#228 id=228 data-nosnippet>228</a>    /// deployment is byte-identical to one built before the feed existed.
+<a href=#229 id=229 data-nosnippet>229</a>    ///
+<a href=#230 id=230 data-nosnippet>230</a>    /// The feed narrows the window in which a revoked session's access token
+<a href=#231 id=231 data-nosnippet>231</a>    /// still verifies — from one token lifetime to one poll interval — for an
+<a href=#232 id=232 data-nosnippet>232</a>    /// SDK guard that opts into polling it. It is never a control: a guard
+<a href=#233 id=233 data-nosnippet>233</a>    /// that cannot fetch it behaves exactly as it does today, and the token
+<a href=#234 id=234 data-nosnippet>234</a>    /// itself still decides.
+<a href=#235 id=235 data-nosnippet>235</a>    </span><span class="attr">#[serde(default)]
+<a href=#236 id=236 data-nosnippet>236</a>    </span><span class="kw">pub </span>revocation_feed_enabled: bool,
+<a href=#237 id=237 data-nosnippet>237</a>    <span class="doccomment">/// Extra browser origins this deployment will hand a **federation SSO
+<a href=#238 id=238 data-nosnippet>238</a>    /// handoff code** to (`AXIAM__AUTH__SSO_SPA_ORIGINS`; a list, set the same
+<a href=#239 id=239 data-nosnippet>239</a>    /// way as `AXIAM__SERVER__CORS_ALLOWED_ORIGINS`).
+<a href=#240 id=240 data-nosnippet>240</a>    ///
+<a href=#241 id=241 data-nosnippet>241</a>    /// # Why this exists
+<a href=#242 id=242 data-nosnippet>242</a>    ///
+<a href=#243 id=243 data-nosnippet>243</a>    /// SAML and Apple return by cross-site form POST, so the session cookies
+<a href=#244 id=244 data-nosnippet>244</a>    /// cannot be set on that response. AXIAM instead mints a single-use handoff
+<a href=#245 id=245 data-nosnippet>245</a>    /// code and redirects the browser to the SPA with it — and that code is a
+<a href=#246 id=246 data-nosnippet>246</a>    /// bearer credential for a session. The redirect target therefore may not
+<a href=#247 id=247 data-nosnippet>247</a>    /// be whatever the caller of the *unauthenticated* login-start endpoint
+<a href=#248 id=248 data-nosnippet>248</a>    /// asked for: on those two protocols the identity provider never sees the
+<a href=#249 id=249 data-nosnippet>249</a>    /// SPA `redirect_uri`, so its own registered-redirect allowlist is not
+<a href=#250 id=250 data-nosnippet>250</a>    /// there to reject an attacker's host.
+<a href=#251 id=251 data-nosnippet>251</a>    ///
+<a href=#252 id=252 data-nosnippet>252</a>    /// The default is empty, which means **the origin of
+<a href=#253 id=253 data-nosnippet>253</a>    /// [`effective_issuer`](Self::effective_issuer) only**. That is the right
+<a href=#254 id=254 data-nosnippet>254</a>    /// default rather than a restrictive one: the endpoint a SAML IdP or Apple
+<a href=#255 id=255 data-nosnippet>255</a>    /// posts to is itself built from `effective_issuer`, so a deployment whose
+<a href=#256 id=256 data-nosnippet>256</a>    /// SPA is served from that origin — the shape `docker/nginx.conf` and the
+<a href=#257 id=257 data-nosnippet>257</a>    /// deployment guides describe, and the only shape in which
+<a href=#258 id=258 data-nosnippet>258</a>    /// `SameSite=Strict` session cookies work same-origin — needs no entry
+<a href=#259 id=259 data-nosnippet>259</a>    /// here at all.
+<a href=#260 id=260 data-nosnippet>260</a>    ///
+<a href=#261 id=261 data-nosnippet>261</a>    /// Set it when the SPA is served from a different host than the API (for
+<a href=#262 id=262 data-nosnippet>262</a>    /// example `https://app.example.com` against `https://api.example.com`).
+<a href=#263 id=263 data-nosnippet>263</a>    /// Values are compared as **origins**: scheme, host and port, with the path
+<a href=#264 id=264 data-nosnippet>264</a>    /// ignored — so `https://app.example.com` does not admit
+<a href=#265 id=265 data-nosnippet>265</a>    /// `https://app.example.com:8443`.
+<a href=#266 id=266 data-nosnippet>266</a>    ///
+<a href=#267 id=267 data-nosnippet>267</a>    /// # Since R-3: all four flows, not two
+<a href=#268 id=268 data-nosnippet>268</a>    ///
+<a href=#269 id=269 data-nosnippet>269</a>    /// This used to have no effect on the OIDC and OAuth2 flows, whose
+<a href=#270 id=270 data-nosnippet>270</a>    /// `redirect_uri` is registered at the provider and checked there. It now
+<a href=#271 id=271 data-nosnippet>271</a>    /// governs those two as well. The provider's check is a real control, but
+<a href=#272 id=272 data-nosnippet>272</a>    /// only as strict as each provider's registration hygiene — several accept
+<a href=#273 id=273 data-nosnippet>273</a>    /// wildcard or prefix registrations — and it is not a control AXIAM owns or
+<a href=#274 id=274 data-nosnippet>274</a>    /// can inspect; it stays as a second, independent layer behind this one.
+<a href=#275 id=275 data-nosnippet>275</a>    ///
+<a href=#276 id=276 data-nosnippet>276</a>    /// **This is the one thing R-3 can break.** A deployment whose SPA lives on
+<a href=#277 id=277 data-nosnippet>277</a>    /// an origin other than the issuer's, signing in through OIDC or OAuth2
+<a href=#278 id=278 data-nosnippet>278</a>    /// providers, worked without this variable and now needs it — the same
+<a href=#279 id=279 data-nosnippet>279</a>    /// requirement the SAML and Apple flows have imposed since beta08. The
+<a href=#280 id=280 data-nosnippet>280</a>    /// shipped same-origin topology needs nothing. The `400` names this
+<a href=#281 id=281 data-nosnippet>281</a>    /// variable, so the failure says what to set.
+<a href=#282 id=282 data-nosnippet>282</a>    </span><span class="kw">pub </span>sso_spa_origins: Vec&lt;String&gt;,
+<a href=#283 id=283 data-nosnippet>283</a>    <span class="doccomment">/// Optional pepper prepended to passwords before Argon2id verification.
+<a href=#284 id=284 data-nosnippet>284</a>    /// Wrapped in `SecretString` so `Debug`/logging never leaks it by
+<a href=#285 id=285 data-nosnippet>285</a>    /// accident (SECHRD-12) — exposed only via `.expose_secret()` at the
+<a href=#286 id=286 data-nosnippet>286</a>    /// `&amp;str` boundary where a pepper value is consumed.
+<a href=#287 id=287 data-nosnippet>287</a>    </span><span class="kw">pub </span>pepper: <span class="prelude-ty">Option</span>&lt;SecretString&gt;,
+<a href=#288 id=288 data-nosnippet>288</a>    <span class="doccomment">/// Previous pepper, kept **verify-only** while a pepper rotation drains
+<a href=#289 id=289 data-nosnippet>289</a>    /// (`AXIAM__AUTH__PEPPER_PREVIOUS`, §13.4 observation 3).
+<a href=#290 id=290 data-nosnippet>290</a>    ///
+<a href=#291 id=291 data-nosnippet>291</a>    /// Client-secret hashes are keyed by the pepper, and the `v2.hs256$` tag
+<a href=#292 id=292 data-nosnippet>292</a>    /// versions the *algorithm*, not the *key* — so without this, rotating
+<a href=#293 id=293 data-nosnippet>293</a>    /// `AXIAM__AUTH__PEPPER` permanently invalidates **every** client secret and
+<a href=#294 id=294 data-nosnippet>294</a>    /// every service account and OAuth2 client has to be re-issued in lockstep
+<a href=#295 id=295 data-nosnippet>295</a>    /// with the restart.
+<a href=#296 id=296 data-nosnippet>296</a>    ///
+<a href=#297 id=297 data-nosnippet>297</a>    /// Set this to the outgoing value for the duration of a rotation. Secrets
+<a href=#298 id=298 data-nosnippet>298</a>    /// hashed under it still verify, and each one is transparently rewritten
+<a href=#299 id=299 data-nosnippet>299</a>    /// under the new pepper the first time its owner authenticates, so the
+<a href=#300 id=300 data-nosnippet>300</a>    /// rotation drains itself. Unset it once the fleet has drained; nothing is
+<a href=#301 id=301 data-nosnippet>301</a>    /// ever *written* under this key.
+<a href=#302 id=302 data-nosnippet>302</a>    ///
+<a href=#303 id=303 data-nosnippet>303</a>    /// It does **not** apply to Argon2id password peppering, which has its own
+<a href=#304 id=304 data-nosnippet>304</a>    /// migration story — only to client-secret hashing.
+<a href=#305 id=305 data-nosnippet>305</a>    </span><span class="kw">pub </span>pepper_previous: <span class="prelude-ty">Option</span>&lt;SecretString&gt;,
+<a href=#306 id=306 data-nosnippet>306</a>    <span class="doccomment">/// Minimum password length for policy enforcement.
+<a href=#307 id=307 data-nosnippet>307</a>    </span><span class="kw">pub </span>min_password_length: usize,
+<a href=#308 id=308 data-nosnippet>308</a>    <span class="doccomment">/// 256-bit AES-GCM key for encrypting TOTP secrets at rest.
+<a href=#309 id=309 data-nosnippet>309</a>    /// `None` disables MFA enrollment. Set programmatically (not from config files).
+<a href=#310 id=310 data-nosnippet>310</a>    </span><span class="attr">#[serde(skip)]
+<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="kw">pub </span>mfa_encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
+<a href=#312 id=312 data-nosnippet>312</a>    <span class="doccomment">/// 256-bit AES-GCM key for encrypting federation client secrets at rest.
+<a href=#313 id=313 data-nosnippet>313</a>    /// `None` means federation config create/update will fail at runtime.
+<a href=#314 id=314 data-nosnippet>314</a>    /// Set programmatically from `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` (not from
+<a href=#315 id=315 data-nosnippet>315</a>    /// config files). Federation is optional — absence is warned, not fatal.
+<a href=#316 id=316 data-nosnippet>316</a>    </span><span class="attr">#[serde(skip)]
+<a href=#317 id=317 data-nosnippet>317</a>    </span><span class="kw">pub </span>federation_encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
+<a href=#318 id=318 data-nosnippet>318</a>    <span class="doccomment">/// 256-bit AES-GCM key that seals an OPAQUE exchange's server state
+<a href=#319 id=319 data-nosnippet>319</a>    /// between its two messages, on both the login and the registration path.
+<a href=#320 id=320 data-nosnippet>320</a>    ///
+<a href=#321 id=321 data-nosnippet>321</a>    /// `None` means the OPAQUE endpoints answer `503`, whatever the org or
+<a href=#322 id=322 data-nosnippet>322</a>    /// tenant policy says. That is deliberate: silently falling back to
+<a href=#323 id=323 data-nosnippet>323</a>    /// password login when the key is missing would turn a misconfiguration
+<a href=#324 id=324 data-nosnippet>324</a>    /// into an undetectable downgrade of a security control an operator
+<a href=#325 id=325 data-nosnippet>325</a>    /// believes is on.
+<a href=#326 id=326 data-nosnippet>326</a>    ///
+<a href=#327 id=327 data-nosnippet>327</a>    /// Deliberately its own key rather than a reuse of
+<a href=#328 id=328 data-nosnippet>328</a>    /// [`Self::mfa_encryption_key`]: the two rotate on different schedules, and
+<a href=#329 id=329 data-nosnippet>329</a>    /// sharing one would couple an OPAQUE outage to an unrelated TOTP
+<a href=#330 id=330 data-nosnippet>330</a>    /// rotation. Set from `AXIAM__AUTH__OPAQUE_SESSION_KEY` (not from config
+<a href=#331 id=331 data-nosnippet>331</a>    /// files).
+<a href=#332 id=332 data-nosnippet>332</a>    ///
+<a href=#333 id=333 data-nosnippet>333</a>    /// Rotating this is cheap — it invalidates exchanges in flight and nothing
+<a href=#334 id=334 data-nosnippet>334</a>    /// else. Contrast [`Self::opaque_setup_key`], which is the expensive one.
+<a href=#335 id=335 data-nosnippet>335</a>    </span><span class="attr">#[serde(skip)]
+<a href=#336 id=336 data-nosnippet>336</a>    </span><span class="kw">pub </span>opaque_session_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
+<a href=#337 id=337 data-nosnippet>337</a>    <span class="doccomment">/// 256-bit AES-GCM key that encrypts each tenant's OPAQUE server key
+<a href=#338 id=338 data-nosnippet>338</a>    /// material — the OPRF seed and the long-term AKE key pair — at rest.
+<a href=#339 id=339 data-nosnippet>339</a>    ///
+<a href=#340 id=340 data-nosnippet>340</a>    /// `None` means the OPAQUE endpoints answer `503`, for the same reason as
+<a href=#341 id=341 data-nosnippet>341</a>    /// above.
+<a href=#342 id=342 data-nosnippet>342</a>    ///
+<a href=#343 id=343 data-nosnippet>343</a>    /// This is a **separate key from [`Self::opaque_session_key`] on purpose**,
+<a href=#344 id=344 data-nosnippet>344</a>    /// and the reason is what rotating each one costs. The session key seals
+<a href=#345 id=345 data-nosnippet>345</a>    /// 120 seconds of in-flight state and can be rotated on any schedule.
+<a href=#346 id=346 data-nosnippet>346</a>    /// This key protects data at rest: rotating it means re-encrypting every
+<a href=#347 id=347 data-nosnippet>347</a>    /// `opaque_server_setup` row, and **losing** it means every registration
+<a href=#348 id=348 data-nosnippet>348</a>    /// record in every tenant becomes unopenable and the whole estate needs a
+<a href=#349 id=349 data-nosnippet>349</a>    /// password reset. Sharing one key would put the cheap rotation and the
+<a href=#350 id=350 data-nosnippet>350</a>    /// catastrophic one on the same schedule, which is how an operator ends up
+<a href=#351 id=351 data-nosnippet>351</a>    /// doing neither. Set from `AXIAM__AUTH__OPAQUE_SETUP_KEY`.
+<a href=#352 id=352 data-nosnippet>352</a>    </span><span class="attr">#[serde(skip)]
+<a href=#353 id=353 data-nosnippet>353</a>    </span><span class="kw">pub </span>opaque_setup_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
+<a href=#354 id=354 data-nosnippet>354</a>    <span class="doccomment">/// When `true`, access tokens decoded without an `aud` claim are treated as
+<a href=#355 id=355 data-nosnippet>355</a>    /// `axiam:user`. Enables a back-compat window during the Phase 4 rollout
+<a href=#356 id=356 data-nosnippet>356</a>    /// while pre-Phase-4 tokens are still circulating. Default: `true`.
+<a href=#357 id=357 data-nosnippet>357</a>    </span><span class="attr">#[serde(default = <span class="string">"default_true"</span>)]
+<a href=#358 id=358 data-nosnippet>358</a>    </span><span class="kw">pub </span>allow_missing_aud_as_user: bool,
+<a href=#359 id=359 data-nosnippet>359</a>    <span class="doccomment">/// When `true` (default), all auth cookies are marked `Secure` and are
+<a href=#360 id=360 data-nosnippet>360</a>    /// therefore sent only over HTTPS. Set `AXIAM__AUTH__COOKIE_SECURE=false`
+<a href=#361 id=361 data-nosnippet>361</a>    /// **only** in local HTTP development (e.g. http://localhost) — **never**
+<a href=#362 id=362 data-nosnippet>362</a>    /// in production or staging (D-18).
+<a href=#363 id=363 data-nosnippet>363</a>    </span><span class="attr">#[serde(default = <span class="string">"default_true"</span>)]
+<a href=#364 id=364 data-nosnippet>364</a>    </span><span class="kw">pub </span>cookie_secure: bool,
+<a href=#365 id=365 data-nosnippet>365</a>    <span class="doccomment">/// MFA challenge token lifetime in seconds (default: 300 = 5 minutes).
+<a href=#366 id=366 data-nosnippet>366</a>    </span><span class="kw">pub </span>mfa_challenge_lifetime_secs: u64,
+<a href=#367 id=367 data-nosnippet>367</a>    <span class="doccomment">/// Issuer name shown in authenticator apps.
+<a href=#368 id=368 data-nosnippet>368</a>    </span><span class="kw">pub </span>totp_issuer: String,
+<a href=#369 id=369 data-nosnippet>369</a>    <span class="doccomment">/// Max consecutive failed login attempts before lockout (default: 5).
+<a href=#370 id=370 data-nosnippet>370</a>    </span><span class="kw">pub </span>max_failed_login_attempts: u32,
+<a href=#371 id=371 data-nosnippet>371</a>    <span class="doccomment">/// Initial lockout duration in seconds (default: 900 = 15 min).
+<a href=#372 id=372 data-nosnippet>372</a>    </span><span class="kw">pub </span>lockout_duration_secs: u64,
+<a href=#373 id=373 data-nosnippet>373</a>    <span class="doccomment">/// Exponential backoff multiplier for repeated lockouts (default: 2.0).
+<a href=#374 id=374 data-nosnippet>374</a>    </span><span class="kw">pub </span>lockout_backoff_multiplier: f64,
+<a href=#375 id=375 data-nosnippet>375</a>    <span class="doccomment">/// Maximum lockout duration in seconds (default: 3600 = 1 hour).
+<a href=#376 id=376 data-nosnippet>376</a>    </span><span class="kw">pub </span>max_lockout_duration_secs: u64,
+<a href=#377 id=377 data-nosnippet>377</a>    <span class="doccomment">/// Grace period in hours during which PendingVerification users
+<a href=#378 id=378 data-nosnippet>378</a>    /// can still log in (default: 24). Set to 0 to disable.
+<a href=#379 id=379 data-nosnippet>379</a>    </span><span class="kw">pub </span>email_verification_grace_period_hours: u32,
+<a href=#380 id=380 data-nosnippet>380</a>    <span class="doccomment">/// Password reset token expiry in hours (default: 1).
+<a href=#381 id=381 data-nosnippet>381</a>    </span><span class="kw">pub </span>password_reset_token_expiry_hours: u32,
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="doccomment">/// WebAuthn Relying Party ID (typically the domain name,
+<a href=#383 id=383 data-nosnippet>383</a>    /// e.g. "auth.example.com").
+<a href=#384 id=384 data-nosnippet>384</a>    </span><span class="kw">pub </span>webauthn_rp_id: String,
+<a href=#385 id=385 data-nosnippet>385</a>    <span class="doccomment">/// WebAuthn Relying Party origin
+<a href=#386 id=386 data-nosnippet>386</a>    /// (e.g. "https://auth.example.com").
+<a href=#387 id=387 data-nosnippet>387</a>    </span><span class="kw">pub </span>webauthn_rp_origin: String,
+<a href=#388 id=388 data-nosnippet>388</a>    <span class="doccomment">/// WebAuthn Relying Party display name.
+<a href=#389 id=389 data-nosnippet>389</a>    </span><span class="kw">pub </span>webauthn_rp_name: String,
+<a href=#390 id=390 data-nosnippet>390</a>    <span class="doccomment">/// CQ-B14: Pre-parsed Ed25519 signing key. Populated once at startup via
+<a href=#391 id=391 data-nosnippet>391</a>    /// `resolve_keys()`. When `Some`, token-issue functions skip PEM re-parsing.
+<a href=#392 id=392 data-nosnippet>392</a>    /// When `None`, they fall back to parsing from `jwt_private_key_pem`.
+<a href=#393 id=393 data-nosnippet>393</a>    </span><span class="attr">#[serde(skip)]
+<a href=#394 id=394 data-nosnippet>394</a>    </span><span class="kw">pub </span>jwt_encoding_key: <span class="prelude-ty">Option</span>&lt;Arc&lt;EncodingKey&gt;&gt;,
+<a href=#395 id=395 data-nosnippet>395</a>    <span class="doccomment">/// CQ-B14: Pre-parsed Ed25519 verification key. Populated once at startup via
+<a href=#396 id=396 data-nosnippet>396</a>    /// `resolve_keys()`. When `Some`, token-verify functions skip PEM re-parsing.
+<a href=#397 id=397 data-nosnippet>397</a>    /// When `None`, they fall back to parsing from `jwt_public_key_pem`.
+<a href=#398 id=398 data-nosnippet>398</a>    </span><span class="attr">#[serde(skip)]
+<a href=#399 id=399 data-nosnippet>399</a>    </span><span class="kw">pub </span>jwt_decoding_key: <span class="prelude-ty">Option</span>&lt;Arc&lt;DecodingKey&gt;&gt;,
+<a href=#400 id=400 data-nosnippet>400</a>    <span class="doccomment">/// PERF-01: Consecutive HIBP failures/timeouts before the process-wide
+<a href=#401 id=401 data-nosnippet>401</a>    /// `HibpBreaker` trips open (default: 5). Overridable via
+<a href=#402 id=402 data-nosnippet>402</a>    /// `AXIAM__AUTH__HIBP_BREAKER_THRESHOLD`.
+<a href=#403 id=403 data-nosnippet>403</a>    </span><span class="kw">pub </span>hibp_breaker_threshold: u32,
+<a href=#404 id=404 data-nosnippet>404</a>    <span class="doccomment">/// PERF-01: Cooldown in seconds the `HibpBreaker` stays open before
+<a href=#405 id=405 data-nosnippet>405</a>    /// allowing a half-open probe request (default: 30). Overridable via
+<a href=#406 id=406 data-nosnippet>406</a>    /// `AXIAM__AUTH__HIBP_BREAKER_COOLDOWN_SECS`.
+<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="kw">pub </span>hibp_breaker_cooldown_secs: u64,
+<a href=#408 id=408 data-nosnippet>408</a>    <span class="doccomment">/// B1: Maximum number of Argon2id hash/verify operations allowed to run
+<a href=#409 id=409 data-nosnippet>409</a>    /// concurrently, enforced by the process-wide `crypto_semaphore` shared
+<a href=#410 id=410 data-nosnippet>410</a>    /// across the login, password-change, password-reset and PKI crypto paths.
+<a href=#411 id=411 data-nosnippet>411</a>    ///
+<a href=#412 id=412 data-nosnippet>412</a>    /// Each in-flight Argon2id operation allocates a ~19 MiB memory arena
+<a href=#413 id=413 data-nosnippet>413</a>    /// (OWASP params m=19456), so unbounded concurrency is an unauthenticated
+<a href=#414 id=414 data-nosnippet>414</a>    /// memory-DoS vector: the login benchmark pegged 2 cores and reached
+<a href=#415 id=415 data-nosnippet>415</a>    /// ~970 MiB RSS ≈ 50 concurrent × 19 MiB arenas, against a 1024 MiB
+<a href=#416 id=416 data-nosnippet>416</a>    /// container cap. This permit count bounds peak concurrent arenas.
+<a href=#417 id=417 data-nosnippet>417</a>    ///
+<a href=#418 id=418 data-nosnippet>418</a>    /// `0` means "auto" and resolves to `min(available_parallelism, 4)` at
+<a href=#419 id=419 data-nosnippet>419</a>    /// semaphore-construction time (see [`AuthConfig::resolved_max_concurrent_hashes`]).
+<a href=#420 id=420 data-nosnippet>420</a>    /// Override via `AXIAM__AUTH__MAX_CONCURRENT_HASHES`.
+<a href=#421 id=421 data-nosnippet>421</a>    </span><span class="kw">pub </span>max_concurrent_hashes: usize,
+<a href=#422 id=422 data-nosnippet>422</a>    <span class="doccomment">/// B1: How long (in seconds) a request waits to acquire a crypto-hash
+<a href=#423 id=423 data-nosnippet>423</a>    /// permit before giving up and returning a `ServiceUnavailable` (HTTP 503)
+<a href=#424 id=424 data-nosnippet>424</a>    /// backpressure error, instead of queueing unboundedly and adding to
+<a href=#425 id=425 data-nosnippet>425</a>    /// tail latency. Default: 5. Override via
+<a href=#426 id=426 data-nosnippet>426</a>    /// `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS`.
+<a href=#427 id=427 data-nosnippet>427</a>    </span><span class="kw">pub </span>hash_acquire_timeout_secs: u64,
+<a href=#428 id=428 data-nosnippet>428</a>    <span class="doccomment">/// I6: TTL, in seconds, of the process-local **session-validation cache**.
+<a href=#429 id=429 data-nosnippet>429</a>    ///
+<a href=#430 id=430 data-nosnippet>430</a>    /// `0` (the default) disables the cache entirely — every authenticated
+<a href=#431 id=431 data-nosnippet>431</a>    /// request performs its own SurrealDB read to confirm the session behind the
+<a href=#432 id=432 data-nosnippet>432</a>    /// access token's `jti` still exists (D-15 / REQ-7). A non-zero value lets
+<a href=#433 id=433 data-nosnippet>433</a>    /// repeated requests inside the window reuse the last positive answer.
+<a href=#434 id=434 data-nosnippet>434</a>    ///
+<a href=#435 id=435 data-nosnippet>435</a>    /// Override via `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`.
+<a href=#436 id=436 data-nosnippet>436</a>    ///
+<a href=#437 id=437 data-nosnippet>437</a>    /// # What it buys and what it costs
+<a href=#438 id=438 data-nosnippet>438</a>    ///
+<a href=#439 id=439 data-nosnippet>439</a>    /// The read it removes is the reason the D7 decision cache helped gRPC
+<a href=#440 id=440 data-nosnippet>440</a>    /// authorization checks 13.1× but REST checks only 5% in benchmark run 4:
+<a href=#441 id=441 data-nosnippet>441</a>    /// the decision cache elides the *authorization* round-trips, this one
+<a href=#442 id=442 data-nosnippet>442</a>    /// elides the *authentication* round-trip, and the gRPC surface never had
+<a href=#443 id=443 data-nosnippet>443</a>    /// the latter.
+<a href=#444 id=444 data-nosnippet>444</a>    ///
+<a href=#445 id=445 data-nosnippet>445</a>    /// The cost is a bounded revocation window. Every session-deleting path in
+<a href=#446 id=446 data-nosnippet>446</a>    /// `SurrealSessionRepository` invalidates the cache in the same call, so on
+<a href=#447 id=447 data-nosnippet>447</a>    /// a **single replica** a logout takes effect immediately. Across **two or
+<a href=#448 id=448 data-nosnippet>448</a>    /// more replicas** there is no invalidation channel, so a session revoked on
+<a href=#449 id=449 data-nosnippet>449</a>    /// replica A stays acceptable on replicas B…N for at most this many
+<a href=#450 id=450 data-nosnippet>450</a>    /// seconds — the same trade-off, and the same reasoning, as
+<a href=#451 id=451 data-nosnippet>451</a>    /// `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Session *expiry* is not
+<a href=#452 id=452 data-nosnippet>452</a>    /// affected: cached entries carry the row's own `expires_at` and are
+<a href=#453 id=453 data-nosnippet>453</a>    /// rejected exactly on time regardless of the TTL.
+<a href=#454 id=454 data-nosnippet>454</a>    ///
+<a href=#455 id=455 data-nosnippet>455</a>    /// Suggested starting point when enabling: `5`, matching the decision
+<a href=#456 id=456 data-nosnippet>456</a>    /// cache's default.
+<a href=#457 id=457 data-nosnippet>457</a>    </span><span class="kw">pub </span>session_validation_cache_ttl_secs: u64,
+<a href=#458 id=458 data-nosnippet>458</a>}
+<a href=#459 id=459 data-nosnippet>459</a>
+<a href=#460 id=460 data-nosnippet>460</a><span class="kw">impl </span>AuthConfig {
+<a href=#461 id=461 data-nosnippet>461</a>    <span class="doccomment">/// Effective issuer for JWT `iss` claims and OIDC discovery.
 <a href=#462 id=462 data-nosnippet>462</a>    ///
-<a href=#463 id=463 data-nosnippet>463</a>    /// [`Self::default_tenant_id`] is called per discovery request. A warning
-<a href=#464 id=464 data-nosnippet>464</a>    /// there is a log flood any anonymous caller can drive by requesting the
-<a href=#465 id=465 data-nosnippet>465</a>    /// document in a loop.
-<a href=#466 id=466 data-nosnippet>466</a>    ///
-<a href=#467 id=467 data-nosnippet>467</a>    /// # Why the shape and never the value
-<a href=#468 id=468 data-nosnippet>468</a>    ///
-<a href=#469 id=469 data-nosnippet>469</a>    /// A tenant id is not a secret, but a variable this code cannot prove *is*
-<a href=#470 id=470 data-nosnippet>470</a>    /// a tenant id may hold anything an operator pasted — including the
-<a href=#471 id=471 data-nosnippet>471</a>    /// contents of the wrong clipboard. The diagnostic therefore carries the
-<a href=#472 id=472 data-nosnippet>472</a>    /// length and a character class and nothing else.
-<a href=#473 id=473 data-nosnippet>473</a>    </span><span class="attr">#[must_use]
-<a href=#474 id=474 data-nosnippet>474</a>    </span><span class="kw">pub fn </span>default_tenant_id_diagnostic(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;DefaultTenantProblem&gt; {
-<a href=#475 id=475 data-nosnippet>475</a>        <span class="kw">let </span>trimmed = <span class="self">self</span>.oauth2_default_tenant_id.trim();
-<a href=#476 id=476 data-nosnippet>476</a>        <span class="comment">// Empty and whitespace-only are "unset", which is the default and
-<a href=#477 id=477 data-nosnippet>477</a>        // needs no warning.
-<a href=#478 id=478 data-nosnippet>478</a>        </span><span class="kw">if </span>trimmed.is_empty() || uuid::Uuid::parse_str(trimmed).is_ok() {
-<a href=#479 id=479 data-nosnippet>479</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
-<a href=#480 id=480 data-nosnippet>480</a>        }
-<a href=#481 id=481 data-nosnippet>481</a>        <span class="prelude-val">Some</span>(DefaultTenantProblem {
-<a href=#482 id=482 data-nosnippet>482</a>            length: trimmed.chars().count(),
-<a href=#483 id=483 data-nosnippet>483</a>            shape: <span class="kw">if </span>trimmed.chars().all(|c| c.is_ascii_hexdigit() || c == <span class="string">'-'</span>) {
-<a href=#484 id=484 data-nosnippet>484</a>                <span class="string">"hexadecimal, but not a 36-character UUID"
-<a href=#485 id=485 data-nosnippet>485</a>            </span>} <span class="kw">else </span>{
-<a href=#486 id=486 data-nosnippet>486</a>                <span class="string">"contains characters a UUID cannot"
-<a href=#487 id=487 data-nosnippet>487</a>            </span>},
-<a href=#488 id=488 data-nosnippet>488</a>        })
-<a href=#489 id=489 data-nosnippet>489</a>    }
-<a href=#490 id=490 data-nosnippet>490</a>
-<a href=#491 id=491 data-nosnippet>491</a>    <span class="kw">pub fn </span>mtls_base_url(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt; {
-<a href=#492 id=492 data-nosnippet>492</a>        <span class="kw">let </span>trimmed = <span class="self">self</span>.oauth2_mtls_base_url.trim().trim_end_matches(<span class="string">'/'</span>);
-<a href=#493 id=493 data-nosnippet>493</a>        (!trimmed.is_empty()).then_some(trimmed)
-<a href=#494 id=494 data-nosnippet>494</a>    }
-<a href=#495 id=495 data-nosnippet>495</a>
-<a href=#496 id=496 data-nosnippet>496</a>    <span class="doccomment">/// CQ-B14: Parse Ed25519 keys from PEM once and cache in `Arc`.
-<a href=#497 id=497 data-nosnippet>497</a>    ///
-<a href=#498 id=498 data-nosnippet>498</a>    /// Call this once at startup after loading config from environment.
-<a href=#499 id=499 data-nosnippet>499</a>    /// After this returns `Ok(())`, all token functions skip per-call PEM
-<a href=#500 id=500 data-nosnippet>500</a>    /// parsing and use the cached keys instead.
-<a href=#501 id=501 data-nosnippet>501</a>    </span><span class="kw">pub fn </span>resolve_keys(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), String&gt; {
-<a href=#502 id=502 data-nosnippet>502</a>        <span class="kw">let </span>enc = EncodingKey::from_ed_pem(<span class="self">self</span>.jwt_private_key_pem.as_bytes())
-<a href=#503 id=503 data-nosnippet>503</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT private key PEM: {e}"</span>))<span class="question-mark">?</span>;
-<a href=#504 id=504 data-nosnippet>504</a>        <span class="kw">let </span>dec = DecodingKey::from_ed_pem(<span class="self">self</span>.jwt_public_key_pem.as_bytes())
-<a href=#505 id=505 data-nosnippet>505</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT public key PEM: {e}"</span>))<span class="question-mark">?</span>;
-<a href=#506 id=506 data-nosnippet>506</a>        <span class="self">self</span>.jwt_encoding_key = <span class="prelude-val">Some</span>(Arc::new(enc));
-<a href=#507 id=507 data-nosnippet>507</a>        <span class="self">self</span>.jwt_decoding_key = <span class="prelude-val">Some</span>(Arc::new(dec));
-<a href=#508 id=508 data-nosnippet>508</a>        <span class="prelude-val">Ok</span>(())
-<a href=#509 id=509 data-nosnippet>509</a>    }
-<a href=#510 id=510 data-nosnippet>510</a>
-<a href=#511 id=511 data-nosnippet>511</a>    <span class="doccomment">/// B1: Resolve `max_concurrent_hashes` (0 = auto) to a concrete permit
-<a href=#512 id=512 data-nosnippet>512</a>    /// count for the crypto semaphore.
-<a href=#513 id=513 data-nosnippet>513</a>    ///
-<a href=#514 id=514 data-nosnippet>514</a>    /// Auto (`0`) resolves to `min(available_parallelism, 4)`: bound by the
-<a href=#515 id=515 data-nosnippet>515</a>    /// core count so Argon2id (a CPU-bound operation) does not oversubscribe
-<a href=#516 id=516 data-nosnippet>516</a>    /// cores, and capped at 4 so peak concurrent ~19 MiB arenas stay well
-<a href=#517 id=517 data-nosnippet>517</a>    /// under typical container memory caps. A non-zero value is used verbatim
-<a href=#518 id=518 data-nosnippet>518</a>    /// (a `0` after resolution is impossible — it would be a zero-permit
-<a href=#519 id=519 data-nosnippet>519</a>    /// semaphore that deadlocks all hashing, so it is clamped to 1).
-<a href=#520 id=520 data-nosnippet>520</a>    </span><span class="kw">pub fn </span>resolved_max_concurrent_hashes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-<a href=#521 id=521 data-nosnippet>521</a>        <span class="kw">match </span><span class="self">self</span>.max_concurrent_hashes {
-<a href=#522 id=522 data-nosnippet>522</a>            <span class="number">0 </span>=&gt; std::thread::available_parallelism()
-<a href=#523 id=523 data-nosnippet>523</a>                .map(|n| n.get().min(<span class="number">4</span>))
-<a href=#524 id=524 data-nosnippet>524</a>                .unwrap_or(<span class="number">4</span>),
-<a href=#525 id=525 data-nosnippet>525</a>            n =&gt; n.max(<span class="number">1</span>),
-<a href=#526 id=526 data-nosnippet>526</a>        }
-<a href=#527 id=527 data-nosnippet>527</a>    }
-<a href=#528 id=528 data-nosnippet>528</a>}
-<a href=#529 id=529 data-nosnippet>529</a>
-<a href=#530 id=530 data-nosnippet>530</a><span class="kw">impl </span>Default <span class="kw">for </span>AuthConfig {
-<a href=#531 id=531 data-nosnippet>531</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-<a href=#532 id=532 data-nosnippet>532</a>        <span class="self">Self </span>{
-<a href=#533 id=533 data-nosnippet>533</a>            jwt_private_key_pem: String::new(),
-<a href=#534 id=534 data-nosnippet>534</a>            jwt_public_key_pem: String::new(),
-<a href=#535 id=535 data-nosnippet>535</a>            <span class="comment">// Fail closed: a forwarded certificate is trusted only where an
-<a href=#536 id=536 data-nosnippet>536</a>            // operator has asserted a proxy terminates mTLS and overwrites the
-<a href=#537 id=537 data-nosnippet>537</a>            // header. See the field docs for what that assertion costs if wrong.
-<a href=#538 id=538 data-nosnippet>538</a>            </span>trust_forwarded_client_cert: <span class="bool-val">false</span>,
-<a href=#539 id=539 data-nosnippet>539</a>            access_token_lifetime_secs: <span class="number">900</span>,
-<a href=#540 id=540 data-nosnippet>540</a>            refresh_token_lifetime_secs: <span class="number">2_592_000</span>,
-<a href=#541 id=541 data-nosnippet>541</a>            auth_code_lifetime_secs: <span class="number">600</span>,
-<a href=#542 id=542 data-nosnippet>542</a>            jwt_issuer: <span class="string">"axiam"</span>.into(),
-<a href=#543 id=543 data-nosnippet>543</a>            oauth2_issuer_url: String::new(),
-<a href=#544 id=544 data-nosnippet>544</a>            <span class="comment">// Empty means "no separate mTLS host", which omits
-<a href=#545 id=545 data-nosnippet>545</a>            // `mtls_endpoint_aliases` from discovery. The correct default:
-<a href=#546 id=546 data-nosnippet>546</a>            // most deployments run one listener.
-<a href=#547 id=547 data-nosnippet>547</a>            </span>oauth2_mtls_base_url: String::new(),
-<a href=#548 id=548 data-nosnippet>548</a>            <span class="comment">// Empty means "the bare document names no tenant", which is
-<a href=#549 id=549 data-nosnippet>549</a>            // today's behaviour and the right default for a multi-tenant
-<a href=#550 id=550 data-nosnippet>550</a>            // deployment. A single-tenant issuer sets it.
-<a href=#551 id=551 data-nosnippet>551</a>            </span>oauth2_default_tenant_id: String::new(),
-<a href=#552 id=552 data-nosnippet>552</a>            revocation_feed_enabled: <span class="bool-val">false</span>,
-<a href=#553 id=553 data-nosnippet>553</a>            sso_spa_origins: Vec::new(),
-<a href=#554 id=554 data-nosnippet>554</a>            pepper: <span class="prelude-val">None</span>,
-<a href=#555 id=555 data-nosnippet>555</a>            pepper_previous: <span class="prelude-val">None</span>,
-<a href=#556 id=556 data-nosnippet>556</a>            min_password_length: <span class="number">12</span>,
-<a href=#557 id=557 data-nosnippet>557</a>            mfa_encryption_key: <span class="prelude-val">None</span>,
-<a href=#558 id=558 data-nosnippet>558</a>            opaque_session_key: <span class="prelude-val">None</span>,
-<a href=#559 id=559 data-nosnippet>559</a>            opaque_setup_key: <span class="prelude-val">None</span>,
-<a href=#560 id=560 data-nosnippet>560</a>            federation_encryption_key: <span class="prelude-val">None</span>,
-<a href=#561 id=561 data-nosnippet>561</a>            allow_missing_aud_as_user: <span class="bool-val">true</span>,
-<a href=#562 id=562 data-nosnippet>562</a>            cookie_secure: <span class="bool-val">true</span>,
-<a href=#563 id=563 data-nosnippet>563</a>            mfa_challenge_lifetime_secs: <span class="number">300</span>,
-<a href=#564 id=564 data-nosnippet>564</a>            totp_issuer: <span class="string">"AXIAM"</span>.into(),
-<a href=#565 id=565 data-nosnippet>565</a>            max_failed_login_attempts: <span class="number">5</span>,
-<a href=#566 id=566 data-nosnippet>566</a>            lockout_duration_secs: <span class="number">900</span>,
-<a href=#567 id=567 data-nosnippet>567</a>            lockout_backoff_multiplier: <span class="number">2.0</span>,
-<a href=#568 id=568 data-nosnippet>568</a>            max_lockout_duration_secs: <span class="number">3600</span>,
-<a href=#569 id=569 data-nosnippet>569</a>            email_verification_grace_period_hours: <span class="number">24</span>,
-<a href=#570 id=570 data-nosnippet>570</a>            password_reset_token_expiry_hours: <span class="number">1</span>,
-<a href=#571 id=571 data-nosnippet>571</a>            webauthn_rp_id: <span class="string">"localhost"</span>.into(),
-<a href=#572 id=572 data-nosnippet>572</a>            webauthn_rp_origin: <span class="string">"http://localhost:8090"</span>.into(),
-<a href=#573 id=573 data-nosnippet>573</a>            webauthn_rp_name: <span class="string">"AXIAM"</span>.into(),
-<a href=#574 id=574 data-nosnippet>574</a>            jwt_encoding_key: <span class="prelude-val">None</span>,
-<a href=#575 id=575 data-nosnippet>575</a>            jwt_decoding_key: <span class="prelude-val">None</span>,
-<a href=#576 id=576 data-nosnippet>576</a>            hibp_breaker_threshold: <span class="number">5</span>,
-<a href=#577 id=577 data-nosnippet>577</a>            hibp_breaker_cooldown_secs: <span class="number">30</span>,
-<a href=#578 id=578 data-nosnippet>578</a>            <span class="comment">// B1: 0 = auto → min(available_parallelism, 4) at construction.
-<a href=#579 id=579 data-nosnippet>579</a>            </span>max_concurrent_hashes: <span class="number">0</span>,
-<a href=#580 id=580 data-nosnippet>580</a>            hash_acquire_timeout_secs: <span class="number">5</span>,
-<a href=#581 id=581 data-nosnippet>581</a>            <span class="comment">// I6: opt-in. 0 = no session-validation cache (today's behaviour).
-<a href=#582 id=582 data-nosnippet>582</a>            </span>session_validation_cache_ttl_secs: <span class="number">0</span>,
-<a href=#583 id=583 data-nosnippet>583</a>        }
-<a href=#584 id=584 data-nosnippet>584</a>    }
-<a href=#585 id=585 data-nosnippet>585</a>}
-<a href=#586 id=586 data-nosnippet>586</a>
-<a href=#587 id=587 data-nosnippet>587</a><span class="attr">#[cfg(test)]
-<a href=#588 id=588 data-nosnippet>588</a></span><span class="kw">mod </span>default_tenant_tests {
-<a href=#589 id=589 data-nosnippet>589</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#590 id=590 data-nosnippet>590</a>
-<a href=#591 id=591 data-nosnippet>591</a>    <span class="kw">fn </span>config_with(value: <span class="kw-2">&amp;</span>str) -&gt; AuthConfig {
-<a href=#592 id=592 data-nosnippet>592</a>        AuthConfig {
-<a href=#593 id=593 data-nosnippet>593</a>            oauth2_default_tenant_id: value.to_owned(),
-<a href=#594 id=594 data-nosnippet>594</a>            ..AuthConfig::default()
-<a href=#595 id=595 data-nosnippet>595</a>        }
-<a href=#596 id=596 data-nosnippet>596</a>    }
-<a href=#597 id=597 data-nosnippet>597</a>
-<a href=#598 id=598 data-nosnippet>598</a>    <span class="doccomment">/// Unset, whitespace-only and valid all mean "nothing to say". A warning
-<a href=#599 id=599 data-nosnippet>599</a>    /// in any of these is a warning an operator learns to scroll past.
-<a href=#600 id=600 data-nosnippet>600</a>    </span><span class="attr">#[test]
-<a href=#601 id=601 data-nosnippet>601</a>    </span><span class="kw">fn </span>a_valid_or_absent_default_tenant_says_nothing() {
-<a href=#602 id=602 data-nosnippet>602</a>        <span class="kw">for </span>quiet <span class="kw">in </span>[
-<a href=#603 id=603 data-nosnippet>603</a>            <span class="string">""</span>,
-<a href=#604 id=604 data-nosnippet>604</a>            <span class="string">"   "</span>,
-<a href=#605 id=605 data-nosnippet>605</a>            <span class="string">"\n"</span>,
-<a href=#606 id=606 data-nosnippet>606</a>            <span class="string">"6f3e0a5c-1b2d-4e8f-9a7b-0c1d2e3f4a5b"</span>,
-<a href=#607 id=607 data-nosnippet>607</a>            <span class="string">"  6f3e0a5c-1b2d-4e8f-9a7b-0c1d2e3f4a5b  "</span>,
-<a href=#608 id=608 data-nosnippet>608</a>        ] {
-<a href=#609 id=609 data-nosnippet>609</a>            <span class="macro">assert_eq!</span>(
-<a href=#610 id=610 data-nosnippet>610</a>                config_with(quiet).default_tenant_id_diagnostic(),
-<a href=#611 id=611 data-nosnippet>611</a>                <span class="prelude-val">None</span>,
-<a href=#612 id=612 data-nosnippet>612</a>                <span class="string">"{quiet:?} must produce no diagnostic"
-<a href=#613 id=613 data-nosnippet>613</a>            </span>);
-<a href=#614 id=614 data-nosnippet>614</a>        }
-<a href=#615 id=615 data-nosnippet>615</a>    }
-<a href=#616 id=616 data-nosnippet>616</a>
-<a href=#617 id=617 data-nosnippet>617</a>    <span class="doccomment">/// A value that is set and unusable is exactly the case the operator
-<a href=#618 id=618 data-nosnippet>618</a>    /// never heard about.
-<a href=#619 id=619 data-nosnippet>619</a>    </span><span class="attr">#[test]
-<a href=#620 id=620 data-nosnippet>620</a>    </span><span class="kw">fn </span>an_unparseable_default_tenant_is_reported() {
-<a href=#621 id=621 data-nosnippet>621</a>        <span class="kw">let </span>problem = config_with(<span class="string">"not-a-uuid"</span>)
-<a href=#622 id=622 data-nosnippet>622</a>            .default_tenant_id_diagnostic()
-<a href=#623 id=623 data-nosnippet>623</a>            .expect(<span class="string">"an unparseable value must be reported"</span>);
-<a href=#624 id=624 data-nosnippet>624</a>        <span class="macro">assert_eq!</span>(problem.length, <span class="number">10</span>);
-<a href=#625 id=625 data-nosnippet>625</a>        <span class="macro">assert_eq!</span>(problem.shape, <span class="string">"contains characters a UUID cannot"</span>);
-<a href=#626 id=626 data-nosnippet>626</a>    }
-<a href=#627 id=627 data-nosnippet>627</a>
-<a href=#628 id=628 data-nosnippet>628</a>    <span class="doccomment">/// A truncated paste is the commonest way to get here, and it is worth
-<a href=#629 id=629 data-nosnippet>629</a>    /// distinguishing from a value that was never a UUID at all: the first is
-<a href=#630 id=630 data-nosnippet>630</a>    /// "you lost some characters", the second is "that is a different thing".
-<a href=#631 id=631 data-nosnippet>631</a>    </span><span class="attr">#[test]
-<a href=#632 id=632 data-nosnippet>632</a>    </span><span class="kw">fn </span>a_truncated_uuid_is_reported_as_the_right_shape() {
-<a href=#633 id=633 data-nosnippet>633</a>        <span class="kw">let </span>problem = config_with(<span class="string">"6f3e0a5c-1b2d-4e8f"</span>)
-<a href=#634 id=634 data-nosnippet>634</a>            .default_tenant_id_diagnostic()
-<a href=#635 id=635 data-nosnippet>635</a>            .expect(<span class="string">"a truncated UUID must be reported"</span>);
-<a href=#636 id=636 data-nosnippet>636</a>        <span class="macro">assert_eq!</span>(problem.length, <span class="number">18</span>);
-<a href=#637 id=637 data-nosnippet>637</a>        <span class="macro">assert_eq!</span>(problem.shape, <span class="string">"hexadecimal, but not a 36-character UUID"</span>);
-<a href=#638 id=638 data-nosnippet>638</a>    }
-<a href=#639 id=639 data-nosnippet>639</a>
-<a href=#640 id=640 data-nosnippet>640</a>    <span class="doccomment">/// The rendered line carries the length and the class, and **no substring
-<a href=#641 id=641 data-nosnippet>641</a>    /// of the value**. The check is deliberately crude — every three-character
-<a href=#642 id=642 data-nosnippet>642</a>    /// window of the value — because the failure mode is somebody adding the
-<a href=#643 id=643 data-nosnippet>643</a>    /// value to the message to make it easier to debug.
-<a href=#644 id=644 data-nosnippet>644</a>    </span><span class="attr">#[test]
-<a href=#645 id=645 data-nosnippet>645</a>    </span><span class="kw">fn </span>the_rendered_diagnostic_never_echoes_the_value() {
-<a href=#646 id=646 data-nosnippet>646</a>        <span class="kw">let </span>value = <span class="string">"tenant-acme-production"</span>;
-<a href=#647 id=647 data-nosnippet>647</a>        <span class="kw">let </span>rendered = config_with(value)
-<a href=#648 id=648 data-nosnippet>648</a>            .default_tenant_id_diagnostic()
-<a href=#649 id=649 data-nosnippet>649</a>            .unwrap()
-<a href=#650 id=650 data-nosnippet>650</a>            .to_string();
-<a href=#651 id=651 data-nosnippet>651</a>        <span class="kw">for </span>window <span class="kw">in </span>value
-<a href=#652 id=652 data-nosnippet>652</a>            .as_bytes()
-<a href=#653 id=653 data-nosnippet>653</a>            .windows(<span class="number">3</span>)
-<a href=#654 id=654 data-nosnippet>654</a>            .map(|w| std::str::from_utf8(w).unwrap())
-<a href=#655 id=655 data-nosnippet>655</a>        {
-<a href=#656 id=656 data-nosnippet>656</a>            <span class="macro">assert!</span>(
-<a href=#657 id=657 data-nosnippet>657</a>                !rendered.contains(window),
-<a href=#658 id=658 data-nosnippet>658</a>                <span class="string">"the diagnostic must not echo any part of the value; \
-<a href=#659 id=659 data-nosnippet>659</a>                 found {window:?} in {rendered:?}"
-<a href=#660 id=660 data-nosnippet>660</a>            </span>);
-<a href=#661 id=661 data-nosnippet>661</a>        }
-<a href=#662 id=662 data-nosnippet>662</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"22 characters"</span>));
-<a href=#663 id=663 data-nosnippet>663</a>    }
-<a href=#664 id=664 data-nosnippet>664</a>
-<a href=#665 id=665 data-nosnippet>665</a>    <span class="doccomment">/// **I4 twin, and the proof this item changed nothing.** The accessor the
-<a href=#666 id=666 data-nosnippet>666</a>    /// discovery builder actually reads answers `None` for an unparseable
-<a href=#667 id=667 data-nosnippet>667</a>    /// value exactly as it did before the diagnostic existed — so the document
-<a href=#668 id=668 data-nosnippet>668</a>    /// a misconfigured deployment serves is the document an unconfigured one
-<a href=#669 id=669 data-nosnippet>669</a>    /// serves, which is what `oidc.rs::a_document_that_names_no_tenant_carries_no_query_string`
-<a href=#670 id=670 data-nosnippet>670</a>    /// pins on the other side.
-<a href=#671 id=671 data-nosnippet>671</a>    </span><span class="attr">#[test]
-<a href=#672 id=672 data-nosnippet>672</a>    </span><span class="kw">fn </span>an_unparseable_default_tenant_is_still_treated_as_unset() {
-<a href=#673 id=673 data-nosnippet>673</a>        <span class="macro">assert_eq!</span>(config_with(<span class="string">"not-a-uuid"</span>).default_tenant_id(), <span class="prelude-val">None</span>);
-<a href=#674 id=674 data-nosnippet>674</a>        <span class="macro">assert_eq!</span>(config_with(<span class="string">""</span>).default_tenant_id(), <span class="prelude-val">None</span>);
-<a href=#675 id=675 data-nosnippet>675</a>        <span class="macro">assert_eq!</span>(
-<a href=#676 id=676 data-nosnippet>676</a>            config_with(<span class="string">"not-a-uuid"</span>).default_tenant_id(),
-<a href=#677 id=677 data-nosnippet>677</a>            config_with(<span class="string">""</span>).default_tenant_id(),
-<a href=#678 id=678 data-nosnippet>678</a>            <span class="string">"a bad value and no value must be indistinguishable to the builder"
-<a href=#679 id=679 data-nosnippet>679</a>        </span>);
-<a href=#680 id=680 data-nosnippet>680</a>    }
-<a href=#681 id=681 data-nosnippet>681</a>}
+<a href=#463 id=463 data-nosnippet>463</a>    /// Returns `oauth2_issuer_url` when set, falling back to
+<a href=#464 id=464 data-nosnippet>464</a>    /// `jwt_issuer`. Trailing slashes are stripped so that the
+<a href=#465 id=465 data-nosnippet>465</a>    /// OIDC discovery `issuer` exactly matches token `iss` claims
+<a href=#466 id=466 data-nosnippet>466</a>    /// (OIDC Core §2 requires an exact string match).
+<a href=#467 id=467 data-nosnippet>467</a>    </span><span class="kw">pub fn </span>effective_issuer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>str {
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="comment">// T21.6 — the per-request tenant issuer wins when there is one, and
+<a href=#469 id=469 data-nosnippet>469</a>        // there is one only on a `/t/{tenant_id}` request. Every caller that
+<a href=#470 id=470 data-nosnippet>470</a>        // *stamps* an `iss` reads this and is therefore correct on both path
+<a href=#471 id=471 data-nosnippet>471</a>        // forms without knowing either exists; every caller that *checks* one
+<a href=#472 id=472 data-nosnippet>472</a>        // reads `root_issuer` instead.
+<a href=#473 id=473 data-nosnippet>473</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>issuer) = <span class="self">self</span>.request_issuer {
+<a href=#474 id=474 data-nosnippet>474</a>            <span class="kw">return </span>issuer.trim_end_matches(<span class="string">'/'</span>);
+<a href=#475 id=475 data-nosnippet>475</a>        }
+<a href=#476 id=476 data-nosnippet>476</a>        <span class="self">self</span>.root_issuer()
+<a href=#477 id=477 data-nosnippet>477</a>    }
+<a href=#478 id=478 data-nosnippet>478</a>
+<a href=#479 id=479 data-nosnippet>479</a>    <span class="doccomment">/// The deployment's own issuer, ignoring any per-request tenant issuer
+<a href=#480 id=480 data-nosnippet>480</a>    /// (T21.6).
+<a href=#481 id=481 data-nosnippet>481</a>    ///
+<a href=#482 id=482 data-nosnippet>482</a>    /// Identical to [`Self::effective_issuer`] on every request that is not on
+<a href=#483 id=483 data-nosnippet>483</a>    /// a `/t/{tenant_id}` path, which is every request on a deployment with
+<a href=#484 id=484 data-nosnippet>484</a>    /// [`Self::tenant_issuer_paths`] off.
+<a href=#485 id=485 data-nosnippet>485</a>    ///
+<a href=#486 id=486 data-nosnippet>486</a>    /// This is the value every **validation** decision is derived from. The
+<a href=#487 id=487 data-nosnippet>487</a>    /// distinction matters exactly once and it is load-bearing: the set of
+<a href=#488 id=488 data-nosnippet>488</a>    /// issuers AXIAM accepts must be a property of the deployment, so a
+<a href=#489 id=489 data-nosnippet>489</a>    /// request that arrived under tenant `A` cannot narrow — or widen — what
+<a href=#490 id=490 data-nosnippet>490</a>    /// counts as a valid `iss`.
+<a href=#491 id=491 data-nosnippet>491</a>    </span><span class="attr">#[must_use]
+<a href=#492 id=492 data-nosnippet>492</a>    </span><span class="kw">pub fn </span>root_issuer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>str {
+<a href=#493 id=493 data-nosnippet>493</a>        <span class="kw">if </span><span class="self">self</span>.oauth2_issuer_url.is_empty() {
+<a href=#494 id=494 data-nosnippet>494</a>            <span class="self">self</span>.jwt_issuer.trim_end_matches(<span class="string">'/'</span>)
+<a href=#495 id=495 data-nosnippet>495</a>        } <span class="kw">else </span>{
+<a href=#496 id=496 data-nosnippet>496</a>            <span class="self">self</span>.oauth2_issuer_url.trim_end_matches(<span class="string">'/'</span>)
+<a href=#497 id=497 data-nosnippet>497</a>        }
+<a href=#498 id=498 data-nosnippet>498</a>    }
+<a href=#499 id=499 data-nosnippet>499</a>
+<a href=#500 id=500 data-nosnippet>500</a>    <span class="doccomment">/// The issuer identifier of one tenant under the T21.6 path form, or
+<a href=#501 id=501 data-nosnippet>501</a>    /// `None` when this deployment does not serve it.
+<a href=#502 id=502 data-nosnippet>502</a>    ///
+<a href=#503 id=503 data-nosnippet>503</a>    /// `{root}/t/{tenant_id}`, with no query and no fragment — which is what
+<a href=#504 id=504 data-nosnippet>504</a>    /// RFC 8414 §2 requires of an issuer and what the `?tenant_id=` form could
+<a href=#505 id=505 data-nosnippet>505</a>    /// never be.
+<a href=#506 id=506 data-nosnippet>506</a>    </span><span class="attr">#[must_use]
+<a href=#507 id=507 data-nosnippet>507</a>    </span><span class="kw">pub fn </span>tenant_issuer(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: uuid::Uuid) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#508 id=508 data-nosnippet>508</a>        <span class="kw">if </span>!<span class="self">self</span>.tenant_issuer_paths {
+<a href=#509 id=509 data-nosnippet>509</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#510 id=510 data-nosnippet>510</a>        }
+<a href=#511 id=511 data-nosnippet>511</a>        <span class="prelude-val">Some</span>(<span class="macro">format!</span>(
+<a href=#512 id=512 data-nosnippet>512</a>            <span class="string">"{}{}{}"</span>,
+<a href=#513 id=513 data-nosnippet>513</a>            <span class="self">self</span>.root_issuer(),
+<a href=#514 id=514 data-nosnippet>514</a>            TENANT_PATH_PREFIX,
+<a href=#515 id=515 data-nosnippet>515</a>            tenant_id
+<a href=#516 id=516 data-nosnippet>516</a>        ))
+<a href=#517 id=517 data-nosnippet>517</a>    }
+<a href=#518 id=518 data-nosnippet>518</a>
+<a href=#519 id=519 data-nosnippet>519</a>    <span class="doccomment">/// This config, as seen by a request that arrived under tenant
+<a href=#520 id=520 data-nosnippet>520</a>    /// `tenant_id`'s path (T21.6).
+<a href=#521 id=521 data-nosnippet>521</a>    ///
+<a href=#522 id=522 data-nosnippet>522</a>    /// A clone rather than a mutation, and a clone rather than a borrow of a
+<a href=#523 id=523 data-nosnippet>523</a>    /// shared cell: the deployment config is shared by every concurrent
+<a href=#524 id=524 data-nosnippet>524</a>    /// request, and the one thing that must never happen is a request on the
+<a href=#525 id=525 data-nosnippet>525</a>    /// root path minting an `iss` a neighbouring tenant-path request put
+<a href=#526 id=526 data-nosnippet>526</a>    /// there. The cost is a handful of small allocations on a path that is
+<a href=#527 id=527 data-nosnippet>527</a>    /// about to sign a token.
+<a href=#528 id=528 data-nosnippet>528</a>    ///
+<a href=#529 id=529 data-nosnippet>529</a>    /// `None` when this deployment does not serve tenant paths, so a caller
+<a href=#530 id=530 data-nosnippet>530</a>    /// cannot manufacture a tenant issuer on a deployment that has not opted
+<a href=#531 id=531 data-nosnippet>531</a>    /// in.
+<a href=#532 id=532 data-nosnippet>532</a>    </span><span class="attr">#[must_use]
+<a href=#533 id=533 data-nosnippet>533</a>    </span><span class="kw">pub fn </span>for_tenant_path(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: uuid::Uuid) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="self">Self</span>&gt; {
+<a href=#534 id=534 data-nosnippet>534</a>        <span class="kw">let </span>issuer = <span class="self">self</span>.tenant_issuer(tenant_id)<span class="question-mark">?</span>;
+<a href=#535 id=535 data-nosnippet>535</a>        <span class="prelude-val">Some</span>(<span class="self">Self </span>{
+<a href=#536 id=536 data-nosnippet>536</a>            request_issuer: <span class="prelude-val">Some</span>(issuer),
+<a href=#537 id=537 data-nosnippet>537</a>            ..<span class="self">self</span>.clone()
+<a href=#538 id=538 data-nosnippet>538</a>        })
+<a href=#539 id=539 data-nosnippet>539</a>    }
+<a href=#540 id=540 data-nosnippet>540</a>
+<a href=#541 id=541 data-nosnippet>541</a>    <span class="doccomment">/// Is `iss` an issuer identifier this deployment mints under?
+<a href=#542 id=542 data-nosnippet>542</a>    ///
+<a href=#543 id=543 data-nosnippet>543</a>    /// With [`Self::tenant_issuer_paths`] off this is `iss == root_issuer()`,
+<a href=#544 id=544 data-nosnippet>544</a>    /// which is exactly the set `jsonwebtoken`'s pinned-issuer check accepted
+<a href=#545 id=545 data-nosnippet>545</a>    /// before T21.6 — so the default deployment's answer is unchanged.
+<a href=#546 id=546 data-nosnippet>546</a>    ///
+<a href=#547 id=547 data-nosnippet>547</a>    /// With it on the set is the root issuer **and** every `{root}/t/{uuid}`.
+<a href=#548 id=548 data-nosnippet>548</a>    /// Three properties of that widening are worth stating, because each one
+<a href=#549 id=549 data-nosnippet>549</a>    /// is a way it could have gone wrong:
+<a href=#550 id=550 data-nosnippet>550</a>    ///
+<a href=#551 id=551 data-nosnippet>551</a>    /// * the tenant segment must parse as a UUID, so `{root}/t/../admin`,
+<a href=#552 id=552 data-nosnippet>552</a>    ///   `{root}/t/` and `{root}/t/a%2Fb` are all refused rather than
+<a href=#553 id=553 data-nosnippet>553</a>    ///   normalised;
+<a href=#554 id=554 data-nosnippet>554</a>    /// * nothing is accepted **after** the tenant segment, so
+<a href=#555 id=555 data-nosnippet>555</a>    ///   `{root}/t/{uuid}/anything` is not an issuer;
+<a href=#556 id=556 data-nosnippet>556</a>    /// * the comparison is on the exact string, with no trailing-slash or
+<a href=#557 id=557 data-nosnippet>557</a>    ///   case folding — OIDC Core §2 requires `iss` to match the discovery
+<a href=#558 id=558 data-nosnippet>558</a>    ///   document's `issuer` exactly, and a comparison that is more forgiving
+<a href=#559 id=559 data-nosnippet>559</a>    ///   than the specification is one an attacker gets to choose the input to.
+<a href=#560 id=560 data-nosnippet>560</a>    ///
+<a href=#561 id=561 data-nosnippet>561</a>    /// Widening the accepted `iss` set does **not** widen the accepted `aud`
+<a href=#562 id=562 data-nosnippet>562</a>    /// set (I3): the audience check is a separate decision in
+<a href=#563 id=563 data-nosnippet>563</a>    /// [`crate::token::decode_access_token`] and stays pinned to the two
+<a href=#564 id=564 data-nosnippet>564</a>    /// built-in audiences.
+<a href=#565 id=565 data-nosnippet>565</a>    </span><span class="attr">#[must_use]
+<a href=#566 id=566 data-nosnippet>566</a>    </span><span class="kw">pub fn </span>accepts_issuer(<span class="kw-2">&amp;</span><span class="self">self</span>, iss: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#567 id=567 data-nosnippet>567</a>        <span class="kw">let </span>root = <span class="self">self</span>.root_issuer();
+<a href=#568 id=568 data-nosnippet>568</a>        <span class="kw">if </span>iss == root {
+<a href=#569 id=569 data-nosnippet>569</a>            <span class="kw">return </span><span class="bool-val">true</span>;
+<a href=#570 id=570 data-nosnippet>570</a>        }
+<a href=#571 id=571 data-nosnippet>571</a>        <span class="kw">if </span>!<span class="self">self</span>.tenant_issuer_paths {
+<a href=#572 id=572 data-nosnippet>572</a>            <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#573 id=573 data-nosnippet>573</a>        }
+<a href=#574 id=574 data-nosnippet>574</a>        <span class="self">self</span>.tenant_of_issuer(iss).is_some()
+<a href=#575 id=575 data-nosnippet>575</a>    }
+<a href=#576 id=576 data-nosnippet>576</a>
+<a href=#577 id=577 data-nosnippet>577</a>    <span class="doccomment">/// The tenant a `{root}/t/{uuid}` issuer names, or `None` when `iss` is
+<a href=#578 id=578 data-nosnippet>578</a>    /// not one (T21.6).
+<a href=#579 id=579 data-nosnippet>579</a>    ///
+<a href=#580 id=580 data-nosnippet>580</a>    /// `None` for the root issuer too: the root issuer names no tenant, which
+<a href=#581 id=581 data-nosnippet>581</a>    /// is the whole reason the path form exists.
+<a href=#582 id=582 data-nosnippet>582</a>    </span><span class="attr">#[must_use]
+<a href=#583 id=583 data-nosnippet>583</a>    </span><span class="kw">pub fn </span>tenant_of_issuer(<span class="kw-2">&amp;</span><span class="self">self</span>, iss: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;uuid::Uuid&gt; {
+<a href=#584 id=584 data-nosnippet>584</a>        <span class="kw">if </span>!<span class="self">self</span>.tenant_issuer_paths {
+<a href=#585 id=585 data-nosnippet>585</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#586 id=586 data-nosnippet>586</a>        }
+<a href=#587 id=587 data-nosnippet>587</a>        <span class="kw">let </span>rest = iss.strip_prefix(<span class="self">self</span>.root_issuer())<span class="question-mark">?</span>;
+<a href=#588 id=588 data-nosnippet>588</a>        <span class="kw">let </span>tenant = rest.strip_prefix(TENANT_PATH_PREFIX)<span class="question-mark">?</span>;
+<a href=#589 id=589 data-nosnippet>589</a>        uuid::Uuid::parse_str(tenant).ok()
+<a href=#590 id=590 data-nosnippet>590</a>    }
+<a href=#591 id=591 data-nosnippet>591</a>
+<a href=#592 id=592 data-nosnippet>592</a>    <span class="doccomment">/// The mTLS listener's base URL, or `None` when this deployment has no
+<a href=#593 id=593 data-nosnippet>593</a>    /// separate one (RFC 8705 §5).
+<a href=#594 id=594 data-nosnippet>594</a>    ///
+<a href=#595 id=595 data-nosnippet>595</a>    /// Trailing slashes are stripped for the same reason
+<a href=#596 id=596 data-nosnippet>596</a>    /// [`effective_issuer`](Self::effective_issuer) strips them: the value is
+<a href=#597 id=597 data-nosnippet>597</a>    /// concatenated with endpoint paths, and `https://host//oauth2/token` is a
+<a href=#598 id=598 data-nosnippet>598</a>    /// different URL from the one the operator meant.
+<a href=#599 id=599 data-nosnippet>599</a>    ///
+<a href=#600 id=600 data-nosnippet>600</a>    /// A value that is entirely whitespace answers `None` rather than `Some("")`
+<a href=#601 id=601 data-nosnippet>601</a>    /// — an empty alias base would produce relative alias URLs, which RFC 8705
+<a href=#602 id=602 data-nosnippet>602</a>    /// §5 does not permit and no client would resolve the way the operator
+<a href=#603 id=603 data-nosnippet>603</a>    /// intended.
+<a href=#604 id=604 data-nosnippet>604</a>    /// The configured default tenant, when one is set and parses as a UUID.
+<a href=#605 id=605 data-nosnippet>605</a>    ///
+<a href=#606 id=606 data-nosnippet>606</a>    /// An unparseable value is treated as unset rather than as an error: this
+<a href=#607 id=607 data-nosnippet>607</a>    /// is consulted while building a *public, unauthenticated* document, and a
+<a href=#608 id=608 data-nosnippet>608</a>    /// deployment whose operator fat-fingered the UUID should serve the
+<a href=#609 id=609 data-nosnippet>609</a>    /// document it served before the setting existed rather than 500 for every
+<a href=#610 id=610 data-nosnippet>610</a>    /// relying party. The mis-set value is visible in the document by its
+<a href=#611 id=611 data-nosnippet>611</a>    /// absence, and `mtls_base_url` takes the opposite view for the opposite
+<a href=#612 id=612 data-nosnippet>612</a>    /// reason — a bad alias actively misdirects a client, a missing tenant only
+<a href=#613 id=613 data-nosnippet>613</a>    /// fails to help one.
+<a href=#614 id=614 data-nosnippet>614</a>    </span><span class="attr">#[must_use]
+<a href=#615 id=615 data-nosnippet>615</a>    </span><span class="kw">pub fn </span>default_tenant_id(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;uuid::Uuid&gt; {
+<a href=#616 id=616 data-nosnippet>616</a>        <span class="kw">let </span>trimmed = <span class="self">self</span>.oauth2_default_tenant_id.trim();
+<a href=#617 id=617 data-nosnippet>617</a>        <span class="kw">if </span>trimmed.is_empty() {
+<a href=#618 id=618 data-nosnippet>618</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#619 id=619 data-nosnippet>619</a>        }
+<a href=#620 id=620 data-nosnippet>620</a>        uuid::Uuid::parse_str(trimmed).ok()
+<a href=#621 id=621 data-nosnippet>621</a>    }
+<a href=#622 id=622 data-nosnippet>622</a>
+<a href=#623 id=623 data-nosnippet>623</a>    <span class="doccomment">/// Whether [`Self::default_tenant_id`] is silently discarding a value the
+<a href=#624 id=624 data-nosnippet>624</a>    /// operator set (T-244, R-1…R-8).
+<a href=#625 id=625 data-nosnippet>625</a>    ///
+<a href=#626 id=626 data-nosnippet>626</a>    /// Treating an unparseable value as unset is right and stays — a public,
+<a href=#627 id=627 data-nosnippet>627</a>    /// unauthenticated document should not `500` for every relying party
+<a href=#628 id=628 data-nosnippet>628</a>    /// because somebody fat-fingered a UUID — but the operator was never told,
+<a href=#629 id=629 data-nosnippet>629</a>    /// so the deployment concluded the setting does not work. This answers
+<a href=#630 id=630 data-nosnippet>630</a>    /// `Some` exactly when a non-empty value failed to parse, and the caller
+<a href=#631 id=631 data-nosnippet>631</a>    /// logs it **once at boot**.
+<a href=#632 id=632 data-nosnippet>632</a>    ///
+<a href=#633 id=633 data-nosnippet>633</a>    /// # Why not on the request path
+<a href=#634 id=634 data-nosnippet>634</a>    ///
+<a href=#635 id=635 data-nosnippet>635</a>    /// [`Self::default_tenant_id`] is called per discovery request. A warning
+<a href=#636 id=636 data-nosnippet>636</a>    /// there is a log flood any anonymous caller can drive by requesting the
+<a href=#637 id=637 data-nosnippet>637</a>    /// document in a loop.
+<a href=#638 id=638 data-nosnippet>638</a>    ///
+<a href=#639 id=639 data-nosnippet>639</a>    /// # Why the shape and never the value
+<a href=#640 id=640 data-nosnippet>640</a>    ///
+<a href=#641 id=641 data-nosnippet>641</a>    /// A tenant id is not a secret, but a variable this code cannot prove *is*
+<a href=#642 id=642 data-nosnippet>642</a>    /// a tenant id may hold anything an operator pasted — including the
+<a href=#643 id=643 data-nosnippet>643</a>    /// contents of the wrong clipboard. The diagnostic therefore carries the
+<a href=#644 id=644 data-nosnippet>644</a>    /// length and a character class and nothing else.
+<a href=#645 id=645 data-nosnippet>645</a>    </span><span class="attr">#[must_use]
+<a href=#646 id=646 data-nosnippet>646</a>    </span><span class="kw">pub fn </span>default_tenant_id_diagnostic(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;DefaultTenantProblem&gt; {
+<a href=#647 id=647 data-nosnippet>647</a>        <span class="kw">let </span>trimmed = <span class="self">self</span>.oauth2_default_tenant_id.trim();
+<a href=#648 id=648 data-nosnippet>648</a>        <span class="comment">// Empty and whitespace-only are "unset", which is the default and
+<a href=#649 id=649 data-nosnippet>649</a>        // needs no warning.
+<a href=#650 id=650 data-nosnippet>650</a>        </span><span class="kw">if </span>trimmed.is_empty() || uuid::Uuid::parse_str(trimmed).is_ok() {
+<a href=#651 id=651 data-nosnippet>651</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#652 id=652 data-nosnippet>652</a>        }
+<a href=#653 id=653 data-nosnippet>653</a>        <span class="prelude-val">Some</span>(DefaultTenantProblem {
+<a href=#654 id=654 data-nosnippet>654</a>            length: trimmed.chars().count(),
+<a href=#655 id=655 data-nosnippet>655</a>            shape: <span class="kw">if </span>trimmed.chars().all(|c| c.is_ascii_hexdigit() || c == <span class="string">'-'</span>) {
+<a href=#656 id=656 data-nosnippet>656</a>                <span class="string">"hexadecimal, but not a 36-character UUID"
+<a href=#657 id=657 data-nosnippet>657</a>            </span>} <span class="kw">else </span>{
+<a href=#658 id=658 data-nosnippet>658</a>                <span class="string">"contains characters a UUID cannot"
+<a href=#659 id=659 data-nosnippet>659</a>            </span>},
+<a href=#660 id=660 data-nosnippet>660</a>        })
+<a href=#661 id=661 data-nosnippet>661</a>    }
+<a href=#662 id=662 data-nosnippet>662</a>
+<a href=#663 id=663 data-nosnippet>663</a>    <span class="kw">pub fn </span>mtls_base_url(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt; {
+<a href=#664 id=664 data-nosnippet>664</a>        <span class="kw">let </span>trimmed = <span class="self">self</span>.oauth2_mtls_base_url.trim().trim_end_matches(<span class="string">'/'</span>);
+<a href=#665 id=665 data-nosnippet>665</a>        (!trimmed.is_empty()).then_some(trimmed)
+<a href=#666 id=666 data-nosnippet>666</a>    }
+<a href=#667 id=667 data-nosnippet>667</a>
+<a href=#668 id=668 data-nosnippet>668</a>    <span class="doccomment">/// CQ-B14: Parse Ed25519 keys from PEM once and cache in `Arc`.
+<a href=#669 id=669 data-nosnippet>669</a>    ///
+<a href=#670 id=670 data-nosnippet>670</a>    /// Call this once at startup after loading config from environment.
+<a href=#671 id=671 data-nosnippet>671</a>    /// After this returns `Ok(())`, all token functions skip per-call PEM
+<a href=#672 id=672 data-nosnippet>672</a>    /// parsing and use the cached keys instead.
+<a href=#673 id=673 data-nosnippet>673</a>    </span><span class="kw">pub fn </span>resolve_keys(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;(), String&gt; {
+<a href=#674 id=674 data-nosnippet>674</a>        <span class="kw">let </span>enc = EncodingKey::from_ed_pem(<span class="self">self</span>.jwt_private_key_pem.as_bytes())
+<a href=#675 id=675 data-nosnippet>675</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT private key PEM: {e}"</span>))<span class="question-mark">?</span>;
+<a href=#676 id=676 data-nosnippet>676</a>        <span class="kw">let </span>dec = DecodingKey::from_ed_pem(<span class="self">self</span>.jwt_public_key_pem.as_bytes())
+<a href=#677 id=677 data-nosnippet>677</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"invalid JWT public key PEM: {e}"</span>))<span class="question-mark">?</span>;
+<a href=#678 id=678 data-nosnippet>678</a>        <span class="self">self</span>.jwt_encoding_key = <span class="prelude-val">Some</span>(Arc::new(enc));
+<a href=#679 id=679 data-nosnippet>679</a>        <span class="self">self</span>.jwt_decoding_key = <span class="prelude-val">Some</span>(Arc::new(dec));
+<a href=#680 id=680 data-nosnippet>680</a>        <span class="prelude-val">Ok</span>(())
+<a href=#681 id=681 data-nosnippet>681</a>    }
+<a href=#682 id=682 data-nosnippet>682</a>
+<a href=#683 id=683 data-nosnippet>683</a>    <span class="doccomment">/// B1: Resolve `max_concurrent_hashes` (0 = auto) to a concrete permit
+<a href=#684 id=684 data-nosnippet>684</a>    /// count for the crypto semaphore.
+<a href=#685 id=685 data-nosnippet>685</a>    ///
+<a href=#686 id=686 data-nosnippet>686</a>    /// Auto (`0`) resolves to `min(available_parallelism, 4)`: bound by the
+<a href=#687 id=687 data-nosnippet>687</a>    /// core count so Argon2id (a CPU-bound operation) does not oversubscribe
+<a href=#688 id=688 data-nosnippet>688</a>    /// cores, and capped at 4 so peak concurrent ~19 MiB arenas stay well
+<a href=#689 id=689 data-nosnippet>689</a>    /// under typical container memory caps. A non-zero value is used verbatim
+<a href=#690 id=690 data-nosnippet>690</a>    /// (a `0` after resolution is impossible — it would be a zero-permit
+<a href=#691 id=691 data-nosnippet>691</a>    /// semaphore that deadlocks all hashing, so it is clamped to 1).
+<a href=#692 id=692 data-nosnippet>692</a>    </span><span class="kw">pub fn </span>resolved_max_concurrent_hashes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#693 id=693 data-nosnippet>693</a>        <span class="kw">match </span><span class="self">self</span>.max_concurrent_hashes {
+<a href=#694 id=694 data-nosnippet>694</a>            <span class="number">0 </span>=&gt; std::thread::available_parallelism()
+<a href=#695 id=695 data-nosnippet>695</a>                .map(|n| n.get().min(<span class="number">4</span>))
+<a href=#696 id=696 data-nosnippet>696</a>                .unwrap_or(<span class="number">4</span>),
+<a href=#697 id=697 data-nosnippet>697</a>            n =&gt; n.max(<span class="number">1</span>),
+<a href=#698 id=698 data-nosnippet>698</a>        }
+<a href=#699 id=699 data-nosnippet>699</a>    }
+<a href=#700 id=700 data-nosnippet>700</a>}
+<a href=#701 id=701 data-nosnippet>701</a>
+<a href=#702 id=702 data-nosnippet>702</a><span class="kw">impl </span>Default <span class="kw">for </span>AuthConfig {
+<a href=#703 id=703 data-nosnippet>703</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#704 id=704 data-nosnippet>704</a>        <span class="self">Self </span>{
+<a href=#705 id=705 data-nosnippet>705</a>            jwt_private_key_pem: String::new(),
+<a href=#706 id=706 data-nosnippet>706</a>            jwt_public_key_pem: String::new(),
+<a href=#707 id=707 data-nosnippet>707</a>            <span class="comment">// Fail closed: a forwarded certificate is trusted only where an
+<a href=#708 id=708 data-nosnippet>708</a>            // operator has asserted a proxy terminates mTLS and overwrites the
+<a href=#709 id=709 data-nosnippet>709</a>            // header. See the field docs for what that assertion costs if wrong.
+<a href=#710 id=710 data-nosnippet>710</a>            </span>trust_forwarded_client_cert: <span class="bool-val">false</span>,
+<a href=#711 id=711 data-nosnippet>711</a>            access_token_lifetime_secs: <span class="number">900</span>,
+<a href=#712 id=712 data-nosnippet>712</a>            refresh_token_lifetime_secs: <span class="number">2_592_000</span>,
+<a href=#713 id=713 data-nosnippet>713</a>            auth_code_lifetime_secs: <span class="number">600</span>,
+<a href=#714 id=714 data-nosnippet>714</a>            jwt_issuer: <span class="string">"axiam"</span>.into(),
+<a href=#715 id=715 data-nosnippet>715</a>            oauth2_issuer_url: String::new(),
+<a href=#716 id=716 data-nosnippet>716</a>            <span class="comment">// Empty means "no separate mTLS host", which omits
+<a href=#717 id=717 data-nosnippet>717</a>            // `mtls_endpoint_aliases` from discovery. The correct default:
+<a href=#718 id=718 data-nosnippet>718</a>            // most deployments run one listener.
+<a href=#719 id=719 data-nosnippet>719</a>            </span>oauth2_mtls_base_url: String::new(),
+<a href=#720 id=720 data-nosnippet>720</a>            <span class="comment">// Empty means "the bare document names no tenant", which is
+<a href=#721 id=721 data-nosnippet>721</a>            // today's behaviour and the right default for a multi-tenant
+<a href=#722 id=722 data-nosnippet>722</a>            // deployment. A single-tenant issuer sets it.
+<a href=#723 id=723 data-nosnippet>723</a>            </span>oauth2_default_tenant_id: String::new(),
+<a href=#724 id=724 data-nosnippet>724</a>            <span class="comment">// T21.6 — off. The whole feature is opt-in (I1): with this false
+<a href=#725 id=725 data-nosnippet>725</a>            // no route, no claim and no accepted issuer differs from a build
+<a href=#726 id=726 data-nosnippet>726</a>            // that predates it.
+<a href=#727 id=727 data-nosnippet>727</a>            </span>tenant_issuer_paths: <span class="bool-val">false</span>,
+<a href=#728 id=728 data-nosnippet>728</a>            <span class="comment">// Never a configured value; see the field docs.
+<a href=#729 id=729 data-nosnippet>729</a>            </span>request_issuer: <span class="prelude-val">None</span>,
+<a href=#730 id=730 data-nosnippet>730</a>            revocation_feed_enabled: <span class="bool-val">false</span>,
+<a href=#731 id=731 data-nosnippet>731</a>            sso_spa_origins: Vec::new(),
+<a href=#732 id=732 data-nosnippet>732</a>            pepper: <span class="prelude-val">None</span>,
+<a href=#733 id=733 data-nosnippet>733</a>            pepper_previous: <span class="prelude-val">None</span>,
+<a href=#734 id=734 data-nosnippet>734</a>            min_password_length: <span class="number">12</span>,
+<a href=#735 id=735 data-nosnippet>735</a>            mfa_encryption_key: <span class="prelude-val">None</span>,
+<a href=#736 id=736 data-nosnippet>736</a>            opaque_session_key: <span class="prelude-val">None</span>,
+<a href=#737 id=737 data-nosnippet>737</a>            opaque_setup_key: <span class="prelude-val">None</span>,
+<a href=#738 id=738 data-nosnippet>738</a>            federation_encryption_key: <span class="prelude-val">None</span>,
+<a href=#739 id=739 data-nosnippet>739</a>            allow_missing_aud_as_user: <span class="bool-val">true</span>,
+<a href=#740 id=740 data-nosnippet>740</a>            cookie_secure: <span class="bool-val">true</span>,
+<a href=#741 id=741 data-nosnippet>741</a>            mfa_challenge_lifetime_secs: <span class="number">300</span>,
+<a href=#742 id=742 data-nosnippet>742</a>            totp_issuer: <span class="string">"AXIAM"</span>.into(),
+<a href=#743 id=743 data-nosnippet>743</a>            max_failed_login_attempts: <span class="number">5</span>,
+<a href=#744 id=744 data-nosnippet>744</a>            lockout_duration_secs: <span class="number">900</span>,
+<a href=#745 id=745 data-nosnippet>745</a>            lockout_backoff_multiplier: <span class="number">2.0</span>,
+<a href=#746 id=746 data-nosnippet>746</a>            max_lockout_duration_secs: <span class="number">3600</span>,
+<a href=#747 id=747 data-nosnippet>747</a>            email_verification_grace_period_hours: <span class="number">24</span>,
+<a href=#748 id=748 data-nosnippet>748</a>            password_reset_token_expiry_hours: <span class="number">1</span>,
+<a href=#749 id=749 data-nosnippet>749</a>            webauthn_rp_id: <span class="string">"localhost"</span>.into(),
+<a href=#750 id=750 data-nosnippet>750</a>            webauthn_rp_origin: <span class="string">"http://localhost:8090"</span>.into(),
+<a href=#751 id=751 data-nosnippet>751</a>            webauthn_rp_name: <span class="string">"AXIAM"</span>.into(),
+<a href=#752 id=752 data-nosnippet>752</a>            jwt_encoding_key: <span class="prelude-val">None</span>,
+<a href=#753 id=753 data-nosnippet>753</a>            jwt_decoding_key: <span class="prelude-val">None</span>,
+<a href=#754 id=754 data-nosnippet>754</a>            hibp_breaker_threshold: <span class="number">5</span>,
+<a href=#755 id=755 data-nosnippet>755</a>            hibp_breaker_cooldown_secs: <span class="number">30</span>,
+<a href=#756 id=756 data-nosnippet>756</a>            <span class="comment">// B1: 0 = auto → min(available_parallelism, 4) at construction.
+<a href=#757 id=757 data-nosnippet>757</a>            </span>max_concurrent_hashes: <span class="number">0</span>,
+<a href=#758 id=758 data-nosnippet>758</a>            hash_acquire_timeout_secs: <span class="number">5</span>,
+<a href=#759 id=759 data-nosnippet>759</a>            <span class="comment">// I6: opt-in. 0 = no session-validation cache (today's behaviour).
+<a href=#760 id=760 data-nosnippet>760</a>            </span>session_validation_cache_ttl_secs: <span class="number">0</span>,
+<a href=#761 id=761 data-nosnippet>761</a>        }
+<a href=#762 id=762 data-nosnippet>762</a>    }
+<a href=#763 id=763 data-nosnippet>763</a>}
+<a href=#764 id=764 data-nosnippet>764</a>
+<a href=#765 id=765 data-nosnippet>765</a><span class="attr">#[cfg(test)]
+<a href=#766 id=766 data-nosnippet>766</a></span><span class="kw">mod </span>default_tenant_tests {
+<a href=#767 id=767 data-nosnippet>767</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#768 id=768 data-nosnippet>768</a>
+<a href=#769 id=769 data-nosnippet>769</a>    <span class="kw">fn </span>config_with(value: <span class="kw-2">&amp;</span>str) -&gt; AuthConfig {
+<a href=#770 id=770 data-nosnippet>770</a>        AuthConfig {
+<a href=#771 id=771 data-nosnippet>771</a>            oauth2_default_tenant_id: value.to_owned(),
+<a href=#772 id=772 data-nosnippet>772</a>            ..AuthConfig::default()
+<a href=#773 id=773 data-nosnippet>773</a>        }
+<a href=#774 id=774 data-nosnippet>774</a>    }
+<a href=#775 id=775 data-nosnippet>775</a>
+<a href=#776 id=776 data-nosnippet>776</a>    <span class="doccomment">/// Unset, whitespace-only and valid all mean "nothing to say". A warning
+<a href=#777 id=777 data-nosnippet>777</a>    /// in any of these is a warning an operator learns to scroll past.
+<a href=#778 id=778 data-nosnippet>778</a>    </span><span class="attr">#[test]
+<a href=#779 id=779 data-nosnippet>779</a>    </span><span class="kw">fn </span>a_valid_or_absent_default_tenant_says_nothing() {
+<a href=#780 id=780 data-nosnippet>780</a>        <span class="kw">for </span>quiet <span class="kw">in </span>[
+<a href=#781 id=781 data-nosnippet>781</a>            <span class="string">""</span>,
+<a href=#782 id=782 data-nosnippet>782</a>            <span class="string">"   "</span>,
+<a href=#783 id=783 data-nosnippet>783</a>            <span class="string">"\n"</span>,
+<a href=#784 id=784 data-nosnippet>784</a>            <span class="string">"6f3e0a5c-1b2d-4e8f-9a7b-0c1d2e3f4a5b"</span>,
+<a href=#785 id=785 data-nosnippet>785</a>            <span class="string">"  6f3e0a5c-1b2d-4e8f-9a7b-0c1d2e3f4a5b  "</span>,
+<a href=#786 id=786 data-nosnippet>786</a>        ] {
+<a href=#787 id=787 data-nosnippet>787</a>            <span class="macro">assert_eq!</span>(
+<a href=#788 id=788 data-nosnippet>788</a>                config_with(quiet).default_tenant_id_diagnostic(),
+<a href=#789 id=789 data-nosnippet>789</a>                <span class="prelude-val">None</span>,
+<a href=#790 id=790 data-nosnippet>790</a>                <span class="string">"{quiet:?} must produce no diagnostic"
+<a href=#791 id=791 data-nosnippet>791</a>            </span>);
+<a href=#792 id=792 data-nosnippet>792</a>        }
+<a href=#793 id=793 data-nosnippet>793</a>    }
+<a href=#794 id=794 data-nosnippet>794</a>
+<a href=#795 id=795 data-nosnippet>795</a>    <span class="doccomment">/// A value that is set and unusable is exactly the case the operator
+<a href=#796 id=796 data-nosnippet>796</a>    /// never heard about.
+<a href=#797 id=797 data-nosnippet>797</a>    </span><span class="attr">#[test]
+<a href=#798 id=798 data-nosnippet>798</a>    </span><span class="kw">fn </span>an_unparseable_default_tenant_is_reported() {
+<a href=#799 id=799 data-nosnippet>799</a>        <span class="kw">let </span>problem = config_with(<span class="string">"not-a-uuid"</span>)
+<a href=#800 id=800 data-nosnippet>800</a>            .default_tenant_id_diagnostic()
+<a href=#801 id=801 data-nosnippet>801</a>            .expect(<span class="string">"an unparseable value must be reported"</span>);
+<a href=#802 id=802 data-nosnippet>802</a>        <span class="macro">assert_eq!</span>(problem.length, <span class="number">10</span>);
+<a href=#803 id=803 data-nosnippet>803</a>        <span class="macro">assert_eq!</span>(problem.shape, <span class="string">"contains characters a UUID cannot"</span>);
+<a href=#804 id=804 data-nosnippet>804</a>    }
+<a href=#805 id=805 data-nosnippet>805</a>
+<a href=#806 id=806 data-nosnippet>806</a>    <span class="doccomment">/// A truncated paste is the commonest way to get here, and it is worth
+<a href=#807 id=807 data-nosnippet>807</a>    /// distinguishing from a value that was never a UUID at all: the first is
+<a href=#808 id=808 data-nosnippet>808</a>    /// "you lost some characters", the second is "that is a different thing".
+<a href=#809 id=809 data-nosnippet>809</a>    </span><span class="attr">#[test]
+<a href=#810 id=810 data-nosnippet>810</a>    </span><span class="kw">fn </span>a_truncated_uuid_is_reported_as_the_right_shape() {
+<a href=#811 id=811 data-nosnippet>811</a>        <span class="kw">let </span>problem = config_with(<span class="string">"6f3e0a5c-1b2d-4e8f"</span>)
+<a href=#812 id=812 data-nosnippet>812</a>            .default_tenant_id_diagnostic()
+<a href=#813 id=813 data-nosnippet>813</a>            .expect(<span class="string">"a truncated UUID must be reported"</span>);
+<a href=#814 id=814 data-nosnippet>814</a>        <span class="macro">assert_eq!</span>(problem.length, <span class="number">18</span>);
+<a href=#815 id=815 data-nosnippet>815</a>        <span class="macro">assert_eq!</span>(problem.shape, <span class="string">"hexadecimal, but not a 36-character UUID"</span>);
+<a href=#816 id=816 data-nosnippet>816</a>    }
+<a href=#817 id=817 data-nosnippet>817</a>
+<a href=#818 id=818 data-nosnippet>818</a>    <span class="doccomment">/// The rendered line carries the length and the class, and **no substring
+<a href=#819 id=819 data-nosnippet>819</a>    /// of the value**. The check is deliberately crude — every three-character
+<a href=#820 id=820 data-nosnippet>820</a>    /// window of the value — because the failure mode is somebody adding the
+<a href=#821 id=821 data-nosnippet>821</a>    /// value to the message to make it easier to debug.
+<a href=#822 id=822 data-nosnippet>822</a>    </span><span class="attr">#[test]
+<a href=#823 id=823 data-nosnippet>823</a>    </span><span class="kw">fn </span>the_rendered_diagnostic_never_echoes_the_value() {
+<a href=#824 id=824 data-nosnippet>824</a>        <span class="kw">let </span>value = <span class="string">"tenant-acme-production"</span>;
+<a href=#825 id=825 data-nosnippet>825</a>        <span class="kw">let </span>rendered = config_with(value)
+<a href=#826 id=826 data-nosnippet>826</a>            .default_tenant_id_diagnostic()
+<a href=#827 id=827 data-nosnippet>827</a>            .unwrap()
+<a href=#828 id=828 data-nosnippet>828</a>            .to_string();
+<a href=#829 id=829 data-nosnippet>829</a>        <span class="kw">for </span>window <span class="kw">in </span>value
+<a href=#830 id=830 data-nosnippet>830</a>            .as_bytes()
+<a href=#831 id=831 data-nosnippet>831</a>            .windows(<span class="number">3</span>)
+<a href=#832 id=832 data-nosnippet>832</a>            .map(|w| std::str::from_utf8(w).unwrap())
+<a href=#833 id=833 data-nosnippet>833</a>        {
+<a href=#834 id=834 data-nosnippet>834</a>            <span class="macro">assert!</span>(
+<a href=#835 id=835 data-nosnippet>835</a>                !rendered.contains(window),
+<a href=#836 id=836 data-nosnippet>836</a>                <span class="string">"the diagnostic must not echo any part of the value; \
+<a href=#837 id=837 data-nosnippet>837</a>                 found {window:?} in {rendered:?}"
+<a href=#838 id=838 data-nosnippet>838</a>            </span>);
+<a href=#839 id=839 data-nosnippet>839</a>        }
+<a href=#840 id=840 data-nosnippet>840</a>        <span class="macro">assert!</span>(rendered.contains(<span class="string">"22 characters"</span>));
+<a href=#841 id=841 data-nosnippet>841</a>    }
+<a href=#842 id=842 data-nosnippet>842</a>
+<a href=#843 id=843 data-nosnippet>843</a>    <span class="doccomment">/// **I4 twin, and the proof this item changed nothing.** The accessor the
+<a href=#844 id=844 data-nosnippet>844</a>    /// discovery builder actually reads answers `None` for an unparseable
+<a href=#845 id=845 data-nosnippet>845</a>    /// value exactly as it did before the diagnostic existed — so the document
+<a href=#846 id=846 data-nosnippet>846</a>    /// a misconfigured deployment serves is the document an unconfigured one
+<a href=#847 id=847 data-nosnippet>847</a>    /// serves, which is what `oidc.rs::a_document_that_names_no_tenant_carries_no_query_string`
+<a href=#848 id=848 data-nosnippet>848</a>    /// pins on the other side.
+<a href=#849 id=849 data-nosnippet>849</a>    </span><span class="attr">#[test]
+<a href=#850 id=850 data-nosnippet>850</a>    </span><span class="kw">fn </span>an_unparseable_default_tenant_is_still_treated_as_unset() {
+<a href=#851 id=851 data-nosnippet>851</a>        <span class="macro">assert_eq!</span>(config_with(<span class="string">"not-a-uuid"</span>).default_tenant_id(), <span class="prelude-val">None</span>);
+<a href=#852 id=852 data-nosnippet>852</a>        <span class="macro">assert_eq!</span>(config_with(<span class="string">""</span>).default_tenant_id(), <span class="prelude-val">None</span>);
+<a href=#853 id=853 data-nosnippet>853</a>        <span class="macro">assert_eq!</span>(
+<a href=#854 id=854 data-nosnippet>854</a>            config_with(<span class="string">"not-a-uuid"</span>).default_tenant_id(),
+<a href=#855 id=855 data-nosnippet>855</a>            config_with(<span class="string">""</span>).default_tenant_id(),
+<a href=#856 id=856 data-nosnippet>856</a>            <span class="string">"a bad value and no value must be indistinguishable to the builder"
+<a href=#857 id=857 data-nosnippet>857</a>        </span>);
+<a href=#858 id=858 data-nosnippet>858</a>    }
+<a href=#859 id=859 data-nosnippet>859</a>
+<a href=#860 id=860 data-nosnippet>860</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#861 id=861 data-nosnippet>861</a>    // T21.6 — per-tenant path issuers
+<a href=#862 id=862 data-nosnippet>862</a>    // -----------------------------------------------------------------------
+<a href=#863 id=863 data-nosnippet>863</a>
+<a href=#864 id=864 data-nosnippet>864</a>    </span><span class="kw">fn </span>issuer_config(tenant_issuer_paths: bool) -&gt; AuthConfig {
+<a href=#865 id=865 data-nosnippet>865</a>        AuthConfig {
+<a href=#866 id=866 data-nosnippet>866</a>            oauth2_issuer_url: <span class="string">"https://id.example.com"</span>.into(),
+<a href=#867 id=867 data-nosnippet>867</a>            jwt_issuer: <span class="string">"axiam"</span>.into(),
+<a href=#868 id=868 data-nosnippet>868</a>            tenant_issuer_paths,
+<a href=#869 id=869 data-nosnippet>869</a>            ..AuthConfig::default()
+<a href=#870 id=870 data-nosnippet>870</a>        }
+<a href=#871 id=871 data-nosnippet>871</a>    }
+<a href=#872 id=872 data-nosnippet>872</a>
+<a href=#873 id=873 data-nosnippet>873</a>    <span class="kw">const </span>TENANT: <span class="kw-2">&amp;</span>str = <span class="string">"11111111-2222-3333-4444-555555555555"</span>;
+<a href=#874 id=874 data-nosnippet>874</a>
+<a href=#875 id=875 data-nosnippet>875</a>    <span class="doccomment">/// The flag's off-state is the whole of I1 for this feature: no tenant
+<a href=#876 id=876 data-nosnippet>876</a>    /// issuer can be built, none is accepted, and the accepted set is exactly
+<a href=#877 id=877 data-nosnippet>877</a>    /// the one string `jsonwebtoken`'s pinned check accepted before T21.6.
+<a href=#878 id=878 data-nosnippet>878</a>    </span><span class="attr">#[test]
+<a href=#879 id=879 data-nosnippet>879</a>    </span><span class="kw">fn </span>with_the_flag_off_no_tenant_issuer_exists_and_none_is_accepted() {
+<a href=#880 id=880 data-nosnippet>880</a>        <span class="kw">let </span>c = issuer_config(<span class="bool-val">false</span>);
+<a href=#881 id=881 data-nosnippet>881</a>        <span class="kw">let </span>tenant = uuid::Uuid::parse_str(TENANT).unwrap();
+<a href=#882 id=882 data-nosnippet>882</a>        <span class="macro">assert_eq!</span>(c.tenant_issuer(tenant), <span class="prelude-val">None</span>);
+<a href=#883 id=883 data-nosnippet>883</a>        <span class="macro">assert_eq!</span>(c.for_tenant_path(tenant).map(|<span class="kw">_</span>| ()), <span class="prelude-val">None</span>);
+<a href=#884 id=884 data-nosnippet>884</a>        <span class="macro">assert_eq!</span>(
+<a href=#885 id=885 data-nosnippet>885</a>            c.tenant_of_issuer(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"https://id.example.com/t/{TENANT}"</span>)),
+<a href=#886 id=886 data-nosnippet>886</a>            <span class="prelude-val">None
+<a href=#887 id=887 data-nosnippet>887</a>        </span>);
+<a href=#888 id=888 data-nosnippet>888</a>        <span class="macro">assert!</span>(c.accepts_issuer(<span class="string">"https://id.example.com"</span>));
+<a href=#889 id=889 data-nosnippet>889</a>        <span class="macro">assert!</span>(!c.accepts_issuer(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"https://id.example.com/t/{TENANT}"</span>)));
+<a href=#890 id=890 data-nosnippet>890</a>        <span class="macro">assert_eq!</span>(c.effective_issuer(), c.root_issuer());
+<a href=#891 id=891 data-nosnippet>891</a>    }
+<a href=#892 id=892 data-nosnippet>892</a>
+<a href=#893 id=893 data-nosnippet>893</a>    <span class="attr">#[test]
+<a href=#894 id=894 data-nosnippet>894</a>    </span><span class="kw">fn </span>a_tenant_issuer_is_the_root_plus_the_derived_path() {
+<a href=#895 id=895 data-nosnippet>895</a>        <span class="kw">let </span>c = issuer_config(<span class="bool-val">true</span>);
+<a href=#896 id=896 data-nosnippet>896</a>        <span class="kw">let </span>tenant = uuid::Uuid::parse_str(TENANT).unwrap();
+<a href=#897 id=897 data-nosnippet>897</a>        <span class="macro">assert_eq!</span>(
+<a href=#898 id=898 data-nosnippet>898</a>            c.tenant_issuer(tenant).unwrap(),
+<a href=#899 id=899 data-nosnippet>899</a>            <span class="macro">format!</span>(<span class="string">"https://id.example.com/t/{TENANT}"</span>)
+<a href=#900 id=900 data-nosnippet>900</a>        );
+<a href=#901 id=901 data-nosnippet>901</a>        <span class="kw">let </span>scoped = c.for_tenant_path(tenant).unwrap();
+<a href=#902 id=902 data-nosnippet>902</a>        <span class="macro">assert_eq!</span>(
+<a href=#903 id=903 data-nosnippet>903</a>            scoped.effective_issuer(),
+<a href=#904 id=904 data-nosnippet>904</a>            <span class="macro">format!</span>(<span class="string">"https://id.example.com/t/{TENANT}"</span>)
+<a href=#905 id=905 data-nosnippet>905</a>        );
+<a href=#906 id=906 data-nosnippet>906</a>        <span class="comment">// The deployment's own issuer is unmoved, and every VALIDATION decision
+<a href=#907 id=907 data-nosnippet>907</a>        // reads it — a request cannot narrow or widen what counts as valid by
+<a href=#908 id=908 data-nosnippet>908</a>        // choosing a path.
+<a href=#909 id=909 data-nosnippet>909</a>        </span><span class="macro">assert_eq!</span>(scoped.root_issuer(), <span class="string">"https://id.example.com"</span>);
+<a href=#910 id=910 data-nosnippet>910</a>    }
+<a href=#911 id=911 data-nosnippet>911</a>
+<a href=#912 id=912 data-nosnippet>912</a>    <span class="doccomment">/// The widening is a set of two shapes and no more. Each of these is a way
+<a href=#913 id=913 data-nosnippet>913</a>    /// a looser comparison — a prefix match, a trailing-slash tolerance, a
+<a href=#914 id=914 data-nosnippet>914</a>    /// normalising parse — would have admitted something it must not.
+<a href=#915 id=915 data-nosnippet>915</a>    </span><span class="attr">#[test]
+<a href=#916 id=916 data-nosnippet>916</a>    </span><span class="kw">fn </span>only_the_root_and_a_well_formed_tenant_issuer_are_accepted() {
+<a href=#917 id=917 data-nosnippet>917</a>        <span class="kw">let </span>c = issuer_config(<span class="bool-val">true</span>);
+<a href=#918 id=918 data-nosnippet>918</a>        <span class="macro">assert!</span>(c.accepts_issuer(<span class="string">"https://id.example.com"</span>));
+<a href=#919 id=919 data-nosnippet>919</a>        <span class="macro">assert!</span>(c.accepts_issuer(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"https://id.example.com/t/{TENANT}"</span>)));
+<a href=#920 id=920 data-nosnippet>920</a>
+<a href=#921 id=921 data-nosnippet>921</a>        <span class="kw">for </span>rejected <span class="kw">in </span>[
+<a href=#922 id=922 data-nosnippet>922</a>            <span class="comment">// A tenant segment that is not a UUID.
+<a href=#923 id=923 data-nosnippet>923</a>            </span><span class="string">"https://id.example.com/t/admin"</span>,
+<a href=#924 id=924 data-nosnippet>924</a>            <span class="string">"https://id.example.com/t/.."</span>,
+<a href=#925 id=925 data-nosnippet>925</a>            <span class="string">"https://id.example.com/t/"</span>,
+<a href=#926 id=926 data-nosnippet>926</a>            <span class="string">"https://id.example.com/t"</span>,
+<a href=#927 id=927 data-nosnippet>927</a>            <span class="comment">// Anything AFTER the tenant segment.
+<a href=#928 id=928 data-nosnippet>928</a>            </span><span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"https://id.example.com/t/{TENANT}/extra"</span>),
+<a href=#929 id=929 data-nosnippet>929</a>            <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"https://id.example.com/t/{TENANT}/"</span>),
+<a href=#930 id=930 data-nosnippet>930</a>            <span class="comment">// A trailing slash on the root, which OIDC Core §2 makes a
+<a href=#931 id=931 data-nosnippet>931</a>            // different identifier.
+<a href=#932 id=932 data-nosnippet>932</a>            </span><span class="string">"https://id.example.com/"</span>,
+<a href=#933 id=933 data-nosnippet>933</a>            <span class="comment">// Another host that merely starts the same way.
+<a href=#934 id=934 data-nosnippet>934</a>            </span><span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"https://id.example.com.evil.test/t/{TENANT}"</span>),
+<a href=#935 id=935 data-nosnippet>935</a>            <span class="string">"https://evil.test"</span>,
+<a href=#936 id=936 data-nosnippet>936</a>            <span class="comment">// The right shape at the wrong scheme.
+<a href=#937 id=937 data-nosnippet>937</a>            </span><span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"http://id.example.com/t/{TENANT}"</span>),
+<a href=#938 id=938 data-nosnippet>938</a>        ] {
+<a href=#939 id=939 data-nosnippet>939</a>            <span class="macro">assert!</span>(
+<a href=#940 id=940 data-nosnippet>940</a>                !c.accepts_issuer(rejected),
+<a href=#941 id=941 data-nosnippet>941</a>                <span class="string">"{rejected} must not be accepted as an issuer"
+<a href=#942 id=942 data-nosnippet>942</a>            </span>);
+<a href=#943 id=943 data-nosnippet>943</a>        }
+<a href=#944 id=944 data-nosnippet>944</a>    }
+<a href=#945 id=945 data-nosnippet>945</a>
+<a href=#946 id=946 data-nosnippet>946</a>    <span class="attr">#[test]
+<a href=#947 id=947 data-nosnippet>947</a>    </span><span class="kw">fn </span>the_tenant_of_an_issuer_is_only_read_from_the_tenant_form() {
+<a href=#948 id=948 data-nosnippet>948</a>        <span class="kw">let </span>c = issuer_config(<span class="bool-val">true</span>);
+<a href=#949 id=949 data-nosnippet>949</a>        <span class="macro">assert_eq!</span>(
+<a href=#950 id=950 data-nosnippet>950</a>            c.tenant_of_issuer(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"https://id.example.com/t/{TENANT}"</span>)),
+<a href=#951 id=951 data-nosnippet>951</a>            <span class="prelude-val">Some</span>(uuid::Uuid::parse_str(TENANT).unwrap())
+<a href=#952 id=952 data-nosnippet>952</a>        );
+<a href=#953 id=953 data-nosnippet>953</a>        <span class="comment">// The root issuer names no tenant — which is the reason the path form
+<a href=#954 id=954 data-nosnippet>954</a>        // exists, so answering `Some` here would be answering the wrong
+<a href=#955 id=955 data-nosnippet>955</a>        // question.
+<a href=#956 id=956 data-nosnippet>956</a>        </span><span class="macro">assert_eq!</span>(c.tenant_of_issuer(<span class="string">"https://id.example.com"</span>), <span class="prelude-val">None</span>);
+<a href=#957 id=957 data-nosnippet>957</a>        <span class="macro">assert_eq!</span>(c.tenant_of_issuer(<span class="string">"https://id.example.com/t/nope"</span>), <span class="prelude-val">None</span>);
+<a href=#958 id=958 data-nosnippet>958</a>    }
+<a href=#959 id=959 data-nosnippet>959</a>}
 </code></pre></div></section></main></body></html>

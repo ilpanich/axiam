@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Delete externally registered clients that have gone unseen for longer than their tenant’s `dcr_unused_client_ttl_days` (T21.4, widened to `cimd` by T21.8 / MCP-04)."><title>sweep_unused_external_clients in axiam_server::cleanup - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_server" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">sweep_unused_external_clients</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_server/index.html">axiam_<wbr>server</a><span class="version">1.0.0-beta16</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">sweep_<wbr>unused_<wbr>external_<wbr>clients</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-it-will-not-touch" title="What it will not touch">What it will not touch</a></li><li><a href="#why-cimd-is-swept-now-when-t214-argued-it-should-not-be" title="Why `cimd` is swept now, when T21.4 argued it should not be">Why <code>cimd</code> is swept now, when T21.4 argued it should not be</a></li><li><a href="#per-tenant-ttl-resolved-per-row" title="Per-tenant TTL, resolved per row">Per-tenant TTL, resolved per row</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In axiam_<wbr>server::<wbr>cleanup</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_server</a>::<wbr><a href="index.html">cleanup</a></div><h1>Function <span class="fn">sweep_<wbr>unused_<wbr>external_<wbr>clients</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_server/cleanup.rs.html#352-445">Source</a> </span></div><pre class="rust item-decl"><code>pub async fn sweep_unused_external_clients&lt;CR, TR, SR&gt;(
+    client_repo: <a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.reference.html">&amp;CR</a>,
+    tenant_repo: <a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.reference.html">&amp;TR</a>,
+    settings_repo: <a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.reference.html">&amp;SR</a>,
+    managed_by: <a class="enum" href="../../axiam_core/models/oauth2_client/enum.ManagedBy.html" title="enum axiam_core::models::oauth2_client::ManagedBy">ManagedBy</a>,
+    now: <a class="struct" href="https://docs.rs/chrono/latest/chrono/datetime/struct.DateTime.html" title="struct chrono::datetime::DateTime">DateTime</a>&lt;<a class="struct" href="https://docs.rs/chrono/latest/chrono/offset/utc/struct.Utc.html" title="struct chrono::offset::utc::Utc">Utc</a>&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.98.1/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.98.1/std/primitive.u64.html">u64</a>, <a class="enum" href="../../axiam_core/error/enum.AxiamError.html" title="enum axiam_core::error::AxiamError">AxiamError</a>&gt;<div class="where">where
+    CR: <a class="trait" href="../../axiam_core/repository/trait.OAuth2ClientRepository.html" title="trait axiam_core::repository::OAuth2ClientRepository">OAuth2ClientRepository</a>,
+    TR: <a class="trait" href="../../axiam_core/repository/trait.TenantRepository.html" title="trait axiam_core::repository::TenantRepository">TenantRepository</a>,
+    SR: <a class="trait" href="../../axiam_core/repository/trait.SettingsRepository.html" title="trait axiam_core::repository::SettingsRepository">SettingsRepository</a>,</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Delete externally registered clients that have gone unseen for longer than
+their tenant’s <code>dcr_unused_client_ttl_days</code> (T21.4, widened to <code>cimd</code> by
+T21.8 / MCP-04).</p>
+<p>One <code>managed_by</code> per call, so <code>/health/jobs</code> can distinguish the two
+sweeps: they delete different things for different reasons and an operator
+debugging one should not have to read the other’s counter.</p>
+<h2 id="what-it-will-not-touch"><a class="doc-anchor" href="#what-it-will-not-touch">§</a>What it will not touch</h2>
+<p>Never <code>admin</code>. An administrator’s client is never swept, however long it
+sits unused, because somebody decided it should exist and nothing here is
+entitled to reverse that. The repository query filters on the value rather
+than on “not admin”, so a fourth provenance added later is opted <strong>in</strong> by
+somebody writing it down.</p>
+<h2 id="why-cimd-is-swept-now-when-t214-argued-it-should-not-be"><a class="doc-anchor" href="#why-cimd-is-swept-now-when-t214-argued-it-should-not-be">§</a>Why <code>cimd</code> is swept now, when T21.4 argued it should not be</h2>
+<p>T21.4’s reasoning, which this function used to carry: a CIMD shadow row is
+a cache of a document the client publishes, so deleting it would be
+re-materialised on the next request and the TTL would mean nothing.</p>
+<p>That is right about TTL semantics and says nothing about storage, which is
+what MCP-04 is about: a cache that is never evicted is not a cache. An
+inert row is still a row — listed on the OAuth2 clients page, counted in
+every <code>list_all_by_managed_by</code> this function runs, and a permanent write a
+stranger made at the cost of one unauthenticated request. And eviction on
+last-seen is <em>consistent</em> with the old argument rather than against it: a
+row deleted while its document is still published is re-materialised on the
+next request, which is exactly what a cache should do. What it must not do
+is delete a row that is still in use, which is what
+<a href="fn.cimd_client_last_seen.html" title="fn axiam_server::cleanup::cimd_client_last_seen"><code>cimd_client_last_seen</code></a> is for — every resolve moves <code>updated_at</code>, so a
+document presented once a day is never due under a 30-day TTL.</p>
+<h2 id="per-tenant-ttl-resolved-per-row"><a class="doc-anchor" href="#per-tenant-ttl-resolved-per-row">§</a>Per-tenant TTL, resolved per row</h2>
+<p>The window is a tenant setting, so each row’s tenant is resolved and its
+effective settings read. Deployment-wide sweeps elsewhere in this file
+(audit retention) deliberately do <strong>not</strong> work this way, and the difference
+is who owns the decision: audit retention is a property of the datastore an
+operator is responsible for, where this is a property of the tenant’s
+relationship with the clients it lets register.</p>
+<p>The settings read is cached per tenant for the duration of one sweep —
+<code>dcr_max_clients</code> bounds the rows per tenant, so a hundred clients in one
+tenant is one read rather than a hundred.</p>
+<p>A tenant whose settings cannot be read is skipped: the fail-closed
+direction for a sweep that <strong>deletes</strong> is to delete nothing.</p>
+</div></details></section></div></main></body></html>

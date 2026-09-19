@@ -279,5 +279,13 @@ benchmarks that consume each SDK from its published package. See
 [`benchmarks/docs/methodology.md`](benchmarks/docs/methodology.md).
 
 ## License
-
 Apache License v2.0
+
+
+## Support the project
+Since I work as developer and manager during the day, I will develop this project during the night and weekends, once I have time.
+If you want to support the project bringing me a coffee to keep me awake and coding, you can do it by clicking the link below:
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/ilpanich)
+
+Thank you for your support!

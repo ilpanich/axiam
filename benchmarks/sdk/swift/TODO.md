@@ -14,9 +14,12 @@ product `AxiamSDK`). It times the four canonical CONTRACT.md §1 ops (`login`, `
   `.package(url: "https://github.com/ilpanich/axiam-swift-sdk.git", from: "1.0.0-beta12")`.
 - `Sources/axiam-bench/main.swift` is the entrypoint (executable target `axiam-bench`, run
   with `swift run -c release axiam-bench`).
-- `run.sh` builds in release config and `exec`s `swift run -c release axiam-bench`; it falls
-  back to `emit_pending swift` when the `swift` toolchain is missing OR the release build
-  fails (e.g. the sibling checkout isn't present).
+- `run.sh` builds in release config and `exec`s the built `axiam-bench` binary. If the default
+  build system (swift-build, the default since Swift 6.4) fails, it retries with
+  `--build-system native`. It falls back to `emit_pending swift` when the `swift` toolchain is
+  missing (note: "not installed") OR both builds fail (note: "build failed"; e.g. the sibling
+  checkout isn't present). The build log goes to stderr, which the dry run keeps in
+  `swift.dryrun.log`.
 
 ## mTLS / custom CA
 Swift is one of the SDKs that shipped a §6.1 client-certificate mTLS option

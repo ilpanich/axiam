@@ -18,7 +18,27 @@ cd "$HERE"
 # axiam-swift-sdk checkout is missing/unbuildable), emit a valid 'pending' record
 # (the collector still gets a well-formed row) instead of failing the whole run.
 command -v swift >/dev/null || { source "$HERE/../_pending.sh"; emit_pending swift; exit 0; }
-swift build -c release --product axiam-bench >/dev/null 2>&1 || {
-  source "$HERE/../_pending.sh"; emit_pending swift; exit 0;
-}
-exec swift run -c release axiam-bench
+
+# Build output goes to stderr (dry-run.sh keeps it in swift.dryrun.log); stdout
+# carries only the JSON record. It used to go to /dev/null, which made a failed
+# build indistinguishable from a missing toolchain.
+#
+# Swift 6.4 made swift-build the default backend, and on some Linux toolchain
+# layouts it fails before compiling anything: it parses the localized
+# `ld --version` text (a non-English locale prints e.g. "ld di GNU" and it then
+# probes ld64's `-version_details`), and it looks for helpers such as
+# swift-autolink-extract next to /usr/sbin instead of in the toolchain. The
+# legacy native build system is still supported, so retry with it.
+build_flags=(-c release)
+if ! swift build "${build_flags[@]}" --product axiam-bench >&2; then
+  echo "[swift bench] default build system failed; retrying with --build-system native" >&2
+  build_flags+=(--build-system native)
+  swift build "${build_flags[@]}" --product axiam-bench >&2 || {
+    source "$HERE/../_pending.sh"
+    emit_pending swift "swift release build failed (toolchain present) — the build log is on stderr, kept in swift.dryrun.log by the dry run."
+    exit 0
+  }
+fi
+# Run the binary just built rather than `swift run`, which would rebuild with
+# the default build system and hit the same failure.
+exec "$(swift build "${build_flags[@]}" --show-bin-path)/axiam-bench"

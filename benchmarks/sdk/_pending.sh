@@ -4,6 +4,10 @@
 # has no bench glue wired up yet. Sourced or called as: _pending.sh <sdk-name>
 emit_pending() {
   local sdk="${1:?sdk name}"
+  # Optional reason. The default only fits a missing toolchain; a caller whose
+  # build FAILED must say so, or a broken build reads as "not installed".
+  # Plain text only — it is interpolated into JSON unescaped.
+  local reason="${2:-$sdk bench is wired but its toolchain/SDK package is not installed here — see sdk/$sdk/TODO.md to run it.}"
   # Every SDK is released; report its real version even in the pending fallback
   # (this path is now only hit when a package/tooling isn't installed locally).
   #
@@ -40,7 +44,7 @@ emit_pending() {
   },
   "client_cpu_ms_total": 0,
   "client_rss_mib_peak": 0,
-  "notes": "$sdk bench is wired but its toolchain/SDK package is not installed here — see sdk/$sdk/TODO.md to run it."
+  "notes": "$reason"
 }
 EOF
 }

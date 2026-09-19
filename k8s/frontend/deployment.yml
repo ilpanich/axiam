@@ -32,7 +32,7 @@ spec:
           # K8S-F7: `OWNER` is a placeholder — see the note in
           # k8s/server/deployment.yml. Upstream is
           # `ghcr.io/ilpanich/axiam/frontend`.
-          image: ghcr.io/OWNER/frontend:1.0.0-beta15
+          image: ghcr.io/OWNER/frontend:1.0.0-beta16
           ports:
             - name: http
               containerPort: 8080

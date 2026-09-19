@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta16] - 2026-09-19
+
 ### Added
+
+- Admin UI for the CIMD posture, and the DCR baseline
+
+- Resolve a URL-shaped client_id from its metadata document (T21.5)
+
+- Per-tenant path issuers, opt-in (T21.6)
+
+- RFC 7591 dynamic client registration (T21.4)
+
+- RFC 8707 resource indicators, end to end (T21.3)
+
+- Admin UI for public OAuth2 clients (T21.2)
+
+- Public clients (`none`) and RFC 8252 loopback redirects (T21.2)
+
+- Serve RFC 8414 discovery alongside OIDC discovery (T21.1)
+
+- OpenTofu stages for the Raspberry Pi 5 k3s deployment
+
+- Host scripts for the Raspberry Pi 5 k3s deployment
+
+- A kustomize overlay for one Raspberry Pi 5 on single-node k3s
+
+- Put TLS on the backend leg, and make the ingress verify it
+
+- Ship the cert-manager examples the manifests already require
 
 - **Admin UI for client ID metadata documents, and for the DCR baseline
   (#477).** The CIMD posture — nine fields, every one a security control by the
@@ -283,6 +311,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Re-pin to surrealkv 0.21.4 and record the re-measurement
+
+- Track Package.resolved, as go.sum is tracked for the Go bench
+
+- Record the 2026-09-13/14 quick-task plans and summaries
+
+- Add the 2026-09-13 and 2026-09-14 sweep reports
+
+- Cache client managed_by on the authorize path
+
+- 2026-09-18 sweep — 165 modules, 0 FAILED, with REVIEW evidence
+
+- Follow the Go SDK main onto jwx v3.3.0
+
+- Measure the T21 MCP-authorization surface — discovery and PKCE redemption
+
+- Drop the rkyv suppression the dependency update made stale
+
+- Updated dependencies
+
+- Record the CIMD surface in the matrix, and what it taught
+
+- Extract the DCR card into its own module
+
+- Revalidate the CIMD admin UI plan against main @ 320ef53
+
+- Plan the CIMD admin UI, and the org-settings save that erases it
+
+- Close T-272, T-275 and T-276 in the records
+
+- Pin MCP-06's refusal, and close T-280 in the records
+
+- Decide and plan the four T21.8 findings (#469–#472)
+
+- Bump the migration tripwire to v65, and hold it to v64's standard
+
+- Record the dcr handler's admin surfaces (T21.4)
+
+- Document AXIAM__RATE_LIMIT__DCR_PER_MIN (T21.4)
+
+- Phase 21 executed — status, commits, and what the plan got wrong
+
+- Correct §28.10/§28.11 R-2's count of unrecorded posture rows
+
+- Discharge the I1 conformance condition, and link the filed findings
+
+- Rustfmt the T21.8 harness and the resource guard
+
+- The MCP security review, and nine STRIDE entries for it (T21.8)
+
+- §28 cross-SDK conformance review, contract 1.49 (T21.9 T9d)
+
+- The adversarial half of the T21.8 harness
+
+- The MCP client sequence end to end, in both issuer modes (T21.8)
+
+- Fronting an MCP server with AXIAM, and the b7-mcp-server example
+
+- Client ID metadata documents — operator page, spec, contract (T21.5)
+
+- Add admin UI for dynamic client registration (T21.4b)
+
+- Bring the orchestrator's amendments onto the accumulation branch
+
+- §28 MCP resource-server helpers, contract 1.48 (T21.9)
+
+- Generate the public-client fixture's password (CodeQL)
+
+- Re-derive management-registry.json after the spec regeneration
+
+- Regenerate sdks/openapi.json for the RFC 8414 discovery alias
+
+- MCP plan — definition of done, SDK fan-out (T21.9), kick-off prompt
+
+- AXIAM as an MCP authorization server — phase 21 plan
+
+- Mark the Pi 5 k3s/OpenTofu plan EXECUTED, and close two verification gaps
+
+- The operator guide for AXIAM on a Pi 5 with k3s
+
+- Name the mandatory runtime settings in the base ConfigMap
+
+- K3s + OpenTofu variant of the Raspberry Pi 5 deployment
+
+- Record the beta15 website pass as EXECUTED
+
+- Sweep every stamped page, move DOCS_VERIFIED_RELEASE to beta15
+
+- Announce 1.0.0-beta15, and extend phase 20 (wave 3)
+
+- Bring the Docs pages up to 1.0.0-beta15 (wave 2)
+
+- The Security section at 1.0.0-beta15 — model 2.16.0
+
 - **Token exchange reads `allowed_resources` for its `audience`/`resource`
   target, and the redirect-URI allow-list is deprecated (SEC-089).** A target is
   accepted if it is one of AXIAM's built-in audiences, appears in
@@ -302,6 +424,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than producing issuers no client can resolve (T21.6).
 
 ### Fixed
+
+- Mark the DCR initial access token Sensitive — contract 1.50
+
+- Carry the whole OIDC policy through an organization save
+
+- Reclaim a never-authorized registration in an hour (MCP-05)
+
+- Bound and reclaim CIMD shadow rows (MCP-04)
+
+- Refuse a wildcard trusted-publisher list for CIMD (MCP-03)
+
+- Accept http://[::1] as a redirect URI
+
+- Redirect an authorization error to a loopback client's port (MCP-01)
+
+- Let AXIAM reach the CIMD publisher from its container
+
+- SC2015 on the org-id guard, and drop a dead jq fallback
+
+- Raise the org baseline, and drop the port from a host pattern
+
+- Return run_erasure_pipeline's doc comment to its function
+
+- Reserve the axiam scheme against use as a resource (MCP-02)
+
+- Six stale struct initializers that stopped compiling before T21.5
+
+- Commit the regenerated spec the merge resolution actually produced
+
+- Compare PathItem via JSON in the discovery-alias unit test
+
+- Make the Vault StatefulSet admit under Pod Security `restricted`
+
+- Open the server -> Vault path, both halves
+
+- Give Vault a component label so commonLabels cannot collapse its selector
 
 - **`/oauth2/authorize` throughput regression since T21.4.** The
   external-consent gate read the client row a second time on every

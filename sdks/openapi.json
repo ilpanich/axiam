@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta16",
-    "x-axiam-spec-digest": "sha256:07b23e28b1bff547764197c5dbf75f5bc5c74516aca4b2d65646655c4aad0805"
+    "x-axiam-spec-digest": "sha256:e380d488f3c68918e68ab4983f0fc7e6275c52eea94e7d91f8eade3cc95b7c1e"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -895,7 +895,7 @@
         "operationId": "device_auth",
         "responses": {
           "200": {
-            "description": "Device authenticated",
+            "description": "Device authenticated. The access token is bound to the presented certificate (RFC 8705 `cnf.x5t#S256`) whenever AXIAM itself terminated the TLS handshake",
             "content": {
               "application/json": {
                 "schema": {
@@ -905,10 +905,7 @@
             }
           },
           "401": {
-            "description": "Invalid or missing certificate"
-          },
-          "403": {
-            "description": "Certificate not bound to a service account"
+            "description": "The certificate is missing, unknown, untrusted, expired, revoked, or bound to no service account. A certificate bound to no principal identifies nobody, so it is unauthenticated rather than forbidden; the body says which case it was"
           }
         }
       }

@@ -574,8 +574,14 @@ async fn device_auth_mints_service_account_sub_kind() {
     );
 }
 
+/// S-4 / DF-027: **401**, not 403.
+///
+/// This used to assert only `!= 200`, which passed either way and is why the
+/// status could be wrong for as long as it was. A certificate bound to no
+/// service account identifies nobody; 403 would assert an identity that was
+/// never established.
 #[actix_rt::test]
-async fn device_auth_unbound_cert_returns_error() {
+async fn device_auth_unbound_cert_returns_401() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
@@ -598,8 +604,77 @@ async fn device_auth_unbound_cert_returns_error() {
         .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
         .to_request();
     let resp = test::call_service(&app, req).await;
-    // Should fail because cert is not bound to a service account
-    assert_ne!(resp.status().as_u16(), 200);
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        status, 401,
+        "a certificate bound to no service account identifies nobody, so it is \
+         unauthenticated rather than forbidden: {body}"
+    );
+    // The two cases stay distinguishable in the body, which is what makes the
+    // shared status cost nothing: an operator still learns which it was.
+    assert!(
+        body.to_string().contains("not bound to a service account"),
+        "the body must still say which refusal this was: {body}"
+    );
+}
+
+/// The I4 twin of the change: the three arms that were **already** 401 still
+/// are, and still say which case they were. A status collapse that swallowed
+/// the distinction would pass `device_auth_unbound_cert_returns_401` and be
+/// wrong.
+#[actix_rt::test]
+async fn the_other_device_auth_refusals_are_still_401_and_still_distinct() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+
+    let anchor_id = generate_ca!(app, org_id, ca_token);
+    flag_trust_anchor(&db, org_id, &anchor_id).await;
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, anchor_id);
+    let (_cert_id, bound_for_nobody) = generate_device_cert!(app, ca_id, token);
+
+    // A well-formed certificate this deployment has never seen.
+    let (_, stranger_pem) = {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("key");
+        let mut params =
+            rcgen::CertificateParams::new(vec!["stranger".to_owned()]).expect("params");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "stranger");
+        let cert = params.self_signed(&key).expect("self-signed");
+        ((), cert.pem())
+    };
+
+    for (what, pem, expected_fragment) in [
+        (
+            "an unbound certificate",
+            bound_for_nobody,
+            "not bound to a service account",
+        ),
+        (
+            "a certificate AXIAM never issued",
+            stranger_pem,
+            "unknown client certificate",
+        ),
+    ] {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/auth/device")
+            .peer_addr(device_peer())
+            .insert_header(("X-Client-Certificate", urlencode(&pem).as_str()))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(status, 401, "{what} must be a 401: {body}");
+        assert!(
+            body.to_string().contains(expected_fragment),
+            "{what}: the body must name the case, expected {expected_fragment:?}, got {body}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

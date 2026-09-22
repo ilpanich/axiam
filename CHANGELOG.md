@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A certificate bound to no service account is a `401`, not a `403` (T22.4,
+  DF-027).** `POST /api/v1/auth/device` answered `403` for exactly one of its
+  refusals, and it reached that status by matching the **text** of an error
+  message raised in `axiam-pki`. Both halves were wrong. A `403` asserts an
+  identity and then refuses what it may do; a certificate bound to no principal
+  identifies nobody, which is what its three sibling refusals — unknown,
+  untrusted, self-asserted — already said with `401`. And a status that depends
+  on the wording of a message in a lower crate is a status nobody can change
+  safely: a reword in `axiam-pki` that never mentions HTTP would have moved it.
+
+  Nothing is newly disclosed. The counter-argument — that `403` hid "unknown
+  certificate" from "known but unbound" — does not survive the change: both are
+  `401` now, and the bodies were always distinct messages, which a new test
+  pins. Clients that mapped `403` on this endpoint to "bound, but not
+  permitted" should map `401` and read the body.
+
 ### Security
 
 - **Device tokens are bound to the certificate that obtained them (T22.3,

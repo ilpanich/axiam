@@ -860,9 +860,15 @@ pub async fn verify_mfa<C: Connection + Clone>(
     path = "/api/v1/auth/device",
     tag = "auth",
     responses(
-        (status = 200, description = "Device authenticated", body = DeviceAuthResponse),
-        (status = 401, description = "Invalid or missing certificate"),
-        (status = 403, description = "Certificate not bound to a service account"),
+        (status = 200, description = "Device authenticated. The access token is bound to \
+                                     the presented certificate (RFC 8705 `cnf.x5t#S256`) \
+                                     whenever AXIAM itself terminated the TLS handshake",
+         body = DeviceAuthResponse),
+        (status = 401, description = "The certificate is missing, unknown, untrusted, \
+                                      expired, revoked, or bound to no service account. \
+                                      A certificate bound to no principal identifies \
+                                      nobody, so it is unauthenticated rather than \
+                                      forbidden; the body says which case it was"),
     )
 )]
 pub async fn device_auth<C: Connection + Clone>(

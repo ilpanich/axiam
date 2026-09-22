@@ -272,15 +272,27 @@ impl CertificateAuthenticated {
             service.authenticate(&pem).await
         };
 
+        // Every refusal on this path is a **401** (S-4 / DF-027).
+        //
+        // There used to be one exception: a certificate bound to no service
+        // account was matched by the text of its error message and turned into
+        // `AuthorizationDenied`, a 403. Two things were wrong with it.
+        //
+        // A 403 asserts an identity and then refuses what it may do. A
+        // certificate bound to no principal identifies **nobody** — there is no
+        // subject to have permissions, and the correct answer to "who are you"
+        // is "unauthenticated", which is what its three siblings here already
+        // said. (The counter-argument, that 403 hides "unknown certificate"
+        // from "known but unbound", does not survive the change: both are 401
+        // now and the bodies were always distinct messages, so nothing is newly
+        // disclosed.)
+        //
+        // And it matched on a string. `axiam-pki` owns that message and could
+        // reword it in a refactor that never mentions HTTP; the status code
+        // would have moved with it, silently, in another crate. A status that
+        // depends on the wording of a message in a lower layer is a status
+        // nobody can change safely.
         let identity: DeviceIdentity = identity_result.map_err(|e| match &e {
-            // Map certificate/NotFound errors to proper 401/403 status codes
-            AxiamError::Certificate(msg) if msg.contains("not bound to a service account") => {
-                AxiamError::AuthorizationDenied {
-                    reason: msg.clone(),
-                    action: None,
-                    resource_id: None,
-                }
-            }
             AxiamError::Certificate(msg) => AxiamError::AuthenticationFailed {
                 reason: msg.clone(),
             },

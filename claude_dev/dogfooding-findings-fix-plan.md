@@ -618,6 +618,37 @@ migration, and it lasts one access-token lifetime.
 
 ### S-4 — an unbound certificate is a 401 (DF-027) — Sonnet 5
 
+> **EXECUTED — 2026-09-22, PR A, commit 5 of 5.**
+>
+> **Shipped exactly as specified.** The `AuthorizationDenied` arm and its string
+> match are gone; every `AxiamError::Certificate` on this path is now
+> `AuthenticationFailed` → 401, like its three siblings. The `#[utoipa::path]`
+> responses lose the 403 row, and `sdks/openapi.json` plus
+> `sdks/management-registry.json` are regenerated.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **The test the plan says to "flip" asserted nothing to flip.**
+>    `device_auth_unbound_cert_returns_error` asserted `!= 200`, which passed
+>    for 401 and 403 alike — which is why the status could be wrong for as long
+>    as it was. It is renamed `device_auth_unbound_cert_returns_401` and now
+>    asserts the status *and* that the body still names the case.
+> 2. **The I4 twin needed inventing.** A change that collapses one status into
+>    another can pass its own test by collapsing the distinction too, so
+>    `the_other_device_auth_refusals_are_still_401_and_still_distinct` walks an
+>    unbound certificate and a certificate AXIAM never issued through the same
+>    route and asserts both the shared 401 and the two different bodies. That is
+>    the assertion the plan's "nothing is newly disclosed" argument rests on,
+>    and it was worth writing down rather than asserting in prose.
+> 3. **The 200 description gained a sentence** about the `cnf` claim S-3 added,
+>    since the spec is regenerated here anyway and the response had changed
+>    shape one commit earlier without the description saying so.
+>
+> **Records.** No threat entry: this changes which status a refusal carries, not
+> whether it refuses, and no entry claimed the old one. CHANGELOG under
+> **Changed**, with the client-side migration stated. Roadmap T22.4.
+
+
 **The fix.** Delete the special-case arm at
 `crates/axiam-api-rest/src/extractors/cert_auth.rs:245-250` that turns
 `"not bound to a service account"` into `AuthorizationDenied`. Every

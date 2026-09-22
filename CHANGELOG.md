@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A signing CA now issues only for the tenant it signs for (T22.1, DF-017 /
+  DF-025).** `prepare_leaf_issuance` scoped the issuing CA to the
+  **organization** and never read `ca_certificate.tenant_id` — the column that
+  exists to say which tenant a signing CA signs for. Any principal holding
+  `certificates:generate` could therefore name any CA of the organization: a
+  sibling tenant's signing CA, or the organization anchor above them. The leaf
+  came back recorded under the caller's own tenant, with another tenant's
+  issuer, chaining to the root every relying party in the organization trusts;
+  the `axiam-domo-demo` dogfooding run rode one to a full MQTT session.
+
+  Both leaf paths — `POST /api/v1/certificates` and
+  `POST /api/v1/certificates/sign-csr` — now match the issuing CA against the
+  tenant being acted on, and answer **404** when it does not match, following
+  the cross-organization precedent: a CA the caller may not use is a CA the
+  caller cannot see. The check is made before the CA's status and validity
+  window are read, so the refusal cannot be used to learn that a CA exists, is
+  revoked, or has expired. An organization-level CA is additionally reachable
+  by a principal whose own record lives in the organization's reserved scope,
+  which is what leaves the intended path — the organization administrator
+  minting under the anchor — byte for byte as it was.
+
+  A tenant that was issuing leaves directly under the organization CA needs a
+  signing CA of its own before it can issue again. Certificates already issued
+  across the boundary are **not** revoked on upgrade: revocation is an
+  operator's act. `docs/pki/README.md` has the reach table and the upgrade
+  paragraph.
+
 ## [1.0.0-beta16] - 2026-09-19
 
 ### Added

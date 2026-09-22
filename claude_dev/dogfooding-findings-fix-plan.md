@@ -277,6 +277,80 @@ plans can be read side by side.
 
 ### S-1 — `prepare_leaf_issuance` binds a tenant signing CA to the acting tenant (DF-017, DF-025) — Opus 5
 
+> **EXECUTED — 2026-09-22, PR A, commit 1 of 4.**
+>
+> **Shipped.** `IssuingScope` (`crates/axiam-pki/src/cert.rs`, re-exported from
+> the crate root) carries what the caller *is*; `prepare_leaf_issuance` takes it
+> and the acting tenant, and matches the CA against both **immediately after the
+> lookup**, ahead of the status and validity-window checks. `generate` and
+> `sign_csr` gained the parameter and pass `input.tenant_id` as the acting
+> tenant. One site covers the Vault custodian too, as the plan predicted: the
+> check precedes `store_for`.
+>
+> **Tests.** Five in `sign_csr_test.rs` — `a_tenant_signing_ca_of_another_tenant_is_not_found`,
+> `a_tenant_may_sign_under_its_own_signing_ca`,
+> `an_organization_ca_is_not_usable_by_a_tenant_principal`,
+> `a_foreign_ca_is_not_found_even_when_it_is_revoked` (the ordering probe, not in
+> the plan — see below), and the I4 twin
+> `an_organization_level_principal_may_still_issue_under_the_org_ca`. Four
+> `generate` twins in `cert_test.rs`. Two at the wire in `certificate_test.rs`:
+> `sign_csr_cannot_reach_another_tenants_signing_ca` beside the
+> cross-organization one, and its I4 twin
+> `sign_csr_under_the_organization_ca_still_works_for_an_organization_principal`.
+> `sign_csr_test`: 25 passed.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`user.organization_level` is the wrong flag, and using it would have
+>    broken the I1.** The plan says "pass `user.organization_level` alongside
+>    `user.tenant_id`". That flag is set only by `resolve_active_tenant`, i.e.
+>    only when a request names *another* tenant through `X-Axiam-Tenant` — which
+>    `handlers/org_scope.rs:59-63` already says in as many words. An organization
+>    administrator acting on its own organization sends no such header, so the
+>    flag is `false` for exactly the call the I1 protects, and reading it would
+>    have made the organization CA unreachable by everyone. Resolved instead
+>    through a new `org_scope::is_organization_principal`, the residence half of
+>    `require_organization_principal`, which reads the caller's own tenant record.
+> 2. **The existing test suites all issued leaves under the organization CA as a
+>    tenant principal** — that was the shape the defect allowed, so it was the
+>    shape the fixtures used. 26 call sites across six `axiam-pki` test files now
+>    pass `IssuingScope::Organization` explicitly (they are, accurately, the
+>    organization-principal case), and the seven leaf tests in
+>    `axiam-api-rest/tests/certificate_test.rs` were moved onto a real tenant
+>    signing CA through a new `tenant_signing_ca!` macro — the two-tier shape the
+>    product deploys. `a_leaf_outliving_its_issuer_is_refused_with_the_real_maximum`
+>    now quotes 363 days rather than 364, because its issuer is the intermediate.
+> 3. **A disclosure-ordering test the plan did not name.** Placing the check
+>    after the status check would let an outsider distinguish "no such CA" from
+>    "revoked CA" by the message. `a_foreign_ca_is_not_found_even_when_it_is_revoked`
+>    pins the order.
+> 4. **The OpenAPI 404 text.** The plan says no OpenAPI change. Two
+>    `#[utoipa::path]` response descriptions are nonetheless wrong after the fix
+>    ("No such issuing CA in this organization"), and `generate` documented no
+>    404 at all although it could always return one. Both are corrected and
+>    `sdks/openapi.json` is regenerated in this commit — a description that
+>    contradicts the handler is worse than a regeneration the plan did not
+>    schedule.
+> 5. **The threat model file is behind its own documents.**
+>    `threat-model-stride.md` carries T-272 … T-280 (the Phase 21 wave of
+>    2026-09-17); `Axiam.json` and `threat-modeling-and-security.md` both still
+>    stood at 271. The next number free in *all three* is therefore **281**, which
+>    is what the new threat uses; `threatTop` is 281 while the file holds 272
+>    entries. Writing the nine missing entries into the Threat Dragon file from
+>    the text `threat-model-stride.md` already holds is a maintainer task, noted
+>    in `threat-modeling-and-security.md`'s wave entry and **not** done here.
+> 6. **T-98 claimed this was already enforced.** Its mitigation said issuance for
+>    a tenant "is anchored at that tenant's path-length-zero intermediate". It was
+>    not; the entry is corrected in place rather than extended, and points at
+>    T-281.
+>
+> **Records.** T-281 (Axiam.json, both STRIDE documents, counts updated);
+> `gen-threat-model.mjs` run — *"threatModel.ts: 9 diagrams, 272 threats (259
+> mitigated, 13 open)"* — generated files reverted. Roadmap Phase 22 / T22.1.
+> CHANGELOG under **Security**. `docs/pki/README.md` gains "Which CA a caller may
+> issue under", with the reach table and the upgrade paragraph.
+
+
 **The defect.** `prepare_leaf_issuance` (`crates/axiam-pki/src/cert.rs:124-212`)
 fetches the issuing CA scoped to the organization (`ca_repo.get_by_id(org_id,
 issuer_ca_id)`, `:146`; the query is `WHERE organization_id = $org_id`,

@@ -455,6 +455,43 @@ the signer returned. A tenant may cap `validity_days` via its
 `max_certificate_validity_days` metadata setting; requests exceeding that cap
 are rejected.
 
+### Which CA a caller may issue under
+
+A signing CA row carries the tenant it signs for, and both leaf paths read it.
+An `issuer_ca_id` outside the caller's reach answers **404**, not 403: a CA you
+may not use is a CA you cannot see, and the refusal is made before the CA's own
+state is read, so it cannot be used to learn that some other tenant's CA exists,
+is revoked, or has expired.
+
+| Issuing CA | Ordinary tenant principal | Principal in the organization scope |
+| --- | --- | --- |
+| The signing CA of the tenant being acted on | issues | issues |
+| Another tenant's signing CA | **404** | **404** |
+| An organization-level CA (the trust anchor) | **404** | issues |
+| A CA of another organization | **404** | **404** |
+
+"The tenant being acted on" is the caller's own tenant, or whichever tenant it
+named in `X-Axiam-Tenant` and was allowed to act on. An organization
+administrator issuing under a particular tenant's signing CA therefore names
+that tenant on the request, exactly as for every other tenant-scoped call.
+
+Before AXIAM 1.0.0-beta17 the issuing CA was scoped to the **organization**
+only: any principal holding `certificates:generate` could name any CA of the
+organization, including a sibling tenant's signing CA and the organization
+anchor above it. The resulting leaf was recorded under the caller's tenant with
+another tenant's issuer, and chained to the root every relying party in the
+organization trusts.
+
+**Upgrading.** Certificates already issued that way are left exactly as they
+are: AXIAM does not revoke on your behalf, because revocation is an operator's
+act with consequences for whatever is presenting those certificates right now.
+Find them by listing each tenant's certificates and comparing `issuer_ca_id`
+against that tenant's signing CAs; revoke what should not exist and re-issue it
+under the right CA. A deployment whose tenants were issuing leaves directly
+under the organization CA needs a signing CA per tenant
+(`POST /api/v1/organizations/{org}/tenants/{tenant}/signing-cas`) before its
+tenant administrators can issue again — which is the tier those CAs exist for.
+
 ### Or bring a CSR
 
 If you already hold the key — generated on a hardware token, an HSM, or

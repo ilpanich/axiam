@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta16",
-    "x-axiam-spec-digest": "sha256:c48b156f6f610f479da977a24ef4bdd7ae6cc864e64aaa40332c3b635a557d03"
+    "x-axiam-spec-digest": "sha256:07b23e28b1bff547764197c5dbf75f5bc5c74516aca4b2d65646655c4aad0805"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2344,6 +2344,9 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "No such issuing CA within this caller's reach: it belongs to another organization, to another tenant, or is the organization CA and the caller is not an organization principal"
           }
         },
         "security": [
@@ -2392,7 +2395,7 @@
             "description": "Forbidden — `certificates:generate` required"
           },
           "404": {
-            "description": "No such issuing CA in this organization"
+            "description": "No such issuing CA within this caller's reach: it belongs to another organization, to another tenant, or is the organization CA and the caller is not an organization principal"
           }
         },
         "security": [

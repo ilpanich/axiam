@@ -23,6 +23,37 @@ use crate::ca::{self, CaService, join_pem};
 use crate::ca_key_store::CaKeyCustodians;
 use crate::crypto::{compute_fingerprint, generate_keypair};
 
+/// Who is asking for a leaf, as far as the issuing CA is concerned.
+///
+/// A signing CA row carries the tenant it signs for
+/// ([`axiam_core::models::certificate::CaCertificate::tenant_id`]), and before
+/// this type nothing read it: a CA id plus `certificates:generate` was enough
+/// to mint a leaf under **any** CA of the organization, including another
+/// tenant's. The scope is resolved from the caller's own record — the tenant it
+/// lives in — and never from request input, which is why it is a separate
+/// argument and not a field on the request body types.
+///
+/// It says what the caller *is*, not what it may do: the permission check is
+/// still the REST layer's, and an organization principal without
+/// `certificates:generate` mints nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssuingScope {
+    /// An ordinary tenant principal.
+    ///
+    /// May issue under the signing CA of the tenant it is acting on, and under
+    /// nothing else — not another tenant's CA, and not the organization CA
+    /// above them, which is the anchor the tenant tier exists to keep leaves
+    /// away from.
+    Tenant,
+    /// A principal whose own record lives in the organization's reserved scope.
+    ///
+    /// May additionally issue directly under an organization-level CA. Acting
+    /// on a particular tenant's CA still means naming that tenant — through
+    /// `X-Axiam-Tenant` on the REST path — because the acting tenant is what
+    /// the CA is matched against for everyone.
+    Organization,
+}
+
 /// Hard cap for leaf certificate validity: 825 days (~27 months).
 ///
 /// Aligns with CA/Browser Forum Baseline Requirements and Apple/Mozilla
@@ -124,6 +155,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     async fn prepare_leaf_issuance(
         &self,
         org_id: Uuid,
+        acting_tenant_id: Uuid,
+        scope: IssuingScope,
         issuer_ca_id: Uuid,
         validity_days: u32,
         max_validity_days: Option<u32>,
@@ -144,6 +177,36 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         // Scoped to the organization, so a CA id from another organization is
         // not found rather than usable (T-98).
         let ca_cert = self.ca_repo.get_by_id(org_id, issuer_ca_id).await?;
+
+        // ...and scoped to the *tenant* as well, which the organization scope
+        // alone never was (DF-017 / DF-025): `get_by_id` asks only
+        // `WHERE organization_id = $org_id`, so every CA of the organization —
+        // every other tenant's signing CA, and the organization anchor above
+        // them — was usable by any tenant administrator holding
+        // `certificates:generate`. The leaf was then recorded under the
+        // caller's tenant with another tenant's issuer, and chained to the same
+        // root every relying party in the organization trusts.
+        //
+        // Refused as `NotFound`, following the cross-organization precedent
+        // (`a_ca_in_another_organization_is_not_found`): a CA the caller may
+        // not use is a CA the caller cannot see, and the refusal must not tell
+        // an outsider whether it exists, is revoked, or has expired. Which is
+        // why it sits here, ahead of the status and window checks below.
+        let usable = match ca_cert.tenant_id {
+            // A tenant signing CA: usable by whoever is acting on that tenant,
+            // organization principal or not.
+            Some(ca_tenant) => ca_tenant == acting_tenant_id,
+            // An organization-level CA: the trust anchor. Issuing leaves
+            // directly under it is the thing the tenant tier exists to prevent,
+            // so only a principal that lives in the organization scope may.
+            None => scope == IssuingScope::Organization,
+        };
+        if !usable {
+            return Err(AxiamError::NotFound {
+                entity: "CA certificate".into(),
+                id: issuer_ca_id.to_string(),
+            });
+        }
 
         if ca_cert.status != CertificateStatus::Active {
             return Err(AxiamError::Certificate(
@@ -211,10 +274,15 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         })
     }
 
-    /// Generate a new certificate signed by an organization CA.
+    /// Generate a new certificate signed by a CA of this organization.
     ///
     /// `org_id` is required to look up the CA certificate and its encrypted
     /// private key for signing.
+    ///
+    /// `scope` says what the caller is — see [`IssuingScope`]. Together with
+    /// `input.tenant_id`, which is the tenant being acted on and comes from the
+    /// authenticated context rather than the body, it decides which CAs of the
+    /// organization this call can reach at all.
     ///
     /// `max_validity_days` is the tenant-level cap (from tenant metadata).
     /// Pass `None` to use the default ([`DEFAULT_LEAF_CERT_VALIDITY_DAYS`]).
@@ -223,6 +291,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     pub async fn generate(
         &self,
         org_id: Uuid,
+        scope: IssuingScope,
         input: CreateCertificate,
         max_validity_days: Option<u32>,
     ) -> AxiamResult<GeneratedCertificate> {
@@ -234,6 +303,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         } = self
             .prepare_leaf_issuance(
                 org_id,
+                input.tenant_id,
+                scope,
                 input.issuer_ca_id,
                 input.validity_days,
                 max_validity_days,
@@ -484,6 +555,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     pub async fn sign_csr(
         &self,
         org_id: Uuid,
+        scope: IssuingScope,
         input: SignCertificateCsr,
         max_validity_days: Option<u32>,
     ) -> AxiamResult<Certificate> {
@@ -526,6 +598,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         } = self
             .prepare_leaf_issuance(
                 org_id,
+                input.tenant_id,
+                scope,
                 input.issuer_ca_id,
                 input.validity_days,
                 max_validity_days,

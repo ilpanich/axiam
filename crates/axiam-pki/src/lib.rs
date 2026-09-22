@@ -21,7 +21,9 @@ pub use ca_key_store::{
     CaKeyCustodians, DatabaseCaKeyStore, ExternalCaKeyStore, VaultCaKeyConfig, VaultCaKeyStore,
     custodians_from_env,
 };
-pub use cert::{CertService, DEFAULT_LEAF_CERT_VALIDITY_DAYS, MAX_LEAF_CERT_VALIDITY_DAYS};
+pub use cert::{
+    CertService, DEFAULT_LEAF_CERT_VALIDITY_DAYS, IssuingScope, MAX_LEAF_CERT_VALIDITY_DAYS,
+};
 pub use config::PkiConfig;
 pub use mtls::DeviceAuthService;
 pub use pgp::PgpService;

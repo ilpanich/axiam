@@ -1686,7 +1686,7 @@ The authorization-check endpoints are the only ones that bind `AuthenticatedPrin
 
 Organization and tenant CA lifecycle with per-CA key custody (sealed database row or Vault), tenant signing CAs beneath the organization CA, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification against hot-reloadable trust anchors, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine. 1.0.0-beta13 lets the listener admit RFC 8705 §2.2 self-signed client certificates under an opt-in policy, with the trust level a certificate earned carried to every consumer so that device authentication can refuse it (T-263).
 
-*26 threats — 7 critical, 15 high, 4 medium; 1 open.*
+*27 threats — 7 critical, 16 high, 4 medium; 1 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1716,6 +1716,7 @@ Organization and tenant CA lifecycle with per-CA key custody (sealed database ro
 | T-206 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | S | Certificate chaining to a CA never enabled as a trust anchor authenticates on the proxy path | High | Mitigated |
 | T-263 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | E | Accepting an unchained certificate for RFC 8705 §2.2 lets a self-minted certificate authenticate as a device or as a `tls_client_auth` client | Critical | Mitigated |
 | T-268 | Certificate issuance (rcgen, policy enforcement) <br/>*Process* | E | Leaf CSR signed with the requester's extensions, a weak key, or onto a key the requester does not hold | High | Mitigated |
+| T-281 | Certificate issuance (rcgen, policy enforcement) <br/>*Process* | E | A tenant administrator issues a leaf under another tenant's signing CA, or directly under the organization anchor | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1761,6 +1762,8 @@ An over-long certificate outlives the review cycle and cannot be retired without
 Issuing under a subject belonging to a different tenant would produce a credential that authenticates across the isolation boundary.
 
 > Issuance is tenant-scoped from the authenticated context, and the signing CA is resolved from the requesting tenant's organization — a cross-tenant subject cannot be signed. Tenant signing CAs (1.0.0-alpha44) narrow the blast radius further: issuance for a tenant is anchored at that tenant's path-length-zero intermediate, so a compromised or misused issuer is revocable without touching any other tenant.
+>
+> **Corrected 2026-09-22 (S-1).** The second sentence described what tenant signing CAs made *possible*, and read as though it were enforced. It was not: the issuing CA was resolved from the requesting tenant's **organization** and nothing compared it against the tenant, so a tenant administrator could anchor its issuance at any tenant's intermediate, or at the organization CA above them all. The subject half of this entry held throughout — `tenant_id` has come from the authenticated context since T-98 was written — but a leaf's authority comes from its chain and not from the row, so the half that failed is the half that mattered. **T-281** carries the defect, the fix and its tests; this entry is left as the record of a claim the code did not keep, which is the more useful thing for it to be.
 
 **T-99 — Returned private key persisted in logs or audit records**  
 `Certificate issuance (rcgen, policy enforcement)` (Process) · Information disclosure · High · Mitigated
@@ -1901,6 +1904,21 @@ When every tenant's user, service and device certificates issue straight from th
 > Tests: twenty in `crates/axiam-pki/tests/sign_csr_test.rs`, one per rule; three against the Vault mock in `vault_pki_test.rs`, including one asserting the exact request body AXIAM sends and one proving a `keyUsage`-requesting CSR never reaches Vault at all; four at the HTTP layer in `certificate_test.rs`; and `a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one` in `mtls_test.rs`, which is the property the feature exists for.
 >
 > **Residual.** What Vault does with the body is documented rather than observed: the tests here run against a mock, and a real Vault was not available. The security property does not rest on that — it rests on the refusal, which is enforced before any custodian is chosen — but the cosmetic parity of the key-usage extension under `vault_pki` is the part taken on the documentation's word.
+
+**T-281 — A tenant administrator issues a leaf under another tenant's signing CA, or directly under the organization anchor**  
+`Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · High · Mitigated
+
+Both leaf paths resolve the issuing CA through `prepare_leaf_issuance`, which fetched it with `ca_repo.get_by_id(org_id, issuer_ca_id)` — a query whose only scope is `WHERE organization_id = $org_id` — and never read `ca_certificate.tenant_id`, the column that exists to record which tenant a signing CA signs for. Every CA of the organization was therefore reachable by every principal of the organization holding `certificates:generate`: a sibling tenant's signing CA, and the organization-level CA that anchors the whole estate. The leaf came back written with the caller's own `tenant_id` and the other tenant's `issuer_ca_id`, chaining to the root every relying party in the organization trusts — so a certificate minted in tenant A authenticated as a principal of tenant B against anything that verified the chain rather than the row, which is what mTLS verifies. No bug in the caller was needed: the API accepted the CA id and answered `201`. `axiam-domo-demo` reproduced it at runtime and rode the certificate to a full MQTT session (DF-017, DF-025).
+
+> **S-1 (2026-09-22).** `prepare_leaf_issuance` takes the tenant being acted on and an `IssuingScope`, and matches the CA against both **immediately after the lookup** — ahead of the status and validity-window checks. The ordering is the disclosure control: a caller outside the tenant must not be able to tell a CA that does not exist from one that is revoked by watching which refusal comes back, and `a_foreign_ca_is_not_found_even_when_it_is_revoked` pins it.
+>
+> A tenant signing CA is usable only by a caller acting on that tenant. An organization-level CA is usable only by a principal whose own record lives in the organization's reserved scope — resolved by the residence test `require_organization_principal` already uses, and deliberately **not** `AuthenticatedUser::organization_level`, which is set only when a request names another tenant through `X-Axiam-Tenant` and is therefore `false` for exactly the calls this governs. Reading that flag instead would have refused the organization administrator its own anchor, which is the one issuance path that had to stay byte for byte as it was.
+>
+> The refusal is `NotFound`, following `a_ca_in_another_organization_is_not_found`: a CA the caller may not use is a CA the caller cannot see. One site covers both custodians, because the check precedes custodian resolution — the Vault path never reaches a `sign-verbatim` it should not have made.
+>
+> Tests: five in `sign_csr_test.rs` (another tenant's CA, the organization CA, the tenant's own CA, the ordering probe, and the I4 twin that an organization principal still issues under the anchor), four `generate` twins in `cert_test.rs`, and the end-to-end refusal in `axiam-api-rest`'s `certificate_test.rs` beside the cross-organization one.
+>
+> **Residual — operator action, deliberately not automated.** Leaves already issued across the boundary are not revoked on upgrade. AXIAM will not revoke on an operator's behalf: revocation takes effect against whatever is presenting those certificates right now, and a deployment that discovers a cross-tenant leaf has to decide when it can afford to. `docs/pki/README.md` carries the reach table, how to find them, and what a tenant needs before it can issue again.
 
 **T-196 — Vault configured, CA keys silently sealed into database rows**  
 `ca_certificate (sealed row or Vault custody)` (Store) · Information disclosure · High · Mitigated
@@ -2712,7 +2730,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-13 of 280 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
+13 of 281 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
 
 
 | # | Severity | Threat | Element | Why it is open |
@@ -2796,14 +2814,14 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Repudiation | 6 |
 | Information disclosure | 67 |
 | Denial of service | 27 |
-| Elevation of privilege | 54 |
+| Elevation of privilege | 55 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 32 | 1 |
-| High | 128 | 8 |
+| High | 129 | 8 |
 | Medium | 110 | 6 |
 | Low | 10 | 2 |
 
@@ -2816,7 +2834,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | OAuth2 / OIDC authorization server | 58 | 4 |
 | Federation — SAML SP & OIDC relying party | 31 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 26 | 0 |
-| PKI, certificates & IoT device identity | 26 | 1 |
+| PKI, certificates & IoT device identity | 27 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
 | Deployment & platform (Kubernetes) | 27 | 5 |
 | Client SDKs & admin UI integration surface | 28 | 3 |

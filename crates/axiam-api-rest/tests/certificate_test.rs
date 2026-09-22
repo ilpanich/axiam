@@ -231,6 +231,42 @@ macro_rules! generate_ca {
     }};
 }
 
+/// The tenant signing CA a leaf is issued under.
+///
+/// Since S-1 a tenant principal reaches exactly one CA: the one that signs for
+/// the tenant it is acting on. The organization CA above it is reachable only
+/// by a principal living in the organization scope, so every leaf test here
+/// needs the two-tier shape the product actually deploys — which is the shape
+/// tenant signing CAs were added for in the first place.
+///
+/// 364 days rather than 365: an intermediate may not outlive the CA that signed
+/// it, and the parent was minted for 365 days a moment ago.
+macro_rules! tenant_signing_ca {
+    ($app:expr, $org_id:expr, $tenant_id:expr, $ca_token:expr, $parent:expr) => {{
+        let req = test::TestRequest::post()
+            .uri(&format!(
+                "/api/v1/organizations/{}/tenants/{}/signing-cas",
+                $org_id, $tenant_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", $ca_token)))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .insert_header(("Content-Type", "application/json"))
+            .set_json(serde_json::json!({
+                "parent_ca_id": $parent,
+                "subject": "Tenant Signing CA",
+                "key_algorithm": "Ed25519",
+                "validity_days": 364
+            }))
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(status, 201, "tenant signing CA: {body}");
+        body["id"].as_str().unwrap().to_string()
+    }};
+}
+
 #[actix_rt::test]
 async fn generate_certificate_signed_by_ca() {
     let (db, org_id, tenant_id) = setup_db().await;
@@ -240,7 +276,8 @@ async fn generate_certificate_signed_by_ca() {
     let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    let ca_id = generate_ca!(app, org_id, ca_token);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
 
     let req = test::TestRequest::post()
         .uri("/api/v1/certificates")
@@ -287,7 +324,8 @@ async fn list_certificates_returns_paginated() {
     let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    let ca_id = generate_ca!(app, org_id, ca_token);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
 
     for subject in ["svc-a", "svc-b"] {
         let req = test::TestRequest::post()
@@ -329,7 +367,8 @@ async fn get_certificate_by_id() {
     let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    let ca_id = generate_ca!(app, org_id, ca_token);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
 
     let req = test::TestRequest::post()
         .uri("/api/v1/certificates")
@@ -374,7 +413,8 @@ async fn revoke_certificate() {
     let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    let ca_id = generate_ca!(app, org_id, ca_token);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
 
     let req = test::TestRequest::post()
         .uri("/api/v1/certificates")
@@ -432,8 +472,10 @@ async fn a_leaf_outliving_its_issuer_is_refused_with_the_real_maximum() {
     let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
 
-    // The CA is issued for 365 days a moment ago, so it has 364 WHOLE days left.
-    let ca_id = generate_ca!(app, org_id, ca_token);
+    // The organization CA is issued for 365 days a moment ago; the tenant
+    // signing CA beneath it for 364, so it has 363 WHOLE days left.
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
 
     let req = test::TestRequest::post()
         .uri("/api/v1/certificates")
@@ -462,15 +504,16 @@ async fn a_leaf_outliving_its_issuer_is_refused_with_the_real_maximum() {
     assert_eq!(status, 400, "body: {body}");
 
     // The number is the point: an error that only says "too long" leaves the
-    // operator guessing at the value the form should have offered. The CA was
-    // issued moments ago for 365 days, so whole days remaining is 364.
+    // operator guessing at the value the form should have offered. The issuer
+    // is the tenant signing CA, minted moments ago for 364 days, so whole days
+    // remaining is 363.
     let message = body.to_string();
     assert!(
         message.contains("cannot outlive its issuer"),
         "the refusal must say why, got: {message}"
     );
     assert!(
-        message.contains("364 days"),
+        message.contains("363 days"),
         "the refusal must quote the maximum the issuer can grant, got: {message}"
     );
 }
@@ -537,7 +580,8 @@ async fn sign_csr_issues_a_certificate_that_carries_no_private_key() {
     let token = mint_token(&auth, user_id, tenant_id, org_id);
     let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
-    let ca_id = generate_ca!(app, org_id, ca_token);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
 
     let req = test::TestRequest::post()
         .uri("/api/v1/certificates/sign-csr")
@@ -609,7 +653,8 @@ async fn sign_csr_refusals_are_400s_that_say_what_is_wrong() {
     let token = mint_token(&auth, user_id, tenant_id, org_id);
     let ca_token = organization_ca_token(&db, &auth, org_id).await;
     let app = test_app!(db, auth);
-    let ca_id = generate_ca!(app, org_id, ca_token);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
 
     // A CSR asking for a subjectAltName, which is refused by name rather than
     // dropped (D-3).
@@ -699,6 +744,84 @@ async fn sign_csr_cannot_reach_another_organizations_ca() {
         }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status().as_u16(), 404);
+}
+
+#[actix_rt::test]
+async fn sign_csr_cannot_reach_another_tenants_signing_ca() {
+    // T-281, the tenant twin of the test above. The CA exists, is active, is in
+    // its window, and belongs to this organization — every earlier gate passes.
+    // It simply signs for somebody else.
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+
+    let neighbour = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org_id,
+            kind: TenantKind::Standard,
+            name: "Neighbour Tenant".into(),
+            slug: "neighbour-tenant".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let app = test_app!(db, auth);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let theirs = tenant_signing_ca!(app, org_id, neighbour.id, ca_token, org_ca_id);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/certificates/sign-csr")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "issuer_ca_id": theirs,
+            "csr_pem": plain_csr("poaching"),
+            "cert_type": "Device",
+            "validity_days": 30
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "a CA that signs for another tenant must be invisible, not merely \
+         refused"
+    );
+}
+
+/// The I4 twin at the wire: the organization CA is still reachable by a
+/// principal whose own record lives in the organization scope.
+#[actix_rt::test]
+async fn sign_csr_under_the_organization_ca_still_works_for_an_organization_principal() {
+    let (db, org_id, _tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/certificates/sign-csr")
+        .insert_header(("Authorization", format!("Bearer {ca_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "issuer_ca_id": org_ca_id,
+            "csr_pem": plain_csr("organization-issued"),
+            "cert_type": "Service",
+            "validity_days": 30
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(status, 201, "body: {body}");
+    assert_eq!(body["issuer_ca_id"], org_ca_id);
 }
 
 // ---------------------------------------------------------------------------

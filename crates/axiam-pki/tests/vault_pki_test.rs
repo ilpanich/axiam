@@ -14,7 +14,7 @@ use axiam_core::models::certificate::{
 use axiam_db::repository::{SurrealCaCertificateRepository, SurrealCertificateRepository};
 use axiam_pki::ca::{CaService, PkiConfig};
 use axiam_pki::{
-    CaKeyCustodians, CertService, VaultPkiCaKeyStore, VaultPkiConfig, VaultPkiLocator,
+    CaKeyCustodians, CertService, IssuingScope, VaultPkiCaKeyStore, VaultPkiConfig, VaultPkiLocator,
 };
 use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use serde_json::json;
@@ -512,6 +512,7 @@ async fn issuing_a_leaf_sends_a_csr_and_records_the_certificate_that_came_back()
     let issued = cert_service
         .generate(
             org,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id: tenant,
                 issuer_ca_id: ca.certificate.id,
@@ -899,6 +900,7 @@ async fn signing_a_caller_csr_sends_the_csr_verbatim_and_states_the_usages() {
     let issued = cert_service
         .sign_csr(
             org,
+            IssuingScope::Organization,
             axiam_core::models::certificate::SignCertificateCsr {
                 tenant_id: tenant,
                 issuer_ca_id: ca.certificate.id,
@@ -984,6 +986,7 @@ async fn a_generated_leaf_still_sends_no_usage_parameters() {
     )
     .generate(
         org,
+        IssuingScope::Organization,
         CreateCertificate {
             tenant_id: Uuid::new_v4(),
             issuer_ca_id: ca.certificate.id,
@@ -1043,6 +1046,7 @@ async fn a_caller_csr_asking_for_a_key_usage_never_reaches_vault() {
     )
     .sign_csr(
         org,
+        IssuingScope::Organization,
         axiam_core::models::certificate::SignCertificateCsr {
             tenant_id: Uuid::new_v4(),
             issuer_ca_id: ca.certificate.id,

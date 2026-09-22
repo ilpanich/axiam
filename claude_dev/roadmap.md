@@ -745,6 +745,26 @@ CONTRACT §28 (RFC 9728 document builder and route, `WWW-Authenticate` challenge
 
 **Commits** `8bdd062` `docs(sdk-contract): §28 cross-SDK conformance review, contract 1.49 (T21.9 T9d)` · `b1aedc8` `docs(sdk-contract): correct §28.10/§28.11 R-2's count of unrecorded posture rows`. PR #468 — all eleven ports read against §28 and against the reference; thirteen divergences recorded in §28.11 with no open row; six contract defects fixed; §28.10's posture table filled in from the merged code and moved to upstream maintenance. Evidence: [`claude_dev/sdk-mcp-helpers-conformance-review.md`](sdk-mcp-helpers-conformance-review.md). One follow-up, **F-28-01**, is open by design and blocked on Phase 21 merging: the eleven vendored `CONTRACT.md`/`openapi.json` copies are re-synced from `main` in one step afterwards, and the review explains why doing it from a phase branch is what left the eleven holding five distinct files.
 
+## Phase 22: Dogfooding remediation (`axiam-domo-demo` DF-001 … DF-027) — IN PROGRESS
+
+Fix what the `axiam-domo-demo` integration found, as re-read against `main`
+rather than as filed. Full verdict per finding, the model assignment, the
+pull-request split and the verification gates:
+[`dogfooding-findings-fix-plan.md`](dogfooding-findings-fix-plan.md). Seventeen
+fixes, four documentation-only items, four recorded declines and two defects the
+findings did not contain (§1.7, §1.8). Every task ships its I1, its negative
+tests' I4 twins, and the §9 records in the same commit.
+
+### T22.1 — A signing CA issues only for the tenant it signs for — Opus 5 ✓ LANDED
+DF-017 / DF-025. `prepare_leaf_issuance` reads `ca_certificate.tenant_id` and
+matches it against the tenant being acted on, ahead of the status and window
+checks; an organization-level CA additionally requires a principal whose record
+lives in the organization scope. `404`, following the cross-organization
+precedent. Nine unit tests plus the end-to-end twin; threat **T-281**, and
+**T-98** corrected where it claimed this was already enforced. PR A.
+
+---
+
 ---
 
 ## Summary
@@ -773,7 +793,8 @@ CONTRACT §28 (RFC 9728 document builder and route, `WWW-Authenticate` challenge
 | Phase 19 | 26 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
+| Phase 22 | 1+ | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes) |
 
-**Total: 112 tasks across 22 phases**
+**Total: 112 tasks across 22 complete phases, plus Phase 22 in progress**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

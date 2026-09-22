@@ -120,6 +120,34 @@ pub async fn require_organization_principal<C: Connection + Clone>(
     Ok(())
 }
 
+/// Whether this caller's own record lives in the organization's reserved
+/// scope — the residence half of [`require_organization_principal`], on its
+/// own.
+///
+/// A question rather than a guard, for the handlers that do not *require* the
+/// organization scope but answer differently to a principal that has it. Leaf
+/// certificate issuance is the case: every principal may mint one, and only an
+/// organization principal may mint one directly under the organization CA.
+///
+/// Deliberately not [`AuthenticatedUser::organization_level`], for the reason
+/// [`require_organization_principal`] gives: that flag is set only when a
+/// request names *another* tenant through `X-Axiam-Tenant`, so it is `false`
+/// for an organization principal acting on its own organization — which is
+/// most of them, most of the time.
+///
+/// A tenant that cannot be resolved answers `false`: the caller is treated as
+/// an ordinary tenant principal, which is the closed direction.
+pub async fn is_organization_principal<C: Connection + Clone>(
+    user: &AuthenticatedUser,
+    state: &AppState<C>,
+) -> bool {
+    state
+        .tenant_repo
+        .get_by_id(user.principal_tenant_id)
+        .await
+        .is_ok_and(|home| home.is_organization_scope())
+}
+
 /// How far across the organization's tenants this caller's grants reach.
 ///
 /// Read from the assignments in the tenant the caller *lives in* — the same

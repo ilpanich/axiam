@@ -182,11 +182,16 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    // D-09: healthcheck subcommand — self-probe /health, exit 0 on 2xx, exit 1 otherwise.
-    // Runs before tracing init and before the async stack to keep the probe lightweight.
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if args.get(1).map(String::as_str) == Some("healthcheck") {
+    // Subcommands. All of them run before tracing init and before the async
+    // stack, so a probe stays lightweight, `--dump-openapi` needs no
+    // infrastructure, and nothing a subcommand prints is interleaved with
+    // startup logging. The parse itself is `axiam_server::cli`, which is
+    // unit-tested; `main.rs` cannot be linked from `tests/`.
+    match axiam_server::cli::parse(&std::env::args().collect::<Vec<_>>()) {
+        axiam_server::cli::Command::Serve => {}
+
+        // D-09: self-probe /health, exit 0 on 2xx, exit 1 otherwise.
+        axiam_server::cli::Command::Healthcheck => {
             let url = std::env::var("AXIAM_HEALTHCHECK_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8090/health".to_owned());
             let ok = reqwest::blocking::get(&url)
@@ -194,21 +199,31 @@ async fn main() -> std::io::Result<()> {
                 .unwrap_or(false);
             std::process::exit(if ok { 0 } else { 1 });
         }
-    }
 
-    // FND-01: --dump-openapi flag — print the OpenAPI JSON spec to stdout and exit 0.
-    // Runs before tracing init and before load_config() / SurrealDB / AMQP so it is
-    // usable in CI without any running infrastructure.  Generate the committed
-    // sdks/openapi.json with:
-    //   cargo build -p axiam-server --no-default-features
-    //   ./target/debug/axiam-server --dump-openapi > sdks/openapi.json
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if args.get(1).map(String::as_str) == Some("--dump-openapi") {
+        // FND-01: print the OpenAPI JSON spec to stdout and exit 0. Generate
+        // the committed sdks/openapi.json with:
+        //   cargo build -p axiam-server --no-default-features
+        //   ./target/debug/axiam-server --dump-openapi > sdks/openapi.json
+        axiam_server::cli::Command::DumpOpenApi => {
             let json = serde_json::to_string_pretty(&axiam_api_rest::openapi::api_doc())
                 .expect("OpenAPI serialization failed");
             println!("{json}");
             std::process::exit(0);
+        }
+
+        // DF-019: replace the bootstrap setup token. The gate lives in
+        // `axiam_db::remint_bootstrap_setup_token` — no `user` row and no
+        // consumed token, i.e. a deployment that has no administrator yet,
+        // which is exactly the state an operator who lost the first-boot token
+        // is stuck in. Before this, the documented recovery was to wipe the
+        // volume.
+        axiam_server::cli::Command::RemintSetupToken => {
+            std::process::exit(remint_setup_token().await);
+        }
+
+        axiam_server::cli::Command::Usage(line) => {
+            eprintln!("{line}");
+            std::process::exit(2);
         }
     }
 
@@ -2822,6 +2837,65 @@ async fn main() -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+/// `axiam-server setup-token --remint` — the whole subcommand, as an exit code.
+///
+/// Runs before tracing is initialised, so everything it says it says on stdout
+/// or stderr directly. **The token goes to stdout and nowhere else**: routing
+/// it through `tracing` would put a live credential in the container log a
+/// second time, which is the one thing first-boot minting already does once
+/// and deliberately.
+///
+/// Migrations run first. They are idempotent and are what boot does anyway;
+/// without them a datastore that has never served would have no
+/// `bootstrap_setup_token` table to write to.
+///
+/// Exit codes: `0` minted, `2` refused, `1` could not tell (configuration,
+/// datastore, migration). A refusal is not an error — see
+/// [`axiam_db::SetupTokenRemint`].
+async fn remint_setup_token() -> i32 {
+    let config = load_config();
+
+    let pool = match axiam_db::DbPool::connect(&config.db).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            eprintln!("could not connect to the datastore: {e}");
+            return 1;
+        }
+    };
+    let db = pool.handle_for_repo().current();
+
+    if let Err(e) = axiam_db::run_migrations(&db).await {
+        eprintln!("could not apply database migrations: {e}");
+        return 1;
+    }
+
+    match axiam_db::remint_bootstrap_setup_token(&db).await {
+        Ok(axiam_db::SetupTokenRemint::Minted(token)) => {
+            println!("{token}");
+            0
+        }
+        Ok(axiam_db::SetupTokenRemint::RefusedUserExists) => {
+            eprintln!(
+                "refused: this deployment already has at least one user. The setup token is \
+                 re-mintable only before anyone has bootstrapped; an existing administrator \
+                 creates further accounts through the authenticated API."
+            );
+            2
+        }
+        Ok(axiam_db::SetupTokenRemint::RefusedTokenConsumed) => {
+            eprintln!(
+                "refused: a bootstrap setup token has already been redeemed on this \
+                 deployment. Whatever that bootstrap created is the way in."
+            );
+            2
+        }
+        Err(e) => {
+            eprintln!("could not re-mint the setup token: {e}");
+            1
+        }
+    }
 }
 
 fn load_config() -> AppConfig {

@@ -912,6 +912,66 @@ they always meant. CHANGELOG: **Fixed**. OpenAPI: doc-comment change only
 
 #### S-6c — `axiam-server setup-token --remint` (DF-019)
 
+> **EXECUTED — 2026-09-22, PR B, commit 3 of 5.**
+>
+> **Shipped.** `axiam_db::remint_bootstrap_setup_token` returns a three-way
+> `SetupTokenRemint` — `Minted(token)`, `RefusedUserExists`,
+> `RefusedTokenConsumed` — rather than a `Result`, because two of the three are
+> not failures: they are the security argument. Both gates run **before** the
+> delete, so a refused call leaves the existing token working. "Delete then
+> mint" is one private `mint_setup_token` shared with
+> `mint_bootstrap_setup_token_if_needed`, as the plan asked, so the two paths
+> cannot drift into producing differently-shaped tokens. `main.rs` prints the
+> token with `println!` and everything else to stderr; exit 0 / 2 / 1.
+>
+> **Tests.** Three in `seeder_default_data_test.rs`:
+> `remint_replaces_the_previous_hash` (one row before, one row after, a
+> different hash — replaced, not added), and the two refusals, each asserting
+> the stored hash is **unchanged** afterwards. Five over the argv table in
+> `axiam_server::cli`, including the I4 twin
+> `an_unrecognised_argument_still_serves`.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **There is no setup-token threat entry to amend.** The plan's records line
+>    says "the setup-token threat entry gains the subcommand and its gate;
+>    status unchanged". No such entry exists: `bootstrap_setup_token`,
+>    `admin/bootstrap` and `SECHRD-04` appear nowhere in `Axiam.json`,
+>    `threat-model-stride.md` or `threat-modeling-and-security.md`; the
+>    "setup token" hits in the STRIDE document are all the **MFA** setup token,
+>    a different credential. Since the subcommand adds a second credential path
+>    to the endpoint that creates the first super-admin, this is a new entry
+>    rather than no entry: **T-284**, on `AXIAM deployment (N replicas, HPA)` in
+>    the deployment diagram — the element a `kubectl exec` reaches — Elevation
+>    of privilege, High, Mitigated on arrival. `threatTop` 283 → 284;
+>    `gen-threat-model.mjs` parses it (275 threats in the JSON, still nine short
+>    of the documents, which is PR A's flagged reconciliation and not this
+>    wave's) and the generated files are reverted.
+> 2. **The argv parse moved into the library.** The plan asks for "a unit test
+>    next to the `healthcheck` one". There is nothing to put it next to:
+>    `tests/healthcheck.rs` re-implements the probe rather than calling it,
+>    because `main.rs` cannot be linked from an integration test. Rather than
+>    add a second untestable branch, the whole parse became
+>    `axiam_server::cli::parse`, a pure function over the arguments, and
+>    `main.rs` matches on its result. One branch justifies it on its own:
+>    `setup-token` with the flag missing or mistyped must **not** fall through
+>    to `Serve` and start a second server against the production datastore.
+> 3. **Migrations run first.** The plan says "loads the configuration, connects
+>    to the datastore". A datastore that has never served has no
+>    `bootstrap_setup_token` table to write to, and `run_migrations` is
+>    idempotent and is what boot does anyway. One line, before the re-mint.
+> 4. **The two gates are not one gate.** The plan lists them together; they are
+>    separate checks because a datastore can carry a consumed token and no
+>    `user` row — a restore, a purge, a rolled-back bootstrap — so neither
+>    implies the other. `remint_refuses_once_a_token_was_consumed` constructs
+>    exactly that state.
+> 5. **The documentation went to `docs/admin/README.md`, with a pointer from
+>    `docs/deployment/README.md`.** The plan names the deployment guide, which
+>    says nothing about bootstrap at all; the Gate 1 / Gate 2 description an
+>    operator would be reading when they discover the loss is in the
+>    administration guide. The full "I lost the setup token" section is there,
+>    under a heading the deployment guide links to by anchor.
+
 **The fix.** A third subcommand next to `healthcheck` and `--dump-openapi`
 (`main.rs:185-210`): `setup-token --remint`. It loads the configuration,
 connects to the datastore, and:

@@ -270,6 +270,20 @@ from `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` (see
 `AXIAM__AMQP__URL` at the deployment layer (see how
 `docker-compose.prod.yml` does this for the Compose path).
 
+## Recovering the bootstrap setup token
+
+On a deployment that has **not** been bootstrapped yet, an operator who lost
+the one-time setup token from the first-boot log can mint a new one:
+
+```
+axiam-server setup-token --remint
+```
+
+The token is printed to stdout and nowhere else. The command refuses with exit
+code `2` once the deployment has any user or any redeemed setup token — see
+[the bootstrap section of the administration guide](../admin/README.md#i-lost-the-setup-token)
+for the gate and what to do when it refuses.
+
 ## Argon2id hash concurrency (memory-DoS protection)
 
 Password hashing/verification uses Argon2id with OWASP-recommended parameters

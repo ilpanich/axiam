@@ -814,6 +814,17 @@ twin; the e2e matrix fixture's idempotency lookup, which matches on the stored
 subject, moved to the bare form with it. OpenAPI regenerated. Records: none.
 PR B.
 
+### T22.7 — `axiam-server setup-token --remint` — Sonnet 5 ✓ LANDED
+DF-019. The bootstrap setup token is stored as a hash and minted only on a
+never-bootstrapped database, so an operator who lost it had one recovery: wipe
+the volume. The subcommand replaces it and prints the new token to stdout only.
+It refuses with exit 2, writing nothing, once a `user` row or a redeemed token
+exists — before bootstrap there is nothing to take over, after it there is an
+authenticated way in. The "delete then mint" is one function shared with the
+first-boot path. Argv parsing moved to a unit-tested `cli` module so
+`setup-token` with a mistyped flag cannot start a server. Eight tests; threat
+**T-284**. PR B.
+
 ---
 
 ---

@@ -175,8 +175,93 @@ pub async fn mint_bootstrap_setup_token_if_needed<C: Connection>(
         return Ok(None);
     }
 
-    // Generate a cryptographically random 32-byte token, base64url-encoded
-    // (same shape as `axiam_auth::token::generate_refresh_token`).
+    mint_setup_token(db).await.map(Some)
+}
+
+/// Why a re-mint was refused, or the token it produced.
+///
+/// Three outcomes rather than an error, because two of them are not failures:
+/// they are the security argument. A setup token is only ever re-mintable on a
+/// deployment that has **no administrator yet** — which is exactly the state an
+/// operator who lost the token at first boot is stuck in. Once anybody has
+/// bootstrapped, the token is a second way in and re-minting it would be a
+/// credential reset with no authentication in front of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupTokenRemint {
+    /// A fresh token. The **plaintext**, returned once; only its hash is stored.
+    Minted(String),
+    /// At least one `user` row exists: this deployment has an administrator,
+    /// who can create others through the authenticated API.
+    RefusedUserExists,
+    /// A setup token was already redeemed. Bootstrap happened; whatever it
+    /// produced is the way in.
+    RefusedTokenConsumed,
+}
+
+/// Replace the bootstrap setup token, on a deployment nobody has bootstrapped.
+///
+/// The recovery path for DF-019: before this existed, an operator who lost the
+/// first-boot token had no way back except wiping the volume, because the token
+/// is stored only as a hash and the boot-time mint is a no-op once a row
+/// exists.
+///
+/// The gate is the whole security argument — see [`SetupTokenRemint`]. Both
+/// refusals are checked **before** anything is deleted, so a refused call
+/// leaves the existing token working.
+///
+/// The plaintext is returned, never logged: the caller prints it to stdout so
+/// it does not land in the container log a second time.
+pub async fn remint_bootstrap_setup_token<C: Connection>(
+    db: &Surreal<C>,
+) -> Result<SetupTokenRemint, DbError> {
+    let existing_users: Vec<CountRow> = db
+        .query("SELECT count() AS total FROM user GROUP ALL")
+        .await
+        .map_err(|e| DbError::Migration(format!("user count failed: {e}")))?
+        .take(0)
+        .map_err(|e| DbError::Migration(format!("user count take failed: {e}")))?;
+    if existing_users.first().map(|r| r.total).unwrap_or(0) > 0 {
+        return Ok(SetupTokenRemint::RefusedUserExists);
+    }
+
+    let consumed: Vec<CountRow> = db
+        .query("SELECT count() AS total FROM bootstrap_setup_token_consumed GROUP ALL")
+        .await
+        .map_err(|e| {
+            DbError::Migration(format!("bootstrap_setup_token_consumed count failed: {e}"))
+        })?
+        .take(0)
+        .map_err(|e| {
+            DbError::Migration(format!(
+                "bootstrap_setup_token_consumed count take failed: {e}"
+            ))
+        })?;
+    if consumed.first().map(|r| r.total).unwrap_or(0) > 0 {
+        return Ok(SetupTokenRemint::RefusedTokenConsumed);
+    }
+
+    // Delete then mint, in that order and only after both gates: the table
+    // holds at most one usable token, so leaving the old hash behind would
+    // give the deployment two valid tokens rather than a replacement.
+    db.query("DELETE bootstrap_setup_token")
+        .await
+        .map_err(|e| DbError::Migration(format!("bootstrap_setup_token delete failed: {e}")))?
+        .check()
+        .map_err(|e| {
+            DbError::Migration(format!("bootstrap_setup_token delete check failed: {e}"))
+        })?;
+
+    mint_setup_token(db).await.map(SetupTokenRemint::Minted)
+}
+
+/// Generate a token, store its hash, and hand back the plaintext.
+///
+/// One function, shared by the first-boot mint and the re-mint, so the two
+/// cannot drift into producing differently-shaped tokens or storing them
+/// differently.
+async fn mint_setup_token<C: Connection>(db: &Surreal<C>) -> Result<String, DbError> {
+    // A cryptographically random 32-byte token, base64url-encoded (same shape
+    // as `axiam_auth::token::generate_refresh_token`).
     let mut rng = rand::rng();
     let bytes: [u8; 32] = rand::RngExt::random(&mut rng);
     let token = URL_SAFE_NO_PAD.encode(bytes);
@@ -192,7 +277,7 @@ pub async fn mint_bootstrap_setup_token_if_needed<C: Connection>(
         .check()
         .map_err(|e| DbError::Migration(format!("bootstrap_setup_token mint check failed: {e}")))?;
 
-    Ok(Some(token))
+    Ok(token)
 }
 
 /// Whether the seeded roles of `tenant_id` may hold organization-level

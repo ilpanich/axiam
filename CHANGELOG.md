@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`axiam-server setup-token --remint` (T22.7, DF-019).** Only the SHA-256 hash
+  of the one-time bootstrap setup token is stored, and the first-boot mint is a
+  no-op once a token row exists — so an operator who lost the token from the
+  first-boot log had exactly one recovery path, which was to wipe the volume.
+
+  The subcommand deletes the stored hash, mints a fresh token and prints **the
+  token and nothing else to stdout** — never through `tracing`, so it does not
+  reach the container log a second time. There is deliberately no `--print`: the
+  plaintext is not stored, and storing it so that it could be printed would be
+  the wrong fix.
+
+  **It refuses, with exit code `2` and no write at all, on any deployment that
+  has been bootstrapped** — one with a `user` row, or one where a setup token
+  has already been redeemed. That gate is the whole security argument. Before
+  bootstrap there is no administrator to take over and no credential to reset,
+  which is exactly the state the operator who lost the token is in; after
+  bootstrap the deployment has an authenticated way to create accounts and a
+  password-reset flow, so re-minting is never the answer. Both gates run before
+  the existing hash is deleted, so a refused call leaves the current token
+  working. Exit `0` minted, `1` could not tell (configuration, datastore).
+
+  Argv parsing moved into a unit-tested function, for one branch in particular:
+  `setup-token` with the flag missing or mistyped now exits `2` instead of
+  falling through and starting a second server against the production datastore.
+  An argument the binary does not recognise still serves, as before.
+
+  Threat **T-284**.
+
 ### Changed
 
 - **A certificate bound to no service account is a `401`, not a `403` (T22.4,

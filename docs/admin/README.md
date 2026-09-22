@@ -84,6 +84,45 @@ If **neither** gate is satisfied (env var unset AND no/invalid/already-used
 setup token), bootstrap is refused with `403` — an unset gate never allows
 an arbitrary caller to create the first admin.
 
+### I lost the setup token
+
+Only the token's SHA-256 hash is stored, so it cannot be printed back, and the
+first-boot mint is a no-op once a token row exists — which used to leave one
+recovery path: wipe the volume.
+
+There is a subcommand for it:
+
+```
+axiam-server setup-token --remint
+```
+
+It deletes the stored hash, mints a fresh token and prints **the token and
+nothing else to stdout**, so it can be piped and does not land in the container
+log a second time. In Kubernetes, run it against the same configuration the
+server uses:
+
+```
+kubectl -n axiam exec deploy/axiam-server -- axiam-server setup-token --remint
+```
+
+**It refuses, with exit code `2`, on any deployment that has been
+bootstrapped** — that is, one with at least one `user` row, or one where a
+setup token has already been redeemed. That gate is the whole security
+argument: a token that could be re-minted after bootstrap would be a
+credential reset with no authentication in front of it. Before bootstrap there
+is nothing to authenticate and nothing yet to take over, which is exactly the
+state an operator who lost the first-boot token is in. A refused call changes
+nothing — the existing token, if any, keeps working. Exit code `0` means a
+token was minted and printed; `1` means the command could not tell (bad
+configuration, unreachable datastore).
+
+If the deployment *has* been bootstrapped and you have lost the admin
+credentials too, this is a password-reset problem, not a bootstrap one: use
+`POST /api/v1/auth/password-reset/request`, or restore from a backup.
+
+There is deliberately no `--print`: the plaintext is not stored, and storing it
+so that it could be printed would be the wrong fix.
+
 **Request:**
 
 ```

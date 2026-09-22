@@ -15,8 +15,9 @@ use axiam_db::repository::{
     SurrealUserRepository,
 };
 use axiam_db::seeder::{
-    ReconcileOutcome, SeederStateRow, mint_bootstrap_setup_token_if_needed,
-    reconcile_default_role_grants, seed_default_roles, seed_permissions,
+    ReconcileOutcome, SeederStateRow, SetupTokenRemint, mint_bootstrap_setup_token_if_needed,
+    reconcile_default_role_grants, remint_bootstrap_setup_token, seed_default_roles,
+    seed_permissions,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -107,6 +108,122 @@ async fn mint_bootstrap_token_noop_when_user_already_exists() {
     assert!(
         token.is_none(),
         "no token should be minted when a user already exists"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// remint_bootstrap_setup_token (DF-019)
+// ---------------------------------------------------------------------------
+
+/// Every stored setup-token hash, so a re-mint can be shown to have replaced
+/// rather than added.
+async fn token_hashes(db: &Db) -> Vec<String> {
+    let hashes: Vec<String> = db
+        .query("SELECT VALUE meta::id(id) FROM bootstrap_setup_token")
+        .await
+        .unwrap()
+        .take(0)
+        .unwrap();
+    hashes
+}
+
+#[tokio::test]
+async fn remint_replaces_the_previous_hash() {
+    let (db, _org, _tenant) = setup().await;
+
+    let first = mint_bootstrap_setup_token_if_needed(&db)
+        .await
+        .expect("first mint")
+        .expect("fresh db mints");
+    let before = token_hashes(&db).await;
+    assert_eq!(before.len(), 1, "exactly one token row after first boot");
+
+    let SetupTokenRemint::Minted(second) = remint_bootstrap_setup_token(&db)
+        .await
+        .expect("remint on a never-bootstrapped deployment")
+    else {
+        panic!("a deployment with no user and no consumed token must re-mint");
+    };
+
+    assert_ne!(first, second, "a re-mint produces a different token");
+
+    let after = token_hashes(&db).await;
+    assert_eq!(
+        after.len(),
+        1,
+        "replaced, not added — two valid tokens would be two ways in"
+    );
+    assert_ne!(before, after, "the stored hash is the new token's");
+}
+
+/// The I4 twin for the user gate: once anybody has bootstrapped, re-minting is
+/// a credential reset with no authentication in front of it.
+#[tokio::test]
+async fn remint_refuses_once_a_user_exists() {
+    let (db, _org, tenant_id) = setup().await;
+
+    mint_bootstrap_setup_token_if_needed(&db)
+        .await
+        .expect("first mint");
+    let before = token_hashes(&db).await;
+
+    SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id,
+            username: "admin".into(),
+            email: "admin@example.com".into(),
+            password: test_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        remint_bootstrap_setup_token(&db)
+            .await
+            .expect("remint call"),
+        SetupTokenRemint::RefusedUserExists
+    );
+    assert_eq!(
+        token_hashes(&db).await,
+        before,
+        "a refused re-mint must leave the existing token working"
+    );
+}
+
+/// The I4 twin for the consumption gate. A deployment can have a consumed
+/// token and no `user` row — bootstrap creates the user in the same request,
+/// but a restore, a purge or a failed rollback can separate them — so this
+/// gate is not implied by the one above.
+#[tokio::test]
+async fn remint_refuses_once_a_token_was_consumed() {
+    let (db, _org, _tenant) = setup().await;
+
+    mint_bootstrap_setup_token_if_needed(&db)
+        .await
+        .expect("first mint");
+    let before = token_hashes(&db).await;
+
+    db.query(
+        "CREATE type::record('bootstrap_setup_token_consumed', $hash) \
+         SET consumed_at = time::now()",
+    )
+    .bind(("hash", "a".repeat(64)))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    assert_eq!(
+        remint_bootstrap_setup_token(&db)
+            .await
+            .expect("remint call"),
+        SetupTokenRemint::RefusedTokenConsumed
+    );
+    assert_eq!(
+        token_hashes(&db).await,
+        before,
+        "a refused re-mint must leave the existing token working"
     );
 }
 

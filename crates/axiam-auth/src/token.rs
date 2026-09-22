@@ -1237,17 +1237,34 @@ pub fn issue_rpt(
 /// `AuthenticatedPrincipal`; any other route a fleet depends on must be
 /// migrated deliberately, which is the point — those grants were previously
 /// implicit.
+/// # The `cnf` parameter (S-3)
+///
+/// `Some` binds the token to the certificate the device presented, per RFC 8705
+/// §3.1 — and it is the whole point of this path. A device proves possession of
+/// a private key to obtain this token; leaving the token a bearer credential
+/// afterwards throws that proof away at the moment it becomes useful, and makes
+/// a token read off a device's disk, or out of a log, as good as the key it was
+/// issued against. [`verify_token_binding`] then refuses it anywhere the
+/// certificate is not presented again.
+///
+/// `None` is not a convenience default: it is what a caller passes when the
+/// certificate reached AXIAM by a means AXIAM cannot re-verify at the point of
+/// use. The caller decides, because the caller is the one that knows how the
+/// certificate arrived.
 pub fn issue_service_account_token(
     user_id: Uuid,
     tenant_id: Uuid,
     org_id: Uuid,
     jti: String,
+    cnf: Option<CnfClaim>,
     config: &AuthConfig,
 ) -> Result<String, AuthError> {
     // §17.2 residual 1: this used to stamp AUD_USER. See the breaking-change
     // note above; `AccessTokenSpec::service_account` stamps AUD_M2M, which is
     // what makes both service-account paths agree.
-    AccessTokenSpec::service_account(user_id, tenant_id, org_id, jti).issue(config)
+    AccessTokenSpec::service_account(user_id, tenant_id, org_id, jti)
+        .cnf(cnf)
+        .issue(config)
 }
 
 /// Mint a service-account access token for the **OAuth2 client-credentials**
@@ -1290,6 +1307,7 @@ pub fn issue_service_account_client_credentials_token(
         scopes,
         config,
         None,
+        None,
     )
 }
 
@@ -1300,6 +1318,13 @@ pub fn issue_service_account_client_credentials_token(
 /// is, and for one more: it is the grant a caller would reach for if they
 /// wanted to mint a token without a reactor watching. A hook that covers three
 /// of the four issuance paths is not a hook, it is a detour sign.
+/// `cnf` carries the same meaning as on [`issue_service_account_token`], and
+/// exists here so the two service-account minting paths have the same shape
+/// rather than one of them being the one where binding is not expressible. Its
+/// caller passes `None` today: this grant authenticates by client secret, and
+/// the mTLS-authenticated client-credentials path builds its own `cnf` through
+/// `axiam_oauth2::token::certificate_binding_for`, which is where a client's
+/// registered binding posture is read.
 pub fn issue_service_account_client_credentials_token_enriched(
     service_account_id: Uuid,
     tenant_id: Uuid,
@@ -1307,6 +1332,7 @@ pub fn issue_service_account_client_credentials_token_enriched(
     scopes: &[String],
     config: &AuthConfig,
     ext: Option<std::collections::BTreeMap<String, String>>,
+    cnf: Option<CnfClaim>,
 ) -> Result<String, AuthError> {
     AccessTokenSpec::service_account(
         service_account_id,
@@ -1316,6 +1342,7 @@ pub fn issue_service_account_client_credentials_token_enriched(
     )
     .scopes(scopes)
     .ext(ext)
+    .cnf(cnf)
     .issue(config)
 }
 
@@ -2637,7 +2664,8 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         let jti = Uuid::new_v4().to_string();
 
         let token =
-            issue_service_account_token(user_id, tenant_id, org_id, jti.clone(), &config).unwrap();
+            issue_service_account_token(user_id, tenant_id, org_id, jti.clone(), None, &config)
+                .unwrap();
         let claims = decode_access_token(&token, &config).unwrap();
 
         assert_eq!(claims.sub, user_id.to_string());
@@ -2657,12 +2685,105 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             Uuid::new_v4(),
             Uuid::new_v4(),
             Uuid::new_v4().to_string(),
+            None,
             &config,
         )
         .unwrap();
 
         let validated = validate_access_token(&token, &config).unwrap();
         assert_eq!(validated.0.sub_kind, SubjectKind::ServiceAccount);
+    }
+
+    // -----------------------------------------------------------------
+    // S-3 / DF-014 — a device token is bound to the certificate that
+    // obtained it
+    // -----------------------------------------------------------------
+
+    /// A device authenticates by proving possession of a private key. Before
+    /// S-3 the token it got back was a plain bearer credential, so the proof
+    /// bought exactly nothing after the handshake that made it: a token lifted
+    /// off the device's flash, or out of a log, was as good as the key.
+    #[test]
+    fn a_device_token_carries_the_certificate_thumbprint() {
+        let config = test_config();
+        // The shape `axiam_oauth2::mtls::thumbprint_s256` produces:
+        // base64url, unpadded, 43 characters for a SHA-256.
+        let thumbprint = "Zm9yLXRlc3RpbmctYS00My1jaGFyYWN0ZXItdGh1bWIw";
+        let token = issue_service_account_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4().to_string(),
+            Some(CnfClaim::from_certificate_thumbprint(thumbprint)),
+            &config,
+        )
+        .unwrap();
+
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert_eq!(
+            claims
+                .cnf
+                .as_ref()
+                .and_then(CnfClaim::certificate_thumbprint),
+            Some(thumbprint),
+            "the certificate the device presented must name the token it received"
+        );
+        assert_eq!(claims.sub_kind, SubjectKind::ServiceAccount);
+    }
+
+    /// The token that claim produces is refused by the very check every
+    /// resource server runs, when the certificate is not presented again —
+    /// which is the theft scenario the claim exists for.
+    #[test]
+    fn a_device_token_is_refused_when_its_certificate_is_not_presented() {
+        let thumbprint = "Zm9yLXRlc3RpbmctYS00My1jaGFyYWN0ZXItdGh1bWIw";
+        let claims = claims_with_cnf(Some(CnfClaim::from_certificate_thumbprint(thumbprint)));
+
+        assert!(
+            verify_token_binding(&claims, PresentedProofs::default()).is_err(),
+            "a bound device token presented over a connection with no client \
+             certificate is a stolen token until proved otherwise"
+        );
+        assert!(
+            verify_token_binding(
+                &claims,
+                PresentedProofs::certificate("some-other-thumbprint")
+            )
+            .is_err(),
+            "another device's certificate is not this device's certificate"
+        );
+        assert!(
+            verify_token_binding(&claims, PresentedProofs::certificate(thumbprint)).is_ok(),
+            "the I4 twin: the device that obtained the token still uses it"
+        );
+    }
+
+    /// **I1.** `None` reproduces the pre-S-3 token exactly. It is what the
+    /// trusted-proxy header path passes — see
+    /// `CertificateAuthenticated::certificate_thumbprint` for why — and what
+    /// every token minted before this change carries, so the migration lasts
+    /// one access-token lifetime and costs nobody a refusal.
+    #[test]
+    fn an_unbound_device_token_is_byte_for_byte_what_it_always_was() {
+        let config = test_config();
+        let (user, tenant, org, jti) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4().to_string(),
+        );
+
+        let token = issue_service_account_token(user, tenant, org, jti, None, &config).unwrap();
+        let claims = decode_access_token(&token, &config).unwrap();
+
+        assert!(
+            claims.cnf.is_none(),
+            "no claim was asked for and none is made"
+        );
+        assert!(
+            verify_token_binding(&claims, PresentedProofs::default()).is_ok(),
+            "an unbound token must not start demanding proofs"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -3277,7 +3398,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             ),
             (
                 "issue_service_account_token",
-                issue_service_account_token(user, tenant, org, "j".into(), &config).unwrap(),
+                issue_service_account_token(user, tenant, org, "j".into(), None, &config).unwrap(),
                 AUD_M2M,
                 SubjectKind::ServiceAccount,
             ),

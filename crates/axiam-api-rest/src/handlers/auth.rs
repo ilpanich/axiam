@@ -3,7 +3,7 @@
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::service::{LoginInput, LoginOutput, RefreshInput, VerifyMfaInput};
-use axiam_auth::token::{issue_service_account_token, validate_access_token};
+use axiam_auth::token::{CnfClaim, issue_service_account_token, validate_access_token};
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::DeviceAuthResponse;
 use axiam_core::repository::{
@@ -874,6 +874,23 @@ pub async fn device_auth<C: Connection + Clone>(
     // Resolve org_id from the tenant
     let tenant = state.tenant_repo.get_by_id(cert_auth.tenant_id).await?;
 
+    // S-3 / DF-014: bind the token to the certificate that obtained it
+    // (RFC 8705 §3.1). The device has just proved possession of a private key;
+    // minting a bearer token on the strength of that proof and then never
+    // referring to it again throws the proof away at the one moment it becomes
+    // useful — a token read off the device's flash, or out of a log, would be
+    // as good as the key. With the claim, `verify_token_binding` refuses it on
+    // any connection that does not present the same certificate, which is
+    // exactly the theft scenario.
+    //
+    // `None` where the certificate arrived through the trusted-proxy header:
+    // see `CertificateAuthenticated::certificate_thumbprint`. Binding a token
+    // AXIAM could not re-check would mint a credential AXIAM itself refuses.
+    let cnf = cert_auth
+        .certificate_thumbprint
+        .as_deref()
+        .map(CnfClaim::from_certificate_thumbprint);
+
     // FUNC-04 (D-09): mint a dedicated service-account token carrying
     // `sub_kind: "service_account"` so downstream handlers/audit can
     // distinguish SA tokens from user tokens. `sub` contains the
@@ -884,6 +901,7 @@ pub async fn device_auth<C: Connection + Clone>(
         cert_auth.tenant_id,
         tenant.organization_id,
         uuid::Uuid::new_v4().to_string(),
+        cnf,
         &state.auth_config,
     )
     .map_err(axiam_core::error::AxiamError::from)?;

@@ -177,6 +177,29 @@ pub struct CertificateAuthenticated {
     pub service_account_id: Uuid,
     pub tenant_id: Uuid,
     pub certificate_id: Uuid,
+    /// RFC 8705 §3.1 `x5t#S256` of the certificate this request presented —
+    /// **only when rustls verified it on this connection** (S-3).
+    ///
+    /// `Some` on the native mTLS path, where the thumbprint is taken over the
+    /// DER bytes of a chain the handshake already validated. `None` on the
+    /// trusted-proxy header path, and that asymmetry is deliberate rather than
+    /// an omission.
+    ///
+    /// A `cnf` claim is only worth minting where it can be *checked* again, and
+    /// the check is `enforce_sender_constraint`, which reads
+    /// [`VerifiedClientCert`] off the connection and nothing else — the
+    /// `X-Client-Certificate` header is refused there by construction, because
+    /// a value a client could set would make the whole mechanism decorative.
+    /// So on a deployment whose TLS terminates upstream, the certificate is
+    /// present at login and absent at every later request. Binding a token
+    /// there would mint a credential that AXIAM itself would then refuse on
+    /// its first use.
+    ///
+    /// The consequence is worth stating plainly: a deployment that terminates
+    /// mTLS at a proxy gets device tokens that are bearer credentials, exactly
+    /// as before this change. Moving that boundary is a deployment decision —
+    /// terminate mTLS at AXIAM — not something a claim can paper over.
+    pub certificate_thumbprint: Option<String>,
 }
 
 impl CertificateAuthenticated {
@@ -197,11 +220,17 @@ impl CertificateAuthenticated {
         // fall back to the `X-Client-Certificate` proxy header when TLS was
         // terminated upstream (no verified cert on this connection) AND the
         // operator has said that upstream is trusted to set the header.
+        // Recorded here and nowhere else: the one place that knows the
+        // certificate came off a handshake rather than out of a header. See the
+        // field's own documentation for why the header path gets `None`.
+        let mut certificate_thumbprint = None;
+
         let identity_result = if let Some(verified) = req.conn_data::<VerifiedClientCert>() {
             // A certificate that chains to nothing must not authenticate a
             // device, however well-formed it is and whatever it says about
             // itself. See `check_usable_for_device_auth` for why (B-06).
             verified.check_usable_for_device_auth()?;
+            certificate_thumbprint = Some(axiam_oauth2::mtls::thumbprint_s256(&verified.der));
             service.authenticate_der(&verified.der).await
         } else {
             // A certificate is public data, and every check on the header path
@@ -265,6 +294,7 @@ impl CertificateAuthenticated {
             service_account_id: identity.service_account_id,
             tenant_id: identity.tenant_id,
             certificate_id: identity.certificate_id,
+            certificate_thumbprint,
         })
     }
 }

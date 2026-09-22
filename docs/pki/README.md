@@ -594,6 +594,49 @@ active CA certificate for that organization exists, the check fails
 closed — a fingerprint match alone is never sufficient to authenticate a
 device.
 
+### The token a device gets back is bound to its certificate
+
+`POST /api/v1/auth/device` answers with an access token carrying an RFC 8705
+`cnf` claim:
+
+```json
+{ "cnf": { "x5t#S256": "<base64url SHA-256 of the presented certificate, unpadded>" } }
+```
+
+The token is therefore **not** a bearer credential. AXIAM refuses it on any
+connection that does not present the same certificate again, and so must every
+relying party that verifies AXIAM's tokens itself — contract §10.1 rule 9 makes
+the check mandatory in all eleven SDKs, and phrases it as *reject when you
+cannot verify* rather than *verify when you can*: a validator that does not
+understand `cnf` must refuse the token, never read it as unbound.
+
+The reasoning is the point of the endpoint. A device proves possession of a
+private key to obtain this token. Handing back a bearer credential throws that
+proof away at the moment it becomes useful: a token read off the device's flash,
+lifted from a log, or captured from a misconfigured egress proxy would be as
+good as the key the device went to the trouble of protecting. With the claim, a
+stolen token is worth nothing without the key.
+
+**Where the claim is not made, and why.** The token carries no `cnf` when the
+certificate reached AXIAM through the `X-Client-Certificate` header rather than
+a TLS handshake AXIAM itself terminated — the trusted-proxy deployment enabled
+by `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT`. On that deployment the
+certificate is present at login and absent from every later request, because it
+never travelled further than the proxy. Minting a bound token there would mint a
+credential AXIAM itself would refuse on its first use. Those deployments get
+bearer device tokens, exactly as before; moving the boundary is a deployment
+decision — terminate mTLS at AXIAM — and not something a claim can paper over.
+
+**Over gRPC**, the check reads the certificate rustls verified for the
+connection. Until the gRPC listener is configured to ask for one, a
+certificate-bound token presented there has no evidence to match and is
+refused — the fail-closed direction, and the reason a device fleet talks to the
+REST surface today.
+
+**Upgrading.** A token minted before this change carries no `cnf` and is
+accepted exactly as it always was; the check is "if `cnf` is present". The
+migration therefore lasts one access-token lifetime and costs nobody a refusal.
+
 ## Turn on mutual TLS using a CA AXIAM generated
 
 Binding a certificate (above) tells AXIAM which principal a certificate

@@ -771,6 +771,15 @@ family so a posture preset scales it (300 / 3 000) for a fleet behind one NAT.
 No existing default moves. Six tests against the real route wiring; threat
 **T-282**. PR A.
 
+### T22.3 — Device tokens are bound to their certificate — Opus 5 ✓ LANDED
+DF-014. `POST /api/v1/auth/device` handed back a plain bearer token although
+the device had just proved possession of a private key. It now carries
+`cnf.x5t#S256` over the certificate rustls verified for the connection. **No
+enforcement code changed:** both REST and gRPC already refuse a `cnf`-bearing
+token whose evidence does not match, so the claim was the only missing half.
+The trusted-proxy header path mints no claim, deliberately. Three unit tests;
+threat **T-283**. PR A.
+
 ---
 
 ---
@@ -801,7 +810,7 @@ No existing default moves. Six tests against the real route wiring; threat
 | Phase 19 | 26 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
-| Phase 22 | 2+ | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes) |
+| Phase 22 | 3+ | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes) |
 
 **Total: 112 tasks across 22 complete phases, plus Phase 22 in progress**
 

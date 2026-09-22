@@ -9999,6 +9999,17 @@
                   "mitigation": "S-2 (2026-09-22): AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN, default 60 per minute per IP, applied through both layers exactly as /auth/login does \u2014 build_governor for the per-process ceiling and RateLimitShared(\"device_login\") so the limit holds across replicas rather than multiplying by replica count. Per-IP unconditionally: the identity on this path is a certificate presented in the handshake and there is no OAuth2 client_id in the request to key a bucket on. The knob is in the machine family, so AXIAM__RATE_LIMIT__PROFILE scales it to 300 (gateway) and 3 000 (mesh), the same 5x and 50x token_per_min takes \u2014 which is the answer for a fleet behind one NAT, rather than raising the shipped default for everyone. Sized from the honest traffic and not from capacity: a device re-authenticates once per access-token lifetime, 900 s by default, so sixty per minute holds nine hundred devices on a single address and no deployment on the shipped posture sees a 429 it did not see before. Six tests in device_login_rate_limit_test.rs drive the real register_api_v1_routes wiring, so a regression to a bare route fails the suite; they include the per-IP isolation property, the I4 twin that login_per_min is untouched and uncharged, and the preset-multiplier check.",
                   "modelType": "STRIDE",
                   "number": 282
+                },
+                {
+                  "id": "5fde9328-a7be-5702-bfc1-7eb4d2968031",
+                  "title": "A device's access token is a bearer credential, so stealing it is as good as stealing the key",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "POST /api/v1/auth/device authenticates a device by a TLS handshake with a client certificate \u2014 the strongest thing the device can prove \u2014 and then called issue_service_account_token, which had no cnf parameter at all and whose AccessTokenSpec::service_account never set one. The token that came back was a plain bearer credential: whoever holds it may use it. So the proof of possession bought nothing past the handshake that produced it. A token read off the device's flash, recovered from a log line, captured at a misconfigured egress proxy, or taken from a compromised Device Twin authenticated as that device for the whole of its lifetime, with no certificate and no key required. The machinery to close this already existed and was already used: AccessTokenClaims.cnf, CnfClaim with x5t#S256 per RFC 8705 \u00a73.1, and verify_token_binding's decision table were all built for OAuth2 mTLS client credentials, which mint the claim. The device path was the one mint site that did not, which made it the weakest credential issued from the strongest authentication AXIAM performs (DF-014).",
+                  "mitigation": "S-3 (2026-09-22): issue_service_account_token takes a cnf and device_auth builds one from the thumbprint of the certificate rustls verified for this connection, so the token names the key the device proved it holds. No enforcement code changed, and that is the finding rather than a shortcut: both surfaces already refuse a cnf-bearing token whose evidence does not match \u2014 axiam-api-rest's enforce_sender_constraint runs inside validate_presented_token, which every extractor reaches including the service-account one, and axiam-api-grpc's interceptor reads peer_certs() and runs the same verify_token_binding. The claim was the only missing half. The thumbprint is recorded only where rustls verified the certificate on this connection: the trusted-proxy X-Client-Certificate path mints no cnf, deliberately, because the certificate is present at login and absent from every later request there, so a bound token would be one AXIAM itself refuses on first use \u2014 an asymmetry stated in CertificateAuthenticated::certificate_thumbprint's own documentation and in docs/pki/README.md rather than left to be discovered. Tokens minted before this change carry no cnf and are accepted exactly as before, so the migration lasts one access-token lifetime. Three unit tests in axiam-auth pin the stamp, the refusal without and with a wrong certificate, the acceptance with the right one, and the I1 that an unbound token demands nothing.",
+                  "modelType": "STRIDE",
+                  "number": 283
                 }
               ]
             }
@@ -15426,6 +15437,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 282
+    "threatTop": 283
   }
 }

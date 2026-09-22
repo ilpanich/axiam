@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Device tokens are bound to the certificate that obtained them (T22.3,
+  DF-014).** `POST /api/v1/auth/device` authenticates a device by a TLS
+  handshake with a client certificate and then handed back a plain **bearer**
+  token, so the proof of possession bought nothing after the handshake that
+  made it: a token read off a device's flash, or out of a log, was as good as
+  the key the device protects. `CnfClaim` and the RFC 8705 `x5t#S256`
+  confirmation already existed and were minted for OAuth2 mTLS clients; the
+  device path alone omitted them.
+
+  The device token now carries `cnf.x5t#S256` over the certificate rustls
+  verified for the connection, and both surfaces refuse it where that
+  certificate is not presented again — the REST extractor and the gRPC
+  interceptor each run the same `verify_token_binding` on every `cnf`-bearing
+  token, so **no enforcement code changed**: the claim was all that was
+  missing.
+
+  A token minted before this change carries no `cnf` and is accepted exactly as
+  before, so the migration lasts one access-token lifetime. Deployments that
+  terminate mTLS at a proxy and forward `X-Client-Certificate` keep getting
+  bearer device tokens, deliberately: AXIAM cannot re-check a certificate it
+  never saw, and binding a token it would then refuse on first use would be
+  worse than not binding it. `docs/pki/README.md` says so, and says what to do
+  about it.
+
 - **The device mTLS login is rate-limited (T22.2, DF-028).**
   `POST /api/v1/auth/device` was registered bare — no governor, no shared
   store — while `/auth/login`, the three OPAQUE routes, the six WebAuthn

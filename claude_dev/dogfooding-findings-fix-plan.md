@@ -490,6 +490,77 @@ min). No existing limiter default moves.
 
 ### S-3 — device tokens carry `cnf` / `x5t#S256` and are enforced against the presenting certificate (DF-014) — Opus 5
 
+> **EXECUTED — 2026-09-22, PR A, commit 4 of 5.**
+>
+> **Half the task did not need doing, and finding that out was the task.** The
+> plan says "**Read how OAuth2 mTLS-bound tokens are enforced on REST today
+> before writing a line** — if that enforcement lives in the same extractor,
+> this is one more call site; if it lives only in introspection output, the REST
+> enforcement is new." It lives in the same extractor, and more generally than
+> that: `enforce_sender_constraint` sits inside `validate_presented_token`,
+> which is the tail of `parse_validated_claims`, which **every** extractor
+> reaches — `AuthenticatedUser`, `AuthenticatedServiceAccount`,
+> `AuthenticatedPrincipal` and the audit middleware's cache alike. The gRPC
+> interceptor has its own copy reading `peer_certs()`. Both are keyed on
+> `claims.cnf.is_none()`, so they began enforcing the moment the claim
+> appeared. **No enforcement code was written, and none needed to be.**
+>
+> **Shipped.** `issue_service_account_token` gains `cnf: Option<CnfClaim>` and
+> passes it through `AccessTokenSpec::cnf`, which already existed.
+> `CertificateAuthenticated` gains `certificate_thumbprint: Option<String>`,
+> set in the extractor and only on the `VerifiedClientCert` branch.
+> `device_auth` turns it into `CnfClaim::from_certificate_thumbprint`.
+> `issue_service_account_client_credentials_token_enriched` gains the parameter
+> for symmetry as the plan asks, passing `None` at its one caller.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **No `thumbprint_s256` move.** The plan expected layering to force it into
+>    `axiam-auth`. It does not: the computation happens in `axiam-api-rest`
+>    (layer 6), which already depends on `axiam-oauth2` (layer 4) and already
+>    calls `axiam_oauth2::mtls::thumbprint_s256` from `enforce_sender_constraint`
+>    eleven lines away. `check-crate-layering.py` is content. Moving it would
+>    have been churn with a third copy of a one-line function as the reward —
+>    the gRPC interceptor already keeps its own, and says why.
+> 2. **The trusted-proxy path must NOT be bound.** The plan does not mention it.
+>    `enforce_sender_constraint` reads `VerifiedClientCert` off the connection
+>    and refuses the `X-Client-Certificate` header by construction, so a token
+>    bound on the header path would be one AXIAM refuses on its own next
+>    request. The thumbprint is therefore recorded only on the native mTLS
+>    branch, and the asymmetry is documented at the field, in `docs/pki/README.md`
+>    and in T-283 rather than left to be discovered.
+> 3. **There is no "stolen device token" residual to flip.** The plan says the
+>    existing one "becomes Mitigated"; no such entry exists in either STRIDE
+>    document. Entered as a new threat, **T-283**, Mitigated on arrival.
+> 4. **The positive native-mTLS direction is not reachable from the test
+>    harness**, so the plan's `a_device_token_presented_with_a_different_certificate_is_refused`
+>    cannot be written at the HTTP layer. `actix_web::test::TestRequest` builds
+>    every request with `conn_data: None` and `HttpRequest::new` is
+>    `pub(crate)`, so no test can put a verified certificate on a connection —
+>    the limitation `oauth2_userinfo_post_test.rs` already records in those
+>    words for the same reason. The three properties are pinned in `axiam-auth`
+>    instead, against `verify_token_binding` itself: refused with no
+>    certificate, refused with a different one, accepted with the right one,
+>    plus the I1. What is not covered is the three-line extractor branch that
+>    sets `Some`, and this block is where that is said rather than implied.
+> 5. **Two suites broke on S-1 and S-2 and are repaired in their own commit**
+>    (`6d42a51`), ahead of this one: `device_auth_test.rs` issued device
+>    certificates with a tenant token against the organization CA (S-1's 404)
+>    and sent requests to a now-rate-limited route with no peer address (S-2's
+>    `500 no peer address`). My runs for those two tasks covered the suites the
+>    plan named and the suites I edited; this is neither, and the miss is
+>    recorded in that commit's message rather than folded away.
+>
+> **Records.** T-283 on the `mTLS device auth` cell (Spoofing, High, Mitigated);
+> both STRIDE documents, counts updated; `gen-threat-model.mjs` run —
+> *"threatModel.ts: 9 diagrams, 274 threats (261 mitigated, 13 open)"* —
+> generated files reverted. Roadmap T22.3. CHANGELOG under **Security**.
+> `docs/pki/README.md` gains "The token a device gets back is bound to its
+> certificate", with the proxy asymmetry, the gRPC consequence and the upgrade
+> note. Contract §6.1 is C-0's, in PR H, as the plan schedules. No OpenAPI
+> change: the token is opaque to the spec.
+
+
 **The fix, in two halves, in this order.**
 
 1. **Stamp.** `issue_service_account_token` (`axiam-auth/src/token.rs:1240`)

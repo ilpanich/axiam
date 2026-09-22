@@ -743,7 +743,7 @@ async fn create_webhook_fails_closed_without_encryption_key() {
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
     let token = mint_token(&auth, user_id, tenant_id, org_id);
-    // No encryption key configured — mirrors AXIAM__PKI__ENCRYPTION_KEY unset.
+    // No encryption key configured — mirrors AXIAM__AUTH__PKI_ENCRYPTION_KEY unset.
     let app = test_app!(db, auth, None::<[u8; 32]>);
 
     let req = test::TestRequest::post()

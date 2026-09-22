@@ -48,7 +48,7 @@ data:
   #
   # `vault`, for parity with everything else this deployment keeps there. The
   # alternative, `database`, seals each CA key into its own `ca_certificate` row
-  # under AXIAM__PKI__ENCRYPTION_KEY — and the difference between the two is
+  # under AXIAM__AUTH__PKI_ENCRYPTION_KEY — and the difference between the two is
   # whether one database dump plus one process's environment yields every CA
   # private key in the deployment, with nothing recording the read.
   #

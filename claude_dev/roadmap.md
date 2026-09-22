@@ -787,6 +787,19 @@ nobody, so it is unauthenticated like its three siblings; and a status that
 depends on a lower crate's wording is one nobody can change safely. The string
 match goes with it. OpenAPI and the management registry regenerated. PR A.
 
+### T22.5 — Messages and docs name the variable the env provider reads — Sonnet 5 ✓ LANDED
+DF-018 / DF-022. `AXIAM__PKI__ENCRYPTION_KEY`, `AXIAM__EMAIL_ENCRYPTION_KEY`,
+`AXIAM__GDPR_PSEUDONYM_PEPPER` and `AXIAM__FEDERATION_ENCRYPTION_KEY` were
+documented, printed in a dozen error messages, and set by `just dev-up`, `just
+prod-up`, the benchmark compose file and the conformance harness — and read by
+nothing. Every secret resolves through the provider to `AXIAM__AUTH__<KEY>`,
+with three grandfathered exceptions. Renamed everywhere, with the rule itself
+stated on both the deployment guide and the configuration page; no aliases
+(D-1). A startup `WARN` names both spellings for a deployment that still sets
+an old one, computed from an *is-set* predicate so it can never touch a value.
+`AXIAM__AMQP__SIGNING_KEY` is excluded — it is genuinely honoured. Seven unit
+tests; records: none. PR B.
+
 ---
 
 ---

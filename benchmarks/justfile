@@ -116,8 +116,8 @@ bench-up:
       # (32-byte AES-256-GCM / HMAC); AXIAM__AUTH__PEPPER is a plain string; the
       # OIDC issuer must be https or localhost.
       export AXIAM__AUTH__MFA_ENCRYPTION_KEY="${AXIAM__AUTH__MFA_ENCRYPTION_KEY:-$(genhex mfa_enc.hex)}"
-      export AXIAM__EMAIL_ENCRYPTION_KEY="${AXIAM__EMAIL_ENCRYPTION_KEY:-$(genhex email_enc.hex)}"
-      export AXIAM__GDPR_PSEUDONYM_PEPPER="${AXIAM__GDPR_PSEUDONYM_PEPPER:-$(genhex gdpr_pepper.hex)}"
+      export AXIAM__AUTH__EMAIL_ENCRYPTION_KEY="${AXIAM__AUTH__EMAIL_ENCRYPTION_KEY:-$(genhex email_enc.hex)}"
+      export AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER="${AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER:-$(genhex gdpr_pepper.hex)}"
       export AXIAM__AUTH__PEPPER="${AXIAM__AUTH__PEPPER:-$(genhex auth_pepper.hex)}"
       # OPAQUE (RFC 9807) keys. Both are 32-byte/64-hex, same shape as the keys
       # above, and BOTH are required or the server treats OPAQUE as unconfigured

@@ -100,6 +100,33 @@ EXEMPT: dict[str, str] = {
     "AXIAM__AUTH__DB_PASSWORD": (
         "not a variable: `db_password` resolves to AXIAM__DB__PASSWORD, which is documented"
     ),
+    # -- Read by nothing: named only so the server can say so -------------
+    #    DF-018/DF-022. Four variables were documented as the way to configure
+    #    a secret and were read by nothing — `AppConfig` marks two of them
+    #    `#[serde(skip)]` and has no field at all for the other two, while the
+    #    secret provider reads `AXIAM__AUTH__<KEY>`. The documentation now
+    #    names the variable that is read; these four survive as literals in
+    #    `axiam_server::legacy_env` solely so a deployment that still sets one
+    #    gets a WARN at startup naming both spellings. Documenting them would
+    #    re-advertise the setting the rename exists to retire.
+    "AXIAM__PKI__ENCRYPTION_KEY": (
+        "read by nothing; `pki_encryption_key` resolves to "
+        "AXIAM__AUTH__PKI_ENCRYPTION_KEY, which is documented. Named only by the "
+        "startup warning for a deployment that still sets the old spelling"
+    ),
+    "AXIAM__EMAIL_ENCRYPTION_KEY": (
+        "read by nothing; `email_encryption_key` resolves to "
+        "AXIAM__AUTH__EMAIL_ENCRYPTION_KEY. Named only by the startup warning"
+    ),
+    "AXIAM__GDPR_PSEUDONYM_PEPPER": (
+        "read by nothing; `gdpr_pseudonym_pepper` resolves to "
+        "AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER. Named only by the startup warning"
+    ),
+    "AXIAM__FEDERATION_ENCRYPTION_KEY": (
+        "read by nothing; `federation_encryption_key` resolves to "
+        "AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY, which is documented. Named only by "
+        "the startup warning"
+    ),
     # -- No observable effect ---------------------------------------------
     "AXIAM__GRPC__KEY": (
         "gRPC rate limiting is per-IP by construction; setting this to anything "

@@ -77,12 +77,14 @@ impl EnvSecretProvider {
     /// credentials T-132's follow-up brought in — `AXIAM__DB__PASSWORD`, not
     /// `AXIAM__AUTH__DB_PASSWORD`. Renaming a variable every deployment
     /// already sets, to make a namespace tidy, is a breaking change dressed as
-    /// housekeeping; the table lives in `axiam_core::secrets::env_var_override`
-    /// so the composition root's warning names the same variable this reads.
+    /// housekeeping.
+    ///
+    /// The mapping itself is [`axiam_core::secrets::env_var_name`]. It lives
+    /// there rather than here so that a crate which only has to *print* the
+    /// variable in an error message — `axiam-pki`, which sits below this one —
+    /// can name the same variable this provider reads.
     pub fn var_name(name: &str) -> String {
-        axiam_core::secrets::env_var_override(name)
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("AXIAM__AUTH__{}", name.to_uppercase()))
+        axiam_core::secrets::env_var_name(name)
     }
 }
 
@@ -734,6 +736,40 @@ mod tests {
         assert_eq!(
             EnvSecretProvider::var_name(OPAQUE_SETUP_KEY),
             "AXIAM__AUTH__OPAQUE_SETUP_KEY"
+        );
+    }
+
+    /// The four secrets whose variable the documentation used to get wrong.
+    ///
+    /// DF-018 and DF-022: the deployment guide, the PKI guide, the GDPR guide
+    /// and two compose files all named `AXIAM__PKI__ENCRYPTION_KEY`,
+    /// `AXIAM__EMAIL_ENCRYPTION_KEY`, `AXIAM__GDPR_PSEUDONYM_PEPPER` and
+    /// `AXIAM__FEDERATION_ENCRYPTION_KEY`. None of the four is read by
+    /// anything: `AppConfig` marks the two it owns `#[serde(skip)]`, and the
+    /// other two have no `AppConfig` field at all, so every one of them is a
+    /// key an operator sets and a server that never sees it.
+    ///
+    /// This test is the pin between the resolver and the printed page. If it
+    /// fails, the documentation is wrong again — change the docs, not this.
+    #[test]
+    fn var_name_is_what_the_docs_say() {
+        use axiam_core::secrets as keys;
+
+        assert_eq!(
+            EnvSecretProvider::var_name(keys::PKI_ENCRYPTION_KEY),
+            "AXIAM__AUTH__PKI_ENCRYPTION_KEY"
+        );
+        assert_eq!(
+            EnvSecretProvider::var_name(keys::EMAIL_ENCRYPTION_KEY),
+            "AXIAM__AUTH__EMAIL_ENCRYPTION_KEY"
+        );
+        assert_eq!(
+            EnvSecretProvider::var_name(keys::GDPR_PSEUDONYM_PEPPER),
+            "AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER"
+        );
+        assert_eq!(
+            EnvSecretProvider::var_name(keys::FEDERATION_ENCRYPTION_KEY),
+            "AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY"
         );
     }
 }

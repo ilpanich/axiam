@@ -200,6 +200,21 @@ prefix (e.g. `AXIAM__DB__USERNAME`) — this is how `config-rs` distinguishes
 the env-var prefix from nested key separators. A single underscore is
 silently ignored and the in-code default wins.
 
+**Secrets follow one further rule.** Every cryptographic secret is fetched
+through the pluggable secret provider, which addresses secrets by a *logical*
+name (`pki_encryption_key`); under the default `env` provider that name
+resolves to `AXIAM__AUTH__<KEY>`, uppercased — so the CA encryption key is
+`AXIAM__AUTH__PKI_ENCRYPTION_KEY` and **not** `AXIAM__PKI__ENCRYPTION_KEY`.
+There are exactly three exceptions, the credentials that already shipped under
+another spelling and keep it: `db_username` → `AXIAM__DB__USERNAME`,
+`db_password` → `AXIAM__DB__PASSWORD`, `amqp_url` → `AXIAM__AMQP__URL`.
+Nothing else has a second accepted name. A variable outside this rule is read
+by nothing: the value is set, the feature stays off, and the fault looks like
+the feature — so the server now logs a `WARN` naming both spellings if it finds
+one of the four that this documentation previously got wrong
+(`AXIAM__PKI__ENCRYPTION_KEY`, `AXIAM__EMAIL_ENCRYPTION_KEY`,
+`AXIAM__GDPR_PSEUDONYM_PEPPER`, `AXIAM__FEDERATION_ENCRYPTION_KEY`).
+
 [`k8s/server/secret.yml`](../../k8s/server/secret.yml) is the canonical list
 of required secret keys for a Kubernetes deployment (the `data:` values are
 intentionally left blank in the committed file — fill them at deploy time,
@@ -212,10 +227,10 @@ never in git):
 | `AXIAM__AUTH__JWT_PRIVATE_KEY_PEM` | Ed25519 JWT signing private key (PEM). Generate with `openssl genpkey -algorithm ed25519` (see `just prod-up` for the exact commands). |
 | `AXIAM__AUTH__JWT_PUBLIC_KEY_PEM` | Ed25519 JWT verification public key (PEM), paired with the private key above. |
 | `AXIAM__AUTH__MFA_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting TOTP MFA secrets at rest. Generate with `openssl rand -hex 32`. |
-| `AXIAM__PKI__ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting CA signing private keys at rest. Generate with `openssl rand -hex 32`. |
+| `AXIAM__AUTH__PKI_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting CA signing private keys at rest. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting SAML/OIDC federation client secrets at rest (SECHRD-09). Generate with `openssl rand -hex 32`. |
-| `AXIAM__EMAIL_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting email/SMTP provider secrets at rest. Generate with `openssl rand -hex 32`. |
-| `AXIAM__GDPR_PSEUDONYM_PEPPER` | HMAC-SHA256 pepper (32 bytes, hex) used to pseudonymize audit-log actor identities on GDPR erasure. Generate with `openssl rand -hex 32`. |
+| `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting email/SMTP provider secrets at rest. Generate with `openssl rand -hex 32`. |
+| `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` | HMAC-SHA256 pepper (32 bytes, hex) used to pseudonymize audit-log actor identities on GDPR erasure. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__PEPPER` | Server pepper (plain string). Prepended before Argon2id password hashing, **and** keys client-secret hashing (OBS-1). **Mandatory in a release build** — the server refuses to start without it. Generate a long random string, e.g. `openssl rand -base64 32`. |
 | `AXIAM__AUTH__PEPPER_PREVIOUS` | Outgoing pepper, **verify-only**, set for the duration of a pepper rotation. Unset outside a rotation. See below. |
 

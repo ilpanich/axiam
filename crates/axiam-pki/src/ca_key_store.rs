@@ -815,7 +815,7 @@ impl CaKeyCustodians {
             if !available {
                 return Err(AxiamError::Internal(format!(
                     "CA key custody is set to `{requested}` but that custodian is not \
-                     configured: database custody needs AXIAM__PKI__ENCRYPTION_KEY, vault \
+                     configured: database custody needs AXIAM__AUTH__PKI_ENCRYPTION_KEY, vault \
                      and vault_pki custody need AXIAM__PKI__VAULT_ADDR and \
                      AXIAM__PKI__VAULT_TOKEN"
                 )));
@@ -865,7 +865,7 @@ impl CaKeyCustodians {
         let custody = self.default_custody.ok_or_else(|| {
             AxiamError::Internal(
                 "no CA key custodian is configured, so a CA signing key cannot be \
-                 stored: set AXIAM__PKI__ENCRYPTION_KEY to keep it encrypted in the \
+                 stored: set AXIAM__AUTH__PKI_ENCRYPTION_KEY to keep it encrypted in the \
                  database, or AXIAM__PKI__VAULT_ADDR and AXIAM__PKI__VAULT_TOKEN to \
                  keep it in Vault"
                     .into(),
@@ -888,7 +888,7 @@ impl CaKeyCustodians {
                 .map(|s| s as &dyn CaKeyStore)
                 .ok_or_else(|| {
                     AxiamError::Internal(
-                        "this CA's key is sealed into its row, but AXIAM__PKI__ENCRYPTION_KEY \
+                        "this CA's key is sealed into its row, but AXIAM__AUTH__PKI_ENCRYPTION_KEY \
                          is not set — the key cannot be opened"
                             .into(),
                     )

@@ -58,7 +58,7 @@ pub enum WebhookError {
     SecretDecrypt(String),
     #[error("secret encrypt failed: {0}")]
     SecretEncrypt(String),
-    #[error("webhook encryption key is not configured (AXIAM__PKI__ENCRYPTION_KEY unset)")]
+    #[error("webhook encryption key is not configured (AXIAM__AUTH__PKI_ENCRYPTION_KEY unset)")]
     EncryptionKeyMissing,
     /// The webhook row could not be fetched (not found, or a repository
     /// error) when `deliver_once` tried to resolve it by ID. Distinct from
@@ -123,7 +123,7 @@ impl From<SsrfError> for WebhookError {
 pub struct WebhookDeliveryService<W> {
     repo: W,
     /// AES-256-GCM key used to encrypt/decrypt webhook secrets stored at
-    /// rest. Corresponds to `AXIAM__PKI__ENCRYPTION_KEY` (SEC-031/SEC-059).
+    /// rest. Corresponds to `AXIAM__AUTH__PKI_ENCRYPTION_KEY` (SEC-031/SEC-059).
     /// `None` when the env var is unset — the server still boots (this is
     /// an optional subsystem), but registration (`encrypt_secret`) and
     /// delivery (`deliver_once`) both refuse to operate rather than falling

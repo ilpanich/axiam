@@ -25,6 +25,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pins. Clients that mapped `403` on this endpoint to "bound, but not
   permitted" should map `401` and read the body.
 
+### Fixed
+
+- **Four documented secret variables were read by nothing (T22.5, DF-018 /
+  DF-022).** `AXIAM__PKI__ENCRYPTION_KEY`, `AXIAM__EMAIL_ENCRYPTION_KEY`,
+  `AXIAM__GDPR_PSEUDONYM_PEPPER` and `AXIAM__FEDERATION_ENCRYPTION_KEY` were
+  named by the deployment guide, the PKI guide, the GDPR guide, the
+  configuration page, a dozen error messages, and — worse — by `just dev-up`,
+  `just prod-up`, the benchmark compose file and the conformance harness. None
+  of the four ever reached the server. Every cryptographic secret is fetched
+  through the secret provider, which addresses secrets by a logical name and,
+  under the default `env` provider, resolves that name to `AXIAM__AUTH__<KEY>`.
+  Two of the four map to `AppConfig` fields marked `#[serde(skip)]`; the other
+  two have no `AppConfig` field at all. The effect was silent: the operator set
+  the key, the feature that needed it stayed off, and the fault looked like the
+  feature — the mail consumer refusing to spawn, the email-config endpoints
+  answering `500`, webhook registration failing closed.
+
+  Every message, document, compose file and recipe now names the variable that
+  is read: `AXIAM__AUTH__PKI_ENCRYPTION_KEY`,
+  `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY`, `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER`,
+  `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY`. **The old spellings are not
+  accepted as aliases** (decision D-1): two names for one secret is the trap
+  this finding describes, read from the other side. A deployment that still
+  sets one gets a `WARN` at startup naming both spellings — and only when the
+  variable AXIAM does read is absent, so a migration that sets both is silent.
+  The warning is computed from a predicate that answers *is this variable set*,
+  never from its value.
+
+  `AXIAM__AMQP__SIGNING_KEY` is deliberately **not** in that set. It is a real,
+  honoured variable that `load_config` deserialises into
+  `AmqpConfig::signing_key`; the provider's `AXIAM__AUTH__AMQP_SIGNING_KEY`
+  merely wins when both are set. Warning about it would tell an operator with a
+  working deployment that it is broken.
+
+  The deployment guide and the configuration page now state the rule itself —
+  every secret is `AXIAM__AUTH__<KEY>`, with exactly three exceptions
+  (`AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD`, `AXIAM__AMQP__URL`) that keep
+  the spelling they shipped with — so the next key does not have to be
+  discovered the same way.
+
 ### Security
 
 - **Device tokens are bound to the certificate that obtained them (T22.3,

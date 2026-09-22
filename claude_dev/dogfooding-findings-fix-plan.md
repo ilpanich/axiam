@@ -709,6 +709,84 @@ Four independent parts; one commit each on PR B.
 
 #### S-6a — messages and docs name the variable the env provider reads (DF-018, DF-022)
 
+> **EXECUTED — 2026-09-22, PR B, commit 1 of 5.**
+>
+> **Shipped.** One resolver, `axiam_core::secrets::env_var_name`, is now the
+> single answer to "which variable is this secret read from";
+> `EnvSecretProvider::var_name` delegates to it. Every message, doc comment,
+> guide, website block, compose file and `just` recipe that named one of the
+> dead spellings now names the resolved one. A new
+> `axiam_server::legacy_env::legacy_secret_env_warnings` produces one `WARN`
+> per legacy spelling that is set while the variable AXIAM reads is not; it is
+> wired in `main.rs` immediately after `read_secret` is bound.
+>
+> **Tests.** `axiam-auth`: `var_name_is_what_the_docs_say` pins the four names.
+> `axiam-core`: `the_overridden_three_keep_their_shipped_spellings` and
+> `every_other_key_is_auth_prefixed` (the latter over `ALL_KEYS` + `ALL_SECRETS`,
+> so a new secret cannot quietly acquire a third convention).
+> `axiam-server::legacy_env`: five —
+> `a_legacy_spelling_alone_is_reported_with_the_variable_that_is_read`,
+> `all_four_are_reported`, `the_amqp_signing_key_is_not_treated_as_legacy`,
+> and the two I4 twins `a_correct_deployment_is_silent` and
+> `both_spellings_set_is_silent`. `scripts/check-config-key-coverage.py`
+> passes, self-test included.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`AXIAM__AMQP__SIGNING_KEY` is not a legacy spelling, and warning on it
+>    would have been a false alarm.** The plan lists it as the fourth variable
+>    to check for. It is a real, honoured variable: `load_config` runs
+>    `config::Environment::with_prefix("AXIAM").separator("__")` and
+>    `AmqpConfig` has a `signing_key` field, so it deserialises — which
+>    `main.rs:359-366` says in as many words, including that the provider's
+>    `AXIAM__AUTH__AMQP_SIGNING_KEY` merely takes precedence when both are set.
+>    Telling an operator whose deployment works that it does not is worse than
+>    saying nothing. Excluded, with `the_amqp_signing_key_is_not_treated_as_legacy`
+>    pinning the exclusion and the reason written where the list is.
+> 2. **A fourth spelling the plan did not name is dead too:**
+>    `AXIAM__FEDERATION_ENCRYPTION_KEY` (`config.auth.federation_encryption_key`
+>    comes from `read_key(FEDERATION_ENCRYPTION_KEY)` only). It took the
+>    vacated slot in the warning table.
+> 3. **The defect is not confined to prose. The repository's own recipes set
+>    the dead names.** `justfile:287,289` (`just dev-up` / `just prod-up`),
+>    `benchmarks/justfile:119-120`, `benchmarks/targets/axiam/docker-compose.yml:76-77`
+>    and `conformance/scripts/serve-axiam.sh:77-78` all exported spellings
+>    nothing reads — so the shipped development stack, the benchmark stack and
+>    the conformance harness have been running with the email key, the GDPR
+>    pepper, the PKI key and the federation key *unset*, which is why the mail
+>    consumer's "NOT spawned" error is a familiar line. Fixed with the docs;
+>    this is the half of DF-018 that had a running consequence.
+> 4. **The resolver belongs in `axiam-core`, not `axiam-auth`.** The plan says
+>    to render through `EnvSecretProvider::var_name`. Six of the message sites
+>    are in `axiam-pki` (`pgp.rs`, `ca_key_store.rs`), which sits below
+>    `axiam-auth` and cannot depend on it. The mapping moved to
+>    `axiam_core::secrets::env_var_name` — beside `env_var_override`, the table
+>    it consults — and the provider now delegates. No layering edge added.
+> 5. **Messages keep literal names rather than a function call.** The plan asks
+>    for `var_name(key)` at each site. Most sites are doc comments and
+>    `#[error]` attributes, where a call is impossible or unreadable; and
+>    `check-config-key-coverage.py` is built to scan *literals*, so rendering
+>    them at runtime would make the documentation gate blind to exactly these
+>    keys. The pin is `var_name_is_what_the_docs_say` instead: it fails if the
+>    resolver and the printed name ever disagree.
+> 6. **The coverage gate needed exemptions, not acceptance.** The plan says it
+>    "must accept the resolved names" — it already would have. What it refuses
+>    is the *legacy* names, which survive as literals in
+>    `axiam_server::legacy_env` so the warning can name them. Four `EXEMPT`
+>    entries, each stating that the key is read by nothing and which documented
+>    key replaces it.
+> 7. **Left alone, deliberately.** `claude_dev/` and `.planning/` are records of
+>    what was decided when, not instructions to a deployment. And
+>    `threat-model-stride.md:1960`, `ThreatDragonModels/Axiam/Axiam.json` and
+>    the generated `website/src/threatModel.ts` quote the legacy spelling inside
+>    a threat *description*: S-6a's records are "none", and editing the model
+>    would desync the committed generated file, so this goes with the
+>    threat-model reconciliation PR A already flagged as a maintainer task.
+> 8. **Citations re-validated against `main` @ `4b482f0`.** The `main.rs` sites
+>    the plan names (172, 631, 1111, 1124, 1194, 2087) are all still the right
+>    lines; `crates/axiam-core/src/secrets.rs:166-174` is now 153-174 after an
+>    earlier doc-comment growth, and the claim it supports is correct.
+
 **Decision (D-1): one name per secret, no alias.** The env provider resolves
 every logical key to `AXIAM__AUTH__<NAME>` (`crates/axiam-auth/src/secrets.rs:85`)
 except the three overrides in `crates/axiam-core/src/secrets.rs:166-174`.

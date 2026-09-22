@@ -780,11 +780,11 @@ export const OPERATE_PAGES: DocPage[] = [
       { type: "h", id: "gdpr", text: "Audit and the right to erasure" },
       {
         type: "p",
-        text: "An append-only log and a legal obligation to erase data are in obvious tension. AXIAM resolves it by **pseudonymising** the actor identity rather than deleting records: on erasure, the identity is replaced by an HMAC-SHA256 pseudonym derived under `AXIAM__GDPR_PSEUDONYM_PEPPER`. The trail's integrity survives; the link to a natural person does not.",
+        text: "An append-only log and a legal obligation to erase data are in obvious tension. AXIAM resolves it by **pseudonymising** the actor identity rather than deleting records: on erasure, the identity is replaced by an HMAC-SHA256 pseudonym derived under `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER`. The trail's integrity survives; the link to a natural person does not.",
       },
       {
         type: "warn",
-        text: "Changing `AXIAM__GDPR_PSEUDONYM_PEPPER` breaks the linkage between existing pseudonyms and new ones — the same person will appear as two different actors either side of the change. Treat it as permanent.",
+        text: "Changing `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` breaks the linkage between existing pseudonyms and new ones — the same person will appear as two different actors either side of the change. Treat it as permanent.",
       },
       { type: "h", id: "retention", text: "Retention" },
       {

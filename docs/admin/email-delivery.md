@@ -43,7 +43,7 @@ to inherit it again, turn the sender override off.
 ### Secrets are write-only and preserve on omit
 
 Provider credentials (`SmtpConfig.password`, `ApiProviderConfig.api_key`) are
-encrypted at rest with `AXIAM__EMAIL_ENCRYPTION_KEY` and are **never** returned
+encrypted at rest with `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` and are **never** returned
 by any `GET`. On the write path an empty credential means *"no new secret
 supplied — keep the stored one"*, which is why the admin panel can show a
 provider's settings without ever holding its key.

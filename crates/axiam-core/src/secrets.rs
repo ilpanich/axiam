@@ -173,6 +173,21 @@ pub fn env_var_override(name: &str) -> Option<&'static str> {
     }
 }
 
+/// The environment variable the `env` provider reads a logical key from.
+///
+/// The single definition of that mapping. It lives here, beside the override
+/// table it consults, so that a crate which only has to *name* the variable in
+/// a message does not have to depend on the provider that reads it — and, more
+/// to the point, so there is exactly one answer to "which variable is this?".
+/// A message that names a variable nobody reads is worse than no message: the
+/// operator sets it, nothing changes, and the fault looks like the feature.
+#[must_use]
+pub fn env_var_name(name: &str) -> String {
+    env_var_override(name)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("AXIAM__AUTH__{}", name.to_uppercase()))
+}
+
 /// A source of 256-bit symmetric keys, addressed by a stable logical name.
 ///
 /// Names are logical (`opaque_setup_key`), not physical: translating one into
@@ -257,6 +272,35 @@ mod credential_tests {
         // And the originals are still there — this list grew, it did not move.
         for name in [AUTH_PEPPER, JWT_PRIVATE_KEY_PEM, JWT_PUBLIC_KEY_PEM] {
             assert!(ALL_SECRETS.contains(&name));
+        }
+    }
+}
+
+#[cfg(test)]
+mod env_name_tests {
+    use super::*;
+
+    /// The three shipped spellings are the exception, and stay the exception.
+    #[test]
+    fn the_overridden_three_keep_their_shipped_spellings() {
+        assert_eq!(env_var_name(DB_USERNAME), "AXIAM__DB__USERNAME");
+        assert_eq!(env_var_name(DB_PASSWORD), "AXIAM__DB__PASSWORD");
+        assert_eq!(env_var_name(AMQP_URL), "AXIAM__AMQP__URL");
+    }
+
+    /// Everything else is `AXIAM__AUTH__<KEY>`, uppercased — the rule the
+    /// deployment documentation now states in one sentence.
+    #[test]
+    fn every_other_key_is_auth_prefixed() {
+        for name in ALL_KEYS.iter().chain(ALL_SECRETS.iter()) {
+            if env_var_override(name).is_some() {
+                continue;
+            }
+            assert_eq!(
+                env_var_name(name),
+                format!("AXIAM__AUTH__{}", name.to_uppercase()),
+                "`{name}` does not follow the documented rule"
+            );
         }
     }
 }

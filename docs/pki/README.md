@@ -39,7 +39,7 @@ POST /api/v1/organizations/{org_id}/ca-certificates
 Response (`201`) is a `GeneratedCaCertificate`: the stored CA certificate
 metadata plus `private_key_pem` — the CA's signing private key, returned
 only this once. Store it in your secrets manager immediately (or, in a
-Kubernetes deployment, seed it into `AXIAM__PKI__ENCRYPTION_KEY`-protected
+Kubernetes deployment, seed it into `AXIAM__AUTH__PKI_ENCRYPTION_KEY`-protected
 storage per your operational process) — AXIAM itself never persists the
 plaintext key.
 
@@ -175,7 +175,7 @@ warning naming what is at stake:
 ```
 WARN  CA signing keys are being sealed into the database although Vault custody
       is configured and reachable. A database dump plus one process's
-      AXIAM__PKI__ENCRYPTION_KEY then yields every CA private key in this
+      AXIAM__AUTH__PKI_ENCRYPTION_KEY then yields every CA private key in this
       deployment, and nothing records the read.
 ```
 

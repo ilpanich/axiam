@@ -695,7 +695,7 @@ async fn cert_generate_rejects_ca_with_no_stored_private_key() {
 /// holds no key to open it (SEC-012).
 ///
 /// The shape an operator meets after restoring a database into a deployment
-/// whose `AXIAM__PKI__ENCRYPTION_KEY` is absent or different — and the reason
+/// whose `AXIAM__AUTH__PKI_ENCRYPTION_KEY` is absent or different — and the reason
 /// the row records its custodian: the failure names the missing configuration
 /// rather than surfacing as a decryption error about bytes.
 #[tokio::test]
@@ -729,7 +729,7 @@ async fn cert_generate_rejects_when_encryption_key_not_configured() {
         .expect("CA generation must succeed");
 
     // ...but the CertService's custodian set holds no database custodian, which
-    // is what an absent AXIAM__PKI__ENCRYPTION_KEY produces. Vault stands in as
+    // is what an absent AXIAM__AUTH__PKI_ENCRYPTION_KEY produces. Vault stands in as
     // the default only so the set has one at all; nothing here reaches it.
     let no_key_config = PkiConfig {
         encryption_key: None,

@@ -169,12 +169,12 @@ struct AppConfig {
     #[serde(default)]
     audit: AuditCollectionConfig,
     /// AES-256-GCM key (32 bytes) for encrypting email provider secrets at rest
-    /// (D-17). Loaded from `AXIAM__EMAIL_ENCRYPTION_KEY` (hex-encoded, 64 chars).
+    /// (D-17). Loaded from `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` (hex-encoded, 64 chars).
     /// Skipped by serde — populated manually from env at startup.
     #[serde(skip)]
     email_encryption_key: Option<[u8; 32]>,
     /// HMAC-SHA256 pepper (32 bytes) for GDPR audit pseudonymization (D-02).
-    /// Loaded from `AXIAM__GDPR_PSEUDONYM_PEPPER` (hex-encoded, 64 chars).
+    /// Loaded from `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` (hex-encoded, 64 chars).
     /// Skipped by serde — populated manually from env at startup.
     #[serde(skip)]
     gdpr_pseudonym_pepper: Option<[u8; 32]>,
@@ -296,6 +296,26 @@ async fn main() -> std::io::Result<()> {
             .get_secret(name)
             .unwrap_or_else(|e| panic!("reading {name} from the secret provider failed: {e}"))
     };
+
+    // DF-018/DF-022. Four variables were documented as the way to configure a
+    // secret and are read by nothing; the deployment that set one has the
+    // feature silently off. The names are corrected everywhere else in this
+    // release, so this is for the operator who upgrades with the old spelling
+    // still in the pod spec. It reads no value — `legacy_secret_env_warnings`
+    // takes a predicate, not a lookup — and says nothing when the variable
+    // AXIAM does read is also set.
+    for warning in
+        axiam_server::legacy_env::legacy_secret_env_warnings(|v| std::env::var_os(v).is_some())
+    {
+        tracing::warn!(
+            legacy = warning.legacy,
+            variable = %warning.resolved,
+            "{} is set and is read by nothing. AXIAM reads this secret from {}; \
+             until that variable is set, the feature it configures is off.",
+            warning.legacy,
+            warning.resolved,
+        );
+    }
 
     // Load MFA encryption key.
     config.auth.mfa_encryption_key = read_key(keys::MFA_ENCRYPTION_KEY);
@@ -628,7 +648,7 @@ async fn main() -> std::io::Result<()> {
             }
         } else {
             tracing::warn!(
-                "AXIAM__EMAIL_ENCRYPTION_KEY missing — \
+                "AXIAM__AUTH__EMAIL_ENCRYPTION_KEY missing — \
                  skipping email config secrets backfill"
             );
         }
@@ -1108,7 +1128,7 @@ async fn main() -> std::io::Result<()> {
         ),
         None => tracing::info!(
             "no CA signing key custodian configured; CA generation and import will be \
-             refused until AXIAM__PKI__ENCRYPTION_KEY or AXIAM__PKI__VAULT_ADDR is set"
+             refused until AXIAM__AUTH__PKI_ENCRYPTION_KEY or AXIAM__PKI__VAULT_ADDR is set"
         ),
     }
     // The arrangement nobody picks deliberately, and the one the 1.0.0-beta01
@@ -1121,7 +1141,7 @@ async fn main() -> std::io::Result<()> {
         tracing::warn!(
             "CA signing keys are being sealed into the database although Vault custody is \
              configured and reachable. A database dump plus one process's \
-             AXIAM__PKI__ENCRYPTION_KEY then yields every CA private key in this \
+             AXIAM__AUTH__PKI_ENCRYPTION_KEY then yields every CA private key in this \
              deployment, and nothing records the read. Unset \
              AXIAM__PKI__CA_KEY_STORE (or set it to `vault`) to hold them in Vault \
              instead, then migrate the CAs you already have with \
@@ -1177,25 +1197,26 @@ async fn main() -> std::io::Result<()> {
     let notification_rule_repo = SurrealNotificationRuleRepository::new(pool.handle_for_repo());
     // Email-config repository (28-04, FUNC-03) — required by the
     // `handlers::email_config::*` handlers' `web::Data<SurrealEmailConfigRepository<C>>`
-    // extractor. Only constructed when AXIAM__EMAIL_ENCRYPTION_KEY is present (same
+    // extractor. Only constructed when AXIAM__AUTH__EMAIL_ENCRYPTION_KEY is present (same
     // fail-closed, no-zero-key-fallback posture as the mail consumer above): when the
     // key is absent, `email_config_repo` stays `None` and is NOT registered as
     // app_data below, so the six email-config routes fail closed with actix's
     // "App data is not configured" 500 rather than silently encrypting with a
     // constant/zero key.
-    let email_config_repo: Option<SurrealEmailConfigRepository<axiam_db::DbClient>> =
-        match config.email_encryption_key {
-            Some(email_key) => Some(SurrealEmailConfigRepository::new(
-                pool.handle_for_repo(),
-                email_key,
-            )),
-            None => {
-                tracing::warn!(
-                    "AXIAM__EMAIL_ENCRYPTION_KEY missing — email-config admin endpoints disabled"
-                );
-                None
-            }
-        };
+    let email_config_repo: Option<SurrealEmailConfigRepository<axiam_db::DbClient>> = match config
+        .email_encryption_key
+    {
+        Some(email_key) => Some(SurrealEmailConfigRepository::new(
+            pool.handle_for_repo(),
+            email_key,
+        )),
+        None => {
+            tracing::warn!(
+                "AXIAM__AUTH__EMAIL_ENCRYPTION_KEY missing — email-config admin endpoints disabled"
+            );
+            None
+        }
+    };
     let federation_config_repo = SurrealFederationConfigRepository::new(pool.handle_for_repo());
     let federation_link_repo = SurrealFederationLinkRepository::new(pool.handle_for_repo());
     let assertion_replay_repo = SurrealAssertionReplayRepository::new(pool.handle_for_repo());
@@ -2041,7 +2062,7 @@ async fn main() -> std::io::Result<()> {
     }
 
     // Spawn AMQP mail consumer on a background task (D-14).
-    // Only spawned when AXIAM__EMAIL_ENCRYPTION_KEY is present; otherwise
+    // Only spawned when AXIAM__AUTH__EMAIL_ENCRYPTION_KEY is present; otherwise
     // mail delivery is disabled and a warning was logged at startup (T-5-key-absent).
     if let Some(email_key) = config.email_encryption_key {
         let mail_channel = amqp
@@ -2084,7 +2105,7 @@ async fn main() -> std::io::Result<()> {
         // design (D-15), so an operator with no mail has a working-looking API,
         // a silent inbox, and one line of startup output between them.
         tracing::error!(
-            "Mail consumer NOT spawned — AXIAM__EMAIL_ENCRYPTION_KEY is missing. \
+            "Mail consumer NOT spawned — AXIAM__AUTH__EMAIL_ENCRYPTION_KEY is missing. \
              NO transactional mail will be delivered: password-reset links, \
              email-verification links and GDPR export notices are queued and \
              never sent. Set the key and restart."

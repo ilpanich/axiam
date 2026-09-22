@@ -899,6 +899,45 @@ verification is **always on** in every rendering and there is deliberately no
 setting that disables it — a backend certificate that does not verify is a
 misconfiguration to fix.
 
+#### The console resolves the backend per request
+
+The console's nginx looks up the host in `AXIAM_BACKEND_ORIGIN` when a request
+needs it, not once at startup, and reuses an answer for at most 30 seconds. So
+the console starts whether or not `axiam-server` exists yet — `/api`, `/oauth2/`
+and `/.well-known` answer `502` until it does, then `200`, with no restart — and
+a backend recreated on a new address is picked up within the same 30 seconds.
+Through 1.0.0-beta16 a console started ahead of its backend exited at once with
+`host not found in upstream`, and one whose backend was recreated answered
+`502` until it was restarted too.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AXIAM_BACKEND_RESOLVER` | the `nameserver` lines of the container's `/etc/resolv.conf` | DNS server(s) nginx asks, as nginx's [`resolver`](https://nginx.org/en/docs/http/ngx_http_core_module.html#resolver) takes them: `10.96.0.10`, `127.0.0.11:53`, `[fd00::53]`, space-separated for several |
+
+Leave it unset on Docker and on Kubernetes: the container's own `resolv.conf`
+already names the right server — Docker's embedded DNS at `127.0.0.11` on a
+user-defined network, the cluster DNS Service (the `kube-dns` ClusterIP) on
+Kubernetes. Set it when neither is what you want, for example a node-local DNS
+cache.
+
+Two rules follow from nginx doing its own lookups:
+
+- **The origin is `scheme://host:port` and nothing else** — no path and no
+  trailing slash. With a path, nginx would send every request to that path
+  rather than to the one the client asked for.
+- **The host must resolve exactly as written.** nginx's resolver does not apply
+  `resolv.conf`'s `search` domains. Docker's embedded DNS answers a bare service
+  name such as `axiam-server`, so the default origin works under Compose. On
+  Kubernetes, write the fully qualified Service name:
+  `http://axiam-server.axiam.svc.cluster.local:8090`. A bare name there answers
+  `502` for every proxied request. The console still starts, but the error log
+  records `could not be resolved`.
+
+An `https` origin is verified exactly as before: the certificate is checked
+against `AXIAM_BACKEND_SNI`, never against whatever address the lookup returned,
+so a wrong DNS answer fails the handshake rather than reaching a different
+server.
+
 ### Client certificates through a proxy
 
 `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` (default **`false`**) controls whether

@@ -93,6 +93,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The console resolves its backend per request (T22.10, DF-026).** Its nginx
+  named the backend literally in `proxy_pass`, and nginx resolves a literal host
+  once, when it loads its configuration. A console started before
+  `axiam-server` therefore did not start at all — `host not found in upstream
+  "axiam-server"` — and one whose backend was recreated on a new address kept
+  the old one and answered `502` until it too was restarted.
+
+  **The three proxy blocks now go through a variable**, which moves the lookup
+  to request time: a `resolver` with `valid=30s` in the `server` block,
+  `set $axiam_backend ${AXIAM_BACKEND_ORIGIN}` once beside it, and
+  `proxy_pass $axiam_backend` in each block. Routing is unchanged, because
+  neither form has a URI part and nginx then forwards the client's request URI
+  as sent. Sixteen request shapes answered identically under both templates on a
+  real nginx before this shipped, and CI pins seven of them. `proxy_ssl_*` is
+  untouched, so an `https` origin is verified against `AXIAM_BACKEND_SNI` exactly
+  as before.
+
+  **`AXIAM_BACKEND_RESOLVER` is new and needs setting almost nowhere.** Left
+  unset, an entrypoint hook reads it from the container's `/etc/resolv.conf`:
+  `127.0.0.11` under Docker, the cluster DNS Service under Kubernetes. A fixed
+  default of `127.0.0.11` would have been correct on Docker alone. **On
+  Kubernetes, `AXIAM_BACKEND_ORIGIN` must be the fully qualified Service name**
+  (`axiam-server.axiam.svc.cluster.local`), because nginx's resolver does not
+  apply `search` domains; the shipped manifests route the API past the console,
+  so they are not affected.
+
+  Every build of the frontend image now renders the template and runs `nginx -t`
+  on it, and a new path-filtered workflow, **Console image**, builds the image
+  on a pull request and drives the start-order scenario: console first, `502`,
+  backend up, `200`, backend moved to a new IP, still `200`, no restart.
+
 - **`axiam-server healthcheck` can probe a TLS listener (T22.8, DF-016).** The
   probe was `reqwest::blocking::get("http://127.0.0.1:8090/health")` with
   `AXIAM_HEALTHCHECK_URL` as its only knob. On a deployment that terminates TLS

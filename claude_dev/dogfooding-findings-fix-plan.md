@@ -1382,6 +1382,107 @@ passes unchanged; a request without the field is today's request.
 
 ### S-11 — the console resolves its upstream at request time (DF-026) — Sonnet 5
 
+> **EXECUTED — 2026-09-22, PR C, commit 1 of 1.**
+>
+> **Shipped.** `docker/nginx.conf.template`: `resolver
+> ${AXIAM_BACKEND_RESOLVER} valid=30s ipv6=off`, `resolver_timeout 5s` and
+> `set $axiam_backend ${AXIAM_BACKEND_ORIGIN}`, once each in the `server`
+> block; `proxy_pass $axiam_backend` in the three proxy blocks. The
+> `proxy_ssl_*` lines are untouched, so T-217's unconditional verification
+> against `AXIAM_BACKEND_SNI` holds in every rendering. New
+> `docker/console-backend-resolver.envsh`, installed as
+> `/docker-entrypoint.d/19-axiam-backend-resolver.envsh`. `Dockerfile.frontend`
+> runs `nginx -t` on the rendered template in every build, and the new
+> `.github/workflows/console-image.yml` builds the image and runs
+> `scripts/e2e-console-resolver-check.sh` against it. The deployment guide has a
+> console subsection.
+>
+> **Citations.** `nginx.conf.template:105/147/176` and
+> `Dockerfile.frontend:155-158` were still exact on `249bd14`: no drift.
+>
+> **Verified here, on a real nginx** (Ubuntu's 1.24, not the image's 1.29; the
+> image could not be pulled — Docker Hub answered 429 and ghcr's blob host is
+> outside this sandbox's egress). The template was rendered by the upstream
+> `20-envsubst-on-templates.sh`, fetched from `nginx/docker-nginx-unprivileged`,
+> with a stub DNS server and echo backends on loopback. Main's template reproduces
+> DF-026: `nginx -t` fails with `[emerg] host not found in upstream
+> "axiam-server"`. The new one starts with the name unresolvable, answers `502`,
+> then `200` once the name resolves, and follows the backend to a new address
+> 30 s later with no reload, because the answer is reused for 30 s. For
+> routing, fifteen request shapes plus a POST gave byte-identical results
+> under both templates: encoded slashes, `..`, `//`, `;params`, bare `/api`,
+> `/oauth2` (301) and `/oauth2-clients` (SPA). The hook was run under dash and
+> bash against Docker, Kubernetes, mixed-family, empty and missing `resolv.conf`
+> fixtures, and nginx accepts the mixed `a.b.c.d [v6]` form it emits.
+> shellcheck and hadolint (2.15.1, the repo's `.hadolint.yaml`) are clean.
+>
+> **Not run here: the Docker half.** The sandbox's Docker daemon is not
+> usable, so the image build, the build-time `nginx -t` and the start-order
+> script were run by CI only.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **A fixed `127.0.0.11` default is right on Docker only.** On Kubernetes
+>    that address has nothing listening, so every proxied request would time out
+>    at the resolver. The default is now read from the container's
+>    `/etc/resolv.conf` by an entrypoint hook, the same source the old
+>    startup-time lookup used: `127.0.0.11` under Docker, the `kube-dns`
+>    ClusterIP under Kubernetes. An operator-set `AXIAM_BACKEND_RESOLVER`
+>    always wins, and `127.0.0.11` remains only as the last resort for a
+>    `resolv.conf` with no nameserver, because an empty `resolver` directive
+>    would stop nginx from starting. There is deliberately no `ENV` default: it
+>    would override the lookup.
+> 2. **nginx's resolver ignores `search` domains.** The plan documents the
+>    resolver for Kubernetes but not the origin. Even with the right resolver,
+>    `http://axiam-server:8090` does not resolve there, so the guide now says
+>    the origin must be the FQDN. The shipped manifests are unaffected: the
+>    ingress routes `/api`, `/oauth2` and `/.well-known` straight to the
+>    server, and `k8s/frontend/deployment.yml` sets no `AXIAM_BACKEND_*`.
+> 3. **`set` once, not three times.** A server-level `set` runs in the
+>    server-rewrite phase for every request, so one line serves the three
+>    blocks and there is one place to change.
+> 4. **No CI job built the frontend image on a pull request.** Only
+>    `release.yml` built it, on a tag, as `ci.yml`'s docker-context comment
+>    already notes, so "the frontend image build runs `nginx -t`" would have
+>    run at release time only. The `nginx -t` step is in the Dockerfile anyway
+>    (every build, release included), and the new workflow is the PR-time build
+>    that §3 calls "its own CI path filter", which did not exist either. The
+>    step runs as uid 101 over a tmpfs `/tmp`, because `nginx -t` creates the
+>    base image's temp directories under `/tmp` and they must not land in the
+>    image. It renders through the real hooks, not a hand-written envsubst, and
+>    greps its patched `nginx.conf` so a base image that moved its include
+>    line fails instead of testing the stock `default.conf`.
+> 5. **`docker-compose.e2e.yml` has no console.** The Playwright suite serves
+>    the SPA from `vite preview`. Adding the console there would mean building
+>    the frontend image inside the E2E job, and `depends_on` ordering is not
+>    a start-order test. The scenario is a dedicated script instead, plain
+>    `docker` on a user-defined network with an echo stand-in for the
+>    backend: the console starts first, `/api`, `/oauth2/` and `/.well-known`
+>    answer `502`, the backend appears and they answer `200`, seven URI shapes
+>    arrive unchanged, the backend is recreated on a new IP and is found with
+>    the console's `StartedAt` unchanged, and an explicit resolver is rendered
+>    verbatim (the I4 twin).
+> 6. **`.dockerignore`** excludes `docker/` and re-includes files by name, so
+>    the hook needed its own negation; `check-docker-context.py` confirms it.
+> 7. **`resolver_timeout 5s`.** nginx's default of 30 s would hold every
+>    proxied request for 30 s behind an unreachable resolver.
+>
+> **Records: none, verified.** No threat entry names the console's upstream
+> resolution. The DNS trust is the same as before, since the old startup-time
+> lookup asked the same server; only the time of the question changes. On an
+> `https` origin a spoofed answer still fails the handshake (T-217 is
+> unchanged). On a plaintext origin a spoofed answer was already enough to
+> read the traffic, which is T-217's own residual. Axiam.json, the two STRIDE
+> documents and `gen-threat-model.mjs` are not touched. `threatTop` stays 284.
+>
+> **Found, not fixed — outside this PR.** `k8s/frontend/deployment.yml` sets
+> `readOnlyRootFilesystem: true` and mounts no volume at
+> `/etc/nginx/conf.d`. The stock `20-envsubst-on-templates.sh` logs
+> `/etc/nginx/conf.d is not writable` and returns without rendering. So on
+> Kubernetes the console most likely serves the base image's own
+> `default.conf`: no SPA fallback, none of the template's security headers,
+> no proxying. Read from the entrypoint source, not observed on a cluster.
+
 **The fix.** In `docker/nginx.conf.template`, the three blocks
 (`:105`, `:147`, `:176`) become:
 

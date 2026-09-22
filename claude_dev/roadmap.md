@@ -852,6 +852,19 @@ none. Also in PR B, deliberately outside the plan: the latent CodeQL
 tenant-B half of `frontend/e2e/matrix/tenancy.spec.ts` snapshotting the users
 table with no wait. PR B.
 
+### T22.10 — The console resolves its upstream at request time — Sonnet 5 ✓ LANDED
+DF-026. A literal host in `proxy_pass` is resolved once, at config load, so a
+console started before `axiam-server` exited with `host not found in upstream`,
+and one whose backend moved kept the dead address. The three proxy blocks now
+go through `set $axiam_backend` and a `resolver ... valid=30s`, once per
+`server`. The resolver comes from the container's `resolv.conf`, through an
+entrypoint hook, unless `AXIAM_BACKEND_RESOLVER` is set: the plan's fixed
+`127.0.0.11` would have been right on Docker only. Routing was proved unchanged
+across sixteen request shapes on a real nginx. The image build now runs
+`nginx -t` on the rendered template, and a new path-filtered workflow runs the
+start-order scenario against the built image (console first, `502`, `200`, the
+backend moved, `200`). Records: none, verified. PR C.
+
 ---
 
 ---

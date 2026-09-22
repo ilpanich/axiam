@@ -150,8 +150,18 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 # terminates its own TLS, without a rebuild. See the header of the template.
 COPY docker/nginx.conf.template /etc/nginx/templates/default.conf.template
 
+# DF-026: supplies AXIAM_BACKEND_RESOLVER, the DNS server the template's
+# request-time `resolver` asks, from /etc/resolv.conf unless the operator set
+# one. Numbered 19 so the stock entrypoint sources it after its own 15-* hooks
+# and before 20-envsubst-on-templates.sh renders the template; the entrypoint
+# ignores an .envsh that is not executable, hence the mode, which the check
+# below asserts rather than trusts.
+COPY --chmod=0755 docker/console-backend-resolver.envsh /docker-entrypoint.d/19-axiam-backend-resolver.envsh
+
 # Substitute ONLY AXIAM_-prefixed names, so nginx's own $host / $remote_addr /
 # $proxy_add_x_forwarded_for / $scheme survive envsubst untouched.
+# AXIAM_BACKEND_RESOLVER is deliberately absent: an ENV default here would win
+# over the resolv.conf lookup above and be right on one runtime only.
 ENV NGINX_ENVSUBST_FILTER="^AXIAM_" \
     AXIAM_BACKEND_ORIGIN="http://axiam-server:8090" \
     AXIAM_BACKEND_SNI="axiam-server" \
@@ -161,6 +171,28 @@ ENV NGINX_ENVSUBST_FILTER="^AXIAM_" \
 # Declared explicitly so the non-root guarantee is visible in this Dockerfile
 # (Trivy DS-0002) rather than only inherited from the base image.
 USER 101
+
+# Every build renders the template with the defaults above, through the same
+# two entrypoint hooks the container runs at start, and has nginx load it — so
+# a template nginx rejects fails here, not on the first container start after a
+# release. As uid 101 and over a tmpfs /tmp, because `nginx -t` creates the
+# temp directories the base image's nginx.conf names under /tmp and nothing it
+# writes may end up in the image. The copy of nginx.conf differs only in which
+# conf.d it includes; the grep proves the substitution happened, so a base image
+# that moved its include line fails the build instead of testing its own stock
+# default.conf. SC1091: the sourced file is this image's own hook, copied above.
+# hadolint ignore=SC1091
+RUN --mount=type=tmpfs,target=/tmp \
+    set -eu; \
+    test -x /docker-entrypoint.d/19-axiam-backend-resolver.envsh; \
+    d=/tmp/nginx-t; \
+    mkdir -p "$d/conf.d"; \
+    . /docker-entrypoint.d/19-axiam-backend-resolver.envsh; \
+    NGINX_ENVSUBST_OUTPUT_DIR="$d/conf.d" /docker-entrypoint.d/20-envsubst-on-templates.sh; \
+    grep -q 'proxy_pass [$]axiam_backend;' "$d/conf.d/default.conf"; \
+    sed "s#/etc/nginx/conf.d/#$d/conf.d/#" /etc/nginx/nginx.conf > "$d/nginx.conf"; \
+    grep -q "$d/conf.d/" "$d/nginx.conf"; \
+    nginx -t -c "$d/nginx.conf"
 
 EXPOSE 8080
 

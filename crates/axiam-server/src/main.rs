@@ -190,14 +190,14 @@ async fn main() -> std::io::Result<()> {
     match axiam_server::cli::parse(&std::env::args().collect::<Vec<_>>()) {
         axiam_server::cli::Command::Serve => {}
 
-        // D-09: self-probe /health, exit 0 on 2xx, exit 1 otherwise.
+        // D-09: self-probe /health, exit 0 on 2xx, exit 1 otherwise. The
+        // scheme follows the listener and the trust anchors follow the
+        // certificate the server serves, so a direct-TLS deployment needs no
+        // `AXIAM_HEALTHCHECK_URL` at all (DF-016) — and there is no switch that
+        // skips verification.
         axiam_server::cli::Command::Healthcheck => {
-            let url = std::env::var("AXIAM_HEALTHCHECK_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8090/health".to_owned());
-            let ok = reqwest::blocking::get(&url)
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            std::process::exit(if ok { 0 } else { 1 });
+            let probe = axiam_server::healthcheck::resolve(|name| std::env::var(name).ok());
+            std::process::exit(i32::from(!axiam_server::healthcheck::run(&probe)));
         }
 
         // FND-01: print the OpenAPI JSON spec to stdout and exit 0. Generate

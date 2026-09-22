@@ -925,6 +925,60 @@ setting is never consulted. If you have IoT devices and an edge that terminates
 TLS, give the devices a route that is *not* terminated — a TCP-passthrough
 Service, or a second hostname — rather than turning this on.
 
+## Container healthcheck (`axiam-server healthcheck`)
+
+The production image is distroless and has no shell, so `docker-compose.prod.yml`
+probes it with the binary's own subcommand:
+
+```yaml
+healthcheck:
+  test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
+```
+
+It requests `/health` and exits `0` on a 2xx, `1` otherwise. **The scheme
+follows the listener**: `https` when the server terminates TLS itself
+(`AXIAM__SERVER__TLS__ENABLED=true` *and* a certificate path set), `http`
+otherwise, on `AXIAM__SERVER__PORT` (default `8090`). A proxy-terminated
+deployment therefore needs no configuration at all, and neither does a
+direct-TLS deployment whose certificate covers `127.0.0.1` — see below.
+
+| Variable | Meaning |
+|---|---|
+| `AXIAM_HEALTHCHECK_URL` | Probe this URL instead of the derived default. Wins outright. |
+| `AXIAM_HEALTHCHECK_CA_FILE` | PEM bundle whose certificates are added as trust anchors for the probe. |
+
+**Note the single underscore**: both are read with `std::env::var` rather than
+through the configuration layer.
+
+**Where the trust anchors come from, when you set no CA file.** On a direct-TLS
+deployment the probe trusts the server's own
+`AXIAM__SERVER__TLS__CERT_PATH` chain file. A process verifying the certificate
+it is itself serving gains no trust it does not already have, which is what
+makes the default zero-configuration. Two cases follow from what that file
+contains:
+
+- a **self-signed** server certificate works on its own — an end-entity
+  certificate that is its own issuer is a usable trust anchor (verified, not
+  assumed: `crates/axiam-server/tests/healthcheck.rs`);
+- a **CA-issued leaf** works when the file is a `fullchain.pem` that also holds
+  the issuer. A file holding the leaf **alone** does not, because the issuer is
+  then anchored nowhere — set `AXIAM_HEALTHCHECK_CA_FILE` to the issuing CA.
+
+**The certificate has to cover the address probed.** The derived default is
+`https://127.0.0.1:<port>/health`, so the certificate needs an IP SAN for
+`127.0.0.1`. If it carries a DNS name instead, point the probe at that name with
+`AXIAM_HEALTHCHECK_URL` and make the name resolve inside the container.
+
+**There is no switch that skips verification, deliberately.** A probe that
+accepted any certificate would report "healthy" for anything listening on the
+port, which is worse than no probe at all — because a deployment then stops
+looking. If the probe cannot verify the listener, it is not healthy, and the
+reason goes to stderr, where `docker inspect` and `kubectl describe` surface it.
+
+The Kubernetes manifests do not use this subcommand: `k8s/server/deployment.yml`
+uses `httpGet` probes with `scheme: HTTPS`, which the kubelet performs without
+verifying the certificate, from outside the container.
+
 ## Network policies
 
 [`k8s/network-policy/`](../../k8s/network-policy/) implements a **default-deny**

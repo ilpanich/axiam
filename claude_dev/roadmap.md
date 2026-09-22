@@ -825,6 +825,18 @@ first-boot path. Argv parsing moved to a unit-tested `cli` module so
 `setup-token` with a mistyped flag cannot start a server. Eight tests; threat
 **T-284**. PR B.
 
+### T22.8 — `healthcheck` can probe a TLS listener — Sonnet 5 ✓ LANDED
+DF-016. The probe was a hardcoded plaintext GET, so a deployment terminating TLS
+in-process — the shipped Kubernetes ConfigMap — failed its container healthcheck
+forever. The scheme now follows the listener (`ENABLED` **and** a certificate
+path, not the path alone, which `docker-compose.prod.yml` sets unconditionally)
+and the port follows `AXIAM__SERVER__PORT`. `AXIAM_HEALTHCHECK_CA_FILE` names
+trust anchors; with none set an `https` self-probe trusts the server's own chain
+file. No insecure switch. Nineteen tests, including the empirical answer to the
+plan's open question — an end-entity certificate that is its own issuer **is** a
+usable trust anchor, a CA-issued leaf without its issuer is not. Records: none.
+PR B.
+
 ---
 
 ---

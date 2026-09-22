@@ -57,6 +57,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`axiam-server healthcheck` can probe a TLS listener (T22.8, DF-016).** The
+  probe was `reqwest::blocking::get("http://127.0.0.1:8090/health")` with
+  `AXIAM_HEALTHCHECK_URL` as its only knob. On a deployment that terminates TLS
+  in the server process — which is how `k8s/server/configmap.yml` runs — that is
+  a plaintext request to a TLS listener, so the container healthcheck fails
+  forever, and the only recourse was an `AXIAM_HEALTHCHECK_URL` pointing at an
+  `https://` address the probe then could not verify.
+
+  **The scheme now follows the listener**: `https` when
+  `AXIAM__SERVER__TLS__ENABLED` is true *and* a certificate path is set, `http`
+  otherwise — both on `AXIAM__SERVER__PORT`, which the old default ignored.
+  Both conditions, not just the path: `docker-compose.prod.yml` sets
+  `AXIAM__SERVER__TLS__CERT_PATH` unconditionally and gates the listener on
+  `ENABLED`, so reading the path alone would have moved every Compose
+  deployment's probe to `https` against a plaintext listener.
+
+  **Trust anchors follow the certificate.** `AXIAM_HEALTHCHECK_CA_FILE` names a
+  PEM bundle; with none set, an `https` self-probe trusts the server's own
+  `AXIAM__SERVER__TLS__CERT_PATH` chain, because a process verifying the
+  certificate it is itself serving gains no trust it does not already have. A
+  self-signed server certificate works as its own anchor — verified against
+  rustls rather than assumed — and so does a `fullchain.pem`; a file holding a
+  CA-issued leaf *without* its issuer does not, which is what the CA file is
+  for. The documentation says all three, and says that the certificate must
+  cover `127.0.0.1` for the derived default to verify.
+
+  **There is no switch that skips verification.** A probe that accepted any
+  certificate would report healthy for anything listening on the port, which is
+  worse than no probe — a deployment then stops looking. Failures go to stderr,
+  where `docker inspect` and `kubectl describe` surface them.
+
+  A plaintext deployment on the default port probes exactly what it probed
+  before; `docker-compose.prod.yml` is unchanged.
+
 - **`subject` is a common name, and a `CN=` prefix is understood exactly once
   (T22.6, DF-023).** Every AXIAM certificate — root CA, signing CA, leaf — has
   exactly one distinguished-name component. The API field that carries it is

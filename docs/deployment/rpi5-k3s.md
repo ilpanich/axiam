@@ -350,12 +350,18 @@ are enrolled, `AXIAM_WEBAUTHN_RP_ORIGIN` must match the address bar byte for byt
 `AXIAM__AUTH__OAUTH2_ISSUER_URL` is what Apple and every SAML IdP build their
 redirect URIs from, and `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is a fail-closed gate.
 
-**Note the double underscore.** `AXIAM__DB__URL`, not `AXIAM_DB_URL`. Five names
+**Note the double underscore.** `AXIAM__DB__URL`, not `AXIAM_DB_URL`. Six names
 break the pattern because they are read with `std::env::var` rather than through
 the config layer — `AXIAM_BOOTSTRAP_ADMIN_EMAIL`, `AXIAM_HEALTHCHECK_URL`,
-`AXIAM__RATE_LIMIT__TRUSTED_HOPS`, `AXIAM__GRPC_TLS_CERT_PATH` and
-`AXIAM__GRPC_TLS_KEY_PATH` — and a misspelling in any of them is silence, not an
-error.
+`AXIAM_HEALTHCHECK_CA_FILE`, `AXIAM__RATE_LIMIT__TRUSTED_HOPS`,
+`AXIAM__GRPC_TLS_CERT_PATH` and `AXIAM__GRPC_TLS_KEY_PATH` — and a misspelling in
+any of them is silence, not an error.
+
+`AXIAM_HEALTHCHECK_CA_FILE` is usually unnecessary: the `healthcheck`
+subcommand's scheme follows the listener and, on a direct-TLS deployment, it
+trusts the server's own `AXIAM__SERVER__TLS__CERT_PATH` chain. Set it when that
+file holds a CA-issued leaf without its issuer beside it. See
+[the deployment guide](README.md#container-healthcheck-axiam-server-healthcheck).
 
 ### 5.2 Credentials are honoured only on the first boot of an empty volume
 

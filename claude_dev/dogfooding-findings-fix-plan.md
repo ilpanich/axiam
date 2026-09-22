@@ -1000,6 +1000,70 @@ entry gains the subcommand and its gate; status unchanged.
 
 #### S-6d — `healthcheck` can probe a TLS listener (DF-016)
 
+> **EXECUTED — 2026-09-22, PR B, commit 4 of 5.**
+>
+> **Shipped.** `axiam_server::healthcheck` — `resolve(var)` over an environment
+> reader and `run(&Probe)`, both called from `main.rs`. The scheme follows the
+> listener, the port follows `AXIAM__SERVER__PORT`, and
+> `AXIAM_HEALTHCHECK_CA_FILE` names trust anchors; with none set, an `https`
+> self-probe trusts the server's own `AXIAM__SERVER__TLS__CERT_PATH` chain. No
+> insecure switch, and an empty or unreadable anchor bundle is a failure rather
+> than a silent fall-back to the platform trust store.
+>
+> **The plan's open question, answered empirically.** *Does webpki accept an
+> end-entity certificate as a trust anchor?* **Yes, when that certificate is its
+> own issuer** — `a_self_signed_server_certificate_is_a_usable_trust_anchor`
+> stands a real rustls listener up and probes it. So the zero-configuration
+> default is sound for the self-signed certificate an internal direct-TLS
+> deployment usually carries. The neighbouring case is *not*, and the
+> documentation says so: a **CA-issued leaf with its issuer absent** from the
+> chain file anchors nothing, which is
+> `a_ca_issued_leaf_without_its_issuer_is_not_a_usable_anchor` and is exactly
+> what `AXIAM_HEALTHCHECK_CA_FILE` is for. A `fullchain.pem` carries the issuer
+> and works.
+>
+> **Tests.** Ten unit tests over `resolve` with an environment map, and nine
+> integration tests in `crates/axiam-server/tests/healthcheck.rs` against a real
+> in-process rustls listener: the three anchor shapes above, the CA file alone,
+> an absent file, an empty file, an unverifiable listener (there being no
+> insecure switch), plus the two plaintext cases that file always had.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`AXIAM__SERVER__TLS__CERT_PATH` alone is the wrong condition, and using
+>    it would have broken every Compose deployment.** The plan says to switch
+>    the default when that variable is set. `docker/docker-compose.prod.yml:268`
+>    sets it **unconditionally** and gates the listener on
+>    `AXIAM__SERVER__TLS__ENABLED` (line 267, default `false`). Reading the path
+>    alone would have moved every Compose deployment's probe to `https` against
+>    a plaintext listener — the present defect, in the opposite direction, on a
+>    stack that works today. The condition is both variables, and
+>    `a_certificate_path_without_enabled_stays_plaintext` pins it.
+> 2. **The certificate has to cover `127.0.0.1`.** The plan's default probes
+>    that address; rustls verifies the server name, so the certificate needs an
+>    IP SAN for it. A certificate issued for a DNS name fails the derived
+>    default no matter how the anchors are resolved. The documentation says so
+>    and names the remedy (`AXIAM_HEALTHCHECK_URL` plus a resolvable name);
+>    the test PKI issues an IP SAN so the integration tests exercise the real
+>    path rather than a hostname-verification bypass.
+> 3. **The port was hardcoded.** The old default was literally
+>    `http://127.0.0.1:8090/health`, so a deployment that moved
+>    `AXIAM__SERVER__PORT` was probing the wrong port whatever its scheme. Both
+>    schemes now read it. A deployment on the default port is unchanged, which
+>    is the I4 twin.
+> 4. **`tests/healthcheck.rs` was testing a copy of the code.** It called
+>    `reqwest::blocking::get` itself, because the probe lived in `main.rs` and
+>    `main.rs` cannot be linked from an integration test — so it would have kept
+>    passing across this change without exercising a line of it. Both existing
+>    tests now call `healthcheck::run`, which is also why the module is in the
+>    library rather than the binary.
+> 5. **The test listener needs `CryptoProvider::install_default`.** `rustls` in
+>    this dependency graph reaches more than one provider feature, so
+>    `ServerConfig::builder()` panics rather than choosing. `reqwest`'s rustls
+>    backend is unaffected — it builds its own configuration — so this is a test
+>    fixture concern only, and the panic is worth recording because it looks
+>    like a verification failure in the output.
+
 **The fix.** Two environment variables in the same single-underscore
 namespace `healthcheck` already uses, documented next to
 `AXIAM_HEALTHCHECK_URL` (`docs/deployment/rpi5-k3s.md:355` and the

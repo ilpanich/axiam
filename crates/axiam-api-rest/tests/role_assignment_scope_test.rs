@@ -1018,17 +1018,22 @@ async fn a_non_inheritable_assignment_is_accepted_and_listed_on_every_path() {
         assert_eq!(rows[0]["resource_id"], json!(f.resource_id), "{listing}");
         assert_eq!(rows[0]["inherit"], json!(false), "{listing}");
     }
-    for uri in [
-        format!("/api/v1/users/{}/roles", f.member),
-        format!("/api/v1/groups/{}/roles", f.group_id),
-        format!("/api/v1/service-accounts/{}/roles", f.service_account_id),
+    // Labelled by a static name, not the URI: the URI carries the service
+    // account's id, which CodeQL reads as sensitive once it reaches a message.
+    for (label, uri) in [
+        ("users", format!("/api/v1/users/{}/roles", f.member)),
+        ("groups", format!("/api/v1/groups/{}/roles", f.group_id)),
+        (
+            "service-accounts",
+            format!("/api/v1/service-accounts/{}/roles", f.service_account_id),
+        ),
     ] {
         let rows = get_json(&app, &f.fx, &uri).await;
         let rows = rows.as_array().unwrap();
-        assert!(!rows.is_empty(), "{uri}");
+        assert!(!rows.is_empty(), "{label}");
         assert!(
             rows.iter().all(|r| r["inherit"] == json!(false)),
-            "{uri} must show the flag"
+            "{label} must show the flag"
         );
     }
 }

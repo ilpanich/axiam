@@ -674,6 +674,72 @@ regenerated (`--dump-openapi`, `check-spec-digest.py`,
 
 ### S-5 — the documentation bundle (DF-002, DF-007, DF-015, DF-020) — Sonnet 5
 
+> **EXECUTED — 2026-09-22, PR B, commit 5 of 5.**
+>
+> **Shipped.** All four prose fixes, each re-validated against the code first.
+>
+> - **DF-002.** `authenticate_device` resolves `get_bound_service_account` and
+>   returns "certificate is not bound to a service account" when it answers
+>   `None` (`crates/axiam-pki/src/mtls.rs:154-160` — the plan says 153-160; PR
+>   A's T22.4 moved it by a line). So the bind is required for **every**
+>   certificate that authenticates, `Device` included, and the "looking for
+>   something that does not exist" paragraph was wrong in the expensive
+>   direction. `docs/pki/README.md` now gives the four-step order, the
+>   `certificates:bind` permission, the same-tenant requirement for both
+>   records, and the `Active` / not-expired checks the bind handler makes
+>   (`handlers/certificates.rs:360-395`). The website's IoT walkthrough gains
+>   the bind as its own step, its warning is inverted, and the service-account
+>   page carries a note saying the same.
+> - **DF-015.** `generate_keypair` routes `Rsa4096` to the `rsa` crate and hands
+>   rcgen a PKCS#8 key (`crypto.rs:70-102`); `cert_generate_rsa4096_ca_succeeds`
+>   says in its own doc comment that this arm used to be pinned as a failure and
+>   no longer is. Both sentences are replaced by the real trade-off: RSA-4096
+>   keygen is a probabilistic prime search, seconds on a server and tens of
+>   seconds with a wide variance on small ARM hardware, inside `spawn_blocking`
+>   behind the crypto semaphore — so the request path is not stalled but a
+>   client timeout sized for Ed25519 will fire.
+> - **DF-007 + DF-020.** A new `###` between "There is no way to skip
+>   verification" and the configuration reference. The `scope` claim half was
+>   verified rather than repeated: `issue_service_account_token`'s own
+>   documentation states that the device path has no way to request scopes and
+>   that a service account registers none, and `AccessTokenSpec::scopes` omits
+>   the claim for an empty slice — so a device token carries no `scope` at all
+>   and `rabbitmq_auth_backend_oauth2` has nothing to read.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **One commit, not four.** S-5 says "one commit each". PR B's task list in
+>    §3 counts S-5 as one task, and §9 binds the records — CHANGELOG, roadmap
+>    entry, this block — to the *task's* commit. Splitting four prose changes
+>    across four commits would have meant either four partial record sets or
+>    three commits that violate §9, and nothing in the diff becomes easier to
+>    review for it.
+> 2. **`authentication.ts` needed an addition, not a correction.** The plan
+>    lists `website/src/docs/authentication.ts:1199,1219` alongside the
+>    `operate.ts` sites. Neither line is wrong: 1199 is the bind endpoint's row
+>    in the service-account API table and 1219 is the mTLS introduction. What
+>    was missing is that the bind applies to devices too, so the row's summary
+>    says so and a note beneath the table states it.
+> 3. **The line numbers had all drifted**, partly because of this PR's own
+>    earlier commits: `docs/pki/README.md:535-559` is now 592-617, `:89-91` is
+>    100-102, `:358-359` is 369-370, and the deployment guide's line 921 is
+>    1156. Each was located by content.
+>
+> **Also in this commit, deliberately outside the plan** (agreed with the
+> requester before starting; the third deferred item, an unexplained
+> intermittent `500` from CA-certificate creation during e2e fixture setup, is
+> a real unknown in CA generation and gets its own change):
+>
+> - `users_rate_limit_split_test.rs:99,230` built **response** cookies with
+>   `Cookie::build(...).finish()` for what is a request cookie — the same latent
+>   CodeQL `rust/insecure-cookie` alert PR A fixed in its own file, fixed the
+>   same way and for the same stated reason.
+> - `frontend/e2e/matrix/tenancy.spec.ts` snapshotted tenant B's users table
+>   with no wait while the tenant-A half waits 20 s. An empty table makes the
+>   "tenant A's users are gone" assertion vacuous and the "tenant B's admin is
+>   listed" one fail — an intermittent failure that reads as a tenancy bug and
+>   is not one. It now waits for the first tenant-B row, as its twin does.
+
 Four prose fixes, one commit each, no code:
 
 1. **DF-002** — `docs/pki/README.md:535-559` and

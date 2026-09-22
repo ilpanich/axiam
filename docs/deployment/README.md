@@ -1153,6 +1153,50 @@ an old snippet is how the plaintext URL that went with it comes back. Without
 this check the sole symptom of a missed stack is a container that refuses to
 boot, which is easy to misread as an unrelated infrastructure fault.
 
+### Two things to decide before you put AXIAM in front of RabbitMQ
+
+**Broker-wide `fail_if_no_peer_cert` needs a certificate AXIAM cannot issue
+yet.** Requiring a client certificate from every AMQPS connection is the right
+posture, and it includes AXIAM's own lapin client. That client connects during
+startup — before the REST API is listening, before an organization CA exists,
+and certainly before anything has called `POST /api/v1/certificates`. There is
+no ordering that lets AXIAM issue the certificate it needs in order to start.
+
+So issue it **offline, from the same root**: generate AXIAM's broker client
+certificate with the same CA (or an offline intermediate under it) that signs
+the rest of the fleet, mount it, and point
+`AXIAM__AMQP__TLS__CLIENT_CERT_PATH` / `..._CLIENT_KEY_PATH` at it. Once AXIAM
+is up it can issue the *devices'* certificates from its own CA and they chain to
+the same root the broker already trusts, which is the arrangement that makes one
+trust store serve both. `scripts/gen-broker-tls.sh` is the shape of this for a
+development stack; production wants your own CA and your own key custody. The
+alternative — bootstrapping AXIAM against a broker that does not require peer
+certificates and tightening it afterwards — leaves a window in which it does not
+require them, and an operator who forgets step two.
+
+**AXIAM's access tokens are not consumable by
+`rabbitmq_auth_backend_oauth2`.** That plugin reads a JWT's `scope` claim and
+turns entries such as `rabbitmq.configure:%2f/*` into broker permissions. AXIAM
+does mint `scope`, but it is an OAuth2 authorization-server claim describing
+scopes a client *requested and was granted* against AXIAM's own resources — an
+application-defined vocabulary, and one the plugin's grammar has no bearing on.
+On the path that matters here it is not merely different, it is absent: the
+device login (`POST /api/v1/auth/device`) has no way to request a scope and a
+service account registers none, so the claim is omitted entirely. A token that
+carries no `scope` grants no RabbitMQ permission, and the plugin's answer is to
+refuse the connection.
+
+The arrangement that does work, and the one the reference integration uses, is
+**certificate login plus an HTTP auth backend**: `rabbitmq_auth_mechanism_ssl`
+takes the identity from the client certificate the device already presents,
+and `rabbitmq_auth_backend_http` asks a small endpoint of yours — which is free
+to call AXIAM's authorization API — for the vhost, resource and topic
+decisions. That keeps one identity per device, issued by AXIAM, and puts the
+permission model where RabbitMQ can express it. Mapping AXIAM roles onto the
+plugin's `scope` grammar in a token is a *possible* third option, and it means
+minting a second, RabbitMQ-shaped token; it is not what these variables
+configure and it is not covered here.
+
 ### Configuration reference
 
 | Variable | Default | Meaning |

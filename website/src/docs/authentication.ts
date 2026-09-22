@@ -1196,8 +1196,12 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
           { method: "PUT", path: "/api/v1/service-accounts/{sa_id}", summary: "Update it." },
           { method: "DELETE", path: "/api/v1/service-accounts/{sa_id}", summary: "Delete it." },
           { method: "POST", path: "/api/v1/service-accounts/{sa_id}/rotate-secret", summary: "Issue a new secret. Returned once." },
-          { method: "POST", path: "/api/v1/service-accounts/{sa_id}/bind-certificate", summary: "Bind an X.509 certificate for mTLS authentication." },
+          { method: "POST", path: "/api/v1/service-accounts/{sa_id}/bind-certificate", summary: "Bind an X.509 certificate for mTLS authentication. Required for `Device` certificates too." },
         ],
+      },
+      {
+        type: "note",
+        text: "**The bind is required for IoT device certificates as well**, not only for `Service` ones. A certificate identifies a key; a service account is what AXIAM authorizes, so a certificate bound to nothing identifies nobody and its login is refused with `401`. Documentation before 1.0.0-beta16 said devices skipped this step — see [PKI & certificates](#/docs/pki) for the order and the requirements the bind enforces.",
       },
       {
         type: "warn",

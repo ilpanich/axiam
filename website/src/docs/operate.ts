@@ -671,12 +671,16 @@ export const OPERATE_PAGES: DocPage[] = [
             code: 'POST /api/v1/certificates\n{\n  "issuer_ca_id": "<ca-certificate-uuid>",\n  "subject": "sensor-0421.acme.dev",\n  "cert_type": "Device",\n  "key_algorithm": "Ed25519",\n  "validity_days": 365\n}',
           },
           {
+            title: "Bind the certificate to a service account",
+            body: "`POST /api/v1/service-accounts/{sa_id}/bind-certificate` with `{ \"certificate_id\": \"…\" }`, holding `certificates:bind`. **This step is required for devices too** — a certificate identifies a key, a service account is what AXIAM authorizes, and without the bind there is nothing for the authenticated connection to be. The certificate and the service account must be in the same tenant, and the certificate must be Active and unexpired: the bind refuses a revoked or expired one rather than leaving a service account that is configured for mTLS and cannot connect.",
+          },
+          {
             title: "Commission the device with the key pair",
             body: "Write the certificate and its private key into the device at manufacture or first provisioning. This is the only moment the private key exists outside the device, which is why the issuing response is the one call whose output you must capture.",
           },
           {
             title: "Let it connect over mTLS",
-            body: "The device presents its client certificate on the TLS handshake. Nothing further needs registering — the binding step that service accounts require does not apply here.",
+            body: "The device presents its client certificate on the TLS handshake. AXIAM verifies the chain, requires it to reach a CA flagged as an mTLS trust anchor, and resolves the service account the certificate was bound to in step 3.",
           },
         ],
       },
@@ -686,7 +690,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "**Device certificates are not bound to anything.** A `Service` certificate must be attached to a service account explicitly, and it is natural to assume a device needs the same. It does not: on connection AXIAM computes the certificate's SHA-256 fingerprint, looks a `Device` certificate up directly by it, checks the certificate is active and unexpired, and **verifies the full chain** to the issuing organization's CA. Looking for a bind endpoint for a device is looking for something that does not exist.",
+        text: "**A device certificate must be bound, exactly like a service one.** Releases before 1.0.0-beta16 documented the opposite here — that a `Device` certificate needs no bind and that looking for a bind endpoint was looking for something that does not exist. It was wrong, and wrong in the expensive direction: the fleet is commissioned, the certificates verify, and every device is refused. `authenticate_device` resolves the bound service account and answers `401` when there is none.",
       },
       {
         type: "note",

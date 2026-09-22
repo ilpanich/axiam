@@ -837,6 +837,21 @@ plan's open question — an end-entity certificate that is its own issuer **is**
 usable trust anchor, a CA-issued leaf without its issuer is not. Records: none.
 PR B.
 
+### T22.9 — The documentation bundle — Sonnet 5 ✓ LANDED
+DF-002, DF-015, DF-007/DF-020. Prose only. DF-002 was the dangerous one: the PKI
+guide and the website both said a `Device` certificate needs no bind, while
+`authenticate_device` refuses an unbound certificate with `401` — a commissioned
+fleet failing every login with nothing to say why. Both now give the order, the
+permission and the bind-time requirements. DF-015: RSA-4096 CA generation works
+under every custodian; the two sentences claiming otherwise are replaced by the
+trade-off that does apply, keygen time on small hardware. DF-007/DF-020: a new
+broker section on the client certificate AXIAM cannot issue for itself, and on
+why AXIAM tokens are not consumable by `rabbitmq_auth_backend_oauth2`. Records:
+none. Also in PR B, deliberately outside the plan: the latent CodeQL
+`rust/insecure-cookie` alert in `users_rate_limit_split_test.rs`, and the
+tenant-B half of `frontend/e2e/matrix/tenancy.spec.ts` snapshotting the users
+table with no wait. PR B.
+
 ---
 
 ---

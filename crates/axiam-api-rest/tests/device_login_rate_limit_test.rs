@@ -76,7 +76,14 @@ fn password_login(peer: std::net::SocketAddr) -> test::TestRequest {
         .uri("/api/v1/auth/login")
         .peer_addr(peer)
         .insert_header(("X-CSRF-Token", "csrf-token"))
-        .cookie(actix_web::cookie::Cookie::build("axiam_csrf", "csrf-token").finish())
+        // The `Cookie:` header a client sends, written the way the rest of the
+        // suite writes it. Not `Cookie::build(...)`: that builds a *response*
+        // cookie, whose `Secure` attribute CodeQL then reports as unset — and
+        // rightly refuses to guess that this one is never `Set-Cookie`d. The
+        // attribute has no meaning on a request cookie, which carries only
+        // `name=value` on the wire, so setting it would be cargo-cult rather
+        // than a fix.
+        .insert_header(("Cookie", "axiam_csrf=csrf-token"))
         .set_json(serde_json::json!({
             "username": "nobody",
             "password": "wrong-on-purpose",

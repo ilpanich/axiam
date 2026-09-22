@@ -1686,7 +1686,7 @@ The authorization-check endpoints are the only ones that bind `AuthenticatedPrin
 
 Organization and tenant CA lifecycle with per-CA key custody (sealed database row or Vault), tenant signing CAs beneath the organization CA, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification against hot-reloadable trust anchors, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine. 1.0.0-beta13 lets the listener admit RFC 8705 §2.2 self-signed client certificates under an opt-in policy, with the trust level a certificate earned carried to every consumer so that device authentication can refuse it (T-263).
 
-*26 threats — 7 critical, 15 high, 4 medium; 1 open.*
+*29 threats — 7 critical, 17 high, 5 medium; 1 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1716,6 +1716,9 @@ Organization and tenant CA lifecycle with per-CA key custody (sealed database ro
 | T-206 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | S | Certificate chaining to a CA never enabled as a trust anchor authenticates on the proxy path | High | Mitigated |
 | T-263 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | E | Accepting an unchained certificate for RFC 8705 §2.2 lets a self-minted certificate authenticate as a device or as a `tls_client_auth` client | Critical | Mitigated |
 | T-268 | Certificate issuance (rcgen, policy enforcement) <br/>*Process* | E | Leaf CSR signed with the requester's extensions, a weak key, or onto a key the requester does not hold | High | Mitigated |
+| T-281 | Certificate issuance (rcgen, policy enforcement) <br/>*Process* | E | A tenant administrator issues a leaf under another tenant's signing CA, or directly under the organization anchor | High | Mitigated |
+| T-282 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | D | The one auth endpoint that performs a client-certificate handshake has no rate limiter | Medium | Mitigated |
+| T-283 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | S | A device's access token is a bearer credential, so stealing it is as good as stealing the key | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1761,6 +1764,8 @@ An over-long certificate outlives the review cycle and cannot be retired without
 Issuing under a subject belonging to a different tenant would produce a credential that authenticates across the isolation boundary.
 
 > Issuance is tenant-scoped from the authenticated context, and the signing CA is resolved from the requesting tenant's organization — a cross-tenant subject cannot be signed. Tenant signing CAs (1.0.0-alpha44) narrow the blast radius further: issuance for a tenant is anchored at that tenant's path-length-zero intermediate, so a compromised or misused issuer is revocable without touching any other tenant.
+>
+> **Corrected 2026-09-22 (S-1).** The second sentence described what tenant signing CAs made *possible*, and read as though it were enforced. It was not: the issuing CA was resolved from the requesting tenant's **organization** and nothing compared it against the tenant, so a tenant administrator could anchor its issuance at any tenant's intermediate, or at the organization CA above them all. The subject half of this entry held throughout — `tenant_id` has come from the authenticated context since T-98 was written — but a leaf's authority comes from its chain and not from the row, so the half that failed is the half that mattered. **T-281** carries the defect, the fix and its tests; this entry is left as the record of a claim the code did not keep, which is the more useful thing for it to be.
 
 **T-99 — Returned private key persisted in logs or audit records**  
 `Certificate issuance (rcgen, policy enforcement)` (Process) · Information disclosure · High · Mitigated
@@ -1901,6 +1906,53 @@ When every tenant's user, service and device certificates issue straight from th
 > Tests: twenty in `crates/axiam-pki/tests/sign_csr_test.rs`, one per rule; three against the Vault mock in `vault_pki_test.rs`, including one asserting the exact request body AXIAM sends and one proving a `keyUsage`-requesting CSR never reaches Vault at all; four at the HTTP layer in `certificate_test.rs`; and `a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one` in `mtls_test.rs`, which is the property the feature exists for.
 >
 > **Residual.** What Vault does with the body is documented rather than observed: the tests here run against a mock, and a real Vault was not available. The security property does not rest on that — it rests on the refusal, which is enforced before any custodian is chosen — but the cosmetic parity of the key-usage extension under `vault_pki` is the part taken on the documentation's word.
+
+**T-281 — A tenant administrator issues a leaf under another tenant's signing CA, or directly under the organization anchor**  
+`Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · High · Mitigated
+
+Both leaf paths resolve the issuing CA through `prepare_leaf_issuance`, which fetched it with `ca_repo.get_by_id(org_id, issuer_ca_id)` — a query whose only scope is `WHERE organization_id = $org_id` — and never read `ca_certificate.tenant_id`, the column that exists to record which tenant a signing CA signs for. Every CA of the organization was therefore reachable by every principal of the organization holding `certificates:generate`: a sibling tenant's signing CA, and the organization-level CA that anchors the whole estate. The leaf came back written with the caller's own `tenant_id` and the other tenant's `issuer_ca_id`, chaining to the root every relying party in the organization trusts — so a certificate minted in tenant A authenticated as a principal of tenant B against anything that verified the chain rather than the row, which is what mTLS verifies. No bug in the caller was needed: the API accepted the CA id and answered `201`. `axiam-domo-demo` reproduced it at runtime and rode the certificate to a full MQTT session (DF-017, DF-025).
+
+> **S-1 (2026-09-22).** `prepare_leaf_issuance` takes the tenant being acted on and an `IssuingScope`, and matches the CA against both **immediately after the lookup** — ahead of the status and validity-window checks. The ordering is the disclosure control: a caller outside the tenant must not be able to tell a CA that does not exist from one that is revoked by watching which refusal comes back, and `a_foreign_ca_is_not_found_even_when_it_is_revoked` pins it.
+>
+> A tenant signing CA is usable only by a caller acting on that tenant. An organization-level CA is usable only by a principal whose own record lives in the organization's reserved scope — resolved by the residence test `require_organization_principal` already uses, and deliberately **not** `AuthenticatedUser::organization_level`, which is set only when a request names another tenant through `X-Axiam-Tenant` and is therefore `false` for exactly the calls this governs. Reading that flag instead would have refused the organization administrator its own anchor, which is the one issuance path that had to stay byte for byte as it was.
+>
+> The refusal is `NotFound`, following `a_ca_in_another_organization_is_not_found`: a CA the caller may not use is a CA the caller cannot see. One site covers both custodians, because the check precedes custodian resolution — the Vault path never reaches a `sign-verbatim` it should not have made.
+>
+> Tests: five in `sign_csr_test.rs` (another tenant's CA, the organization CA, the tenant's own CA, the ordering probe, and the I4 twin that an organization principal still issues under the anchor), four `generate` twins in `cert_test.rs`, and the end-to-end refusal in `axiam-api-rest`'s `certificate_test.rs` beside the cross-organization one.
+>
+> **Residual — operator action, deliberately not automated.** Leaves already issued across the boundary are not revoked on upgrade. AXIAM will not revoke on an operator's behalf: revocation takes effect against whatever is presenting those certificates right now, and a deployment that discovers a cross-tenant leaf has to decide when it can afford to. `docs/pki/README.md` carries the reach table, how to find them, and what a tenant needs before it can issue again.
+
+**T-282 — The one auth endpoint that performs a client-certificate handshake has no rate limiter**  
+`mTLS device auth (fingerprint + chain verify)` (Process) · Denial of service · Medium · Mitigated
+
+`POST /api/v1/auth/device` was a bare route in `server.rs` — no `build_governor`, no `RateLimitShared` — while every neighbouring auth resource carried both layers: `/auth/login`, the three OPAQUE routes, the six WebAuthn ceremony routes, the federation sign-in routes. It is in `PUBLIC_PATHS` and CSRF-exempt, both of which it must be, because a device holds no session and no cookie. So the single endpoint whose happy path makes the server complete a TLS handshake with a client certificate — asymmetric verification plus a chain walk against the trust anchors, the most expensive work an unauthenticated caller can ask of it — was the one an unauthenticated caller could drive at line rate. Every other shape of the same attack was already bounded, and nothing in the code said why this one was not, which is the signature of an omission rather than a decision. Filed by `axiam-domo-demo`'s reading as the suggested DF-028.
+
+> **S-2 (2026-09-22).** `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, default **60** per minute per IP, through both layers exactly as `/auth/login`: `build_governor` for the per-process ceiling and `RateLimitShared("device_login")` so the limit holds across replicas rather than multiplying by their count.
+>
+> Per-IP unconditionally. The identity on this path is a certificate presented in the handshake; there is no OAuth2 `client_id` in the request to key a bucket on, and the `RateLimitKeyMode` that would offer one governs three OAuth2 endpoints and not this.
+>
+> **In the machine family, not the human one.** G7 rules that no preset may move a human-endpoint default, and this is not a human endpoint: the caller is a device and the traffic shape is a fleet's re-login interval. `gateway` and `mesh` take it to 300 and 3 000 — the same 5x and 50x `token_per_min` takes, so the family scales coherently — and that, rather than a higher shipped default for everyone, is the answer for a fleet behind one NAT.
+>
+> **Sized from the honest traffic, not from capacity.** A device re-authenticates once per access-token lifetime, 900 s by default. Sixty per minute per address therefore holds nine hundred devices with the whole allowance to spare, and no deployment on the shipped posture sees a 429 it did not see before — which is the I1.
+>
+> Tests: six in `device_login_rate_limit_test.rs`, driving the real `register_api_v1_routes` wiring so that a regression to a bare route fails the suite rather than passing quietly. They pin the 429 and its `Retry-After`, the per-IP isolation (one noisy device must not lock out a fleet), the I4 twin that `login_per_min` is neither changed nor charged, the shipped-default arithmetic, the preset multipliers, and that an operator's pinned value still beats the preset.
+
+**T-283 — A device's access token is a bearer credential, so stealing it is as good as stealing the key**  
+`mTLS device auth (fingerprint + chain verify)` (Process) · Spoofing · High · Mitigated
+
+`POST /api/v1/auth/device` authenticates a device by a TLS handshake with a client certificate — the strongest thing a device can prove — and then called `issue_service_account_token`, which had no `cnf` parameter at all. The token that came back was a plain bearer credential: whoever holds it may use it. So the proof of possession bought nothing past the handshake that produced it, and a token read off the device's flash, recovered from a log line, captured at a misconfigured egress proxy, or taken from a compromised Twin authenticated *as that device* for its whole lifetime, with no certificate and no key required. What makes this the sharpest entry in this diagram is that the machinery to close it already existed and was already in use: `CnfClaim`, `x5t#S256` per RFC 8705 §3.1, and `verify_token_binding`'s decision table were all built for OAuth2 mTLS client credentials, which mint the claim. The device path was the one mint site that did not — the weakest credential AXIAM issues, from the strongest authentication it performs (DF-014).
+
+> **S-3 (2026-09-22).** `issue_service_account_token` takes a `cnf`, and `device_auth` builds one from the thumbprint of the certificate rustls verified for this connection, so the token names the key the device proved it holds.
+>
+> **No enforcement code changed, and that is the finding rather than a shortcut.** Both surfaces already refuse a `cnf`-bearing token whose evidence does not match: `axiam-api-rest`'s `enforce_sender_constraint` runs inside `validate_presented_token`, which *every* extractor reaches — the service-account one included — and `axiam-api-grpc`'s interceptor reads `peer_certs()` and runs the same `verify_token_binding`. The plan expected to write REST enforcement and found it already generic. The claim was the only missing half.
+>
+> **The thumbprint is recorded only where rustls verified the certificate on this connection.** The trusted-proxy `X-Client-Certificate` path mints no `cnf`, deliberately: there the certificate is present at login and absent from every later request, so a bound token would be one AXIAM itself refuses on first use. The asymmetry is stated in `CertificateAuthenticated::certificate_thumbprint`'s own documentation and in `docs/pki/README.md`, rather than left to be discovered — and the remedy named there is a deployment change (terminate mTLS at AXIAM), because no claim can substitute for evidence that never arrives.
+>
+> **Over gRPC** the evidence is `peer_certs()`, which is empty until the listener asks for a client certificate — `with_no_client_auth()` today, which S-8 changes. A device token presented there is therefore refused for want of evidence. That is the fail-closed direction and it is why a fleet talks to the REST surface; it is also the ordering argument for taking S-8 before anything routes device traffic through the mesh.
+>
+> **I1.** A token minted before this change carries no `cnf` and takes row one of the decision table, which returns `Ok` without reading anything. The migration lasts one access-token lifetime.
+>
+> Tests: three in `axiam-auth` — the stamp round-trips the thumbprint into the decoded claim, the bound token is refused with no certificate and with a different one and accepted with the right one, and an unbound one demands nothing.
 
 **T-196 — Vault configured, CA keys silently sealed into database rows**  
 `ca_certificate (sealed row or Vault custody)` (Store) · Information disclosure · High · Mitigated
@@ -2712,7 +2764,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-13 of 280 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
+13 of 283 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
 
 
 | # | Severity | Threat | Element | Why it is open |
@@ -2791,20 +2843,20 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 | Category | Threats |
 |---|---|
-| Spoofing | 67 |
+| Spoofing | 68 |
 | Tampering | 59 |
 | Repudiation | 6 |
 | Information disclosure | 67 |
-| Denial of service | 27 |
-| Elevation of privilege | 54 |
+| Denial of service | 28 |
+| Elevation of privilege | 55 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 32 | 1 |
-| High | 128 | 8 |
-| Medium | 110 | 6 |
+| High | 130 | 8 |
+| Medium | 111 | 6 |
 | Low | 10 | 2 |
 
 **By diagram**
@@ -2816,7 +2868,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | OAuth2 / OIDC authorization server | 58 | 4 |
 | Federation — SAML SP & OIDC relying party | 31 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 26 | 0 |
-| PKI, certificates & IoT device identity | 26 | 1 |
+| PKI, certificates & IoT device identity | 29 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
 | Deployment & platform (Kubernetes) | 27 | 5 |
 | Client SDKs & admin UI integration surface | 28 | 3 |

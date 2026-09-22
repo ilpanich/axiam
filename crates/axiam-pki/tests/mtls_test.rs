@@ -11,6 +11,7 @@ use axiam_core::repository::{CaCertificateRepository, CertificateRepository};
 use axiam_db::repository::{
     SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealServiceAccountRepository,
 };
+use axiam_pki::IssuingScope;
 use axiam_pki::ca::{CaService, PkiConfig};
 use axiam_pki::cert::CertService;
 use axiam_pki::mtls::DeviceAuthService;
@@ -103,6 +104,7 @@ async fn mtls_authenticate_valid_cert_returns_device_identity() {
     let leaf = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -215,6 +217,7 @@ async fn mtls_rejects_unknown_fingerprint() {
     let leaf_not_registered = svc_cert2
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id: uuid::Uuid::new_v4(),
                 issuer_ca_id: ca2.certificate.id,
@@ -399,6 +402,7 @@ async fn mtls_rejects_revoked_cert() {
     let leaf = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -505,6 +509,7 @@ async fn a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one()
     )
     .sign_csr(
         org_id,
+        IssuingScope::Organization,
         SignCertificateCsr {
             tenant_id,
             issuer_ca_id: ca.certificate.id,

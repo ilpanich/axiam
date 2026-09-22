@@ -10,6 +10,7 @@ use axiam_core::repository::Pagination;
 use axiam_db::repository::{
     SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealPgpKeyRepository,
 };
+use axiam_pki::IssuingScope;
 use axiam_pki::ca::{CaService, PkiConfig};
 use axiam_pki::cert::CertService;
 use axiam_pki::pgp::PgpService;
@@ -143,6 +144,7 @@ async fn cert_get_by_id_fingerprint_list_revoke() {
     let leaf = svc
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,

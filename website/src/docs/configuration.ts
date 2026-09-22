@@ -404,6 +404,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "10",
           ],
           [
+            "AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN",
+            "Max device mTLS logins (POST /api/v1/auth/device) per minute, per IP. The route carried no limiter at all before 1.0.0-beta17, although a TLS handshake bearing a client certificate is the most expensive thing an unauthenticated caller can ask of the server. Sized from the honest traffic rather than from capacity: a device re-authenticates once per access-token lifetime (900s by default), so 60/min holds a fleet of nine hundred devices on one address. In the machine family, so a profile preset scales it \u2014 which is the answer for a fleet behind a single NAT.",
+            "60",
+          ],
+          [
             "AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN",
             "Max UMA permission-ticket requests per minute.",
             "120",

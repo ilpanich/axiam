@@ -1415,6 +1415,13 @@ where
             &[],
             &self.minting_config(issuer),
             ext,
+            // No binding on this grant: it authenticates by client secret, and
+            // a client whose registered posture wants certificate or DPoP
+            // binding is served by `certificate_binding_for` on the general
+            // client-credentials path. Stamping a `cnf` here from a
+            // certificate the client did not register against would bind a
+            // token nobody asked to have bound.
+            None,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;

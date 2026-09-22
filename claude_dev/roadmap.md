@@ -745,6 +745,50 @@ CONTRACT §28 (RFC 9728 document builder and route, `WWW-Authenticate` challenge
 
 **Commits** `8bdd062` `docs(sdk-contract): §28 cross-SDK conformance review, contract 1.49 (T21.9 T9d)` · `b1aedc8` `docs(sdk-contract): correct §28.10/§28.11 R-2's count of unrecorded posture rows`. PR #468 — all eleven ports read against §28 and against the reference; thirteen divergences recorded in §28.11 with no open row; six contract defects fixed; §28.10's posture table filled in from the merged code and moved to upstream maintenance. Evidence: [`claude_dev/sdk-mcp-helpers-conformance-review.md`](sdk-mcp-helpers-conformance-review.md). One follow-up, **F-28-01**, is open by design and blocked on Phase 21 merging: the eleven vendored `CONTRACT.md`/`openapi.json` copies are re-synced from `main` in one step afterwards, and the review explains why doing it from a phase branch is what left the eleven holding five distinct files.
 
+## Phase 22: Dogfooding remediation (`axiam-domo-demo` DF-001 … DF-027) — IN PROGRESS
+
+Fix what the `axiam-domo-demo` integration found, as re-read against `main`
+rather than as filed. Full verdict per finding, the model assignment, the
+pull-request split and the verification gates:
+[`dogfooding-findings-fix-plan.md`](dogfooding-findings-fix-plan.md). Seventeen
+fixes, four documentation-only items, four recorded declines and two defects the
+findings did not contain (§1.7, §1.8). Every task ships its I1, its negative
+tests' I4 twins, and the §9 records in the same commit.
+
+### T22.1 — A signing CA issues only for the tenant it signs for — Opus 5 ✓ LANDED
+DF-017 / DF-025. `prepare_leaf_issuance` reads `ca_certificate.tenant_id` and
+matches it against the tenant being acted on, ahead of the status and window
+checks; an organization-level CA additionally requires a principal whose record
+lives in the organization scope. `404`, following the cross-organization
+precedent. Nine unit tests plus the end-to-end twin; threat **T-281**, and
+**T-98** corrected where it claimed this was already enforced. PR A.
+
+### T22.2 — The device mTLS login gets a rate limiter — Sonnet 5 ✓ LANDED
+DF-028 (new, from §1.7 of the plan). `POST /api/v1/auth/device` was a bare route
+while every neighbouring auth resource carried a governor and a shared store.
+`AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, default 60 per IP, in the machine
+family so a posture preset scales it (300 / 3 000) for a fleet behind one NAT.
+No existing default moves. Six tests against the real route wiring; threat
+**T-282**. PR A.
+
+### T22.3 — Device tokens are bound to their certificate — Opus 5 ✓ LANDED
+DF-014. `POST /api/v1/auth/device` handed back a plain bearer token although
+the device had just proved possession of a private key. It now carries
+`cnf.x5t#S256` over the certificate rustls verified for the connection. **No
+enforcement code changed:** both REST and gRPC already refuse a `cnf`-bearing
+token whose evidence does not match, so the claim was the only missing half.
+The trusted-proxy header path mints no claim, deliberately. Three unit tests;
+threat **T-283**. PR A.
+
+### T22.4 — An unbound certificate is a 401 — Sonnet 5 ✓ LANDED
+DF-027. The device-auth path reached `403` for one refusal by matching the text
+of an `axiam-pki` error message. A certificate bound to no principal identifies
+nobody, so it is unauthenticated like its three siblings; and a status that
+depends on a lower crate's wording is one nobody can change safely. The string
+match goes with it. OpenAPI and the management registry regenerated. PR A.
+
+---
+
 ---
 
 ## Summary
@@ -773,7 +817,8 @@ CONTRACT §28 (RFC 9728 document builder and route, `WWW-Authenticate` challenge
 | Phase 19 | 26 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
+| Phase 22 | 4+ | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes) |
 
-**Total: 112 tasks across 22 phases**
+**Total: 112 tasks across 22 complete phases, plus Phase 22 in progress**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

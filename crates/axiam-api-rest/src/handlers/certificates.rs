@@ -16,7 +16,9 @@ use uuid::Uuid;
 use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
+use crate::handlers::org_scope::is_organization_principal;
 use crate::state::AppState;
+use axiam_pki::IssuingScope;
 
 // -----------------------------------------------------------------------
 // Request / response types (CQ-B25)
@@ -33,6 +35,25 @@ pub struct CreateCertificateRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// The issuing scope this caller acts with on both leaf paths.
+///
+/// [`IssuingScope::Organization`] only for a principal whose own record lives
+/// in the organization's reserved scope; everyone else is
+/// [`IssuingScope::Tenant`] and is confined to the signing CA of the tenant
+/// being acted on. The tenant being acted on is `user.tenant_id`, which is the
+/// caller's own tenant unless it named another through `X-Axiam-Tenant` and was
+/// allowed to.
+async fn issuing_scope<C: Connection + Clone>(
+    user: &AuthenticatedUser,
+    state: &AppState<C>,
+) -> IssuingScope {
+    if is_organization_principal(user, state).await {
+        IssuingScope::Organization
+    } else {
+        IssuingScope::Tenant
+    }
+}
+
 /// `POST /api/v1/certificates`
 #[utoipa::path(
     post,
@@ -42,6 +63,10 @@ pub struct CreateCertificateRequest {
     responses(
         (status = 201, description = "Certificate generated",
          body = GeneratedCertificate),
+        (status = 404, description = "No such issuing CA within this caller's reach: it \
+                                      belongs to another organization, to another tenant, \
+                                      or is the organization CA and the caller is not an \
+                                      organization principal"),
     ),
     security(("bearer" = []))
 )]
@@ -73,10 +98,16 @@ pub async fn generate<C: Connection + Clone>(
         .and_then(|v| v.as_u64())
         .map(|v| v as u32);
 
+    // Which CAs of the organization this call can reach: its own tenant's
+    // signing CA always, the organization CA only for a principal that lives in
+    // the organization scope. Resolved from the caller's own record, never from
+    // the body (DF-017).
+    let scope = issuing_scope(&user, state.get_ref()).await;
+
     let result = state
         .pki
         .cert_service
-        .generate(user.org_id, input, max_validity)
+        .generate(user.org_id, scope, input, max_validity)
         .await?;
     Ok(HttpResponse::Created().json(result))
 }
@@ -132,7 +163,10 @@ pub struct SignCertificateCsrRequest {
                                       825-day hard cap, or the issuer's own expiry"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Forbidden — `certificates:generate` required"),
-        (status = 404, description = "No such issuing CA in this organization"),
+        (status = 404, description = "No such issuing CA within this caller's reach: it \
+                                      belongs to another organization, to another tenant, \
+                                      or is the organization CA and the caller is not an \
+                                      organization principal"),
     ),
     security(("bearer" = []))
 )]
@@ -164,10 +198,12 @@ pub async fn sign_csr<C: Connection + Clone>(
         .and_then(|v| v.as_u64())
         .map(|v| v as u32);
 
+    let scope = issuing_scope(&user, state.get_ref()).await;
+
     let certificate = state
         .pki
         .cert_service
-        .sign_csr(user.org_id, input, max_validity)
+        .sign_csr(user.org_id, scope, input, max_validity)
         .await?;
     Ok(HttpResponse::Created().json(certificate))
 }

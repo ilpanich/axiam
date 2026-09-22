@@ -277,6 +277,80 @@ plans can be read side by side.
 
 ### S-1 — `prepare_leaf_issuance` binds a tenant signing CA to the acting tenant (DF-017, DF-025) — Opus 5
 
+> **EXECUTED — 2026-09-22, PR A, commit 1 of 4.**
+>
+> **Shipped.** `IssuingScope` (`crates/axiam-pki/src/cert.rs`, re-exported from
+> the crate root) carries what the caller *is*; `prepare_leaf_issuance` takes it
+> and the acting tenant, and matches the CA against both **immediately after the
+> lookup**, ahead of the status and validity-window checks. `generate` and
+> `sign_csr` gained the parameter and pass `input.tenant_id` as the acting
+> tenant. One site covers the Vault custodian too, as the plan predicted: the
+> check precedes `store_for`.
+>
+> **Tests.** Five in `sign_csr_test.rs` — `a_tenant_signing_ca_of_another_tenant_is_not_found`,
+> `a_tenant_may_sign_under_its_own_signing_ca`,
+> `an_organization_ca_is_not_usable_by_a_tenant_principal`,
+> `a_foreign_ca_is_not_found_even_when_it_is_revoked` (the ordering probe, not in
+> the plan — see below), and the I4 twin
+> `an_organization_level_principal_may_still_issue_under_the_org_ca`. Four
+> `generate` twins in `cert_test.rs`. Two at the wire in `certificate_test.rs`:
+> `sign_csr_cannot_reach_another_tenants_signing_ca` beside the
+> cross-organization one, and its I4 twin
+> `sign_csr_under_the_organization_ca_still_works_for_an_organization_principal`.
+> `sign_csr_test`: 25 passed.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`user.organization_level` is the wrong flag, and using it would have
+>    broken the I1.** The plan says "pass `user.organization_level` alongside
+>    `user.tenant_id`". That flag is set only by `resolve_active_tenant`, i.e.
+>    only when a request names *another* tenant through `X-Axiam-Tenant` — which
+>    `handlers/org_scope.rs:59-63` already says in as many words. An organization
+>    administrator acting on its own organization sends no such header, so the
+>    flag is `false` for exactly the call the I1 protects, and reading it would
+>    have made the organization CA unreachable by everyone. Resolved instead
+>    through a new `org_scope::is_organization_principal`, the residence half of
+>    `require_organization_principal`, which reads the caller's own tenant record.
+> 2. **The existing test suites all issued leaves under the organization CA as a
+>    tenant principal** — that was the shape the defect allowed, so it was the
+>    shape the fixtures used. 26 call sites across six `axiam-pki` test files now
+>    pass `IssuingScope::Organization` explicitly (they are, accurately, the
+>    organization-principal case), and the seven leaf tests in
+>    `axiam-api-rest/tests/certificate_test.rs` were moved onto a real tenant
+>    signing CA through a new `tenant_signing_ca!` macro — the two-tier shape the
+>    product deploys. `a_leaf_outliving_its_issuer_is_refused_with_the_real_maximum`
+>    now quotes 363 days rather than 364, because its issuer is the intermediate.
+> 3. **A disclosure-ordering test the plan did not name.** Placing the check
+>    after the status check would let an outsider distinguish "no such CA" from
+>    "revoked CA" by the message. `a_foreign_ca_is_not_found_even_when_it_is_revoked`
+>    pins the order.
+> 4. **The OpenAPI 404 text.** The plan says no OpenAPI change. Two
+>    `#[utoipa::path]` response descriptions are nonetheless wrong after the fix
+>    ("No such issuing CA in this organization"), and `generate` documented no
+>    404 at all although it could always return one. Both are corrected and
+>    `sdks/openapi.json` is regenerated in this commit — a description that
+>    contradicts the handler is worse than a regeneration the plan did not
+>    schedule.
+> 5. **The threat model file is behind its own documents.**
+>    `threat-model-stride.md` carries T-272 … T-280 (the Phase 21 wave of
+>    2026-09-17); `Axiam.json` and `threat-modeling-and-security.md` both still
+>    stood at 271. The next number free in *all three* is therefore **281**, which
+>    is what the new threat uses; `threatTop` is 281 while the file holds 272
+>    entries. Writing the nine missing entries into the Threat Dragon file from
+>    the text `threat-model-stride.md` already holds is a maintainer task, noted
+>    in `threat-modeling-and-security.md`'s wave entry and **not** done here.
+> 6. **T-98 claimed this was already enforced.** Its mitigation said issuance for
+>    a tenant "is anchored at that tenant's path-length-zero intermediate". It was
+>    not; the entry is corrected in place rather than extended, and points at
+>    T-281.
+>
+> **Records.** T-281 (Axiam.json, both STRIDE documents, counts updated);
+> `gen-threat-model.mjs` run — *"threatModel.ts: 9 diagrams, 272 threats (259
+> mitigated, 13 open)"* — generated files reverted. Roadmap Phase 22 / T22.1.
+> CHANGELOG under **Security**. `docs/pki/README.md` gains "Which CA a caller may
+> issue under", with the reach table and the upgrade paragraph.
+
+
 **The defect.** `prepare_leaf_issuance` (`crates/axiam-pki/src/cert.rs:124-212`)
 fetches the issuing CA scoped to the organization (`ca_repo.get_by_id(org_id,
 issuer_ca_id)`, `:146`; the query is `WHERE organization_id = $org_id`,
@@ -336,6 +410,59 @@ docs say so.
 
 ### S-2 — the device mTLS login gets a rate limiter (§1.7; suggested DF-028) — Sonnet 5
 
+> **EXECUTED — 2026-09-22, PR A, commit 2 of 4.**
+>
+> **Shipped exactly as specified.** `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`,
+> default 60, per IP, in the machine family, both layers on `/auth/device`
+> (`build_governor` + `RateLimitShared("device_login")`) as on `/auth/login`.
+> Preset values 300 (`gateway`) and 3 000 (`mesh`) — the same 5x and 50x
+> `token_per_min` takes, so the family scales by one rule rather than by taste;
+> the plan left the numbers to the executor.
+>
+> **Tests.** `crates/axiam-api-rest/tests/device_login_rate_limit_test.rs`,
+> six tests driving the real `register_api_v1_routes` wiring so a regression
+> to a bare route fails rather than passing quietly:
+> `device_login_is_rate_limited_per_ip` (with its `Retry-After`),
+> `one_exhausted_address_does_not_refuse_another`,
+> `login_per_min_is_unchanged_by_the_device_knob` (the I4 twin, asserting both
+> the unmoved `10` and that the buckets do not cross),
+> `the_shipped_default_is_sixty_per_minute` (the I1, as arithmetic over the
+> token lifetime rather than as a bare constant),
+> `device_login_limit_scales_with_the_machine_preset`, and
+> `an_explicit_device_login_value_beats_the_preset`.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`documented_presets_match_applied_profiles` needed extending, and one
+>    sibling test needed leaving alone.** The plan names the first. There are
+>    two tables in `config/rate_limit.rs` keyed on `ENV_*` constants: the
+>    posture-doc pair (`documented_defaults_match_shipped_config` and
+>    `documented_presets_match_applied_profiles`), which the new row joins, and
+>    `public_benchmark_doc_shipped_defaults_match_code`, which asserts every
+>    knob it lists appears in `benchmarks/PUBLIC_BENCH_ANALYSIS.md`. Adding the
+>    device row to the second would have failed: that document is a record of a
+>    measurement run, and this limit is sized from the honest traffic rather
+>    than from capacity, so there is nothing measured to put in it.
+> 2. **Two prose sentences enumerate the machine family** — one in
+>    `docs/deployment/README.md`'s `PROFILE` row, one in
+>    `rate-limit-sizing.md` §3 — and both had to gain "device login" or the
+>    table above them would contradict them.
+> 3. **`check-config-key-coverage.py` wants the key on the website too.** The
+>    plan names `docs/deployment/README.md` and the rate-limit page; the gate
+>    reads `website/src/docs/configuration.ts` and fails a key documented only
+>    in `docs/`. Four documentation sites in total, then: the posture table,
+>    the deployment config reference, the website configuration page, and the
+>    two family sentences.
+>
+> **Records.** Threat T-282 on the `mTLS device auth` cell (Denial of service,
+> Medium, Mitigated); both STRIDE documents, counts updated;
+> `gen-threat-model.mjs` run — *"threatModel.ts: 9 diagrams, 273 threats (260
+> mitigated, 13 open)"* — generated files reverted. Roadmap T22.2. CHANGELOG
+> under **Security**. Docs: the posture table, the deployment config reference
+> row, and the two family sentences. No OpenAPI change: the endpoint's contract
+> is unchanged and a 429 is not a documented response on any route.
+
+
 **The fix.** A new knob in the **machine family** —
 `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, default **60**, per IP — wrapped on
 `/auth/device` exactly as `/auth/login` is at `server.rs:181-182`:
@@ -362,6 +489,77 @@ is the deployment's reason to choose a preset, which the docs say.
 min). No existing limiter default moves.
 
 ### S-3 — device tokens carry `cnf` / `x5t#S256` and are enforced against the presenting certificate (DF-014) — Opus 5
+
+> **EXECUTED — 2026-09-22, PR A, commit 4 of 5.**
+>
+> **Half the task did not need doing, and finding that out was the task.** The
+> plan says "**Read how OAuth2 mTLS-bound tokens are enforced on REST today
+> before writing a line** — if that enforcement lives in the same extractor,
+> this is one more call site; if it lives only in introspection output, the REST
+> enforcement is new." It lives in the same extractor, and more generally than
+> that: `enforce_sender_constraint` sits inside `validate_presented_token`,
+> which is the tail of `parse_validated_claims`, which **every** extractor
+> reaches — `AuthenticatedUser`, `AuthenticatedServiceAccount`,
+> `AuthenticatedPrincipal` and the audit middleware's cache alike. The gRPC
+> interceptor has its own copy reading `peer_certs()`. Both are keyed on
+> `claims.cnf.is_none()`, so they began enforcing the moment the claim
+> appeared. **No enforcement code was written, and none needed to be.**
+>
+> **Shipped.** `issue_service_account_token` gains `cnf: Option<CnfClaim>` and
+> passes it through `AccessTokenSpec::cnf`, which already existed.
+> `CertificateAuthenticated` gains `certificate_thumbprint: Option<String>`,
+> set in the extractor and only on the `VerifiedClientCert` branch.
+> `device_auth` turns it into `CnfClaim::from_certificate_thumbprint`.
+> `issue_service_account_client_credentials_token_enriched` gains the parameter
+> for symmetry as the plan asks, passing `None` at its one caller.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **No `thumbprint_s256` move.** The plan expected layering to force it into
+>    `axiam-auth`. It does not: the computation happens in `axiam-api-rest`
+>    (layer 6), which already depends on `axiam-oauth2` (layer 4) and already
+>    calls `axiam_oauth2::mtls::thumbprint_s256` from `enforce_sender_constraint`
+>    eleven lines away. `check-crate-layering.py` is content. Moving it would
+>    have been churn with a third copy of a one-line function as the reward —
+>    the gRPC interceptor already keeps its own, and says why.
+> 2. **The trusted-proxy path must NOT be bound.** The plan does not mention it.
+>    `enforce_sender_constraint` reads `VerifiedClientCert` off the connection
+>    and refuses the `X-Client-Certificate` header by construction, so a token
+>    bound on the header path would be one AXIAM refuses on its own next
+>    request. The thumbprint is therefore recorded only on the native mTLS
+>    branch, and the asymmetry is documented at the field, in `docs/pki/README.md`
+>    and in T-283 rather than left to be discovered.
+> 3. **There is no "stolen device token" residual to flip.** The plan says the
+>    existing one "becomes Mitigated"; no such entry exists in either STRIDE
+>    document. Entered as a new threat, **T-283**, Mitigated on arrival.
+> 4. **The positive native-mTLS direction is not reachable from the test
+>    harness**, so the plan's `a_device_token_presented_with_a_different_certificate_is_refused`
+>    cannot be written at the HTTP layer. `actix_web::test::TestRequest` builds
+>    every request with `conn_data: None` and `HttpRequest::new` is
+>    `pub(crate)`, so no test can put a verified certificate on a connection —
+>    the limitation `oauth2_userinfo_post_test.rs` already records in those
+>    words for the same reason. The three properties are pinned in `axiam-auth`
+>    instead, against `verify_token_binding` itself: refused with no
+>    certificate, refused with a different one, accepted with the right one,
+>    plus the I1. What is not covered is the three-line extractor branch that
+>    sets `Some`, and this block is where that is said rather than implied.
+> 5. **Two suites broke on S-1 and S-2 and are repaired in their own commit**
+>    (`6d42a51`), ahead of this one: `device_auth_test.rs` issued device
+>    certificates with a tenant token against the organization CA (S-1's 404)
+>    and sent requests to a now-rate-limited route with no peer address (S-2's
+>    `500 no peer address`). My runs for those two tasks covered the suites the
+>    plan named and the suites I edited; this is neither, and the miss is
+>    recorded in that commit's message rather than folded away.
+>
+> **Records.** T-283 on the `mTLS device auth` cell (Spoofing, High, Mitigated);
+> both STRIDE documents, counts updated; `gen-threat-model.mjs` run —
+> *"threatModel.ts: 9 diagrams, 274 threats (261 mitigated, 13 open)"* —
+> generated files reverted. Roadmap T22.3. CHANGELOG under **Security**.
+> `docs/pki/README.md` gains "The token a device gets back is bound to its
+> certificate", with the proxy asymmetry, the gRPC consequence and the upgrade
+> note. Contract §6.1 is C-0's, in PR H, as the plan schedules. No OpenAPI
+> change: the token is opaque to the spec.
+
 
 **The fix, in two halves, in this order.**
 
@@ -419,6 +617,37 @@ today until it expires — the check is "if `cnf` is present"; that is the
 migration, and it lasts one access-token lifetime.
 
 ### S-4 — an unbound certificate is a 401 (DF-027) — Sonnet 5
+
+> **EXECUTED — 2026-09-22, PR A, commit 5 of 5.**
+>
+> **Shipped exactly as specified.** The `AuthorizationDenied` arm and its string
+> match are gone; every `AxiamError::Certificate` on this path is now
+> `AuthenticationFailed` → 401, like its three siblings. The `#[utoipa::path]`
+> responses lose the 403 row, and `sdks/openapi.json` plus
+> `sdks/management-registry.json` are regenerated.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **The test the plan says to "flip" asserted nothing to flip.**
+>    `device_auth_unbound_cert_returns_error` asserted `!= 200`, which passed
+>    for 401 and 403 alike — which is why the status could be wrong for as long
+>    as it was. It is renamed `device_auth_unbound_cert_returns_401` and now
+>    asserts the status *and* that the body still names the case.
+> 2. **The I4 twin needed inventing.** A change that collapses one status into
+>    another can pass its own test by collapsing the distinction too, so
+>    `the_other_device_auth_refusals_are_still_401_and_still_distinct` walks an
+>    unbound certificate and a certificate AXIAM never issued through the same
+>    route and asserts both the shared 401 and the two different bodies. That is
+>    the assertion the plan's "nothing is newly disclosed" argument rests on,
+>    and it was worth writing down rather than asserting in prose.
+> 3. **The 200 description gained a sentence** about the `cnf` claim S-3 added,
+>    since the spec is regenerated here anyway and the response had changed
+>    shape one commit earlier without the description saying so.
+>
+> **Records.** No threat entry: this changes which status a refusal carries, not
+> whether it refuses, and no entry claimed the old one. CHANGELOG under
+> **Changed**, with the client-side migration stated. Roadmap T22.4.
+
 
 **The fix.** Delete the special-case arm at
 `crates/axiam-api-rest/src/extractors/cert_auth.rs:245-250` that turns

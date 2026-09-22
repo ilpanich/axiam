@@ -114,8 +114,8 @@ Two shape facts that matter more than the absolute numbers:
 
 `AXIAM__RATE_LIMIT__PROFILE` = `internet` (default) | `gateway` | `mesh`.
 It sets the whole machine-traffic family — key mode, token, introspect,
-revoke, REST authz, and the gRPC authz ceiling — coherently, so you cannot
-half-apply it.
+revoke, REST authz, device login, and the gRPC authz ceiling — coherently, so
+you cannot half-apply it.
 
 **Precedence: an explicit env var always beats the preset, which always
 beats the shipped default.** If you set `AXIAM__RATE_LIMIT__TOKEN_PER_MIN`
@@ -135,6 +135,7 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN` | 600 | 6000 | 60000 |
 | `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | 60 | 600 | 6000 |
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 1800 | 6000 | 60000 |
+| `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` | 60 | 300 | 3000 |
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | 12 | 12 | 12 |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | 10 | 10 | 10 |
 | `AXIAM__RATE_LIMIT__DCR_PER_MIN` | 5 | 5 | 5 |

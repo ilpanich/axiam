@@ -22,6 +22,46 @@
 > the entry point for that pass; the beta14 plan was executed on 2026-09-13 and
 > records what it landed.**
 >
+> **The 2026-09-22 dogfooding-remediation wave (model 2.17.0).** Three threats
+> enter so far, all Mitigated on arrival. **T-283**: a device authenticates by a
+> TLS handshake with a client certificate and got back a plain *bearer* token,
+> so the proof of possession bought nothing past the handshake — a token read
+> off the device's flash was as good as the key. The sharpest part is that the
+> machinery was already there and already used for OAuth2 mTLS clients; the
+> device path was the one mint site that omitted it. The token now carries
+> `cnf.x5t#S256`, and **no enforcement code changed**, because both surfaces
+> already refused a `cnf`-bearing token whose evidence does not match.
+> **T-282**: `POST
+> /api/v1/auth/device` was a bare route — no governor, no shared store — while
+> every neighbouring auth resource carried both, so the one endpoint whose
+> happy path makes the server complete a client-certificate TLS handshake was
+> the one an unauthenticated caller could drive without limit. It now has
+> `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, default 60 per IP, in the machine
+> family so a posture preset scales it for a fleet behind one NAT. And
+> **T-281**, a tenant administrator issuing
+> a leaf under another tenant's signing CA — or directly under the organization
+> anchor — because `prepare_leaf_issuance` scoped the issuing CA to the
+> organization and never read the `tenant_id` the CA row carries. It is the
+> boundary the product is built on, crossed by an ordinary tenant administrator
+> with no bug in the caller, and `axiam-domo-demo` rode one such certificate to
+> a full MQTT session before filing it as DF-017 / DF-025. **T-98 is corrected
+> in the same pass** rather than quietly extended: its mitigation said issuance
+> for a tenant "is anchored at that tenant's path-length-zero intermediate",
+> which tenant signing CAs made possible in 1.0.0-alpha44 and nothing made
+> compulsory. The entry stays, with the correction attached, because a claim the
+> code did not keep is worth more as a record than as a deletion.
+>
+> **A counting correction belongs with it.** This document and
+> `ThreatDragonModels/Axiam/Axiam.json` both stood at 271 threats while
+> [`threat-model-stride.md`](threat-model-stride.md) already carried T-272 …
+> T-280 — the nine Phase 21 entries of 2026-09-17, four of them since closed.
+> That wave reached one of the three artifacts and not the other two. The model
+> is therefore **283 threats, 270 mitigated / 13 open**, and the counts here are
+> corrected to it. The nine entries still have to be written into the Threat
+> Dragon file itself, from the text `threat-model-stride.md` already holds; that
+> is a maintainer task and is not part of this wave, which is why `threatTop` in
+> the model file reads 281 while the file carries 272 entries.
+>
 > **The 2026-09-14 early-refusal pass (model 2.16.0).** Two threats enter, both
 > Mitigated on arrival, and six entries gain a clause, taking the model to **271
 > threats, 258 mitigated / 13 open**; nothing on the open register moves.
@@ -503,7 +543,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 271 threats** and a
+The system is verified against a **STRIDE threat model of 283 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -526,8 +566,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 271 |
-| Mitigated / Open | 258 / 13 |
+| Threats identified | 283 |
+| Mitigated / Open | 270 / 13 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -1395,7 +1435,7 @@ checklist — most of the threat model's open items live here.
 **The open risk register**
 
 Every threat the model does not record as mitigated, most severe first — 13 of
-271. On the website this table is generated from the Threat Dragon model, so it
+283. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind

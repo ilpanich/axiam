@@ -1,11 +1,12 @@
 //! Integration tests for CertService — leaf cert issuance and CA validation.
 
 use axiam_core::models::certificate::{
-    CertificateStatus, CertificateType, CreateCaCertificate, CreateCertificate, KeyAlgorithm,
-    StoreCaCertificate,
+    CertificateStatus, CertificateType, CreateCaCertificate, CreateCertificate,
+    CreateIntermediateCa, KeyAlgorithm, StoreCaCertificate,
 };
 use axiam_core::repository::CaCertificateRepository;
 use axiam_db::repository::{SurrealCaCertificateRepository, SurrealCertificateRepository};
+use axiam_pki::IssuingScope;
 use axiam_pki::ca::{CaService, PkiConfig};
 use axiam_pki::cert::CertService;
 use chrono::{Duration, Utc};
@@ -88,6 +89,7 @@ async fn cert_generate_against_active_ca_succeeds() {
     let generated = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -165,6 +167,7 @@ async fn cert_generate_rejects_revoked_ca() {
     let result = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -262,6 +265,7 @@ async fn cert_generate_rejects_expired_ca() {
     let result = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: expired_ca.id,
@@ -367,6 +371,7 @@ async fn cert_generate_issuer_dn_matches_real_ca_subject_not_stored_subject_fiel
     let generated = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: manipulated_ca.id,
@@ -453,6 +458,7 @@ async fn cert_generate_rejects_zero_validity_days() {
     let result = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -517,6 +523,7 @@ async fn cert_generate_rejects_validity_days_above_default_max() {
     let result = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -588,6 +595,7 @@ async fn cert_generate_clamps_tenant_override_to_hard_cap() {
     let result = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -661,6 +669,7 @@ async fn cert_generate_rejects_ca_with_no_stored_private_key() {
     let result = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca_no_key.id,
@@ -749,6 +758,7 @@ async fn cert_generate_rejects_when_encryption_key_not_configured() {
     let result = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -870,6 +880,7 @@ async fn cert_service_read_and_revoke_wrappers_work() {
     let generated = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -962,6 +973,7 @@ async fn cert_generate_refuses_to_outlive_its_issuer() {
     let err = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -1030,6 +1042,7 @@ async fn cert_generate_grants_the_full_window_when_the_issuer_allows_it() {
     let generated = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -1100,6 +1113,7 @@ async fn cert_generate_issues_an_rsa4096_leaf() {
     let generated = svc_cert
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -1122,4 +1136,203 @@ async fn cert_generate_issues_an_rsa4096_leaf() {
             .contains("BEGIN CERTIFICATE")
     );
     assert!(generated.private_key_pem.contains("PRIVATE KEY"));
+}
+
+// ---------------------------------------------------------------------------
+// The issuing CA belongs to the tenant being acted on (DF-017 / DF-025)
+//
+// The `generate` twins of `sign_csr_test.rs`'s "Rule 4b" section. Both leaf
+// paths go through `prepare_leaf_issuance`, and a rule proven on one and not
+// the other is a rule that survives exactly until someone refactors.
+// ---------------------------------------------------------------------------
+
+/// An organization CA, and a tenant signing CA beneath it for `tenant`.
+async fn org_and_tenant_ca(
+    ca_repo: &SurrealCaCertificateRepository<TestDb>,
+    org_id: uuid::Uuid,
+    tenant: uuid::Uuid,
+) -> (uuid::Uuid, uuid::Uuid) {
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let svc_ca = CaService::new(
+        ca_repo.clone(),
+        test_pki_config(),
+        sem,
+        test_ca_custodians(),
+    );
+
+    let org_ca = svc_ca
+        .generate(CreateCaCertificate {
+            organization_id: org_id,
+            subject: "Test CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+            intermediate_subject: None,
+            intermediate_validity_days: None,
+            issue_from_root: false,
+        })
+        .await
+        .expect("CA generation must succeed")
+        .certificate
+        .id;
+
+    let tenant_ca = svc_ca
+        .generate_intermediate(CreateIntermediateCa {
+            organization_id: org_id,
+            tenant_id: tenant,
+            parent_ca_id: org_ca,
+            subject: "Tenant Signing CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 180,
+        })
+        .await
+        .expect("tenant signing CA")
+        .certificate
+        .id;
+
+    (org_ca, tenant_ca)
+}
+
+fn leaf(tenant_id: uuid::Uuid, issuer_ca_id: uuid::Uuid, subject: &str) -> CreateCertificate {
+    CreateCertificate {
+        tenant_id,
+        issuer_ca_id,
+        subject: subject.into(),
+        cert_type: CertificateType::Device,
+        key_algorithm: KeyAlgorithm::Ed25519,
+        validity_days: 30,
+        metadata: None,
+    }
+}
+
+#[tokio::test]
+async fn generate_refuses_another_tenants_signing_ca() {
+    let db = setup_db().await;
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let org_id = uuid::Uuid::new_v4();
+    let theirs = uuid::Uuid::new_v4();
+
+    let (_, their_ca) = org_and_tenant_ca(&ca_repo, org_id, theirs).await;
+
+    let svc_cert = CertService::new(
+        ca_repo,
+        cert_repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+
+    let err = svc_cert
+        .generate(
+            org_id,
+            IssuingScope::Tenant,
+            leaf(uuid::Uuid::new_v4(), their_ca, "CN=poaching"),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, axiam_core::error::AxiamError::NotFound { .. }),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn generate_refuses_the_organization_ca_for_a_tenant_principal() {
+    let db = setup_db().await;
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let (org_ca, _) = org_and_tenant_ca(&ca_repo, org_id, tenant_id).await;
+
+    let svc_cert = CertService::new(
+        ca_repo,
+        cert_repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+
+    let err = svc_cert
+        .generate(
+            org_id,
+            IssuingScope::Tenant,
+            leaf(tenant_id, org_ca, "CN=under-the-anchor"),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, axiam_core::error::AxiamError::NotFound { .. }),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn generate_accepts_the_tenants_own_signing_ca() {
+    let db = setup_db().await;
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let (_, tenant_ca) = org_and_tenant_ca(&ca_repo, org_id, tenant_id).await;
+
+    let svc_cert = CertService::new(
+        ca_repo,
+        cert_repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+
+    let generated = svc_cert
+        .generate(
+            org_id,
+            IssuingScope::Tenant,
+            leaf(tenant_id, tenant_ca, "CN=device-001"),
+            None,
+        )
+        .await
+        .expect("a tenant issues under the CA that signs for it");
+
+    assert_eq!(generated.certificate.issuer_ca_id, tenant_ca);
+    assert_eq!(generated.certificate.tenant_id, tenant_id);
+}
+
+/// The I4 twin of the two refusals above: an organization principal issuing
+/// under the organization CA is exactly what it was before this rule existed.
+#[tokio::test]
+async fn generate_still_accepts_the_organization_ca_for_an_organization_principal() {
+    let db = setup_db().await;
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let (org_ca, _) = org_and_tenant_ca(&ca_repo, org_id, tenant_id).await;
+
+    let svc_cert = CertService::new(
+        ca_repo,
+        cert_repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+
+    let generated = svc_cert
+        .generate(
+            org_id,
+            IssuingScope::Organization,
+            leaf(tenant_id, org_ca, "CN=organization-issued"),
+            None,
+        )
+        .await
+        .expect("an organization principal issues under the organization CA");
+
+    assert_eq!(generated.certificate.issuer_ca_id, org_ca);
 }

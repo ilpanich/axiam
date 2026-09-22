@@ -19,6 +19,7 @@ use axiam_core::repository::{
 use axiam_db::repository::{
     SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealServiceAccountRepository,
 };
+use axiam_pki::IssuingScope;
 use axiam_pki::ca::{CaService, PkiConfig};
 use axiam_pki::cert::CertService;
 use axiam_pki::mtls::DeviceAuthService;
@@ -104,6 +105,7 @@ async fn mtls_chain_accept_leaf_signed_by_tenant_ca() {
     let leaf = cert_svc
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -207,6 +209,7 @@ async fn mtls_chain_reject_leaf_from_ca_that_is_not_a_trust_anchor() {
     let leaf = cert_svc
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -449,6 +452,7 @@ async fn mtls_rejects_revoked_issuing_ca() {
     let leaf = cert_svc
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -547,6 +551,7 @@ async fn mtls_rejects_expired_issuing_ca() {
     let leaf = cert_svc
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: ca.certificate.id,
@@ -688,6 +693,7 @@ async fn a_leaf_beneath_an_intermediate(
     let leaf = cert_svc
         .generate(
             org_id,
+            IssuingScope::Organization,
             CreateCertificate {
                 tenant_id,
                 issuer_ca_id: intermediate.certificate.id,

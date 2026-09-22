@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A certificate bound to no service account is a `401`, not a `403` (T22.4,
+  DF-027).** `POST /api/v1/auth/device` answered `403` for exactly one of its
+  refusals, and it reached that status by matching the **text** of an error
+  message raised in `axiam-pki`. Both halves were wrong. A `403` asserts an
+  identity and then refuses what it may do; a certificate bound to no principal
+  identifies nobody, which is what its three sibling refusals — unknown,
+  untrusted, self-asserted — already said with `401`. And a status that depends
+  on the wording of a message in a lower crate is a status nobody can change
+  safely: a reword in `axiam-pki` that never mentions HTTP would have moved it.
+
+  Nothing is newly disclosed. The counter-argument — that `403` hid "unknown
+  certificate" from "known but unbound" — does not survive the change: both are
+  `401` now, and the bodies were always distinct messages, which a new test
+  pins. Clients that mapped `403` on this endpoint to "bound, but not
+  permitted" should map `401` and read the body.
+
+### Security
+
+- **Device tokens are bound to the certificate that obtained them (T22.3,
+  DF-014).** `POST /api/v1/auth/device` authenticates a device by a TLS
+  handshake with a client certificate and then handed back a plain **bearer**
+  token, so the proof of possession bought nothing after the handshake that
+  made it: a token read off a device's flash, or out of a log, was as good as
+  the key the device protects. `CnfClaim` and the RFC 8705 `x5t#S256`
+  confirmation already existed and were minted for OAuth2 mTLS clients; the
+  device path alone omitted them.
+
+  The device token now carries `cnf.x5t#S256` over the certificate rustls
+  verified for the connection, and both surfaces refuse it where that
+  certificate is not presented again — the REST extractor and the gRPC
+  interceptor each run the same `verify_token_binding` on every `cnf`-bearing
+  token, so **no enforcement code changed**: the claim was all that was
+  missing.
+
+  A token minted before this change carries no `cnf` and is accepted exactly as
+  before, so the migration lasts one access-token lifetime. Deployments that
+  terminate mTLS at a proxy and forward `X-Client-Certificate` keep getting
+  bearer device tokens, deliberately: AXIAM cannot re-check a certificate it
+  never saw, and binding a token it would then refuse on first use would be
+  worse than not binding it. `docs/pki/README.md` says so, and says what to do
+  about it.
+
+- **The device mTLS login is rate-limited (T22.2, DF-028).**
+  `POST /api/v1/auth/device` was registered bare — no governor, no shared
+  store — while `/auth/login`, the three OPAQUE routes, the six WebAuthn
+  ceremony routes and the federation sign-in routes all carried both layers.
+  It is also public and CSRF-exempt, as it has to be: a device has no session
+  and no cookie. So the one auth endpoint that makes the server complete a TLS
+  handshake with a client certificate — the most expensive thing an
+  unauthenticated caller can ask of it — was the one an unauthenticated caller
+  could ask for without limit.
+
+  New knob `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, default **60**, per IP.
+  It sits in the machine family, so `AXIAM__RATE_LIMIT__PROFILE` scales it to
+  300 (`gateway`) and 3 000 (`mesh`) — the same 5x and 50x `TOKEN_PER_MIN`
+  takes, which is what a fleet behind a single NAT should reach for. No
+  existing default moves: a device re-authenticates once per access-token
+  lifetime (900 s), so sixty per minute holds nine hundred devices on one
+  address and no deployment on the shipped posture sees a new 429.
+
+- **A signing CA now issues only for the tenant it signs for (T22.1, DF-017 /
+  DF-025).** `prepare_leaf_issuance` scoped the issuing CA to the
+  **organization** and never read `ca_certificate.tenant_id` — the column that
+  exists to say which tenant a signing CA signs for. Any principal holding
+  `certificates:generate` could therefore name any CA of the organization: a
+  sibling tenant's signing CA, or the organization anchor above them. The leaf
+  came back recorded under the caller's own tenant, with another tenant's
+  issuer, chaining to the root every relying party in the organization trusts;
+  the `axiam-domo-demo` dogfooding run rode one to a full MQTT session.
+
+  Both leaf paths — `POST /api/v1/certificates` and
+  `POST /api/v1/certificates/sign-csr` — now match the issuing CA against the
+  tenant being acted on, and answer **404** when it does not match, following
+  the cross-organization precedent: a CA the caller may not use is a CA the
+  caller cannot see. The check is made before the CA's status and validity
+  window are read, so the refusal cannot be used to learn that a CA exists, is
+  revoked, or has expired. An organization-level CA is additionally reachable
+  by a principal whose own record lives in the organization's reserved scope,
+  which is what leaves the intended path — the organization administrator
+  minting under the anchor — byte for byte as it was.
+
+  A tenant that was issuing leaves directly under the organization CA needs a
+  signing CA of its own before it can issue again. Certificates already issued
+  across the boundary are **not** revoked on upgrade: revocation is an
+  operator's act. `docs/pki/README.md` has the reach table and the upgrade
+  paragraph.
+
 ## [1.0.0-beta16] - 2026-09-19
 
 ### Added

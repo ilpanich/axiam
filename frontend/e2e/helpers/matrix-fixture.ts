@@ -694,8 +694,8 @@ async function buildPki(api: Api, fx: MatrixFixture): Promise<void> {
       fx.caCertificates[key] = String(id);
     });
 
-  await ensureCa("org-ca", "CN=mx-org-ca");
-  await ensureCa("untrusted-ca", "CN=mx-untrusted-ca");
+  await ensureCa("org-ca", "mx-org-ca");
+  await ensureCa("untrusted-ca", "mx-untrusted-ca");
 
   // Only the first is enabled as an mTLS trust anchor. The second exists to be
   // refused: a certificate from an untrusted CA must not authenticate.
@@ -714,7 +714,11 @@ async function buildPki(api: Api, fx: MatrixFixture): Promise<void> {
     const parent = fx.caCertificates["org-ca"];
     if (!parent) throw new Error("mx-org-ca was not built");
     const path = `/api/v1/organizations/${fx.orgId}/tenants/${fx.tenantA}/signing-cas`;
-    const subject = "CN=mx-signing-ca-a";
+    // A bare common name, not a distinguished name: `subject` is normalised
+    // server-side (DF-023), so `CN=mx-signing-ca-a` would be stored as
+    // `mx-signing-ca-a` and the idempotency lookup below — which matches on
+    // the stored value — would never find what this created.
+    const subject = "mx-signing-ca-a";
     const existing = await findBy(api, path, "subject", subject);
     if (existing) {
       fx.caCertificates["signing-ca-a"] = String(existing["id"]);
@@ -762,10 +766,10 @@ async function buildPki(api: Api, fx: MatrixFixture): Promise<void> {
       fx.certificates[key] = String(id);
     });
 
-  await issue("sa", "CN=mx-cert-sa", "signing-ca-a");
-  await issue("unbound", "CN=mx-cert-unbound", "signing-ca-a");
-  await issue("revoked", "CN=mx-cert-revoked", "signing-ca-a");
-  await issue("untrusted", "CN=mx-cert-untrusted", "untrusted-ca");
+  await issue("sa", "mx-cert-sa", "signing-ca-a");
+  await issue("unbound", "mx-cert-unbound", "signing-ca-a");
+  await issue("revoked", "mx-cert-revoked", "signing-ca-a");
+  await issue("untrusted", "mx-cert-untrusted", "untrusted-ca");
 
   await step(fx, "bind mx-cert-sa to mx-sa-cert", async () => {
     const certId = fx.certificates["sa"];

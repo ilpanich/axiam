@@ -821,6 +821,68 @@ CHANGELOG: **Fixed**. Records: none.
 
 #### S-6b — `subject` is a common name, and a `CN=` prefix is understood, once (DF-023)
 
+> **EXECUTED — 2026-09-22, PR B, commit 2 of 5.**
+>
+> **Shipped.** `axiam_pki::subject::subject_common_name` — its own module, not
+> a private function in `cert.rs`, because three call sites in two files use it
+> and one of them is a CA path. Called **once per operation, at the top**, in
+> `CaService::generate`, `CaService::generate_intermediate` and
+> `CertService::generate`: the normalised value then reaches the certificate,
+> the `subject` column and (under `vault_pki`) the derived intermediate name,
+> so the three cannot disagree. Docs, OpenAPI descriptions, the admin-UI
+> placeholder, the end-to-end fixtures and the two mTLS check scripts all show
+> the bare form.
+>
+> **Tests.** Six unit tests in `subject.rs` (`a_bare_subject_is_unchanged`,
+> `a_single_cn_component_is_understood_once`, `normalisation_is_idempotent`,
+> `a_multi_rdn_subject_is_refused`, `an_empty_subject_is_refused`,
+> `the_refusal_says_what_is_accepted`); the plan's trio plus its I4 twin in
+> `ca_test.rs` (and a fourth, over the derived intermediate subject),
+> `intermediate_ca_test.rs` and `cert_test.rs`; plus
+> `a_refused_subject_issues_nothing`, which pins that the refusal precedes
+> issuance rather than following it. `ca_test`: 9, `intermediate_ca_test`: 13,
+> `cert_test`: 22, all passing.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **Two of the three cited line numbers point somewhere else now.**
+>    `ca.rs:1338` is inside `mod import_tests` — a test helper — not the
+>    intermediate path; the real one is `intermediate_params` at `ca.rs:951`.
+>    `cert.rs:719` is now `leaf_params` at `cert.rs:793`, and there is a
+>    *second* `DnType::CommonName` push at `cert.rs:441`, on the
+>    remote-custodian branch that builds a CSR rather than a certificate.
+>    Normalising at the three `DnType::CommonName` sites as the plan says would
+>    therefore have fixed the certificate and left the stored `subject` column
+>    wrong on every path, which is half the finding. Normalising at the entry
+>    point fixes both halves and covers the CSR branch for free.
+> 2. **`intermediate_subject` needed it too.** Under `vault_pki` custody the
+>    intermediate's name defaults to `format!("{} Intermediate Authority",
+>    input.subject)`, so an un-normalised root subject put `CN=` in the *middle*
+>    of a generated name. Both fields are normalised.
+> 3. **The end-to-end matrix fixture breaks without a change the plan does not
+>    mention.** `frontend/e2e/helpers/matrix-fixture.ts` creates its six CAs and
+>    certificates with `CN=`-prefixed subjects and is idempotent by looking each
+>    one up **by its stored subject**. Once the server normalises, that lookup
+>    can never match what it created, so every re-run would try to create them
+>    again. The fixture now uses bare names, with a comment saying why.
+>    `scripts/e2e-mtls-check.sh` and `scripts/e2e-mtls-native-check.sh` were
+>    moved with it for consistency (they do not look up by subject, so they were
+>    not broken — only wrong).
+> 4. **The existing tests needed no edits, as the plan predicted**, and that
+>    held: `cert_test.rs:373`, `crud_test.rs:149`, `mtls_chain_test.rs:110` and
+>    the rest pass `"CN=…"` and now get the DN they always meant. Nothing in
+>    `crates/` asserted a stored subject *with* the prefix, which was checked
+>    rather than assumed.
+> 5. **An empty subject is now a `Validation` error.** The plan's rule implies
+>    it ("trim; empty → `Validation`") but no existing path rejected an empty
+>    subject, so this is new behaviour on a case that previously produced a
+>    certificate with an empty common name. It is strictly better and is
+>    pinned by `an_empty_subject_is_refused`.
+> 6. **Refused subjects are refused before issuance.** Because normalisation is
+>    the first statement of each method, a bad subject costs no keygen, no
+>    custodian round trip and leaves no row — pinned by
+>    `a_refused_subject_issues_nothing` rather than left to the reader.
+
 **Decision (D-2): accept a bare CN or exactly one `CN=<value>` RDN; refuse
 anything else containing `=`.** A full DN parser (RFC 4514) for a field that
 becomes a single CN is scope the certificate does not use.

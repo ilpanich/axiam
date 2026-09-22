@@ -663,12 +663,12 @@ export const OPERATE_PAGES: DocPage[] = [
           {
             title: "Have an organization CA",
             body: "CA certificates are organization-scoped and are the trust root every leaf in that organization chains to. The response carries the CA's signing private key **once** — AXIAM never persists the plaintext — so store it in your secret manager before you do anything else.",
-            code: 'POST /api/v1/organizations/{org_id}/ca-certificates\n{\n  "subject": "CN=Acme Corp Root CA",\n  "key_algorithm": "Ed25519",\n  "validity_days": 3650\n}',
+            code: 'POST /api/v1/organizations/{org_id}/ca-certificates\n{\n  "subject": "Acme Corp Root CA",\n  "key_algorithm": "Ed25519",\n  "validity_days": 3650\n}',
           },
           {
             title: "Issue the device certificate",
             body: "Leaf certificates are tenant-scoped. Set `cert_type` to `Device` — that is what makes the certificate addressable by fingerprint at authentication time. The private key comes back once and is never stored.",
-            code: 'POST /api/v1/certificates\n{\n  "issuer_ca_id": "<ca-certificate-uuid>",\n  "subject": "CN=sensor-0421.acme.dev",\n  "cert_type": "Device",\n  "key_algorithm": "Ed25519",\n  "validity_days": 365\n}',
+            code: 'POST /api/v1/certificates\n{\n  "issuer_ca_id": "<ca-certificate-uuid>",\n  "subject": "sensor-0421.acme.dev",\n  "cert_type": "Device",\n  "key_algorithm": "Ed25519",\n  "validity_days": 365\n}',
           },
           {
             title: "Commission the device with the key pair",
@@ -679,6 +679,10 @@ export const OPERATE_PAGES: DocPage[] = [
             body: "The device presents its client certificate on the TLS handshake. Nothing further needs registering — the binding step that service accounts require does not apply here.",
           },
         ],
+      },
+      {
+        type: "note",
+        text: "**`subject` is a common name, not a distinguished name.** Every AXIAM certificate has exactly one DN component, so `subject` carries that name directly — `Acme Corp Root CA`, `sensor-0421.acme.dev`. A single `CN=` prefix is understood and stripped, once, so a request written from an older example still produces the certificate it meant; anything else containing `=` is refused with `400`. The stored `subject` is the normalised value, so the row and the certificate always agree.",
       },
       {
         type: "warn",

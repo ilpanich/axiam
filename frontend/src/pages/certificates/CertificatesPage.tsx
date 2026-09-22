@@ -302,7 +302,7 @@ function GenerateFields({
           id="cert-subject"
           value={subject}
           onChange={(e) => onSubjectChange(e.target.value)}
-          placeholder="CN=device-001"
+          placeholder="device-001"
           required
           autoComplete="off"
         />

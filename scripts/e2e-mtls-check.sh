@@ -99,7 +99,7 @@ ANCHOR_ID=$(curl -sk -b "$JAR" "$AXIAM_URL/api/v1/organizations/$ORG_ID/ca-certi
   | jq -r 'map(select(.mtls_trust_anchor == true)) | .[0].id // empty' 2>/dev/null)
 if [ -z "$ANCHOR_ID" ]; then
   CODE=$(api POST "/api/v1/organizations/$ORG_ID/ca-certificates" \
-    "{\"subject\":\"CN=mx-mtls-anchor-$STAMP\",\"key_algorithm\":\"Ed25519\",\"validity_days\":90}")
+    "{\"subject\":\"mx-mtls-anchor-$STAMP\",\"key_algorithm\":\"Ed25519\",\"validity_days\":90}")
   ANCHOR_ID=$(jq -r '.id // empty' "$WORK/resp.json")
   [ -n "$ANCHOR_ID" ] || { fail "could not mint a CA (HTTP $CODE): $(head -c 200 "$WORK/resp.json")"; exit 1; }
   api PUT "/api/v1/organizations/$ORG_ID/ca-certificates/$ANCHOR_ID/mtls-trust-anchor" '{"enabled":true}' >/dev/null
@@ -111,7 +111,7 @@ UNTRUSTED_ID=$(curl -sk -b "$JAR" "$AXIAM_URL/api/v1/organizations/$ORG_ID/ca-ce
   | jq -r 'map(select(.mtls_trust_anchor != true)) | .[0].id // empty' 2>/dev/null)
 if [ -z "$UNTRUSTED_ID" ]; then
   api POST "/api/v1/organizations/$ORG_ID/ca-certificates" \
-    "{\"subject\":\"CN=mx-mtls-untrusted-$STAMP\",\"key_algorithm\":\"Ed25519\",\"validity_days\":90}" >/dev/null
+    "{\"subject\":\"mx-mtls-untrusted-$STAMP\",\"key_algorithm\":\"Ed25519\",\"validity_days\":90}" >/dev/null
   UNTRUSTED_ID=$(jq -r '.id // empty' "$WORK/resp.json")
 fi
 pass "untrusted CA (never flagged): ${UNTRUSTED_ID:-<none>}"
@@ -120,7 +120,7 @@ pass "untrusted CA (never flagged): ${UNTRUSTED_ID:-<none>}"
 issue() {
   local name="$1" ca="$2" code
   code=$(api POST "/api/v1/certificates" \
-    "{\"issuer_ca_id\":\"$ca\",\"subject\":\"CN=$name\",\"cert_type\":\"Service\",\"key_algorithm\":\"Ed25519\",\"validity_days\":30}")
+    "{\"issuer_ca_id\":\"$ca\",\"subject\":\"$name\",\"cert_type\":\"Service\",\"key_algorithm\":\"Ed25519\",\"validity_days\":30}")
   if [ "$code" != "201" ] && [ "$code" != "200" ]; then
     fail "issuing $name returned HTTP $code: $(head -c 200 "$WORK/resp.json")"
     return 1

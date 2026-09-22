@@ -222,7 +222,7 @@ test.describe("PKI — chain, trust anchor, bindings and revocation", () => {
             ...(csrf ? { "X-CSRF-Token": decodeURIComponent(csrf) } : {}),
           },
           body: JSON.stringify({
-            subject: "CN=mx-tenant-admin-should-not-be-able-to-do-this",
+            subject: "mx-tenant-admin-should-not-be-able-to-do-this",
             key_algorithm: "Ed25519",
             validity_days: 30,
           }),

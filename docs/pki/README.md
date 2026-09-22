@@ -27,10 +27,21 @@ revocation. See also: [Admin Guide](../admin/README.md),
 CA certificates are organization-scoped and are the trust root every leaf
 certificate in that organization chains to.
 
+> **`subject` is a common name, not a distinguished name.** Every AXIAM
+> certificate — root CA, signing CA, leaf — has exactly one DN component, so
+> `subject` carries that name directly: `Acme Corp Root CA`, `device-001`,
+> `jdoe@example.com`. A single `CN=` prefix is understood and stripped, once,
+> so a request written from an older example still produces the certificate it
+> meant (before 1.0.0-beta16 it produced a DN of `CN=CN=Acme Corp Root CA`).
+> Anything else containing `=` — `O=Acme, OU=Devices, CN=device-001` — is
+> refused with `400`: the certificate has one CN, and silently discarding the
+> components you asked for would be worse than saying so. The stored `subject`
+> is the normalised value, so the row and the certificate always agree.
+
 ```
 POST /api/v1/organizations/{org_id}/ca-certificates
 {
-  "subject": "CN=Acme Corp Root CA",
+  "subject": "Acme Corp Root CA",
   "key_algorithm": "Ed25519",
   "validity_days": 3650
 }
@@ -438,7 +449,7 @@ an IoT device — set `cert_type` accordingly:
 POST /api/v1/certificates
 {
   "issuer_ca_id": "<ca-certificate-uuid>",
-  "subject": "CN=jdoe@example.com",
+  "subject": "jdoe@example.com",
   "cert_type": "User",
   "key_algorithm": "Ed25519",
   "validity_days": 365,
@@ -750,7 +761,7 @@ Three properties worth knowing:
 # 1. Generate the organization CA in the admin UI, or:
 curl -X POST https://axiam.example.com/api/v1/organizations/$ORG/ca-certificates \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"subject":"CN=Acme Root CA","key_algorithm":"Ed25519","validity_days":3650}'
+  -d '{"subject":"Acme Root CA","key_algorithm":"Ed25519","validity_days":3650}'
 # With Vault custody configured, the signing key is created in Vault and the
 # response carries no private_key_pem. That is the intended shape.
 

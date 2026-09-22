@@ -800,6 +800,20 @@ an old one, computed from an *is-set* predicate so it can never touch a value.
 `AXIAM__AMQP__SIGNING_KEY` is excluded — it is genuinely honoured. Seven unit
 tests; records: none. PR B.
 
+### T22.6 — `subject` is a common name, and `CN=` is understood once — Sonnet 5 ✓ LANDED
+DF-023. Every AXIAM certificate has one DN component, but `subject` was pushed
+into rcgen whole, so a documented `CN=device-001` produced a DN of
+`CN=CN=device-001` while the row stored the prefix. `subject_common_name` in
+`axiam-pki` normalises once, at the top of the three paths that accept a
+caller-supplied subject, so the certificate and the row agree. A distinguished
+name is refused with `400` rather than silently reduced to its CN (D-2): no RFC
+4514 parser for a field with one consumer. Paths whose subject is parsed out of
+a certificate or CSR are untouched. Eleven tests across `subject.rs`,
+`ca_test.rs`, `intermediate_ca_test.rs` and `cert_test.rs`, each with its I4
+twin; the e2e matrix fixture's idempotency lookup, which matches on the stored
+subject, moved to the bare form with it. OpenAPI regenerated. Records: none.
+PR B.
+
 ---
 
 ---

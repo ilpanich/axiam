@@ -27,6 +27,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`subject` is a common name, and a `CN=` prefix is understood exactly once
+  (T22.6, DF-023).** Every AXIAM certificate — root CA, signing CA, leaf — has
+  exactly one distinguished-name component. The API field that carries it is
+  called `subject`, and every documented example spelled it
+  `CN=ACME Corp Root CA`, so callers sent that. rcgen then pushed the whole
+  string as the **value** of a CommonName RDN, producing a DN of
+  `CN=CN=ACME Corp Root CA`, while the row stored the string as given. Two wrong
+  answers that also disagreed with each other — and a common name no relying
+  party matching on it will accept.
+
+  `subject` is now normalised once, at the top of `CaService::generate`,
+  `CaService::generate_intermediate` and `CertService::generate`, before
+  anything reads it — so the certificate, the stored `subject` column and (for
+  `vault_pki` custody) the derived intermediate name all carry the same value.
+  A bare name passes through unchanged; a single `CN=` component, in any case,
+  is understood and stripped.
+
+  **A distinguished name is refused, not reduced** (decision D-2): anything else
+  containing `=`, such as `O=Acme, OU=Devices, CN=device-001`, is a `400` naming
+  the rule. The certificate has one CN, so a parser that accepted the full DN
+  would have to discard most of what it parsed, and doing that silently is worse
+  than saying so. An RFC 4514 parser for a field with one consumer is scope with
+  no user.
+
+  Paths whose subject comes from a parsed certificate or CSR — `import`,
+  `sign_csr`, the `vault_pki` read-back — are unchanged: their value is already
+  a common name, read out of the artefact rather than asserted by a caller.
+
+  Existing callers that sent a bare name see no change. Callers that sent
+  `CN=…` now get the certificate they always meant, and the stored `subject`
+  loses the prefix — a client that matched the stored value literally should
+  match the common name instead. The documentation, the OpenAPI descriptions,
+  the admin UI placeholder and the end-to-end fixtures all show the bare form.
+
 - **Four documented secret variables were read by nothing (T22.5, DF-018 /
   DF-022).** `AXIAM__PKI__ENCRYPTION_KEY`, `AXIAM__EMAIL_ENCRYPTION_KEY`,
   `AXIAM__GDPR_PSEUDONYM_PEPPER` and `AXIAM__FEDERATION_ENCRYPTION_KEY` were

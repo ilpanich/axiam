@@ -30,6 +30,7 @@ use zeroize::Zeroize;
 
 use crate::ca_key_store::CaKeyCustodians;
 use crate::crypto::{compute_fingerprint, generate_keypair};
+use crate::subject::subject_common_name;
 
 pub use crate::config::PkiConfig;
 
@@ -82,8 +83,18 @@ impl<R: CaCertificateRepository> CaService<R> {
     ///   omits the field rather than sending an empty one.
     pub async fn generate(
         &self,
-        input: CreateCaCertificate,
+        mut input: CreateCaCertificate,
     ) -> AxiamResult<GeneratedCaCertificate> {
+        // DF-023. `subject` is a common name, not a distinguished name.
+        // Normalised here, at the top, rather than where the DN is built:
+        // this one value reaches the certificate, the `subject` column, and —
+        // through the default below — the intermediate's subject too, and the
+        // three have to agree. See [`crate::subject_common_name`].
+        input.subject = subject_common_name(&input.subject)?;
+        if let Some(intermediate) = input.intermediate_subject.take() {
+            input.intermediate_subject = Some(subject_common_name(&intermediate)?);
+        }
+
         if input.validity_days == 0 || input.validity_days > MAX_CA_VALIDITY_DAYS {
             return Err(AxiamError::Validation {
                 message: format!(
@@ -345,8 +356,12 @@ impl<R: CaCertificateRepository> CaService<R> {
     /// downstream had to trust for no gain.
     pub async fn generate_intermediate(
         &self,
-        input: CreateIntermediateCa,
+        mut input: CreateIntermediateCa,
     ) -> AxiamResult<GeneratedCaCertificate> {
+        // DF-023, as in [`Self::generate`]: one common name, agreed between
+        // the certificate's DN and the row that describes it.
+        input.subject = subject_common_name(&input.subject)?;
+
         if input.validity_days == 0 || input.validity_days > MAX_CA_VALIDITY_DAYS {
             return Err(AxiamError::Validation {
                 message: format!(

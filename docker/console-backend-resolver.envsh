@@ -1,0 +1,28 @@
+#!/bin/sh
+# Sourced by the nginx image's /docker-entrypoint.sh (as
+# /docker-entrypoint.d/19-axiam-backend-resolver.envsh) before
+# 20-envsubst-on-templates.sh renders docker/nginx.conf.template, so what it
+# exports is what the template's `resolver` line receives. Sourced, not run:
+# it must not `exit`, and it writes nothing, so it works on a read-only root.
+#
+# DF-026. The console resolves AXIAM_BACKEND_ORIGIN per request, which needs a
+# DNS server nginx can ask directly. An operator-set AXIAM_BACKEND_RESOLVER
+# always wins. Otherwise the nameservers come from the container's own
+# /etc/resolv.conf — the answer the old startup-time lookup used, and the right
+# one on every runtime: 127.0.0.11 under Docker's user-defined networks, the
+# cluster DNS Service under Kubernetes. A constant would have been right on
+# Docker alone. IPv6 servers are bracketed, as nginx's `resolver` requires.
+#
+# 127.0.0.11 is the last resort only for a resolv.conf with no nameserver,
+# because the rendered `resolver` directive may not be empty: nginx would refuse
+# to start, which is the failure DF-026 is about.
+
+if [ -z "${AXIAM_BACKEND_RESOLVER:-}" ]; then
+    AXIAM_BACKEND_RESOLVER=$(awk 'BEGIN { ORS = " " } $1 == "nameserver" { if ($2 ~ ":") print "[" $2 "]"; else print $2 }' /etc/resolv.conf 2>/dev/null || true)
+    AXIAM_BACKEND_RESOLVER="${AXIAM_BACKEND_RESOLVER% }"
+    if [ -z "$AXIAM_BACKEND_RESOLVER" ]; then
+        AXIAM_BACKEND_RESOLVER=127.0.0.11
+        echo "19-axiam-backend-resolver.envsh: no nameserver in /etc/resolv.conf; using ${AXIAM_BACKEND_RESOLVER}" >&2
+    fi
+fi
+export AXIAM_BACKEND_RESOLVER

@@ -27,6 +27,17 @@
 #                         Defaults to the system bundle, which is correct for a
 #                         publicly-issued leaf. Point it at a private CA bundle
 #                         if you issue the backend certificate yourself.
+#   AXIAM_BACKEND_RESOLVER
+#                         the DNS server(s) nginx asks for the origin's address,
+#                         at request time. Unset (the default), it is read from
+#                         the container's /etc/resolv.conf at start by
+#                         docker/console-backend-resolver.envsh — 127.0.0.11 under
+#                         Docker, the cluster DNS Service under Kubernetes.
+#
+# The origin must be scheme://host:port with no path and no trailing slash, and
+# its host must be a name the resolver answers AS WRITTEN: nginx's resolver does
+# not apply resolv.conf's `search` list. Docker's embedded DNS answers a bare
+# service name; Kubernetes needs the FQDN (axiam-server.axiam.svc.cluster.local).
 #
 # There is deliberately no way to turn verification off. A backend certificate
 # that does not verify is a misconfiguration to fix, not a check to disable, and
@@ -38,6 +49,21 @@ server {
 
     root /usr/share/nginx/html;
     index index.html;
+
+    # DF-026: resolve the backend per request, not once at startup. A literal
+    # host in proxy_pass is resolved when nginx loads its config, which made the
+    # console refuse to start at all ("host not found in upstream") whenever it
+    # came up before axiam-server, and pinned the address it found for the life
+    # of the process — a recreated backend on a new IP answered 502 until the
+    # console was restarted too. A variable in proxy_pass defers the lookup to
+    # request time and needs a `resolver`; `valid=30s` bounds how long an answer
+    # — including "no such host" — is reused, overriding the record's own TTL.
+    #
+    # Routing is unchanged: proxy_pass had no URI part before and has none now,
+    # and in both forms nginx then forwards the client's request URI as sent.
+    resolver ${AXIAM_BACKEND_RESOLVER} valid=30s ipv6=off;
+    resolver_timeout 5s;
+    set $axiam_backend ${AXIAM_BACKEND_ORIGIN};
 
     # Gzip compression
     gzip on;
@@ -102,7 +128,7 @@ server {
 
     # Proxy API requests to the backend (match both /api and /api/*)
     location /api {
-        proxy_pass ${AXIAM_BACKEND_ORIGIN};
+        proxy_pass $axiam_backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -144,7 +170,7 @@ server {
     # adding proxy_set_header alone does NOT suppress header inheritance, but
     # explicit repetition prevents silent regressions on future header additions).
     location /oauth2/ {
-        proxy_pass ${AXIAM_BACKEND_ORIGIN};
+        proxy_pass $axiam_backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -173,7 +199,7 @@ server {
 
     # SEC-016: Proxy OIDC/OAuth2 discovery endpoints (/.well-known/*) to the backend.
     location /.well-known {
-        proxy_pass ${AXIAM_BACKEND_ORIGIN};
+        proxy_pass $axiam_backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

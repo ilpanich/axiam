@@ -1,0 +1,47 @@
+name: Console image
+
+# The frontend image is otherwise built only by release.yml, on a version tag —
+# so a change to the console's nginx configuration reached its first real build
+# after it had shipped. This workflow builds the image from the PR and runs the
+# DF-026 start-order scenario against it. Path-filtered: the build compiles the
+# OPAQUE wasm and the SPA, several minutes that only these files can change the
+# outcome of. The build itself also runs `nginx -t` on the rendered template
+# (docker/Dockerfile.frontend), so a template nginx rejects fails at the first
+# step.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docker/Dockerfile.frontend
+      - docker/nginx.conf.template
+      - docker/console-backend-resolver.envsh
+      - .dockerignore
+      - scripts/e2e-console-resolver-check.sh
+      - .github/workflows/console-image.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - docker/Dockerfile.frontend
+      - docker/nginx.conf.template
+      - docker/console-backend-resolver.envsh
+      - .dockerignore
+      - scripts/e2e-console-resolver-check.sh
+      - .github/workflows/console-image.yml
+
+permissions:
+  contents: read
+
+jobs:
+  console-resolver:
+    name: Console image (build, nginx -t, DF-026 start order)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Build the frontend image (renders the template and runs nginx -t)
+        run: docker build -f docker/Dockerfile.frontend -t axiam-frontend:ci .
+
+      - name: Console starts before the backend and follows it (DF-026)
+        run: bash scripts/e2e-console-resolver-check.sh axiam-frontend:ci

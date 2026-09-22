@@ -38,7 +38,45 @@ const DEVICE_LOGIN_PER_MIN: u32 = 3;
 
 /// Comfortably above `DEVICE_LOGIN_PER_MIN` — any residual coupling of the
 /// login bucket to the device route shows up as a 429 well before this.
-const LOGIN_BURST: u32 = 12;
+///
+/// Small on purpose, and paired with [`LOGIN_LIMIT`] below: see that constant
+/// for why a bigger burst made this test depend on the wall clock.
+const LOGIN_BURST: u32 = 6;
+
+/// The `login_per_min` this test configures, and the reason it is **18 rather
+/// than something roomier**.
+///
+/// `SharedRateLimitCounter::check_at` pro-rata backfills a bucket first seen
+/// partway through a window — `elapsed_frac * limit * (1 - COLD_ENTRY_BURST_FRACTION)`
+/// — but only once `limit >= COLD_ENTRY_MIN_LIMIT`, which is 20. That
+/// threshold is deliberate: it sits above every human endpoint (login 10,
+/// register 5) and below every machine one, so a *human* limit is never
+/// seeded.
+///
+/// The first version of this test set the limit to 24 for headroom and burst
+/// 12 against it. That crossed the threshold, so the login bucket was seeded
+/// with up to `0.9 * 24` depending on where in the minute the test happened to
+/// run, and the burst only fitted when it started in roughly the first half of
+/// a wall-clock minute. It passed locally and failed in CI for no reason other
+/// than the time of day — the exact flake CI caught on the first run of PR A.
+///
+/// 18 keeps the configured limit on the human side of `COLD_ENTRY_MIN_LIMIT`,
+/// where the shipped 10 also lives, so no seeding applies at all. The sliding
+/// carry still does, which is why the burst is 6 and not 17: a window that
+/// rolls mid-burst carries at most the 6 already spent, so the worst case any
+/// request sees is 12 against 18.
+const LOGIN_LIMIT: u32 = 18;
+
+/// Enforced at **compile time**, not merely documented: `axiam-db`'s
+/// `COLD_ENTRY_MIN_LIMIT` is private, so the threshold is restated here with
+/// the name that owns it. Anyone who raises `LOGIN_LIMIT` for headroom gets a
+/// build error instead of a test that passes all morning and fails after lunch.
+const _: () = assert!(
+    LOGIN_LIMIT < 20 && LOGIN_BURST * 2 <= LOGIN_LIMIT,
+    "LOGIN_LIMIT must stay below axiam-db's COLD_ENTRY_MIN_LIMIT (20), where no \
+     cold-entry seeding applies, and leave the burst at most half of it so a \
+     window rolling mid-burst still fits"
+);
 
 async fn test_db() -> Surreal<TestDb> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
@@ -169,7 +207,7 @@ async fn login_per_min_is_unchanged_by_the_device_knob() {
     // crossing of the two buckets shows up immediately.
     let cfg = RateLimitConfig {
         device_login_per_min: DEVICE_LOGIN_PER_MIN,
-        login_per_min: LOGIN_BURST * 2,
+        login_per_min: LOGIN_LIMIT,
         ..RateLimitConfig::default()
     };
     let app = build_real_app!(db, cfg);

@@ -2155,7 +2155,7 @@ Runtime and platform view: the edge (ingress or reverse proxy), replicated AXIAM
 
 T-212…T-217 record the 1.0.0-beta08 topology change (`claude_dev/public-backend-tls-design.md`): the edge now routes **by path** — the SPA at `/`, and `/api`, `/oauth2` and `/.well-known` to the server over TLS the server terminates itself. That removes a proxy hop and a cleartext leg, and moves four things across a trust boundary that were previously behind one. T-231…T-234 and T-236 record the beta09…beta11 follow-through on the same topology: the Vault seeder and the server's Vault policy, gRPC published through the same edge and the certificate-renewal gap that opened with it — closed at 1.0.0-beta12 by R-1, which moved the gRPC handshake off tonic and onto the same reloadable, TLS 1.3-only resolver the REST listener uses — and the CI gates that must measure the artifact rather than the worktree. 1.0.0-beta13 adds the Vault CA bundle that could parse to nothing and silently fall back to the public trust store (T-264), and narrows T-236's Trivy scan to what AXIAM ships.
 
-*27 threats — 2 critical, 16 high, 9 medium; 5 open.*
+*28 threats — 2 critical, 17 high, 9 medium; 5 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -2186,6 +2186,7 @@ T-212…T-217 record the 1.0.0-beta08 topology change (`claude_dev/public-backen
 | T-234 | AXIAM deployment (N replicas, HPA) <br/>*Process* | D | The gRPC TLS leaf expires because tonic reads it once at startup | Medium | Mitigated |
 | T-236 | AXIAM deployment (N replicas, HPA) <br/>*Process* | T | A registry outage or a stale suppression turns the dependency-audit gate into a rubber stamp | Medium | Mitigated |
 | T-264 | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Store* | T | A Vault CA bundle that parses to nothing silently replaces the operator's pin with the public trust store | Medium | Mitigated |
+| T-284 | AXIAM deployment (N replicas, HPA) <br/>*Process* | E | A re-minted bootstrap setup token is a second way to create the first administrator | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -2520,6 +2521,23 @@ The gate T-127 relies on failed in both directions at once. `npm audit` got `503
 
 > c38879a: refused at the bundle, naming the file. Two tests under `tests/` so no fixture is instrumented — an unreadable path and a bundle that parses to nothing — and the empty-bundle case asserts the message is *not* a downstream "error sending request", because failing later, against Vault, was the original symptom. Found while writing tests for `SecretProviderKind::build`, the one place in that change where the code did not do what its comment said. The neighbouring invariant is now asserted too: `SettingsLockoutPolicy` falls back to the deployment default when a tenant is unresolvable or the settings store is unreachable, so brute force is still metered while the store is down — failure must not mean "no lockout" (T-178's rule).
 
+**T-284 — A re-minted bootstrap setup token is a second way to create the first administrator**  
+`AXIAM deployment (N replicas, HPA)` (Process) · Elevation of privilege · High · Mitigated
+
+Only the SHA-256 hash of the one-time bootstrap setup token is stored, and `mint_bootstrap_setup_token_if_needed` is a no-op once a token row exists — so an operator who lost the token from the first-boot log had exactly one documented recovery, which was to wipe the volume (DF-019). Closing that cliff means adding a second credential path to `POST /api/v1/admin/bootstrap`, the endpoint that creates the first super-admin. Ungated, it would work on a deployment that already has administrators: an account takeover available to anyone who can run a command in the pod, with no authentication in front of it and nothing in the audit trail naming a principal.
+
+> **S-6c (2026-09-22).** `axiam-server setup-token --remint` refuses — exit code **2**, and no write at all — unless the deployment has **no `user` row AND no redeemed setup token**.
+>
+> **The gate is the whole security argument, and it is a statement about time rather than about authorization.** Before bootstrap there is no administrator to take over and no credential to reset; that is precisely the state the operator who lost the token is stuck in. After bootstrap the deployment has an authenticated way to create accounts and a password-reset flow, so re-minting is never the answer, and the command says so rather than doing it.
+>
+> **Both gates are evaluated before the existing hash is deleted**, so a refused call leaves the current token working. The two are separate checks rather than one: a datastore can carry a consumed token and no `user` row — a restore, a purge, a rolled-back bootstrap — so neither implies the other.
+>
+> The token is printed to **stdout only**, never through `tracing`, so it does not reach the container log a second time; first-boot minting already makes that exception once, deliberately, and twice is a habit. There is no `--print`: the plaintext is not stored, and storing it so that it could be printed would be the wrong fix.
+>
+> The argv parse moved into `axiam_server::cli`, a unit-tested pure function, for one branch in particular: `setup-token` with the flag missing or mistyped must exit 2 rather than fall through to `Serve` and quietly start a second server against the production datastore.
+>
+> Tests: `remint_replaces_the_previous_hash` (one row before, one row after, a different hash — not two valid tokens), `remint_refuses_once_a_user_exists` and `remint_refuses_once_a_token_was_consumed`, the last two asserting the stored hash is **unchanged** after the refusal; five over the argv table, including the I4 twin that an unrecognised argument still serves.
+
 </details>
 
 ### 5.9 Client SDKs & admin UI integration surface
@@ -2764,7 +2782,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-13 of 283 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
+13 of 284 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
 
 
 | # | Severity | Threat | Element | Why it is open |
@@ -2848,14 +2866,14 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Repudiation | 6 |
 | Information disclosure | 67 |
 | Denial of service | 28 |
-| Elevation of privilege | 55 |
+| Elevation of privilege | 56 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 32 | 1 |
-| High | 130 | 8 |
+| High | 131 | 8 |
 | Medium | 111 | 6 |
 | Low | 10 | 2 |
 
@@ -2870,7 +2888,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Authorization engine — RBAC, hierarchy & scopes | 26 | 0 |
 | PKI, certificates & IoT device identity | 29 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
-| Deployment & platform (Kubernetes) | 27 | 5 |
+| Deployment & platform (Kubernetes) | 28 | 5 |
 | Client SDKs & admin UI integration surface | 28 | 3 |
 
 ## 8. Assumptions

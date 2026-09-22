@@ -124,7 +124,7 @@ user-owned table is missing from the export blob.**
 
 The export blob is encrypted with **AES-256-GCM** before being stored
 (`cleanup.rs::process_export_job`, using `axiam_auth::crypto::encrypt_separate`
-with the tenant's `AXIAM__EMAIL_ENCRYPTION_KEY`-derived key) and only
+with the tenant's `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY`-derived key) and only
 decrypted transiently inside
 [`handlers/gdpr.rs::download_account_export`](../../crates/axiam-api-rest/src/handlers/gdpr.rs)
 when the data subject (or an authorized admin) redeems the single-use,

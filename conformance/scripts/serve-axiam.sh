@@ -74,9 +74,9 @@ gen_hex_key() {
   cat "$f"
 }
 AXIAM__AUTH__MFA_ENCRYPTION_KEY="$(gen_hex_key mfa_enc.hex)"
-AXIAM__FEDERATION_ENCRYPTION_KEY="$(gen_hex_key federation_enc.hex)"
-AXIAM__EMAIL_ENCRYPTION_KEY="$(gen_hex_key email_enc.hex)"
-export AXIAM__AUTH__MFA_ENCRYPTION_KEY AXIAM__FEDERATION_ENCRYPTION_KEY AXIAM__EMAIL_ENCRYPTION_KEY
+AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY="$(gen_hex_key federation_enc.hex)"
+AXIAM__AUTH__EMAIL_ENCRYPTION_KEY="$(gen_hex_key email_enc.hex)"
+export AXIAM__AUTH__MFA_ENCRYPTION_KEY AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY AXIAM__AUTH__EMAIL_ENCRYPTION_KEY
 
 export AXIAM__AMQP__URL="${AXIAM__AMQP__URL:-amqps://axiam:axiam@localhost:5671}"
 export AXIAM__AMQP__TLS__CA_CERT_PATH="${AXIAM__AMQP__TLS__CA_CERT_PATH:-$SECRETS_DIR/broker-tls/ca.pem}"

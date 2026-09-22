@@ -440,3 +440,105 @@ async fn the_tenant_list_shows_that_tenants_cas_and_no_others() {
         .expect("list org");
     assert_eq!(all.total, 4, "one organization CA plus three tenant CAs");
 }
+
+/// DF-023: `subject` is a common name, and `CN=` is understood exactly once.
+///
+/// The documentation's own examples spelled this field `CN=ACME R&D Signing
+/// CA`, so callers sent that, and rcgen pushed the whole string as the *value*
+/// of a CommonName RDN — producing a DN of `CN=CN=ACME R&D Signing CA`. The
+/// row, meanwhile, stored the string as given. Two wrong answers that also
+/// disagreed with each other.
+#[tokio::test]
+async fn a_cn_prefixed_subject_yields_a_single_cn() {
+    let svc = setup().await;
+    let org_id = Uuid::new_v4();
+    let parent = root_ca(&svc, org_id, 3650).await;
+
+    let generated = svc
+        .generate_intermediate(CreateIntermediateCa {
+            organization_id: org_id,
+            tenant_id: Uuid::new_v4(),
+            parent_ca_id: parent.id,
+            subject: "CN=ACME R&D Signing CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+        })
+        .await
+        .expect("intermediate");
+
+    // The row says what the certificate says.
+    assert_eq!(generated.certificate.subject, "ACME R&D Signing CA");
+
+    with_cert(&generated.certificate.public_cert_pem, |cert| {
+        let cns: Vec<_> = cert
+            .subject()
+            .iter_common_name()
+            .map(|cn| cn.as_str().expect("printable CN").to_owned())
+            .collect();
+        assert_eq!(
+            cns,
+            vec!["ACME R&D Signing CA".to_owned()],
+            "one common name, and not the prefix doubled"
+        );
+    });
+}
+
+/// The I4 twin: the form the documentation now shows is passed through
+/// untouched, so every existing caller that already sent a bare name sees the
+/// certificate it always got.
+#[tokio::test]
+async fn a_bare_subject_is_unchanged() {
+    let svc = setup().await;
+    let org_id = Uuid::new_v4();
+    let parent = root_ca(&svc, org_id, 3650).await;
+
+    let generated = svc
+        .generate_intermediate(CreateIntermediateCa {
+            organization_id: org_id,
+            tenant_id: Uuid::new_v4(),
+            parent_ca_id: parent.id,
+            subject: "ACME R&D Signing CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+        })
+        .await
+        .expect("intermediate");
+
+    assert_eq!(generated.certificate.subject, "ACME R&D Signing CA");
+    with_cert(&generated.certificate.public_cert_pem, |cert| {
+        let cns: Vec<_> = cert
+            .subject()
+            .iter_common_name()
+            .map(|cn| cn.as_str().expect("printable CN").to_owned())
+            .collect();
+        assert_eq!(cns, vec!["ACME R&D Signing CA".to_owned()]);
+    });
+}
+
+/// D-2: a distinguished name is refused rather than silently reduced to its
+/// common name. The certificate has one CN; accepting `O=Acme, OU=Devices,
+/// CN=x` would mean discarding two components the caller asked for.
+#[tokio::test]
+async fn a_multi_rdn_subject_is_refused() {
+    let svc = setup().await;
+    let org_id = Uuid::new_v4();
+    let parent = root_ca(&svc, org_id, 3650).await;
+
+    let err = svc
+        .generate_intermediate(CreateIntermediateCa {
+            organization_id: org_id,
+            tenant_id: Uuid::new_v4(),
+            parent_ca_id: parent.id,
+            subject: "O=Acme, CN=ACME R&D Signing CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+        })
+        .await
+        .expect_err("a distinguished name is not a common name");
+
+    assert!(
+        matches!(&err, axiam_core::error::AxiamError::Validation { message }
+            if message.contains("bare common name")),
+        "expected a validation error naming the rule, got {err:?}"
+    );
+}

@@ -132,6 +132,10 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         text: "These are required for a real deployment. Generate the 32-byte hex keys with `openssl rand -hex 32` and the Ed25519 JWT keypair with `openssl genpkey -algorithm ed25519`.",
       },
       {
+        type: "p",
+        text: "**Every secret is `AXIAM__AUTH__<KEY>`.** Secrets are fetched through the secret provider, which addresses them by a logical name (`pki_encryption_key`); the default `env` provider resolves that name to `AXIAM__AUTH__` plus the name uppercased. The three exceptions are the credentials that shipped under another spelling and keep it: `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL`. Nothing else has a second accepted name — a variable outside this rule is read by nothing, so the value is set, the feature stays off, and the fault looks like the feature. Releases before 1.0.0-beta16 documented four of these keys under a `AXIAM__PKI__`, `AXIAM__EMAIL_`, `AXIAM__GDPR_` or `AXIAM__FEDERATION_` spelling that was never read; the server now logs a `WARN` naming both if it finds one set.",
+      },
+      {
         type: "table",
         headers: ["Variable", "Meaning", "Example"],
         rows: [
@@ -161,7 +165,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "<64 hex chars>",
           ],
           [
-            "AXIAM__PKI__ENCRYPTION_KEY",
+            "AXIAM__AUTH__PKI_ENCRYPTION_KEY",
             "AES-256-GCM key (hex) encrypting CA signing keys (and webhook secrets) at rest.",
             "<64 hex chars>",
           ],
@@ -171,12 +175,12 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "<64 hex chars>",
           ],
           [
-            "AXIAM__EMAIL_ENCRYPTION_KEY",
+            "AXIAM__AUTH__EMAIL_ENCRYPTION_KEY",
             "AES-256-GCM key (hex) encrypting email/SMTP secrets; also gates the email-config admin endpoints.",
             "<64 hex chars>",
           ],
           [
-            "AXIAM__GDPR_PSEUDONYM_PEPPER",
+            "AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER",
             "HMAC-SHA256 pepper (hex) pseudonymizing audit-log actor identities on GDPR erasure.",
             "<64 hex chars>",
           ],
@@ -626,7 +630,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       { type: "h", id: "ca-key-custody", text: "CA signing key custody" },
       {
         type: "p",
-        text: "An organization's CA signing key is the one private key AXIAM persists. By default it is AES-256-GCM ciphertext in the CA record, sealed under `AXIAM__PKI__ENCRYPTION_KEY` — a real control with a bound worth stating: the key and the thing that opens it are in the same blast radius, and nothing anywhere records a read. Pointing the variables below at a HashiCorp Vault moves it somewhere access is a policy that can be scoped and revoked, every read is audited by something that is not AXIAM, and a database dump on its own is inert.",
+        text: "An organization's CA signing key is the one private key AXIAM persists. By default it is AES-256-GCM ciphertext in the CA record, sealed under `AXIAM__AUTH__PKI_ENCRYPTION_KEY` — a real control with a bound worth stating: the key and the thing that opens it are in the same blast radius, and nothing anywhere records a read. Pointing the variables below at a HashiCorp Vault moves it somewhere access is a policy that can be scoped and revoked, every read is audited by something that is not AXIAM, and a database dump on its own is inert.",
       },
       {
         type: "table",
@@ -680,7 +684,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "Custody is recorded per CA, not read from this configuration, and that is the point: a deployment that adopts Vault does not thereby move the CAs it already has. Those records still say `database`, their keys are still sealed into them, and the signing path asks the record rather than the environment — so `AXIAM__PKI__ENCRYPTION_KEY` stays required for as long as any such CA exists. What this configuration decides is the custodian for CAs created from now on; moving an existing one is `POST /api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody`, which copies the key to the new custodian and only then releases it from the old, so the CA is never left without it.",
+        text: "Custody is recorded per CA, not read from this configuration, and that is the point: a deployment that adopts Vault does not thereby move the CAs it already has. Those records still say `database`, their keys are still sealed into them, and the signing path asks the record rather than the environment — so `AXIAM__AUTH__PKI_ENCRYPTION_KEY` stays required for as long as any such CA exists. What this configuration decides is the custodian for CAs created from now on; moving an existing one is `POST /api/v1/organizations/{org_id}/ca-certificates/{id}/migrate-custody`, which copies the key to the new custodian and only then releases it from the old, so the CA is never left without it.",
       },
       {
         type: "p",

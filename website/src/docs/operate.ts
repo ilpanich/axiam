@@ -663,12 +663,16 @@ export const OPERATE_PAGES: DocPage[] = [
           {
             title: "Have an organization CA",
             body: "CA certificates are organization-scoped and are the trust root every leaf in that organization chains to. The response carries the CA's signing private key **once** — AXIAM never persists the plaintext — so store it in your secret manager before you do anything else.",
-            code: 'POST /api/v1/organizations/{org_id}/ca-certificates\n{\n  "subject": "CN=Acme Corp Root CA",\n  "key_algorithm": "Ed25519",\n  "validity_days": 3650\n}',
+            code: 'POST /api/v1/organizations/{org_id}/ca-certificates\n{\n  "subject": "Acme Corp Root CA",\n  "key_algorithm": "Ed25519",\n  "validity_days": 3650\n}',
           },
           {
             title: "Issue the device certificate",
             body: "Leaf certificates are tenant-scoped. Set `cert_type` to `Device` — that is what makes the certificate addressable by fingerprint at authentication time. The private key comes back once and is never stored.",
-            code: 'POST /api/v1/certificates\n{\n  "issuer_ca_id": "<ca-certificate-uuid>",\n  "subject": "CN=sensor-0421.acme.dev",\n  "cert_type": "Device",\n  "key_algorithm": "Ed25519",\n  "validity_days": 365\n}',
+            code: 'POST /api/v1/certificates\n{\n  "issuer_ca_id": "<ca-certificate-uuid>",\n  "subject": "sensor-0421.acme.dev",\n  "cert_type": "Device",\n  "key_algorithm": "Ed25519",\n  "validity_days": 365\n}',
+          },
+          {
+            title: "Bind the certificate to a service account",
+            body: "`POST /api/v1/service-accounts/{sa_id}/bind-certificate` with `{ \"certificate_id\": \"…\" }`, holding `certificates:bind`. **This step is required for devices too** — a certificate identifies a key, a service account is what AXIAM authorizes, and without the bind there is nothing for the authenticated connection to be. The certificate and the service account must be in the same tenant, and the certificate must be Active and unexpired: the bind refuses a revoked or expired one rather than leaving a service account that is configured for mTLS and cannot connect.",
           },
           {
             title: "Commission the device with the key pair",
@@ -676,13 +680,17 @@ export const OPERATE_PAGES: DocPage[] = [
           },
           {
             title: "Let it connect over mTLS",
-            body: "The device presents its client certificate on the TLS handshake. Nothing further needs registering — the binding step that service accounts require does not apply here.",
+            body: "The device presents its client certificate on the TLS handshake. AXIAM verifies the chain, requires it to reach a CA flagged as an mTLS trust anchor, and resolves the service account the certificate was bound to in step 3.",
           },
         ],
       },
       {
+        type: "note",
+        text: "**`subject` is a common name, not a distinguished name.** Every AXIAM certificate has exactly one DN component, so `subject` carries that name directly — `Acme Corp Root CA`, `sensor-0421.acme.dev`. A single `CN=` prefix is understood and stripped, once, so a request written from an older example still produces the certificate it meant; anything else containing `=` is refused with `400`. The stored `subject` is the normalised value, so the row and the certificate always agree.",
+      },
+      {
         type: "warn",
-        text: "**Device certificates are not bound to anything.** A `Service` certificate must be attached to a service account explicitly, and it is natural to assume a device needs the same. It does not: on connection AXIAM computes the certificate's SHA-256 fingerprint, looks a `Device` certificate up directly by it, checks the certificate is active and unexpired, and **verifies the full chain** to the issuing organization's CA. Looking for a bind endpoint for a device is looking for something that does not exist.",
+        text: "**A device certificate must be bound, exactly like a service one.** Releases before 1.0.0-beta16 documented the opposite here — that a `Device` certificate needs no bind and that looking for a bind endpoint was looking for something that does not exist. It was wrong, and wrong in the expensive direction: the fleet is commissioned, the certificates verify, and every device is refused. `authenticate_device` resolves the bound service account and answers `401` when there is none.",
       },
       {
         type: "note",
@@ -780,11 +788,11 @@ export const OPERATE_PAGES: DocPage[] = [
       { type: "h", id: "gdpr", text: "Audit and the right to erasure" },
       {
         type: "p",
-        text: "An append-only log and a legal obligation to erase data are in obvious tension. AXIAM resolves it by **pseudonymising** the actor identity rather than deleting records: on erasure, the identity is replaced by an HMAC-SHA256 pseudonym derived under `AXIAM__GDPR_PSEUDONYM_PEPPER`. The trail's integrity survives; the link to a natural person does not.",
+        text: "An append-only log and a legal obligation to erase data are in obvious tension. AXIAM resolves it by **pseudonymising** the actor identity rather than deleting records: on erasure, the identity is replaced by an HMAC-SHA256 pseudonym derived under `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER`. The trail's integrity survives; the link to a natural person does not.",
       },
       {
         type: "warn",
-        text: "Changing `AXIAM__GDPR_PSEUDONYM_PEPPER` breaks the linkage between existing pseudonyms and new ones — the same person will appear as two different actors either side of the change. Treat it as permanent.",
+        text: "Changing `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` breaks the linkage between existing pseudonyms and new ones — the same person will appear as two different actors either side of the change. Treat it as permanent.",
       },
       { type: "h", id: "retention", text: "Retention" },
       {

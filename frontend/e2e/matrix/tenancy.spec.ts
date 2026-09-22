@@ -165,6 +165,19 @@ test.describe("organization-level reach", () => {
 
     await selectTenant(page, "Matrix Tenant B");
     await navigateInApp(page, "Users");
+    // Wait for tenant B's table to have rendered before snapshotting it. The
+    // tenant-A half above waits 20 s for its first row; this half did not, so
+    // the snapshot was often taken against an empty table — which makes the
+    // "mx-viewer is gone" assertion below vacuously true and the "mx-b-admin
+    // is listed" one fail, an intermittent failure that reads as a tenancy bug
+    // and is not one.
+    await expect
+      .soft(
+        page.getByText("mx-b-admin", { exact: false }).first(),
+        "with tenant B selected, tenant B's users must load",
+      )
+      .toBeVisible({ timeout: 20_000 });
+
     const inB = new Set((await page.getByRole("cell").allInnerTexts()).map((t) => t.trim()));
     expect
       .soft(

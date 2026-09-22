@@ -200,6 +200,21 @@ prefix (e.g. `AXIAM__DB__USERNAME`) — this is how `config-rs` distinguishes
 the env-var prefix from nested key separators. A single underscore is
 silently ignored and the in-code default wins.
 
+**Secrets follow one further rule.** Every cryptographic secret is fetched
+through the pluggable secret provider, which addresses secrets by a *logical*
+name (`pki_encryption_key`); under the default `env` provider that name
+resolves to `AXIAM__AUTH__<KEY>`, uppercased — so the CA encryption key is
+`AXIAM__AUTH__PKI_ENCRYPTION_KEY` and **not** `AXIAM__PKI__ENCRYPTION_KEY`.
+There are exactly three exceptions, the credentials that already shipped under
+another spelling and keep it: `db_username` → `AXIAM__DB__USERNAME`,
+`db_password` → `AXIAM__DB__PASSWORD`, `amqp_url` → `AXIAM__AMQP__URL`.
+Nothing else has a second accepted name. A variable outside this rule is read
+by nothing: the value is set, the feature stays off, and the fault looks like
+the feature — so the server now logs a `WARN` naming both spellings if it finds
+one of the four that this documentation previously got wrong
+(`AXIAM__PKI__ENCRYPTION_KEY`, `AXIAM__EMAIL_ENCRYPTION_KEY`,
+`AXIAM__GDPR_PSEUDONYM_PEPPER`, `AXIAM__FEDERATION_ENCRYPTION_KEY`).
+
 [`k8s/server/secret.yml`](../../k8s/server/secret.yml) is the canonical list
 of required secret keys for a Kubernetes deployment (the `data:` values are
 intentionally left blank in the committed file — fill them at deploy time,
@@ -212,10 +227,10 @@ never in git):
 | `AXIAM__AUTH__JWT_PRIVATE_KEY_PEM` | Ed25519 JWT signing private key (PEM). Generate with `openssl genpkey -algorithm ed25519` (see `just prod-up` for the exact commands). |
 | `AXIAM__AUTH__JWT_PUBLIC_KEY_PEM` | Ed25519 JWT verification public key (PEM), paired with the private key above. |
 | `AXIAM__AUTH__MFA_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting TOTP MFA secrets at rest. Generate with `openssl rand -hex 32`. |
-| `AXIAM__PKI__ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting CA signing private keys at rest. Generate with `openssl rand -hex 32`. |
+| `AXIAM__AUTH__PKI_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting CA signing private keys at rest. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting SAML/OIDC federation client secrets at rest (SECHRD-09). Generate with `openssl rand -hex 32`. |
-| `AXIAM__EMAIL_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting email/SMTP provider secrets at rest. Generate with `openssl rand -hex 32`. |
-| `AXIAM__GDPR_PSEUDONYM_PEPPER` | HMAC-SHA256 pepper (32 bytes, hex) used to pseudonymize audit-log actor identities on GDPR erasure. Generate with `openssl rand -hex 32`. |
+| `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting email/SMTP provider secrets at rest. Generate with `openssl rand -hex 32`. |
+| `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` | HMAC-SHA256 pepper (32 bytes, hex) used to pseudonymize audit-log actor identities on GDPR erasure. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__PEPPER` | Server pepper (plain string). Prepended before Argon2id password hashing, **and** keys client-secret hashing (OBS-1). **Mandatory in a release build** — the server refuses to start without it. Generate a long random string, e.g. `openssl rand -base64 32`. |
 | `AXIAM__AUTH__PEPPER_PREVIOUS` | Outgoing pepper, **verify-only**, set for the duration of a pepper rotation. Unset outside a rotation. See below. |
 
@@ -254,6 +269,20 @@ from `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` (see
 [`k8s/rabbitmq/secret.yml`](../../k8s/rabbitmq/secret.yml)) into
 `AXIAM__AMQP__URL` at the deployment layer (see how
 `docker-compose.prod.yml` does this for the Compose path).
+
+## Recovering the bootstrap setup token
+
+On a deployment that has **not** been bootstrapped yet, an operator who lost
+the one-time setup token from the first-boot log can mint a new one:
+
+```
+axiam-server setup-token --remint
+```
+
+The token is printed to stdout and nowhere else. The command refuses with exit
+code `2` once the deployment has any user or any redeemed setup token — see
+[the bootstrap section of the administration guide](../admin/README.md#i-lost-the-setup-token)
+for the gate and what to do when it refuses.
 
 ## Argon2id hash concurrency (memory-DoS protection)
 
@@ -896,6 +925,60 @@ setting is never consulted. If you have IoT devices and an edge that terminates
 TLS, give the devices a route that is *not* terminated — a TCP-passthrough
 Service, or a second hostname — rather than turning this on.
 
+## Container healthcheck (`axiam-server healthcheck`)
+
+The production image is distroless and has no shell, so `docker-compose.prod.yml`
+probes it with the binary's own subcommand:
+
+```yaml
+healthcheck:
+  test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
+```
+
+It requests `/health` and exits `0` on a 2xx, `1` otherwise. **The scheme
+follows the listener**: `https` when the server terminates TLS itself
+(`AXIAM__SERVER__TLS__ENABLED=true` *and* a certificate path set), `http`
+otherwise, on `AXIAM__SERVER__PORT` (default `8090`). A proxy-terminated
+deployment therefore needs no configuration at all, and neither does a
+direct-TLS deployment whose certificate covers `127.0.0.1` — see below.
+
+| Variable | Meaning |
+|---|---|
+| `AXIAM_HEALTHCHECK_URL` | Probe this URL instead of the derived default. Wins outright. |
+| `AXIAM_HEALTHCHECK_CA_FILE` | PEM bundle whose certificates are added as trust anchors for the probe. |
+
+**Note the single underscore**: both are read with `std::env::var` rather than
+through the configuration layer.
+
+**Where the trust anchors come from, when you set no CA file.** On a direct-TLS
+deployment the probe trusts the server's own
+`AXIAM__SERVER__TLS__CERT_PATH` chain file. A process verifying the certificate
+it is itself serving gains no trust it does not already have, which is what
+makes the default zero-configuration. Two cases follow from what that file
+contains:
+
+- a **self-signed** server certificate works on its own — an end-entity
+  certificate that is its own issuer is a usable trust anchor (verified, not
+  assumed: `crates/axiam-server/tests/healthcheck.rs`);
+- a **CA-issued leaf** works when the file is a `fullchain.pem` that also holds
+  the issuer. A file holding the leaf **alone** does not, because the issuer is
+  then anchored nowhere — set `AXIAM_HEALTHCHECK_CA_FILE` to the issuing CA.
+
+**The certificate has to cover the address probed.** The derived default is
+`https://127.0.0.1:<port>/health`, so the certificate needs an IP SAN for
+`127.0.0.1`. If it carries a DNS name instead, point the probe at that name with
+`AXIAM_HEALTHCHECK_URL` and make the name resolve inside the container.
+
+**There is no switch that skips verification, deliberately.** A probe that
+accepted any certificate would report "healthy" for anything listening on the
+port, which is worse than no probe at all — because a deployment then stops
+looking. If the probe cannot verify the listener, it is not healthy, and the
+reason goes to stderr, where `docker inspect` and `kubectl describe` surface it.
+
+The Kubernetes manifests do not use this subcommand: `k8s/server/deployment.yml`
+uses `httpGet` probes with `scheme: HTTPS`, which the kubelet performs without
+verifying the certificate, from outside the container.
+
 ## Network policies
 
 [`k8s/network-policy/`](../../k8s/network-policy/) implements a **default-deny**
@@ -1069,6 +1152,50 @@ leftover `AXIAM__AMQP__ALLOW_PLAINTEXT` anywhere it survives — a stale copy of
 an old snippet is how the plaintext URL that went with it comes back. Without
 this check the sole symptom of a missed stack is a container that refuses to
 boot, which is easy to misread as an unrelated infrastructure fault.
+
+### Two things to decide before you put AXIAM in front of RabbitMQ
+
+**Broker-wide `fail_if_no_peer_cert` needs a certificate AXIAM cannot issue
+yet.** Requiring a client certificate from every AMQPS connection is the right
+posture, and it includes AXIAM's own lapin client. That client connects during
+startup — before the REST API is listening, before an organization CA exists,
+and certainly before anything has called `POST /api/v1/certificates`. There is
+no ordering that lets AXIAM issue the certificate it needs in order to start.
+
+So issue it **offline, from the same root**: generate AXIAM's broker client
+certificate with the same CA (or an offline intermediate under it) that signs
+the rest of the fleet, mount it, and point
+`AXIAM__AMQP__TLS__CLIENT_CERT_PATH` / `..._CLIENT_KEY_PATH` at it. Once AXIAM
+is up it can issue the *devices'* certificates from its own CA and they chain to
+the same root the broker already trusts, which is the arrangement that makes one
+trust store serve both. `scripts/gen-broker-tls.sh` is the shape of this for a
+development stack; production wants your own CA and your own key custody. The
+alternative — bootstrapping AXIAM against a broker that does not require peer
+certificates and tightening it afterwards — leaves a window in which it does not
+require them, and an operator who forgets step two.
+
+**AXIAM's access tokens are not consumable by
+`rabbitmq_auth_backend_oauth2`.** That plugin reads a JWT's `scope` claim and
+turns entries such as `rabbitmq.configure:%2f/*` into broker permissions. AXIAM
+does mint `scope`, but it is an OAuth2 authorization-server claim describing
+scopes a client *requested and was granted* against AXIAM's own resources — an
+application-defined vocabulary, and one the plugin's grammar has no bearing on.
+On the path that matters here it is not merely different, it is absent: the
+device login (`POST /api/v1/auth/device`) has no way to request a scope and a
+service account registers none, so the claim is omitted entirely. A token that
+carries no `scope` grants no RabbitMQ permission, and the plugin's answer is to
+refuse the connection.
+
+The arrangement that does work, and the one the reference integration uses, is
+**certificate login plus an HTTP auth backend**: `rabbitmq_auth_mechanism_ssl`
+takes the identity from the client certificate the device already presents,
+and `rabbitmq_auth_backend_http` asks a small endpoint of yours — which is free
+to call AXIAM's authorization API — for the vhost, resource and topic
+decisions. That keeps one identity per device, issued by AXIAM, and puts the
+permission model where RabbitMQ can express it. Mapping AXIAM roles onto the
+plugin's `scope` grammar in a token is a *possible* third option, and it means
+minting a second, RabbitMQ-shaped token; it is not what these variables
+configure and it is not covered here.
 
 ### Configuration reference
 

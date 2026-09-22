@@ -169,12 +169,12 @@ struct AppConfig {
     #[serde(default)]
     audit: AuditCollectionConfig,
     /// AES-256-GCM key (32 bytes) for encrypting email provider secrets at rest
-    /// (D-17). Loaded from `AXIAM__EMAIL_ENCRYPTION_KEY` (hex-encoded, 64 chars).
+    /// (D-17). Loaded from `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` (hex-encoded, 64 chars).
     /// Skipped by serde — populated manually from env at startup.
     #[serde(skip)]
     email_encryption_key: Option<[u8; 32]>,
     /// HMAC-SHA256 pepper (32 bytes) for GDPR audit pseudonymization (D-02).
-    /// Loaded from `AXIAM__GDPR_PSEUDONYM_PEPPER` (hex-encoded, 64 chars).
+    /// Loaded from `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` (hex-encoded, 64 chars).
     /// Skipped by serde — populated manually from env at startup.
     #[serde(skip)]
     gdpr_pseudonym_pepper: Option<[u8; 32]>,
@@ -182,33 +182,48 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    // D-09: healthcheck subcommand — self-probe /health, exit 0 on 2xx, exit 1 otherwise.
-    // Runs before tracing init and before the async stack to keep the probe lightweight.
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if args.get(1).map(String::as_str) == Some("healthcheck") {
-            let url = std::env::var("AXIAM_HEALTHCHECK_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8090/health".to_owned());
-            let ok = reqwest::blocking::get(&url)
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-    }
+    // Subcommands. All of them run before tracing init and before the async
+    // stack, so a probe stays lightweight, `--dump-openapi` needs no
+    // infrastructure, and nothing a subcommand prints is interleaved with
+    // startup logging. The parse itself is `axiam_server::cli`, which is
+    // unit-tested; `main.rs` cannot be linked from `tests/`.
+    match axiam_server::cli::parse(&std::env::args().collect::<Vec<_>>()) {
+        axiam_server::cli::Command::Serve => {}
 
-    // FND-01: --dump-openapi flag — print the OpenAPI JSON spec to stdout and exit 0.
-    // Runs before tracing init and before load_config() / SurrealDB / AMQP so it is
-    // usable in CI without any running infrastructure.  Generate the committed
-    // sdks/openapi.json with:
-    //   cargo build -p axiam-server --no-default-features
-    //   ./target/debug/axiam-server --dump-openapi > sdks/openapi.json
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if args.get(1).map(String::as_str) == Some("--dump-openapi") {
+        // D-09: self-probe /health, exit 0 on 2xx, exit 1 otherwise. The
+        // scheme follows the listener and the trust anchors follow the
+        // certificate the server serves, so a direct-TLS deployment needs no
+        // `AXIAM_HEALTHCHECK_URL` at all (DF-016) — and there is no switch that
+        // skips verification.
+        axiam_server::cli::Command::Healthcheck => {
+            let probe = axiam_server::healthcheck::resolve(|name| std::env::var(name).ok());
+            std::process::exit(i32::from(!axiam_server::healthcheck::run(&probe)));
+        }
+
+        // FND-01: print the OpenAPI JSON spec to stdout and exit 0. Generate
+        // the committed sdks/openapi.json with:
+        //   cargo build -p axiam-server --no-default-features
+        //   ./target/debug/axiam-server --dump-openapi > sdks/openapi.json
+        axiam_server::cli::Command::DumpOpenApi => {
             let json = serde_json::to_string_pretty(&axiam_api_rest::openapi::api_doc())
                 .expect("OpenAPI serialization failed");
             println!("{json}");
             std::process::exit(0);
+        }
+
+        // DF-019: replace the bootstrap setup token. The gate lives in
+        // `axiam_db::remint_bootstrap_setup_token` — no `user` row and no
+        // consumed token, i.e. a deployment that has no administrator yet,
+        // which is exactly the state an operator who lost the first-boot token
+        // is stuck in. Before this, the documented recovery was to wipe the
+        // volume.
+        axiam_server::cli::Command::RemintSetupToken => {
+            std::process::exit(remint_setup_token().await);
+        }
+
+        axiam_server::cli::Command::Usage(line) => {
+            eprintln!("{line}");
+            std::process::exit(2);
         }
     }
 
@@ -296,6 +311,26 @@ async fn main() -> std::io::Result<()> {
             .get_secret(name)
             .unwrap_or_else(|e| panic!("reading {name} from the secret provider failed: {e}"))
     };
+
+    // DF-018/DF-022. Four variables were documented as the way to configure a
+    // secret and are read by nothing; the deployment that set one has the
+    // feature silently off. The names are corrected everywhere else in this
+    // release, so this is for the operator who upgrades with the old spelling
+    // still in the pod spec. It reads no value — `legacy_secret_env_warnings`
+    // takes a predicate, not a lookup — and says nothing when the variable
+    // AXIAM does read is also set.
+    for warning in
+        axiam_server::legacy_env::legacy_secret_env_warnings(|v| std::env::var_os(v).is_some())
+    {
+        tracing::warn!(
+            legacy = warning.legacy,
+            variable = %warning.resolved,
+            "{} is set and is read by nothing. AXIAM reads this secret from {}; \
+             until that variable is set, the feature it configures is off.",
+            warning.legacy,
+            warning.resolved,
+        );
+    }
 
     // Load MFA encryption key.
     config.auth.mfa_encryption_key = read_key(keys::MFA_ENCRYPTION_KEY);
@@ -628,7 +663,7 @@ async fn main() -> std::io::Result<()> {
             }
         } else {
             tracing::warn!(
-                "AXIAM__EMAIL_ENCRYPTION_KEY missing — \
+                "AXIAM__AUTH__EMAIL_ENCRYPTION_KEY missing — \
                  skipping email config secrets backfill"
             );
         }
@@ -1108,7 +1143,7 @@ async fn main() -> std::io::Result<()> {
         ),
         None => tracing::info!(
             "no CA signing key custodian configured; CA generation and import will be \
-             refused until AXIAM__PKI__ENCRYPTION_KEY or AXIAM__PKI__VAULT_ADDR is set"
+             refused until AXIAM__AUTH__PKI_ENCRYPTION_KEY or AXIAM__PKI__VAULT_ADDR is set"
         ),
     }
     // The arrangement nobody picks deliberately, and the one the 1.0.0-beta01
@@ -1121,7 +1156,7 @@ async fn main() -> std::io::Result<()> {
         tracing::warn!(
             "CA signing keys are being sealed into the database although Vault custody is \
              configured and reachable. A database dump plus one process's \
-             AXIAM__PKI__ENCRYPTION_KEY then yields every CA private key in this \
+             AXIAM__AUTH__PKI_ENCRYPTION_KEY then yields every CA private key in this \
              deployment, and nothing records the read. Unset \
              AXIAM__PKI__CA_KEY_STORE (or set it to `vault`) to hold them in Vault \
              instead, then migrate the CAs you already have with \
@@ -1177,25 +1212,26 @@ async fn main() -> std::io::Result<()> {
     let notification_rule_repo = SurrealNotificationRuleRepository::new(pool.handle_for_repo());
     // Email-config repository (28-04, FUNC-03) — required by the
     // `handlers::email_config::*` handlers' `web::Data<SurrealEmailConfigRepository<C>>`
-    // extractor. Only constructed when AXIAM__EMAIL_ENCRYPTION_KEY is present (same
+    // extractor. Only constructed when AXIAM__AUTH__EMAIL_ENCRYPTION_KEY is present (same
     // fail-closed, no-zero-key-fallback posture as the mail consumer above): when the
     // key is absent, `email_config_repo` stays `None` and is NOT registered as
     // app_data below, so the six email-config routes fail closed with actix's
     // "App data is not configured" 500 rather than silently encrypting with a
     // constant/zero key.
-    let email_config_repo: Option<SurrealEmailConfigRepository<axiam_db::DbClient>> =
-        match config.email_encryption_key {
-            Some(email_key) => Some(SurrealEmailConfigRepository::new(
-                pool.handle_for_repo(),
-                email_key,
-            )),
-            None => {
-                tracing::warn!(
-                    "AXIAM__EMAIL_ENCRYPTION_KEY missing — email-config admin endpoints disabled"
-                );
-                None
-            }
-        };
+    let email_config_repo: Option<SurrealEmailConfigRepository<axiam_db::DbClient>> = match config
+        .email_encryption_key
+    {
+        Some(email_key) => Some(SurrealEmailConfigRepository::new(
+            pool.handle_for_repo(),
+            email_key,
+        )),
+        None => {
+            tracing::warn!(
+                "AXIAM__AUTH__EMAIL_ENCRYPTION_KEY missing — email-config admin endpoints disabled"
+            );
+            None
+        }
+    };
     let federation_config_repo = SurrealFederationConfigRepository::new(pool.handle_for_repo());
     let federation_link_repo = SurrealFederationLinkRepository::new(pool.handle_for_repo());
     let assertion_replay_repo = SurrealAssertionReplayRepository::new(pool.handle_for_repo());
@@ -2041,7 +2077,7 @@ async fn main() -> std::io::Result<()> {
     }
 
     // Spawn AMQP mail consumer on a background task (D-14).
-    // Only spawned when AXIAM__EMAIL_ENCRYPTION_KEY is present; otherwise
+    // Only spawned when AXIAM__AUTH__EMAIL_ENCRYPTION_KEY is present; otherwise
     // mail delivery is disabled and a warning was logged at startup (T-5-key-absent).
     if let Some(email_key) = config.email_encryption_key {
         let mail_channel = amqp
@@ -2084,7 +2120,7 @@ async fn main() -> std::io::Result<()> {
         // design (D-15), so an operator with no mail has a working-looking API,
         // a silent inbox, and one line of startup output between them.
         tracing::error!(
-            "Mail consumer NOT spawned — AXIAM__EMAIL_ENCRYPTION_KEY is missing. \
+            "Mail consumer NOT spawned — AXIAM__AUTH__EMAIL_ENCRYPTION_KEY is missing. \
              NO transactional mail will be delivered: password-reset links, \
              email-verification links and GDPR export notices are queued and \
              never sent. Set the key and restart."
@@ -2801,6 +2837,65 @@ async fn main() -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+/// `axiam-server setup-token --remint` — the whole subcommand, as an exit code.
+///
+/// Runs before tracing is initialised, so everything it says it says on stdout
+/// or stderr directly. **The token goes to stdout and nowhere else**: routing
+/// it through `tracing` would put a live credential in the container log a
+/// second time, which is the one thing first-boot minting already does once
+/// and deliberately.
+///
+/// Migrations run first. They are idempotent and are what boot does anyway;
+/// without them a datastore that has never served would have no
+/// `bootstrap_setup_token` table to write to.
+///
+/// Exit codes: `0` minted, `2` refused, `1` could not tell (configuration,
+/// datastore, migration). A refusal is not an error — see
+/// [`axiam_db::SetupTokenRemint`].
+async fn remint_setup_token() -> i32 {
+    let config = load_config();
+
+    let pool = match axiam_db::DbPool::connect(&config.db).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            eprintln!("could not connect to the datastore: {e}");
+            return 1;
+        }
+    };
+    let db = pool.handle_for_repo().current();
+
+    if let Err(e) = axiam_db::run_migrations(&db).await {
+        eprintln!("could not apply database migrations: {e}");
+        return 1;
+    }
+
+    match axiam_db::remint_bootstrap_setup_token(&db).await {
+        Ok(axiam_db::SetupTokenRemint::Minted(token)) => {
+            println!("{token}");
+            0
+        }
+        Ok(axiam_db::SetupTokenRemint::RefusedUserExists) => {
+            eprintln!(
+                "refused: this deployment already has at least one user. The setup token is \
+                 re-mintable only before anyone has bootstrapped; an existing administrator \
+                 creates further accounts through the authenticated API."
+            );
+            2
+        }
+        Ok(axiam_db::SetupTokenRemint::RefusedTokenConsumed) => {
+            eprintln!(
+                "refused: a bootstrap setup token has already been redeemed on this \
+                 deployment. Whatever that bootstrap created is the way in."
+            );
+            2
+        }
+        Err(e) => {
+            eprintln!("could not re-mint the setup token: {e}");
+            1
+        }
+    }
 }
 
 fn load_config() -> AppConfig {

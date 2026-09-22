@@ -137,7 +137,7 @@ ANCHOR_ID=$(curl -sk -b "$JAR" "$AXIAM_URL/api/v1/organizations/$ORG_ID/ca-certi
   | jq -r 'map(select(.mtls_trust_anchor == true)) | .[0].id // empty' 2>/dev/null)
 if [ -z "$ANCHOR_ID" ]; then
   api POST "/api/v1/organizations/$ORG_ID/ca-certificates" \
-    "{\"subject\":\"CN=mx-native-anchor-$STAMP\",\"key_algorithm\":\"Ed25519\",\"validity_days\":90}" >/dev/null
+    "{\"subject\":\"mx-native-anchor-$STAMP\",\"key_algorithm\":\"Ed25519\",\"validity_days\":90}" >/dev/null
   ANCHOR_ID=$(jq -r '.id // empty' "$WORK/resp.json")
   [ -n "$ANCHOR_ID" ] || { fail "could not mint a CA"; exit 1; }
   api PUT "/api/v1/organizations/$ORG_ID/ca-certificates/$ANCHOR_ID/mtls-trust-anchor" \
@@ -149,7 +149,7 @@ UNTRUSTED_ID=$(curl -sk -b "$JAR" "$AXIAM_URL/api/v1/organizations/$ORG_ID/ca-ce
   | jq -r 'map(select(.mtls_trust_anchor != true)) | .[0].id // empty' 2>/dev/null)
 if [ -z "$UNTRUSTED_ID" ]; then
   api POST "/api/v1/organizations/$ORG_ID/ca-certificates" \
-    "{\"subject\":\"CN=mx-native-untrusted-$STAMP\",\"key_algorithm\":\"Ed25519\",\"validity_days\":90}" >/dev/null
+    "{\"subject\":\"mx-native-untrusted-$STAMP\",\"key_algorithm\":\"Ed25519\",\"validity_days\":90}" >/dev/null
   UNTRUSTED_ID=$(jq -r '.id // empty' "$WORK/resp.json")
 fi
 pass "untrusted CA (never flagged): ${UNTRUSTED_ID:-<none>}"
@@ -157,7 +157,7 @@ pass "untrusted CA (never flagged): ${UNTRUSTED_ID:-<none>}"
 issue() { # <name> <issuer-ca-id>
   local name="$1" ca="$2" code
   code=$(api POST "/api/v1/certificates" \
-    "{\"issuer_ca_id\":\"$ca\",\"subject\":\"CN=$name\",\"cert_type\":\"Service\",\"key_algorithm\":\"Ed25519\",\"validity_days\":30}")
+    "{\"issuer_ca_id\":\"$ca\",\"subject\":\"$name\",\"cert_type\":\"Service\",\"key_algorithm\":\"Ed25519\",\"validity_days\":30}")
   case "$code" in 200|201) ;; *) fail "issuing $name returned HTTP $code: $(head -c 200 "$WORK/resp.json")"; return 1 ;; esac
   jq -r '.public_cert_pem // .certificate.public_cert_pem // empty' "$WORK/resp.json" > "$WORK/$name.crt"
   jq -r '.private_key_pem // empty' "$WORK/resp.json" > "$WORK/$name.key"

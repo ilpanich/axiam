@@ -1,7 +1,7 @@
 //! SurrealDB implementation of [`EmailConfigRepository`].
 //!
 //! Provider secrets (SMTP password, API key) are encrypted at rest using
-//! AES-256-GCM with a dedicated `AXIAM__EMAIL_ENCRYPTION_KEY` (D-17).
+//! AES-256-GCM with a dedicated `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` (D-17).
 //! The repository stores `{field}_ciphertext`, `{field}_nonce`, and
 //! `secret_key_version` columns; plaintext is only present in the returned
 //! in-memory domain structs.
@@ -358,7 +358,7 @@ fn encrypt_provider(
 /// SurrealDB implementation of [`EmailConfigRepository`].
 ///
 /// The `key` field holds the 32-byte AES-256-GCM encryption key loaded from
-/// `AXIAM__EMAIL_ENCRYPTION_KEY` at startup. Secrets are encrypted on write
+/// `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` at startup. Secrets are encrypted on write
 /// and decrypted on read — never stored plaintext (D-17).
 pub struct SurrealEmailConfigRepository<C: Connection> {
     db: DbHandle<C>,

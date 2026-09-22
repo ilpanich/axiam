@@ -83,7 +83,7 @@ impl<R: PgpKeyRepository> PgpService<R> {
         let encrypted_private_key = if !is_export {
             let enc_key = self.config.encryption_key.ok_or_else(|| {
                 AxiamError::Internal(
-                    "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable"
+                    "AXIAM__AUTH__PKI_ENCRYPTION_KEY not set — CA/cert key encryption unavailable"
                         .into(),
                 )
             })?;
@@ -148,7 +148,8 @@ impl<R: PgpKeyRepository> PgpService<R> {
 
         let enc_key = self.config.encryption_key.ok_or_else(|| {
             AxiamError::Internal(
-                "AXIAM__PKI__ENCRYPTION_KEY not set — CA/cert key encryption unavailable".into(),
+                "AXIAM__AUTH__PKI_ENCRYPTION_KEY not set — CA/cert key encryption unavailable"
+                    .into(),
             )
         })?;
         let private_key_pem = decrypt_secret(encrypted_pk, &enc_key)?;

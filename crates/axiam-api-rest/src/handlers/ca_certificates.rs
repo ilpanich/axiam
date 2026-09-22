@@ -21,6 +21,11 @@ use crate::state::AppState;
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateCaCertificateRequest {
+    /// The CA's common name, e.g. `ACME Corp Root CA`.
+    ///
+    /// A **common name**, not a distinguished name. A single `CN=` prefix is
+    /// accepted and stripped; anything else containing `=` — `O=Acme,
+    /// CN=ACME Corp Root CA` — is refused with `400`.
     pub subject: String,
     pub key_algorithm: KeyAlgorithm,
     /// Validity duration in days.
@@ -645,7 +650,11 @@ pub async fn set_mtls_trust_anchor<C: Connection + Clone>(
 pub struct CreateIntermediateCaRequest {
     /// The organization CA that signs it.
     pub parent_ca_id: Uuid,
-    /// Subject for the signing CA, e.g. `CN=ACME R&D Signing CA`.
+    /// The signing CA's common name, e.g. `ACME R&D Signing CA`.
+    ///
+    /// A **common name**, not a distinguished name. A single `CN=` prefix is
+    /// accepted and stripped; anything else containing `=` is refused with
+    /// `400`.
     pub subject: String,
     pub key_algorithm: KeyAlgorithm,
     /// Validity duration in days, capped to the parent's own expiry.

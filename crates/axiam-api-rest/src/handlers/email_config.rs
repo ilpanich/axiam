@@ -34,7 +34,7 @@ use crate::extractors::auth::AuthenticatedUser;
 use crate::state::AppState;
 
 /// D-02 fail-closed guard: `email_config_repo` is `None` when
-/// `AXIAM__EMAIL_ENCRYPTION_KEY` is unset. Every email-config handler must
+/// `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` is unset. Every email-config handler must
 /// go through this instead of unwrapping directly, preserving the
 /// pre-AppState "App data is not configured" 500 behavior with a clearer
 /// error path.
@@ -43,7 +43,7 @@ fn require_email_config_repo<C: Connection + Clone>(
 ) -> Result<&SurrealEmailConfigRepository<C>, AxiamApiError> {
     state.mail.email_config_repo.as_ref().ok_or_else(|| {
         AxiamApiError(AxiamError::Internal(
-            "email configuration is disabled (AXIAM__EMAIL_ENCRYPTION_KEY not set)".into(),
+            "email configuration is disabled (AXIAM__AUTH__EMAIL_ENCRYPTION_KEY not set)".into(),
         ))
     })
 }

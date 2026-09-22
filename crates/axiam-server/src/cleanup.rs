@@ -930,7 +930,9 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         let pepper = match self.gdpr_pepper {
             Some(p) => p,
             None => {
-                tracing::warn!("GDPR purge sweep skipped — AXIAM__GDPR_PSEUDONYM_PEPPER not set");
+                tracing::warn!(
+                    "GDPR purge sweep skipped — AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER not set"
+                );
                 return Ok(0);
             }
         };
@@ -1142,7 +1144,9 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         let key = match self.export_encryption_key {
             Some(k) => k,
             None => {
-                tracing::warn!("GDPR export sweep skipped — AXIAM__EMAIL_ENCRYPTION_KEY not set");
+                tracing::warn!(
+                    "GDPR export sweep skipped — AXIAM__AUTH__EMAIL_ENCRYPTION_KEY not set"
+                );
                 return Ok(0);
             }
         };

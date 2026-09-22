@@ -787,6 +787,71 @@ nobody, so it is unauthenticated like its three siblings; and a status that
 depends on a lower crate's wording is one nobody can change safely. The string
 match goes with it. OpenAPI and the management registry regenerated. PR A.
 
+### T22.5 — Messages and docs name the variable the env provider reads — Sonnet 5 ✓ LANDED
+DF-018 / DF-022. `AXIAM__PKI__ENCRYPTION_KEY`, `AXIAM__EMAIL_ENCRYPTION_KEY`,
+`AXIAM__GDPR_PSEUDONYM_PEPPER` and `AXIAM__FEDERATION_ENCRYPTION_KEY` were
+documented, printed in a dozen error messages, and set by `just dev-up`, `just
+prod-up`, the benchmark compose file and the conformance harness — and read by
+nothing. Every secret resolves through the provider to `AXIAM__AUTH__<KEY>`,
+with three grandfathered exceptions. Renamed everywhere, with the rule itself
+stated on both the deployment guide and the configuration page; no aliases
+(D-1). A startup `WARN` names both spellings for a deployment that still sets
+an old one, computed from an *is-set* predicate so it can never touch a value.
+`AXIAM__AMQP__SIGNING_KEY` is excluded — it is genuinely honoured. Seven unit
+tests; records: none. PR B.
+
+### T22.6 — `subject` is a common name, and `CN=` is understood once — Sonnet 5 ✓ LANDED
+DF-023. Every AXIAM certificate has one DN component, but `subject` was pushed
+into rcgen whole, so a documented `CN=device-001` produced a DN of
+`CN=CN=device-001` while the row stored the prefix. `subject_common_name` in
+`axiam-pki` normalises once, at the top of the three paths that accept a
+caller-supplied subject, so the certificate and the row agree. A distinguished
+name is refused with `400` rather than silently reduced to its CN (D-2): no RFC
+4514 parser for a field with one consumer. Paths whose subject is parsed out of
+a certificate or CSR are untouched. Eleven tests across `subject.rs`,
+`ca_test.rs`, `intermediate_ca_test.rs` and `cert_test.rs`, each with its I4
+twin; the e2e matrix fixture's idempotency lookup, which matches on the stored
+subject, moved to the bare form with it. OpenAPI regenerated. Records: none.
+PR B.
+
+### T22.7 — `axiam-server setup-token --remint` — Sonnet 5 ✓ LANDED
+DF-019. The bootstrap setup token is stored as a hash and minted only on a
+never-bootstrapped database, so an operator who lost it had one recovery: wipe
+the volume. The subcommand replaces it and prints the new token to stdout only.
+It refuses with exit 2, writing nothing, once a `user` row or a redeemed token
+exists — before bootstrap there is nothing to take over, after it there is an
+authenticated way in. The "delete then mint" is one function shared with the
+first-boot path. Argv parsing moved to a unit-tested `cli` module so
+`setup-token` with a mistyped flag cannot start a server. Eight tests; threat
+**T-284**. PR B.
+
+### T22.8 — `healthcheck` can probe a TLS listener — Sonnet 5 ✓ LANDED
+DF-016. The probe was a hardcoded plaintext GET, so a deployment terminating TLS
+in-process — the shipped Kubernetes ConfigMap — failed its container healthcheck
+forever. The scheme now follows the listener (`ENABLED` **and** a certificate
+path, not the path alone, which `docker-compose.prod.yml` sets unconditionally)
+and the port follows `AXIAM__SERVER__PORT`. `AXIAM_HEALTHCHECK_CA_FILE` names
+trust anchors; with none set an `https` self-probe trusts the server's own chain
+file. No insecure switch. Nineteen tests, including the empirical answer to the
+plan's open question — an end-entity certificate that is its own issuer **is** a
+usable trust anchor, a CA-issued leaf without its issuer is not. Records: none.
+PR B.
+
+### T22.9 — The documentation bundle — Sonnet 5 ✓ LANDED
+DF-002, DF-015, DF-007/DF-020. Prose only. DF-002 was the dangerous one: the PKI
+guide and the website both said a `Device` certificate needs no bind, while
+`authenticate_device` refuses an unbound certificate with `401` — a commissioned
+fleet failing every login with nothing to say why. Both now give the order, the
+permission and the bind-time requirements. DF-015: RSA-4096 CA generation works
+under every custodian; the two sentences claiming otherwise are replaced by the
+trade-off that does apply, keygen time on small hardware. DF-007/DF-020: a new
+broker section on the client certificate AXIAM cannot issue for itself, and on
+why AXIAM tokens are not consumable by `rabbitmq_auth_backend_oauth2`. Records:
+none. Also in PR B, deliberately outside the plan: the latent CodeQL
+`rust/insecure-cookie` alert in `users_rate_limit_split_test.rs`, and the
+tenant-B half of `frontend/e2e/matrix/tenancy.spec.ts` snapshotting the users
+table with no wait. PR B.
+
 ---
 
 ---

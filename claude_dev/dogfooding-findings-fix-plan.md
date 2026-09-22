@@ -674,6 +674,72 @@ regenerated (`--dump-openapi`, `check-spec-digest.py`,
 
 ### S-5 — the documentation bundle (DF-002, DF-007, DF-015, DF-020) — Sonnet 5
 
+> **EXECUTED — 2026-09-22, PR B, commit 5 of 5.**
+>
+> **Shipped.** All four prose fixes, each re-validated against the code first.
+>
+> - **DF-002.** `authenticate_device` resolves `get_bound_service_account` and
+>   returns "certificate is not bound to a service account" when it answers
+>   `None` (`crates/axiam-pki/src/mtls.rs:154-160` — the plan says 153-160; PR
+>   A's T22.4 moved it by a line). So the bind is required for **every**
+>   certificate that authenticates, `Device` included, and the "looking for
+>   something that does not exist" paragraph was wrong in the expensive
+>   direction. `docs/pki/README.md` now gives the four-step order, the
+>   `certificates:bind` permission, the same-tenant requirement for both
+>   records, and the `Active` / not-expired checks the bind handler makes
+>   (`handlers/certificates.rs:360-395`). The website's IoT walkthrough gains
+>   the bind as its own step, its warning is inverted, and the service-account
+>   page carries a note saying the same.
+> - **DF-015.** `generate_keypair` routes `Rsa4096` to the `rsa` crate and hands
+>   rcgen a PKCS#8 key (`crypto.rs:70-102`); `cert_generate_rsa4096_ca_succeeds`
+>   says in its own doc comment that this arm used to be pinned as a failure and
+>   no longer is. Both sentences are replaced by the real trade-off: RSA-4096
+>   keygen is a probabilistic prime search, seconds on a server and tens of
+>   seconds with a wide variance on small ARM hardware, inside `spawn_blocking`
+>   behind the crypto semaphore — so the request path is not stalled but a
+>   client timeout sized for Ed25519 will fire.
+> - **DF-007 + DF-020.** A new `###` between "There is no way to skip
+>   verification" and the configuration reference. The `scope` claim half was
+>   verified rather than repeated: `issue_service_account_token`'s own
+>   documentation states that the device path has no way to request scopes and
+>   that a service account registers none, and `AccessTokenSpec::scopes` omits
+>   the claim for an empty slice — so a device token carries no `scope` at all
+>   and `rabbitmq_auth_backend_oauth2` has nothing to read.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **One commit, not four.** S-5 says "one commit each". PR B's task list in
+>    §3 counts S-5 as one task, and §9 binds the records — CHANGELOG, roadmap
+>    entry, this block — to the *task's* commit. Splitting four prose changes
+>    across four commits would have meant either four partial record sets or
+>    three commits that violate §9, and nothing in the diff becomes easier to
+>    review for it.
+> 2. **`authentication.ts` needed an addition, not a correction.** The plan
+>    lists `website/src/docs/authentication.ts:1199,1219` alongside the
+>    `operate.ts` sites. Neither line is wrong: 1199 is the bind endpoint's row
+>    in the service-account API table and 1219 is the mTLS introduction. What
+>    was missing is that the bind applies to devices too, so the row's summary
+>    says so and a note beneath the table states it.
+> 3. **The line numbers had all drifted**, partly because of this PR's own
+>    earlier commits: `docs/pki/README.md:535-559` is now 592-617, `:89-91` is
+>    100-102, `:358-359` is 369-370, and the deployment guide's line 921 is
+>    1156. Each was located by content.
+>
+> **Also in this commit, deliberately outside the plan** (agreed with the
+> requester before starting; the third deferred item, an unexplained
+> intermittent `500` from CA-certificate creation during e2e fixture setup, is
+> a real unknown in CA generation and gets its own change):
+>
+> - `users_rate_limit_split_test.rs:99,230` built **response** cookies with
+>   `Cookie::build(...).finish()` for what is a request cookie — the same latent
+>   CodeQL `rust/insecure-cookie` alert PR A fixed in its own file, fixed the
+>   same way and for the same stated reason.
+> - `frontend/e2e/matrix/tenancy.spec.ts` snapshotted tenant B's users table
+>   with no wait while the tenant-A half waits 20 s. An empty table makes the
+>   "tenant A's users are gone" assertion vacuous and the "tenant B's admin is
+>   listed" one fail — an intermittent failure that reads as a tenancy bug and
+>   is not one. It now waits for the first tenant-B row, as its twin does.
+
 Four prose fixes, one commit each, no code:
 
 1. **DF-002** — `docs/pki/README.md:535-559` and
@@ -709,6 +775,84 @@ Four independent parts; one commit each on PR B.
 
 #### S-6a — messages and docs name the variable the env provider reads (DF-018, DF-022)
 
+> **EXECUTED — 2026-09-22, PR B, commit 1 of 5.**
+>
+> **Shipped.** One resolver, `axiam_core::secrets::env_var_name`, is now the
+> single answer to "which variable is this secret read from";
+> `EnvSecretProvider::var_name` delegates to it. Every message, doc comment,
+> guide, website block, compose file and `just` recipe that named one of the
+> dead spellings now names the resolved one. A new
+> `axiam_server::legacy_env::legacy_secret_env_warnings` produces one `WARN`
+> per legacy spelling that is set while the variable AXIAM reads is not; it is
+> wired in `main.rs` immediately after `read_secret` is bound.
+>
+> **Tests.** `axiam-auth`: `var_name_is_what_the_docs_say` pins the four names.
+> `axiam-core`: `the_overridden_three_keep_their_shipped_spellings` and
+> `every_other_key_is_auth_prefixed` (the latter over `ALL_KEYS` + `ALL_SECRETS`,
+> so a new secret cannot quietly acquire a third convention).
+> `axiam-server::legacy_env`: five —
+> `a_legacy_spelling_alone_is_reported_with_the_variable_that_is_read`,
+> `all_four_are_reported`, `the_amqp_signing_key_is_not_treated_as_legacy`,
+> and the two I4 twins `a_correct_deployment_is_silent` and
+> `both_spellings_set_is_silent`. `scripts/check-config-key-coverage.py`
+> passes, self-test included.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`AXIAM__AMQP__SIGNING_KEY` is not a legacy spelling, and warning on it
+>    would have been a false alarm.** The plan lists it as the fourth variable
+>    to check for. It is a real, honoured variable: `load_config` runs
+>    `config::Environment::with_prefix("AXIAM").separator("__")` and
+>    `AmqpConfig` has a `signing_key` field, so it deserialises — which
+>    `main.rs:359-366` says in as many words, including that the provider's
+>    `AXIAM__AUTH__AMQP_SIGNING_KEY` merely takes precedence when both are set.
+>    Telling an operator whose deployment works that it does not is worse than
+>    saying nothing. Excluded, with `the_amqp_signing_key_is_not_treated_as_legacy`
+>    pinning the exclusion and the reason written where the list is.
+> 2. **A fourth spelling the plan did not name is dead too:**
+>    `AXIAM__FEDERATION_ENCRYPTION_KEY` (`config.auth.federation_encryption_key`
+>    comes from `read_key(FEDERATION_ENCRYPTION_KEY)` only). It took the
+>    vacated slot in the warning table.
+> 3. **The defect is not confined to prose. The repository's own recipes set
+>    the dead names.** `justfile:287,289` (`just dev-up` / `just prod-up`),
+>    `benchmarks/justfile:119-120`, `benchmarks/targets/axiam/docker-compose.yml:76-77`
+>    and `conformance/scripts/serve-axiam.sh:77-78` all exported spellings
+>    nothing reads — so the shipped development stack, the benchmark stack and
+>    the conformance harness have been running with the email key, the GDPR
+>    pepper, the PKI key and the federation key *unset*, which is why the mail
+>    consumer's "NOT spawned" error is a familiar line. Fixed with the docs;
+>    this is the half of DF-018 that had a running consequence.
+> 4. **The resolver belongs in `axiam-core`, not `axiam-auth`.** The plan says
+>    to render through `EnvSecretProvider::var_name`. Six of the message sites
+>    are in `axiam-pki` (`pgp.rs`, `ca_key_store.rs`), which sits below
+>    `axiam-auth` and cannot depend on it. The mapping moved to
+>    `axiam_core::secrets::env_var_name` — beside `env_var_override`, the table
+>    it consults — and the provider now delegates. No layering edge added.
+> 5. **Messages keep literal names rather than a function call.** The plan asks
+>    for `var_name(key)` at each site. Most sites are doc comments and
+>    `#[error]` attributes, where a call is impossible or unreadable; and
+>    `check-config-key-coverage.py` is built to scan *literals*, so rendering
+>    them at runtime would make the documentation gate blind to exactly these
+>    keys. The pin is `var_name_is_what_the_docs_say` instead: it fails if the
+>    resolver and the printed name ever disagree.
+> 6. **The coverage gate needed exemptions, not acceptance.** The plan says it
+>    "must accept the resolved names" — it already would have. What it refuses
+>    is the *legacy* names, which survive as literals in
+>    `axiam_server::legacy_env` so the warning can name them. Four `EXEMPT`
+>    entries, each stating that the key is read by nothing and which documented
+>    key replaces it.
+> 7. **Left alone, deliberately.** `claude_dev/` and `.planning/` are records of
+>    what was decided when, not instructions to a deployment. And
+>    `threat-model-stride.md:1960`, `ThreatDragonModels/Axiam/Axiam.json` and
+>    the generated `website/src/threatModel.ts` quote the legacy spelling inside
+>    a threat *description*: S-6a's records are "none", and editing the model
+>    would desync the committed generated file, so this goes with the
+>    threat-model reconciliation PR A already flagged as a maintainer task.
+> 8. **Citations re-validated against `main` @ `4b482f0`.** The `main.rs` sites
+>    the plan names (172, 631, 1111, 1124, 1194, 2087) are all still the right
+>    lines; `crates/axiam-core/src/secrets.rs:166-174` is now 153-174 after an
+>    earlier doc-comment growth, and the claim it supports is correct.
+
 **Decision (D-1): one name per secret, no alias.** The env provider resolves
 every logical key to `AXIAM__AUTH__<NAME>` (`crates/axiam-auth/src/secrets.rs:85`)
 except the three overrides in `crates/axiam-core/src/secrets.rs:166-174`.
@@ -743,6 +887,68 @@ CHANGELOG: **Fixed**. Records: none.
 
 #### S-6b — `subject` is a common name, and a `CN=` prefix is understood, once (DF-023)
 
+> **EXECUTED — 2026-09-22, PR B, commit 2 of 5.**
+>
+> **Shipped.** `axiam_pki::subject::subject_common_name` — its own module, not
+> a private function in `cert.rs`, because three call sites in two files use it
+> and one of them is a CA path. Called **once per operation, at the top**, in
+> `CaService::generate`, `CaService::generate_intermediate` and
+> `CertService::generate`: the normalised value then reaches the certificate,
+> the `subject` column and (under `vault_pki`) the derived intermediate name,
+> so the three cannot disagree. Docs, OpenAPI descriptions, the admin-UI
+> placeholder, the end-to-end fixtures and the two mTLS check scripts all show
+> the bare form.
+>
+> **Tests.** Six unit tests in `subject.rs` (`a_bare_subject_is_unchanged`,
+> `a_single_cn_component_is_understood_once`, `normalisation_is_idempotent`,
+> `a_multi_rdn_subject_is_refused`, `an_empty_subject_is_refused`,
+> `the_refusal_says_what_is_accepted`); the plan's trio plus its I4 twin in
+> `ca_test.rs` (and a fourth, over the derived intermediate subject),
+> `intermediate_ca_test.rs` and `cert_test.rs`; plus
+> `a_refused_subject_issues_nothing`, which pins that the refusal precedes
+> issuance rather than following it. `ca_test`: 9, `intermediate_ca_test`: 13,
+> `cert_test`: 22, all passing.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **Two of the three cited line numbers point somewhere else now.**
+>    `ca.rs:1338` is inside `mod import_tests` — a test helper — not the
+>    intermediate path; the real one is `intermediate_params` at `ca.rs:951`.
+>    `cert.rs:719` is now `leaf_params` at `cert.rs:793`, and there is a
+>    *second* `DnType::CommonName` push at `cert.rs:441`, on the
+>    remote-custodian branch that builds a CSR rather than a certificate.
+>    Normalising at the three `DnType::CommonName` sites as the plan says would
+>    therefore have fixed the certificate and left the stored `subject` column
+>    wrong on every path, which is half the finding. Normalising at the entry
+>    point fixes both halves and covers the CSR branch for free.
+> 2. **`intermediate_subject` needed it too.** Under `vault_pki` custody the
+>    intermediate's name defaults to `format!("{} Intermediate Authority",
+>    input.subject)`, so an un-normalised root subject put `CN=` in the *middle*
+>    of a generated name. Both fields are normalised.
+> 3. **The end-to-end matrix fixture breaks without a change the plan does not
+>    mention.** `frontend/e2e/helpers/matrix-fixture.ts` creates its six CAs and
+>    certificates with `CN=`-prefixed subjects and is idempotent by looking each
+>    one up **by its stored subject**. Once the server normalises, that lookup
+>    can never match what it created, so every re-run would try to create them
+>    again. The fixture now uses bare names, with a comment saying why.
+>    `scripts/e2e-mtls-check.sh` and `scripts/e2e-mtls-native-check.sh` were
+>    moved with it for consistency (they do not look up by subject, so they were
+>    not broken — only wrong).
+> 4. **The existing tests needed no edits, as the plan predicted**, and that
+>    held: `cert_test.rs:373`, `crud_test.rs:149`, `mtls_chain_test.rs:110` and
+>    the rest pass `"CN=…"` and now get the DN they always meant. Nothing in
+>    `crates/` asserted a stored subject *with* the prefix, which was checked
+>    rather than assumed.
+> 5. **An empty subject is now a `Validation` error.** The plan's rule implies
+>    it ("trim; empty → `Validation`") but no existing path rejected an empty
+>    subject, so this is new behaviour on a case that previously produced a
+>    certificate with an empty common name. It is strictly better and is
+>    pinned by `an_empty_subject_is_refused`.
+> 6. **Refused subjects are refused before issuance.** Because normalisation is
+>    the first statement of each method, a bad subject costs no keygen, no
+>    custodian round trip and leaves no row — pinned by
+>    `a_refused_subject_issues_nothing` rather than left to the reader.
+
 **Decision (D-2): accept a bare CN or exactly one `CN=<value>` RDN; refuse
 anything else containing `=`.** A full DN parser (RFC 4514) for a field that
 becomes a single CN is scope the certificate does not use.
@@ -772,6 +978,66 @@ they always meant. CHANGELOG: **Fixed**. OpenAPI: doc-comment change only
 
 #### S-6c — `axiam-server setup-token --remint` (DF-019)
 
+> **EXECUTED — 2026-09-22, PR B, commit 3 of 5.**
+>
+> **Shipped.** `axiam_db::remint_bootstrap_setup_token` returns a three-way
+> `SetupTokenRemint` — `Minted(token)`, `RefusedUserExists`,
+> `RefusedTokenConsumed` — rather than a `Result`, because two of the three are
+> not failures: they are the security argument. Both gates run **before** the
+> delete, so a refused call leaves the existing token working. "Delete then
+> mint" is one private `mint_setup_token` shared with
+> `mint_bootstrap_setup_token_if_needed`, as the plan asked, so the two paths
+> cannot drift into producing differently-shaped tokens. `main.rs` prints the
+> token with `println!` and everything else to stderr; exit 0 / 2 / 1.
+>
+> **Tests.** Three in `seeder_default_data_test.rs`:
+> `remint_replaces_the_previous_hash` (one row before, one row after, a
+> different hash — replaced, not added), and the two refusals, each asserting
+> the stored hash is **unchanged** afterwards. Five over the argv table in
+> `axiam_server::cli`, including the I4 twin
+> `an_unrecognised_argument_still_serves`.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **There is no setup-token threat entry to amend.** The plan's records line
+>    says "the setup-token threat entry gains the subcommand and its gate;
+>    status unchanged". No such entry exists: `bootstrap_setup_token`,
+>    `admin/bootstrap` and `SECHRD-04` appear nowhere in `Axiam.json`,
+>    `threat-model-stride.md` or `threat-modeling-and-security.md`; the
+>    "setup token" hits in the STRIDE document are all the **MFA** setup token,
+>    a different credential. Since the subcommand adds a second credential path
+>    to the endpoint that creates the first super-admin, this is a new entry
+>    rather than no entry: **T-284**, on `AXIAM deployment (N replicas, HPA)` in
+>    the deployment diagram — the element a `kubectl exec` reaches — Elevation
+>    of privilege, High, Mitigated on arrival. `threatTop` 283 → 284;
+>    `gen-threat-model.mjs` parses it (275 threats in the JSON, still nine short
+>    of the documents, which is PR A's flagged reconciliation and not this
+>    wave's) and the generated files are reverted.
+> 2. **The argv parse moved into the library.** The plan asks for "a unit test
+>    next to the `healthcheck` one". There is nothing to put it next to:
+>    `tests/healthcheck.rs` re-implements the probe rather than calling it,
+>    because `main.rs` cannot be linked from an integration test. Rather than
+>    add a second untestable branch, the whole parse became
+>    `axiam_server::cli::parse`, a pure function over the arguments, and
+>    `main.rs` matches on its result. One branch justifies it on its own:
+>    `setup-token` with the flag missing or mistyped must **not** fall through
+>    to `Serve` and start a second server against the production datastore.
+> 3. **Migrations run first.** The plan says "loads the configuration, connects
+>    to the datastore". A datastore that has never served has no
+>    `bootstrap_setup_token` table to write to, and `run_migrations` is
+>    idempotent and is what boot does anyway. One line, before the re-mint.
+> 4. **The two gates are not one gate.** The plan lists them together; they are
+>    separate checks because a datastore can carry a consumed token and no
+>    `user` row — a restore, a purge, a rolled-back bootstrap — so neither
+>    implies the other. `remint_refuses_once_a_token_was_consumed` constructs
+>    exactly that state.
+> 5. **The documentation went to `docs/admin/README.md`, with a pointer from
+>    `docs/deployment/README.md`.** The plan names the deployment guide, which
+>    says nothing about bootstrap at all; the Gate 1 / Gate 2 description an
+>    operator would be reading when they discover the loss is in the
+>    administration guide. The full "I lost the setup token" section is there,
+>    under a heading the deployment guide links to by anchor.
+
 **The fix.** A third subcommand next to `healthcheck` and `--dump-openapi`
 (`main.rs:185-210`): `setup-token --remint`. It loads the configuration,
 connects to the datastore, and:
@@ -799,6 +1065,70 @@ fix.
 entry gains the subcommand and its gate; status unchanged.
 
 #### S-6d — `healthcheck` can probe a TLS listener (DF-016)
+
+> **EXECUTED — 2026-09-22, PR B, commit 4 of 5.**
+>
+> **Shipped.** `axiam_server::healthcheck` — `resolve(var)` over an environment
+> reader and `run(&Probe)`, both called from `main.rs`. The scheme follows the
+> listener, the port follows `AXIAM__SERVER__PORT`, and
+> `AXIAM_HEALTHCHECK_CA_FILE` names trust anchors; with none set, an `https`
+> self-probe trusts the server's own `AXIAM__SERVER__TLS__CERT_PATH` chain. No
+> insecure switch, and an empty or unreadable anchor bundle is a failure rather
+> than a silent fall-back to the platform trust store.
+>
+> **The plan's open question, answered empirically.** *Does webpki accept an
+> end-entity certificate as a trust anchor?* **Yes, when that certificate is its
+> own issuer** — `a_self_signed_server_certificate_is_a_usable_trust_anchor`
+> stands a real rustls listener up and probes it. So the zero-configuration
+> default is sound for the self-signed certificate an internal direct-TLS
+> deployment usually carries. The neighbouring case is *not*, and the
+> documentation says so: a **CA-issued leaf with its issuer absent** from the
+> chain file anchors nothing, which is
+> `a_ca_issued_leaf_without_its_issuer_is_not_a_usable_anchor` and is exactly
+> what `AXIAM_HEALTHCHECK_CA_FILE` is for. A `fullchain.pem` carries the issuer
+> and works.
+>
+> **Tests.** Ten unit tests over `resolve` with an environment map, and nine
+> integration tests in `crates/axiam-server/tests/healthcheck.rs` against a real
+> in-process rustls listener: the three anchor shapes above, the CA file alone,
+> an absent file, an empty file, an unverifiable listener (there being no
+> insecure switch), plus the two plaintext cases that file always had.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`AXIAM__SERVER__TLS__CERT_PATH` alone is the wrong condition, and using
+>    it would have broken every Compose deployment.** The plan says to switch
+>    the default when that variable is set. `docker/docker-compose.prod.yml:268`
+>    sets it **unconditionally** and gates the listener on
+>    `AXIAM__SERVER__TLS__ENABLED` (line 267, default `false`). Reading the path
+>    alone would have moved every Compose deployment's probe to `https` against
+>    a plaintext listener — the present defect, in the opposite direction, on a
+>    stack that works today. The condition is both variables, and
+>    `a_certificate_path_without_enabled_stays_plaintext` pins it.
+> 2. **The certificate has to cover `127.0.0.1`.** The plan's default probes
+>    that address; rustls verifies the server name, so the certificate needs an
+>    IP SAN for it. A certificate issued for a DNS name fails the derived
+>    default no matter how the anchors are resolved. The documentation says so
+>    and names the remedy (`AXIAM_HEALTHCHECK_URL` plus a resolvable name);
+>    the test PKI issues an IP SAN so the integration tests exercise the real
+>    path rather than a hostname-verification bypass.
+> 3. **The port was hardcoded.** The old default was literally
+>    `http://127.0.0.1:8090/health`, so a deployment that moved
+>    `AXIAM__SERVER__PORT` was probing the wrong port whatever its scheme. Both
+>    schemes now read it. A deployment on the default port is unchanged, which
+>    is the I4 twin.
+> 4. **`tests/healthcheck.rs` was testing a copy of the code.** It called
+>    `reqwest::blocking::get` itself, because the probe lived in `main.rs` and
+>    `main.rs` cannot be linked from an integration test — so it would have kept
+>    passing across this change without exercising a line of it. Both existing
+>    tests now call `healthcheck::run`, which is also why the module is in the
+>    library rather than the binary.
+> 5. **The test listener needs `CryptoProvider::install_default`.** `rustls` in
+>    this dependency graph reaches more than one provider feature, so
+>    `ServerConfig::builder()` panics rather than choosing. `reqwest`'s rustls
+>    backend is unaffected — it builds its own configuration — so this is a test
+>    fixture concern only, and the panic is worth recording because it looks
+>    like a verification failure in the output.
 
 **The fix.** Two environment variables in the same single-underscore
 namespace `healthcheck` already uses, documented next to

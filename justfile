@@ -284,9 +284,9 @@ run-local:
     }
     export AXIAM__AUTH__MFA_ENCRYPTION_KEY="$(gen_hex_key mfa_enc.hex)"
     export AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY="$(gen_hex_key federation_enc.hex)"
-    export AXIAM__PKI__ENCRYPTION_KEY="$(gen_hex_key pki_enc.hex)"
+    export AXIAM__AUTH__PKI_ENCRYPTION_KEY="$(gen_hex_key pki_enc.hex)"
     # Enables the mail consumer + GDPR Art.15 export sweep (both skipped without it).
-    export AXIAM__EMAIL_ENCRYPTION_KEY="$(gen_hex_key email_enc.hex)"
+    export AXIAM__AUTH__EMAIL_ENCRYPTION_KEY="$(gen_hex_key email_enc.hex)"
     # D-18: cookies must work over plain http://localhost in local dev. NEVER false in prod.
     export AXIAM__AUTH__COOKIE_SECURE="false"
     # dev-up RabbitMQ runs as axiam/axiam with the default guest user disabled,

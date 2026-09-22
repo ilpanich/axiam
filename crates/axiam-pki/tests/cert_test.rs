@@ -695,7 +695,7 @@ async fn cert_generate_rejects_ca_with_no_stored_private_key() {
 /// holds no key to open it (SEC-012).
 ///
 /// The shape an operator meets after restoring a database into a deployment
-/// whose `AXIAM__PKI__ENCRYPTION_KEY` is absent or different — and the reason
+/// whose `AXIAM__AUTH__PKI_ENCRYPTION_KEY` is absent or different — and the reason
 /// the row records its custodian: the failure names the missing configuration
 /// rather than surfacing as a decryption error about bytes.
 #[tokio::test]
@@ -729,7 +729,7 @@ async fn cert_generate_rejects_when_encryption_key_not_configured() {
         .expect("CA generation must succeed");
 
     // ...but the CertService's custodian set holds no database custodian, which
-    // is what an absent AXIAM__PKI__ENCRYPTION_KEY produces. Vault stands in as
+    // is what an absent AXIAM__AUTH__PKI_ENCRYPTION_KEY produces. Vault stands in as
     // the default only so the set has one at all; nothing here reaches it.
     let no_key_config = PkiConfig {
         encryption_key: None,
@@ -1335,4 +1335,173 @@ async fn generate_still_accepts_the_organization_ca_for_an_organization_principa
         .expect("an organization principal issues under the organization CA");
 
     assert_eq!(generated.certificate.issuer_ca_id, org_ca);
+}
+
+// ---------------------------------------------------------------------------
+// DF-023 — the leaf subject is a common name
+// ---------------------------------------------------------------------------
+
+/// Every common name in a PEM certificate's subject DN, in order.
+fn leaf_common_names(pem: &str) -> Vec<String> {
+    use x509_parser::certificate::X509Certificate;
+    use x509_parser::prelude::FromDer;
+
+    let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).expect("PEM");
+    let (_, cert) = X509Certificate::from_der(&block.contents).expect("DER");
+    cert.subject()
+        .iter_common_name()
+        .map(|cn| cn.as_str().expect("printable CN").to_owned())
+        .collect()
+}
+
+/// DF-023 on the path that matters most: the documented request body for
+/// `POST /api/v1/certificates` used `"subject": "CN=jdoe@example.com"`, so a
+/// device's certificate came out as `CN=CN=device-001` — a name no relying
+/// party matching on the common name will accept.
+#[tokio::test]
+async fn a_cn_prefixed_subject_yields_a_single_cn() {
+    let db = setup_db().await;
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let (_, tenant_ca) = org_and_tenant_ca(&ca_repo, org_id, tenant_id).await;
+    let svc = CertService::new(
+        ca_repo,
+        cert_repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+
+    let generated = svc
+        .generate(
+            org_id,
+            IssuingScope::Tenant,
+            leaf(tenant_id, tenant_ca, "CN=device-001"),
+            None,
+        )
+        .await
+        .expect("leaf");
+
+    assert_eq!(
+        generated.certificate.subject, "device-001",
+        "the row records the name the certificate carries"
+    );
+    assert_eq!(
+        leaf_common_names(&generated.certificate.public_cert_pem),
+        vec!["device-001".to_owned()],
+        "one common name, and not the prefix doubled"
+    );
+}
+
+/// The I4 twin.
+#[tokio::test]
+async fn a_bare_subject_is_unchanged() {
+    let db = setup_db().await;
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let (_, tenant_ca) = org_and_tenant_ca(&ca_repo, org_id, tenant_id).await;
+    let svc = CertService::new(
+        ca_repo,
+        cert_repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+
+    let generated = svc
+        .generate(
+            org_id,
+            IssuingScope::Tenant,
+            leaf(tenant_id, tenant_ca, "device-001"),
+            None,
+        )
+        .await
+        .expect("leaf");
+
+    assert_eq!(generated.certificate.subject, "device-001");
+    assert_eq!(
+        leaf_common_names(&generated.certificate.public_cert_pem),
+        vec!["device-001".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn a_multi_rdn_subject_is_refused() {
+    let db = setup_db().await;
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let (_, tenant_ca) = org_and_tenant_ca(&ca_repo, org_id, tenant_id).await;
+    let svc = CertService::new(
+        ca_repo,
+        cert_repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+
+    let err = svc
+        .generate(
+            org_id,
+            IssuingScope::Tenant,
+            leaf(tenant_id, tenant_ca, "O=Acme, CN=device-001"),
+            None,
+        )
+        .await
+        .expect_err("a distinguished name is not a common name");
+
+    assert!(
+        matches!(&err, axiam_core::error::AxiamError::Validation { message }
+            if message.contains("bare common name")),
+        "expected a validation error naming the rule, got {err:?}"
+    );
+}
+
+/// The refusal happens before anything is issued or stored — a rejected
+/// subject must not leave a row, a key, or an audit trail of a certificate
+/// that does not exist.
+#[tokio::test]
+async fn a_refused_subject_issues_nothing() {
+    use axiam_core::repository::CertificateRepository as _;
+
+    let db = setup_db().await;
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+
+    let (_, tenant_ca) = org_and_tenant_ca(&ca_repo, org_id, tenant_id).await;
+    let svc = CertService::new(
+        ca_repo,
+        cert_repo.clone(),
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+
+    svc.generate(
+        org_id,
+        IssuingScope::Tenant,
+        leaf(tenant_id, tenant_ca, "O=Acme, CN=device-001"),
+        None,
+    )
+    .await
+    .expect_err("refused");
+
+    let listed = cert_repo
+        .list(tenant_id, axiam_core::repository::Pagination::default())
+        .await
+        .expect("list");
+    assert!(
+        listed.items.is_empty(),
+        "a refused subject must not leave a certificate behind"
+    );
 }

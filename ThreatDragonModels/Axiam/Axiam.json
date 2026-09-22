@@ -12956,6 +12956,17 @@
                   "mitigation": "Fixed in 1.0.0-beta11. The npm audit step retries with backoff and tells \"found advisories\" apart from \"could not reach the endpoint\" by the shape of the output rather than the exit code \u2014 npm exits `1` for both, but only a completed audit parses as JSON without an `error` key. A real HIGH/CRITICAL finding still fails the job; anything parseable that is not an error object counts as a real report, so an unfamiliar schema fails rather than being waved through; and a sustained outage ends in a `::warning::` that says explicitly it is not a clean bill of health. `cargo-deny` now runs with `-D advisory-not-detected`, so the next stale entry fails CI instead of scrolling past, and the two ignore-lists are allowed to differ legitimately \u2014 cargo-deny resolves the feature graph while cargo-audit reads `Cargo.lock` \u2014 under a containment check that demands an explicit `# audit-only: <ID> \u2014 <reason>` declaration and rejects one that is missing, unreasoned, contradictory or stale, with seven self-test cases. The yanked `chacha20 0.10.1` was bumped, and the four SARIF uploads are guarded on the file existing so a failed producer stops adding its own errors on top of the one that matters. `scripts/check-docker-context.py` closes the neighbouring class of the same shape \u2014 a gate that reads the worktree while the artifact is built from a filtered context, which is how the beta08 release lost both frontend image legs \u2014 by asking, for every `COPY`/`ADD` in every Dockerfile, whether at least one tracked file both exists and survives `.dockerignore`, cross-checked file by file against BuildKit's real context export. Narrowed deliberately at 1.0.0-beta13, and stated rather than folded into another change: the Trivy filesystem scan is scoped to what AXIAM ships \u2014 `crates/`, `frontend/`, `website/`, `examples/` and the root lockfile \u2014 and excludes the `benchmarks/` and `conformance/` harnesses, whose transitive CVEs (a netty CRITICAL under the Java bench) nothing in this repository can remediate and which were turning the gate red on every unrelated PR, which is how a red security check stops being read. The same wave removed 209 files of unbuilt design-system tooling that had entered the scan and the lint by accident.",
                   "modelType": "STRIDE",
                   "number": 236
+                },
+                {
+                  "id": "eba132c2-7708-50e7-9bb1-f93c7b7a7d00",
+                  "title": "A re-minted bootstrap setup token is a second way to create the first administrator",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "Only the SHA-256 hash of the one-time bootstrap setup token is stored, and the first-boot mint is a no-op once a token row exists, so an operator who lost the token had exactly one documented recovery: wipe the volume (DF-019). A subcommand that re-mints it removes that cliff and introduces a second credential path to POST /api/v1/admin/bootstrap, the endpoint that creates the first super-admin. Ungated, it would work on a deployment that already has administrators, and would therefore be an account takeover available to anyone who can run a command in the pod \u2014 with no authentication in front of it and nothing in the audit trail naming a principal.",
+                  "mitigation": "axiam-server setup-token --remint refuses, with exit code 2 and no write at all, unless the deployment has no user row AND no redeemed setup token \u2014 that is, unless nobody has bootstrapped it. Before bootstrap there is no administrator to take over and no credential to reset, which is exactly the state an operator who lost the first-boot token is in; after it, the deployment has an authenticated way to create accounts and a password-reset flow, so re-minting is never the answer. Both gates are evaluated before the existing hash is deleted, so a refused call leaves the current token working. The token is printed to stdout only, never through tracing, so it does not reach the container log a second time; there is deliberately no --print, because the plaintext is not stored and storing it so that it could be printed would be the wrong fix. The subcommand parse is its own unit-tested function so that setup-token with the flag missing or mistyped exits 2 rather than silently starting a second server. Pinned by remint_replaces_the_previous_hash, remint_refuses_once_a_user_exists and remint_refuses_once_a_token_was_consumed, the last two asserting that the stored hash is unchanged after a refusal.",
+                  "modelType": "STRIDE",
+                  "number": 284
                 }
               ]
             }
@@ -15437,6 +15448,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 283
+    "threatTop": 284
   }
 }

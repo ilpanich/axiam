@@ -22,6 +22,7 @@ use crate::PkiConfig;
 use crate::ca::{self, CaService, join_pem};
 use crate::ca_key_store::CaKeyCustodians;
 use crate::crypto::{compute_fingerprint, generate_keypair};
+use crate::subject::subject_common_name;
 
 /// Who is asking for a leaf, as far as the issuing CA is concerned.
 ///
@@ -292,9 +293,14 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         &self,
         org_id: Uuid,
         scope: IssuingScope,
-        input: CreateCertificate,
+        mut input: CreateCertificate,
         max_validity_days: Option<u32>,
     ) -> AxiamResult<GeneratedCertificate> {
+        // DF-023. Normalised before anything reads it, so the locally signed
+        // path, the remote-custodian path and the stored row all carry the
+        // same common name. See [`crate::subject_common_name`].
+        input.subject = subject_common_name(&input.subject)?;
+
         let LeafIssuance {
             ca_cert,
             store,

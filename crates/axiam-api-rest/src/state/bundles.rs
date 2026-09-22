@@ -123,14 +123,14 @@ pub struct GdprState<C: Connection + Clone> {
 
 /// Outbound mail, provider configuration and the two token-mail services.
 ///
-/// `email_encryption_key` is `None` when `AXIAM__EMAIL_ENCRYPTION_KEY` is
+/// `email_encryption_key` is `None` when `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` is
 /// unset, and that absence is what makes the email-config routes fail closed. It
 /// lives beside the repository it protects rather than several screens away from
 /// it, so the pairing is visible at the point of use.
 #[derive(Clone)]
 pub struct MailState<C: Connection + Clone> {
     pub mail_outbound_publisher: Arc<dyn DynMailPublisher>,
-    /// D-02: `None` when `AXIAM__EMAIL_ENCRYPTION_KEY` is unset — the six
+    /// D-02: `None` when `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` is unset — the six
     /// email-config routes fail closed rather than silently using a
     /// constant/zero key.
     pub email_config_repo: Option<SurrealEmailConfigRepository<C>>,

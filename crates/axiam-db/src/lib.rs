@@ -72,8 +72,9 @@ pub use repository::{
 pub use axiam_auth::client_secret::{self, ClientSecretHasher, ClientSecretVerdict};
 pub use schema::{run_migrations, schema_v1};
 pub use seeder::{
-    ReconcileOutcome, SeedRolesResult, SeederStateRow, mint_bootstrap_setup_token_if_needed,
-    reconcile_default_role_grants, seed_default_roles, seed_permissions,
+    ReconcileOutcome, SeedRolesResult, SeederStateRow, SetupTokenRemint,
+    mint_bootstrap_setup_token_if_needed, reconcile_default_role_grants,
+    remint_bootstrap_setup_token, seed_default_roles, seed_permissions,
 };
 pub use session_validation_cache::SessionValidationCache;
 /// Re-export SurrealDB connection types for use in repository type aliases.

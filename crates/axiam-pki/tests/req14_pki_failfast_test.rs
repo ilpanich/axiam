@@ -67,7 +67,7 @@ async fn ca_custody_without_any_key_source_defers_its_refusal_to_first_use() {
     match err {
         AxiamError::Internal(msg) => {
             assert!(
-                msg.contains("AXIAM__PKI__ENCRYPTION_KEY"),
+                msg.contains("AXIAM__AUTH__PKI_ENCRYPTION_KEY"),
                 "error must name the missing env var, got: {msg}"
             );
             assert!(

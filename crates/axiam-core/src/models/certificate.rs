@@ -61,7 +61,11 @@ pub struct CaCertificate {
     /// imported and has no parent inside AXIAM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_ca_id: Option<Uuid>,
-    /// The certificate subject (e.g., `CN=ACME Corp Root CA`).
+    /// The CA's common name, e.g. `ACME Corp Root CA`.
+    ///
+    /// The normalised value: a `CN=` prefix in the request is understood and
+    /// stripped, so this always says what the certificate's subject DN says
+    /// (DF-023).
     pub subject: String,
     /// PEM-encoded public certificate.
     ///
@@ -179,6 +183,13 @@ impl std::fmt::Debug for CaCertificate {
 pub struct CreateCaCertificate {
     #[serde(default)]
     pub organization_id: Uuid,
+    /// The CA's common name, e.g. `ACME Corp Root CA`.
+    ///
+    /// A **common name**, not a distinguished name. A single `CN=` prefix is
+    /// accepted and stripped; anything else containing `=` — `O=Acme,
+    /// CN=ACME Corp Root CA` — is refused with `400`, because the certificate
+    /// has one CN and silently discarding the rest would be worse than saying
+    /// so.
     pub subject: String,
     pub key_algorithm: KeyAlgorithm,
     /// Validity duration in days.
@@ -309,7 +320,10 @@ pub struct CreateIntermediateCa {
     /// The organization CA that signs it. Must be Active, in its validity
     /// window, and hold a key AXIAM can sign with.
     pub parent_ca_id: Uuid,
-    /// The intermediate's subject (e.g., `CN=ACME R&D Signing CA`).
+    /// The intermediate's common name, e.g. `ACME R&D Signing CA`.
+    ///
+    /// A **common name**, not a distinguished name; see
+    /// [`CreateCaCertificate::subject`] for what is accepted.
     pub subject: String,
     pub key_algorithm: KeyAlgorithm,
     /// Validity duration in days. Capped to the parent's own expiry — an
@@ -409,7 +423,11 @@ pub struct Certificate {
     pub tenant_id: Uuid,
     /// The CA certificate that signed this certificate.
     pub issuer_ca_id: Uuid,
-    /// The certificate subject (e.g., `CN=device-001`).
+    /// The certificate's common name, e.g. `device-001`.
+    ///
+    /// The normalised value: a `CN=` prefix in the request is understood and
+    /// stripped, so this always says what the certificate's subject DN says
+    /// (DF-023).
     pub subject: String,
     /// PEM-encoded public certificate.
     pub public_cert_pem: String,
@@ -433,6 +451,11 @@ pub struct CreateCertificate {
     #[serde(default)]
     pub tenant_id: Uuid,
     pub issuer_ca_id: Uuid,
+    /// The certificate's common name, e.g. `device-001`.
+    ///
+    /// A **common name**, not a distinguished name. A single `CN=` prefix is
+    /// accepted and stripped; anything else containing `=` is refused with
+    /// `400`.
     pub subject: String,
     pub cert_type: CertificateType,
     pub key_algorithm: KeyAlgorithm,

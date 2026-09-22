@@ -938,6 +938,8 @@ struct RoleSpec<'a> {
     scope_ids: Vec<Uuid>,
     /// `None` assigns the role globally (§2.2 row 8).
     resource_id: Option<Uuid>,
+    /// `false` stops the assignment at `resource_id` (§2.2 rows 9–11).
+    inherit: bool,
 }
 
 impl<'a> RoleSpec<'a> {
@@ -948,6 +950,7 @@ impl<'a> RoleSpec<'a> {
             effect: PermissionEffect::Allow,
             scope_ids: Vec::new(),
             resource_id: Some(resource_id),
+            inherit: true,
         }
     }
 
@@ -958,6 +961,7 @@ impl<'a> RoleSpec<'a> {
             effect: PermissionEffect::Deny,
             scope_ids: Vec::new(),
             resource_id: Some(resource_id),
+            inherit: true,
         }
     }
 
@@ -968,6 +972,12 @@ impl<'a> RoleSpec<'a> {
 
     fn scoped(mut self, scope_ids: Vec<Uuid>) -> Self {
         self.scope_ids = scope_ids;
+        self
+    }
+
+    /// Assign it `inherit: false` — at its resource, and no further.
+    fn here_only(mut self) -> Self {
+        self.inherit = false;
         self
     }
 }
@@ -986,6 +996,7 @@ async fn assign_role_with_effect(
         effect,
         scope_ids,
         resource_id,
+        inherit,
     } = spec;
     let is_global = resource_id.is_none();
     let role_repo = SurrealRoleRepository::new(db.clone());
@@ -1009,7 +1020,15 @@ async fn assign_role_with_effect(
         .unwrap();
 
     role_repo
-        .assign_to_user(tenant_id, user_id, role.id, resource_id.into())
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            role.id,
+            AssignmentScope {
+                inherit,
+                ..resource_id.into()
+            },
+        )
         .await
         .unwrap();
 
@@ -2048,5 +2067,316 @@ async fn a_deny_scoped_on_an_ancestor_masks_a_descendants_scopes() {
     assert!(
         matches!(decision, AccessDecision::DeniedByRule(_)),
         "an ancestor-scoped deny must reach the descendant's scopes too, got {decision:?}",
+    );
+}
+
+// -----------------------------------------------------------------------
+// T22.11 — `inherit: false`, END TO END
+// (claude_dev/deny-override-design.md §2.2 rows 9–11)
+//
+// The flag is read by `applicable_role_ids`, the one function whose
+// regressions only these tests see (§5.1): the unit tests in `engine.rs` pin
+// the rule, these prove the real repositories deliver the flag to it — for a
+// direct assignment and for one inherited through a group, which reach the
+// engine through two different SELECTs.
+//
+// Every row is decided twice, by `check_access` (`evaluate`) and by
+// `check_access_batch` under `Coalesced` (`evaluate_batch`), which re-derives
+// applicability from its own lookups. The two must agree item for item.
+// -----------------------------------------------------------------------
+
+/// `/fleet` → `/fleet/decommissioned` → `/fleet/decommissioned/unit-7`.
+async fn fleet_tree(db: &Surreal<TestDb>, tenant_id: Uuid) -> [Uuid; 3] {
+    let fleet = create_resource(db, tenant_id, "fleet", None).await;
+    let decommissioned = create_resource(db, tenant_id, "decommissioned", Some(fleet)).await;
+    let unit7 = create_resource(db, tenant_id, "unit-7", Some(decommissioned)).await;
+    [fleet, decommissioned, unit7]
+}
+
+/// Decide `read` on each of `nodes` through BOTH engine paths, assert they
+/// agree, and return the decisions in node order.
+async fn decide_both_ways(
+    engine: TestEngine,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    nodes: &[Uuid],
+) -> Vec<AccessDecision> {
+    let engine = engine.with_batch_config(axiam_authz::BatchStrategy::Coalesced, 1);
+    let requests: Vec<AccessRequest> = nodes
+        .iter()
+        .map(|&resource_id| AccessRequest {
+            tenant_id,
+            subject_scope: SubjectScope::Tenant,
+            subject_id: user_id,
+            action: "read".into(),
+            resource_id,
+            scope: None,
+        })
+        .collect();
+
+    let mut singly = Vec::new();
+    for req in &requests {
+        singly.push(engine.check_access(req).await.unwrap());
+    }
+    let batched = engine.check_access_batch(&requests).await.unwrap();
+    assert_eq!(
+        batched, singly,
+        "evaluate and evaluate_batch must agree on every node"
+    );
+    singly
+}
+
+fn reason_codes(decisions: &[AccessDecision]) -> Vec<&'static str> {
+    decisions.iter().map(AccessDecision::reason_code).collect()
+}
+
+/// Row 9: an allow on `/fleet` with `inherit: false` applies at `/fleet` and
+/// stops there — `unit-7` is `no_grant`.
+#[tokio::test]
+async fn row_9_a_non_inheritable_allow_stops_at_its_node_end_to_end() {
+    let (db, tenant_id, user_id) = setup().await;
+    let nodes = fleet_tree(&db, tenant_id).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("fleet-reader", "read", nodes[0]).here_only(),
+    )
+    .await;
+
+    let decisions = decide_both_ways(make_engine(&db), tenant_id, user_id, &nodes).await;
+    assert_eq!(
+        reason_codes(&decisions),
+        ["allowed", "no_grant", "no_grant"],
+        "a non-inheritable allow on /fleet must not reach its descendants"
+    );
+}
+
+/// Row 9's I1 twin: the same allow with the flag left at its default is row 1,
+/// reaching `unit-7` as it always has.
+#[tokio::test]
+async fn an_assignment_without_the_flag_still_inherits_end_to_end() {
+    let (db, tenant_id, user_id) = setup().await;
+    let nodes = fleet_tree(&db, tenant_id).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("fleet-reader", "read", nodes[0]),
+    )
+    .await;
+
+    let decisions = decide_both_ways(make_engine(&db), tenant_id, user_id, &nodes).await;
+    assert_eq!(reason_codes(&decisions), ["allowed", "allowed", "allowed"]);
+}
+
+/// Row 10: a non-inheritable deny on `/fleet` beside an inheritable allow on
+/// `/fleet`. The deny holds at `/fleet` (`denied_by_rule`) and reaches nothing
+/// below it, so the allow stands at `unit-7`.
+///
+/// This is the row where the flag *widens* relative to an inheritable deny —
+/// which is why changing it is an unassign-and-assign, never an in-place edit.
+#[tokio::test]
+async fn row_10_a_non_inheritable_deny_denies_at_its_node_only_end_to_end() {
+    let (db, tenant_id, user_id) = setup().await;
+    let nodes = fleet_tree(&db, tenant_id).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::deny("fleet-blocked-here", "read", nodes[0]).here_only(),
+    )
+    .await;
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("fleet-reader", "read", nodes[0]),
+    )
+    .await;
+
+    let decisions = decide_both_ways(make_engine(&db), tenant_id, user_id, &nodes).await;
+    assert_eq!(
+        reason_codes(&decisions),
+        ["denied_by_rule", "allowed", "allowed"],
+        "a non-inheritable deny must hold at its node and not below it"
+    );
+}
+
+/// Row 11: an allow on `unit-7` itself, `inherit: false`. The node is always
+/// in scope; the flag only ever removes descendants.
+#[tokio::test]
+async fn row_11_the_node_itself_is_always_in_scope_end_to_end() {
+    let (db, tenant_id, user_id) = setup().await;
+    let nodes = fleet_tree(&db, tenant_id).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("unit7-reader", "read", nodes[2]).here_only(),
+    )
+    .await;
+
+    let decisions = decide_both_ways(make_engine(&db), tenant_id, user_id, &nodes).await;
+    assert_eq!(
+        reason_codes(&decisions),
+        ["no_grant", "no_grant", "allowed"],
+        "inherit: false must never remove the node the assignment names"
+    );
+}
+
+/// A non-inheritable deny still beats an allow at its own node, and a
+/// non-inheritable deny on an ancestor does not — row 4 is not reopened for
+/// an inheritable deny, only for one the operator stopped.
+#[tokio::test]
+async fn row_4_still_holds_for_an_inheritable_deny_beside_a_non_inheritable_one() {
+    let (db, tenant_id, user_id) = setup().await;
+    let nodes = fleet_tree(&db, tenant_id).await;
+
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::deny("fleet-blocked", "read", nodes[0]),
+    )
+    .await;
+    assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("decom-reader", "read", nodes[1]).here_only(),
+    )
+    .await;
+
+    let decisions = decide_both_ways(make_engine(&db), tenant_id, user_id, &nodes).await;
+    assert_eq!(
+        reason_codes(&decisions),
+        ["denied_by_rule", "denied_by_rule", "denied_by_rule"],
+        "an inherited deny must still beat a nearer allow, inheritable or not"
+    );
+}
+
+/// The flag on a GROUP's assignment. A role reaches a member through the
+/// group-inherited SELECT, a different statement from the direct one, so the
+/// flag has to be read there as well — or a non-inheritable group allow would
+/// silently cascade to every descendant for every member.
+#[tokio::test]
+async fn a_non_inheritable_group_assignment_stops_at_its_node_end_to_end() {
+    let (db, tenant_id, user_id) = setup().await;
+    let nodes = fleet_tree(&db, tenant_id).await;
+
+    let group_repo = SurrealGroupRepository::new(db.clone());
+    let group = group_repo
+        .create(CreateGroup {
+            tenant_id,
+            name: "fleet-ops".into(),
+            description: "fleet operators".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    group_repo
+        .add_member(tenant_id, user_id, group.id)
+        .await
+        .unwrap();
+
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: "fleet-reader".into(),
+            description: "read /fleet, and only /fleet".into(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    let permission_id = ensure_permission(&db, tenant_id, "read").await;
+    perm_repo
+        .grant_to_role(tenant_id, role.id, permission_id)
+        .await
+        .unwrap();
+    role_repo
+        .assign_to_group(
+            tenant_id,
+            group.id,
+            role.id,
+            AssignmentScope::resource_only(nodes[0]),
+        )
+        .await
+        .unwrap();
+
+    let decisions = decide_both_ways(make_engine(&db), tenant_id, user_id, &nodes).await;
+    assert_eq!(
+        reason_codes(&decisions),
+        ["allowed", "no_grant", "no_grant"],
+        "a non-inheritable group assignment must not reach the node's descendants"
+    );
+
+    // And the listing reads the flag back, so an operator can see it.
+    let listed = role_repo
+        .get_group_role_assignments(tenant_id, group.id)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(!listed[0].inherit);
+}
+
+/// Changing the flag is an unassign-and-assign. `has_role` is `UNIQUE(in,
+/// out)`, so assigning the same role again with a different flag is refused
+/// rather than silently producing a second edge or overwriting the first.
+#[tokio::test]
+async fn the_flag_changes_only_through_unassign_and_assign() {
+    let (db, tenant_id, user_id) = setup().await;
+    let nodes = fleet_tree(&db, tenant_id).await;
+
+    let role_id = assign_role_with_effect(
+        &db,
+        tenant_id,
+        user_id,
+        RoleSpec::allow("fleet-reader", "read", nodes[0]),
+    )
+    .await;
+    let role_repo = SurrealRoleRepository::new(db.clone());
+
+    let again = role_repo
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            role_id,
+            AssignmentScope::resource_only(nodes[0]),
+        )
+        .await;
+    assert!(
+        matches!(
+            again,
+            Err(axiam_core::error::AxiamError::AlreadyExists { .. })
+        ),
+        "a second assignment of the same role must be refused, got {again:?}"
+    );
+    let decisions = decide_both_ways(make_engine(&db), tenant_id, user_id, &nodes).await;
+    assert_eq!(reason_codes(&decisions), ["allowed", "allowed", "allowed"]);
+
+    role_repo
+        .unassign_from_user(tenant_id, user_id, role_id, Some(nodes[0]))
+        .await
+        .unwrap();
+    role_repo
+        .assign_to_user(
+            tenant_id,
+            user_id,
+            role_id,
+            AssignmentScope::resource_only(nodes[0]),
+        )
+        .await
+        .unwrap();
+    let decisions = decide_both_ways(make_engine(&db), tenant_id, user_id, &nodes).await;
+    assert_eq!(
+        reason_codes(&decisions),
+        ["allowed", "no_grant", "no_grant"]
     );
 }

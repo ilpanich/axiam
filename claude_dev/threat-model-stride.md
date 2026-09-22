@@ -266,6 +266,14 @@ The authorization engine is additive-only (allow-wins, default deny). A role gra
 > most-specific-wins — the property it buys is that adding a deny rule can never
 > widen access and can never be undone by adding allows, which is asserted by an
 > exhaustive property test.
+>
+> **Amended 2026-09-22 (T22.11, DF-021).** An assignment can now also be made
+> **non-inheritable** — `inherit: false` on the `has_role` edge — so a role
+> granted high in the hierarchy can be stopped at its node instead of cascading
+> to every child ("here and no further"), for allows and denies alike.
+> Precedence is unchanged: the flag decides which assignments are *applicable*
+> at a resource, never how deny-override weighs them (§2.2 rows 9–11 of the
+> design document). The flag's own hazards are T-285.
 
 **T-17 — Direct datastore access bypasses every application control**  
 `SurrealDB cluster (all tenant data)` (Store) · Information disclosure · Critical · Mitigated
@@ -1461,7 +1469,7 @@ A generic provider may carry an operator-uploaded icon, and that image is return
 
 The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP async), the default-deny RBAC engine with explicit deny-override and resource-hierarchy traversal, the decision cache, and the graph and audit stores behind them. Organization-level principals are evaluated under an explicit SubjectScope claim: only global grants carry across a tenant boundary, and an ordinary tenant principal cannot express cross-tenant reach at all. Since 1.0.0-beta05 a role assignment can additionally name the tenants it reaches (`tenant_scope`), confining an organization-level account to particular tenants, and organization-level actions require an organization-scoped principal, not merely the permission. 1.0.0-beta09 corrected three defects in how a grant's reach is computed — an assignment naming no resource is tenant-wide rather than inert, scoped grants inherit down the resource lineage without widening sideways, and the authorization-check endpoints resolve the acting tenant through the same reach check as every other route (T-226…T-228).
 
-*26 threats — 6 critical, 13 high, 7 medium; 0 open.*
+*27 threats — 6 critical, 14 high, 7 medium; 0 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1491,6 +1499,7 @@ The three authorization entry points (REST middleware, gRPC CheckAccess, AMQP as
 | T-226 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | An upgrade turns dormant unscoped role assignments into live tenant-wide grants | High | Mitigated |
 | T-227 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | Scope inheritance down the hierarchy widens a grant to sibling or unrelated resources | High | Mitigated |
 | T-228 | REST authz middleware <br/>*Process* | E | Two request extractors resolve the acting tenant separately, and one of them skips the reach check | High | Mitigated |
+| T-285 | RBAC engine (graph traversal, hierarchy, scopes) <br/>*Process* | E | A non-inheritable role assignment reaches further, or less far, than it reads | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1567,6 +1576,13 @@ The engine is allow-wins with default deny and no explicit deny. A role granted 
 > overrides every allow at any depth. Modelling exclusions by granting lower in
 > the hierarchy is still valid, but it is no longer the only option. See
 > `claude_dev/deny-override-design.md`.
+>
+> **Amended 2026-09-22 (T22.11, DF-021).** "Cannot be revoked on one child
+> alone" no longer holds in the other direction either: an assignment made with
+> `inherit: false` applies at its resource and at no descendant, so a parent
+> grant need not cascade at all. It stops allows and denies alike and changes
+> applicability, not precedence — a non-inheritable allow below an inheritable
+> deny is still denied. See T-285.
 
 **T-88 — Stale allow served after revocation**  
 `Decision cache` (Process) · Elevation of privilege · High · Mitigated
@@ -1679,6 +1695,19 @@ A `Scope` belongs to exactly one resource and scope names are unique per resourc
 The authorization-check endpoints are the only ones that bind `AuthenticatedPrincipal` rather than `AuthenticatedUser`, and the two extractors had a field of the same name meaning different things: `AuthenticatedUser::tenant_id` is the tenant being acted upon, resolved from the `X-Axiam-Tenant` header through the organization-reach check (T-193, T-204), while `AuthenticatedPrincipal::tenant_id` was the raw claim — the caller's own tenant. The visible symptom was fail-closed: every effective-access preview an organization-level administrator ran was evaluated in the organization's own tenant, where the subject being asked about has no assignments, and answered `no roles assigned` against a correct rule set. The structural hazard is worse than the symptom. The reach check is the only thing standing between "acting on another tenant" and "asserting another tenant's grants", and a second copy of it — or, as here, a second extractor with none — is exactly how the guard drifts on one path and not the others. The handler also hard-coded `SubjectScope::Tenant`, which is right for a checked-as subject (an ordinary member of the tenant being acted upon) and wrong for an organization principal asking about its own access, whose roles live in its own tenant.
 
 > Fixed in 1.0.0-beta09. `AuthenticatedPrincipal` resolves the acting tenant exactly as `AuthenticatedUser` does — same header, same tenant lookup, same reach check, same refusal when the caller's own tenant is not the organization scope — through one implementation, `resolve_active_tenant_for`, keyed on the home tenant id, so there is one copy of the check and both extractors run it. The session-revocation check keeps reading the principal's own tenant and still runs before the header is applied, which is where the session row lives. Both call sites pick the subject scope rather than hard-coding it, and the `authz:check_as` guard reads the caller's grants through `subject_scope()` for the same reason — with the fixed scope it looked for the permission in the wrong tenant and would refuse a caller that holds it. Only `authz_check.rs` binds this extractor, so the blast radius was the two check endpoints; a regression test pins the tenant a check is evaluated in.
+
+**T-285 — A non-inheritable role assignment reaches further, or less far, than it reads**  
+`RBAC engine (graph traversal, hierarchy, scopes)` (Process) · Elevation of privilege · High · Mitigated
+
+DF-021 asked for a role assignment that applies at its resource and not below it. `inherit: false` on the `has_role` edge does that, and it can go wrong three ways. **It can be honoured on one path and not another.** The engine decides through `evaluate` and, for batches, `evaluate_batch`, and an assignment reaches a subject through two different SELECTs — direct and group-inherited — so a flag read on one of them leaves a non-inheritable allow cascading to every descendant on the other; `deny-override-design.md` §5.1 records that exactly this class of regression in `applicable_role_ids` leaves every evaluator unit test green. **It can be stored where the engine ignores it** — an assignment naming no resource, or one of an `is_global` role — so an operator believes access stops at a node when it does not. **And it moves access in both directions:** `false` on an allow narrows, but `false` on a deny re-opens every descendant the deny covered, so a silent in-place toggle, or one a decision cache does not see, would widen access with nobody reviewing it.
+
+> **T22.11 (2026-09-22).** One clause in `applicable_role_ids` — the assignment's own resource always applies, an ancestor's only when `inherit` is true — shared by `evaluate` and `evaluate_batch`. The repository reads the field in both the direct and the group-inherited SELECT and in every assignment listing. Schema v66 adds it as `option<bool>` with no backfill, and absent reads as `true`, so every existing assignment and every client that does not send the field keeps its meaning.
+>
+> The three assign routes (user, group, service account) refuse `inherit: false` with **400** when no `resource_id` is named and when the role is global, each with an I4 twin that the same request without the field, or with `true`, is accepted. There is no update: `has_role` is `UNIQUE(in, out)`, so changing the flag is an unassign and an assign, each of which invalidates the subject's cached decisions (the tenant's, for a group), and the `grant.pre_assign` four-eyes hook payload carries `inherit`.
+>
+> Property tests over every rule set of a three-node chain: adding a deny never widens access whatever its flag; `false` on an allow never widens; `false` on a deny can, with row 10 as the asserted witness. Rows 9–11 are proved end to end through both `evaluate` and `evaluate_batch`, for a group-inherited assignment, and over gRPC `CheckAccess` and `BatchCheckAccess`. The clause was broken on purpose — the `inherit` guard alone, then the whole ancestor term — and the new tests went red both times.
+>
+> Residual, documented in `docs/admin/README.md`: making a role global *after* assigning it non-inheritably widens that assignment to everywhere, as it widens every assignment of the role; and the admin console does not yet offer the flag, so it is set through the API.
 
 </details>
 
@@ -2782,7 +2811,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-13 of 284 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
+13 of 285 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
 
 
 | # | Severity | Threat | Element | Why it is open |
@@ -2866,14 +2895,14 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Repudiation | 6 |
 | Information disclosure | 67 |
 | Denial of service | 28 |
-| Elevation of privilege | 56 |
+| Elevation of privilege | 57 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 32 | 1 |
-| High | 131 | 8 |
+| High | 132 | 8 |
 | Medium | 111 | 6 |
 | Low | 10 | 2 |
 
@@ -2885,7 +2914,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 58 | 4 |
 | Federation — SAML SP & OIDC relying party | 31 | 1 |
-| Authorization engine — RBAC, hierarchy & scopes | 26 | 0 |
+| Authorization engine — RBAC, hierarchy & scopes | 27 | 0 |
 | PKI, certificates & IoT device identity | 29 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
 | Deployment & platform (Kubernetes) | 28 | 5 |

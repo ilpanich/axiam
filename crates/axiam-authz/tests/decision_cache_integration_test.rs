@@ -398,6 +398,7 @@ fn build_engine(
             role: role(role_id, tenant),
             resource_id: Some(resource_id),
             tenant_scope: None,
+            inherit: true,
         }],
     );
 

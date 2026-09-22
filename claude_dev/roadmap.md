@@ -865,6 +865,21 @@ across sixteen request shapes on a real nginx. The image build now runs
 start-order scenario against the built image (console first, `502`, `200`, the
 backend moved, `200`). Records: none, verified. PR C.
 
+### T22.11 — A role assignment can be non-inheritable — Opus 5 ✓ LANDED
+DF-021. A resource-scoped assignment always cascaded to every descendant, so
+"this building and not its apartments" needed a deny at every apartment.
+`inherit: bool` on the `has_role` edge, default `true` (schema v66,
+`option<bool>`, no backfill): `false` applies the assignment at its resource
+only, for allows and denies alike. One clause in `applicable_role_ids`, shared
+by `evaluate` and `evaluate_batch`; read in both the direct and the
+group-inherited SELECT. The three assign routes take `inherit`, refuse `false`
+with `400` on a tenant-wide assignment and on a global role, and every listing
+shows it; changing it is unassign-and-assign (`UNIQUE(in, out)`), both of which
+invalidate. Precedence rows 9–11 in the design document, proved end to end
+through both engine paths and over gRPC; three property tests; the clause
+broken on purpose twice to watch the new tests fail. OpenAPI and the management
+registry regenerated. Threat **T-285**; **T-16** and **T-87** amended. PR D.
+
 ---
 
 ---

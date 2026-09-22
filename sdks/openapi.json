@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta16",
-    "x-axiam-spec-digest": "sha256:8a06f0367bed357dda85a76de34739cea8b19c107e137d1b7a85f5df80fd96cb"
+    "x-axiam-spec-digest": "sha256:b1f3112bf0c21b3c9cd9ac498f8b4aa7f566cd5db67883f15cfda0fd6f96769e"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -12104,6 +12104,13 @@
             "type": "string",
             "format": "uuid"
           },
+          "inherit": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the assignment also reaches the descendants of `resource_id`.\n\nOmitted — the default — or `true` is today's behaviour: a\nresource-scoped assignment applies at its resource and everywhere below\nit. `false` applies it at `resource_id` only, \"here and no further\",\nfor allow and deny grants alike.\n\nRefused with 400 when `false` is sent with no `resource_id` (a\ntenant-wide assignment has no node to stop at) or for a role with\n`is_global: true` (a global role applies everywhere by definition).\nThe flag is part of the assignment: to change it, unassign and assign\nagain."
+          },
           "resource_id": {
             "type": [
               "string",
@@ -12130,6 +12137,13 @@
           "service_account_id"
         ],
         "properties": {
+          "inherit": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the assignment also reaches the descendants of `resource_id`.\n\nOmitted — the default — or `true` is today's behaviour: a\nresource-scoped assignment applies at its resource and everywhere below\nit. `false` applies it at `resource_id` only, \"here and no further\",\nfor allow and deny grants alike.\n\nRefused with 400 when `false` is sent with no `resource_id` (a\ntenant-wide assignment has no node to stop at) or for a role with\n`is_global: true` (a global role applies everywhere by definition).\nThe flag is part of the assignment: to change it, unassign and assign\nagain."
+          },
           "resource_id": {
             "type": [
               "string",
@@ -12160,6 +12174,13 @@
           "user_id"
         ],
         "properties": {
+          "inherit": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the assignment also reaches the descendants of `resource_id`.\n\nOmitted — the default — or `true` is today's behaviour: a\nresource-scoped assignment applies at its resource and everywhere below\nit. `false` applies it at `resource_id` only, \"here and no further\",\nfor allow and deny grants alike.\n\nRefused with 400 when `false` is sent with no `resource_id` (a\ntenant-wide assignment has no node to stop at) or for a role with\n`is_global: true` (a global role applies everywhere by definition).\nThe flag is part of the assignment: to change it, unassign and assign\nagain."
+          },
           "resource_id": {
             "type": [
               "string",
@@ -18430,6 +18451,10 @@
           "role"
         ],
         "properties": {
+          "inherit": {
+            "type": "boolean",
+            "description": "Whether the assignment reaches the descendants of `resource_id` as\nwell as the resource itself (`true`, the default, and the value of every\nassignment written before the field existed) or applies at that\nresource only (`false`)."
+          },
           "resource_id": {
             "type": [
               "string",
@@ -18458,12 +18483,17 @@
         "type": "object",
         "description": "A group together with the resource scope of its assignment of this role.",
         "required": [
-          "group"
+          "group",
+          "inherit"
         ],
         "properties": {
           "group": {
             "$ref": "#/components/schemas/Group",
             "description": "The assigned group."
+          },
+          "inherit": {
+            "type": "boolean",
+            "description": "Whether the assignment also reaches the descendants of `resource_id`\n(`true`, the default) or applies at that resource only (`false`)."
           },
           "resource_id": {
             "type": [
@@ -18490,9 +18520,14 @@
         "type": "object",
         "description": "A service account together with the resource scope of its assignment.",
         "required": [
-          "service_account"
+          "service_account",
+          "inherit"
         ],
         "properties": {
+          "inherit": {
+            "type": "boolean",
+            "description": "Whether the assignment also reaches the descendants of `resource_id`\n(`true`, the default) or applies at that resource only (`false`)."
+          },
           "resource_id": {
             "type": [
               "string",
@@ -18522,9 +18557,14 @@
         "type": "object",
         "description": "A user together with the resource scope of their assignment of this role.",
         "required": [
-          "user"
+          "user",
+          "inherit"
         ],
         "properties": {
+          "inherit": {
+            "type": "boolean",
+            "description": "Whether the assignment also reaches the descendants of `resource_id`\n(`true`, the default) or applies at that resource only (`false`)."
+          },
           "resource_id": {
             "type": [
               "string",

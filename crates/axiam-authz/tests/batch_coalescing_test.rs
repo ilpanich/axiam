@@ -426,6 +426,7 @@ fn build_engine(
             role: role(role_id, tenant, false),
             resource_id: Some(resource_id),
             tenant_scope: None,
+            inherit: true,
         }],
     );
 
@@ -555,6 +556,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
             role: role(role_a, tenant, false),
             resource_id: Some(resource_x),
             tenant_scope: None,
+            inherit: true,
         }],
     );
     by_subject.insert(
@@ -563,6 +565,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
             role: role(role_b, tenant, false),
             resource_id: Some(resource_y),
             tenant_scope: None,
+            inherit: true,
         }],
     );
 
@@ -808,6 +811,7 @@ async fn coalesced_batch_resolves_scope_allow_and_not_found() {
             role: role(role_id, tenant, false),
             resource_id: Some(resource_id),
             tenant_scope: None,
+            inherit: true,
         }],
     );
 

@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A role assignment can stop at its resource: `inherit: false` (T22.11,
+  DF-021).** A resource-scoped assignment always applied to its resource and
+  every descendant, so "this building, not its apartments" could only be written
+  as an allow at the building plus a deny at every apartment — a workaround that
+  grows with the tree.
+
+  The three assign routes — `POST /api/v1/roles/{role_id}/users`, `.../groups`,
+  `.../service-accounts` — take an optional `inherit`. Omitted or `true` is
+  today's cascading assignment; `false` applies the assignment at `resource_id`
+  only, "here and no further". The flag belongs to the assignment, not to the
+  role's grants, so it stops **allows and denies alike**, and it changes which
+  assignments reach a resource, never how deny-override weighs them: a
+  non-inheritable allow below an inheritable deny is still denied. The
+  precedence table gains rows 9–11 and loses none
+  (`claude_dev/deny-override-design.md` §2.2).
+
+  - **Refused with `400` where it would be ignored:** `inherit: false` with no
+    `resource_id` (a tenant-wide assignment has no resource to stop at), and on
+    a role with `is_global: true` (a global role applies everywhere).
+  - **No update.** A subject holds a role at most once, so changing the flag is
+    unassign-and-assign; both invalidate the subject's cached decisions. Mind
+    the direction: `false` on an allow narrows access, `false` on a **deny**
+    widens it.
+  - **Visible.** Every assignment listing carries `inherit` beside
+    `resource_id`, and the `grant.pre_assign` reactor payload carries it too.
+    The admin console does not offer the flag yet; set it through the API.
+
+  Nothing existing changes meaning: schema v66 adds `has_role.inherit` as
+  `option<bool>` with no backfill, and an absent value reads as `true`.
+  OpenAPI and the management registry regenerated. Threat **T-285**; T-16 and
+  T-87 amended.
+
 - **`axiam-server setup-token --remint` (T22.7, DF-019).** Only the SHA-256 hash
   of the one-time bootstrap setup token is stored, and the first-boot mint is a
   no-op once a token row exists — so an operator who lost the token from the

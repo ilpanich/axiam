@@ -402,6 +402,7 @@ mod tests {
                 role: r,
                 resource_id: None,
                 tenant_scope: None,
+                inherit: true,
             }],
             grants,
         );
@@ -438,6 +439,7 @@ mod tests {
                     role: allower,
                     resource_id: None,
                     tenant_scope: None,
+                    inherit: true,
                 },
                 RoleAssignment {
                     role: denier,
@@ -446,6 +448,7 @@ mod tests {
                     // `RbacScopeAuthority`.
                     resource_id: Some(Uuid::new_v4()),
                     tenant_scope: None,
+                    inherit: true,
                 },
             ],
             grants,
@@ -478,6 +481,7 @@ mod tests {
                 role: r,
                 resource_id: None,
                 tenant_scope: None,
+                inherit: true,
             }],
             grants,
         );
@@ -509,6 +513,7 @@ mod tests {
                 role: r,
                 resource_id: None,
                 tenant_scope: None,
+                inherit: true,
             }],
             grants,
         );

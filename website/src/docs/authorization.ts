@@ -332,6 +332,10 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
         text: "There are two independent ways for a grant to reach everything, and it is worth being precise about which one you are using. **The assignment names no resource**: it is tenant-wide — every resource in the tenant, at every depth — which is what you get by assigning a role to a user or a group without picking a resource. **The role carries `is_global`**: it applies everywhere *however* it is assigned, including when the assignment does name a resource. An assignment that does name a resource reaches that resource and cascades to its descendants, unless a deny overrides it.",
       },
       {
+        type: "p",
+        text: `Unless the assignment says otherwise. A resource-scoped assignment made with **\`inherit: false\`** applies at the resource it names and at no descendant — *here and no further*. The flag belongs to the assignment, not to the role's grants, so it stops allows and denies alike, and it changes only which assignments reach a resource, never how deny-override weighs the ones that do. Omitting it, or sending \`true\`, is the cascading assignment every client has always made. It is refused with 400 on an assignment that names no resource, and on a role with \`is_global\`, because there it would be stored and ignored. To change it, unassign and assign again — and note which way that moves access: \`false\` on an allow narrows it, \`false\` on a deny widens it. See [the precedence table](#/docs/deny#table) and the [administrator guide](${GH_BLOB}/docs/admin/README.md#stopping-an-assignment-at-its-resource-inherit-false).`,
+      },
+      {
         type: "note",
         text: "Tenant-wide is not organization-wide. An unscoped assignment made in an organization's own reserved scope reaches that scope, not the organization's member tenants — see [Organization-level principals](#/docs/organization-scope).",
       },
@@ -703,6 +707,24 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
             "read",
             "**deny** (`denied_by_rule`)",
             "Global versus resource-scoped changes applicability, not precedence.",
+          ],
+          [
+            "allow `read` on `/fleet`, `inherit: false`",
+            "read",
+            "**deny** (`no_grant`)",
+            "A non-inheritable allow stops at its node. On `/fleet` itself it is **allow**.",
+          ],
+          [
+            "deny `read` on `/fleet`, `inherit: false`; allow `read` on `/fleet` via another role",
+            "read",
+            "**allow**",
+            "The deny stops at `/fleet`, so only the allow reaches the leaf. On `/fleet` itself: **deny**.",
+          ],
+          [
+            "allow `read` on `/fleet/decommissioned/unit-7`, `inherit: false`",
+            "read",
+            "**allow**",
+            "The node an assignment names is always in scope; the flag only removes descendants.",
           ],
         ],
       },

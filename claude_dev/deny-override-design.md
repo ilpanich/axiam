@@ -41,6 +41,15 @@ Deny-override gives one property that is worth more than the expressiveness:
 **adding a deny rule can never widen access, and can never be undone by adding
 allows.** That is checkable, and it is asserted as a property test.
 
+The `inherit` flag (§2.2 rows 9–11) leaves that property intact — a
+non-inheritable deny is a deny that reaches fewer nodes, never a widening of
+any allow — and adds a clause of its own: **setting `inherit: false` on an
+allow never widens access; on a deny it can** (row 10 is the witness: the
+descendants the deny used to reach are no longer denied). Changing the flag is
+therefore an unassign-and-assign, both of which invalidate the subject's cached
+decisions like any other assignment change; there is no in-place update. All
+three statements are property tests over every rule set of a three-node chain.
+
 The cost is real and should be stated: you cannot express "deny the subtree,
 except this one leaf". The answer is to narrow the deny, not to widen the
 allow. If that turns out to be too restrictive in practice, the escape hatch is
@@ -64,6 +73,27 @@ Resources: `/fleet` → `/fleet/decommissioned` → `/fleet/decommissioned/unit-
 
 Row 4 is the one that surprises people. It is also the one that makes the
 property in §2.1 true.
+
+**Non-inheritable assignments (T22.11, DF-021).** A role assignment carries
+`inherit`, default `true`. With `inherit: false` a resource-scoped assignment
+applies at the resource it names and at no descendant — "here and no further".
+The flag lives on the assignment (`has_role`), not on the grant, because
+inheritance is about *where* an assignment applies, which is what the
+assignment's `resource_id` already answers; so it stops allows and denies
+alike. It changes which assignments are **applicable** at a node
+(`applicable_role_ids`), never how the applicable ones are **evaluated**, so
+rows 1–8 keep their answers and the table gains three rows and loses none.
+Checks below are on `unit-7` unless the row says otherwise:
+
+| # | Rules | Check | Result | Why |
+|---|---|---|---|---|
+| 9 | allow `read` on `/fleet`, `inherit: false` | read on `unit-7` | **deny** (`no_grant`) | the allow stops at `/fleet`; on `/fleet` itself it is **allow** |
+| 10 | deny `read` on `/fleet`, `inherit: false`; allow `read` on `/fleet` via another role, inheritable | read on `unit-7` | **allow** | the deny stops at `/fleet`, so only the allow reaches `unit-7`; on `/fleet` itself: **deny** (`denied_by_rule`) — row 6 |
+| 11 | allow `read` on `/fleet/decommissioned/unit-7`, `inherit: false` | read on `unit-7` | **allow** | the node an assignment names is always in scope; the flag only ever removes descendants |
+
+`inherit: false` is refused at write time (400) where the engine would ignore
+it: an assignment naming no resource (tenant-wide, no node to stop at) and an
+assignment of a role with `is_global: true` (everywhere by definition).
 
 ### 2.3 Scope interaction
 
@@ -132,10 +162,15 @@ contract. Deny rules are not special to the cache; they are grants.
 
 ## 3. API surface
 
-`effect: "allow" | "deny"`, defaulting to `"allow"`, on:
+`effect: "allow" | "deny"`, defaulting to `"allow"`, on role→permission grant
+create/update (REST, gRPC, AMQP).
 
-- role→permission grant create/update (REST, gRPC, AMQP),
-- role assignment on a resource node.
+An earlier revision of this section also listed "role assignment on a resource
+node". That was never implemented, and is not needed: `effect` is a property of
+the role→permission `grants` edge, and a role whose grants are denies, assigned
+at a node, denies there. What an assignment *does* carry is where it applies —
+`resource_id`, and since T22.11 `inherit` (§2.2 rows 9–11) — on the three
+assign routes, optional, defaulting to `true`.
 
 **Backward compatible by construction.** Existing data has no `effect` field
 and reads back as `allow`; existing clients send no `effect` and get `allow`.
@@ -203,6 +238,18 @@ unit tests passing** while row 4 inverts from deny to allow. Only the
 end-to-end tests fail. Anything asserting a row of §2.2 belongs in the second
 file, or in both.
 
+Rows 9–11 are asserted in both files, and the end-to-end half decides each
+row through `evaluate` **and** `evaluate_batch` (the coalesced path, which
+re-derives applicability from its own lookups), plus a group-inherited
+assignment, since a group's roles reach a member through a separate SELECT.
+When T22.11 landed the ancestor clause was broken on purpose twice: dropping
+only the `a.inherit &&` guard turned 3 unit tests and 4 end-to-end tests red
+(rows 9 and 10, the group row, the unassign-and-assign row); dropping the whole
+ancestor term turned the same 3 unit tests and 12 end-to-end tests red,
+including rows 3 and 4. One gRPC `CheckAccess`/`BatchCheckAccess` test per row
+(`crates/axiam-api-grpc/tests/grpc_authz_test.rs`) went red for rows 9 and 10
+under the first break.
+
 ## 6. Explicitly out of scope
 
 - **Deny on a permission itself** (as opposed to on a grant). A permission is a
@@ -210,3 +257,7 @@ file, or in both.
   could be a "deny-read" permission, which is incoherent.
 - **Conditional / attribute-based denies.** That is ABAC, not RBAC deny-override.
 - **Deny exceptions** ("deny the subtree except this leaf") — see §2.1.
+  Distinct from, and not delivered by, `inherit: false`: that flag stops an
+  assignment at its node ("here and no further", §2.2 rows 9–11), which is
+  supported; it cannot carve one leaf out of a subtree an inheritable deny
+  covers. The answer there is still to narrow the deny.

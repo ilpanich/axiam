@@ -107,14 +107,22 @@ mod tests {
         let found = legacy_secret_env_warnings(|v| set.contains(v));
 
         assert_eq!(found.len(), 4);
-        for w in &found {
-            assert!(
-                w.resolved.starts_with("AXIAM__AUTH__"),
-                "{} resolved to {}, which is not what the env provider reads",
-                w.legacy,
-                w.resolved
-            );
-        }
+        // The message interpolates nothing. Both fields are variable *names*
+        // and never values — `legacy_secret_env_warnings` takes an is-set
+        // predicate, so no value is reachable from here — but a panic message
+        // reaches stderr and a CI log that outlives the run, so a test is not
+        // exempt from the rule this repository already settled once: don't
+        // format something that reads as secret material into an assertion.
+        // CodeQL reported exactly this shape (`rust/cleartext-logging`, high)
+        // and is right about the construct even though nothing leaks. The four
+        // inputs are the four literals directly above; a failure is
+        // reproducible without them being printed back.
+        assert!(
+            found
+                .iter()
+                .all(|w| w.resolved.starts_with("AXIAM__AUTH__")),
+            "every legacy spelling must resolve to an AXIAM__AUTH__ variable"
+        );
     }
 
     /// The I4 twin: a deployment that set nothing, or set the right variable,

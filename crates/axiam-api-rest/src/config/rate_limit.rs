@@ -176,6 +176,8 @@ pub struct MachineLimitPreset {
     pub revoke_per_min: u32,
     /// REST authz-check endpoints per minute per IP.
     pub authz_check_per_min: u32,
+    /// `POST /api/v1/auth/device` per minute per IP.
+    pub device_login_per_min: u32,
     /// gRPC `AuthorizationService` per second per IP — applied to
     /// `axiam_api_grpc::GrpcConfig::grpc_authz_per_sec` by the composition
     /// root (`axiam-server::main`). Kept here so the whole family has one
@@ -193,6 +195,8 @@ pub const ENV_INTROSPECT_PER_MIN: &str = "AXIAM__RATE_LIMIT__INTROSPECT_PER_MIN"
 pub const ENV_REVOKE_PER_MIN: &str = "AXIAM__RATE_LIMIT__REVOKE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN`.
 pub const ENV_AUTHZ_CHECK_PER_MIN: &str = "AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN";
+/// `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` — S-2 / DF-028.
+pub const ENV_DEVICE_LOGIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN` — B3.
 pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` — B5, never preset.
@@ -261,6 +265,7 @@ impl RateLimitProfile {
                 introspect_per_min: 6_000,
                 revoke_per_min: 600,
                 authz_check_per_min: 6_000,
+                device_login_per_min: 300,
                 grpc_authz_per_sec: 1_000,
             }),
             // Private-network sizing: 6 000/min token = 100/s per client
@@ -274,6 +279,7 @@ impl RateLimitProfile {
                 introspect_per_min: 60_000,
                 revoke_per_min: 6_000,
                 authz_check_per_min: 60_000,
+                device_login_per_min: 3_000,
                 grpc_authz_per_sec: 5_000,
             }),
         }
@@ -519,6 +525,36 @@ pub struct RateLimitConfig {
     /// reconciliation ever measures past this, split it then — with the
     /// measurement, not ahead of it.
     pub scim_per_min: u32,
+    /// Max `POST /api/v1/auth/device` requests per minute per IP (default:
+    /// 60 — S-2 / DF-028).
+    ///
+    /// The route carried **no limiter at all**: it was a bare
+    /// `.route("/device", …)` while every neighbouring auth resource —
+    /// `/auth/login`, the three OPAQUE routes, the six WebAuthn ceremony
+    /// routes, federation sign-in — was wrapped. A TLS handshake carrying a
+    /// client certificate is the most expensive thing an unauthenticated
+    /// caller can make this server do, and the one auth endpoint that performs
+    /// one was the one with nothing in front of it.
+    ///
+    /// **A machine endpoint, so a preset may scale it**, unlike the human
+    /// family above. The caller is a device, the traffic shape is a fleet's
+    /// re-login interval, and a deployment whose whole fleet sits behind one
+    /// NAT is exactly the case `gateway`/`mesh` exist for — the presets take
+    /// it to 300 and 3 000, the same 5x and 50x `token_per_min` takes.
+    ///
+    /// **Sized from the honest traffic, not from capacity.** One device
+    /// re-authenticates once per access-token lifetime — 900 s by default, so
+    /// one handshake per fifteen minutes each. Sixty per minute per IP holds a
+    /// single-address fleet of nine hundred devices with the whole allowance
+    /// to spare, and still refuses a caller trying to spend the server's CPU
+    /// on handshakes. Deliberately an order of magnitude below
+    /// `token_per_min`: a handshake costs more than a token exchange and the
+    /// legitimate rate is far lower.
+    ///
+    /// Per-IP, never client-keyed: the identity on this path is a certificate
+    /// presented in the TLS handshake, and there is no OAuth2 `client_id` in
+    /// the request to key a bucket on.
+    pub device_login_per_min: u32,
     /// Rate-limit bucket-key derivation mode (D8, default: `Ip` — current
     /// behavior, unchanged). See [`RateLimitKeyMode`] for the full
     /// rationale and scope (only `/oauth2/token`, `/oauth2/revoke`,
@@ -587,6 +623,10 @@ impl Default for RateLimitConfig {
             // same stated reason: privileged M2M provisioning traffic whose
             // real cost is Argon2id. Never preset — see the field docs.
             scim_per_min: 600,
+            // --- S-2 / DF-028: the one auth endpoint that had no limiter ---
+            // A machine endpoint — see the field docs for why 60, and why a
+            // preset may move it when the human family may not.
+            device_login_per_min: 60,
             key: RateLimitKeyMode::Ip,
             profile: RateLimitProfile::Internet,
         }
@@ -657,6 +697,11 @@ impl RateLimitConfig {
                 ENV_AUTHZ_CHECK_PER_MIN,
                 &mut self.authz_check_per_min,
                 preset.authz_check_per_min,
+            ),
+            (
+                ENV_DEVICE_LOGIN_PER_MIN,
+                &mut self.device_login_per_min,
+                preset.device_login_per_min,
             ),
         ] {
             if is_set(env) {
@@ -749,6 +794,10 @@ impl RateLimitConfig {
         assert!(
             self.authz_check_per_min >= 1,
             "authz_check_per_min must be >= 1"
+        );
+        assert!(
+            self.device_login_per_min >= 1,
+            "device_login_per_min must be >= 1"
         );
         assert!(
             self.device_authorization_per_min >= 1,
@@ -900,6 +949,7 @@ mod tests {
             (ENV_INTROSPECT_PER_MIN, d.introspect_per_min),
             (ENV_REVOKE_PER_MIN, d.revoke_per_min),
             (ENV_AUTHZ_CHECK_PER_MIN, d.authz_check_per_min),
+            (ENV_DEVICE_LOGIN_PER_MIN, d.device_login_per_min),
             (
                 ENV_DEVICE_AUTHORIZATION_PER_MIN,
                 d.device_authorization_per_min,
@@ -944,6 +994,7 @@ mod tests {
                 (ENV_INTROSPECT_PER_MIN, cfg.introspect_per_min),
                 (ENV_REVOKE_PER_MIN, cfg.revoke_per_min),
                 (ENV_AUTHZ_CHECK_PER_MIN, cfg.authz_check_per_min),
+                (ENV_DEVICE_LOGIN_PER_MIN, cfg.device_login_per_min),
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),

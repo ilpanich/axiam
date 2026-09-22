@@ -258,7 +258,28 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::post().to(handlers::auth::setup_confirm_mfa::<C>)),
             )
-            .route("/device", web::post().to(handlers::auth::device_auth::<C>))
+            // S-2 / DF-028. This route was bare — no governor, no shared
+            // store — while every neighbour above and below it was wrapped. A
+            // TLS handshake carrying a client certificate is the most
+            // expensive thing an unauthenticated caller can make this server
+            // do, and it is the only auth endpoint that performs one. Both
+            // layers, as on `/auth/login`: the governor is per-process and the
+            // shared store is what makes the limit hold across replicas.
+            //
+            // Per-IP unconditionally, like `/login` and for the same reason:
+            // the identity here is a certificate presented in the handshake,
+            // and there is no `client_id` in the request to key on. A fleet
+            // behind one NAT is why `device_login_per_min` sits in the machine
+            // family, where a posture preset can raise it.
+            .service(
+                web::resource("/device")
+                    .wrap(build_governor(rate_limit_cfg.device_login_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "device_login",
+                        rate_limit_cfg.device_login_per_min,
+                    ))
+                    .route(web::post().to(handlers::auth::device_auth::<C>)),
+            )
             // All six WebAuthn ceremony routes take their limit from
             // `webauthn_per_min`, the way the five MFA routes above take theirs
             // from `mfa_per_min`. Each route still gets its OWN bucket —

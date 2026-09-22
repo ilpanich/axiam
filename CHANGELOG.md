@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The device mTLS login is rate-limited (T22.2, DF-028).**
+  `POST /api/v1/auth/device` was registered bare — no governor, no shared
+  store — while `/auth/login`, the three OPAQUE routes, the six WebAuthn
+  ceremony routes and the federation sign-in routes all carried both layers.
+  It is also public and CSRF-exempt, as it has to be: a device has no session
+  and no cookie. So the one auth endpoint that makes the server complete a TLS
+  handshake with a client certificate — the most expensive thing an
+  unauthenticated caller can ask of it — was the one an unauthenticated caller
+  could ask for without limit.
+
+  New knob `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, default **60**, per IP.
+  It sits in the machine family, so `AXIAM__RATE_LIMIT__PROFILE` scales it to
+  300 (`gateway`) and 3 000 (`mesh`) — the same 5x and 50x `TOKEN_PER_MIN`
+  takes, which is what a fleet behind a single NAT should reach for. No
+  existing default moves: a device re-authenticates once per access-token
+  lifetime (900 s), so sixty per minute holds nine hundred devices on one
+  address and no deployment on the shipped posture sees a new 429.
+
 - **A signing CA now issues only for the tenant it signs for (T22.1, DF-017 /
   DF-025).** `prepare_leaf_issuance` scoped the issuing CA to the
   **organization** and never read `ca_certificate.tenant_id` — the column that

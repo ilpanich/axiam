@@ -763,6 +763,14 @@ lives in the organization scope. `404`, following the cross-organization
 precedent. Nine unit tests plus the end-to-end twin; threat **T-281**, and
 **T-98** corrected where it claimed this was already enforced. PR A.
 
+### T22.2 — The device mTLS login gets a rate limiter — Sonnet 5 ✓ LANDED
+DF-028 (new, from §1.7 of the plan). `POST /api/v1/auth/device` was a bare route
+while every neighbouring auth resource carried a governor and a shared store.
+`AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, default 60 per IP, in the machine
+family so a posture preset scales it (300 / 3 000) for a fleet behind one NAT.
+No existing default moves. Six tests against the real route wiring; threat
+**T-282**. PR A.
+
 ---
 
 ---
@@ -793,7 +801,7 @@ precedent. Nine unit tests plus the end-to-end twin; threat **T-281**, and
 | Phase 19 | 26 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
-| Phase 22 | 1+ | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes) |
+| Phase 22 | 2+ | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes) |
 
 **Total: 112 tasks across 22 complete phases, plus Phase 22 in progress**
 

@@ -22,8 +22,15 @@
 > the entry point for that pass; the beta14 plan was executed on 2026-09-13 and
 > records what it landed.**
 >
-> **The 2026-09-22 dogfooding-remediation wave (model 2.17.0), first item.** One
-> threat enters, Mitigated on arrival: **T-281**, a tenant administrator issuing
+> **The 2026-09-22 dogfooding-remediation wave (model 2.17.0).** Two threats
+> enter so far, both Mitigated on arrival. **T-282**: `POST
+> /api/v1/auth/device` was a bare route — no governor, no shared store — while
+> every neighbouring auth resource carried both, so the one endpoint whose
+> happy path makes the server complete a client-certificate TLS handshake was
+> the one an unauthenticated caller could drive without limit. It now has
+> `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, default 60 per IP, in the machine
+> family so a posture preset scales it for a fleet behind one NAT. And
+> **T-281**, a tenant administrator issuing
 > a leaf under another tenant's signing CA — or directly under the organization
 > anchor — because `prepare_leaf_issuance` scoped the issuing CA to the
 > organization and never read the `tenant_id` the CA row carries. It is the
@@ -41,7 +48,7 @@
 > [`threat-model-stride.md`](threat-model-stride.md) already carried T-272 …
 > T-280 — the nine Phase 21 entries of 2026-09-17, four of them since closed.
 > That wave reached one of the three artifacts and not the other two. The model
-> is therefore **281 threats, 268 mitigated / 13 open**, and the counts here are
+> is therefore **282 threats, 269 mitigated / 13 open**, and the counts here are
 > corrected to it. The nine entries still have to be written into the Threat
 > Dragon file itself, from the text `threat-model-stride.md` already holds; that
 > is a maintainer task and is not part of this wave, which is why `threatTop` in
@@ -528,7 +535,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 281 threats** and a
+The system is verified against a **STRIDE threat model of 282 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -551,8 +558,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 281 |
-| Mitigated / Open | 268 / 13 |
+| Threats identified | 282 |
+| Mitigated / Open | 269 / 13 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -1420,7 +1427,7 @@ checklist — most of the threat model's open items live here.
 **The open risk register**
 
 Every threat the model does not record as mitigated, most severe first — 13 of
-281. On the website this table is generated from the Threat Dragon model, so it
+282. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind

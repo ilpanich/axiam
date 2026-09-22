@@ -410,6 +410,59 @@ docs say so.
 
 ### S-2 — the device mTLS login gets a rate limiter (§1.7; suggested DF-028) — Sonnet 5
 
+> **EXECUTED — 2026-09-22, PR A, commit 2 of 4.**
+>
+> **Shipped exactly as specified.** `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`,
+> default 60, per IP, in the machine family, both layers on `/auth/device`
+> (`build_governor` + `RateLimitShared("device_login")`) as on `/auth/login`.
+> Preset values 300 (`gateway`) and 3 000 (`mesh`) — the same 5x and 50x
+> `token_per_min` takes, so the family scales by one rule rather than by taste;
+> the plan left the numbers to the executor.
+>
+> **Tests.** `crates/axiam-api-rest/tests/device_login_rate_limit_test.rs`,
+> six tests driving the real `register_api_v1_routes` wiring so a regression
+> to a bare route fails rather than passing quietly:
+> `device_login_is_rate_limited_per_ip` (with its `Retry-After`),
+> `one_exhausted_address_does_not_refuse_another`,
+> `login_per_min_is_unchanged_by_the_device_knob` (the I4 twin, asserting both
+> the unmoved `10` and that the buckets do not cross),
+> `the_shipped_default_is_sixty_per_minute` (the I1, as arithmetic over the
+> token lifetime rather than as a bare constant),
+> `device_login_limit_scales_with_the_machine_preset`, and
+> `an_explicit_device_login_value_beats_the_preset`.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`documented_presets_match_applied_profiles` needed extending, and one
+>    sibling test needed leaving alone.** The plan names the first. There are
+>    two tables in `config/rate_limit.rs` keyed on `ENV_*` constants: the
+>    posture-doc pair (`documented_defaults_match_shipped_config` and
+>    `documented_presets_match_applied_profiles`), which the new row joins, and
+>    `public_benchmark_doc_shipped_defaults_match_code`, which asserts every
+>    knob it lists appears in `benchmarks/PUBLIC_BENCH_ANALYSIS.md`. Adding the
+>    device row to the second would have failed: that document is a record of a
+>    measurement run, and this limit is sized from the honest traffic rather
+>    than from capacity, so there is nothing measured to put in it.
+> 2. **Two prose sentences enumerate the machine family** — one in
+>    `docs/deployment/README.md`'s `PROFILE` row, one in
+>    `rate-limit-sizing.md` §3 — and both had to gain "device login" or the
+>    table above them would contradict them.
+> 3. **`check-config-key-coverage.py` wants the key on the website too.** The
+>    plan names `docs/deployment/README.md` and the rate-limit page; the gate
+>    reads `website/src/docs/configuration.ts` and fails a key documented only
+>    in `docs/`. Four documentation sites in total, then: the posture table,
+>    the deployment config reference, the website configuration page, and the
+>    two family sentences.
+>
+> **Records.** Threat T-282 on the `mTLS device auth` cell (Denial of service,
+> Medium, Mitigated); both STRIDE documents, counts updated;
+> `gen-threat-model.mjs` run — *"threatModel.ts: 9 diagrams, 273 threats (260
+> mitigated, 13 open)"* — generated files reverted. Roadmap T22.2. CHANGELOG
+> under **Security**. Docs: the posture table, the deployment config reference
+> row, and the two family sentences. No OpenAPI change: the endpoint's contract
+> is unchanged and a 429 is not a documented response on any route.
+
+
 **The fix.** A new knob in the **machine family** —
 `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, default **60**, per IP — wrapped on
 `/auth/device` exactly as `/auth/login` is at `server.rs:181-182`:

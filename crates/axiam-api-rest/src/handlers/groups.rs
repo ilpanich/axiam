@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::AuthenticatedPrincipal;
 use crate::handlers::service_accounts::ServiceAccountResponse;
 use crate::handlers::users::UserResponse;
 use crate::state::AppState;
@@ -64,20 +64,20 @@ pub struct ServiceAccountMemberPath {
     responses(
         (status = 201, description = "Group created", body = Group),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn create<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<CreateGroupRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:create", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let input = CreateGroup {
-        tenant_id: user.tenant_id,
+        tenant_id: principal.tenant_id,
         name: req.name,
         description: req.description,
         metadata: req.metadata,
@@ -95,20 +95,20 @@ pub async fn create<C: Connection + Clone>(
     responses(
         (status = 200, description = "List of groups", body = inline(PaginatedResult<Group>)),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:list", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let result = state
         .group_repo
-        .list(user.tenant_id, query.into_inner())
+        .list(principal.tenant_id, query.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -123,20 +123,20 @@ pub async fn list<C: Connection + Clone>(
         (status = 200, description = "Group found", body = Group),
         (status = 404, description = "Group not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn get<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let group = state
         .group_repo
-        .get_by_id(user.tenant_id, path.into_inner())
+        .get_by_id(principal.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(group))
 }
@@ -152,21 +152,21 @@ pub async fn get<C: Connection + Clone>(
         (status = 200, description = "Group updated", body = Group),
         (status = 404, description = "Group not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn update<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateGroup>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:update", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let group = state
         .group_repo
-        .update(user.tenant_id, path.into_inner(), body.into_inner())
+        .update(principal.tenant_id, path.into_inner(), body.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(group))
 }
@@ -181,27 +181,27 @@ pub async fn update<C: Connection + Clone>(
         (status = 204, description = "Group deleted"),
         (status = 404, description = "Group not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn delete<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:delete", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     state
         .group_repo
-        .delete(user.tenant_id, path.into_inner())
+        .delete(principal.tenant_id, path.into_inner())
         .await?;
     // D7 (REVOCATION — security critical): deleting a group removes its
     // inherited roles from every member. Member set unknown here — flush tenant.
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -220,29 +220,29 @@ pub async fn delete<C: Connection + Clone>(
     responses(
         (status = 204, description = "Member added"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn add_member<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<AddMemberRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:add_member", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let new_member = body.user_id;
     state
         .group_repo
-        .add_member(user.tenant_id, body.user_id, path.into_inner())
+        .add_member(principal.tenant_id, body.user_id, path.into_inner())
         .await?;
     // D7: adding a member widens that one subject's inherited access (safe
     // direction) — targeted flush so it takes effect immediately.
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, new_member)
+        .invalidate_subject(principal.tenant_id, new_member)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -259,21 +259,21 @@ pub async fn add_member<C: Connection + Clone>(
     responses(
         (status = 200, description = "List of group members", body = inline(PaginatedResult<UserResponse>)),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_members<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:list_members", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let result = state
         .group_repo
-        .get_members(user.tenant_id, path.into_inner(), query.into_inner())
+        .get_members(principal.tenant_id, path.into_inner(), query.into_inner())
         .await?;
     let items: Vec<UserResponse> = result.items.into_iter().map(UserResponse::from).collect();
     Ok(HttpResponse::Ok().json(PaginatedResult {
@@ -296,28 +296,28 @@ pub async fn list_members<C: Connection + Clone>(
     responses(
         (status = 204, description = "Member removed"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn remove_member<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<MemberPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:remove_member", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
     state
         .group_repo
-        .remove_member(user.tenant_id, p.user_id, p.group_id)
+        .remove_member(principal.tenant_id, p.user_id, p.group_id)
         .await?;
     // D7 (REVOCATION — security critical): removing a member drops the group's
     // inherited roles for exactly this subject — targeted flush, immediate.
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, p.user_id)
+        .invalidate_subject(principal.tenant_id, p.user_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -344,29 +344,29 @@ pub async fn remove_member<C: Connection + Clone>(
         (status = 404, description = "Group or service account not found in this tenant"),
         (status = 409, description = "Already a member"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn add_service_account_member<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<AddServiceAccountMemberRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:add_member", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let new_member = body.service_account_id;
     state
         .group_repo
-        .add_service_account_member(user.tenant_id, new_member, path.into_inner())
+        .add_service_account_member(principal.tenant_id, new_member, path.into_inner())
         .await?;
     // D7: adding a member widens that one subject's inherited access (the safe
     // direction) — targeted flush so it takes effect immediately.
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, new_member)
+        .invalidate_subject(principal.tenant_id, new_member)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -383,28 +383,28 @@ pub async fn add_service_account_member<C: Connection + Clone>(
     responses(
         (status = 204, description = "Service account removed from the group"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn remove_service_account_member<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<ServiceAccountMemberPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:remove_member", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
     state
         .group_repo
-        .remove_service_account_member(user.tenant_id, p.service_account_id, p.group_id)
+        .remove_service_account_member(principal.tenant_id, p.service_account_id, p.group_id)
         .await?;
     // D7 (REVOCATION): removing a member narrows access, so a cached allow must
     // not outlive it.
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, p.service_account_id)
+        .invalidate_subject(principal.tenant_id, p.service_account_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -422,21 +422,21 @@ pub async fn remove_service_account_member<C: Connection + Clone>(
         (status = 200, description = "Service accounts in this group",
          body = inline(PaginatedResult<ServiceAccountResponse>)),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_service_account_members<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:list_members", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let page = state
         .group_repo
-        .get_service_account_members(user.tenant_id, path.into_inner(), query.into_inner())
+        .get_service_account_members(principal.tenant_id, path.into_inner(), query.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(PaginatedResult {
         items: page
@@ -459,20 +459,20 @@ pub async fn list_service_account_members<C: Connection + Clone>(
     responses(
         (status = 200, description = "Groups this service account belongs to", body = [Group]),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_service_account_groups<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("groups:list_members", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let groups = state
         .group_repo
-        .get_service_account_groups(user.tenant_id, path.into_inner())
+        .get_service_account_groups(principal.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(groups))
 }

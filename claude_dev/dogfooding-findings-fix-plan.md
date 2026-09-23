@@ -1414,6 +1414,158 @@ handshake behaviour, not the struct.
 
 ### S-9 — service-account principals on the management routes (DF-013) — Opus 5
 
+> **EXECUTED — 2026-09-23, PR F, one commit** (branch `feat/m2m-management`, cut
+> from `94a0865`, the merge of #493).
+>
+> **Shipped.** The eight D-5 families take `AuthenticatedPrincipal`: **66
+> handlers** in `handlers/{resources,scopes,permissions,roles,groups,
+> service_accounts,certificates,webhooks}.rs`, which serve exactly the **66 of
+> the 146 routes** in `ROUTE_PERMISSION_MAP` whose permission is in those
+> families. §3 says "~100 handler signatures" and §4 says "~70". Both counted
+> something wider: ~100 is every `.check(&user, …)` site, which the plan's own
+> `RequirePermission` doc comment also calls "~100". D-5 is
+> `permissions::M2M_MANAGEMENT_FAMILIES` / `HUMAN_ONLY_FAMILIES` (8 + 18 = the
+> 26 families of `PERMISSION_REGISTRY`). The OpenAPI document gains a
+> `service_account` security scheme, listed as an alternative to `bearer` on
+> those 66 operations and on the two `/authz/check` routes. `bearer` gains a
+> description. The audit middleware reads the actor type from `sub_kind`.
+> `grant.pre_assign` payloads gain `actor_type`. The operator note at
+> `axiam-auth/src/token.rs:1240` (the plan's `~1230`) now lists what a service
+> account can call.
+>
+> **Tests.** `crates/axiam-api-rest/tests/m2m_management_test.rs`, 14:
+> - the registry-placement test;
+> - the route-map sweep, both directions, with a no-role and a `super-admin`
+>   account over all 146 routes;
+> - the OpenAPI walk over every other non-public `/api/v1` operation
+>   (self-service included);
+> - spec ↔ code agreement;
+> - per family: viewer → 200, no role → 403 `authorization_denied` naming the
+>   action, and the same pair for users (the I4 twin);
+> - a provisioning run (role, group, permission, service account, assignment);
+> - default-deny;
+> - the differential I1;
+> - the exchanged-token refusal;
+> - the sender constraint;
+> - tenant/organization scope;
+> - CA scope;
+> - CSRF;
+> - audit end to end.
+>
+> Four more in `crates/axiam-audit/tests/service_and_middleware.rs`.
+>
+> **Six deliberate mutations**, each red in the test meant to catch it:
+> - one handler back on `AuthenticatedUser` → the sweep;
+> - the `sub_kind` gate removed → the exchanged-token test, which then read
+>   `/roles` as the user with no session behind it;
+> - the machine check removed from `is_organization_principal` → the CA test,
+>   which then issued under the organization root;
+> - the old `jti`-only session read restored → the differential test on the
+>   `sid` case;
+> - the tenant-switch resolution removed from the machine branch (the earlier
+>   variant of (d) below) → the header test;
+> - `actor_type_of` forced to `User` → both audit tests.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`check_subject` would have broken the I1.** The plan says to switch "from
+>    `RequirePermission::check` to `check_subject`". `check_subject` hard-codes
+>    `SubjectScope::Tenant`, so an organization administrator acting on a tenant
+>    through `X-Axiam-Tenant` would have had their organization grants
+>    evaluated as tenant grants on every converted route. `check` now takes any
+>    `Caller`, a three-method trait both extractors implement. The ~100
+>    unconverted call sites did not change.
+> 2. **`AuthenticatedPrincipal`'s user branch was a copy, and the copy
+>    differed.** It read the session id from `jti`. `AuthenticatedUser` reads
+>    `sid` first, so an OAuth2-issued user token (random `jti`, session in `sid`)
+>    passed every unconverted route and would have been refused as "session
+>    revoked or expired" on every converted one. That was already true of
+>    `/authz/check`. The user branch now *is* `AuthenticatedUser`'s code
+>    (`user_from_validated`, the tenant-path binding, `RequestScopeHandles::apply`),
+>    converted afterwards. `a_user_token_is_answered_identically_by_both_extractors`
+>    compares both extractors over eight token shapes. The
+>    absent-`aud` back-compat case is not among them: the public token builder
+>    cannot omit `aud`. It is `user_from_validated` on both sides by
+>    construction.
+> 3. **An exchanged user token was accepted as a machine.** RFC 8693 exchange
+>    may target `axiam:m2m` for any subject (`token_exchange.rs:342`) and keeps
+>    `sub_kind = user`. The machine branch skips the session check, so such a
+>    token would have acted with the *user's* roles and no session behind it,
+>    audited as a service account. The machine branch now requires
+>    `sub_kind = service_account` (401 otherwise), on `/authz/check` too. That
+>    is the one narrowing of existing behaviour in this PR, and it is in the
+>    CHANGELOG. The `sub_kind` doc comment said "informational only" and now
+>    says what it decides.
+> 4. **The T21.6 tenant-path binding was missing from `AuthenticatedPrincipal`.**
+>    It is inert today, since no management route is mounted under `/t/`, but a
+>    converted route would have silently lost it the day one is. Both branches
+>    apply it.
+> 5. **(d) was decided twice.** The first version refused `X-Axiam-Tenant` for
+>    every machine. Reading the website's service-account page reversed that:
+>    an **organization-level service account** is a documented design ("a
+>    deployment-wide automation"), `tenant_scope` on service-account assignments
+>    exists for it, and before this PR `/authz/check` honoured the header for
+>    one. The shipped rule is **the user's rule, through one function**:
+>    `act_on_requested_tenant` is now called by both kinds, and every refusal is
+>    compared body for body with a user's in the same position. The
+>    **exception is the organization CA**: `is_organization_principal` answers
+>    `false` for a machine wherever it lives, so a service account issues under
+>    the signing CA of the tenant it acts on, or not at all. S-1's gate stays
+>    human-only, which is D-5's line for trust-posture acts.
+> 6. **The audit middleware recorded every authenticated request as `User`.**
+>    The plan says the audit event "carries the principal kind". It did not, for
+>    any route: `extract_or_cache_user_info` hard-coded `ActorType::User`. The
+>    type now comes from the signed `sub_kind`, which also keeps an exchanged
+>    user token recorded as a user. An OAuth2 client's `sub` is not a UUID, so
+>    it stays `System` as before.
+> 7. **Self-service is not in `ROUTE_PERMISSION_MAP`**, so a sweep over the map
+>    alone cannot show `/auth/me` or password change still refusing a machine.
+>    The second sweep walks the OpenAPI document instead, and
+>    `route_openapi_parity_test` already holds the document to the route table.
+>    D-5's "`/users/me`" is `/api/v1/auth/me`.
+> 8. **The sweep cannot reach RBAC on routes with a body.** With no body, the
+>    `Json` extractor answers 400 before the handler runs. So the sweep asserts
+>    "never the audience refusal, never a 2xx" on every admitted route, and
+>    403 `authorization_denied` naming the route's own permission on all 41
+>    admitted GET/DELETE routes. The per-family and provisioning tests cover the
+>    writes with real bodies.
+> 9. **(c) confirmed by reading.** `extract_principal` reaches
+>    `enforce_sender_constraint` on both paths: `cached_identity` (the
+>    audit-middleware cache) and `parse_validated_claims` →
+>    `validate_presented_token`. The positive half is still unreachable from
+>    `TestRequest` (S-3 note 4), so only the refusal is pinned at the wire, on
+>    `GET /roles` with a `super-admin` device token. Its I4 twin is the same
+>    account's unbound token, 200.
+> 10. **(e) CSRF.** Unchanged, and audience-agnostic by construction.
+>     `is_bearer_only` never looks at the token. A bearer-only service-account
+>     write is exempt (201); the same write with an `axiam_access` cookie beside
+>     the header is refused by CSRF (403 "CSRF validation failed", while the
+>     account holds `admin`).
+> 11. **Disk, and what the full suite showed.** The whole `axiam-api-rest`
+>     suite exceeds this sandbox's write allowance in one build. It was run one
+>     target at a time with `--no-default-features`, deleting each executable
+>     after its run. Result: 86 of 87 targets green, 1,344 tests. The one red
+>     target was `federation_test`: 15 SAML tests answered 404. That binary is
+>     not feature-gated while the SAML routes are (`server.rs:546`, `:1416`),
+>     so with `saml` off they do not exist. It is unrelated to this diff, and
+>     CI runs that binary only with default features. Rerun here with default
+>     features once libxml2 was installed: 78 of 78. The binaries this commit
+>     touched, and their closest neighbours, were run three times each with
+>     default features, all green every time: `m2m_management_test`,
+>     `certificate_test`, `rbac_test`, `role_assignment_scope_test`, the
+>     crate's lib tests and `axiam-audit`'s `service_and_middleware`.
+>
+> **Records.** **T-287** on `REST API (Actix-Web)` in the system diagram,
+> Elevation of privilege, High, Mitigated. It is recorded in Axiam.json and in
+> both STRIDE documents (287 threats, 274 / 13; Elevation of privilege 58, High
+> 134, system diagram 33). `gen-threat-model.mjs`: *"threatModel.ts: 9
+> diagrams, 278 threats (265 mitigated, 13 open)"*, still nine behind the
+> documents, and the generated files were reverted. Roadmap T22.13. CHANGELOG
+> under **Changed**. Docs: `docs/api/README.md` gains "Authentication — who may
+> call which route", and the website's audience section gains a paragraph.
+> OpenAPI and the management registry are regenerated. No `/oauth2/*` route
+> changed, so the FAPI 2.0 and Basic OP results of 2026-09-11 stand (§7.2).
+
 **The fix.** The §27 management families switch from `AuthenticatedUser` to
 `AuthenticatedPrincipal` and from `RequirePermission::check` to
 `check_subject` (`authz.rs:207`), which already applies RBAC identically to

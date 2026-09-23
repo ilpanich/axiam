@@ -272,6 +272,66 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
 ];
 
 // ---------------------------------------------------------------------------
+// Which permission families admit a service account (S-9, D-5)
+// ---------------------------------------------------------------------------
+
+/// The permission families whose routes accept a **service-account** token
+/// (`aud = axiam:m2m`) as well as a user token — decision D-5 of
+/// `claude_dev/dogfooding-findings-fix-plan.md` (S-9, DF-013).
+///
+/// A route's family is the namespace of the permission it requires in
+/// [`ROUTE_PERMISSION_MAP`] — the part before the `:`. So
+/// `GET /users/{id}/roles`, which requires `roles:get`, is a *roles* route and
+/// admits a service account, while `GET /users/{id}` is a *users* route and
+/// does not. The handlers of these families take
+/// [`crate::AuthenticatedPrincipal`]; every other guarded route takes
+/// [`crate::AuthenticatedUser`] and refuses a machine token with 401.
+///
+/// Admitting a service account is not granting it anything: RBAC is
+/// default-deny, and an account with no role assignment is refused every one
+/// of these routes with 403 `authorization_denied`, exactly as a user with no
+/// role is.
+pub const M2M_MANAGEMENT_FAMILIES: &[&str] = &[
+    "resources",
+    "scopes",
+    "permissions",
+    "roles",
+    "groups",
+    "service_accounts",
+    "certificates",
+    "webhooks",
+];
+
+/// Every other permission family, which keeps a human audience.
+///
+/// Named rather than derived as "the rest", so that a family added to
+/// [`PERMISSION_REGISTRY`] fails `m2m_management_test` until someone decides
+/// which list it belongs in. The routes behind these either mint long-lived
+/// secrets, change the trust posture of the organization or the deployment,
+/// or act on a person (D-5): each would need its own argument to admit a
+/// machine, and none has had one yet.
+pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
+    "users",
+    "ca_certificates",
+    "audit_logs",
+    "pgp_keys",
+    "reactors",
+    "oauth2_clients",
+    "federation",
+    "notification_rules",
+    "settings",
+    "email_config",
+    "tenants",
+    "organizations",
+    "admin",
+    "gdpr",
+    "authz",
+    "webauthn_policy",
+    "scim",
+    "scim_tokens",
+];
+
+// ---------------------------------------------------------------------------
 // Public-path allowlist (D-04)
 // ---------------------------------------------------------------------------
 

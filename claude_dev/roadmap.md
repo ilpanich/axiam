@@ -896,6 +896,23 @@ proved end to end with the right certificate, another device's certificate,
 and none. Three mutations were made to confirm the new tests can fail.
 Threat **T-286**; **T-234** and **T-283** amended. PR E.
 
+### T22.13 — Service accounts on the management routes — Opus 5 ✓ LANDED
+DF-013. Every management handler took `AuthenticatedUser`, so automation that
+provisions a tenant needed a human administrator's credential. D-5 admits a
+service-account token on eight families — resources, scopes, permissions, roles
+(assignments included), groups, service accounts, certificates, webhooks — whose
+66 handlers now take `AuthenticatedPrincipal` and `RequirePermission::check`
+over a `Caller` trait; every other route still refuses `axiam:m2m` with `401`.
+The boundary is `M2M_MANAGEMENT_FAMILIES` / `HUMAN_ONLY_FAMILIES`, checked
+against the permission registry, and a sweep drives all 146 mapped routes plus
+every other non-public `/api/v1` operation with real tokens. The machine branch
+admits `sub_kind = service_account` only (an exchanged user token is not a
+machine); the user branch is `AuthenticatedUser`'s own code, which fixes a `sid`
+misread; `X-Axiam-Tenant` resolves as for a user; no service account issues
+under the organization CA. The audit log records the actor type from
+`sub_kind`. OpenAPI gains a `service_account` security scheme on the admitted
+operations; spec and management registry regenerated. Threat **T-287**. PR F.
+
 ---
 
 ---

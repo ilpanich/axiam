@@ -110,6 +110,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Service accounts can call the management API (T22.13, DF-013).** Every
+  management route took a user token only, so a service account could
+  authenticate and then reach nothing but `/authz/check`. Automation that
+  provisions a tenant was therefore given a human administrator's credential —
+  all of that person's roles, revocable only by locking the person out, and
+  audited as the person.
+
+  A service-account token (`aud` = `axiam:m2m`) is now accepted on eight
+  families, and on nothing else:
+
+  | Admitted | Still human-only (`401` for a machine token) |
+  |---|---|
+  | resources, scopes, permissions, roles (assignments included), groups, service accounts, certificates (generate, sign-csr, bind, list, get, revoke), webhooks | `/auth/me` and all self-service, MFA, sessions, passwords, users, organizations, tenants, settings, CA certificates, PGP keys, SCIM tokens, federation, OAuth2 clients, reactors, audit logs, notification rules, email config, WebAuthn policy |
+
+  - **Admitted is not allowed.** Each route is authorized by the roles assigned
+    to the service account, exactly as for a user. An account with no role is
+    refused every one of them with `403` `authorization_denied`.
+  - **Tenant scope.** An account in an ordinary tenant acts there only.
+    `X-Axiam-Tenant` works for an account in the organization scope on the
+    same terms as for an organization administrator. No service account
+    issues under the organization CA.
+  - **A certificate-bound device token** (T22.3) is refused on these routes
+    without its certificate.
+  - **The audit log** records `service_account` as the actor type for a
+    service account's request, where every authenticated entry used to read
+    `user`. `grant.pre_assign` reactor payloads gain `actor_type`.
+  - **OpenAPI.** A second security scheme, `service_account`, is listed as an
+    alternative on exactly the operations that admit one — the eight families
+    and the two `/authz/check` routes. `bearer` gains a description saying it
+    is a user token. The management registry is regenerated.
+
+  **Behaviour changes for existing clients.**
+
+  - **User tokens: none.** A converted route now authenticates a user token
+    with the very code the other routes use, and a test compares the two
+    extractors case by case.
+  - **Machine-audience tokens that name a person are now `401`**, on
+    `/authz/check` too. An RFC 8693 exchange that narrowed a *user's* token to
+    `axiam:m2m` produces such a token (`sub_kind` = `user`). It used to be
+    accepted there as a machine, with no session check behind it.
+  - **A user token with `sid` distinct from `jti`** (the OAuth2 shape) is now
+    accepted on `/authz/check`. The two routes had been refusing it as
+    "session revoked or expired".
+
+  Threat **T-287**.
+
 - **A certificate bound to no service account is a `401`, not a `403` (T22.4,
   DF-027).** `POST /api/v1/auth/device` answered `403` for exactly one of its
   refusals, and it reached that status by matching the **text** of an error

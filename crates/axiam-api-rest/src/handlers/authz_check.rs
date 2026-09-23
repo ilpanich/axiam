@@ -164,7 +164,7 @@ async fn append_check_as_audit<C: Connection + Clone>(
         (status = 403, description = "Forbidden — caller lacks authz:check_as for subject_id override"),
         (status = 401, description = "Unauthenticated"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn check_access<C: Connection + Clone>(
     user: AuthenticatedPrincipal,
@@ -255,7 +255,7 @@ pub async fn check_access<C: Connection + Clone>(
         (status = 403, description = "Forbidden — caller lacks authz:check_as for subject_id override"),
         (status = 401, description = "Unauthenticated"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn batch_check_access<C: Connection + Clone>(
     user: AuthenticatedPrincipal,

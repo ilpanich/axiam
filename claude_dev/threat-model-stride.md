@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 286 |
-| **Mitigated / Open** | 273 / 13 |
+| **Threats identified** | 287 |
+| **Mitigated / Open** | 274 / 13 |
 | **Owner** | ilpanich |
 
 ---
@@ -108,7 +108,7 @@ Each subsection corresponds to one diagram in the Threat Dragon model. Threat nu
 
 Level-0 context data-flow diagram: external actors, the three AXIAM API surfaces, the shared middleware pipeline, the core service layer and the private data tier. Trust boundaries separate the public Internet, the Kubernetes runtime and the data tier. 1.0.0-beta13 adds two findings from the OpenID Connect work that belong to the system rather than to any one protocol surface: the explicit column lists behind erasure and export (T-261) and the datastore's own write-conflict phrasing going unrecognised (T-262).
 
-*32 threats — 3 critical, 16 high, 13 medium; 2 open.*
+*33 threats — 3 critical, 17 high, 13 medium; 2 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -144,6 +144,7 @@ Level-0 context data-flow diagram: external actors, the three AXIAM API surfaces
 | T-261 | REST API (Actix-Web) <br/>*Process* | I | A personal-data column added to `user` survives erasure and never reaches the Art. 15 export, and a SCIM patch that erases it is read as a no-op | High | Mitigated |
 | T-262 | SurrealDB cluster (all tenant data) <br/>*Store* | D | A contended write surfaces as a migration failure, and the single-use guard cannot recognise the engine's own conflict message | Medium | Mitigated |
 | T-286 | gRPC API (Tonic) <br/>*Process* | S | The gRPC listener cannot verify client certificates, so every call rests on a bearer token alone | High | Mitigated |
+| T-287 | REST API (Actix-Web) <br/>*Process* | E | Automation holds a human administrator's credentials because no management route accepts a service-account token | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -393,6 +394,19 @@ The first run of the `scim_provisioning` benchmark cell failed 20 of 907 operati
 > `off` keeps `with_no_client_auth()`. The I1 compares handshakes, not structs: four client shapes against the pre-change configuration, including a client holding a certificate, which is neither asked for it nor has it reach the server. `crates/axiam-server/tests/grpc_client_auth.rs` carries six tests through the real `start_grpc_server`, and ten unit tests cover `resolve_grpc_tls` and the reload; three deliberate mutations — the verifying modes falling back to `with_no_client_auth()`, the reload skipping gRPC, `off` sending a `CertificateRequest` — each turned the relevant tests red.
 >
 > Residual, by design: the default is `off`, so a deployment that sets nothing keeps a bearer-only gRPC listener; and the certificate is proof of possession and a gate, never an identity — authenticating a gRPC caller by certificate alone is out of scope.
+
+**T-287 — Automation holds a human administrator's credentials because no management route accepts a service-account token**  
+`REST API (Actix-Web)` (Process) · Elevation of privilege · High · Mitigated
+
+Every REST management handler took `AuthenticatedUser`, which refuses `aud = axiam:m2m`, so a service account could authenticate and then reach two routes: `POST /authz/check` and its batch form (DF-013). Automation that has to create resources, roles and groups, assign roles, issue and bind device certificates or register webhooks — a tenant's provisioning job, the demo's `domo-bootstrap` — was therefore given a person's credential instead: a password or a refresh token sitting in a CI secret or a container environment. That credential carries every role the person holds rather than the few the job needs, cannot be narrowed without narrowing the person, and is revoked only by locking the person out; its session looks interactive, and every change the job makes is audited as that person, so the trail cannot separate an administrator's act from a script's. The plumbing to do better already existed and was unused: `AuthenticatedPrincipal`, RBAC applied identically to both principal kinds, and role assignments on service accounts.
+
+> **T22.13 (S-9, 2026-09-23).** Decision D-5 admits a service-account token on eight permission families — resources, scopes, permissions, roles (assignments included), groups, service accounts, certificates (generate, sign-csr, bind, list, get, revoke) and webhooks — whose 66 handlers now take `AuthenticatedPrincipal`; every other guarded route keeps `AuthenticatedUser` and still answers a machine token with `401`. The boundary is two constants in `permissions.rs` checked against `PERMISSION_REGISTRY`, and a sweep drives every route of `ROUTE_PERMISSION_MAP`, plus every other non-public `/api/v1` operation in the OpenAPI document, with real service-account tokens: admitted exactly on those families, refused everywhere else, and an account with no role reaches none of them (`403 authorization_denied` — RBAC is default-deny). Reaching a route is not being allowed on it; each is authorized by the roles assigned to the account.
+>
+> Widening the surface made four latent properties of `AuthenticatedPrincipal` matter, and all four are closed. (1) A machine-audience token is admitted only with `sub_kind = service_account`, because an RFC 8693 exchange can narrow a user's token to `axiam:m2m` and the machine branch skips the session check — such a token would have acted as that user with no session behind it. (2) Its user branch is now `AuthenticatedUser`'s own code, not a copy; the copy read the session id from `jti` where the original reads `sid` first, so an OAuth2-issued user token would have been refused on every converted route; a differential test compares both extractors case by case. (3) The T21.6 tenant-path binding applies to both kinds. (4) `X-Axiam-Tenant` is resolved for a service account through the same function as for a user, so only an organization-level account may name another tenant of its organization, within its `tenant_scope`; and no service account is an organization principal for issuance, so the organization CA stays human-only (S-1's gate, T-281).
+>
+> A certificate-bound device token (T-283) is refused on the new surface without its certificate, since `enforce_sender_constraint` runs on every extraction path. The audit middleware records the actor type from the signed `sub_kind` claim, so a service account's write reads `service_account` rather than `user`, and `grant.pre_assign` payloads carry `actor_type` for four-eyes rules. The CSRF exemption for bearer-only callers (T-200) is unchanged and does not cover a request that also carries a session cookie.
+>
+> Residual: a service account holding `roles:assign` can grant itself any role of its tenant, exactly as a user with that permission can — RBAC is the control, and granting it is the operator's decision; a machine token has no session to revoke, so disabling an account stops new tokens and the last one lives out its access-token lifetime (15 minutes by default); families outside D-5 still require a person, each to be argued on its own.
 
 </details>
 
@@ -2828,7 +2842,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-13 of 286 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
+13 of 287 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
 
 
 | # | Severity | Threat | Element | Why it is open |
@@ -2912,14 +2926,14 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Repudiation | 6 |
 | Information disclosure | 67 |
 | Denial of service | 28 |
-| Elevation of privilege | 57 |
+| Elevation of privilege | 58 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 32 | 1 |
-| High | 133 | 8 |
+| High | 134 | 8 |
 | Medium | 111 | 6 |
 | Low | 10 | 2 |
 
@@ -2927,7 +2941,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 | Diagram | Threats | Open |
 |---|---|---|
-| System diagram | 32 | 2 |
+| System diagram | 33 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 58 | 4 |
 | Federation — SAML SP & OIDC relying party | 31 | 1 |

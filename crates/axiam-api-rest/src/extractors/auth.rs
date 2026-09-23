@@ -328,7 +328,7 @@ pub struct AuthenticatedUser {
     /// Whether [`Self::principal_tenant_id`] was **verified** to be the
     /// organization's reserved scope.
     ///
-    /// Set only by [`resolve_active_tenant`], which reads the tenant record and
+    /// Set only by [`act_on_requested_tenant`], which reads the tenant record and
     /// checks its `kind`. `false` until then, so a request that never named
     /// another tenant is evaluated as an ordinary tenant principal — which it
     /// is, as far as this request is concerned.
@@ -351,7 +351,7 @@ impl AuthenticatedUser {
     ///
     /// [`SubjectScope::Organization`] only when
     /// [`Self::organization_level`] was set by the tenant lookup in
-    /// [`resolve_active_tenant`], so the claim can never be made on the
+    /// [`act_on_requested_tenant`], so the claim can never be made on the
     /// strength of request input alone.
     pub fn subject_scope(&self) -> SubjectScope {
         if self.organization_level {
@@ -468,30 +468,65 @@ impl RequestScopeHandles {
             .into());
         }
 
-        if let Some(target) = requested_tenant.filter(|t| *t != user.principal_tenant_id) {
-            user.tenant_id = resolve_active_tenant(&user, target, tenants.as_ref()).await?;
-            // ...and, for a principal whose roles name the tenants they
-            // reach, that the tenant named is one of them. See
-            // [`PrincipalReachResolver`] for why this is a courtesy refusal
-            // rather than the enforcement.
-            if let Some(reach) = reach
-                && let Some(reach) = reach.reach(user.principal_tenant_id, user.user_id).await
-                && !reach.includes(target)
-            {
-                return Err(AxiamError::AuthorizationDenied {
-                    reason: "this account's roles do not reach the requested tenant".into(),
-                    action: None,
-                    resource_id: None,
-                }
-                .into());
-            }
-            // Reached only when the resolution above confirmed the caller's
-            // own tenant is the organization scope — it refuses otherwise.
+        if let Some(target) = act_on_requested_tenant(
+            user.principal_tenant_id,
+            user.user_id,
+            requested_tenant,
+            tenants.as_ref(),
+            reach.as_ref(),
+        )
+        .await?
+        {
+            user.tenant_id = target;
             user.organization_level = true;
         }
 
         Ok(user)
     }
+}
+
+/// The active-tenant half of authentication, for every kind of principal.
+///
+/// `Some(target)` when the request named a tenant other than the caller's own
+/// **and** the caller was verified to be allowed to act on it: its own tenant is
+/// the organization scope, the target is in the same organization
+/// ([`resolve_active_tenant_for`]), and — for a principal whose roles name the
+/// tenants they reach — the target is one of them. `None` when the request named
+/// no other tenant. An error otherwise.
+///
+/// One function, two callers — [`RequestScopeHandles::apply`] for users and the
+/// machine branch of [`AuthenticatedPrincipal`] for service accounts — because
+/// a service account in the organization scope is an organization-level
+/// principal on exactly the terms a user there is, and a second copy of this
+/// check is a second place for the two to disagree.
+async fn act_on_requested_tenant(
+    home_tenant_id: Uuid,
+    subject_id: Uuid,
+    requested_tenant: Option<Uuid>,
+    tenants: Option<&Arc<dyn TenantScopeResolver>>,
+    reach: Option<&Arc<dyn PrincipalReachResolver>>,
+) -> Result<Option<Uuid>, AxiamApiError> {
+    let Some(target) = requested_tenant.filter(|t| *t != home_tenant_id) else {
+        return Ok(None);
+    };
+    let target = resolve_active_tenant_for(home_tenant_id, target, tenants).await?;
+    // ...and, for a principal whose roles name the tenants they reach, that the
+    // tenant named is one of them. See [`PrincipalReachResolver`] for why this
+    // is a courtesy refusal rather than the enforcement.
+    if let Some(reach) = reach
+        && let Some(reach) = reach.reach(home_tenant_id, subject_id).await
+        && !reach.includes(target)
+    {
+        return Err(AxiamError::AuthorizationDenied {
+            reason: "this account's roles do not reach the requested tenant".into(),
+            action: None,
+            resource_id: None,
+        }
+        .into());
+    }
+    // Reached only when the resolution above confirmed the caller's own tenant
+    // is the organization scope — it refuses otherwise.
+    Ok(Some(target))
 }
 
 /// [`AuthenticatedUser`], or the 401 that would have been returned instead
@@ -822,6 +857,10 @@ fn verified_dpop_proof(
 /// With no resolver registered — the shape most test harnesses use — the header
 /// is refused rather than trusted. Failing closed is the only safe default for
 /// a check whose entire job is to say no.
+// Its production caller became `act_on_requested_tenant` (S-9), which both
+// principal kinds share; the unit tests below still state their cases in terms
+// of an `AuthenticatedUser`, which this adapts.
+#[cfg(test)]
 async fn resolve_active_tenant(
     user: &AuthenticatedUser,
     target: Uuid,
@@ -830,8 +869,8 @@ async fn resolve_active_tenant(
     resolve_active_tenant_for(user.principal_tenant_id, target, tenants).await
 }
 
-/// The body of [`resolve_active_tenant`], keyed on the caller's home tenant
-/// rather than on a whole [`AuthenticatedUser`].
+/// The organization-scope half of [`act_on_requested_tenant`], keyed on the
+/// caller's home tenant rather than on a whole [`AuthenticatedUser`].
 ///
 /// Both principal extractors resolve organization scope, and they must resolve
 /// it identically: the check that the caller's own tenant really is the
@@ -1185,28 +1224,66 @@ fn extract_service_account(
 // ---------------------------------------------------------------------------
 
 /// An authenticated caller that may be **either** a human user
-/// (`aud = axiam:user`) or a machine (`aud = axiam:m2m`).
+/// (`aud = axiam:user`) or a service account (`aud = axiam:m2m`).
 ///
-/// This exists so the mTLS device path can carry the machine audience
+/// It exists so the mTLS device path could carry the machine audience
 /// (§17.2 residual 1) without losing the endpoints a device legitimately
-/// needs. Before it, `axiam:m2m` reached **no** REST route at all — every
-/// guarded handler takes [`AuthenticatedUser`], which rejects that audience —
-/// so moving device tokens to `axiam:m2m` on its own would have replaced a
-/// too-wide grant with no grant, which is an outage rather than a narrowing.
+/// needs, and since S-9 (DF-013) it is the extractor of the §27 management
+/// families — resources, scopes, permissions, roles, groups, service
+/// accounts, certificates and webhooks — as well as of the
+/// authorization-check endpoints. Every other guarded route keeps
+/// [`AuthenticatedUser`] and so keeps refusing machine tokens outright;
+/// [`crate::permissions::M2M_MANAGEMENT_FAMILIES`] is the list, and
+/// widening it is a security decision, not a convenience one.
 ///
-/// **What this deliberately is not:** a general-purpose relaxation. It is used
-/// only on the authorization-check endpoints, which are the machine-facing
-/// read-only surface. Every other route keeps [`AuthenticatedUser`] and so
-/// keeps rejecting machine tokens outright. Widening its use is a security
-/// decision, not a convenience one.
+/// # The user branch is `AuthenticatedUser`, not a copy of it
+///
+/// A token that is not a machine token is authenticated by exactly the code
+/// [`AuthenticatedUser`] runs — `user_from_validated`, the tenant-path
+/// binding, then `RequestScopeHandles::apply` — and converted afterwards.
+/// That is what makes "a user token behaves exactly as today on every
+/// converted route" a property of the code rather than of a test. It was not
+/// always so: this extractor used to carry its own copy, and the copy read the
+/// session id from `jti` where the original reads `sid` first, so an
+/// OAuth2-issued user token was accepted by one extractor and refused by the
+/// other.
+///
+/// # The machine branch admits service accounts only
+///
+/// `aud = axiam:m2m` is necessary and not sufficient. The token's `sub_kind`
+/// must be `service_account`:
+///
+/// * an **OAuth2 client**'s `sub` is its `oa_…` client id, which has no row in
+///   the role graph — it could authenticate and then fail every check;
+/// * an **RFC 8693 exchange** may narrow a *user* token to the machine
+///   audience (`sub_kind = user`, `sub` = the user's id). Admitting it here
+///   would evaluate that user's roles with no session behind them, since the
+///   machine branch skips the revocation check — that exemption is sound only
+///   because a service account has no session row to revoke — and would audit
+///   a person as a machine.
+///
+/// # Tenant and organization scope for a service account
+///
+/// Exactly a user's, with one exception:
+///
+/// * **`X-Axiam-Tenant`** is honoured on the same terms — through the same
+///   function — as for a user: only when the account lives in the
+///   organization's reserved tenant, names a tenant of the same organization,
+///   and its roles reach that tenant. A service account in an ordinary tenant
+///   therefore acts in that tenant and nowhere else (403 otherwise). An
+///   organization-level service account is the deployment-wide automation the
+///   organization scope was built for, and [`Self::organization_level`] means
+///   for it what it means for a person: its *global* grants apply in the
+///   tenant it names.
+/// * **The exception: the organization CA.** A service account is never an
+///   organization principal for issuance
+///   ([`crate::handlers::org_scope::is_organization_principal`]), so it issues
+///   under a tenant's signing CA or not at all. Issuing directly under the
+///   organization root is a trust-posture act, and D-5 keeps those human.
 ///
 /// Two properties worth stating because they are easy to lose:
 ///
-/// * **User tokens are not weakened.** A `axiam:user` token extracted this way
-///   still goes through the same session-revocation check
-///   [`AuthenticatedUser`] applies, so a revoked session cannot reach these
-///   endpoints through the wider extractor. That check is skipped only for
-///   machine tokens, which have no session row to check by construction.
+/// * **User tokens are not weakened.** See above: same code, same order.
 /// * **`aud` must be present.** The `allow_missing_aud_as_user` back-compat
 ///   window is honoured for the user branch only, exactly as on the narrow
 ///   extractor — an absent `aud` is never silently treated as a machine.
@@ -1236,13 +1313,14 @@ pub struct AuthenticatedPrincipal {
     /// is in, which is why the revocation check reads it and not `tenant_id`.
     pub principal_tenant_id: Uuid,
     /// Whether [`Self::principal_tenant_id`] was **verified** to be the
-    /// organization's reserved scope — set only by [`resolve_active_tenant`],
-    /// exactly as on [`AuthenticatedUser`].
+    /// organization's reserved scope — set only by [`act_on_requested_tenant`],
+    /// exactly as on [`AuthenticatedUser`], for either kind of principal.
     pub organization_level: bool,
     pub org_id: Uuid,
-    /// `true` when the caller authenticated as a machine (`aud = axiam:m2m`).
-    /// Handlers use this for audit attribution, not for authorization — RBAC
-    /// is applied identically to both kinds.
+    /// `true` when the caller authenticated as a service account
+    /// (`aud = axiam:m2m`, `sub_kind = service_account`). Handlers use this
+    /// for attribution, not for authorization — RBAC is applied identically
+    /// to both kinds.
     pub is_machine: bool,
     pub claims: ValidatedClaims,
 }
@@ -1254,6 +1332,16 @@ impl AuthenticatedPrincipal {
             axiam_core::models::audit::ActorType::ServiceAccount
         } else {
             axiam_core::models::audit::ActorType::User
+        }
+    }
+
+    /// The same distinction as [`Self::actor_type`], as the string the audit
+    /// log and reactor payloads carry (`"user"` / `"service_account"`).
+    pub fn actor_kind(&self) -> &'static str {
+        if self.is_machine {
+            "service_account"
+        } else {
+            "user"
         }
     }
 
@@ -1273,41 +1361,62 @@ impl AuthenticatedPrincipal {
     }
 }
 
-fn extract_principal(req: &HttpRequest) -> Result<AuthenticatedPrincipal, AxiamApiError> {
+impl From<AuthenticatedUser> for AuthenticatedPrincipal {
+    fn from(user: AuthenticatedUser) -> Self {
+        Self {
+            subject_id: user.user_id,
+            tenant_id: user.tenant_id,
+            principal_tenant_id: user.principal_tenant_id,
+            organization_level: user.organization_level,
+            org_id: user.org_id,
+            is_machine: false,
+            claims: user.claims,
+        }
+    }
+}
+
+/// The synchronous half of [`AuthenticatedPrincipal`]'s extraction: which kind
+/// of caller this is, authenticated as far as a borrowed request allows.
+enum PrincipalStart {
+    /// A user token, authenticated by [`AuthenticatedUser`]'s own code.
+    User(AuthenticatedUser),
+    /// A service-account token.
+    Machine(AuthenticatedPrincipal),
+}
+
+fn extract_principal(req: &HttpRequest) -> Result<PrincipalStart, AxiamApiError> {
+    use axiam_auth::token::SubjectKind;
+
     let config = req
         .app_data::<web::Data<AuthConfig>>()
         .ok_or(AxiamError::Internal("missing auth config".into()))?;
 
+    // The audit middleware's cache is consulted exactly as `extract_user`
+    // consults it — through `cached_identity`, which enforces the `cnf`
+    // sender constraint every time — and otherwise the token is validated
+    // here, through `validate_presented_token`, which enforces it too.
     let validated = match cached_identity(req)? {
         Some(cached) => cached.claims.clone(),
         None => parse_validated_claims(req)?,
     };
 
-    // Machine tokens take the m2m branch; everything else (including the
-    // absent-`aud` back-compat window) is decided by the *same* function the
-    // narrow user extractor uses, so the two cannot drift apart.
-    let is_machine = validated.0.aud.as_deref() == Some(AUD_M2M);
-    if !is_machine {
-        check_user_aud_and_parse_jti(&validated, config)?;
+    if validated.0.aud.as_deref() != Some(AUD_M2M) {
+        // Everything that is not a machine token — the absent-`aud`
+        // back-compat window included — is decided by the narrow extractor's
+        // own function, so the two cannot drift apart.
+        let user = user_from_validated(validated, config)?;
+        enforce_tenant_path_binding(req, user.principal_tenant_id)?;
+        return Ok(PrincipalStart::User(user));
     }
 
-    // `sub` must be a UUID, which quietly makes this extractor reject one of
-    // the two machine principal kinds — an asymmetry worth stating rather than
-    // leaving to be rediscovered.
-    //
-    // A *service account*'s `sub` is its UUID, so it parses. An *OAuth2
-    // client*'s `sub` is its `oa_…` client id, so it does not, and such a
-    // caller gets 401 here even though its token carries `axiam:m2m` and is
-    // accepted elsewhere.
-    //
-    // That is the correct outcome, not a gap to close: role assignments are
-    // keyed on a subject UUID, and an OAuth2 client has no row in that graph.
-    // Admitting one would produce a principal the authorization engine can
-    // only ever evaluate to "no grants" — a caller that authenticates and then
-    // fails every check, which is a worse experience than a clean 401 and
-    // invites someone to "fix" it later by inventing a subject mapping. If
-    // OAuth2 clients ever need to be RBAC subjects, that is a deliberate
-    // modelling change, and this parse is where it would start.
+    // See the type's documentation for why a machine audience is not enough.
+    if validated.0.sub_kind != SubjectKind::ServiceAccount {
+        return Err(AxiamError::AuthenticationFailed {
+            reason: "a machine-audience token is accepted here only for a service account".into(),
+        }
+        .into());
+    }
+
     let subject_id =
         Uuid::parse_str(&validated.0.sub).map_err(|_| AxiamError::AuthenticationFailed {
             reason: "invalid sub claim".into(),
@@ -1320,17 +1429,20 @@ fn extract_principal(req: &HttpRequest) -> Result<AuthenticatedPrincipal, AxiamA
         Uuid::parse_str(&validated.0.org_id).map_err(|_| AxiamError::AuthenticationFailed {
             reason: "invalid org_id claim".into(),
         })?;
+    // T21.6 — the same binding the user branch gets: a route mounted under
+    // `/t/{tenant_id}` must not accept a token of another tenant, whichever
+    // kind of principal holds it.
+    enforce_tenant_path_binding(req, tenant_id)?;
 
-    Ok(AuthenticatedPrincipal {
+    Ok(PrincipalStart::Machine(AuthenticatedPrincipal {
         subject_id,
         tenant_id,
-        // Equal until `from_request` applies the active-tenant header.
         principal_tenant_id: tenant_id,
         organization_level: false,
         org_id,
-        is_machine,
+        is_machine: true,
         claims: validated,
-    })
+    }))
 }
 
 impl actix_web::FromRequest for AuthenticatedPrincipal {
@@ -1338,102 +1450,39 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
     type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
-        let principal_result = extract_principal(req);
-        let validator = req
-            .app_data::<web::Data<Arc<dyn SessionValidator>>>()
-            .map(|d| d.get_ref().clone());
-        let tenants = req
-            .app_data::<web::Data<Arc<dyn TenantScopeResolver>>>()
-            .map(|d| d.get_ref().clone());
-        let reach = req
-            .app_data::<web::Data<Arc<dyn PrincipalReachResolver>>>()
-            .map(|d| d.get_ref().clone());
-        // Read while `req` is still borrowed, and drop a malformed value rather
-        // than refusing it — same rule as `AuthenticatedUser`: it names a
-        // tenant that cannot exist, so the request falls back to the caller's
-        // own and is denied by RBAC like any other over-reach.
-        let requested_tenant = req
-            .headers()
-            .get(ACTIVE_TENANT_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| Uuid::parse_str(v.trim()).ok());
-        // RFC 9449 §11.1 — read after `extract_principal` has run, which is
-        // what puts the stash there. Same rule as `AuthenticatedUser`: these
-        // endpoints are resource endpoints too, and a proof that is
-        // single-use on one route and replayable on another is not
-        // single-use.
-        let dpop = req.extensions().get::<PendingDpopProof>().cloned();
-        let replay_guard = req
-            .app_data::<web::Data<Arc<dyn DpopReplayGuard>>>()
-            .map(|d| d.get_ref().clone());
+        let start = extract_principal(req);
+        // Read after `extract_principal` has run, which is the order the user
+        // extractor establishes: the DPoP stash does not exist before it.
+        let handles = RequestScopeHandles::read(req);
 
         Box::pin(async move {
-            let mut principal = principal_result?;
-
-            record_verified_proof(dpop, replay_guard).await?;
-
-            // A user token reaching these endpoints must satisfy exactly the
-            // same session-revocation rule it would on any other route
-            // (REQ-7 / D-15). Skipping it for machines is not a relaxation:
-            // a machine token has no session row, so there is nothing to
-            // revoke — revocation for machines is disabling the account,
-            // which the token-issuing path checks.
-            //
-            // Against the *principal's* tenant, and BEFORE the active tenant is
-            // applied below. The two are equal at this point; the ordering is
-            // what keeps them equal here, because resolving the active tenant
-            // first would look the session up in the tenant the request asked
-            // to act on and find none. `AuthenticatedUser` is ordered the same
-            // way for the same reason.
-            if !principal.is_machine
-                && let Some(validator) = validator
-            {
-                let session_id = Uuid::parse_str(&principal.claims.0.jti).map_err(|_| {
-                    AxiamError::AuthenticationFailed {
-                        reason: "invalid jti".into(),
+            match start? {
+                // Session revocation, then active-tenant resolution — the
+                // user extractor's own asynchronous half, not a second copy.
+                PrincipalStart::User(user) => handles.apply(user).await.map(Self::from),
+                PrincipalStart::Machine(mut principal) => {
+                    // RFC 9449 §11.1: a machine token can carry `cnf` exactly
+                    // as a user token can, and a proof single-use on one route
+                    // and replayable on another is not single-use.
+                    record_verified_proof(handles.dpop, handles.replay_guard).await?;
+                    // No session check: a service-account token has no session
+                    // row. Revoking a machine is disabling the account, which
+                    // the token-issuing paths check.
+                    if let Some(target) = act_on_requested_tenant(
+                        principal.principal_tenant_id,
+                        principal.subject_id,
+                        handles.requested_tenant,
+                        handles.tenants.as_ref(),
+                        handles.reach.as_ref(),
+                    )
+                    .await?
+                    {
+                        principal.tenant_id = target;
+                        principal.organization_level = true;
                     }
-                })?;
-                if !validator
-                    .is_session_active(principal.principal_tenant_id, session_id)
-                    .await
-                {
-                    return Err(AxiamError::AuthenticationFailed {
-                        reason: "session revoked or expired".into(),
-                    }
-                    .into());
+                    Ok(principal)
                 }
             }
-
-            // Organization scope, resolved exactly as `AuthenticatedUser` does
-            // — the same helper, the same reach check, the same refusal when
-            // the caller's own tenant is not the organization scope. Without
-            // this the authorization-check endpoints were the one guarded
-            // surface that could not see which tenant the admin UI was pointed
-            // at.
-            if let Some(target) = requested_tenant.filter(|t| *t != principal.principal_tenant_id) {
-                principal.tenant_id = resolve_active_tenant_for(
-                    principal.principal_tenant_id,
-                    target,
-                    tenants.as_ref(),
-                )
-                .await?;
-                if let Some(reach) = reach
-                    && let Some(reach) = reach
-                        .reach(principal.principal_tenant_id, principal.subject_id)
-                        .await
-                    && !reach.includes(target)
-                {
-                    return Err(AxiamError::AuthorizationDenied {
-                        reason: "this account's roles do not reach the requested tenant".into(),
-                        action: None,
-                        resource_id: None,
-                    }
-                    .into());
-                }
-                principal.organization_level = true;
-            }
-
-            Ok(principal)
         })
     }
 }

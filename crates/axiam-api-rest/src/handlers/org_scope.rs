@@ -44,9 +44,9 @@
 
 use surrealdb::Connection;
 
-use crate::AuthenticatedUser;
 use crate::error::AxiamApiError;
 use crate::state::AppState;
+use crate::{AuthenticatedPrincipal, AuthenticatedUser};
 use axiam_core::error::AxiamError;
 use axiam_core::models::role::{TenantReach, tenant_reach_of};
 use axiam_core::repository::{RoleRepository as _, TenantRepository as _};
@@ -137,13 +137,27 @@ pub async fn require_organization_principal<C: Connection + Clone>(
 ///
 /// A tenant that cannot be resolved answers `false`: the caller is treated as
 /// an ordinary tenant principal, which is the closed direction.
+///
+/// # A service account is never an organization principal (S-9)
+///
+/// Whatever tenant it lives in, the organization's reserved one included. The
+/// organization CA is the anchor every relying party of the organization
+/// trusts; issuing directly beneath it is the act the tenant-CA tier exists to
+/// keep narrow, and D-5 leaves every organization-level act with a human. A
+/// service account therefore issues under the signing CA of the tenant it acts
+/// on, or not at all — an organization-level one included, even though
+/// `X-Axiam-Tenant` lets it act on its organization's tenants as a person there
+/// can.
 pub async fn is_organization_principal<C: Connection + Clone>(
-    user: &AuthenticatedUser,
+    principal: &AuthenticatedPrincipal,
     state: &AppState<C>,
 ) -> bool {
+    if principal.is_machine {
+        return false;
+    }
     state
         .tenant_repo
-        .get_by_id(user.principal_tenant_id)
+        .get_by_id(principal.principal_tenant_id)
         .await
         .is_ok_and(|home| home.is_organization_scope())
 }

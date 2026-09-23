@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::AuthenticatedPrincipal;
 use crate::state::AppState;
 
 // -----------------------------------------------------------------------
@@ -45,20 +45,20 @@ pub struct UpdateResourceRequest {
     responses(
         (status = 201, description = "Resource created", body = Resource),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn create<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<CreateResourceRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("resources:create", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let input = CreateResource {
-        tenant_id: user.tenant_id,
+        tenant_id: principal.tenant_id,
         name: req.name,
         resource_type: req.resource_type,
         parent_id: req.parent_id,
@@ -116,20 +116,20 @@ pub async fn create<C: Connection + Clone>(
     responses(
         (status = 200, description = "List of resources", body = inline(PaginatedResult<Resource>)),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("resources:list", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let result = state
         .resource_repo
-        .list(user.tenant_id, query.into_inner())
+        .list(principal.tenant_id, query.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -144,20 +144,20 @@ pub async fn list<C: Connection + Clone>(
         (status = 200, description = "Resource found", body = Resource),
         (status = 404, description = "Resource not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn get<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("resources:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let resource = state
         .resource_repo
-        .get_by_id(user.tenant_id, path.into_inner())
+        .get_by_id(principal.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(resource))
 }
@@ -173,17 +173,17 @@ pub async fn get<C: Connection + Clone>(
         (status = 200, description = "Resource updated", body = Resource),
         (status = 404, description = "Resource not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn update<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateResourceRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("resources:update", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let input = UpdateResource {
@@ -194,7 +194,7 @@ pub async fn update<C: Connection + Clone>(
     };
     let resource = state
         .resource_repo
-        .update(user.tenant_id, path.into_inner(), input)
+        .update(principal.tenant_id, path.into_inner(), input)
         .await?;
     // D7 (REVOCATION — security critical): a resource update can re-parent it,
     // changing which ancestor-scoped roles cascade down and thereby NARROWING
@@ -202,7 +202,7 @@ pub async fn update<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::Ok().json(resource))
 }
@@ -217,27 +217,27 @@ pub async fn update<C: Connection + Clone>(
         (status = 204, description = "Resource deleted"),
         (status = 404, description = "Resource not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn delete<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("resources:delete", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     state
         .resource_repo
-        .delete(user.tenant_id, path.into_inner())
+        .delete(principal.tenant_id, path.into_inner())
         .await?;
     // D7 (REVOCATION — security critical): deleting a resource removes it (and
     // its subtree scoping) from the hierarchy, narrowing access. Flush tenant.
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -255,20 +255,20 @@ pub async fn delete<C: Connection + Clone>(
     responses(
         (status = 200, description = "Child resources", body = Vec<Resource>),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_children<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("resources:list_children", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let children = state
         .resource_repo
-        .get_children(user.tenant_id, path.into_inner())
+        .get_children(principal.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(children))
 }
@@ -282,20 +282,20 @@ pub async fn list_children<C: Connection + Clone>(
     responses(
         (status = 200, description = "Ancestor resources", body = Vec<Resource>),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_ancestors<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("resources:list_ancestors", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let ancestors = state
         .resource_repo
-        .get_ancestors(user.tenant_id, path.into_inner())
+        .get_ancestors(principal.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(ancestors))
 }

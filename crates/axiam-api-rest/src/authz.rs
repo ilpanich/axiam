@@ -19,7 +19,47 @@ use axiam_core::repository::{
 use uuid::Uuid;
 
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::{AuthenticatedPrincipal, AuthenticatedUser};
+
+/// What the route guard needs to know about an authenticated caller: who it
+/// is, which tenant it acts on, and where its grants live.
+///
+/// Implemented by both extractors, so that [`RequirePermission::check`] reads
+/// the same three facts from a user and from a service account and a handler
+/// that switches extractor (S-9) changes its signature and nothing else.
+pub trait Caller {
+    /// The subject role assignments are keyed on.
+    fn subject_id(&self) -> Uuid;
+    /// The tenant being acted upon.
+    fn acting_tenant_id(&self) -> Uuid;
+    /// Where the caller's own grants live — see
+    /// [`AuthenticatedUser::subject_scope`].
+    fn subject_scope(&self) -> SubjectScope;
+}
+
+impl Caller for AuthenticatedUser {
+    fn subject_id(&self) -> Uuid {
+        self.user_id
+    }
+    fn acting_tenant_id(&self) -> Uuid {
+        self.tenant_id
+    }
+    fn subject_scope(&self) -> SubjectScope {
+        AuthenticatedUser::subject_scope(self)
+    }
+}
+
+impl Caller for AuthenticatedPrincipal {
+    fn subject_id(&self) -> Uuid {
+        self.subject_id
+    }
+    fn acting_tenant_id(&self) -> Uuid {
+        self.tenant_id
+    }
+    fn subject_scope(&self) -> SubjectScope {
+        AuthenticatedPrincipal::subject_scope(self)
+    }
+}
 
 /// Type-erased authorization checker.
 ///
@@ -181,19 +221,29 @@ impl RequirePermission {
     ///
     /// Returns `Ok(())` on [`AccessDecision::Allow`], or
     /// `Err(AxiamApiError)` with HTTP 403 on deny.
-    pub async fn check(
+    ///
+    /// Either kind of caller: an [`AuthenticatedUser`] or, on the routes that
+    /// admit service accounts, an [`AuthenticatedPrincipal`]. RBAC is applied
+    /// identically to both — a service account's grants are the roles assigned
+    /// to it, exactly as a user's are.
+    pub async fn check<P: Caller + ?Sized>(
         &self,
-        user: &AuthenticatedUser,
+        caller: &P,
         authz: &dyn AuthzChecker,
     ) -> Result<(), AxiamApiError> {
-        // `tenant_id` is what is being acted upon; `principal_tenant_id` is
-        // where the caller's grants are. They are the same value for every
+        // The acting tenant is what is being acted upon; the subject scope says
+        // where the caller's grants are. They are the same tenant for every
         // ordinary principal, and differ only for an organization-level one
         // acting on one of its organization's tenants — which the extractor has
         // already verified. This one line is what carries organization scope
         // into all ~100 guarded endpoints without any of them changing.
-        self.check_subject_from(user.tenant_id, user.subject_scope(), user.user_id, authz)
-            .await
+        self.check_subject_from(
+            caller.acting_tenant_id(),
+            caller.subject_scope(),
+            caller.subject_id(),
+            authz,
+        )
+        .await
     }
 
     /// Same check, against an explicit `(tenant, subject)` pair.

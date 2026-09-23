@@ -8,7 +8,7 @@ Resume check-ins (send_later): `trig_01QoSznG8scYRczWhYxqJqv9` (fires
 Delete both once the PR is open and green.
 
 - [x] 0. Resume check-ins armed, ledger written
-- [ ] 1. SAGE boot (or note that the MCP is not connected)
+- [x] 1. SAGE boot — MCP not connected, noted below
 - [ ] 2. Citations re-validated against `1cb1371`; S-3/S-4/S-7/S-9/S-10 read in code; drift noted
 - [ ] 3. Contract amendments 1–8 of §6 C-0 (incl. §27.5 decision, §27.10 tier gap)
 - [ ] 4. Version bump to 1.50 + every gate that moves with it; drift check red only for SDK re-vendor

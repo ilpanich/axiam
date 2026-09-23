@@ -379,10 +379,10 @@ async fn a_shrinking_org_server_name_baseline_narrows_the_stored_override() {
         .get_effective_settings(org_id, tenant_id)
         .await
         .unwrap();
-    assert!(
-        effective.certificate.server_cert_allowed_names.is_empty(),
-        "got {:?}: the tenant must lose api.a and must not gain .b",
-        effective.certificate.server_cert_allowed_names
+    // The tenant loses api.a and does not gain .b.
+    assert_eq!(
+        effective.certificate.server_cert_allowed_names,
+        Vec::<String>::new()
     );
 
     // And the clamp on the stored mask agrees with the resolution.

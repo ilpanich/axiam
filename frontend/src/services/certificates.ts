@@ -4,8 +4,72 @@ import { fetchAllPages } from "@/services/_pagination";
 // ─── Backend enums (PascalCase — serde default, no rename) ──────────────────────
 
 export type KeyAlgorithm = "Rsa4096" | "Ed25519";
-export type CertificateType = "User" | "Service" | "Device";
+/**
+ * `Server` (S-7) is the one type that carries `subjectAltName` and
+ * `extendedKeyUsage: serverAuth`. It authenticates nobody: the server refuses
+ * to bind one to a service account and device login refuses it.
+ */
+export type CertificateType = "User" | "Service" | "Device" | "Server";
 export type CertificateStatus = "Active" | "Revoked" | "Expired";
+
+/**
+ * One name in a `Server` certificate's `subjectAltName`, exactly as the server
+ * deserialises `SubjectAltName` (`crates/axiam-core/src/models/certificate.rs`,
+ * `rename_all = "snake_case"`): `{ "dns": "api.lakeside.internal" }` or
+ * `{ "ip": "10.0.0.5" }`. URI and e-mail names are not offered server-side.
+ */
+export type SubjectAltName = { dns: string } | { ip: string };
+
+/** The kind of one SAN row in the form. */
+export type SubjectAltNameKind = "dns" | "ip";
+
+/** One editable row of the SAN list: a kind and the text typed for it. */
+export interface SubjectAltNameRow {
+  kind: SubjectAltNameKind;
+  value: string;
+}
+
+/**
+ * Turn the form's SAN rows into the request field — checking **shape only**.
+ *
+ * The rules here are the two the form owns: a `Server` request states at least
+ * one name, and every row is a non-empty `dns` or `ip` value. Surrounding
+ * whitespace is trimmed, as it is for the subject.
+ *
+ * Everything else is deliberately left to the server, which is the one
+ * authority on names: whether a name is admitted by the tenant's
+ * `server_cert_allowed_names`, whether a wildcard is a whole leftmost label,
+ * whether an IP literal parses, whether a label is a Unicode U-label, whether
+ * there is a trailing dot or an IPv4-mapped IPv6 address. Its 400 names the
+ * offending entry and the remedy, and the form shows it verbatim. A second
+ * matcher here could only ever disagree with the first.
+ */
+export function subjectAltNamesFromRows(
+  rows: SubjectAltNameRow[]
+): { names: SubjectAltName[] } | { error: string } {
+  if (rows.length === 0) {
+    return {
+      error:
+        "A Server certificate needs at least one subject alternative name (a DNS name or an IP address).",
+    };
+  }
+  const names: SubjectAltName[] = [];
+  for (const [i, row] of rows.entries()) {
+    const value = row.value.trim();
+    if (value.length === 0) {
+      return {
+        error: `Subject alternative name ${i + 1} is empty — enter a name or remove the row.`,
+      };
+    }
+    if (row.kind === "dns") names.push({ dns: value });
+    else if (row.kind === "ip") names.push({ ip: value });
+    else
+      return {
+        error: `Subject alternative name ${i + 1} must be a DNS name or an IP address.`,
+      };
+  }
+  return { names };
+}
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
@@ -75,6 +139,12 @@ export interface GenerateCertificatePayload {
   key_algorithm: KeyAlgorithm;
   validity_days: number;
   metadata?: Record<string, unknown>;
+  /**
+   * S-7. Required for `cert_type: "Server"` and refused for every other type,
+   * so the form sends the key only for `Server` — every other request body is
+   * byte-for-byte what it was before the field existed.
+   */
+  subject_alt_names?: SubjectAltName[];
 }
 
 /**
@@ -95,6 +165,13 @@ export interface SignCsrPayload {
   cert_type: CertificateType;
   validity_days: number;
   metadata?: Record<string, unknown>;
+  /**
+   * S-7, as on `GenerateCertificatePayload`. Stated here and never in the CSR,
+   * which is still refused if it asks for a `subjectAltName`. Under a CA whose
+   * key Vault holds, the server refuses a `Server` request on this path by
+   * design; the form shows that 400 as it comes.
+   */
+  subject_alt_names?: SubjectAltName[];
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────

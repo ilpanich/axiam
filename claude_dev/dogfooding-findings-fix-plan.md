@@ -1291,6 +1291,55 @@ working unchanged. CHANGELOG: **Fixed**. Records: none.
 > types are hand-written, so nothing breaks meanwhile: the form simply does
 > not offer `Server` yet.
 
+> **EXECUTED — S-7b, 2026-09-23, PR G2, commit 1 of 4** (branch
+> `feat/console-leaf-profile`, cut from `f210676`, the merge of #495; the task
+> §3 does not list, taken as the console follow-up this block names).
+>
+> **Commit 1 — the certificate form.**
+>
+> - **Shipped.** `CertificateType` gains `Server`; `SubjectAltName` is typed as
+>   the server deserialises it (`{dns}` | `{ip}`, externally tagged, snake
+>   case). Both dialogs share one `CertificateTypeSelect` and, for `Server`
+>   only, one `SubjectAltNamesField`: one row per name, a DNS/IP select, add and
+>   remove. `subjectAltNamesFromRows` (`services/certificates.ts`) is the whole
+>   client-side rule: at least one row, no blank row, kind `dns` or `ip`,
+>   surrounding whitespace trimmed as the subject already was. Nothing else is
+>   judged in the browser — no suffix match, no wildcard or IDNA or trailing-dot
+>   or IPv4-mapped check — and the tests pin that by sending each of those
+>   through unchanged. The server's `400` reaches the dialog through the
+>   existing `getApiErrorMessage` path, verbatim.
+> - **I4.** A `User`, `Service` or `Device` request carries no
+>   `subject_alt_names` key at all, not an empty one — asserted on the key set,
+>   because `toHaveBeenCalledWith` treats an `undefined` property as absent and
+>   would pass either way. A type switched away from `Server` drops its names.
+> - **The Vault custodian.** A `Server` sign-CSR under a `vault_pki` CA is
+>   refused by design (the S-7 block above). The console does not try to
+>   predict it — `CaCertificateOption` does not even carry `key_custody` — it
+>   says so beside the list and shows the server's message, quoted from
+>   `CertService::sign_csr` in the test.
+> - **One sentence was false since S-7 and is corrected**: the CSR dialog's hint
+>   said the issued certificate carries no `keyUsage` or `extendedKeyUsage`.
+>   Every leaf now carries the profile.
+> - **Tests.** `services/certificates.test.ts` (new, 14): the mapping, the
+>   three shape refusals, six "does not judge" cases, both endpoints' bodies and
+>   the Device twin. `CertificatesPage.test.tsx` (+11): the type offered in both
+>   dialogs with the list only for `Server`, a mixed DNS/IP body in order, the
+>   blank-row and no-row refusals on both paths, fenced names sent as typed with
+>   the `400` verbatim, the Vault refusal verbatim, both I4 twins and a reset on
+>   reopen. `e2e/certificates.spec.ts` gains a live-backend test per dialog that
+>   waits for the page rather than probing it once — the file's two older
+>   dialog tests use a one-shot `isVisible()` and take their `else` branch; they
+>   are left as they are, since rewriting them is not this task.
+> - **Docs.** `docs/pki/README.md` did **not** carry a "the console does not
+>   offer this yet" sentence, as the brief expected: the guide said nothing
+>   about the console for `Server` at all. It gains an "In the admin console"
+>   paragraph instead.
+> - **Records: none, verified.** T-288's mitigation is entirely server-side
+>   (`check_leaf_names` runs before the CA lookup on both leaf paths) and
+>   nothing in Axiam.json or either STRIDE document says anything about the
+>   console for `Server` certificates. The form adds no decision the server
+>   does not make again.
+
 
 **Why fix, and why carefully.** The demo's whole PKI constraint — one trust
 anchor, everything anchored in the AXIAM organization root — fails at exactly

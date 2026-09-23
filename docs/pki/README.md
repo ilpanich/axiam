@@ -597,6 +597,16 @@ A `Server` certificate **authenticates nobody**: binding one to a service
 account is refused with `400`, device login refuses it, and its `serverAuth`
 usage fails the `clientAuth` check every client-certificate verifier makes.
 
+**In the admin console.** *Certificates → Generate Certificate* and *Sign a
+CSR* offer the `Server` type. Choosing it opens a list of names, one row per
+name, each a DNS name or an IP address; the list is required for `Server` and
+not shown for any other type, so a `User`, `Service` or `Device` request is
+sent exactly as before. The console checks only that each row is filled in.
+Whether a name is admitted is the server's decision, and its `400` — an
+off-list name, a Unicode label, a trailing dot, a wildcard that is not a whole
+leftmost label, an IPv4-mapped address, or a `Server` CSR under a `vault_pki`
+CA — is shown in the dialog word for word.
+
 The fence is AXIAM's. X.509 `nameConstraints` in the tenant CA itself — so the
 fence would also hold for a relying party that never talks to AXIAM — is
 deliberately not built yet: changing the list would then mean re-issuing the

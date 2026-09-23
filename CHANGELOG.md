@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Server certificates in the admin console (T22.14b, S-7b).** The
+  certificate dialogs — *Generate Certificate* and *Sign a CSR* — offer the
+  `Server` type with a list of subject alternative names, one row per DNS name
+  or IP address. The list is shown only for `Server` and required there; every
+  other type's request body is unchanged. The console checks shape only (a row
+  is not empty, and is DNS or IP); admission is the server's, and its `400` is
+  shown verbatim, including the refusal of a `Server` CSR under a `vault_pki`
+  CA. The CSR dialog no longer claims that a leaf carries no `keyUsage` or
+  `extendedKeyUsage`, which stopped being true with the T22.14 profile.
 - **Server certificates, and the names they may carry (T22.14, DF-001).**
   AXIAM could not issue a certificate a TLS *server* can present: leaves
   carried no subjectAltName, and neither request body had a field to ask for

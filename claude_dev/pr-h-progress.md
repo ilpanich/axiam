@@ -65,3 +65,10 @@ Delete both once the PR is open and green.
   (docblock says it does). Only C++ has `authenticate_device()`; no SDK sends
   `X-Axiam-Tenant`; no SDK wraps TokenService (Go's stubs are `internal/`,
   Python/PHP generate none).
+
+### Decisions from the user (2026-09-23)
+
+- C-0 ships as **contract 1.51** (1.50 is `d5a6811`'s). C-12 becomes 1.52.
+  Branch stays `docs/contract-1.50`; the PR says why.
+- §27.1's table and the "147" prose are re-rendered from the registry (162) in
+  this PR, recorded in the EXECUTED block as not anticipated.

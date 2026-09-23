@@ -59,6 +59,8 @@ import {
 } from "@/components/AssignmentInheritChange";
 import { useResourceNames } from "@/hooks/useResourceNames";
 import { invalidateEntity } from "@/lib/queryInvalidation";
+import { useMakeRoleGlobalGuard } from "@/hooks/useMakeRoleGlobalGuard";
+import { MakeRoleGlobalConfirm } from "@/components/MakeRoleGlobalConfirm";
 
 // ─── Scope chips ──────────────────────────────────────────────────────────────
 
@@ -876,6 +878,10 @@ export function RoleDetailPage() {
     setEditOpen(true);
   }
 
+  // S-10b — making a role global widens its non-inheritable assignments to
+  // everywhere; the guard asks first, and otherwise saves exactly as before.
+  const makeGlobalGuard = useMakeRoleGlobalGuard();
+
   function handleEditSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setEditError("");
@@ -883,14 +889,15 @@ export function RoleDetailPage() {
       setEditError("Name is required.");
       return;
     }
-    editMutation.mutate({
-      id: roleId!,
-      payload: {
-        name: editName.trim(),
-        description: editDescription.trim() || undefined,
-        is_global: editIsGlobal,
-      },
-    });
+    if (!role) return;
+    const payload = {
+      name: editName.trim(),
+      description: editDescription.trim() || undefined,
+      is_global: editIsGlobal,
+    };
+    void makeGlobalGuard.guard(role, editIsGlobal, () =>
+      editMutation.mutate({ id: roleId!, payload })
+    );
   }
 
   // ─── Revoke permission ─────────────────────────────────────────────────────
@@ -1361,11 +1368,13 @@ export function RoleDetailPage() {
 
       {/* Edit dialog */}
       <FormDialog
-        open={editOpen}
+        // Hidden, not closed, while the make-global question is open: its
+        // fields are page state, so "Keep it scoped" returns to them intact.
+        open={editOpen && makeGlobalGuard.pending === null}
         onClose={() => setEditOpen(false)}
         title="Edit Role"
         onSubmit={handleEditSubmit}
-        isLoading={editMutation.isPending}
+        isLoading={editMutation.isPending || makeGlobalGuard.checking}
         submitLabel="Save Changes"
         error={editError}
         errorId="role-detail-edit-error"
@@ -1379,6 +1388,12 @@ export function RoleDetailPage() {
           onIsGlobalChange={setEditIsGlobal}
         />
       </FormDialog>
+
+      <MakeRoleGlobalConfirm
+        pending={makeGlobalGuard.pending}
+        onConfirm={makeGlobalGuard.confirm}
+        onCancel={makeGlobalGuard.cancel}
+      />
 
       {/* Revoke permission confirm */}
       <ConfirmDialog

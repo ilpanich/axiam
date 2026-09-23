@@ -1304,3 +1304,114 @@ describe("RoleDetailPage — inherit (S-10b)", () => {
     expect(apiMock.post).not.toHaveBeenCalled();
   });
 });
+
+// ─── S-10b — making a role global ─────────────────────────────────────────────
+
+describe("RoleDetailPage — making a role global (S-10b)", () => {
+  async function toggleGlobalAndSave() {
+    await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByLabelText("Global role"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+  }
+
+  it("asks first when the role has non-inheritable assignments, naming them and the effect", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1", inherit: false }],
+        [URLS.groups]: [{ group: groups[0], resource_id: "res2", inherit: false }],
+      })
+    );
+    apiMock.put.mockResolvedValue(res({ ...role, is_global: true }));
+    renderPage();
+    await toggleGlobalAndSave();
+
+    const question = await screen.findByRole("dialog", { name: "Make this role global?" });
+    expect(question).toHaveTextContent(/"Editor" has 2 assignments made to stop at their resource/);
+    expect(question).toHaveTextContent(/user "Alice A" at "Billing"/);
+    expect(question).toHaveTextContent(/group "Admins" at "Reports"/);
+    expect(question).toHaveTextContent(/including the descendants they were made to stop short of/);
+    expect(apiMock.put).not.toHaveBeenCalled();
+
+    await userEvent.click(within(question).getByRole("button", { name: "Make global" }));
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(URLS.role, {
+        name: "Editor",
+        description: "Can edit things",
+        is_global: true,
+      })
+    );
+  });
+
+  it("'Keep it scoped' saves nothing and returns to the form as it was", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1", inherit: false }],
+      })
+    );
+    renderPage();
+    await toggleGlobalAndSave();
+    const question = await screen.findByRole("dialog", { name: "Make this role global?" });
+    await userEvent.click(within(question).getByRole("button", { name: "Keep it scoped" }));
+    const form = await screen.findByRole("dialog", { name: "Edit Role" });
+    expect(within(form).getByLabelText("Global role")).toBeChecked();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("asks, saying it could not check, when the listings cannot be read", async () => {
+    routeGet(defaultData());
+    renderPage();
+    await screen.findByText("Alice A");
+    // The page has its listings; the guard's own read is what fails.
+    apiMock.get.mockImplementation((url: string) =>
+      url === URLS.users ? Promise.reject(new Error("offline")) : Promise.resolve(res([]))
+    );
+    await toggleGlobalAndSave();
+    expect(
+      await screen.findByRole("dialog", { name: "Make this role global?" })
+    ).toHaveTextContent(/Could not check whether "Editor" has assignments made to stop/);
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("I4 twin: with only cascading assignments, saves at once with no question", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1" }],
+      })
+    );
+    apiMock.put.mockResolvedValue(res({ ...role, is_global: true }));
+    renderPage();
+    await toggleGlobalAndSave();
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog", { name: "Make this role global?" })).not.toBeInTheDocument();
+  });
+
+  it("I4 twin: an edit that leaves the role scoped reads nothing more and asks nothing", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1", inherit: false }],
+      })
+    );
+    const listingReads = () =>
+      apiMock.get.mock.calls.filter(([url]) =>
+        [URLS.users, URLS.groups, URLS.serviceAccounts].includes(url as string)
+      ).length;
+    // Count the listing reads at the instant the PUT is issued: the guard
+    // would have read all three before it.
+    let readsAtPut = -1;
+    apiMock.put.mockImplementation(() => {
+      readsAtPut = listingReads();
+      return Promise.resolve(res(role));
+    });
+    renderPage();
+    await screen.findByText("Alice A");
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const readsBefore = listingReads();
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Save Changes" })
+    );
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(readsAtPut).toBe(readsBefore);
+    expect(screen.queryByRole("dialog", { name: "Make this role global?" })).not.toBeInTheDocument();
+  });
+});

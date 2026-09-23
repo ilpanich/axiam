@@ -337,7 +337,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "In the admin console every assign dialog offers **Also applies to the resource's descendants** once a resource is chosen for a role that is not global — nowhere else, since the server would refuse it there. A non-inheritable row is badged **This resource only**, and **Stop here** / **Include descendants** beside a resource-scoped row changes the flag after a confirmation that says which way access moves.",
+        text: "In the admin console every assign dialog offers **Also applies to the resource's descendants** once a resource is chosen for a role that is not global — nowhere else, since the server would refuse it there. A non-inheritable row is badged **This resource only**, and **Stop here** / **Include descendants** beside a resource-scoped row changes the flag after a confirmation that says which way access moves. Saving a role as global while it has non-inheritable assignments asks first, naming them: a global role ignores where it is assigned, so each would apply everywhere.",
       },
       {
         type: "note",

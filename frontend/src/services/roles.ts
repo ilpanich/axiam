@@ -135,6 +135,13 @@ export function canChangeInherit(
 /** Which kind of principal an assignment belongs to. */
 export type AssignmentSubjectKind = "user" | "group" | "service account";
 
+/** One non-inheritable assignment of a role, named for a confirmation. */
+export interface NonInheritableAssignment {
+  kind: AssignmentSubjectKind;
+  name: string;
+  resource_id: string;
+}
+
 /**
  * A flag change that did not complete. `restored` says which of the two
  * possible states the subject is left in, because the answer is the whole
@@ -356,6 +363,46 @@ export const roleService = {
         resourceId ? { params: { resource_id: resourceId } } : {}
       )
       .then(() => undefined),
+
+  /**
+   * The role's non-inheritable assignments, across all three kinds of
+   * principal, read from the server's own listings.
+   *
+   * What making the role global would widen (S-10 item 6, T-285): `is_global`
+   * applies a role everywhere whatever its assignments say, so each of these —
+   * made to stop at its resource — would then reach every resource. The server
+   * does not refuse that change, deliberately; the console asks first.
+   */
+  nonInheritableAssignments: async (
+    roleId: string
+  ): Promise<NonInheritableAssignment[]> => {
+    const [users, groups, serviceAccounts] = await Promise.all([
+      roleService.listUsers(roleId),
+      roleService.listGroups(roleId),
+      roleService.listServiceAccounts(roleId),
+    ]);
+    const stopped = <T extends { resource_id: string | null; inherit?: boolean }>(
+      a: T
+    ): a is T & { resource_id: string } =>
+      a.resource_id !== null && !assignmentInherits(a);
+    return [
+      ...users.filter(stopped).map((a) => ({
+        kind: "user" as const,
+        name: a.user.display_name ?? a.user.username,
+        resource_id: a.resource_id,
+      })),
+      ...groups.filter(stopped).map((a) => ({
+        kind: "group" as const,
+        name: a.group.name,
+        resource_id: a.resource_id,
+      })),
+      ...serviceAccounts.filter(stopped).map((a) => ({
+        kind: "service account" as const,
+        name: a.service_account.name,
+        resource_id: a.resource_id,
+      })),
+    ];
+  },
 
   // ─── Changing `inherit` on an existing assignment ─────────────────────────
 

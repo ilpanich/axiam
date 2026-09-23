@@ -210,3 +210,46 @@ describe("roleService.setAssignmentInherit", () => {
     });
   });
 });
+
+// ─── S-10b — what making a role global would widen ────────────────────────────
+
+describe("roleService.nonInheritableAssignments", () => {
+  it("collects the non-inheritable, resource-scoped rows of all three listings", async () => {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/roles/r1/users")
+        return Promise.resolve(
+          res([
+            { user: { id: "u1", username: "alice", display_name: "Alice A" }, resource_id: "res1", inherit: false },
+            { user: { id: "u2", username: "bob" }, resource_id: "res1", inherit: true },
+            { user: { id: "u3", username: "carol" }, resource_id: "res2" },
+            { user: { id: "u4", username: "dan" }, resource_id: null, inherit: false },
+          ])
+        );
+      if (url === "/api/v1/roles/r1/groups")
+        return Promise.resolve(res([{ group: { id: "g1", name: "Ops" }, resource_id: "res2", inherit: false }]));
+      if (url === "/api/v1/roles/r1/service-accounts")
+        return Promise.resolve(
+          res([{ service_account: { id: "sa1", name: "ingest" }, resource_id: "res1", inherit: false }])
+        );
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    expect(await roleService.nonInheritableAssignments("r1")).toEqual([
+      { kind: "user", name: "Alice A", resource_id: "res1" },
+      { kind: "group", name: "Ops", resource_id: "res2" },
+      { kind: "service account", name: "ingest", resource_id: "res1" },
+    ]);
+  });
+
+  it("I4 twin: a role whose assignments all cascade has none", async () => {
+    apiMock.get.mockImplementation((url: string) =>
+      Promise.resolve(
+        res(
+          url.endsWith("/users")
+            ? [{ user: { id: "u1", username: "alice" }, resource_id: "res1" }]
+            : []
+        )
+      )
+    );
+    expect(await roleService.nonInheritableAssignments("r1")).toEqual([]);
+  });
+});

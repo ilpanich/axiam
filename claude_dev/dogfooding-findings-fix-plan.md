@@ -1291,7 +1291,7 @@ working unchanged. CHANGELOG: **Fixed**. Records: none.
 > types are hand-written, so nothing breaks meanwhile: the form simply does
 > not offer `Server` yet.
 
-> **EXECUTED — S-7b, 2026-09-23, PR G2, commits 1 and 2 of 4** (branch
+> **EXECUTED — S-7b, 2026-09-23, PR G2, commits 1 and 2 of 5** (branch
 > `feat/console-leaf-profile`, cut from `f210676`, the merge of #495; the task
 > §3 does not list, taken as the console follow-up this block names).
 >
@@ -1951,7 +1951,7 @@ reach before — RBAC is default-deny, and the sweep test proves it.
 >     breaks and the new response field is ignored; the dialogs gain no control.
 >     Recorded in the admin guide and the CHANGELOG as API-only for now.
 
-> **EXECUTED — S-10b, 2026-09-23, PR G2, commit 3 of 4** (the console half of
+> **EXECUTED — S-10b, 2026-09-23, PR G2, commits 3 and 4 of 5** (the console half of
 > item 11 above; roadmap **T22.11b** — numbered after the task it completes,
 > since this roadmap's T22.10 is the console resolver, S-11).
 >
@@ -2013,6 +2013,41 @@ reach before — RBAC is default-deny, and the sweep test proves it.
 >   already verified invalidate, and the console only chooses not to offer what
 >   would be refused. `gen-threat-model.mjs`: *"threatModel.ts: 9 diagrams, 279
 >   threats (266 mitigated, 13 open)"* — unchanged; generated files reverted.
+>
+> **Commit 4 — asking before a role is made global.**
+>
+> - **Shipped.** `useMakeRoleGlobalGuard` (hook) and `MakeRoleGlobalConfirm`
+>   (dialog), used by both places that edit `is_global`: the role list's and
+>   the role page's *Edit Role*. The guard does nothing — no read, no dialog,
+>   the same `PUT` — unless the save moves `is_global` from false to true. Then
+>   it reads the role's three assignment listings from the server
+>   (`roleService.nonInheritableAssignments`) and asks only if one of them is
+>   resource-scoped with `inherit: false`, or if the read failed ("could not
+>   check" is not "none"). The question names up to three of them with their
+>   resources, counts the rest, and says the effect: each will apply
+>   everywhere, the descendants it stopped short of included, and a deny among
+>   the role's grants would deny everywhere. *Keep it scoped* returns to the
+>   form with its values intact (the form is hidden, not closed); *Make global*
+>   sends exactly the body it would have sent.
+> - **A confirmation, not a refusal**, as the brief and T-285 say: the server
+>   accepts the change by design, so the console must not make it impossible —
+>   only not silent.
+> - **Tests.** `roles.test.ts` (+2: the aggregation across all three kinds,
+>   excluding cascading and tenant-wide rows; the none case),
+>   `RoleDetailPage.test.tsx` (+5) and `RolesPage.test.tsx` (+3): asked and
+>   saved on confirm, *Keep it scoped* saves nothing, the failed-read wording,
+>   and the I4 twins — only cascading assignments save at once, an edit that
+>   leaves the role scoped makes none of the guard's reads before its `PUT`
+>   (counted at the instant the `PUT` is issued), and un-making a role global
+>   never asks.
+> - **Mutations, all four caught, all reverted.** The guard reading on every
+>   save (the no-read twin went red); the guard never asking (four tests red);
+>   `setAssignmentInherit` skipping the restore (five red, commit 3's); the
+>   dialog offering the flag unconditionally (four red, commit 3's).
+> - **Records: T-285 amended again, no new threat — verified.** The residual
+>   stands, since the server behaviour is unchanged; its text now says the
+>   console confirms first. `gen-threat-model.mjs`: *"threatModel.ts: 9
+>   diagrams, 279 threats (266 mitigated, 13 open)"*; generated files reverted.
 
 **The proposal, kept, with two refinements.** The user's DF-021 asks for a
 `non_inheritable` flag on a grant plus a write-time rejection of a

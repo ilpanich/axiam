@@ -880,14 +880,16 @@ through both engine paths and over gRPC; three property tests; the clause
 broken on purpose twice to watch the new tests fail. OpenAPI and the management
 registry regenerated. Threat **T-285**; **T-16** and **T-87** amended. PR D.
 
-### T22.11b — Non-inheritable assignments in the admin console — Sonnet 5 · IN PROGRESS
+### T22.11b — Non-inheritable assignments in the admin console — Sonnet 5 ✓ LANDED
 S-10b, the console half of T22.11 (PR G2). Every assign dialog — role → user,
 group, service account; user → role; group → role — offers `inherit` only
 with a resource on a non-global role, and sends it only as `false`. Listings
 badge a non-inheritable row; *Stop here* / *Include descendants* changes the
 flag as unassign-then-assign with a restore on failure and a loud message if
 the restore fails too. T-285's "console does not offer the flag" residual
-amended. Pending in this task: the confirmation when a role is made global.
+amended. Saving a role as global while it has non-inheritable assignments asks
+first, naming them (the T-285 residual: a confirmation, not a refusal), on both
+the role list and the role page.
 (Numbered after T22.11, the task it completes; the brief called it T22.10b,
 but T22.10 in this roadmap is the console resolver, S-11.)
 

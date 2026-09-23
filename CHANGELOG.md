@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `409` by design, the change is unassign-then-assign; a refused second call
   re-assigns the old assignment and says so, and a failed restore says the
   subject no longer holds the role.
+  Saving a role as global while it has non-inheritable assignments now asks
+  first, naming them: a global role ignores where it is assigned, so each would
+  apply everywhere. A confirmation, not a refusal — the server accepts the
+  change, as T-285's residual records; a role with none is saved exactly as
+  before.
 - **Server certificates in the admin console (T22.14b, S-7b).** The
   certificate dialogs — *Generate Certificate* and *Sign a CSR* — offer the
   `Server` type with a list of subject alternative names, one row per DNS name

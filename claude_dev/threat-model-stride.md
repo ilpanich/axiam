@@ -1737,7 +1737,7 @@ DF-021 asked for a role assignment that applies at its resource and not below it
 >
 > Residual, documented in `docs/admin/README.md`: making a role global *after* assigning it non-inheritably widens that assignment to everywhere, as it widens every assignment of the role.
 >
-> **Amended 2026-09-23 (T22.11b, S-10b).** The admin console now offers the flag, only where the server would store and apply it — a resource chosen, a role that is not global — and changes it as the same unassign then assign. If the second call is refused the old assignment is assigned again, and if that fails too the operator is told the subject no longer holds the role; nothing is left silently. The console decides nothing the three assign routes do not decide again, so the mitigation above is unchanged.
+> **Amended 2026-09-23 (T22.11b, S-10b).** The admin console now offers the flag, only where the server would store and apply it — a resource chosen, a role that is not global — and changes it as the same unassign then assign. If the second call is refused the old assignment is assigned again, and if that fails too the operator is told the subject no longer holds the role; nothing is left silently. The console decides nothing the three assign routes do not decide again, so the mitigation above is unchanged. Saving a role as global while it has non-inheritable assignments opens a confirmation that names them and says each will apply everywhere; the residual stands — the server accepts the change by design — but it no longer happens unannounced in the console.
 
 </details>
 

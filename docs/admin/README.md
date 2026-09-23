@@ -415,7 +415,10 @@ it.
   assignment has no resource to stop at), and `inherit: false` for a role with
   `is_global: true` (a global role applies everywhere by definition). Making a
   role global *after* assigning it non-inheritably widens that assignment to
-  everywhere, as it widens every other assignment of the role.
+  everywhere, as it widens every other assignment of the role. The server does
+  not refuse that — it is what `is_global` means — but the admin console asks
+  first: saving a role as global while it has non-inheritable assignments
+  opens a confirmation that names them and says they will apply everywhere.
 - **The flag is part of the assignment.** A subject holds a given role at most
   once, so there is no update: to change it, unassign
   (`DELETE .../users/{user_id}?resource_id=<uuid>`) and assign again. Both

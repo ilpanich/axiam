@@ -21,6 +21,8 @@ import { cn, formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleField } from "@/components/shared";
 import { useCrudMutations } from "@/hooks/useCrudMutations";
+import { useMakeRoleGlobalGuard } from "@/hooks/useMakeRoleGlobalGuard";
+import { MakeRoleGlobalConfirm } from "@/components/MakeRoleGlobalConfirm";
 import {
   reachLabel,
   reachTitle,
@@ -215,6 +217,10 @@ export function RolesPage() {
     setEditError("");
   }
 
+  // S-10b — see RoleDetailPage: ask before non-inheritable assignments are
+  // widened to everywhere, and otherwise save exactly as before.
+  const makeGlobalGuard = useMakeRoleGlobalGuard();
+
   function handleEditSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setEditError("");
@@ -222,14 +228,15 @@ export function RolesPage() {
       setEditError("Name is required.");
       return;
     }
-    editMutation.mutate({
-      id: editRole.id,
-      payload: {
-        name: editName.trim(),
-        description: editDescription.trim(),
-        is_global: editIsGlobal,
-      },
-    });
+    const id = editRole.id;
+    const payload = {
+      name: editName.trim(),
+      description: editDescription.trim(),
+      is_global: editIsGlobal,
+    };
+    void makeGlobalGuard.guard(editRole, editIsGlobal, () =>
+      editMutation.mutate({ id, payload })
+    );
   }
 
   // ─── Table columns ─────────────────────────────────────────────────────────
@@ -366,11 +373,12 @@ export function RolesPage() {
 
       {/* Edit dialog */}
       <FormDialog
-        open={editRole !== null}
+        // Hidden, not closed, while the make-global question is open.
+        open={editRole !== null && makeGlobalGuard.pending === null}
         onClose={() => setEditRole(null)}
         title="Edit Role"
         onSubmit={handleEditSubmit}
-        isLoading={editMutation.isPending}
+        isLoading={editMutation.isPending || makeGlobalGuard.checking}
         submitLabel="Save Changes"
         error={editError}
         errorId="role-edit-error"
@@ -387,6 +395,12 @@ export function RolesPage() {
           toggleId="edit-role-is-global"
         />
       </FormDialog>
+
+      <MakeRoleGlobalConfirm
+        pending={makeGlobalGuard.pending}
+        onConfirm={makeGlobalGuard.confirm}
+        onCancel={makeGlobalGuard.cancel}
+      />
 
       {/* Delete confirm */}
       <ConfirmDialog

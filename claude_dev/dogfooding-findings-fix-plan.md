@@ -1328,8 +1328,9 @@ working unchanged. CHANGELOG: **Fixed**. Records: none.
 >   the `400` verbatim, the Vault refusal verbatim, both I4 twins and a reset on
 >   reopen. `e2e/certificates.spec.ts` gains a live-backend test per dialog that
 >   waits for the page rather than probing it once — the file's two older
->   dialog tests use a one-shot `isVisible()` and take their `else` branch; they
->   are left as they are, since rewriting them is not this task.
+>   dialog tests use a one-shot `isVisible()` and look for labels the page does
+>   not have (`Common Name *`, `Key Type`), so they can pass only through their
+>   `else` branch; they are left as they are and listed in §13.
 > - **Docs.** `docs/pki/README.md` did **not** carry a "the console does not
 >   offer this yet" sentence, as the brief expected: the guide said nothing
 >   about the console for `Server` at all. It gains an "In the admin console"
@@ -2569,6 +2570,37 @@ Rules that bind this session:
 Start by printing the task list for PR <LETTER> with the files each task
 touches, then begin with the first task.
 ```
+
+---
+
+## 13. Open after PR G
+
+Written at the end of PR G2 (S-7b, S-10b), when every server task of this plan
+— S-1 … S-11 — and both console follow-ups have shipped. What remains is
+below, one row per item, each with who takes it and what the next step is.
+None of it is worked in PR G2.
+
+| # | Item | Owner | Next step |
+|---|---|---|---|
+| 1 | **PR H → I₁ … I₁₁ → J**: contract 1.50 (C-0), the eleven SDK ports (C-1 … C-11), the conformance review (C-12) | Executing sessions: Opus 5 for C-0, C-1, C-12; Sonnet 5 for C-2 … C-11 (§2) | Open PR H (`docs/contract-1.50`) from `main` as it stands after G2 — §6 C-0 is the brief — then C-1 (Rust) before the ten ports, per §8. `check-sdk-artifact-drift.py` stays red until the SDKs re-vendor from the C-0 commit; that is expected, not a regression |
+| 2 | **Vault `sign_csr` of a `Server` certificate.** Refused under a `vault_pki` CA today, by design (S-7 EXECUTED, item 1): Vault's `sign-verbatim` takes SANs from the CSR only, and the CSR may not carry them | Maintainer decision, then an Opus 5 session (certificate issuance) | Decide whether to add the config key the plan excluded: a Vault role with `use_csr_sans=false`, so explicit names can reach the certificate. Until then `POST /certificates` (generate) is the path under a Vault CA, and the console says so |
+| 3 | **D-7: X.509 `nameConstraints` in tenant CAs**, so the name fence holds for a relying party that never talks to AXIAM. T-288's residual | Next PKI pass; Opus 5 | A design note first: how a change to `server_cert_allowed_names` re-issues (or does not re-issue) a tenant CA, and what happens to leaves already issued under the old constraints |
+| 4 | **The intermittent `500` from CA-certificate creation during e2e fixture setup**, deferred in S-5 as "a real unknown in CA generation; gets its own change" | Unassigned; its own change | Reproduce first: loop the matrix fixture's CA creation against a local stack and capture the server log for the `500`. No fix before there is a cause |
+| 5 | **`k8s/frontend/deployment.yml`**: `readOnlyRootFilesystem: true` with no volume at `/etc/nginx/conf.d`, so the stock `20-envsubst-on-templates.sh` cannot render and the console most likely serves the base image's `default.conf` — no SPA fallback, no security headers, no proxying. Found in S-11 by reading the entrypoint; **not observed on a cluster** | Maintainer (deployment); a Sonnet 5 session can take the change | Observe it on a cluster (`kubectl exec … cat /etc/nginx/conf.d/default.conf`) before changing anything; if confirmed, mount an `emptyDir` at `/etc/nginx/conf.d` and add a probe that fails on the stock page |
+| 6 | **Threat-model reconciliation**: `Axiam.json` is nine entries behind the STRIDE documents (flagged since PR A) | Maintainer | Write the nine missing entries into the Threat Dragon file from the text `threat-model-stride.md` already holds, then regenerate `website/src/threatModel.ts` and commit it, closing the gap `gen-threat-model.mjs` reports (279 in the JSON against 288 in the documents) |
+| 7 | **D-3: widen the `has_role` key to (subject, role, resource)** | Maintainer decision (§7.1) | A design document of its own, with the data migration: verify no subject holds a role both globally and at a resource, and how "one global assignment" stays unique without a partial index |
+| 8 | **D-4: mirror the management surface on gRPC** | Deferred | When taken: `ReactorAdminService` (`proto/axiam/v1/reactor.proto`) is the precedent; S-8's client-certificate verification is now in place for the listener it would ride on |
+| 9 | **D-5, second round**: whether each excluded route family should accept a service-account token — self-service, organizations/tenants, settings, CA, PGP, SCIM, federation | Maintainer, argued family by family | One decision per family, each with the argument S-9 made for the eight it admitted; the route-map sweep in `m2m_management_test.rs` is where each decision is pinned |
+| 10 | **D-6: a device access-token lifetime setting** | Deferred, only if the fleet cost turns out to be real | Measure first: handshake and token-issuance cost per device over a day, against the default 900 s lifetime |
+| 11 | **§7.2's deliberate exclusions**: `webhooks` in the manifest; certificate-only authentication on gRPC; the `users` / `scopes` manifest tier in PHP, Swift, C and C++ | Deferred; C-0 records the tier gap in §27.10 | Each is taken when a consumer asks for it, not before |
+| 12 | **§10: the feedback rows for the `axiam-domo-demo` findings document** — DF-001, DF-003, DF-004, DF-013, DF-014, DF-024, and the new DF-028 and DF-029 | Maintainer (edits that repository; a session does not) | Apply §10's table to `docs/dogfooding-findings.md` in `axiam-domo-demo` |
+
+**Found during PR G2, not fixed there:**
+
+| # | Item | Owner | Next step |
+|---|---|---|---|
+| 13 | `frontend/e2e/certificates.spec.ts`: the two older Generate-dialog tests probe once with `isVisible()` and look for labels the page does not have (`Common Name *`, `Key Type`), so they can pass only through their `else` branch and assert nothing about the dialog | Sonnet 5, test-only change | Rewrite them with auto-waiting assertions on the real labels (`Subject *`, `Key Algorithm`), as the Server tests next to them do |
+| 14 | The settings lists edited as a textarea (DCR scopes, redirect hosts, audiences; CIMD domains) re-parse on every keystroke through `parseLines`, which drops a trailing newline, so starting a second line is awkward | Sonnet 5, console-only | Keep the raw text in form state and parse on save, or move them to the row editor `serverNamesPolicy.tsx` uses |
 
 **References**
 

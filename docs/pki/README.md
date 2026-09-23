@@ -674,10 +674,13 @@ bearer device tokens, exactly as before; moving the boundary is a deployment
 decision — terminate mTLS at AXIAM — and not something a claim can paper over.
 
 **Over gRPC**, the check reads the certificate rustls verified for the
-connection. Until the gRPC listener is configured to ask for one, a
-certificate-bound token presented there has no evidence to match and is
-refused — the fail-closed direction, and the reason a device fleet talks to the
-REST surface today.
+connection. That listener asks for one only when
+`AXIAM__GRPC_TLS_CLIENT_AUTH` is `optional` or `required` (see
+[the deployment guide](../deployment/README.md#the-grpc-listener-tls-and-client-certificates)).
+Under the default, `off`, a certificate-bound token presented there has no
+evidence to match and is refused. That is the fail-closed direction. With client
+authentication on, a device presents the same certificate it logged in with,
+and its token is accepted over gRPC as it is over REST.
 
 **Upgrading.** A token minted before this change carries no `cnf` and is
 accepted exactly as it always was; the check is "if `cnf` is present". The

@@ -353,13 +353,37 @@ pub fn peer_certificate_trust(
 /// anchor. The live anchor set is left **unchanged** in that case: the new
 /// bundle is fully parsed and the verifier fully built before anything is
 /// swapped, so a bad reload cannot leave the listener trusting nothing.
-pub fn reload_trust_anchors(pem: &str) -> io::Result<Option<usize>> {
-    let Some((verifier, provider)) = LIVE_VERIFIER.get() else {
-        return Ok(None);
+///
+/// # The gRPC listener (S-8)
+///
+/// The same call reloads every gRPC listener built with client authentication
+/// on. Each re-reads **its own** `AXIAM__GRPC_TLS_CLIENT_CA_PATH` rather than
+/// taking `pem`, for the reason the REST bundle is written before it is
+/// swapped: a listener must never trust a set its next boot would not read.
+/// Pointed at the REST bundle — the documented topology — it therefore picks
+/// up exactly what was just written there; pointed at a bundle of its own, it
+/// re-reads that and nothing changes. An empty or unreadable gRPC bundle is
+/// logged and that listener keeps the anchors it has.
+///
+/// `written_to` is where `pem` was just written, if anywhere. When no REST
+/// listener verifies clients, the result is the count of a gRPC listener whose
+/// bundle **is** that file — the one case where the set just flagged is the set
+/// that listener now trusts — so the caller reports "applied" rather than
+/// "restart". A gRPC listener reading a bundle of its own is still reloaded,
+/// but it does not make the flagged set "applied": that set did not reach it.
+pub fn reload_trust_anchors(
+    pem: &str,
+    written_to: Option<&std::path::Path>,
+) -> io::Result<Option<usize>> {
+    let rest = match LIVE_VERIFIER.get() {
+        Some((verifier, provider)) => {
+            let roots = roots_from_pem(pem, "the mTLS trust anchor bundle")?;
+            Some(verifier.replace(roots, provider)?)
+        }
+        None => None,
     };
-    let roots = roots_from_pem(pem, "the mTLS trust anchor bundle")?;
-    let count = verifier.replace(roots, provider)?;
-    Ok(Some(count))
+    let grpc = reload_grpc_trust_anchors(written_to);
+    Ok(rest.or(grpc))
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,15 +1269,206 @@ pub const ENV_GRPC_TLS_KEY_PATH: &str = "AXIAM__GRPC_TLS_KEY_PATH";
 /// what a client sees on the wire is unchanged.
 const GRPC_ALPN_H2: &[u8] = b"h2";
 
+/// The environment variable choosing the gRPC listener's client-certificate
+/// policy (S-8, DF-005): `off` (the default), `optional` or `required`.
+///
+/// Flat, in the namespace [`ENV_GRPC_TLS_CERT_PATH`] already uses. Parsed by
+/// [`resolve_grpc_tls`]; see it for every combination that refuses to boot.
+///
+/// `optional_self_signed`, which the REST listener accepts, is refused here:
+/// it exists for RFC 8705 §2.2 clients of the OAuth2 token endpoint, which is
+/// not on this listener, and accepting an unchained certificate would give the
+/// interceptor's `cnf` check a peer certificate nobody vouches for.
+pub const ENV_GRPC_TLS_CLIENT_AUTH: &str = "AXIAM__GRPC_TLS_CLIENT_AUTH";
+
+/// The environment variable naming the PEM bundle the gRPC listener verifies
+/// client certificates against. Required when [`ENV_GRPC_TLS_CLIENT_AUTH`] is
+/// `optional` or `required`, refused when it is `off`.
+///
+/// Point it at the same bundle the REST listener reads
+/// (`AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH`, or the `client-ca-bundle.pem`
+/// derived beside the server certificate) and the two listeners trust one
+/// anchor set: flagging a CA rewrites that file and
+/// [`reload_trust_anchors`] installs it on both.
+pub const ENV_GRPC_TLS_CLIENT_CA_PATH: &str = "AXIAM__GRPC_TLS_CLIENT_CA_PATH";
+
+/// The gRPC listener's client-certificate policy, validated.
+///
+/// Only the three shapes [`resolve_grpc_tls`] can produce are constructible
+/// through it: `Off` with no bundle, or `Optional` / `Required` with one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcClientAuth {
+    mode: ClientAuth,
+    ca_path: Option<std::path::PathBuf>,
+}
+
+impl GrpcClientAuth {
+    /// No client certificate is requested — today's handshake, and the default.
+    pub fn off() -> Self {
+        Self {
+            mode: ClientAuth::Off,
+            ca_path: None,
+        }
+    }
+
+    /// Verify a client certificate when one is offered, against `ca_path`.
+    pub fn optional(ca_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            mode: ClientAuth::Optional,
+            ca_path: Some(ca_path.into()),
+        }
+    }
+
+    /// Refuse the handshake unless a certificate chaining to `ca_path` is
+    /// presented.
+    pub fn required(ca_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            mode: ClientAuth::Required,
+            ca_path: Some(ca_path.into()),
+        }
+    }
+
+    /// The policy: [`ClientAuth::Off`], [`ClientAuth::Optional`] or
+    /// [`ClientAuth::Required`], never [`ClientAuth::OptionalSelfSigned`].
+    pub fn mode(&self) -> ClientAuth {
+        self.mode
+    }
+
+    /// The anchor bundle, `None` exactly when the mode is `Off`.
+    pub fn ca_path(&self) -> Option<&std::path::Path> {
+        self.ca_path.as_deref()
+    }
+}
+
+/// What the environment asks of the gRPC listener, once validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcTlsSettings {
+    /// The leaf's certificate chain.
+    pub cert_path: std::path::PathBuf,
+    /// The leaf's private key.
+    pub key_path: std::path::PathBuf,
+    /// Whether, and against what, client certificates are verified.
+    pub client_auth: GrpcClientAuth,
+}
+
+/// Decide, from the four `AXIAM__GRPC_TLS_*` variables, how the gRPC listener
+/// terminates TLS — without reading the process environment, so every
+/// combination is testable from a map.
+///
+/// `Ok(None)` is plaintext: neither certificate variable set, or only one of
+/// them, which has always been treated as "off" (the runbook says both or
+/// neither). `Ok(Some(..))` is TLS.
+///
+/// # What refuses to boot
+///
+/// Every case where the listener would come up **weaker than configured** —
+/// T-233's "a typo is a failed boot", applied to client authentication:
+///
+/// | Case | Why it is not a warning |
+/// |---|---|
+/// | `CLIENT_AUTH` is not `off`, `optional` or `required` | a misspelt `required` must not mean `off` |
+/// | `optional` / `required` without `CLIENT_CA_PATH` | there is nothing to verify against |
+/// | `CLIENT_CA_PATH` set while `CLIENT_AUTH` is `off` | an operator who named a bundle believes clients are verified |
+/// | either client-auth variable set on a **plaintext** listener | a listener with no handshake cannot ask for a certificate; serving cleartext on a port its operator believes is mutually authenticated is the worst reading available |
+///
+/// The last row covers "only one certificate variable set" too: on its own
+/// that stays the silent plaintext it always was (I1), but together with a
+/// client-auth variable it is refused, because the operator's intent is then
+/// unambiguous. An explicit `CLIENT_AUTH=off` on a plaintext listener is
+/// accepted — it asks for nothing.
+///
+/// Empty values count as unset for the two client-auth variables, so a
+/// Compose file's `${VAR:-}` does not trip the refusals above.
+///
+/// # Errors
+///
+/// A message naming the variables involved; [`grpc_tls_from_env`] panics with
+/// it.
+pub fn resolve_grpc_tls(
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<Option<GrpcTlsSettings>, String> {
+    let non_empty = |name: &str| var(name).filter(|v| !v.trim().is_empty());
+
+    let mode = match non_empty(ENV_GRPC_TLS_CLIENT_AUTH) {
+        None => None,
+        Some(raw) => Some(match raw.trim().to_ascii_lowercase().as_str() {
+            "off" => ClientAuth::Off,
+            "optional" => ClientAuth::Optional,
+            "required" => ClientAuth::Required,
+            "optional_self_signed" => {
+                return Err(format!(
+                    "{ENV_GRPC_TLS_CLIENT_AUTH}=optional_self_signed is not supported on the \
+                     gRPC listener: it exists for RFC 8705 self-signed OAuth2 clients, which \
+                     authenticate at the REST token endpoint. Use `optional` or `required`."
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "{ENV_GRPC_TLS_CLIENT_AUTH}='{other}' is not one of off, optional, required"
+                ));
+            }
+        }),
+    };
+    let ca_path = non_empty(ENV_GRPC_TLS_CLIENT_CA_PATH).map(std::path::PathBuf::from);
+
+    let (Some(cert_path), Some(key_path)) =
+        (var(ENV_GRPC_TLS_CERT_PATH), var(ENV_GRPC_TLS_KEY_PATH))
+    else {
+        let asks_for_client_auth = matches!(mode, Some(m) if m != ClientAuth::Off);
+        if asks_for_client_auth || ca_path.is_some() {
+            return Err(format!(
+                "gRPC client-certificate verification is configured \
+                 ({ENV_GRPC_TLS_CLIENT_AUTH} / {ENV_GRPC_TLS_CLIENT_CA_PATH}) but the gRPC \
+                 listener is plaintext: set both {ENV_GRPC_TLS_CERT_PATH} and \
+                 {ENV_GRPC_TLS_KEY_PATH}, or unset the client-auth variables. Refusing to \
+                 serve cleartext on a listener configured for mutual TLS."
+            ));
+        }
+        return Ok(None);
+    };
+
+    let client_auth = match (mode.unwrap_or(ClientAuth::Off), ca_path) {
+        (ClientAuth::Off, None) => GrpcClientAuth::off(),
+        (ClientAuth::Off, Some(path)) => {
+            return Err(format!(
+                "{ENV_GRPC_TLS_CLIENT_CA_PATH}='{}' is set but {ENV_GRPC_TLS_CLIENT_AUTH} is \
+                 off, so no client certificate would be requested: set \
+                 {ENV_GRPC_TLS_CLIENT_AUTH} to optional or required, or unset the path",
+                path.display()
+            ));
+        }
+        (mode, None) => {
+            return Err(format!(
+                "{ENV_GRPC_TLS_CLIENT_AUTH}={} requires {ENV_GRPC_TLS_CLIENT_CA_PATH}: \
+                 there is no trust anchor to verify client certificates against",
+                if mode == ClientAuth::Required {
+                    "required"
+                } else {
+                    "optional"
+                }
+            ));
+        }
+        (ClientAuth::Required, Some(path)) => GrpcClientAuth::required(path),
+        (_, Some(path)) => GrpcClientAuth::optional(path),
+    };
+
+    Ok(Some(GrpcTlsSettings {
+        cert_path: cert_path.into(),
+        key_path: key_path.into(),
+        client_auth,
+    }))
+}
+
 /// Decide, from the environment, how the gRPC listener should terminate TLS,
 /// and build the configuration for it.
 ///
-/// Returns `None` when neither variable is set — the shipped in-mesh posture,
-/// where a sidecar or a terminating proxy owns transport security. Setting only
-/// one of the two is treated as "off" for the same reason it always was: the
-/// runbook says both or neither, and half a TLS configuration is more likely a
-/// typo than an intention. (The typo *within* a set variable is what panics —
-/// see below.)
+/// Returns `None` when neither certificate variable is set — the shipped
+/// in-mesh posture, where a sidecar or a terminating proxy owns transport
+/// security. Setting only one of the two is treated as "off" for the same
+/// reason it always was: the runbook says both or neither, and half a TLS
+/// configuration is more likely a typo than an intention. (The typo *within* a
+/// set variable is what panics — see below.) [`resolve_grpc_tls`] holds every
+/// rule about the four variables.
 ///
 /// # What this shares with the REST listener
 ///
@@ -1266,50 +1481,80 @@ const GRPC_ALPN_H2: &[u8] = b"h2";
 /// the same triggers; what is not possible any more is a second, unreloaded
 /// path.
 ///
-/// # What it deliberately does not share
+/// Client certificates (S-8, DF-005) go through the same mechanism as REST's:
+/// a [`ReloadableClientCertVerifier`] whose anchors [`reload_trust_anchors`]
+/// replaces — one reload, both listeners. It is a second *instance*, not the
+/// REST one, because the policy is fixed per verifier and the two listeners may
+/// be configured differently (REST `optional` for browsers beside gRPC
+/// `required` for the mesh), and because either listener may be the only one
+/// with TLS on. Under `off` — the default — no verifier is installed at all and
+/// the handshake is exactly the one T-234 shipped; see
+/// [`build_grpc_rustls_server_config_with_client_auth`].
 ///
-/// Client certificate policy. The REST listener installs a
-/// [`ReloadableClientCertVerifier`]; this one calls `with_no_client_auth`,
-/// which is exactly what tonic's `ServerTlsConfig` did with no `client_ca_root`
-/// configured. Requesting a client certificate here would change what every
-/// existing in-mesh gRPC client is asked for during the handshake, which is a
-/// deployment decision and not part of closing T-234.
-///
-/// Session resumption, likewise: tonic set no ticketer, and gRPC connections
-/// are long-lived by design, so a full handshake per *connection* is not the
-/// per-request cost it was for REST (B2).
+/// Session resumption is still not shared: tonic set no ticketer, and gRPC
+/// connections are long-lived by design, so a full handshake per *connection*
+/// is not the per-request cost it was for REST (B2).
 ///
 /// # Panics
 ///
 /// If a variable is set but the file behind it cannot be read or does not parse
-/// as a certificate/key pair. T-233 rests on "a typo is a failed boot": a
-/// listener that fell back to plaintext because a path was misspelled would be
-/// serving unencrypted traffic on a port an operator believes is TLS, and would
-/// say so only in a log line nobody greps until the incident.
+/// as a certificate/key pair or an anchor bundle, or if the variables combine
+/// into one of the refusals [`resolve_grpc_tls`] lists. T-233 rests on "a typo
+/// is a failed boot": a listener that fell back to plaintext because a path
+/// was misspelled would be serving unencrypted traffic on a port an operator
+/// believes is TLS, and would say so only in a log line nobody greps until the
+/// incident. The same holds for one that fell back to *not verifying clients*.
 pub fn grpc_tls_from_env() -> Option<Arc<ServerConfig>> {
-    let cert_path = std::env::var(ENV_GRPC_TLS_CERT_PATH).ok()?;
-    let key_path = std::env::var(ENV_GRPC_TLS_KEY_PATH).ok()?;
+    let settings = resolve_grpc_tls(|name| std::env::var(name).ok())
+        .unwrap_or_else(|e| panic!("invalid gRPC TLS configuration: {e}"))?;
 
-    let config = build_grpc_rustls_server_config(
-        std::path::Path::new(&cert_path),
-        std::path::Path::new(&key_path),
+    // Checked ahead of the build so a bad bundle is reported against its own
+    // variable, not as an unusable certificate/key pair. The build reads it
+    // again; it is a few kilobytes, once, at boot.
+    if let Some(ca) = settings.client_auth.ca_path()
+        && let Err(e) = read_grpc_client_ca_roots(ca)
+    {
+        panic!(
+            "{ENV_GRPC_TLS_CLIENT_CA_PATH} set but the bundle at '{}' is unusable: {e}",
+            ca.display()
+        );
+    }
+
+    let config = build_grpc_rustls_server_config_with_client_auth(
+        &settings.cert_path,
+        &settings.key_path,
+        &settings.client_auth,
     )
     .unwrap_or_else(|e| {
         panic!(
             "{ENV_GRPC_TLS_CERT_PATH}/{ENV_GRPC_TLS_KEY_PATH} set but the pair at \
-             '{cert_path}' + '{key_path}' is unusable: {e}"
+             '{}' + '{}' is unusable: {e}",
+            settings.cert_path.display(),
+            settings.key_path.display()
         )
     });
+
+    match settings.client_auth.ca_path() {
+        None => tracing::info!(
+            client_auth = "off",
+            "gRPC client certificates are not requested"
+        ),
+        Some(ca) => tracing::info!(
+            client_auth = ?settings.client_auth.mode(),
+            client_ca = %ca.display(),
+            "gRPC client certificates are verified ({ENV_GRPC_TLS_CLIENT_AUTH})"
+        ),
+    }
 
     Some(Arc::new(config))
 }
 
 /// Build the gRPC listener's TLS 1.3-only rustls [`ServerConfig`] over the
-/// given certificate and key.
+/// given certificate and key, requesting no client certificate.
 ///
-/// Separate from [`grpc_tls_from_env`] so the behaviour that matters — TLS 1.3
-/// only, ALPN `h2`, and a resolver shared with the REST listener when the paths
-/// match — is testable without mutating process-global environment state.
+/// Exactly [`build_grpc_rustls_server_config_with_client_auth`] with
+/// [`GrpcClientAuth::off`] — kept under its original name and signature so the
+/// T-234 handshake has one spelling that cannot drift from the `off` one.
 ///
 /// # Example
 ///
@@ -1346,6 +1591,49 @@ pub fn build_grpc_rustls_server_config(
     cert_path: &std::path::Path,
     key_path: &std::path::Path,
 ) -> io::Result<ServerConfig> {
+    build_grpc_rustls_server_config_with_client_auth(cert_path, key_path, &GrpcClientAuth::off())
+}
+
+/// Build the gRPC listener's TLS 1.3-only rustls [`ServerConfig`], with the
+/// given client-certificate policy.
+///
+/// Separate from [`grpc_tls_from_env`] so the behaviour that matters — TLS 1.3
+/// only, ALPN `h2`, a resolver shared with the REST listener when the paths
+/// match, and who is asked for a certificate — is testable without mutating
+/// process-global environment state.
+///
+/// # `off` is today's handshake, by construction
+///
+/// Under [`ClientAuth::Off`] the builder calls `with_no_client_auth()`, as it
+/// did before S-8 — not a [`ReloadableClientCertVerifier`] with no anchors,
+/// which is the REST listener's `off`. The two differ in one way that matters
+/// here: REST's can be given anchors later by flagging a CA, and gRPC's `off`
+/// must stay off. A client that offers a certificate anyway is never asked for
+/// it, so none reaches `Request::peer_certs()` and a certificate-bound token is
+/// refused exactly as it was.
+///
+/// # `optional` and `required`
+///
+/// A [`ReloadableClientCertVerifier`] over the bundle at `ca_path`, registered
+/// with [`reload_trust_anchors`]. `required` is enforced by rustls in the
+/// handshake; nothing downstream needs to know the mode. A certificate the
+/// verifier accepts reaches the auth interceptor through tonic's
+/// `TlsConnectInfo` — the `Connected` impl on the `TlsStream` that
+/// `axiam_api_grpc`'s accept loop yields — where `enforce_sender_constraint`
+/// matches it against a token's `cnf.x5t#S256`.
+///
+/// # Errors
+///
+/// Everything [`build_grpc_rustls_server_config`] refuses, plus an anchor
+/// bundle that is unreadable, does not parse, or holds no certificate. An
+/// empty bundle is refused rather than treated as "no anchors": under
+/// `required` that would be a listener that verifies nobody while its operator
+/// believes it verifies everybody.
+pub fn build_grpc_rustls_server_config_with_client_auth(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+    client_auth: &GrpcClientAuth,
+) -> io::Result<ServerConfig> {
     // The same explicit `ring` selection the REST listener makes, and for the
     // same reason: this build links both `ring` and `aws-lc-rs`, so anything
     // that resolves the *process-default* provider is one transitive dependency
@@ -1355,16 +1643,144 @@ pub fn build_grpc_rustls_server_config(
 
     // TLS 1.3 only (ASVS V9.1.2) — the pin tonic's `ServerTlsConfig` had no
     // knob for, which is half of what T-234 was about.
-    let mut config = ServerConfig::builder_with_provider(Arc::clone(&provider))
+    let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| io::Error::other(format!("rustls TLS 1.3 configuration failed: {e}")))?
-        .with_no_client_auth()
-        .with_cert_resolver(
-            shared_resolver(cert_path, key_path, &provider)? as Arc<dyn ResolvesServerCert>
-        );
+        .map_err(|e| io::Error::other(format!("rustls TLS 1.3 configuration failed: {e}")))?;
 
+    let builder = match client_auth.ca_path() {
+        None => builder.with_no_client_auth(),
+        Some(ca_path) => {
+            let verifier = Arc::new(ReloadableClientCertVerifier::empty(client_auth.mode()));
+            let count = verifier.replace(read_grpc_client_ca_roots(ca_path)?, &provider)?;
+            tracing::info!(anchors = count, "gRPC client trust anchors loaded");
+            register_grpc_verifier(&verifier, ca_path, &provider);
+            builder.with_client_cert_verifier(verifier as Arc<dyn ClientCertVerifier>)
+        }
+    };
+
+    let mut config = builder.with_cert_resolver(
+        shared_resolver(cert_path, key_path, &provider)? as Arc<dyn ResolvesServerCert>
+    );
     config.alpn_protocols = vec![GRPC_ALPN_H2.to_vec()];
     Ok(config)
+}
+
+/// Read a gRPC client-CA bundle, refusing an empty one.
+///
+/// The REST reader's rules ([`read_client_ca_roots`]) over a path rather than a
+/// [`TlsConfig`], with the gRPC variable named in the errors.
+fn read_grpc_client_ca_roots(ca_path: &std::path::Path) -> io::Result<RootCertStore> {
+    let pem = std::fs::read_to_string(ca_path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "failed to open the gRPC client CA bundle {} ({ENV_GRPC_TLS_CLIENT_CA_PATH}): {e}",
+                ca_path.display()
+            ),
+        )
+    })?;
+    let roots = roots_from_pem(&pem, &ca_path.display().to_string())?;
+    if roots.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "no client CA certificates found in {} ({ENV_GRPC_TLS_CLIENT_CA_PATH})",
+                ca_path.display()
+            ),
+        ));
+    }
+    Ok(roots)
+}
+
+/// A gRPC listener's verifier, the bundle it was built from, and the provider
+/// to rebuild with.
+struct GrpcAnchorSource {
+    verifier: std::sync::Weak<ReloadableClientCertVerifier>,
+    ca_path: std::path::PathBuf,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+/// Every gRPC verifier [`reload_trust_anchors`] must reach.
+///
+/// A list rather than [`LIVE_VERIFIER`]'s set-once slot, holding weak
+/// references: production builds one gRPC listener, but a set-once slot would
+/// silently keep the *first* config ever built in a process — in a test binary,
+/// whichever test ran first — and a reload that reached a dead listener while
+/// missing the live one is the failure this whole mechanism exists to avoid.
+/// Entries whose listener has been dropped are pruned on the next reload.
+static GRPC_VERIFIERS: std::sync::Mutex<Vec<GrpcAnchorSource>> = std::sync::Mutex::new(Vec::new());
+
+fn register_grpc_verifier(
+    verifier: &Arc<ReloadableClientCertVerifier>,
+    ca_path: &std::path::Path,
+    provider: &Arc<rustls::crypto::CryptoProvider>,
+) {
+    GRPC_VERIFIERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(GrpcAnchorSource {
+            verifier: Arc::downgrade(verifier),
+            ca_path: ca_path.to_path_buf(),
+            provider: Arc::clone(provider),
+        });
+}
+
+/// Re-read every gRPC listener's anchor bundle and install it.
+///
+/// Returns the anchor count of a listener whose bundle is `written_to` — see
+/// [`reload_trust_anchors`] — or `None` when there is no such listener, or when
+/// its reload failed.
+///
+/// # A bad bundle leaves the listener as it was
+///
+/// An unreadable, unparsable or **empty** bundle is logged and the listener
+/// keeps the anchors it has. Empty is included deliberately, and differs from
+/// the REST listener, whose empty set means "stop asking": the gRPC listener
+/// refuses to *boot* on an empty bundle, and a reload must not reach a state
+/// the boot path forbids — under `required`, that state is a listener that
+/// verifies nobody.
+fn reload_grpc_trust_anchors(written_to: Option<&std::path::Path>) -> Option<usize> {
+    let mut sources = GRPC_VERIFIERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    sources.retain(|s| s.verifier.strong_count() > 0);
+
+    // Compared canonically where both sides resolve, so `./a/../bundle.pem`
+    // and a symlinked directory still name the same file.
+    let same_file = |a: &std::path::Path, b: &std::path::Path| match (
+        std::fs::canonicalize(a),
+        std::fs::canonicalize(b),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+
+    let mut reloaded = None;
+    for source in sources.iter() {
+        let Some(verifier) = source.verifier.upgrade() else {
+            continue;
+        };
+        match read_grpc_client_ca_roots(&source.ca_path)
+            .and_then(|roots| verifier.replace(roots, &source.provider))
+        {
+            Ok(count) => {
+                tracing::info!(
+                    anchors = count,
+                    client_ca = %source.ca_path.display(),
+                    "gRPC client trust anchors reloaded"
+                );
+                if written_to.is_some_and(|w| same_file(w, &source.ca_path)) {
+                    reloaded = Some(count);
+                }
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                client_ca = %source.ca_path.display(),
+                "gRPC client trust anchors NOT reloaded; the listener keeps its previous set"
+            ),
+        }
+    }
+    reloaded
 }
 
 #[cfg(test)]
@@ -2845,6 +3261,8 @@ mod tests {
             unsafe {
                 std::env::remove_var(ENV_GRPC_TLS_CERT_PATH);
                 std::env::remove_var(ENV_GRPC_TLS_KEY_PATH);
+                std::env::remove_var(ENV_GRPC_TLS_CLIENT_AUTH);
+                std::env::remove_var(ENV_GRPC_TLS_CLIENT_CA_PATH);
             }
         }
     }
@@ -3279,5 +3697,259 @@ mod tests {
             before_untouched,
             "a leaf nobody renewed must be left exactly as it was"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // S-8 (DF-005) — client certificates on the gRPC listener
+    //
+    // `resolve_grpc_tls` is exercised from a map, never the process
+    // environment, so these need no lock. The handshake-level properties —
+    // who is asked for a certificate, and what reaches the interceptor — are
+    // in tests/grpc_client_auth.rs, against a real listener.
+    // ---------------------------------------------------------------------
+
+    fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    const TLS_PAIR: [(&str, &str); 2] = [
+        (ENV_GRPC_TLS_CERT_PATH, "/tls/fullchain.pem"),
+        (ENV_GRPC_TLS_KEY_PATH, "/tls/privkey.pem"),
+    ];
+
+    fn with_tls(extra: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
+        let mut all = TLS_PAIR.to_vec();
+        all.extend_from_slice(extra);
+        all
+    }
+
+    /// I1, at the configuration layer: nothing set is plaintext, the two
+    /// certificate variables alone are TLS with client authentication off, and
+    /// one certificate variable alone is still the silent plaintext it was.
+    #[test]
+    fn no_client_auth_variable_resolves_to_todays_listener() {
+        assert_eq!(resolve_grpc_tls(vars(&[])), Ok(None));
+        assert_eq!(
+            resolve_grpc_tls(vars(&[TLS_PAIR[0]])),
+            Ok(None),
+            "half a TLS pair stays plaintext, as it always has"
+        );
+        let settings = resolve_grpc_tls(vars(&TLS_PAIR)).unwrap().unwrap();
+        assert_eq!(settings.client_auth, GrpcClientAuth::off());
+        assert_eq!(
+            settings.cert_path,
+            std::path::Path::new("/tls/fullchain.pem")
+        );
+    }
+
+    #[test]
+    fn optional_and_required_resolve_with_their_bundle() {
+        let ca = (ENV_GRPC_TLS_CLIENT_CA_PATH, "/tls/client-ca-bundle.pem");
+        for (raw, expected) in [
+            (
+                "optional",
+                GrpcClientAuth::optional("/tls/client-ca-bundle.pem"),
+            ),
+            (
+                "required",
+                GrpcClientAuth::required("/tls/client-ca-bundle.pem"),
+            ),
+            (
+                " Required ",
+                GrpcClientAuth::required("/tls/client-ca-bundle.pem"),
+            ),
+        ] {
+            let settings =
+                resolve_grpc_tls(vars(&with_tls(&[(ENV_GRPC_TLS_CLIENT_AUTH, raw), ca])))
+                    .unwrap_or_else(|e| panic!("{raw:?} must resolve: {e}"))
+                    .unwrap();
+            assert_eq!(settings.client_auth, expected, "for {raw:?}");
+        }
+    }
+
+    /// Point (b) of the brief: `optional` or `required` with no bundle refuses
+    /// to boot — it does not warn and carry on unverified.
+    #[test]
+    fn a_verifying_mode_without_a_bundle_refuses_to_boot() {
+        for mode in ["optional", "required"] {
+            let err = resolve_grpc_tls(vars(&with_tls(&[(ENV_GRPC_TLS_CLIENT_AUTH, mode)])))
+                .expect_err("no bundle must be a refusal");
+            assert!(
+                err.contains(ENV_GRPC_TLS_CLIENT_CA_PATH),
+                "the refusal must name the missing variable: {err}"
+            );
+        }
+        // An empty value is unset, so it is the same refusal, not a path "".
+        let err = resolve_grpc_tls(vars(&with_tls(&[
+            (ENV_GRPC_TLS_CLIENT_AUTH, "required"),
+            (ENV_GRPC_TLS_CLIENT_CA_PATH, "  "),
+        ])))
+        .expect_err("an empty bundle path is no bundle");
+        assert!(err.contains("requires"), "{err}");
+    }
+
+    /// Point (b), second half: a client-auth variable on a listener that is
+    /// not TLS — neither certificate variable, or only one — refuses to boot.
+    #[test]
+    fn client_auth_on_a_plaintext_listener_refuses_to_boot() {
+        let ca = (ENV_GRPC_TLS_CLIENT_CA_PATH, "/tls/client-ca-bundle.pem");
+        let cases: [Vec<(&str, &str)>; 5] = [
+            vec![(ENV_GRPC_TLS_CLIENT_AUTH, "required"), ca],
+            vec![(ENV_GRPC_TLS_CLIENT_AUTH, "optional")],
+            vec![ca],
+            vec![TLS_PAIR[0], (ENV_GRPC_TLS_CLIENT_AUTH, "required"), ca],
+            vec![TLS_PAIR[1], ca],
+        ];
+        for case in cases {
+            let err = resolve_grpc_tls(vars(&case))
+                .expect_err("client auth on a plaintext listener must refuse");
+            assert!(err.contains("plaintext"), "{case:?}: {err}");
+        }
+    }
+
+    /// The I4 twin of the refusal above: an explicit `off` asks for nothing,
+    /// so it is accepted on a plaintext listener and on a TLS one alike.
+    #[test]
+    fn an_explicit_off_is_accepted_everywhere() {
+        let off = (ENV_GRPC_TLS_CLIENT_AUTH, "off");
+        assert_eq!(resolve_grpc_tls(vars(&[off])), Ok(None));
+        assert_eq!(
+            resolve_grpc_tls(vars(&with_tls(&[off])))
+                .unwrap()
+                .unwrap()
+                .client_auth,
+            GrpcClientAuth::off()
+        );
+        // So is an empty one, which is what `${VAR:-}` renders.
+        assert_eq!(
+            resolve_grpc_tls(vars(&[(ENV_GRPC_TLS_CLIENT_AUTH, "")])),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_bundle_without_a_verifying_mode_refuses_to_boot() {
+        let err = resolve_grpc_tls(vars(&with_tls(&[(
+            ENV_GRPC_TLS_CLIENT_CA_PATH,
+            "/tls/client-ca-bundle.pem",
+        )])))
+        .expect_err("a bundle under `off` would verify nobody");
+        assert!(err.contains("is off"), "{err}");
+    }
+
+    /// A misspelt `required` must not come up as `off`, and the REST-only
+    /// variant is refused by name rather than as an unknown word.
+    #[test]
+    fn an_unknown_or_rest_only_mode_refuses_to_boot() {
+        let ca = (ENV_GRPC_TLS_CLIENT_CA_PATH, "/tls/client-ca-bundle.pem");
+        let err = resolve_grpc_tls(vars(&with_tls(&[
+            (ENV_GRPC_TLS_CLIENT_AUTH, "requried"),
+            ca,
+        ])))
+        .expect_err("a typo must refuse");
+        assert!(err.contains("'requried'"), "{err}");
+
+        let err = resolve_grpc_tls(vars(&with_tls(&[
+            (ENV_GRPC_TLS_CLIENT_AUTH, "optional_self_signed"),
+            ca,
+        ])))
+        .expect_err("optional_self_signed has no gRPC consumer");
+        assert!(err.contains("RFC 8705"), "{err}");
+    }
+
+    /// The boot path refuses an empty anchor bundle — it would be a `required`
+    /// listener that verifies nobody.
+    #[test]
+    fn an_empty_grpc_bundle_is_refused_at_build() {
+        let pki = gen_test_pki();
+        let cert = write_tmp("grpc-ca-empty-cert", &pki.server_cert_pem);
+        let key = write_tmp("grpc-ca-empty-key", &pki.server_key_pem);
+        let ca = write_tmp("grpc-ca-empty", "");
+        let err = build_grpc_rustls_server_config_with_client_auth(
+            &cert,
+            &key,
+            &GrpcClientAuth::required(&ca),
+        )
+        .expect_err("an empty bundle must refuse");
+        assert!(
+            err.to_string().contains("no client CA certificates"),
+            "{err}"
+        );
+    }
+
+    /// A reload that finds the bundle emptied — or gone — keeps the anchors
+    /// the listener has. The boot path forbids that state; a reload must not
+    /// reach it either.
+    #[test]
+    fn a_reload_that_empties_the_grpc_bundle_keeps_the_previous_anchors() {
+        let pki = gen_test_pki();
+        let cert = write_tmp("grpc-reload-keep-cert", &pki.server_cert_pem);
+        let key = write_tmp("grpc-reload-keep-key", &pki.server_key_pem);
+        let ca = write_tmp("grpc-reload-keep-ca", &pki.ca_pem);
+        let config = build_grpc_rustls_server_config_with_client_auth(
+            &cert,
+            &key,
+            &GrpcClientAuth::required(&ca),
+        )
+        .expect("the listener must build");
+
+        // Find this listener's verifier through the registry it joined.
+        let verifier = GRPC_VERIFIERS
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|s| s.ca_path == ca)
+            .and_then(|s| s.verifier.upgrade())
+            .expect("the verifier must be registered for reload");
+        assert_eq!(verifier.anchor_count(), 1);
+
+        std::fs::write(&ca, "").unwrap();
+        reload_grpc_trust_anchors(Some(&ca));
+        assert_eq!(
+            verifier.anchor_count(),
+            1,
+            "an emptied bundle must not unset the anchors"
+        );
+        assert!(
+            verifier.client_auth_mandatory(),
+            "`required` must still be enforced"
+        );
+
+        std::fs::remove_file(&ca).unwrap();
+        reload_grpc_trust_anchors(Some(&ca));
+        assert_eq!(
+            verifier.anchor_count(),
+            1,
+            "a vanished bundle must not either"
+        );
+        drop(config);
+    }
+
+    /// "Applied" means the set just written is the set the listener trusts. A
+    /// listener reading the bundle that was written counts; one reading a
+    /// bundle of its own is reloaded but does not make the flagged set
+    /// "applied", because that set did not reach it.
+    #[test]
+    fn only_a_listener_on_the_written_bundle_reports_the_reload_as_applied() {
+        let pki = gen_test_pki();
+        let cert = write_tmp("grpc-applied-cert", &pki.server_cert_pem);
+        let key = write_tmp("grpc-applied-key", &pki.server_key_pem);
+        let ca = write_tmp("grpc-applied-ca", &pki.ca_pem);
+        let _config = build_grpc_rustls_server_config_with_client_auth(
+            &cert,
+            &key,
+            &GrpcClientAuth::optional(&ca),
+        )
+        .expect("the listener must build");
+
+        let elsewhere = write_tmp("grpc-applied-elsewhere", &pki.ca_pem);
+        assert_eq!(reload_grpc_trust_anchors(Some(&elsewhere)), None);
+        assert_eq!(reload_grpc_trust_anchors(None), None);
+        assert_eq!(reload_grpc_trust_anchors(Some(&ca)), Some(1));
     }
 }

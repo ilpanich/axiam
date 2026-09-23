@@ -39,6 +39,11 @@
 //! CA. The bundle on disk is still written and still read at every boot, so a
 //! restart reaches the same state by the same path.
 //!
+//! The gRPC listener, when `AXIAM__GRPC_TLS_CLIENT_AUTH` verifies clients,
+//! holds a verifier of its own on the same mechanism and is reloaded by the
+//! same call: it re-reads `AXIAM__GRPC_TLS_CLIENT_CA_PATH`, so pointing that at
+//! this bundle gives both listeners one anchor set (S-8).
+//!
 //! Connections already established keep the verifier they handshook with. That
 //! is correct rather than a limitation: a certificate accepted a moment ago
 //! does not become invalid mid-connection, and ending a session that is already
@@ -280,7 +285,7 @@ impl<C: surrealdb::Connection> axiam_api_rest::TrustAnchorReloader for TrustAnch
                 })?;
             }
 
-            crate::tls::reload_trust_anchors(&pem).map_err(|e| {
+            crate::tls::reload_trust_anchors(&pem, self.bundle_path.as_deref()).map_err(|e| {
                 axiam_core::error::AxiamError::Internal(format!(
                     "failed to install the trust anchor bundle on the listener: {e}"
                 ))

@@ -1041,6 +1041,11 @@ mod tests {
         // SECHRD-03/D-01d: trusted_hops(1) >= hops.len()(1) => XFF is
         // completely untrusted; a rotating single-hop XFF must NOT be used
         // (never `hops[0]`) — fall through to the verified peer address.
+        //
+        // Both requests are discards, so they bump the process-global
+        // `XFF_DISCARDED`: without the lock, a counter test running in
+        // parallel sees it move under its own before/after assertion.
+        let _guard = xff_metric_lock();
         let extractor = GrpcTrustedHopsKeyExtractor::new(1);
         let peer: SocketAddr = "203.0.113.42:1234".parse().unwrap();
 

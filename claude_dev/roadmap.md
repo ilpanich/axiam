@@ -880,6 +880,22 @@ through both engine paths and over gRPC; three property tests; the clause
 broken on purpose twice to watch the new tests fail. OpenAPI and the management
 registry regenerated. Threat **T-285**; **T-16** and **T-87** amended. PR D.
 
+### T22.12 — Client-certificate verification on the gRPC listener — Opus 5 ✓ LANDED
+DF-005. The gRPC listener's rustls configuration called `with_no_client_auth()`,
+a deployment decision deferred from T-234, while `ReactorAdminService` joined
+`CheckAccess` on it. `AXIAM__GRPC_TLS_CLIENT_AUTH` (`off` default | `optional`
+| `required`) and `AXIAM__GRPC_TLS_CLIENT_CA_PATH`. `off` keeps
+`with_no_client_auth()`, and the handshake is proved unchanged against the
+pre-change configuration. The verifying modes install a second
+`ReloadableClientCertVerifier`, registered with `reload_trust_anchors`, which
+re-reads its own bundle on each reload. Seven misconfigurations refuse to boot,
+including client auth on a plaintext listener. The verified certificate reaches
+the interceptor through tonic's `TlsConnectInfo`, which the custom accept loop
+already produced. So S-3's certificate-bound device tokens now work over gRPC,
+proved end to end with the right certificate, another device's certificate,
+and none. Three mutations were made to confirm the new tests can fail.
+Threat **T-286**; **T-234** and **T-283** amended. PR E.
+
 ---
 
 ---

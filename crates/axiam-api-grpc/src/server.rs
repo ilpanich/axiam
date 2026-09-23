@@ -152,6 +152,13 @@ pub enum GrpcTls {
     /// exactly that. Nothing here enforces those properties — this crate cannot
     /// see the resolver behind the config — which is why the builder that can
     /// is the one the composition root calls.
+    ///
+    /// Whether client certificates are requested is also the configuration's
+    /// business (S-8: `AXIAM__GRPC_TLS_CLIENT_AUTH`, built by
+    /// `axiam_server::tls::build_grpc_rustls_server_config_with_client_auth`).
+    /// Nothing in this crate reads the mode: `required` is enforced by rustls
+    /// in the handshake, and a verified certificate reaches the interceptor
+    /// through `Request::peer_certs()` (see [`crate::tls_incoming`]).
     Rustls(Arc<rustls::ServerConfig>),
 }
 

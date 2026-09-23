@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 280 |
-| **Mitigated / Open** | 258 / 13 |
+| **Threats identified** | 286 |
+| **Mitigated / Open** | 273 / 13 |
 | **Owner** | ilpanich |
 
 ---
@@ -108,7 +108,7 @@ Each subsection corresponds to one diagram in the Threat Dragon model. Threat nu
 
 Level-0 context data-flow diagram: external actors, the three AXIAM API surfaces, the shared middleware pipeline, the core service layer and the private data tier. Trust boundaries separate the public Internet, the Kubernetes runtime and the data tier. 1.0.0-beta13 adds two findings from the OpenID Connect work that belong to the system rather than to any one protocol surface: the explicit column lists behind erasure and export (T-261) and the datastore's own write-conflict phrasing going unrecognised (T-262).
 
-*31 threats — 3 critical, 15 high, 13 medium; 2 open.*
+*32 threats — 3 critical, 16 high, 13 medium; 2 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -143,6 +143,7 @@ Level-0 context data-flow diagram: external actors, the three AXIAM API surfaces
 | T-200 | Security middleware (authn, CSRF, rate limit, CORS, audit) <br/>*Process* | S | CSRF exemption for machine callers forged by pairing a bearer header with a session cookie | Medium | Mitigated |
 | T-261 | REST API (Actix-Web) <br/>*Process* | I | A personal-data column added to `user` survives erasure and never reaches the Art. 15 export, and a SCIM patch that erases it is read as a no-op | High | Mitigated |
 | T-262 | SurrealDB cluster (all tenant data) <br/>*Store* | D | A contended write surfaces as a migration failure, and the single-use guard cannot recognise the engine's own conflict message | Medium | Mitigated |
+| T-286 | gRPC API (Tonic) <br/>*Process* | S | The gRPC listener cannot verify client certificates, so every call rests on a bearer token alone | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -379,6 +380,19 @@ Both erasure statements — the Art. 17 pipeline's `anonymize_user` and the admi
 The first run of the `scim_provisioning` benchmark cell failed 20 of 907 operations, every one a concurrent `PATCH /scim/v2/Users/{id}` that lost a SurrealDB optimistic-concurrency race and reached the client as `500` carrying the engine's own words — "Transaction write conflict. This transaction can be retried". Nothing retried it: the `retry_on_write_conflict` helper the marker documentation linked to had never been written, so the one method that had surfaced the bug got a hand-rolled loop and every other contended write got nothing, and an IdP driving Okta- or Entra-shaped provisioning reads those as failed syncs and re-sends the whole record. Worse for T-163 and T-164: `is_transaction_conflict` — the single-use consume guard on `device_grant`, `permission_ticket`, `pushed_auth_request` and `oauth2_auth_code` — matched only the two pre-v3 phrasings, so on the deployed engine its "someone else got there first" branch could not fire and a correctly refused replay surfaced as a `500` rather than as "no row consumed". Fail-closed, so a robustness defect and not a hole: no token is minted either way.
 
 > 2d371ad. `retry_on_write_conflict` now exists; `update` — which every administrative and SCIM write goes through — and `increment_failed_logins` use it, and replay is safe because a conflicted transaction commits *nothing*, which is also why the non-idempotent `failed_login_attempts += 1` can be retried at all. `classify_write_error` gains a conflict branch feeding `DbError::Conflict`, ordered after the UNIQUE check so a constraint violation — a statement about the request, which retrying only reproduces — still wins, and a contended write is no longer reported as a schema-migration failure that sends operators hunting a broken migration; the HTTP status stayed `5xx` pending a separate decision, which was taken on 2026-09-12 (R-4, decision A): a contended write now answers **`503 Service Unavailable` with `Retry-After: 1`** over REST and `UNAVAILABLE` over gRPC, through one new payload-free `AxiamError::WriteContention` and one mapping. `503` because the answer is a statement about the *server* — come back in a moment — which is what an IdP driving SCIM provisioning (Okta, Entra) treats as transient and retries; `409` in SCIM means "your request conflicts with the resource's state" (RFC 7644 §3.12), a statement about the request that changing the request is the response to, and `500` tells a client to stop when the correct advice is the opposite. The variant carries no payload, so the engine's own words stay on `DbError::Conflict` for the log and can never reach a body; the `Retry-After: 1` is a convention rather than a measurement, and CONTRACT §16.1 makes every SDK honour it as a floor so a client's own backoff still governs the wait. The UNIQUE-before-conflict ordering is what keeps a constraint violation on `409`, and it is pinned by its own I4 twin. No SDK behaviour needed to change — §16.3 already retries `5xx` on an eligible operation — and each SDK gains one test pinning that. Both legacy literals now live in `WRITE_CONFLICT_MARKERS` beside the v3 phrasing and the helper delegates, so the two sets can never again disagree about what a conflict looks like — the drift D-09 and `scripts/check-conflict-markers.py` exist to prevent, and which survived because these were never one set. Seven tests, one pinning the verbatim message captured from the failing run. **Corrected 2026-09-13 (f7d5ab8).** The sentence above claimed `503` *over REST*, and for a day it was true of every REST surface but the one the defect was found on: `axiam-scim`'s own error type maps `AxiamError` itself, its 5xx branch redacted every body to "An internal error occurred", and `WriteContention` fell through its catch-all as `500` — the exact answer an IdP reads as a failed sync. It now maps to `ScimError::retry_later`: `503`, `Retry-After: 1`, no `scimType` (RFC 7644 §3.12 defines none for a 5xx), the header and the body's exemption from redaction set from one field so they cannot drift apart, and the echoed `detail` a fixed, payload-free sentence — the engine's own words stay on `DbError::Conflict`, in the log, and a control test asserts that an ordinary `500` still redacts and advertises no retry. Four handler-level tests over the wire, one row on the mapping table. A control wired on two of three surfaces had been recorded here as whole; it is recorded now as it was.
+
+**T-286 — The gRPC listener cannot verify client certificates, so every call rests on a bearer token alone**  
+`gRPC API (Tonic)` (Process) · Spoofing · High · Mitigated
+
+`build_grpc_rustls_server_config` built the listener's rustls configuration with `with_no_client_auth()`, and no setting could change it; its own doc comment recorded client-certificate policy as a deployment decision deferred from T-234 (DF-005). That was defensible while the listener answered `CheckAccess`. It stopped being so as the surface grew: `ReactorAdminService` — create, update and delete of the reactors a tenant's policy decisions call out to — sits on the same listener, `UserService/ValidateCredentials` is a password check behind a rate limit, and gRPC skips session revocation by default (`AXIAM__GRPC__STRICT_REVOCATION`), so a revoked session keeps passing there until its token expires. A bearer token was all any caller needed, and a mesh that already issues client certificates had no network-level gate it could turn on. The other half is S-3's (T-283): device tokens carry `cnf.x5t#S256`, and the interceptor matches it against `Request::peer_certs()` — which was always empty, so a certificate-bound token was refused on every gRPC call. Fail-closed, but the property the binding exists for could only be had by keeping devices on REST.
+
+> **T22.12 (S-8, 2026-09-23).** Two flat variables beside the certificate pair: `AXIAM__GRPC_TLS_CLIENT_AUTH` (`off` default | `optional` | `required`) and `AXIAM__GRPC_TLS_CLIENT_CA_PATH`. The verifying modes install a `ReloadableClientCertVerifier` — the REST listener's mechanism, as a second instance, because the policy is fixed per verifier and the two listeners may be configured differently — registered with `reload_trust_anchors`, which re-reads each gRPC listener's own bundle so it never trusts a set its next boot would not read. Pointed at the REST bundle, flagging a CA reaches both listeners without a restart, and only then is the reload reported as applied. `required` is enforced by rustls in the handshake, ahead of every RPC. The verified certificate reaches the interceptor through tonic's `TlsConnectInfo`, which the custom accept loop already produced — confirmed against tonic 0.14.6 and end to end rather than assumed — so a device token is now accepted over gRPC with its own certificate and refused with another device's or with none.
+>
+> Boot is refused, not warned about, on an unknown mode, on `optional_self_signed` (it exists for RFC 8705 clients of an endpoint this listener does not serve), on a verifying mode without a bundle, on a bundle under `off`, on an empty or unreadable bundle, and on either variable set while the listener is plaintext. A reload that finds the bundle empty or unreadable keeps the previous anchors: REST's reading of an empty set, "stop asking", would under `required` be a listener that verifies nobody.
+>
+> `off` keeps `with_no_client_auth()`. The I1 compares handshakes, not structs: four client shapes against the pre-change configuration, including a client holding a certificate, which is neither asked for it nor has it reach the server. `crates/axiam-server/tests/grpc_client_auth.rs` carries six tests through the real `start_grpc_server`, and ten unit tests cover `resolve_grpc_tls` and the reload; three deliberate mutations — the verifying modes falling back to `with_no_client_auth()`, the reload skipping gRPC, `off` sending a `CertificateRequest` — each turned the relevant tests red.
+>
+> Residual, by design: the default is `off`, so a deployment that sets nothing keeps a bearer-only gRPC listener; and the certificate is proof of possession and a gate, never an identity — authenticating a gRPC caller by certificate alone is out of scope.
 
 </details>
 
@@ -1977,7 +1991,8 @@ Both leaf paths resolve the issuing CA through `prepare_leaf_issuance`, which fe
 >
 > **The thumbprint is recorded only where rustls verified the certificate on this connection.** The trusted-proxy `X-Client-Certificate` path mints no `cnf`, deliberately: there the certificate is present at login and absent from every later request, so a bound token would be one AXIAM itself refuses on first use. The asymmetry is stated in `CertificateAuthenticated::certificate_thumbprint`'s own documentation and in `docs/pki/README.md`, rather than left to be discovered — and the remedy named there is a deployment change (terminate mTLS at AXIAM), because no claim can substitute for evidence that never arrives.
 >
-> **Over gRPC** the evidence is `peer_certs()`, which is empty until the listener asks for a client certificate — `with_no_client_auth()` today, which S-8 changes. A device token presented there is therefore refused for want of evidence. That is the fail-closed direction and it is why a fleet talks to the REST surface; it is also the ordering argument for taking S-8 before anything routes device traffic through the mesh.
+> **Over gRPC** the evidence is `peer_certs()`, which is empty until the listener asks for a client certificate — `with_no_client_auth()` today, which S-8 changes. A device token presented there is therefore refused for want of evidence. That is the fail-closed direction and it is why a fleet talks to the REST surface; it is also the ordering argument for taking S-8 before anything routes device traffic through the mesh.>
+> **Amended 2026-09-23 (T22.12, S-8).** The paragraph above now describes the default rather than the only posture. With `AXIAM__GRPC_TLS_CLIENT_AUTH` set to `optional` or `required` the listener verifies the device's certificate and the interceptor finds it in `peer_certs()`, so a device token is accepted over gRPC with its own certificate and refused with another device's or with none — proved end to end through the real listener. Under `off` it is refused, as before. See T-286.
 >
 > **I1.** A token minted before this change carries no `cnf` and takes row one of the decision table, which returns `Ok` without reading anything. The migration lasts one access-token lifetime.
 >
@@ -2535,6 +2550,8 @@ The gRPC listener is loopback-bound in Compose and ClusterIP-only in Kubernetes,
 T-214 made the REST listener's certificate hot-reloadable so that an ACME renewal would never need a restart. That work covered the actix listener only: `axiam-api-grpc`'s `start_grpc_server` read `AXIAM__GRPC_TLS_CERT_PATH` / `_KEY_PATH` once, handed the PEM to tonic's `ServerTlsConfig`, and the crate contained no reload path and no poll. A gRPC listener that is public was therefore a listener whose certificate expires at day 90 while REST keeps working — the failure mode T-214 exists to prevent, reintroduced on the other protocol, and the worst version of it because it presents as a gRPC bug. The same API limit kept that leg TLS 1.2-negotiable where the REST listener is 1.3-only.
 
 > Fixed in 1.0.0-beta12 (R-1). The gRPC listener no longer asks tonic to terminate TLS. `start_grpc_server` takes the rustls configuration as a value (`GrpcTls::Plaintext | Rustls(Arc<ServerConfig>)`), binds its own `TcpListener`, completes each handshake with `tokio-rustls`, and hands tonic an already-encrypted stream through `serve_with_incoming` — the hand-rolled accept loop this threat named as the structural fix, and it closes the reload gap and the TLS-version gap in the one change, as anticipated. The configuration is built by the composition root (`axiam_server::tls::build_grpc_rustls_server_config`), not by `axiam-api-grpc`: `ReloadableCertResolver` lives in `axiam-server` at layer 8 and the gRPC crate is layer 6, and `scripts/check-crate-layering.py` fails any edge pointing the other way. That builder resolves the leaf through `shared_resolver`, which returns the **same** resolver instance when both listeners name the same certificate and key — the documented topology, where there is no second certificate — so one `SIGHUP` or one hourly poll renews both; a deployment that really does point them at different files gets a second registered leaf reloaded on the same triggers, replacing the single-slot `OnceLock` that would have silently kept only the first. The configuration pins `with_protocol_versions(&[&rustls::version::TLS13])` and advertises ALPN `h2` alone, so the leg is TLS 1.3-**exclusive** rather than merely 1.3-capable. The flat env-var names and the panic-on-unreadable behaviour moved with the read and are unchanged: a typo is still a failed boot. Terminating the handshake here introduces one new denial-of-service surface — a client that opens TCP and never speaks — bounded by 512 concurrent handshakes taken with a non-blocking `try_acquire_owned` (so the accept loop is never starved, however many half-open clients are outstanding) and a 10-second handshake timeout that releases every permit; a failed or timed-out handshake logs at `debug` and drops that connection only, never the accept loop. Five tests carry it: a resolver swapped between two real handshakes against one running listener, with the connection established before the swap still usable after it; a TLS 1.2-only client refused rather than downgraded; a real TLS connection's peer address carried through `Connected::connect_info()` into the request extension and out of `GrpcTrustedHopsKeyExtractor` as the client's IP (verified against the pinned tonic before the code was written — had it come back `None` the limiter would have failed closed for everyone); sixty-four half-open connections not stopping a well-behaved client; and plaintext mode unchanged. On the server side, one reload covering every registered leaf, the shared-resolver identity asserted by pointer, and the boot panic for each half of an unreadable pair. The certbot deploy hook's container restart (Pi runbook §14.5) is now redundant rather than required.
+>
+> **Follow-up closed 2026-09-23 (T22.12, S-8).** R-1's builder recorded one thing as deferred rather than done: client-certificate policy, left at `with_no_client_auth()` as "a deployment decision and not part of closing T-234". That deferral is now a setting, `AXIAM__GRPC_TLS_CLIENT_AUTH`, off by default so the handshake above is unchanged unless an operator asks for more; the doc comment that recorded the deferral is rewritten to describe the control. See T-286.
 
 **T-236 — A registry outage or a stale suppression turns the dependency-audit gate into a rubber stamp**  
 `AXIAM deployment (N replicas, HPA)` (Process) · Tampering · Medium · Mitigated
@@ -2811,7 +2828,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-13 of 285 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
+13 of 286 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
 
 
 | # | Severity | Threat | Element | Why it is open |
@@ -2890,7 +2907,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 | Category | Threats |
 |---|---|
-| Spoofing | 68 |
+| Spoofing | 69 |
 | Tampering | 59 |
 | Repudiation | 6 |
 | Information disclosure | 67 |
@@ -2902,7 +2919,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 32 | 1 |
-| High | 132 | 8 |
+| High | 133 | 8 |
 | Medium | 111 | 6 |
 | Low | 10 | 2 |
 
@@ -2910,7 +2927,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 | Diagram | Threats | Open |
 |---|---|---|
-| System diagram | 31 | 2 |
+| System diagram | 32 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 58 | 4 |
 | Federation — SAML SP & OIDC relying party | 31 | 1 |

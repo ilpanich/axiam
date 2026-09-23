@@ -10,8 +10,8 @@ Delete both once the PR is open and green.
 - [x] 0. Resume check-ins armed, ledger written
 - [x] 1. SAGE boot — MCP not connected, noted below
 - [x] 2. Citations re-validated against `1cb1371`; S-3/S-4/S-7/S-9/S-10 read in code; drift noted
-- [ ] 3. Contract amendments 1–8 of §6 C-0 (incl. §27.5 decision, §27.10 tier gap)
-- [ ] 4. Version bump to 1.50 + every gate that moves with it; drift check red only for SDK re-vendor
+- [x] 3. Contract amendments 1–8 of §6 C-0 (incl. §27.5 decision, §27.10 tier gap)
+- [x] 4. Version bump to 1.50 + every gate that moves with it; drift check red only for SDK re-vendor
 - [ ] 5. Records: CHANGELOG, roadmap T22.15, EXECUTED block in §6 C-0, §13 item 1, threat model verified
 - [ ] 6. Gates run (doc links, docs lint, contract/spec checks); signed commits
 - [ ] 7. PR opened, subscribed, green
@@ -72,3 +72,10 @@ Delete both once the PR is open and green.
   Branch stays `docs/contract-1.50`; the PR says why.
 - §27.1's table and the "147" prose are re-rendered from the registry (162) in
   this PR, recorded in the EXECUTED block as not anticipated.
+
+### Steps 3–4 (commit "docs(sdk-contract): contract 1.51 — the dogfooding remediation (C-0)")
+
+- Contract + website anchors + reference page in one signed commit.
+- Drift gate: 33 problems = 11 × {CONTRACT.md, openapi.json, registry} STALE;
+  proto, OPAQUE vectors, vendored crate OK. openapi/registry were already stale
+  on main (SDKs vendor beta16's, `2617eae`).

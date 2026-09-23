@@ -1155,6 +1155,143 @@ working unchanged. CHANGELOG: **Fixed**. Records: none.
 
 ### S-7 — explicit, name-constrained SAN issuance and a per-type KU/EKU profile (DF-001) — Opus 5
 
+> **EXECUTED — 2026-09-23, PR G, one commit** (branch `feat/pki-leaf-profile`, cut
+> from `9cc472f`, the merge of #494).
+>
+> **Shipped.**
+>
+> - **The type and the field.** `CertificateType::Server`, plus
+>   `subject_alt_names: [{"dns"|"ip": …}]` on both leaf request DTOs and both
+>   domain inputs.
+> - **The fence.** `axiam_core::models::server_names` holds the matcher, the
+>   entry parser, `covers` / `intersect` and `check_leaf_names`. Both leaf
+>   paths call `check_leaf_names` before the CA lookup.
+> - **The setting.** `server_cert_allowed_names` sits in `CertificatePolicy`,
+>   `SetOrgSettings` and `TenantSettingsOverride`. The plan's
+>   `pki.server_cert_allowed_names` is spelled
+>   `certificate.server_cert_allowed_names` in the resolved view, because
+>   `certificate` is the group this model already had for issuance
+>   constraints. It rides the same four functions every override uses:
+>   `validate_tenant_override`, `clamp_overrides_to_org`, `effective_settings`
+>   and `diff_against_org`. The org check is in `validate_org_settings`.
+> - **The profile.** `LeafProfile::for_leaf` reaches `leaf_params` and the
+>   Vault body.
+> - **Refusals.** `Server` is refused at `bind` (400) and in
+>   `DeviceAuthService::authenticate_der`.
+> - **Schema v67.**
+> - OpenAPI and the management registry are regenerated.
+>
+> **Tests.**
+>
+> - `server_names` unit tests: 16.
+> - Settings interlock unit tests: 7.
+> - `settings_org_propagation_test`: 2, the stored baseline and a shrinking
+>   baseline.
+> - `cert_test`: 6, the five the plan names plus
+>   `the_profile_is_per_type_and_per_key_algorithm`.
+> - `sign_csr_test`: 4 twins.
+> - `vault_pki_test`: 4 twins.
+> - `mtls_test::a_server_certificate_cannot_log_in_as_a_device`.
+> - `device_auth_test`: `a_server_certificate_cannot_be_bound` and
+>   `a_server_certificate_is_issued_over_rest_only_for_allow_listed_names`.
+> - `settings_test`: one wire-level test for the tighten-only rule.
+> - `axiam-server/tests/server_leaf_profile.rs`: the browser-shaped
+>   acceptance, its Device twin, and the client-certificate verifier refusing
+>   a Server leaf.
+>
+> Nine deliberate mutations each turned a named test red; the PR description
+> lists them.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`sign-verbatim` ignores `alt_names` and `ip_sans`.** Design item 2 says
+>    Vault's `alt_names` / `ip_sans` "are passed on the sign call". They would
+>    be dropped. Measured against a real Vault 1.18.3 dev server: SANs come
+>    from the CSR and nowhere else (`use_csr_sans` is hard-wired on), while
+>    `key_usage` and `ext_key_usage` apply when the CSR requests neither. So:
+>    - On `generate`, the admitted names go **inside the CSR AXIAM builds**.
+>    - On `sign-csr`, a `Server` request under a remote signer is **refused**,
+>      because no channel for its names exists: the CSR may not carry them,
+>      and the body parameter is ignored. A Vault role with
+>      `use_csr_sans=false` would be one, but it needs a new config key the
+>      plan excluded. It is recorded here as the follow-up, not built.
+>    - Every Vault call now states the profile and `exclude_cn_from_sans`.
+>      T-268's "documented rather than observed" residual is amended with the
+>      observation.
+> 2. **`cert_type` has a database assertion.** v1 lists three values, so a
+>    `Server` row would have failed at the insert, after signing. That makes
+>    the plan's "Schema: maybe" a **yes**: v67 restates the assertion with four
+>    values (`OVERWRITE`, as v46 did for `key_custody`) and adds
+>    `security_settings.cert_server_allowed_names`, `option<array<string>>`.
+>    The tenant override needs no DDL, because it lives in `overrides_json`.
+>    No row is rewritten.
+> 3. **Clearing is the wrong clamp for a list.** `clamp_overrides_to_org`
+>    clears a stale override so the tenant tracks the baseline. That is right
+>    for scalars, where the baseline is the stricter value, but wrong here.
+>    Take a tenant that kept only `.a.x` out of `[.a.x, .b.x]`: if the
+>    organization drops `.a.x`, clearing would hand the tenant `.b.x`, which
+>    it had removed. The override is narrowed to the **intersection**
+>    instead, and `effective_settings` computes the same intersection on every
+>    read, so no path sees an uncovered entry even when the clamp did not run.
+>    Every pair of entries is either nested or disjoint, so the intersection
+>    is exact.
+> 4. **The CIMD precedent argues the other way for this list.** CIMD's lists
+>    are deliberately unordered, because they name the tenant's own resources.
+>    This one names what the organization root vouches for, so it is ordered
+>    by inclusion. The interlock is reused; the unordered exemption is not.
+> 5. **The Vault generate path diverged from the in-process path.** Before
+>    this change it sent no usage parameters, so Vault leaves carried Vault's
+>    default KU with no EKU, while caller-CSR Vault leaves carried none. The
+>    test `a_generated_leaf_still_sends_no_usage_parameters` pinned that and
+>    is renamed `a_generated_leaf_states_the_same_profile_as_a_caller_csr`. In
+>    `sign_csr_test`, one assertion ("a leaf carries no key usage extension")
+>    now asserts the profile. Both are behaviour changes this task makes on
+>    purpose, not weakened tests.
+> 6. **`optional_self_signed` downgrades rather than refuses.** Under that
+>    policy the REST verifier accepts a certificate that fails the chain
+>    check, including one that fails only on EKU, and classifies it
+>    `SelfAsserted`. Device login and `tls_client_auth` both refuse
+>    `SelfAsserted`, so the separation holds; a test pins the classification.
+> 7. **Citation drift** against `9cc472f`, all located by content:
+>    - `models/certificate.rs:29-36` was exact.
+>    - `inspect_csr` is at `ca.rs:1084`, and the refused list at `:1144-1157`
+>      (the plan said `:1129-1143`).
+>    - The `sign_csr` refusal is at `cert.rs:586-597` (plan: `:508-519`), and
+>      its rationale at `:548-560` (plan: `:471-483`).
+>    - `leaf_params` is at `:792-806` and its "follow-up" comment at
+>      `:777-791` (plan: `:712-726` and `:698-711`).
+>    - `CreateCertificateRequest` is at `handlers/certificates.rs:28` (plan:
+>      `:25`) and `SignCertificateCsrRequest` at `:123` (plan: `:90`).
+>    - A stray doc comment, `parse_issued_leaf`'s, sat above `leaf_params`.
+>      It is moved back.
+>
+> **Records.**
+>
+> - **T-288** is on `Certificate issuance` in the PKI diagram: Spoofing, High,
+>   Mitigated. It is in `Axiam.json` (`threatTop` 287 → 288) and in both STRIDE
+>   documents: 288 threats, 275 mitigated / 13 open; Spoofing 70, High 135,
+>   PKI diagram 30.
+> - **T-268** is amended.
+> - `gen-threat-model.mjs` reports *"threatModel.ts: 9 diagrams, 279 threats
+>   (266 mitigated, 13 open)"*, still nine behind the documents, which is not
+>   this task's to reconcile. The generated files were reverted.
+> - `threat-modeling-and-security.md`'s "Coverage by area" table was already
+>   stale before this wave (PKI 26) and is left for the same reconciliation.
+> - Roadmap **T22.14**.
+> - CHANGELOG entries under **Added** (type, fields, policy, v67) and
+>   **Changed** (profile, with the migration note).
+> - **D-7** (`nameConstraints` in tenant CAs) is recorded as deferred, in
+>   T-288's residual and in the PKI guide.
+> - No `/oauth2/*` route changed, so the FAPI 2.0 and Basic OP results of
+>   2026-09-11 stand (§7.2).
+>
+> **Next step: S-7b** (Sonnet 5), the admin UI. It needs a settings card for
+> `server_cert_allowed_names`, with the org baseline and the tenant override,
+> and a `Server` type with a SAN list on the certificate form. The console's
+> types are hand-written, so nothing breaks meanwhile: the form simply does
+> not offer `Server` yet.
+
+
 **Why fix, and why carefully.** The demo's whole PKI constraint — one trust
 anchor, everything anchored in the AXIAM organization root — fails at exactly
 one point: AXIAM cannot issue a certificate a TLS *server* can present, so

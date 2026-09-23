@@ -13,6 +13,9 @@ use crate::error::{AxiamError, AxiamResult};
 use crate::models::opaque::{
     OpaqueKsf, OpaqueMode, OpaqueSuite, opaque_ksf_is_at_least, opaque_suite_is_at_least,
 };
+use crate::models::server_names::{
+    intersect_allowed_names, uncovered_allowed_names, validate_allowed_names,
+};
 use crate::models::webauthn_policy::{WebauthnUserVerification, user_verification_is_at_least};
 
 // -----------------------------------------------------------------------
@@ -66,6 +69,19 @@ pub struct EmailVerificationPolicy {
 pub struct CertificatePolicy {
     pub default_cert_validity_days: u32,
     pub max_cert_validity_days: u32,
+    /// The names a `Server` certificate may be issued for (S-7, DF-001): DNS
+    /// suffixes (`.lakeside.internal`, strictly below), exact hosts
+    /// (`lakeside.internal`) and IP prefixes (`10.0.0.0/8`, `fd00::/8`). See
+    /// [`crate::models::server_names`] for the matching rules.
+    ///
+    /// **Empty by default, and empty refuses every `Server` request** (I1).
+    /// A certificate for a name, signed under the organization root, is trusted
+    /// by every relying party that trusts that root, so the list is written
+    /// where the root is owned. A tenant override may only remove an entry or
+    /// narrow one; when the baseline later shrinks, the tenant's effective list
+    /// is the intersection of the two.
+    #[serde(default)]
+    pub server_cert_allowed_names: Vec<String>,
 }
 
 /// Admin notification preferences.
@@ -1059,6 +1075,12 @@ pub struct TenantSettingsOverride {
     // Certificate
     pub default_cert_validity_days: Option<u32>,
     pub max_cert_validity_days: Option<u32>,
+    /// S-7 — tighten-only: every entry must be covered by an organization
+    /// entry. An empty list means this tenant issues no `Server` certificate
+    /// at all, which is different from an absent field (inherit the
+    /// organization's list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_cert_allowed_names: Option<Vec<String>>,
     // Notification
     pub admin_notifications_enabled: Option<bool>,
     // OPAQUE
@@ -1132,6 +1154,10 @@ pub struct SetOrgSettings {
     // Certificate
     pub default_cert_validity_days: u32,
     pub max_cert_validity_days: u32,
+    /// S-7 — defaulted to empty, so an API client written before the field
+    /// lands on "no `Server` certificate is issued" (I1).
+    #[serde(default)]
+    pub server_cert_allowed_names: Vec<String>,
     // Notification
     pub admin_notifications_enabled: bool,
     // OPAQUE — defaulted so an existing API client that has never heard of
@@ -1239,6 +1265,9 @@ pub fn system_defaults() -> SetOrgSettings {
         // Certificate
         default_cert_validity_days: 365,
         max_cert_validity_days: 730,
+        // S-7 — no server names: `Server` issuance is refused until an
+        // organization administrator lists some (I1).
+        server_cert_allowed_names: Vec::new(),
         // Notification
         admin_notifications_enabled: true,
         // OPAQUE — off by default. Turning it on is a deliberate operator
@@ -1362,6 +1391,10 @@ pub fn validate_org_settings(input: &SetOrgSettings) -> AxiamResult<()> {
     // baseline that enables CIMD with no resource list and no trusted
     // publisher opens it for every tenant that has not overridden it.
     violations.extend(validate_cimd_policy(&oidc));
+    // S-7 — every entry must parse. A malformed entry would match nothing and
+    // fail closed anyway; refusing it tells the operator now rather than at
+    // the first refused issuance.
+    violations.extend(validate_allowed_names(&input.server_cert_allowed_names));
 
     if violations.is_empty() {
         Ok(())
@@ -1456,6 +1489,16 @@ pub fn effective_settings(
             max_cert_validity_days: tenant_override
                 .max_cert_validity_days
                 .unwrap_or(org.certificate.max_cert_validity_days),
+            // S-7 — not `unwrap_or`: an override is intersected with the
+            // current baseline at every resolution, so no path that reaches
+            // the effective policy can see a tenant entry the organization no
+            // longer covers, whether or not `clamp_overrides_to_org` ran.
+            server_cert_allowed_names: match &tenant_override.server_cert_allowed_names {
+                Some(tenant) => {
+                    intersect_allowed_names(tenant, &org.certificate.server_cert_allowed_names)
+                }
+                None => org.certificate.server_cert_allowed_names.clone(),
+            },
         },
         notification: NotificationPolicy {
             admin_notifications_enabled: tenant_override
@@ -1769,6 +1812,18 @@ pub fn clamp_overrides_to_org(
         overrides.cimd = None;
         cleared.push("cimd");
     }
+    // S-7 — narrowed, not cleared. Clearing would make the tenant inherit the
+    // organization's list, which after a shrink can still hold entries the
+    // tenant had removed: a tenant that kept only `.a.x` must not wake up with
+    // `.b.x` because the organization dropped `.a.x`. The intersection is the
+    // widest list both parties have agreed to; it may be empty.
+    if let Some(tenant) = &overrides.server_cert_allowed_names {
+        let narrowed = intersect_allowed_names(tenant, &org.certificate.server_cert_allowed_names);
+        if narrowed != *tenant {
+            overrides.server_cert_allowed_names = Some(narrowed);
+            cleared.push("server_cert_allowed_names");
+        }
+    }
 
     cleared
 }
@@ -2075,6 +2130,23 @@ pub fn validate_tenant_override(
         }
     }
 
+    // --- S-7 server certificate names: tighten-only ---
+    //
+    // The CIMD precedent is "the lists name this tenant's own resources and are
+    // unordered". This list is the opposite case: it names what the
+    // organization root may be made to vouch for, so it is ordered by
+    // inclusion, and a tenant entry no organization entry covers is a tenant
+    // widening the organization's trust decision.
+    if let Some(tenant) = &overrides.server_cert_allowed_names {
+        violations.extend(validate_allowed_names(tenant));
+        for entry in uncovered_allowed_names(&org.certificate.server_cert_allowed_names, tenant) {
+            violations.push(format!(
+                "server_cert_allowed_names: {entry:?} is not within the org baseline; a tenant \
+                 may remove an entry or narrow one, never add or widen one"
+            ));
+        }
+    }
+
     if !violations.is_empty() {
         return Err(AxiamError::Validation {
             message: format!(
@@ -2259,6 +2331,14 @@ pub fn diff_against_org(
             org.notification.admin_notifications_enabled,
             tenant.notification.admin_notifications_enabled
         ),
+        // Cloned rather than `diff!`, for the reason the DCR lists give below.
+        server_cert_allowed_names: if tenant.certificate.server_cert_allowed_names
+            != org.certificate.server_cert_allowed_names
+        {
+            Some(tenant.certificate.server_cert_allowed_names.clone())
+        } else {
+            None
+        },
         opaque_mode: diff!(
             opaque_mode,
             org.opaque.opaque_mode,
@@ -2385,6 +2465,7 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
         certificate: CertificatePolicy {
             default_cert_validity_days: input.default_cert_validity_days,
             max_cert_validity_days: input.max_cert_validity_days,
+            server_cert_allowed_names: input.server_cert_allowed_names.clone(),
         },
         notification: NotificationPolicy {
             admin_notifications_enabled: input.admin_notifications_enabled,
@@ -4338,5 +4419,165 @@ mod tests {
         assert_eq!(decoded, CimdPolicy::default());
         assert!(!decoded.enabled);
         assert!(decoded.restrict_same_domain);
+    }
+
+    // -------------------------------------------------------------------
+    // S-7 — server_cert_allowed_names rides the same interlock
+    // -------------------------------------------------------------------
+
+    fn org_with_names(names: &[&str]) -> SecuritySettings {
+        let mut org = org_settings();
+        org.certificate.server_cert_allowed_names = names.iter().map(|n| n.to_string()).collect();
+        org
+    }
+
+    fn names(v: &[&str]) -> Option<Vec<String>> {
+        Some(v.iter().map(|n| n.to_string()).collect())
+    }
+
+    #[test]
+    fn the_shipped_default_lists_no_server_names() {
+        assert!(system_defaults().server_cert_allowed_names.is_empty());
+        assert!(
+            org_settings()
+                .certificate
+                .server_cert_allowed_names
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_tenant_override_may_remove_or_narrow_server_names() {
+        let org = org_with_names(&[".lakeside.internal", "10.0.0.0/8"]);
+        for tenant in [
+            names(&[]),
+            names(&[".lakeside.internal"]),
+            names(&[".plant.lakeside.internal", "10.1.0.0/16"]),
+            names(&["api.lakeside.internal"]),
+        ] {
+            let o = TenantSettingsOverride {
+                server_cert_allowed_names: tenant.clone(),
+                ..Default::default()
+            };
+            assert!(validate_tenant_override(&org, &o).is_ok(), "{tenant:?}");
+        }
+    }
+
+    #[test]
+    fn a_tenant_override_cannot_widen_the_allow_list() {
+        let org = org_with_names(&[".lakeside.internal", "10.0.0.0/8"]);
+        for tenant in [
+            names(&[".internal"]),
+            names(&["lakeside.internal"]),
+            names(&[".example.com"]),
+            names(&["0.0.0.0/0"]),
+            names(&["fd00::/8"]),
+        ] {
+            let o = TenantSettingsOverride {
+                server_cert_allowed_names: tenant.clone(),
+                ..Default::default()
+            };
+            let err = validate_tenant_override(&org, &o).unwrap_err().to_string();
+            assert!(
+                err.contains("server_cert_allowed_names"),
+                "{tenant:?}: {err}"
+            );
+        }
+        // And against an empty baseline nothing can be added at all.
+        let o = TenantSettingsOverride {
+            server_cert_allowed_names: names(&[".lakeside.internal"]),
+            ..Default::default()
+        };
+        assert!(validate_tenant_override(&org_with_names(&[]), &o).is_err());
+    }
+
+    #[test]
+    fn an_org_baseline_rejects_a_malformed_server_name() {
+        let mut input = system_defaults();
+        input.server_cert_allowed_names = vec!["*.lakeside.internal".into()];
+        assert!(validate_org_settings(&input).is_err());
+        input.server_cert_allowed_names = vec![".lakeside.internal".into(), "10.0.0.0/8".into()];
+        assert!(validate_org_settings(&input).is_ok());
+    }
+
+    #[test]
+    fn a_shrinking_baseline_narrows_an_existing_override_and_never_widens_it() {
+        // The tenant narrowed to one of two organization suffixes...
+        let before = org_with_names(&[".a.x", ".b.x"]);
+        let mut o = TenantSettingsOverride {
+            server_cert_allowed_names: names(&[".a.x"]),
+            ..Default::default()
+        };
+        assert!(validate_tenant_override(&before, &o).is_ok());
+
+        // ...and the organization then drops that one.
+        let after = org_with_names(&[".b.x"]);
+        let effective = effective_settings(&after, &o, Uuid::nil(), Uuid::nil());
+        assert!(
+            effective.certificate.server_cert_allowed_names.is_empty(),
+            "the tenant must not inherit .b.x, which it had removed"
+        );
+        let cleared = clamp_overrides_to_org(&after, &mut o);
+        assert_eq!(cleared, vec!["server_cert_allowed_names"]);
+        assert_eq!(
+            o.server_cert_allowed_names,
+            names(&[]),
+            "narrowed, not cleared"
+        );
+
+        // An organization narrowing below a tenant entry leaves the narrower.
+        let narrower = org_with_names(&[".c.a.x"]);
+        let o = TenantSettingsOverride {
+            server_cert_allowed_names: names(&[".a.x"]),
+            ..Default::default()
+        };
+        let effective = effective_settings(&narrower, &o, Uuid::nil(), Uuid::nil());
+        assert_eq!(
+            Some(effective.certificate.server_cert_allowed_names),
+            names(&[".c.a.x"])
+        );
+    }
+
+    #[test]
+    fn an_absent_override_inherits_the_baseline_and_a_compliant_one_is_kept() {
+        let org = org_with_names(&[".lakeside.internal"]);
+        let effective = effective_settings(
+            &org,
+            &TenantSettingsOverride::default(),
+            Uuid::nil(),
+            Uuid::nil(),
+        );
+        assert_eq!(
+            Some(effective.certificate.server_cert_allowed_names),
+            names(&[".lakeside.internal"])
+        );
+        let mut o = TenantSettingsOverride {
+            server_cert_allowed_names: names(&["api.lakeside.internal"]),
+            ..Default::default()
+        };
+        assert!(clamp_overrides_to_org(&org, &mut o).is_empty());
+        assert_eq!(
+            o.server_cert_allowed_names,
+            names(&["api.lakeside.internal"])
+        );
+    }
+
+    #[test]
+    fn server_names_round_trip_through_diff_against_org() {
+        let org = org_with_names(&[".lakeside.internal"]);
+        let o = TenantSettingsOverride {
+            server_cert_allowed_names: names(&["api.lakeside.internal"]),
+            ..Default::default()
+        };
+        let merged = effective_settings(&org, &o, Uuid::nil(), Uuid::nil());
+        assert_eq!(
+            diff_against_org(&org, &merged).server_cert_allowed_names,
+            o.server_cert_allowed_names
+        );
+        assert_eq!(
+            diff_against_org(&org, &org).server_cert_allowed_names,
+            None,
+            "an unchanged list is no override"
+        );
     }
 }

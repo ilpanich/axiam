@@ -372,6 +372,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "role_assignment_inherit",
         sql: SCHEMA_V66,
     },
+    Migration {
+        version: 67,
+        name: "server_certificates",
+        sql: SCHEMA_V67,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3582,9 +3587,55 @@ const SCHEMA_V66: &str = "\
 DEFINE FIELD IF NOT EXISTS inherit ON TABLE has_role TYPE option<bool>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v67 — Server certificates and the names they may carry (T22.14, DF-001)
+// -----------------------------------------------------------------------
+//
+// Two changes, both needed before a `Server` certificate can exist at all.
+//
+// **`certificate.cert_type` admits `'Server'`.** The v1 assertion lists three
+// values, and a row carrying a fourth is refused by the datastore — so without
+// this the new type would fail at the insert, after the leaf was signed.
+// `OVERWRITE` rather than `IF NOT EXISTS`, and the assertion restated in full,
+// for the reason v46 gives for `key_custody`: SurrealDB replaces a field
+// definition rather than merging it. Every existing row holds one of the three
+// old values and still satisfies the wider assertion; nothing is rewritten.
+//
+// **`security_settings.cert_server_allowed_names`**, the organization baseline
+// of the name fence. A column rather than a key in `overrides_json` because an
+// organization row has no override mask; a tenant's override *does* live in
+// `overrides_json`, which is flexible JSON and needs no DDL. `option<…>`, and
+// absent reads as the empty list — which refuses every `Server` request (I1).
+const SCHEMA_V67: &str = "\
+DEFINE FIELD OVERWRITE cert_type ON TABLE certificate TYPE string \
+    ASSERT $value IN ['User', 'Service', 'Device', 'Server'];
+DEFINE FIELD IF NOT EXISTS cert_server_allowed_names ON TABLE security_settings \
+    TYPE option<array<string>>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T22.14 — v67 widens one assertion and adds one optional column; it
+    /// rewrites no row, and the widened assertion still names the three
+    /// values every existing certificate carries.
+    #[test]
+    fn v67_admits_server_certificates_and_backfills_nothing() {
+        assert!(
+            SCHEMA_V67.contains("['User', 'Service', 'Device', 'Server']"),
+            "v67 must restate the cert_type assertion with all four values"
+        );
+        assert!(SCHEMA_V67.contains(
+            "cert_server_allowed_names ON TABLE security_settings TYPE option<array<string>>"
+        ));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V67.contains(forbidden),
+                "v67 must not contain {forbidden}: it is DDL only"
+            );
+        }
+    }
 
     /// T22.11 — v66 adds one optional column to `has_role` and nothing else.
     /// Optional is the whole compatibility argument: an absent flag reads as
@@ -4030,9 +4081,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&66),
-            "v66 is the newest migration (T22.11 — the optional `inherit` flag on \
-             `has_role`, one additive column). This assertion is a \
+            Some(&67),
+            "v67 is the newest migration (T22.14 — `Server` in the cert_type \
+             assertion and the organization's server-name allow-list). This assertion is a \
              tripwire, not bookkeeping: bumping it is how a new migration is declared \
              deliberate rather than merged in by accident. It caught this phase doing \
              exactly what it is for: T21.4 (v64) and T21.5 (v65) were written on branches \

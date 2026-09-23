@@ -8,8 +8,10 @@
 //! test of any single step passes while the sequence is wrong.
 
 use axiam_core::ca_keys::{CaKeyCustody, CaKeyRef, CaKeyStore};
+use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::{
     CertificateType, CreateCaCertificate, CreateCertificate, ImportCaCertificate, KeyAlgorithm,
+    SubjectAltName,
 };
 use axiam_db::repository::{SurrealCaCertificateRepository, SurrealCertificateRepository};
 use axiam_pki::ca::{CaService, PkiConfig};
@@ -521,8 +523,10 @@ async fn issuing_a_leaf_sends_a_csr_and_records_the_certificate_that_came_back()
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             Some(90),
+            &[],
         )
         .await
         .expect("issuance must go through Vault");
@@ -908,8 +912,10 @@ async fn signing_a_caller_csr_sends_the_csr_verbatim_and_states_the_usages() {
                 cert_type: CertificateType::Device,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             Some(90),
+            &[],
         )
         .await
         .expect("a caller's CSR is signed through Vault");
@@ -921,12 +927,16 @@ async fn signing_a_caller_csr_sends_the_csr_verbatim_and_states_the_usages() {
         "the caller's request goes to Vault byte for byte — AXIAM does not \
          rewrite a document it did not author"
     );
+    // S-7: the profile, where this used to state `[]`. Still explicit, still
+    // AXIAM's decision rather than a Vault default — now the same decision the
+    // in-process path makes for the same request.
     assert_eq!(
         body["key_usage"],
-        json!([]),
+        json!(["DigitalSignature"]),
         "stated explicitly so the shape is AXIAM's decision and not a Vault default"
     );
-    assert_eq!(body["ext_key_usage"], json!([]));
+    assert_eq!(body["ext_key_usage"], json!(["ClientAuth"]));
+    assert_eq!(body["exclude_cn_from_sans"], json!(true));
     assert!(
         body["ttl"].as_str().is_some(),
         "a PKCS#10 request cannot carry a validity window, so the TTL is sent \
@@ -947,11 +957,13 @@ async fn signing_a_caller_csr_sends_the_csr_verbatim_and_states_the_usages() {
 }
 
 #[tokio::test]
-async fn a_generated_leaf_still_sends_no_usage_parameters() {
-    // The other side of `csr_is_caller_supplied`: AXIAM builds that CSR itself
-    // from a key it just generated, so there is nothing in it a caller chose
-    // and nothing for this to defend against. Certificates already issued to
-    // deployments on this path keep the shape they have.
+async fn a_generated_leaf_states_the_same_profile_as_a_caller_csr() {
+    // Before S-7 this was `a_generated_leaf_still_sends_no_usage_parameters`:
+    // the generation path sent no usages and so got Vault's defaults
+    // (DigitalSignature, KeyAgreement, KeyEncipherment, no EKU) while the
+    // caller-CSR path stated `[]` — two shapes for one request, on one
+    // custodian. The profile ends that: both paths, both custodians, one
+    // function. Leaves issued before it keep the shape they have.
     let server = MockServer::start().await;
     let root = ca_pair("Acme Root", None);
     let int = ca_pair("Acme Intermediate", Some(&root));
@@ -995,16 +1007,23 @@ async fn a_generated_leaf_still_sends_no_usage_parameters() {
             key_algorithm: KeyAlgorithm::Ed25519,
             validity_days: 30,
             metadata: None,
+            subject_alt_names: vec![],
         },
         Some(90),
+        &[],
     )
     .await
     .expect("issued");
 
     let body = seen.lock().unwrap()[0].clone();
+    assert_eq!(body["key_usage"], json!(["DigitalSignature"]), "{body}");
+    assert_eq!(body["ext_key_usage"], json!(["ClientAuth"]), "{body}");
+    assert_eq!(body["exclude_cn_from_sans"], json!(true), "{body}");
+    let csr =
+        rcgen::CertificateSigningRequestParams::from_pem(body["csr"].as_str().unwrap()).unwrap();
     assert!(
-        body.get("key_usage").is_none() && body.get("ext_key_usage").is_none(),
-        "the generation path's request body is unchanged: {body}"
+        csr.params.subject_alt_names.is_empty(),
+        "a Device leaf's CSR names no host"
     );
 }
 
@@ -1054,8 +1073,10 @@ async fn a_caller_csr_asking_for_a_key_usage_never_reaches_vault() {
             cert_type: CertificateType::Device,
             validity_days: 30,
             metadata: None,
+            subject_alt_names: vec![],
         },
         Some(90),
+        &[],
     )
     .await
     .expect_err("a CSR requesting a key usage is refused before any signing");
@@ -1064,4 +1085,228 @@ async fn a_caller_csr_asking_for_a_key_usage_never_reaches_vault() {
         matches!(&err, axiam_core::error::AxiamError::Validation { message } if message.contains("keyUsage")),
         "got {err:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// S-7 — Server certificates and the name fence under `vault_pki` custody
+// ---------------------------------------------------------------------------
+
+const LAKESIDE: &[&str] = &[".lakeside.internal", "10.0.0.0/8"];
+
+fn lakeside() -> Vec<String> {
+    LAKESIDE.iter().map(|s| s.to_string()).collect()
+}
+
+/// A Vault-custody CA and a cert service over it. `sign_verbatim` says how many
+/// `sign-verbatim` calls the test expects: zero means reaching Vault is itself
+/// the failure.
+async fn vault_fixture(
+    sign_verbatim: u64,
+) -> (
+    CertService<SurrealCaCertificateRepository<TestDb>, SurrealCertificateRepository<TestDb>>,
+    Uuid,
+    Uuid,
+    Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    MockServer,
+) {
+    let server = MockServer::start().await;
+    let root = ca_pair("Acme Root", None);
+    let int = ca_pair("Acme Intermediate", Some(&root));
+    mock_generation(&server, &root, &int).await;
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/issuer/int-issuer-id/sign-verbatim"))
+        .and(header("X-Vault-Token", TOKEN))
+        .respond_with(RecordingSignVerbatim {
+            issuer_key_pem: int.0.clone(),
+            issuer_cert_pem: int.1.clone(),
+            seen: Arc::clone(&seen),
+        })
+        .expect(sign_verbatim)
+        .mount(&server)
+        .await;
+
+    let db = setup_db().await;
+    let org = Uuid::new_v4();
+    let ca = ca_service(db.clone(), &server)
+        .generate(create_ca("Acme Root", org))
+        .await
+        .unwrap();
+    let certs = CertService::new(
+        SurrealCaCertificateRepository::new(db.clone()),
+        SurrealCertificateRepository::new(db),
+        PkiConfig::default(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        custodians(&server),
+    );
+    (certs, org, ca.certificate.id, seen, server)
+}
+
+fn server_request(ca_id: Uuid, subject: &str, sans: Vec<SubjectAltName>) -> CreateCertificate {
+    CreateCertificate {
+        tenant_id: Uuid::new_v4(),
+        issuer_ca_id: ca_id,
+        subject: subject.into(),
+        cert_type: CertificateType::Server,
+        key_algorithm: KeyAlgorithm::Ed25519,
+        validity_days: 30,
+        metadata: None,
+        subject_alt_names: sans,
+    }
+}
+
+/// The Vault twin of `a_server_leaf_carries_the_requested_sans`: the names go
+/// inside the CSR AXIAM builds, because `sign-verbatim` reads them from nowhere
+/// else, and the profile goes as parameters.
+#[tokio::test]
+async fn a_server_leaf_through_vault_carries_the_sans_in_axiams_own_csr() {
+    let (certs, org, ca_id, seen, _server) = vault_fixture(1).await;
+    let issued = certs
+        .generate(
+            org,
+            IssuingScope::Organization,
+            server_request(
+                ca_id,
+                "api.lakeside.internal",
+                vec![
+                    SubjectAltName::Dns("api.lakeside.internal".into()),
+                    SubjectAltName::Ip("10.0.0.5".into()),
+                ],
+            ),
+            Some(90),
+            &lakeside(),
+        )
+        .await
+        .expect("an allow-listed Server leaf is issued through Vault");
+
+    let body = seen.lock().unwrap()[0].clone();
+    assert_eq!(body["ext_key_usage"], json!(["ServerAuth"]));
+    assert_eq!(body["key_usage"], json!(["DigitalSignature"]));
+    assert_eq!(body["exclude_cn_from_sans"], json!(true));
+    assert!(
+        body.get("alt_names").is_none() && body.get("ip_sans").is_none(),
+        "sign-verbatim ignores both; sending them would be a promise it does not keep"
+    );
+    let csr =
+        rcgen::CertificateSigningRequestParams::from_pem(body["csr"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        csr.params.subject_alt_names,
+        vec![
+            rcgen::SanType::DnsName("api.lakeside.internal".try_into().unwrap()),
+            rcgen::SanType::IpAddress("10.0.0.5".parse().unwrap()),
+        ]
+    );
+    assert_eq!(issued.certificate.cert_type, CertificateType::Server);
+}
+
+/// (a) on the Vault custodian, generate path: the fence refuses before any call
+/// to Vault — a SAN off the list, and a common name off the list.
+#[tokio::test]
+async fn a_san_outside_the_allow_list_is_refused_under_vault_before_vault_is_asked() {
+    let (certs, org, ca_id, _seen, _server) = vault_fixture(0).await;
+    for request in [
+        server_request(
+            ca_id,
+            "api.lakeside.internal",
+            vec![SubjectAltName::Dns("login.example.com".into())],
+        ),
+        server_request(
+            ca_id,
+            "login.example.com",
+            vec![SubjectAltName::Dns("api.lakeside.internal".into())],
+        ),
+    ] {
+        let err = certs
+            .generate(
+                org,
+                IssuingScope::Organization,
+                request,
+                Some(90),
+                &lakeside(),
+            )
+            .await
+            .expect_err("an off-list name must be refused");
+        assert!(
+            matches!(&err, AxiamError::Validation { message } if message.contains("server_cert_allowed_names")),
+            "got {err:?}"
+        );
+    }
+}
+
+/// (a) on the Vault custodian, sign-csr path, and (d): a caller-CSR `Server`
+/// certificate has no channel to Vault for its names, so it is refused — after
+/// the fence, which answers first for an off-list name — and Vault is never
+/// asked.
+#[tokio::test]
+async fn a_server_csr_is_refused_under_vault_and_the_fence_answers_first() {
+    let (certs, org, ca_id, _seen, _server) = vault_fixture(0).await;
+    let sign = |sans: Vec<SubjectAltName>| axiam_core::models::certificate::SignCertificateCsr {
+        tenant_id: Uuid::new_v4(),
+        issuer_ca_id: ca_id,
+        csr_pem: caller_csr("api.lakeside.internal"),
+        cert_type: CertificateType::Server,
+        validity_days: 30,
+        metadata: None,
+        subject_alt_names: sans,
+    };
+
+    let off_list = certs
+        .sign_csr(
+            org,
+            IssuingScope::Organization,
+            sign(vec![SubjectAltName::Dns("login.example.com".into())]),
+            Some(90),
+            &lakeside(),
+        )
+        .await
+        .expect_err("off the list");
+    assert!(
+        matches!(&off_list, AxiamError::Validation { message } if message.contains("server_cert_allowed_names")),
+        "got {off_list:?}"
+    );
+
+    let on_list = certs
+        .sign_csr(
+            org,
+            IssuingScope::Organization,
+            sign(vec![SubjectAltName::Dns("api.lakeside.internal".into())]),
+            Some(90),
+            &lakeside(),
+        )
+        .await
+        .expect_err("no channel for the names under a verbatim signer");
+    assert!(
+        matches!(&on_list, AxiamError::Validation { message } if message.contains("remote signer")),
+        "got {on_list:?}"
+    );
+}
+
+/// I1 under Vault: with the allow-list empty no Server leaf is issued, and a
+/// Device request made exactly as before S-7 still is.
+#[tokio::test]
+async fn under_vault_an_empty_allow_list_refuses_server_and_nothing_else() {
+    let (certs, org, ca_id, _seen, _server) = vault_fixture(1).await;
+    let err = certs
+        .generate(
+            org,
+            IssuingScope::Organization,
+            server_request(
+                ca_id,
+                "api.lakeside.internal",
+                vec![SubjectAltName::Dns("api.lakeside.internal".into())],
+            ),
+            Some(90),
+            &[],
+        )
+        .await
+        .expect_err("I1");
+    assert!(matches!(err, AxiamError::Validation { .. }), "got {err:?}");
+
+    let mut device = server_request(ca_id, "device-7", vec![]);
+    device.cert_type = CertificateType::Device;
+    certs
+        .generate(org, IssuingScope::Organization, device, Some(90), &[])
+        .await
+        .expect("a pre-S-7 Device request is unchanged");
 }

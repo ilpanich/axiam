@@ -104,6 +104,7 @@ fn parse_cert_type(s: &str) -> Result<CertificateType, DbError> {
         "User" => Ok(CertificateType::User),
         "Service" => Ok(CertificateType::Service),
         "Device" => Ok(CertificateType::Device),
+        "Server" => Ok(CertificateType::Server),
         other => Err(DbError::Migration(format!(
             "unknown certificate type: {other}"
         ))),
@@ -115,6 +116,7 @@ fn cert_type_str(t: &CertificateType) -> &'static str {
         CertificateType::User => "User",
         CertificateType::Service => "Service",
         CertificateType::Device => "Device",
+        CertificateType::Server => "Server",
     }
 }
 

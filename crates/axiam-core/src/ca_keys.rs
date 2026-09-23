@@ -223,6 +223,17 @@ pub struct LeafSigningRequest {
     /// extensions that would survive — but a second statement of the same
     /// intent at the place the certificate is actually minted.
     pub csr_is_caller_supplied: bool,
+    /// The key usages the certificate must carry (S-7), stated to the signer
+    /// rather than left to its defaults. The same
+    /// [`LeafProfile::for_leaf`](crate::models::certificate::LeafProfile::for_leaf)
+    /// the in-process path builds from, so the two custodians issue one shape.
+    ///
+    /// SANs are deliberately **not** a field here. A custodian that signs a CSR
+    /// verbatim takes the SAN list from the CSR and nowhere else — Vault's
+    /// `sign-verbatim` ignores `alt_names` and `ip_sans` — so the only way to
+    /// state them is inside a CSR AXIAM wrote itself, which is what
+    /// `CertService::generate` does.
+    pub profile: crate::models::certificate::LeafProfile,
 }
 
 /// What a remote signer returned.
@@ -599,6 +610,10 @@ mod tests {
             csr_pem: "CSR".to_string(),
             ttl_seconds: 3600,
             csr_is_caller_supplied: false,
+            profile: crate::models::certificate::LeafProfile::for_leaf(
+                &crate::models::certificate::CertificateType::Device,
+                &KeyAlgorithm::Ed25519,
+            ),
         };
         assert!(custodian.sign_csr(&parent, &leaf).await.is_err());
 

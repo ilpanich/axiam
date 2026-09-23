@@ -472,8 +472,10 @@ POST /api/v1/certificates
 ```
 
 `cert_type` is one of `User` (authenticate a human user), `Service`
-(authenticate a service/service-account), or `Device` (authenticate an IoT
-device). Response (`201`) is a `GeneratedCertificate`: the stored
+(authenticate a service/service-account), `Device` (authenticate an IoT
+device), or `Server` (a certificate a TLS server presents — see
+[Server certificates](#server-certificates-and-the-names-they-may-carry)).
+Response (`201`) is a `GeneratedCertificate`: the stored
 certificate metadata plus `private_key_pem`, again returned only once — and,
 when the issuing CA is under `vault_pki` custody, `chain_pem` holding the chain
 the signer returned. A tenant may cap `validity_days` via its
@@ -517,6 +519,113 @@ under the organization CA needs a signing CA per tenant
 (`POST /api/v1/organizations/{org}/tenants/{tenant}/signing-cas`) before its
 tenant administrators can issue again — which is the tier those CAs exist for.
 
+### Server certificates, and the names they may carry
+
+A `Server` certificate is the one AXIAM leaf a TLS **server** can present: it
+carries `subjectAltName` entries and `extendedKeyUsage: serverAuth`. Signed by a
+tenant CA under the organization root, it is trusted by every relying party
+that trusts that root — a browser, a gateway, an MQTT client — so the names it
+may carry are fenced, and the fence is written by the organization:
+
+```
+POST /api/v1/certificates
+{
+  "issuer_ca_id": "<tenant-signing-ca-uuid>",
+  "subject": "api.lakeside.internal",
+  "cert_type": "Server",
+  "key_algorithm": "Ed25519",
+  "validity_days": 90,
+  "subject_alt_names": [
+    { "dns": "api.lakeside.internal" },
+    { "dns": "*.plant.lakeside.internal" },
+    { "ip": "10.0.0.5" }
+  ]
+}
+```
+
+Every SAN, **and the common name**, must be admitted by the tenant's effective
+`server_cert_allowed_names` setting. The list is **empty by default, and empty
+refuses every `Server` request** with `400` — no deployment issues a server
+certificate until an organization administrator says for which names.
+`subject_alt_names` is required for `Server` (TLS clients match the host
+against the SAN list and ignore the common name) and refused with `400` on every
+other type. DNS and IP names only; URI and e-mail SANs are not offered.
+
+The list lives in the settings hierarchy
+(`PUT /api/v1/organizations/{org}/settings`, field `server_cert_allowed_names`;
+read back as `certificate.server_cert_allowed_names`). Three entry forms:
+
+| Entry | Admits | Does not admit |
+| --- | --- | --- |
+| `.lakeside.internal` | `a.lakeside.internal`, `a.b.lakeside.internal`, `*.lakeside.internal` | `lakeside.internal` itself, `xlakeside.internal` |
+| `lakeside.internal` | `lakeside.internal` only | anything below it, `*.lakeside.internal` |
+| `10.0.0.0/8`, `fd00::/8`, `10.0.0.5` | an IP SAN of the same family inside the prefix | the other family |
+
+The rules, each pinned by a test:
+
+- A leading dot means **strictly below**, matched on label boundaries. The apex
+  is a different name — often the organization's own — so list it without the
+  dot when it is meant.
+- Names compare **case-insensitively**. A **trailing dot** is refused, in
+  entries and requests alike.
+- **Internationalised names** must be written as A-labels (`xn--…`); a Unicode
+  label is refused rather than converted, so there is one spelling to match.
+- A **wildcard** is a whole leftmost `*` label in a request, admitted by a
+  suffix entry at or above the rest (`*.a.x` by `.a.x` or `.x`). Entries never
+  contain `*`, and `a*.x` or a bare `*` is refused.
+- An **IPv4-mapped IPv6** address (`::ffff:10.0.0.5`) is refused in requests and
+  entries; write the IPv4 address. A CIDR with host bits set is refused with the
+  canonical form named.
+
+**Tenants may only narrow it.** A tenant override
+(`PUT /api/v1/settings`, same field) may remove entries or narrow one
+(`.plant.lakeside.internal` under `.lakeside.internal`, `10.1.0.0/16` under
+`10.0.0.0/8`); an entry no organization entry covers is refused with `400`. If
+the organization later shrinks its list, each tenant's effective list is the
+**intersection** of the two, computed on every read — a tenant never keeps a
+name the organization withdrew, and never gains one it had removed.
+
+**Under `vault_pki` custody** a generated `Server` leaf is issued normally: AXIAM
+puts the admitted names in the CSR it builds itself, because Vault's
+`sign-verbatim` reads SANs from the CSR and ignores `alt_names` and `ip_sans`. A
+`Server` certificate from **your own CSR** (`sign-csr`) is refused under a
+`vault_pki` CA for the same reason — the names would have to come from the CSR,
+which may not carry any. Use `POST /api/v1/certificates` there, or a CA whose
+key AXIAM holds.
+
+A `Server` certificate **authenticates nobody**: binding one to a service
+account is refused with `400`, device login refuses it, and its `serverAuth`
+usage fails the `clientAuth` check every client-certificate verifier makes.
+
+The fence is AXIAM's. X.509 `nameConstraints` in the tenant CA itself — so the
+fence would also hold for a relying party that never talks to AXIAM — is
+deliberately not built yet: changing the list would then mean re-issuing the
+CA.
+
+### What every leaf may be used for
+
+Since 1.0.0-beta17 every leaf carries `keyUsage` and `extendedKeyUsage`, from
+one profile both leaf paths and both custodians share:
+
+| Type | Key | keyUsage | extendedKeyUsage |
+| --- | --- | --- | --- |
+| `User`, `Service`, `Device` | Ed25519 | digitalSignature | clientAuth |
+| `User`, `Service`, `Device` | RSA | digitalSignature, keyEncipherment | clientAuth |
+| `Server` | Ed25519 | digitalSignature | serverAuth |
+| `Server` | RSA | digitalSignature, keyEncipherment | serverAuth |
+
+**Upgrading.** Before 1.0.0-beta17 leaves carried neither extension, which
+X.509 reads as "any usage" (and, under `vault_pki` custody, generated leaves
+carried Vault's default `keyUsage` with no `extendedKeyUsage`). The profile only
+narrows: a `User`, `Service` or `Device` certificate keeps every use AXIAM has
+ever made of it — mutual-TLS client authentication, device login, RFC 8705
+`tls_client_auth` — and loses only the ability to act as a TLS server, which it
+never had in practice because it carried no SAN. Certificates issued before the
+upgrade are not re-issued and keep carrying neither extension; they behave as
+they always did until they are rotated. A consumer that pinned "no key usage
+extension" on an AXIAM leaf — nothing in AXIAM does — needs to accept the
+profile.
+
 ### Or bring a CSR
 
 If you already hold the key — generated on a hardware token, an HSM, or
@@ -548,7 +657,9 @@ else's key rather than mint your own:
   certificate says what the CSR asked for its name and key to be, and there
   is no second place for those two facts to disagree.
 - **`subjectAltName`, `keyUsage` and `extendedKeyUsage` requests are refused
-  outright, all three — not silently dropped.** A CSR asking for any of them
+  outright, all three — not silently dropped.** A `Server` certificate's names
+  go in the request's `subject_alt_names` field, never in the CSR, and its
+  usages are AXIAM's profile. A CSR asking for any of them
   is rejected with `400` before signing, on any custodian. This is stricter
   than it needs to be for the in-process signer, which would simply overwrite
   them — but under Vault custody, `sign-verbatim` honours exactly these three
@@ -624,8 +735,9 @@ The order, once:
    ```
 
    Requires the **`certificates:bind`** permission. Both the certificate and
-   the service account must belong to the caller's tenant, and the certificate
-   must be **`Active`** and **not expired** — a revoked or expired certificate
+   the service account must belong to the caller's tenant, the certificate
+   must not be a `Server` certificate (refused with `400`: it names a host and
+   cannot authenticate a client), and it must be **`Active`** and **not expired** — a revoked or expired certificate
    binds happily and then fails every handshake, so the bind refuses it with
    `400` rather than leaving a service account that is configured for mTLS and
    cannot connect.

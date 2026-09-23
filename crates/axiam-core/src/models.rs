@@ -30,6 +30,7 @@ pub mod resource;
 pub mod role;
 pub mod scim_token;
 pub mod scope;
+pub mod server_names;
 pub mod service_account;
 pub mod session;
 pub mod settings;

@@ -114,8 +114,10 @@ async fn mtls_chain_accept_leaf_signed_by_tenant_ca() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("leaf cert generation must succeed");
@@ -218,8 +220,10 @@ async fn mtls_chain_reject_leaf_from_ca_that_is_not_a_trust_anchor() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("leaf cert generation must succeed");
@@ -461,8 +465,10 @@ async fn mtls_rejects_revoked_issuing_ca() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("leaf cert generation must succeed");
@@ -560,8 +566,10 @@ async fn mtls_rejects_expired_issuing_ca() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("leaf cert generation must succeed");
@@ -702,8 +710,10 @@ async fn a_leaf_beneath_an_intermediate(
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("leaf cert generation must succeed");

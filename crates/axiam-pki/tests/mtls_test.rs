@@ -113,8 +113,10 @@ async fn mtls_authenticate_valid_cert_returns_device_identity() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("leaf cert generation must succeed");
@@ -226,8 +228,10 @@ async fn mtls_rejects_unknown_fingerprint() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("leaf cert generation in other DB must succeed");
@@ -411,8 +415,10 @@ async fn mtls_rejects_revoked_cert() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("leaf cert must be created");
@@ -517,8 +523,10 @@ async fn a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one()
             cert_type: CertificateType::Device,
             validity_days: 30,
             metadata: None,
+            subject_alt_names: vec![],
         },
         None,
+        &[],
     )
     .await
     .expect("the device's CSR is signed");
@@ -547,4 +555,117 @@ async fn a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one()
     assert_eq!(identity.service_account_id, sa.id);
     assert_eq!(identity.tenant_id, tenant_id);
     assert_eq!(identity.certificate_id, leaf.id);
+}
+
+// ---------------------------------------------------------------------------
+// S-7 — a Server certificate authenticates nobody
+// ---------------------------------------------------------------------------
+
+/// Bound straight through the repository — the route the bind endpoint's own
+/// refusal cannot see — a Server leaf still does not log in as a device. Its
+/// I4 twin, a Device leaf issued and bound identically, does.
+#[tokio::test]
+async fn a_server_certificate_cannot_log_in_as_a_device() {
+    use axiam_core::models::certificate::SubjectAltName;
+    use axiam_core::repository::ServiceAccountRepository;
+
+    let db = setup_db().await;
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let ca = CaService::new(
+        ca_repo.clone(),
+        test_pki_config(),
+        sem.clone(),
+        test_ca_custodians(),
+    )
+    .generate(CreateCaCertificate {
+        organization_id: org_id,
+        subject: "mTLS Test CA".into(),
+        key_algorithm: KeyAlgorithm::Ed25519,
+        validity_days: 365,
+        intermediate_subject: None,
+        intermediate_validity_days: None,
+        issue_from_root: false,
+    })
+    .await
+    .unwrap();
+    ca_repo
+        .set_mtls_trust_anchor(org_id, ca.certificate.id, true)
+        .await
+        .unwrap();
+
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let certs = CertService::new(
+        ca_repo,
+        cert_repo.clone(),
+        test_pki_config(),
+        sem,
+        test_ca_custodians(),
+    );
+    let issue =
+        |cert_type: CertificateType, subject: &str, sans: Vec<SubjectAltName>| CreateCertificate {
+            tenant_id,
+            issuer_ca_id: ca.certificate.id,
+            subject: subject.into(),
+            cert_type,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 30,
+            metadata: None,
+            subject_alt_names: sans,
+        };
+    let allowed = vec![".lakeside.internal".to_string()];
+    let server = certs
+        .generate(
+            org_id,
+            IssuingScope::Organization,
+            issue(
+                CertificateType::Server,
+                "api.lakeside.internal",
+                vec![SubjectAltName::Dns("api.lakeside.internal".into())],
+            ),
+            None,
+            &allowed,
+        )
+        .await
+        .unwrap();
+    let device = certs
+        .generate(
+            org_id,
+            IssuingScope::Organization,
+            issue(CertificateType::Device, "device-7", vec![]),
+            None,
+            &allowed,
+        )
+        .await
+        .unwrap();
+
+    let (sa, _secret) = SurrealServiceAccountRepository::new(db.clone())
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "SA".into(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    for id in [server.certificate.id, device.certificate.id] {
+        cert_repo
+            .bind_to_service_account(tenant_id, id, sa.id)
+            .await
+            .unwrap();
+    }
+
+    let auth = DeviceAuthService::new(cert_repo, SurrealCaCertificateRepository::new(db.clone()));
+    let err = auth
+        .authenticate(&server.certificate.public_cert_pem)
+        .await
+        .expect_err("a Server certificate must not authenticate");
+    assert!(
+        matches!(&err, axiam_core::error::AxiamError::Certificate(m) if m.contains("Server")),
+        "got {err:?}"
+    );
+    auth.authenticate(&device.certificate.public_cert_pem)
+        .await
+        .expect("I4: a Device certificate bound the same way still authenticates");
 }

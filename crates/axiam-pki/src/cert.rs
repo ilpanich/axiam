@@ -3,14 +3,18 @@
 use axiam_core::ca_keys::LeafSigningRequest;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{
-    Certificate, CertificateStatus, CreateCertificate, GeneratedCertificate, SignCertificateCsr,
-    StoreCertificate,
+    Certificate, CertificateStatus, CreateCertificate, GeneratedCertificate, LeafExtendedKeyUsage,
+    LeafKeyUsage, LeafProfile, SignCertificateCsr, StoreCertificate,
 };
+use axiam_core::models::server_names::{RequestedName, check_leaf_names};
 use axiam_core::repository::{
     CaCertificateRepository, CertificateRepository, PaginatedResult, Pagination,
 };
 use chrono::{DateTime, Duration, Utc};
-use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
+use rcgen::{
+    CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    SanType,
+};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -289,17 +293,37 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     /// Pass `None` to use the default ([`DEFAULT_LEAF_CERT_VALIDITY_DAYS`]).
     /// The hard cap ([`MAX_LEAF_CERT_VALIDITY_DAYS`], 825 days) is always
     /// enforced per CA/Browser Forum Baseline Requirements.
+    ///
+    /// `server_names` is the acting tenant's **effective**
+    /// `server_cert_allowed_names` (S-7), resolved by the caller from the
+    /// settings hierarchy. It is a required argument rather than something
+    /// this service looks up so that no caller can issue without having
+    /// answered the question; an empty slice is the shipped answer, and it
+    /// refuses every `Server` request. See
+    /// [`axiam_core::models::server_names::check_leaf_names`].
     pub async fn generate(
         &self,
         org_id: Uuid,
         scope: IssuingScope,
         mut input: CreateCertificate,
         max_validity_days: Option<u32>,
+        server_names: &[String],
     ) -> AxiamResult<GeneratedCertificate> {
         // DF-023. Normalised before anything reads it, so the locally signed
         // path, the remote-custodian path and the stored row all carry the
         // same common name. See [`crate::subject_common_name`].
         input.subject = subject_common_name(&input.subject)?;
+
+        // S-7 — the name fence, before the CA is even looked up: a name the
+        // tenant may not use is refused the same way whichever CA it named
+        // and whichever custodian holds that CA's key.
+        let sans = check_leaf_names(
+            &input.cert_type,
+            &input.subject,
+            &input.subject_alt_names,
+            server_names,
+        )?;
+        let profile = LeafProfile::for_leaf(&input.cert_type, &input.key_algorithm);
 
         let LeafIssuance {
             ca_cert,
@@ -323,7 +347,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         // certificate comes back. See [`axiam_core::ca_keys`].
         if store.signs_remotely() {
             return self
-                .generate_remotely(&ca_cert, input, not_before, not_after)
+                .generate_remotely(&ca_cert, input, not_before, not_after, sans, profile)
                 .await;
         }
 
@@ -374,7 +398,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 // Build end-entity certificate request — from the same
                 // function `sign_csr` overwrites a caller's parameters with, so
                 // the two paths cannot issue different shapes.
-                let ee_params = leaf_params(&ee_subject, not_before_ts, not_after_ts)?;
+                let ee_params =
+                    leaf_params(&ee_subject, not_before_ts, not_after_ts, &sans, &profile)?;
 
                 let cert = ee_params.signed_by(&ee_key_pair, &ca_issuer).map_err(|e| {
                     AxiamError::Certificate(format!("certificate signing failed: {e}"))
@@ -422,6 +447,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         input: CreateCertificate,
         not_before: DateTime<Utc>,
         not_after: DateTime<Utc>,
+        sans: Vec<RequestedName>,
+        profile: LeafProfile,
     ) -> AxiamResult<GeneratedCertificate> {
         // Only the keygen and CSR are CPU-bound. The permit is dropped before
         // the call to the custodian: holding it across a network round trip
@@ -446,6 +473,14 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     .distinguished_name
                     .push(DnType::CommonName, &ee_subject);
                 params.is_ca = IsCa::NoCa;
+                // S-7. The SANs go *in the CSR*, because that is the only place
+                // a verbatim signer reads them from: Vault's `sign-verbatim`
+                // ignores `alt_names` and `ip_sans` (measured on 1.18.3). This
+                // CSR is AXIAM's own, built from names the fence just admitted,
+                // so nothing a caller wrote reaches the list. The usages are
+                // not put here — they travel as `profile`, which the signer
+                // applies because this CSR requests none.
+                params.subject_alt_names = san_types(&sans)?;
                 // No validity window: a PKCS#10 request cannot carry one. The
                 // signer is told the lifetime out of band, as a TTL.
                 let csr = params.serialize_request(&ee_key_pair).map_err(|e| {
@@ -471,6 +506,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     // just generated: there is nothing in it a caller chose.
                     csr_is_caller_supplied: false,
                     ttl_seconds: (not_after - not_before).num_seconds(),
+                    profile,
                 },
             )
             .await?;
@@ -558,12 +594,24 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     ///
     /// `basicConstraints` needs no such rule: the in-process path overwrites it
     /// and Vault ignores a CSR's basic constraints outright.
+    ///
+    /// # Names (S-7)
+    ///
+    /// `subjectAltName` stays refused *in the CSR*. A `Server` certificate's
+    /// names come from [`SignCertificateCsr::subject_alt_names`], through the
+    /// same fence [`Self::generate`] runs, with `server_names` as the acting
+    /// tenant's effective allow-list. Under a custodian that signs remotely a
+    /// `Server` request is refused: such a signer signs the caller's CSR
+    /// verbatim, takes SANs only from it, and the CSR may not carry any — so
+    /// there is no channel left through which the explicit names could reach
+    /// the certificate. Use [`Self::generate`] under such a CA.
     pub async fn sign_csr(
         &self,
         org_id: Uuid,
         scope: IssuingScope,
         input: SignCertificateCsr,
         max_validity_days: Option<u32>,
+        server_names: &[String],
     ) -> AxiamResult<Certificate> {
         // Parsed before the CA is even looked up, and outside the blocking
         // task: a malformed or unsigned request is by far the likeliest failure
@@ -596,6 +644,16 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             });
         }
 
+        // S-7 — the same fence `generate` runs, over the CSR's own common name
+        // and the request's explicit SANs.
+        let sans = check_leaf_names(
+            &input.cert_type,
+            &facts.common_name,
+            &input.subject_alt_names,
+            server_names,
+        )?;
+        let profile = LeafProfile::for_leaf(&input.cert_type, &facts.key_algorithm);
+
         let LeafIssuance {
             ca_cert,
             store,
@@ -612,6 +670,17 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             )
             .await?;
 
+        if store.signs_remotely() && !sans.is_empty() {
+            return Err(AxiamError::Validation {
+                message: "a Server certificate cannot be issued from a caller's CSR under a CA \
+                          whose key is held by a remote signer: the signer copies the CSR's \
+                          subjectAltName verbatim and ignores any other, and AXIAM refuses a CSR \
+                          that carries one. Issue it with POST /api/v1/certificates under this \
+                          CA, or sign the CSR under a CA whose key AXIAM holds"
+                    .into(),
+            });
+        }
+
         let (public_cert_pem, fingerprint, chain_pem, issued_window) = if store.signs_remotely() {
             let key_ref = CaService::<CA>::key_ref(&ca_cert);
             let signed = store
@@ -623,6 +692,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                         // These bytes are the caller's. See the custodian's own
                         // doc comment for what it does about that.
                         csr_is_caller_supplied: true,
+                        profile,
                     },
                 )
                 .await?;
@@ -680,7 +750,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     // AXIAM has decided it is — the same leaf parameters
                     // `generate` builds, so the two paths issue the same shape
                     // of certificate for the same request.
-                    request.params = leaf_params(&subject, not_before_ts, not_after_ts)?;
+                    request.params =
+                        leaf_params(&subject, not_before_ts, not_after_ts, &sans, &profile)?;
                     // Deliberately **not** `use_authority_key_identifier_extension`,
                     // which the intermediate CSR path sets. Setting it here put
                     // an authorityKeyIdentifier on a CSR-signed leaf that a
@@ -688,8 +759,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     // divergence D-5 forbids: two ways of asking for the same
                     // certificate producing two different certificates. An AKI
                     // on leaves is worth having and is a change to make on both
-                    // paths at once, with the KU/EKU profiles, not a side
-                    // effect of how the key was made.
+                    // paths at once — the KU/EKU profile (S-7) was made that
+                    // way — not a side effect of how the key was made.
 
                     let cert = request.signed_by(&ca_issuer).map_err(|e| {
                         AxiamError::Certificate(format!("certificate signing failed: {e}"))
@@ -772,17 +843,15 @@ struct IssuedLeaf {
     not_after: DateTime<Utc>,
 }
 
-/// Read back a signed leaf, so the row describes the certificate rather than
-/// the request that produced it.
 /// The parameters every AXIAM leaf certificate is built from: the common name,
-/// the validity window, and `CA:FALSE`.
+/// the validity window, `CA:FALSE`, the SANs the name fence admitted, and the
+/// per-type usage profile (S-7).
 ///
-/// No subjectAltName, no key usage, no extended key usage — deliberately, and
-/// identically on both leaf paths. Adding a usage profile to one of them only
-/// would be a worse outcome than the status quo: two ways of asking for the
-/// same certificate would produce two different certificates. Giving *both*
-/// paths a per-`cert_type` profile is a follow-up to be decided once, for both,
-/// with a migration note for everything already issued without one.
+/// The SANs are empty for every type but `Server`, and are only ever the names
+/// [`check_leaf_names`] returned — never anything from a CSR. The profile is
+/// [`LeafProfile::for_leaf`]; before S-7 a leaf carried no keyUsage and no
+/// extendedKeyUsage, which RFC 5280 reads as "any usage", so adding them only
+/// narrows. Leaves issued earlier keep carrying neither.
 ///
 /// Shared by [`CertService::generate`], which builds a key to go with it, and
 /// by [`CertService::sign_csr`], which overwrites a caller's requested
@@ -793,11 +862,30 @@ fn leaf_params(
     subject: &str,
     not_before_ts: i64,
     not_after_ts: i64,
+    sans: &[RequestedName],
+    profile: &LeafProfile,
 ) -> AxiamResult<CertificateParams> {
     let mut params = CertificateParams::new(Vec::<String>::new())
         .map_err(|e| AxiamError::Certificate(e.to_string()))?;
     params.distinguished_name.push(DnType::CommonName, subject);
     params.is_ca = IsCa::NoCa;
+    params.subject_alt_names = san_types(sans)?;
+    params.key_usages = profile
+        .key_usage
+        .iter()
+        .map(|u| match u {
+            LeafKeyUsage::DigitalSignature => KeyUsagePurpose::DigitalSignature,
+            LeafKeyUsage::KeyEncipherment => KeyUsagePurpose::KeyEncipherment,
+        })
+        .collect();
+    params.extended_key_usages = profile
+        .extended_key_usage
+        .iter()
+        .map(|u| match u {
+            LeafExtendedKeyUsage::ClientAuth => ExtendedKeyUsagePurpose::ClientAuth,
+            LeafExtendedKeyUsage::ServerAuth => ExtendedKeyUsagePurpose::ServerAuth,
+        })
+        .collect();
     params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before_ts)
         .map_err(|e| AxiamError::Certificate(format!("invalid notBefore: {e}")))?;
     params.not_after = time::OffsetDateTime::from_unix_timestamp(not_after_ts)
@@ -805,6 +893,20 @@ fn leaf_params(
     Ok(params)
 }
 
+/// The fence's names in rcgen's form.
+fn san_types(sans: &[RequestedName]) -> AxiamResult<Vec<SanType>> {
+    sans.iter()
+        .map(|n| match n {
+            RequestedName::Dns(d) => rcgen::string::Ia5String::try_from(d.as_str())
+                .map(SanType::DnsName)
+                .map_err(|e| AxiamError::Certificate(format!("invalid DNS name: {e}"))),
+            RequestedName::Ip(ip) => Ok(SanType::IpAddress(*ip)),
+        })
+        .collect()
+}
+
+/// Read back a signed leaf, so the row describes the certificate rather than
+/// the request that produced it.
 fn parse_issued_leaf(pem: &str) -> AxiamResult<IssuedLeaf> {
     let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).map_err(|e| {
         AxiamError::Certificate(format!(

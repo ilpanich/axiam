@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Server certificates, and the names they may carry (T22.14, DF-001).**
+  AXIAM could not issue a certificate a TLS *server* can present: leaves
+  carried no subjectAltName, and neither request body had a field to ask for
+  one. So every listener in a deployment anchored in an AXIAM organization root
+  had its certificate signed offline.
+  - **`cert_type: Server`**, the only type that carries SANs, requested through
+    a new optional **`subject_alt_names`** field on `POST /certificates` and
+    `POST /certificates/sign-csr`: `[{"dns": "…"}, {"ip": "…"}]`. The field is
+    required for `Server` and refused with `400` on every other type. A CSR that
+    itself requests a `subjectAltName` is still refused.
+  - **`server_cert_allowed_names`**, a new setting in the organization baseline
+    (`certificate.server_cert_allowed_names` when read back). It holds DNS
+    suffixes (`.lakeside.internal`, strictly below, on label boundaries), exact
+    hosts, and IP prefixes. Every SAN and the common name must be admitted. It
+    is **empty by default, and empty refuses every `Server` request.**
+  - **Tenants may only narrow the list**, through the same interlock as every
+    other override: removing or narrowing an entry is accepted; adding or
+    widening one is a `400`. When the organization later shrinks its list, each
+    tenant's effective list is the intersection of the two.
+  - **Refused, each with a test:** a trailing dot, a Unicode label (write the
+    `xn--` form), a wildcard anywhere but a whole leftmost label, and an
+    IPv4-mapped IPv6 address.
+  - **A `Server` certificate authenticates nobody.** Binding one to a service
+    account is refused with `400`, and device login refuses it.
+  - **Under `vault_pki` custody** a generated `Server` leaf carries its names
+    in the CSR AXIAM builds, because `sign-verbatim` ignores `alt_names` and
+    `ip_sans`. A caller-CSR `Server` request is refused under such a CA.
+  - Schema **v67**: `certificate.cert_type` admits `Server`, and
+    `security_settings` gains the baseline column. No row is rewritten.
+
 - **The gRPC listener can verify client certificates (T22.12, DF-005).** Its TLS
   configuration called `with_no_client_auth()`, and no setting could change
   that. The same listener carries `ReactorAdminService` as well as
@@ -109,6 +139,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Threat **T-284**.
 
 ### Changed
+
+- **Every leaf certificate now carries a usage profile (T22.14, DF-001).** The
+  profile covers both leaf paths and both custodians:
+
+  | Type | keyUsage | extendedKeyUsage |
+  |---|---|---|
+  | `User`, `Service`, `Device` | digitalSignature, plus keyEncipherment for RSA | clientAuth |
+  | `Server` | digitalSignature, plus keyEncipherment for RSA | serverAuth |
+
+  Leaves used to carry neither extension, which X.509 reads as "any usage".
+  Vault-signed leaves used to carry Vault's default keyUsage and no EKU. The
+  profile only narrows: every use AXIAM makes of a User, Service or Device
+  certificate is client authentication, and each keeps it.
+
+  **Migration:** certificates issued before this release are not re-issued.
+  They carry neither extension and behave as before until rotated. A consumer
+  that asserted "no key usage extension" on an AXIAM leaf must accept the
+  profile; nothing in AXIAM did. Under `vault_pki` custody every
+  `sign-verbatim` call now states `key_usage`, `ext_key_usage` and
+  `exclude_cn_from_sans`.
 
 - **Service accounts can call the management API (T22.13, DF-013).** Every
   management route took a user token only, so a service account could

@@ -154,7 +154,7 @@ that ships a gRPC transport**:
    (`access_token`) and is a different credential. An SDK MUST keep the two apart and MUST
    NOT default the inspected token to the caller's.
 2. **Precondition.** Both calls need a caller token, so §1.1 rule 3 applies: with no token,
-   the SDK raises `AuthenticationError` client-side, without a wire call. The inspected token
+   the SDK raises `AuthError` client-side, without a wire call. The inspected token
    is secret material, and the parameter that carries it is `Sensitive<T>` (§7).
 3. **Return shape.** A typed value holding **every** field the response message defines.
    For `validate_token` that is `valid`, `subject_id`, `tenant_id`, `org_id`, `exp`, `cnf`
@@ -769,20 +769,20 @@ it. Rules 6–10 close that. The name is §1's.
    dogfooding remediation plan). A device re-authenticates by calling this operation
    again, which costs one TLS handshake. The SDK adopts the token as the client's
    credential exactly as it adopts a `login` result. With no refresh token, the §9 guard
-   has nothing to spend: a later `401` on this token is surfaced as `AuthenticationError`
+   has nothing to spend: a later `401` on this token is surfaced as `AuthError`
    without a refresh attempt, and the caller recovers by calling `authenticate_device()`
    again.
 7. **Reachable only on a client configured with a certificate.** On a client built
    without rules 1–5's identity, the operation MUST NOT be reachable. Where the type
    system can express that, it does. Elsewhere, the call MUST fail client-side with the
-   §2 `AuthenticationError`, with zero wire calls. Without a certificate the server would
+   §2 `AuthError`, with zero wire calls. Without a certificate the server would
    answer `401`, so going to the wire gains nothing and turns a configuration mistake into
    an authentication failure.
 8. **Every refusal is a `401`** (server T22.4). An unknown, untrusted, expired, revoked
    or unbound certificate, and a `Server`-type certificate (§27.13), all return 401 with
    the error code `authentication_failed`. The message differs by case, and the SDK
    surfaces it verbatim. Before T22.4 an unbound certificate returned `403`. An SDK MUST
-   map the operation's `401` to `AuthenticationError` and MUST NOT enter the §9 refresh
+   map the operation's `401` to `AuthError` and MUST NOT enter the §9 refresh
    guard for it: this *is* the login. The route is rate-limited per client IP (default 60
    per minute, server T22.2). A `429` follows §16 and is not an authentication failure.
 9. **The token is certificate-bound, and §10.1 rule 9 applies to it** (server T22.3).

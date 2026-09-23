@@ -933,12 +933,17 @@ fail. OpenAPI and the management registry regenerated. Threat **T-288**;
 **T-268** amended. Decision D-7 (`nameConstraints` in tenant CAs) deferred. The
 admin UI is S-7b, next. PR G.
 
-### T22.14b — Server certificates in the admin console — Sonnet 5 · IN PROGRESS
+### T22.14b — Server certificates in the admin console — Sonnet 5 ✓ LANDED
 S-7b, the console half of T22.14 (PR G2). The certificate dialogs offer
 `Server` with a SAN list editor, `{dns}` or `{ip}` per row, required for
 `Server` and absent for every other type; the form checks shape only and shows
-the server's `400` verbatim, the `vault_pki` sign-CSR refusal included.
-Pending in this task: the `server_cert_allowed_names` settings card.
+the server's `400` verbatim, the `vault_pki` sign-CSR refusal included. A
+**Server Certificate Names** card edits `server_cert_allowed_names` on the
+organization Settings tab (baseline), the tenant Settings page (effective list,
+read back) and the tenant Security Overrides panel (its own group: absent
+follows the organization, empty issues none). Fixes three console paths that
+silently dropped the list on an unrelated save since #495. Records: none,
+verified.
 
 ---
 

@@ -607,6 +607,16 @@ off-list name, a Unicode label, a trailing dot, a wildcard that is not a whole
 leftmost label, an IPv4-mapped address, or a `Server` CSR under a `vault_pki`
 CA — is shown in the dialog word for word.
 
+The list itself is edited in three places, each explaining the three entry
+forms, that an empty list refuses every `Server` request, and that a tenant
+may only narrow: the organization's **Settings** tab (the baseline), a tenant's
+own **Settings** page (its override, shown as the effective list the server
+reads back), and the tenant detail page's **Security Overrides** panel, where
+*Override Server certificate names* unchecked means "follow the organization"
+and checked with no entries means "this tenant issues none". A widening is
+refused by the server with `400`, and the console shows that refusal as it
+comes rather than checking coverage itself.
+
 The fence is AXIAM's. X.509 `nameConstraints` in the tenant CA itself — so the
 fence would also hold for a relying party that never talks to AXIAM — is
 deliberately not built yet: changing the list would then mean re-issuing the

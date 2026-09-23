@@ -17,9 +17,12 @@ import {
   ChevronRight,
   UserPlus,
   Globe,
+  Server as ServerIcon,
 } from "lucide-react";
 import {
   settingsService,
+  cleanAllowedNames,
+  readServerCertAllowedNames,
   validateCimdPolicy,
   validateDcrPolicy,
   DEFAULT_CIMD_POLICY,
@@ -51,6 +54,7 @@ import { Label } from "@/components/ui/label";
 import { BooleanDisplay, NumberDisplay } from "./policyFields";
 import { DcrPolicyFields, DcrPolicySummary } from "./dcrPolicy";
 import { CimdPolicyFields, CimdPolicySummary } from "./cimdPolicy";
+import { ServerNamesFields, ServerNamesSummary } from "./serverNamesPolicy";
 
 // ─── Flat editable view-model (minutes where presented as minutes) ────────────
 // The backend stores token/lockout/mfa durations in SECONDS. We present the
@@ -80,6 +84,11 @@ interface SettingsForm {
   email_verification_required: boolean;
   // Certificate
   default_cert_validity_days: number;
+  // S-7 — seeded from the *effective* list and always sent back. The server
+  // stores only what differs from the organization baseline, so sending the
+  // effective list unedited stores exactly what is stored now; omitting it,
+  // as this form did before the card existed, dropped a tenant's narrowing.
+  server_cert_allowed_names: string[];
   // Notification
   admin_notifications_enabled: boolean;
   // OPAQUE
@@ -147,6 +156,7 @@ function toForm(s: SecuritySettings): SettingsForm {
     ),
     email_verification_required: s.email.email_verification_required,
     default_cert_validity_days: s.certificate.default_cert_validity_days,
+    server_cert_allowed_names: readServerCertAllowedNames(s),
     admin_notifications_enabled: s.notification.admin_notifications_enabled,
     // Optional on the wire so a server older than the field still types: fall
     // back to the same `preferred` that server would apply anyway.
@@ -187,6 +197,7 @@ function toOverride(f: SettingsForm): TenantSettingsOverride {
     refresh_token_lifetime_secs: f.refresh_token_lifetime_days * SECS_PER_DAY,
     email_verification_required: f.email_verification_required,
     default_cert_validity_days: f.default_cert_validity_days,
+    server_cert_allowed_names: cleanAllowedNames(f.server_cert_allowed_names),
     admin_notifications_enabled: f.admin_notifications_enabled,
     opaque_mode: f.opaque_mode,
     opaque_suite: f.opaque_suite,
@@ -865,6 +876,34 @@ export function SettingsPage() {
                 enabled={data.admin_notifications_enabled}
               />
             </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Server certificate names (S-7b) ─────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <ServerIcon size={18} className="text-primary" aria-hidden="true" />
+            <CardTitle className="text-base">Server Certificate Names</CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {editing ? (
+            <ServerNamesFields
+              idPrefix="tenant"
+              scope="tenant"
+              value={data.server_cert_allowed_names}
+              onChange={(v) => setField("server_cert_allowed_names", v)}
+            />
+          ) : (
+            // The list the server read back — the intersection of this
+            // tenant's override and the organization baseline — never one
+            // computed here.
+            <ServerNamesSummary
+              scope="tenant"
+              value={readServerCertAllowedNames(settings!)}
+            />
           )}
         </CardContent>
       </Card>

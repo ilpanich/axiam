@@ -1291,7 +1291,7 @@ working unchanged. CHANGELOG: **Fixed**. Records: none.
 > types are hand-written, so nothing breaks meanwhile: the form simply does
 > not offer `Server` yet.
 
-> **EXECUTED — S-7b, 2026-09-23, PR G2, commit 1 of 4** (branch
+> **EXECUTED — S-7b, 2026-09-23, PR G2, commits 1 and 2 of 4** (branch
 > `feat/console-leaf-profile`, cut from `f210676`, the merge of #495; the task
 > §3 does not list, taken as the console follow-up this block names).
 >
@@ -1339,6 +1339,69 @@ working unchanged. CHANGELOG: **Fixed**. Records: none.
 >   nothing in Axiam.json or either STRIDE document says anything about the
 >   console for `Server` certificates. The form adds no decision the server
 >   does not make again.
+>
+> **Commit 2 — the settings card.**
+>
+> - **Shipped.** One module, `pages/settings/serverNamesPolicy.tsx`
+>   (`ServerNamesFields`, `ServerNamesSummary`), mounted where the list is
+>   written: the organization Settings tab (baseline, `PUT
+>   /organizations/{id}/settings`), the tenant's own Settings page (`PUT
+>   /api/v1/settings`) and the tenant detail page's Security Overrides panel
+>   (`PUT /tenants/{id}/settings`). All three say the same four things: the
+>   three entry forms, that `.x` means strictly below and not the apex, that
+>   empty refuses every `Server` request, and who may widen. Rows, not a
+>   textarea: the other settings lists re-parse a textarea on every keystroke,
+>   which drops a trailing newline and makes a second line hard to start.
+> - **Read-back, not computed.** The tenant pages render
+>   `certificate.server_cert_allowed_names` from `GET /api/v1/settings` — the
+>   intersection the server computes on every read — and a test changes the
+>   list between load and save to prove the page shows the server's answer, not
+>   the body it sent. The organization tab shows the stored baseline under its
+>   editor for the same reason. No coverage or intersection logic exists in the
+>   console; `cleanAllowedNames` trims and drops blank rows and passes a
+>   malformed CIDR, a wildcard entry, a trailing dot or a URL through to the
+>   server's `400`.
+> - **What the plan did not anticipate: three silent-loss paths on `main`
+>   since #495,** found by reading the three handlers rather than the form.
+>   1. `flattenOrgSettings` omitted the field, the organization `PUT` replaces
+>      the whole row, and `SetOrgSettings` defaults an absent list to `[]` —
+>      so saving any organization setting emptied the baseline, and
+>      `reconcile_tenant_overrides` narrowed every tenant to nothing. Fails
+>      closed, but silently undoes an administrator's decision; it is the
+>      OPAQUE and OIDC round-trip bugs of earlier waves, for a third block.
+>   2. `PUT /api/v1/settings` stores `diff_against_org(effective)`
+>      (`repository/settings.rs`, `store_effective_tenant_settings`). With the
+>      field absent the effective list is the organization's, the diff is
+>      `None`, and a tenant's narrowing was dropped — the tenant went back to
+>      the wider organization list. The page now always sends the effective
+>      list it loaded; the diff makes that a no-op when nothing was edited,
+>      which the "no allow-list" I4 twin states (the body carries the `[]` the
+>      server already stores).
+>   3. `PUT /tenants/{id}/settings` replaces the override whole, so the panel
+>      discarded a narrowing on a save of any other group. The panel gains its
+>      own `serverNames` group, re-checked from a stored override, rather than
+>      riding the "certificate validity" group, because absent ("follow the
+>      organization") and empty ("issue none") are different values.
+>   None of the three could widen beyond the organization's list, so T-288
+>   holds as written; they are recorded under **Fixed** in the CHANGELOG
+>   rather than as a threat.
+> - **Tests.** `settings.test.ts` (+5: read-back fallback, clean, "judges
+>   nothing else", empty), `services.test.ts` (+1 and one assertion: the
+>   flatten carries the list; absent reads as `[]`), `SettingsPage.test.tsx`
+>   (+8), `OrganizationDetailPage.component.test.tsx` (+5),
+>   `SecurityOverridePanel.test.tsx` (+7): each regression above pinned on its
+>   own page, the widening `400` quoted from `validate_tenant_override`, the
+>   explicit-empty override kept distinct from inheriting, and the I4 twins
+>   (no key sent while the panel group is unchecked; `[]` round-tripped where
+>   nothing is listed). `e2e/settings.spec.ts` gains the empty-by-default card
+>   and a live widening refused verbatim, which changes nothing server-side.
+> - **Docs.** `docs/pki/README.md`'s console paragraph gains the three places;
+>   the website's Server-certificate block gains one sentence
+>   (`website/src/docs/operate.ts`; website lint, type-check and build run).
+> - **Records: none, verified**, as for commit 1: the tighten-only interlock,
+>   the org-side validation and the intersection are all in
+>   `axiam_core::models::settings`, and the console only carries values to
+>   them.
 
 
 **Why fix, and why carefully.** The demo's whole PKI constraint — one trust

@@ -795,3 +795,123 @@ describe("TenantSecurityOverridePanel — dynamic registration and CIMD", () => 
     expect(apiMock.put).not.toHaveBeenCalled();
   });
 });
+
+// ─── S-7b — server certificate names ──────────────────────────────────────────
+
+describe("TenantSecurityOverridePanel — S-7b server certificate names", () => {
+  /** The merged view with an effective list, and the override behind it. */
+  function mockNames(effectiveNames: string[], override: unknown | { notFound: true }) {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/settings")
+        return res({
+          ...effective,
+          certificate: {
+            ...effective.certificate,
+            server_cert_allowed_names: effectiveNames,
+          },
+        });
+      if (url === "/api/v1/tenants/t1/settings") {
+        if (override && (override as { notFound?: true }).notFound) {
+          return Promise.reject({ response: { status: 404 } });
+        }
+        return res(override);
+      }
+      return res({});
+    });
+  }
+
+  const group = () =>
+    screen.findByRole("checkbox", { name: /Override Server certificate names/ });
+
+  it("I4: unchecked when nothing is overridden, and no key is sent", async () => {
+    mockNames([".lakeside.internal"], { notFound: true });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+    expect(await group()).not.toBeChecked();
+    await userEvent.click(screen.getByRole("checkbox", { name: /Override admin notifications/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).not.toHaveProperty("server_cert_allowed_names");
+  });
+
+  it("shows the effective list the server read back, whatever the group says", async () => {
+    mockNames([".plant.lakeside.internal"], { notFound: true });
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+    await group();
+    const list = screen.getByRole("list", { name: "Allowed server names" });
+    expect(within(list).getByText(".plant.lakeside.internal")).toBeInTheDocument();
+    expect(screen.getByText(/Effective for this tenant/)).toBeInTheDocument();
+  });
+
+  it("I4: with no allow-list at all, says every Server request is refused", async () => {
+    mockGets({ notFound: true }); // the merged view carries no field
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+    await group();
+    expect(
+      screen.getByText(/Empty — every Server certificate request is refused/)
+    ).toBeInTheDocument();
+  });
+
+  // The regression: this PUT replaces the override whole, so without the
+  // group a save of any other group discarded a narrowing the tenant had set
+  // — and the tenant went back to the organization's wider list.
+  it("re-checks a stored narrowing and carries it through a save of another group", async () => {
+    mockNames([".plant.lakeside.internal"], {
+      server_cert_allowed_names: [".plant.lakeside.internal"],
+    });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+    expect(await group()).toBeChecked();
+    await userEvent.click(screen.getByRole("checkbox", { name: /Override admin notifications/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).toMatchObject({
+      server_cert_allowed_names: [".plant.lakeside.internal"],
+      admin_notifications_enabled: true,
+    });
+  });
+
+  it("an explicit empty override is kept, and is not mistaken for inheriting", async () => {
+    mockNames([], { server_cert_allowed_names: [] });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+    expect(await group()).toBeChecked();
+    expect(screen.getByText(/Checked with no entries, this tenant issues no Server/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).toEqual({ server_cert_allowed_names: [] });
+  });
+
+  it("narrows by editing rows, and sends the list trimmed", async () => {
+    mockNames([".lakeside.internal", "10.0.0.0/8"], { notFound: true });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+    await userEvent.click(await group());
+    // Seeded from the effective list, so opening the group changes nothing yet.
+    expect(screen.getByLabelText("Allowed name 1")).toHaveValue(".lakeside.internal");
+    const first = screen.getByLabelText("Allowed name 1");
+    await userEvent.clear(first);
+    await userEvent.type(first, " .plant.lakeside.internal");
+    await userEvent.click(screen.getByRole("button", { name: "Remove allowed name 2" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).toEqual({
+      server_cert_allowed_names: [".plant.lakeside.internal"],
+    });
+  });
+
+  it("shows the server's refusal of a widening as it comes", async () => {
+    mockNames([".lakeside.internal"], { notFound: true });
+    const message =
+      'Tenant override violates org baseline: server_cert_allowed_names: ".example.com" is not within the org baseline; a tenant may remove an entry or narrow one, never add or widen one';
+    apiMock.put.mockRejectedValue({ response: { status: 400, data: { message } } });
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+    await userEvent.click(await group());
+    await userEvent.click(screen.getByRole("button", { name: "Add entry" }));
+    fireEvent.change(screen.getByLabelText("Allowed name 2"), {
+      target: { value: ".example.com" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  });
+});

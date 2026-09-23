@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 
 import {
   DEFAULT_CIMD_POLICY,
+  cleanAllowedNames,
+  readServerCertAllowedNames,
   validateCimdPolicy,
   type CimdPolicy,
   type CimdPolicyViolation,
@@ -207,5 +209,50 @@ describe("validateCimdPolicy — the disabled posture", () => {
 
   it("accepts the shipped default posture once it is turned on properly", () => {
     expect(validateCimdPolicy(validPolicy())).toEqual([]);
+  });
+});
+
+// ─── S-7b — server_cert_allowed_names ─────────────────────────────────────────
+
+describe("readServerCertAllowedNames", () => {
+  it("returns the list the server read back", () => {
+    expect(
+      readServerCertAllowedNames({
+        certificate: { server_cert_allowed_names: [".lakeside.internal", "10.0.0.0/8"] },
+      })
+    ).toEqual([".lakeside.internal", "10.0.0.0/8"]);
+  });
+
+  it("I4 twin: a response without the field reads as the server default, empty", () => {
+    expect(readServerCertAllowedNames({ certificate: {} })).toEqual([]);
+  });
+});
+
+describe("cleanAllowedNames", () => {
+  it("trims each entry and drops blank rows, keeping the order", () => {
+    expect(cleanAllowedNames(["  .lakeside.internal ", "", "   ", "10.0.0.0/8"])).toEqual([
+      ".lakeside.internal",
+      "10.0.0.0/8",
+    ]);
+  });
+
+  it("judges nothing else — the server refuses a bad entry and names it", () => {
+    // Each of these is a 400 from `validate_allowed_names` or the tighten-only
+    // interlock. The form sends them as typed so the refusal is the server's.
+    const entries = [
+      "*.lakeside.internal",
+      "10.0.0.1/8",
+      "lakeside.internal.",
+      "bücher.lakeside.internal",
+      "::ffff:10.0.0.0/104",
+      "LAKESIDE.internal",
+      "https://api.lakeside.internal",
+    ];
+    expect(cleanAllowedNames(entries)).toEqual(entries);
+  });
+
+  it("an empty list stays empty — which the server reads as refuse-all", () => {
+    expect(cleanAllowedNames([])).toEqual([]);
+    expect(cleanAllowedNames([""])).toEqual([]);
   });
 });

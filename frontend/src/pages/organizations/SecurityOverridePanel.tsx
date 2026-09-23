@@ -3,7 +3,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Trash2 } from "lucide-react";
 
 import {
+  cleanAllowedNames,
   readOidcPolicy,
+  readServerCertAllowedNames,
   settingsService,
   validateCimdPolicy,
   type CimdPolicy,
@@ -11,6 +13,10 @@ import {
   type TenantSettingsOverride,
 } from "@/services/settings";
 import { CimdPolicyFields } from "@/pages/settings/cimdPolicy";
+import {
+  ServerNamesFields,
+  ServerNamesSummary,
+} from "@/pages/settings/serverNamesPolicy";
 import { DcrPolicyFields } from "@/pages/settings/dcrPolicy";
 import {
   MAX_DELETION_GRACE_PERIOD_DAYS,
@@ -52,6 +58,8 @@ interface OverrideGroups {
   privacy: boolean;
   dcr: boolean;
   cimd: boolean;
+  /** S-7 — its own group, because an absent list and an empty one differ. */
+  serverNames: boolean;
 }
 
 const NO_GROUPS: OverrideGroups = {
@@ -66,6 +74,7 @@ const NO_GROUPS: OverrideGroups = {
   privacy: false,
   dcr: false,
   cimd: false,
+  serverNames: false,
 };
 
 /** The panel's editable state — flat, seconds where the backend uses seconds. */
@@ -101,6 +110,8 @@ interface FormState {
   dcr_unused_client_ttl_days: number;
   // T21.5 — the CIMD posture, whole, because that is how it is overridden.
   cimd: CimdPolicy;
+  // S-7 — rows as typed; cleaned on save.
+  server_cert_allowed_names: string[];
 }
 
 /** Seed the form from the effective settings, so an un-overridden group opens
@@ -135,6 +146,7 @@ function formFromEffective(s: SecuritySettings): FormState {
     // older than the fields sends no `oidc`, and the fallback is the value that
     // server would itself apply.
     ...readOidcPolicy(s),
+    server_cert_allowed_names: readServerCertAllowedNames(s),
   };
 }
 
@@ -181,6 +193,7 @@ function groupsFromOverride(o: TenantSettingsOverride): OverrideGroups {
       o.dcr_unused_client_ttl_days !== undefined,
     // One key, because the posture is one object: `Option<CimdPolicy>`.
     cimd: o.cimd !== undefined,
+    serverNames: o.server_cert_allowed_names !== undefined,
   };
 }
 
@@ -244,6 +257,11 @@ function overrideFromForm(
   }
   if (groups.cimd) {
     out.cimd = form.cimd;
+  }
+  if (groups.serverNames) {
+    out.server_cert_allowed_names = cleanAllowedNames(
+      form.server_cert_allowed_names
+    );
   }
   return out;
 }
@@ -829,6 +847,44 @@ export function TenantSecurityOverridePanel({
                 per-field merge, because a posture half of each is one neither
                 party wrote.
               </p>
+            </div>
+          )}
+
+          {/* Server certificate names (S-7b). Its own group rather than part of
+              "certificate validity", because an absent list and an empty one
+              mean different things: absent follows the organization, empty
+              refuses every Server certificate here whatever it lists. And, as
+              for DCR above, without the group this endpoint's whole-row
+              replacement silently discarded a narrowing the tenant had set. */}
+          <GroupToggle
+            label="Override Server certificate names"
+            checked={groups.serverNames}
+            onChange={(v) => setGroups((g) => ({ ...g, serverNames: v }))}
+          />
+          {groups.serverNames && (
+            <div className="ml-6 space-y-3">
+              <ServerNamesFields
+                idPrefix="tso"
+                scope="tenant"
+                value={form.server_cert_allowed_names}
+                onChange={(v) => setField("server_cert_allowed_names", v)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Checked with no entries, this tenant issues no Server
+                certificate at all, whatever the organization lists. Unchecked,
+                it follows the organization&rsquo;s list as that list changes.
+              </p>
+            </div>
+          )}
+          {/* What the server reads back for this tenant — its override
+              intersected with the baseline — whatever the group says. */}
+          {effective && (
+            <div className="ml-6">
+              <ServerNamesSummary
+                scope="tenant"
+                value={readServerCertAllowedNames(effective)}
+                help={false}
+              />
             </div>
           )}
         </fieldset>

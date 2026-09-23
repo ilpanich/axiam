@@ -17,7 +17,15 @@ import {
   MAX_DELETION_GRACE_PERIOD_DAYS,
 } from "@/services/organizations";
 import { shouldSeedForm, computeIsDirty } from "./settingsForm";
-import { validateCimdPolicy } from "@/services/settings";
+import {
+  cleanAllowedNames,
+  readServerCertAllowedNames,
+  validateCimdPolicy,
+} from "@/services/settings";
+import {
+  ServerNamesFields,
+  ServerNamesSummary,
+} from "@/pages/settings/serverNamesPolicy";
 import { CimdPolicyFields } from "@/pages/settings/cimdPolicy";
 import { DcrPolicyFields } from "@/pages/settings/dcrPolicy";
 import { OpaquePolicyFields } from "@/components/OpaquePolicyFields";
@@ -1133,7 +1141,12 @@ function SettingsTab({
     if (!form) return;
     setSaveError("");
     setSaveSuccess(false);
-    updateMutation.mutate(form);
+    // Blank rows are dropped; nothing else about an entry is judged here —
+    // `validate_org_settings` refuses a malformed one with a 400 naming it.
+    updateMutation.mutate({
+      ...form,
+      server_cert_allowed_names: cleanAllowedNames(form.server_cert_allowed_names),
+    });
   }
 
   if (isLoading || !form) {
@@ -1432,6 +1445,32 @@ function SettingsTab({
               }
             />
           </div>
+        </div>
+
+        {/* Server certificate names (S-7b). Carried on every save, not only
+            when edited: this PUT replaces the whole row, and an absent list
+            is stored as empty — which refuses every Server certificate in
+            every tenant of the organization. */}
+        <div className="glass-card space-y-4">
+          <h3 className="text-base font-semibold text-foreground">
+            Server Certificate Names
+          </h3>
+          <ServerNamesFields
+            idPrefix="org"
+            scope="organization"
+            value={merged.server_cert_allowed_names}
+            onChange={(v) => setField("server_cert_allowed_names", v)}
+          />
+          {settings && (
+            <div className="border-t border-white/10 pt-3">
+              <ServerNamesSummary
+                scope="organization"
+                caption="Stored baseline, as the server reads it back"
+                value={readServerCertAllowedNames(settings)}
+                help={false}
+              />
+            </div>
+          )}
         </div>
 
         {/* OPAQUE (RFC 9807) */}

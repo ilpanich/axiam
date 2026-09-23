@@ -9,6 +9,7 @@ import {
 } from "@/services/opaquePolicy";
 import {
   readOidcPolicy,
+  readServerCertAllowedNames,
   type CimdPolicy,
   type DynamicRegistrationMode,
   type OidcPolicy,
@@ -157,6 +158,11 @@ export interface EmailVerificationPolicy {
 export interface CertificatePolicy {
   default_cert_validity_days: number;
   max_cert_validity_days: number;
+  /**
+   * S-7 — the organization baseline for `Server` certificate names. Optional
+   * so a server older than the field still types. See `services/settings.ts`.
+   */
+  server_cert_allowed_names?: string[];
 }
 
 export interface NotificationPolicy {
@@ -249,6 +255,12 @@ export interface SetOrgSettings {
   // Certificate
   default_cert_validity_days: number;
   max_cert_validity_days: number;
+  // S-7. Required for the reason the OPAQUE comment below gives: this PUT
+  // replaces the whole row, the backend's default for an absent list is `[]`,
+  // and `reconcile_tenant_overrides` then narrows every tenant to the row just
+  // written. Omitted, a save of any other setting emptied the organization's
+  // Server-name allow-list and every tenant's with it.
+  server_cert_allowed_names: string[];
   // Notification
   admin_notifications_enabled: boolean;
   // OPAQUE. Required here like every other field, because this PUT replaces the
@@ -310,6 +322,9 @@ export function flattenOrgSettings(s: SecuritySettings): SetOrgSettings {
       s.email.email_verification_grace_period_hours,
     default_cert_validity_days: s.certificate.default_cert_validity_days,
     max_cert_validity_days: s.certificate.max_cert_validity_days,
+    // Through the guard: a server older than the field sends none, and `[]`
+    // is what that server would apply.
+    server_cert_allowed_names: readServerCertAllowedNames(s),
     admin_notifications_enabled: s.notification.admin_notifications_enabled,
     // Read through the guard rather than `s.opaque.*`: a settings row written
     // before the OPAQUE migration carries no such block, and an `undefined`

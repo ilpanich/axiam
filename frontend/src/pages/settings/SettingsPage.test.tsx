@@ -798,3 +798,152 @@ describe("SettingsPage — T21.5 client ID metadata documents", () => {
     });
   });
 });
+
+// ─── S-7b — Server certificate names ──────────────────────────────────────────
+
+describe("SettingsPage — S-7b server certificate names", () => {
+  const withNames = (names: string[]): SecuritySettings => ({
+    ...settings,
+    certificate: { ...settings.certificate, server_cert_allowed_names: names },
+  });
+
+  function card() {
+    return screen
+      .getByText("Server Certificate Names")
+      .closest("[class*='rounded']") as HTMLElement;
+  }
+
+  it("I1/I4 — with no allow-list, says every Server request is refused and explains the three forms", async () => {
+    apiMock.get.mockResolvedValue(res(settings)); // no field at all: an older-shaped response
+    renderWithProviders(<SettingsPage />);
+    await screen.findByText("Server Certificate Names");
+    const c = card();
+    expect(within(c).getByText(/Effective for this tenant/)).toBeInTheDocument();
+    expect(within(c).getByText(/Empty — every Server certificate request is refused/)).toBeInTheDocument();
+    expect(c).toHaveTextContent("api.lakeside.internal");
+    expect(c).toHaveTextContent(".lakeside.internal");
+    expect(c).toHaveTextContent("10.0.0.0/8");
+    expect(c).toHaveTextContent(/strictly below/);
+    expect(c).toHaveTextContent(/may only remove an entry or narrow one/);
+  });
+
+  it("shows the effective list the server read back", async () => {
+    apiMock.get.mockResolvedValue(res(withNames([".plant.lakeside.internal", "10.1.0.0/16"])));
+    renderWithProviders(<SettingsPage />);
+    await screen.findByText("Server Certificate Names");
+    const list = within(card()).getByRole("list", { name: "Allowed server names" });
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      ".plant.lakeside.internal",
+      "10.1.0.0/16",
+    ]);
+  });
+
+  it("saving an unrelated setting sends the effective list back unchanged", async () => {
+    // The regression: this PUT stores only what differs from the organization
+    // baseline, so a body without the list dropped a tenant's narrowing and put
+    // it back on the organization's wider list.
+    apiMock.get.mockResolvedValue(res(withNames([".plant.lakeside.internal"])));
+    apiMock.put.mockResolvedValue(res(withNames([".plant.lakeside.internal"])));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.click(screen.getByLabelText("Require symbol"));
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1].server_cert_allowed_names).toEqual([
+      ".plant.lakeside.internal",
+    ]);
+  });
+
+  it("I4 twin: with no allow-list, the body carries the empty list the server already stores", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1].server_cert_allowed_names).toEqual([]);
+  });
+
+  it("edits the list row by row, sending it trimmed with blank rows dropped", async () => {
+    apiMock.get.mockResolvedValue(res(withNames([".lakeside.internal", "10.0.0.0/8"])));
+    apiMock.put.mockResolvedValue(res(withNames([".plant.lakeside.internal"])));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    const c = card();
+    expect(within(c).getByLabelText("Allowed name 1")).toHaveValue(".lakeside.internal");
+    expect(within(c).getByLabelText("Allowed name 2")).toHaveValue("10.0.0.0/8");
+    // Narrow the first, remove the second, add a blank row.
+    const first = within(c).getByLabelText("Allowed name 1");
+    await userEvent.clear(first);
+    await userEvent.type(first, " .plant.lakeside.internal ");
+    await userEvent.click(within(c).getByRole("button", { name: "Remove allowed name 2" }));
+    await userEvent.click(within(c).getByRole("button", { name: "Add entry" }));
+    expect(within(c).getByLabelText("Allowed name 2")).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1].server_cert_allowed_names).toEqual([
+      ".plant.lakeside.internal",
+    ]);
+  });
+
+  it("removing every entry says so before saving, and sends an empty list", async () => {
+    apiMock.get.mockResolvedValue(res(withNames([".lakeside.internal"])));
+    apiMock.put.mockResolvedValue(res(withNames([])));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    const c = card();
+    await userEvent.click(within(c).getByRole("button", { name: "Remove allowed name 1" }));
+    expect(within(c).getByRole("note")).toHaveTextContent(
+      /Empty — every Server certificate request is refused/
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1].server_cert_allowed_names).toEqual([]);
+  });
+
+  it("shows the server's refusal of a widening verbatim", async () => {
+    apiMock.get.mockResolvedValue(res(withNames([".lakeside.internal"])));
+    // `validate_tenant_override`'s own wording (axiam-core, settings.rs).
+    const message =
+      'Tenant override violates org baseline: server_cert_allowed_names: ".example.com" is not within the org baseline; a tenant may remove an entry or narrow one, never add or widen one';
+    apiMock.put.mockRejectedValue({
+      message: "Request failed with status code 400",
+      response: { status: 400, data: { error: "validation_error", message } },
+    });
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    const c = card();
+    await userEvent.click(within(c).getByRole("button", { name: "Add entry" }));
+    await userEvent.type(within(c).getByLabelText("Allowed name 2"), ".example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    // Nothing was pre-judged: the widening reached the server as typed.
+    expect(apiMock.put.mock.calls[0][1].server_cert_allowed_names).toEqual([
+      ".lakeside.internal",
+      ".example.com",
+    ]);
+  });
+
+  it("after a save, shows what the server reads back rather than what was sent", async () => {
+    // The organization withdrew `10.1.0.0/16` between load and save: the server
+    // intersects on every read, so the effective list is shorter than the body.
+    apiMock.get
+      .mockResolvedValueOnce(res(withNames([".plant.lakeside.internal", "10.1.0.0/16"])))
+      .mockResolvedValue(res(withNames([".plant.lakeside.internal"])));
+    apiMock.put.mockResolvedValue(res(withNames([".plant.lakeside.internal"])));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    expect(await screen.findByText("Settings saved successfully.")).toBeInTheDocument();
+    await waitFor(() => {
+      const list = within(card()).getByRole("list", { name: "Allowed server names" });
+      expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+        ".plant.lakeside.internal",
+      ]);
+    });
+    expect(apiMock.put.mock.calls[0][1].server_cert_allowed_names).toEqual([
+      ".plant.lakeside.internal",
+      "10.1.0.0/16",
+    ]);
+  });
+});

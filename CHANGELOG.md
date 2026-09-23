@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shown verbatim, including the refusal of a `Server` CSR under a `vault_pki`
   CA. The CSR dialog no longer claims that a leaf carries no `keyUsage` or
   `extendedKeyUsage`, which stopped being true with the T22.14 profile.
+  A **Server Certificate Names** card edits `server_cert_allowed_names` where
+  it is written: the organization's Settings tab (the baseline), a tenant's own
+  Settings page (shown as the effective list the server reads back), and the
+  tenant detail page's Security Overrides panel, where *Override Server
+  certificate names* distinguishes "follow the organization" from "issue none".
+  Each explains the three entry forms, that an empty list refuses every
+  `Server` request, and that a tenant may only narrow; a widening is the
+  server's `400`, shown as it comes.
 - **Server certificates, and the names they may carry (T22.14, DF-001).**
   AXIAM could not issue a certificate a TLS *server* can present: leaves
   carried no subjectAltName, and neither request body had a field to ask for
@@ -269,6 +277,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Saving any setting in the console no longer discards a Server-name
+  allow-list (T22.14b).** Between #495 and this change the console knew
+  nothing of `server_cert_allowed_names`, and three of its settings writes
+  lost it silently:
+  - the organization **Settings** tab sends the whole baseline, which the
+    server stores whole, so a save of any other field stored the list as empty
+    and `reconcile_tenant_overrides` narrowed every tenant to nothing. That
+    direction fails closed: no `Server` certificate could be issued until the
+    list was re-entered through the API;
+  - a tenant's own **Settings** page stores only what differs from the
+    baseline, so a save dropped a tenant's narrowing and put the tenant back
+    on the organization's wider list;
+  - the tenant detail page's **Security Overrides** panel replaces the override
+    whole, with the same result.
+
+  Each path now carries the list it loaded. Neither widening could exceed the
+  organization's own list, which is the fence T-288 describes.
 - **The console resolves its backend per request (T22.10, DF-026).** Its nginx
   named the backend literally in `proxy_pass`, and nginx resolves a literal host
   once, when it loads its configuration. A console started before

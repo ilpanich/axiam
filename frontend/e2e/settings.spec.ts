@@ -124,7 +124,7 @@ test.describe("Settings page", () => {
     await page.getByRole("button", { name: /Edit Settings/i }).click();
     const names = page.getByRole("group", { name: "Server certificate names" });
     await names.getByRole("button", { name: "Add entry" }).click();
-    await names.getByLabel("Allowed name 1").fill(".example.com");
+    await names.getByLabel("Allowed name 1", { exact: true }).fill(".example.com");
     await page.getByRole("button", { name: /Save Settings/i }).click();
     await expect(page.getByRole("alert")).toContainText(
       /server_cert_allowed_names: ".example.com" is not within the org baseline/

@@ -124,8 +124,12 @@ pub struct AccessTokenClaims {
     /// Self-describing subject kind (FUNC-04, D-09/D-10/D-11).
     ///
     /// Always serialized when a token is issued. Missing on decode (a
-    /// pre-phase token) defaults to [`SubjectKind::User`]. Informational
-    /// only — does not affect validation or authorization decisions.
+    /// pre-phase token) defaults to [`SubjectKind::User`]. Does not affect
+    /// signature or expiry validation. It **does** decide one thing since S-9:
+    /// the REST management routes admit a machine-audience token only when
+    /// this is [`SubjectKind::ServiceAccount`], so an RFC 8693 exchange that
+    /// narrowed a *user* token to `axiam:m2m` is not mistaken for a service
+    /// account there. It is also what the audit log records as the actor type.
     #[serde(default)]
     pub sub_kind: SubjectKind,
     /// RFC 8693 §4.1 actor claim — B3 token exchange, **delegation only**.
@@ -1232,11 +1236,26 @@ pub fn issue_rpt(
 /// [`AUD_M2M`]. The audience finally describes *what kind of principal
 /// holds the token* rather than which endpoint happened to issue it.
 ///
-/// **Operator impact:** a device can no longer call user-facing routes. The
-/// authorization-check endpoints accept machine tokens via
-/// `AuthenticatedPrincipal`; any other route a fleet depends on must be
-/// migrated deliberately, which is the point — those grants were previously
-/// implicit.
+/// **Operator impact:** a device can no longer call user-facing routes. Which
+/// routes a service-account token — this one or a client-credentials one —
+/// *can* call, since S-9 (DF-013):
+///
+/// * `POST /authz/check` and `/authz/check/batch`;
+/// * the management families **resources, scopes, permissions, roles**
+///   (assignments included), **groups, service accounts, certificates**
+///   (generate, sign-csr, bind, list, get, revoke) and **webhooks** — the
+///   routes whose permission is in `axiam_api_rest::permissions::M2M_MANAGEMENT_FAMILIES`.
+///
+/// Reaching a route is not being allowed on it: each is authorized by the roles
+/// assigned to the service account, and an account with none is refused every
+/// one of them with 403. An account in an ordinary tenant acts in that tenant
+/// only; one in the organization scope may name a tenant of its organization in
+/// `X-Axiam-Tenant` on the same terms as an organization administrator. No
+/// service account issues under the organization CA. Everything else — `/users/me` and the rest of self-service,
+/// MFA, sessions, passwords, organizations and tenants, settings, CA
+/// certificates, PGP keys, SCIM tokens, federation configuration, and every
+/// other family — still refuses a machine token with 401. Those grants were
+/// previously implicit; each further family is a decision to argue on its own.
 /// # The `cnf` parameter (S-3)
 ///
 /// `Some` binds the token to the certificate the device presented, per RFC 8705

@@ -295,8 +295,9 @@ where
             // The verified token first: it is proof, where an attribution is a
             // handler's assertion. They agree in practice; where they cannot
             // both exist, whichever is present is used.
+            let authenticated = user_info.is_some();
             let (actor_id, tenant_id, org_id, actor_type) = match user_info {
-                Some((uid, tid, oid)) => (uid, tid, oid, ActorType::User),
+                Some((uid, tid, oid, kind)) => (uid, tid, oid, kind),
                 None => match attribution {
                     Some(a) => (Uuid::nil(), a.tenant_id, a.org_id, ActorType::System),
                     None => (Uuid::nil(), Uuid::nil(), Uuid::nil(), ActorType::System),
@@ -313,7 +314,7 @@ where
                 ip_address,
                 metadata: Some(serde_json::json!({
                     "http_status": status,
-                    "authenticated": user_info.is_some(),
+                    "authenticated": authenticated,
                 })),
             };
 
@@ -331,20 +332,25 @@ where
     }
 }
 
-/// Extract `(user_id, tenant_id, org_id)` from cached extensions, or validate
-/// the JWT and cache it.
+/// Extract `(subject_id, tenant_id, org_id, actor_type)` from cached
+/// extensions, or validate the JWT and cache it.
 ///
 /// The organization is returned as well as the tenant because the notification
 /// dispatcher needs it to resolve the effective email configuration — it was
 /// already being parsed here for the cache and then thrown away.
-fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid, Uuid)> {
+fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid, Uuid, ActorType)> {
     use actix_web::web;
     use axiam_auth::config::AuthConfig;
     use axiam_auth::token::{CachedUserIdentity, validate_access_token};
 
     // Check cache first.
     if let Some(cached) = req.extensions().get::<Arc<CachedUserIdentity>>() {
-        return Some((cached.user_id, cached.tenant_id, cached.org_id));
+        return Some((
+            cached.user_id,
+            cached.tenant_id,
+            cached.org_id,
+            actor_type_of(&cached.claims),
+        ));
     }
 
     let config = req.app_data::<web::Data<AuthConfig>>()?;
@@ -388,7 +394,30 @@ fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid, Uuid)
         token: credentials,
     });
 
+    let actor_type = actor_type_of(&identity.claims);
     req.extensions_mut().insert(identity);
 
-    Some((user_id, tenant_id, org_id))
+    Some((user_id, tenant_id, org_id, actor_type))
+}
+
+/// Which kind of principal a validated token names, for the audit record.
+///
+/// Read from the signed `sub_kind` claim. Before S-9 every authenticated entry
+/// was recorded as [`ActorType::User`], which was accurate while no management
+/// route admitted a machine; once service accounts can write roles,
+/// certificates and webhooks, a write they make must be told apart from one a
+/// person makes, or the audit trail answers "who did this" wrongly for exactly
+/// the automated changes an investigator most needs to separate out.
+///
+/// An OAuth2 client's `sub` is its `oa_…` client id, not a UUID, so its request
+/// is recorded before this is reached as [`ActorType::System`] with a nil
+/// actor, as it always was; the arm below says the same thing for the day that
+/// stops being true.
+fn actor_type_of(claims: &axiam_auth::token::ValidatedClaims) -> ActorType {
+    use axiam_auth::token::SubjectKind;
+    match claims.0.sub_kind {
+        SubjectKind::User => ActorType::User,
+        SubjectKind::ServiceAccount => ActorType::ServiceAccount,
+        SubjectKind::OAuth2Client => ActorType::System,
+    }
 }

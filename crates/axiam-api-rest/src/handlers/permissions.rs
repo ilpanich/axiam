@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::AuthenticatedPrincipal;
 use crate::state::AppState;
 
 // -----------------------------------------------------------------------
@@ -71,20 +71,20 @@ pub struct RolePermissionPath {
     responses(
         (status = 201, description = "Permission created", body = Permission),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn create<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<CreatePermissionRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("permissions:create", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let input = CreatePermission {
-        tenant_id: user.tenant_id,
+        tenant_id: principal.tenant_id,
         action: req.action,
         description: req.description,
     };
@@ -101,20 +101,20 @@ pub async fn create<C: Connection + Clone>(
     responses(
         (status = 200, description = "List of permissions", body = inline(PaginatedResult<Permission>)),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("permissions:list", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let result = state
         .permission_repo
-        .list(user.tenant_id, query.into_inner())
+        .list(principal.tenant_id, query.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -129,20 +129,20 @@ pub async fn list<C: Connection + Clone>(
         (status = 200, description = "Permission found", body = Permission),
         (status = 404, description = "Permission not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn get<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("permissions:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let permission = state
         .permission_repo
-        .get_by_id(user.tenant_id, path.into_inner())
+        .get_by_id(principal.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(permission))
 }
@@ -158,17 +158,17 @@ pub async fn get<C: Connection + Clone>(
         (status = 200, description = "Permission updated", body = Permission),
         (status = 404, description = "Permission not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn update<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdatePermissionRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("permissions:update", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let input = UpdatePermission {
@@ -177,7 +177,7 @@ pub async fn update<C: Connection + Clone>(
     };
     let permission = state
         .permission_repo
-        .update(user.tenant_id, path.into_inner(), input)
+        .update(principal.tenant_id, path.into_inner(), input)
         .await?;
     // D7 (REVOCATION — security critical): changing a permission's `action`
     // narrows access (a subject allowed for the old action is now denied).
@@ -185,7 +185,7 @@ pub async fn update<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::Ok().json(permission))
 }
@@ -200,27 +200,27 @@ pub async fn update<C: Connection + Clone>(
         (status = 204, description = "Permission deleted"),
         (status = 404, description = "Permission not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn delete<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("permissions:delete", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     state
         .permission_repo
-        .delete(user.tenant_id, path.into_inner())
+        .delete(principal.tenant_id, path.into_inner())
         .await?;
     // D7 (REVOCATION — security critical): deleting a permission removes it
     // from every role/subject that was granted it. Flush the tenant.
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -239,23 +239,23 @@ pub async fn delete<C: Connection + Clone>(
     responses(
         (status = 204, description = "Permission granted to role"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn grant_to_role<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<GrantPermissionRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("permissions:grant", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     state
         .permission_repo
         .grant_to_role_with_effect(
-            user.tenant_id,
+            principal.tenant_id,
             path.into_inner(),
             req.permission_id,
             req.scope_ids,
@@ -273,7 +273,7 @@ pub async fn grant_to_role<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -288,20 +288,20 @@ pub async fn grant_to_role<C: Connection + Clone>(
         (status = 200, description = "Permission grants for role, with scopes resolved",
          body = Vec<ResolvedPermissionGrant>),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_role_permissions<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("permissions:list", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let grants = state
         .permission_repo
-        .get_role_permission_grants(user.tenant_id, path.into_inner())
+        .get_role_permission_grants(principal.tenant_id, path.into_inner())
         .await?;
 
     // Resolve each grant's `scope_ids` to the scopes they name.
@@ -312,7 +312,7 @@ pub async fn list_role_permissions<C: Connection + Clone>(
     // would have meant listing every resource in the tenant and then every
     // resource's scopes, just to turn three UUIDs into three names. The ids are
     // resolved here instead, where one lookup answers it.
-    let resolved = resolve_grant_scopes(&state, user.tenant_id, grants).await;
+    let resolved = resolve_grant_scopes(&state, principal.tenant_id, grants).await;
     Ok(HttpResponse::Ok().json(resolved))
 }
 
@@ -425,21 +425,21 @@ async fn resolve_grant_scopes<C: Connection + Clone>(
     responses(
         (status = 204, description = "Permission revoked from role"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn revoke_from_role<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<RolePermissionPath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("permissions:revoke", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
     state
         .permission_repo
-        .revoke_from_role(user.tenant_id, p.role_id, p.permission_id)
+        .revoke_from_role(principal.tenant_id, p.role_id, p.permission_id)
         .await?;
     // D7 (REVOCATION — security critical): revoking a grant removes access for
     // every subject holding this role. The subject set isn't known here without
@@ -447,7 +447,7 @@ pub async fn revoke_from_role<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }

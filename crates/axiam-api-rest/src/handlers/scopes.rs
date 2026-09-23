@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::AuthenticatedPrincipal;
 use crate::state::AppState;
 
 // -----------------------------------------------------------------------
@@ -58,21 +58,21 @@ pub struct UpdateScopeRequest {
     responses(
         (status = 201, description = "Scope created", body = Scope),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn create<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<ResourcePath>,
     body: web::Json<CreateScopeRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("scopes:create", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let input = CreateScope {
-        tenant_id: user.tenant_id,
+        tenant_id: principal.tenant_id,
         resource_id: path.resource_id,
         name: req.name,
         description: req.description,
@@ -90,20 +90,20 @@ pub async fn create<C: Connection + Clone>(
     responses(
         (status = 200, description = "List of scopes", body = Vec<Scope>),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<ResourcePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("scopes:list", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let scopes = state
         .scope_repo
-        .list_by_resource(user.tenant_id, path.resource_id)
+        .list_by_resource(principal.tenant_id, path.resource_id)
         .await?;
     Ok(HttpResponse::Ok().json(scopes))
 }
@@ -121,20 +121,20 @@ pub async fn list<C: Connection + Clone>(
         (status = 200, description = "Scope found", body = Scope),
         (status = 404, description = "Scope not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn get<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<ScopePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("scopes:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let scope = state
         .scope_repo
-        .get_by_id(user.tenant_id, path.scope_id)
+        .get_by_id(principal.tenant_id, path.scope_id)
         .await?;
     if scope.resource_id != path.resource_id {
         return Err(AxiamError::NotFound {
@@ -160,21 +160,21 @@ pub async fn get<C: Connection + Clone>(
         (status = 200, description = "Scope updated", body = Scope),
         (status = 404, description = "Scope not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn update<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<ScopePath>,
     body: web::Json<UpdateScopeRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("scopes:update", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let existing = state
         .scope_repo
-        .get_by_id(user.tenant_id, path.scope_id)
+        .get_by_id(principal.tenant_id, path.scope_id)
         .await?;
     if existing.resource_id != path.resource_id {
         return Err(AxiamError::NotFound {
@@ -190,7 +190,7 @@ pub async fn update<C: Connection + Clone>(
     };
     let scope = state
         .scope_repo
-        .update(user.tenant_id, path.scope_id, input)
+        .update(principal.tenant_id, path.scope_id, input)
         .await?;
     // D7 (REVOCATION — security critical): decisions are cached by scope *name*.
     // Renaming a scope narrows access for requests using the old name — flush
@@ -198,7 +198,7 @@ pub async fn update<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::Ok().json(scope))
 }
@@ -216,20 +216,20 @@ pub async fn update<C: Connection + Clone>(
         (status = 204, description = "Scope deleted"),
         (status = 404, description = "Scope not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn delete<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<ScopePath>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("scopes:delete", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let existing = state
         .scope_repo
-        .get_by_id(user.tenant_id, path.scope_id)
+        .get_by_id(principal.tenant_id, path.scope_id)
         .await?;
     if existing.resource_id != path.resource_id {
         return Err(AxiamError::NotFound {
@@ -240,14 +240,14 @@ pub async fn delete<C: Connection + Clone>(
     }
     state
         .scope_repo
-        .delete(user.tenant_id, path.scope_id)
+        .delete(principal.tenant_id, path.scope_id)
         .await?;
     // D7 (REVOCATION — security critical): deleting a scope removes it from
     // grants that referenced it, narrowing scoped access — flush the tenant.
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }

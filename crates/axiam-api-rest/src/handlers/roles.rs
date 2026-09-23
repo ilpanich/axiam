@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::AuthenticatedPrincipal;
 use crate::state::AppState;
 
 // -----------------------------------------------------------------------
@@ -238,20 +238,20 @@ pub struct UnassignQuery {
     responses(
         (status = 201, description = "Role created", body = Role),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn create<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<CreateRoleRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:create", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let input = CreateRole {
-        tenant_id: user.tenant_id,
+        tenant_id: principal.tenant_id,
         name: req.name,
         description: req.description,
         is_global: req.is_global,
@@ -269,20 +269,20 @@ pub async fn create<C: Connection + Clone>(
     responses(
         (status = 200, description = "List of roles", body = inline(PaginatedResult<Role>)),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:list", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let result = state
         .role_repo
-        .list(user.tenant_id, query.into_inner())
+        .list(principal.tenant_id, query.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(result))
 }
@@ -297,20 +297,20 @@ pub async fn list<C: Connection + Clone>(
         (status = 200, description = "Role found", body = Role),
         (status = 404, description = "Role not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn get<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let role = state
         .role_repo
-        .get_by_id(user.tenant_id, path.into_inner())
+        .get_by_id(principal.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(role))
 }
@@ -326,21 +326,21 @@ pub async fn get<C: Connection + Clone>(
         (status = 200, description = "Role updated", body = Role),
         (status = 404, description = "Role not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn update<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateRole>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:update", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let role = state
         .role_repo
-        .update(user.tenant_id, path.into_inner(), body.into_inner())
+        .update(principal.tenant_id, path.into_inner(), body.into_inner())
         .await?;
     // D7: a role change (e.g. is_global, name) can narrow effective access for
     // an unknown set of subjects — flush the whole tenant so no stale allow
@@ -348,7 +348,7 @@ pub async fn update<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::Ok().json(role))
 }
@@ -363,27 +363,27 @@ pub async fn update<C: Connection + Clone>(
         (status = 204, description = "Role deleted"),
         (status = 404, description = "Role not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn delete<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:delete", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     state
         .role_repo
-        .delete(user.tenant_id, path.into_inner())
+        .delete(principal.tenant_id, path.into_inner())
         .await?;
     // D7: deleting a role revokes it from every subject holding it — flush the
     // tenant so no cached allow granted through this role can survive.
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -549,17 +549,17 @@ async fn validate_inherit<C: Connection + Clone>(
     responses(
         (status = 204, description = "Role assigned to user"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn assign_to_user<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<AssignRoleToUserRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:assign", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let target_user = req.user_id;
@@ -570,7 +570,7 @@ pub async fn assign_to_user<C: Connection + Clone>(
     // access the subject already has.
     crate::reactor_hooks::grant_pre_assign(
         &state.events.reactor_gate,
-        user.tenant_id,
+        principal.tenant_id,
         serde_json::json!({
             "grantee_kind": "user",
             "user_id": target_user,
@@ -582,16 +582,19 @@ pub async fn assign_to_user<C: Connection + Clone>(
             "tenant_scope": req.tenant_scope,
             // And whether it reaches below its resource at all.
             "inherit": req.inherit,
-            "tenant_id": user.tenant_id,
+            "tenant_id": principal.tenant_id,
             // Who is asking — the half a four-eyes rule is actually about.
-            "actor_id": user.user_id,
+            "actor_id": principal.subject_id,
+            // Which kind of principal is asking: a four-eyes rule that
+            // approves a person's grant need not approve a machine's.
+            "actor_type": principal.actor_kind(),
         }),
     )
     .await?;
 
     let inherit = validate_inherit(
         state.get_ref(),
-        user.tenant_id,
+        principal.tenant_id,
         role_id,
         req.resource_id,
         req.inherit,
@@ -601,7 +604,7 @@ pub async fn assign_to_user<C: Connection + Clone>(
         inherit,
         ..validate_tenant_scope(
             state.get_ref(),
-            user.tenant_id,
+            principal.tenant_id,
             req.resource_id,
             req.tenant_scope,
         )
@@ -609,7 +612,7 @@ pub async fn assign_to_user<C: Connection + Clone>(
     };
     state
         .role_repo
-        .assign_to_user(user.tenant_id, req.user_id, role_id, scope)
+        .assign_to_user(principal.tenant_id, req.user_id, role_id, scope)
         .await?;
     // D7: only this subject's effective permissions change — targeted flush.
     // (Assignment widens access, the safe direction, but we invalidate anyway
@@ -617,7 +620,7 @@ pub async fn assign_to_user<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, target_user)
+        .invalidate_subject(principal.tenant_id, target_user)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -635,22 +638,22 @@ pub async fn assign_to_user<C: Connection + Clone>(
     responses(
         (status = 204, description = "Role unassigned from user"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn unassign_from_user<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<RoleUserPath>,
     query: web::Query<UnassignQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:unassign", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
     state
         .role_repo
-        .unassign_from_user(user.tenant_id, p.user_id, p.role_id, query.resource_id)
+        .unassign_from_user(principal.tenant_id, p.user_id, p.role_id, query.resource_id)
         .await?;
     // D7 (REVOCATION — security critical): unassigning a role removes access
     // for exactly this subject. Invalidate immediately so a cached allow cannot
@@ -664,7 +667,7 @@ pub async fn unassign_from_user<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, p.user_id)
+        .invalidate_subject(principal.tenant_id, p.user_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -691,17 +694,17 @@ pub async fn unassign_from_user<C: Connection + Clone>(
         (status = 204, description = "Role assigned to service account"),
         (status = 404, description = "Role or service account not found in this tenant"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn assign_to_service_account<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<AssignRoleToServiceAccountRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:assign", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let role_id = path.into_inner();
@@ -711,7 +714,7 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
     // human grants and silently ignores machine ones reviews the easier half.
     crate::reactor_hooks::grant_pre_assign(
         &state.events.reactor_gate,
-        user.tenant_id,
+        principal.tenant_id,
         serde_json::json!({
             "grantee_kind": "service_account",
             "service_account_id": req.service_account_id,
@@ -723,15 +726,18 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
             "tenant_scope": req.tenant_scope,
             // And whether it reaches below its resource at all.
             "inherit": req.inherit,
-            "tenant_id": user.tenant_id,
-            "actor_id": user.user_id,
+            "tenant_id": principal.tenant_id,
+            "actor_id": principal.subject_id,
+            // Which kind of principal is asking: a four-eyes rule that
+            // approves a person's grant need not approve a machine's.
+            "actor_type": principal.actor_kind(),
         }),
     )
     .await?;
 
     let inherit = validate_inherit(
         state.get_ref(),
-        user.tenant_id,
+        principal.tenant_id,
         role_id,
         req.resource_id,
         req.inherit,
@@ -741,7 +747,7 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
         inherit,
         ..validate_tenant_scope(
             state.get_ref(),
-            user.tenant_id,
+            principal.tenant_id,
             req.resource_id,
             req.tenant_scope,
         )
@@ -749,7 +755,7 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
     };
     state
         .role_repo
-        .assign_to_service_account(user.tenant_id, req.service_account_id, role_id, scope)
+        .assign_to_service_account(principal.tenant_id, req.service_account_id, role_id, scope)
         .await?;
     // D7: the machine's own effective permissions changed — targeted flush, on
     // the same terms as the user path. The engine caches by `(tenant, subject)`
@@ -757,7 +763,7 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, req.service_account_id)
+        .invalidate_subject(principal.tenant_id, req.service_account_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -775,23 +781,23 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
     responses(
         (status = 204, description = "Role unassigned from service account"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn unassign_from_service_account<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<RoleServiceAccountPath>,
     query: web::Query<UnassignQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:unassign", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
     state
         .role_repo
         .unassign_from_service_account(
-            user.tenant_id,
+            principal.tenant_id,
             p.service_account_id,
             p.role_id,
             query.resource_id,
@@ -803,7 +809,7 @@ pub async fn unassign_from_service_account<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_subject(user.tenant_id, p.service_account_id)
+        .invalidate_subject(principal.tenant_id, p.service_account_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -818,21 +824,21 @@ pub async fn unassign_from_service_account<C: Connection + Clone>(
         (status = 200, description = "Service-account assignments of this role",
          body = [RoleServiceAccountAssignment]),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_service_accounts<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let role_id = path.into_inner();
     let assignments = state
         .role_repo
-        .get_role_service_account_assignments(user.tenant_id, role_id)
+        .get_role_service_account_assignments(principal.tenant_id, role_id)
         .await?;
     let mut rows = Vec::with_capacity(assignments.len());
     for a in assignments {
@@ -840,7 +846,7 @@ pub async fn list_service_accounts<C: Connection + Clone>(
             service_account: ServiceAccountResponse::from(
                 state
                     .service_account_repo
-                    .get_by_id(user.tenant_id, a.subject_id)
+                    .get_by_id(principal.tenant_id, a.subject_id)
                     .await?,
             ),
             resource_id: a.resource_id,
@@ -863,16 +869,16 @@ pub async fn list_service_accounts<C: Connection + Clone>(
          body = [RoleAssignment]),
         (status = 404, description = "Service account not found in this tenant"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_service_account_roles<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let target = path.into_inner();
     // Confine the lookup to the caller's tenant first, for the same reason
@@ -881,11 +887,11 @@ pub async fn list_service_account_roles<C: Connection + Clone>(
     // account belonging to some other tenant.
     state
         .service_account_repo
-        .get_by_id(user.tenant_id, target)
+        .get_by_id(principal.tenant_id, target)
         .await?;
     let assignments = state
         .role_repo
-        .get_user_role_assignments(user.tenant_id, target)
+        .get_user_role_assignments(principal.tenant_id, target)
         .await?;
     Ok(HttpResponse::Ok().json(assignments))
 }
@@ -904,17 +910,17 @@ pub async fn list_service_account_roles<C: Connection + Clone>(
     responses(
         (status = 204, description = "Role assigned to group"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn assign_to_group<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<AssignRoleToGroupRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:assign", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let role_id = path.into_inner();
@@ -924,7 +930,7 @@ pub async fn assign_to_group<C: Connection + Clone>(
     // paths and the one a four-eyes rule most needs to see.
     crate::reactor_hooks::grant_pre_assign(
         &state.events.reactor_gate,
-        user.tenant_id,
+        principal.tenant_id,
         serde_json::json!({
             "grantee_kind": "group",
             "group_id": req.group_id,
@@ -936,15 +942,18 @@ pub async fn assign_to_group<C: Connection + Clone>(
             "tenant_scope": req.tenant_scope,
             // And whether it reaches below its resource at all.
             "inherit": req.inherit,
-            "tenant_id": user.tenant_id,
-            "actor_id": user.user_id,
+            "tenant_id": principal.tenant_id,
+            "actor_id": principal.subject_id,
+            // Which kind of principal is asking: a four-eyes rule that
+            // approves a person's grant need not approve a machine's.
+            "actor_type": principal.actor_kind(),
         }),
     )
     .await?;
 
     let inherit = validate_inherit(
         state.get_ref(),
-        user.tenant_id,
+        principal.tenant_id,
         role_id,
         req.resource_id,
         req.inherit,
@@ -954,7 +963,7 @@ pub async fn assign_to_group<C: Connection + Clone>(
         inherit,
         ..validate_tenant_scope(
             state.get_ref(),
-            user.tenant_id,
+            principal.tenant_id,
             req.resource_id,
             req.tenant_scope,
         )
@@ -962,14 +971,14 @@ pub async fn assign_to_group<C: Connection + Clone>(
     };
     state
         .role_repo
-        .assign_to_group(user.tenant_id, req.group_id, role_id, scope)
+        .assign_to_group(principal.tenant_id, req.group_id, role_id, scope)
         .await?;
     // D7: the affected subjects are every member of the group (set unknown
     // without a query) — conservative per-tenant flush.
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -987,22 +996,27 @@ pub async fn assign_to_group<C: Connection + Clone>(
     responses(
         (status = 204, description = "Role unassigned from group"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn unassign_from_group<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<RoleGroupPath>,
     query: web::Query<UnassignQuery>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:unassign", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
     state
         .role_repo
-        .unassign_from_group(user.tenant_id, p.group_id, p.role_id, query.resource_id)
+        .unassign_from_group(
+            principal.tenant_id,
+            p.group_id,
+            p.role_id,
+            query.resource_id,
+        )
         .await?;
     // D7 (REVOCATION — security critical): unassigning a role from a group
     // revokes it from every member. The member set isn't known here without a
@@ -1010,7 +1024,7 @@ pub async fn unassign_from_group<C: Connection + Clone>(
     authz
         .get_ref()
         .as_ref()
-        .invalidate_tenant(user.tenant_id)
+        .invalidate_tenant(principal.tenant_id)
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -1033,21 +1047,21 @@ pub async fn unassign_from_group<C: Connection + Clone>(
         (status = 200, description = "User assignments of this role",
          body = [RoleUserAssignment]),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_users<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let role_id = path.into_inner();
     let assignments = state
         .role_repo
-        .get_role_user_assignments(user.tenant_id, role_id)
+        .get_role_user_assignments(principal.tenant_id, role_id)
         .await?;
     let mut rows = Vec::with_capacity(assignments.len());
     for a in assignments {
@@ -1055,7 +1069,7 @@ pub async fn list_users<C: Connection + Clone>(
             user: UserResponse::from(
                 state
                     .user_repo
-                    .get_by_id(user.tenant_id, a.subject_id)
+                    .get_by_id(principal.tenant_id, a.subject_id)
                     .await?,
             ),
             resource_id: a.resource_id,
@@ -1080,28 +1094,28 @@ pub async fn list_users<C: Connection + Clone>(
         (status = 200, description = "Group assignments of this role",
          body = [RoleGroupAssignment]),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_groups<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let role_id = path.into_inner();
     let assignments = state
         .role_repo
-        .get_role_group_assignments(user.tenant_id, role_id)
+        .get_role_group_assignments(principal.tenant_id, role_id)
         .await?;
     let mut rows = Vec::with_capacity(assignments.len());
     for a in assignments {
         rows.push(RoleGroupAssignment {
             group: state
                 .group_repo
-                .get_by_id(user.tenant_id, a.subject_id)
+                .get_by_id(principal.tenant_id, a.subject_id)
                 .await?,
             resource_id: a.resource_id,
             tenant_scope: a.tenant_scope.clone(),
@@ -1129,26 +1143,29 @@ pub async fn list_groups<C: Connection + Clone>(
         (status = 200, description = "Role assignments of this user",
          body = [RoleAssignment]),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_user_roles<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let target = path.into_inner();
     // Confine the lookup to the caller's tenant before touching the edges: the
     // repository predicate does the same, but a missing user must read as 404
     // rather than as an empty role list, which would say "this user has no
     // roles" about a user of some other tenant.
-    state.user_repo.get_by_id(user.tenant_id, target).await?;
+    state
+        .user_repo
+        .get_by_id(principal.tenant_id, target)
+        .await?;
     let assignments = state
         .role_repo
-        .get_user_role_assignments(user.tenant_id, target)
+        .get_user_role_assignments(principal.tenant_id, target)
         .await?;
     Ok(HttpResponse::Ok().json(assignments))
 }
@@ -1166,24 +1183,27 @@ pub async fn list_user_roles<C: Connection + Clone>(
         (status = 200, description = "Role assignments of this group",
          body = [RoleAssignment]),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list_group_roles<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("roles:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let group_id = path.into_inner();
     // Same reason as `list_user_roles`: 404 for a group of another tenant, not
     // an empty list.
-    state.group_repo.get_by_id(user.tenant_id, group_id).await?;
+    state
+        .group_repo
+        .get_by_id(principal.tenant_id, group_id)
+        .await?;
     let assignments = state
         .role_repo
-        .get_group_role_assignments(user.tenant_id, group_id)
+        .get_group_role_assignments(principal.tenant_id, group_id)
         .await?;
     Ok(HttpResponse::Ok().json(assignments))
 }

@@ -26,8 +26,8 @@ pub use authz::{AuthzChecker, AuthzData, RequirePermission};
 pub use config::{RateLimitConfig, RateLimitPosture, RateLimitProfile, ServerConfig};
 pub use error::AxiamApiError;
 pub use extractors::auth::{
-    ACTIVE_TENANT_HEADER, AuthenticatedUser, DpopReplayGuard, PrincipalReachResolver,
-    SessionValidator, TenantScope, TenantScopeResolver,
+    ACTIVE_TENANT_HEADER, AuthenticatedPrincipal, AuthenticatedUser, DpopReplayGuard,
+    PrincipalReachResolver, SessionValidator, TenantScope, TenantScopeResolver,
 };
 pub use extractors::cert_auth::{CertificateAuthenticated, VerifiedClientCert};
 pub use extractors::scim_token::{ScimTokenPrincipal, ScimTokenResolver, SurrealScimTokenResolver};

@@ -1285,6 +1285,10 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
         type: "p",
         text: "The split is deliberate rather than incidental: it lets a resource server decide that an endpoint is for humans, or for machines, without inspecting roles. Pin whichever audience the endpoint is actually for, and pin it explicitly — a verifier that checks no audience accepts both.",
       },
+      {
+        type: "p",
+        text: "AXIAM's own API draws the same line. A service account can call the **management families** — resources, scopes, permissions, roles and their assignments, groups, service accounts, certificates and webhooks — plus the authorization checks, and is authorized there by the roles assigned to it, exactly as a user is: with no role it gets `403`, not `401`. Everything else, from `/auth/me` to organizations, tenants, settings and CA certificates, keeps a human audience and answers a machine token with `401`. The OpenAPI document lists a `service_account` security scheme on exactly the operations that admit one; the [API reference](https://github.com/ilpanich/axiam/blob/main/docs/api/README.md#authentication--who-may-call-which-route) has the rules for tenant scope, certificates and audit.",
+      },
     ],
   },
 ];

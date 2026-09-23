@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta16",
-    "x-axiam-spec-digest": "sha256:b1f3112bf0c21b3c9cd9ac498f8b4aa7f566cd5db67883f15cfda0fd6f96769e"
+    "x-axiam-spec-digest": "sha256:c6d155c618ec177bc1fe4752dcfc7db300cf3aa3add09445418916aca7f36e69"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2162,6 +2162,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -2205,6 +2208,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -2312,6 +2318,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -2349,6 +2358,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -2398,6 +2410,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -2436,6 +2451,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -2467,6 +2485,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -3226,6 +3247,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -3260,6 +3284,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -3301,6 +3328,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -3350,6 +3380,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -3382,6 +3415,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -3550,6 +3586,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -3589,6 +3628,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -3630,6 +3672,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -3672,6 +3717,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -3815,6 +3863,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -3860,6 +3911,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -3901,6 +3955,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -6585,6 +6642,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -6619,6 +6679,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -6660,6 +6723,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -6709,6 +6775,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -6741,6 +6810,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -7560,6 +7632,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -7594,6 +7669,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -7635,6 +7713,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -7684,6 +7765,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -7716,6 +7800,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -7757,6 +7844,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -7798,6 +7888,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -7839,6 +7932,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -7885,6 +7981,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -7936,6 +8035,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -7995,6 +8097,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -8037,6 +8142,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -8164,6 +8272,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -8198,6 +8309,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -8239,6 +8353,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -8288,6 +8405,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -8320,6 +8440,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -8362,6 +8485,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -8401,6 +8527,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -8455,6 +8584,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -8496,6 +8628,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -8535,6 +8670,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -8576,6 +8714,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -8617,6 +8758,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -8659,6 +8803,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -8713,6 +8860,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -8755,6 +8905,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -8794,6 +8947,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -8848,6 +9004,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -9079,6 +9238,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -9113,6 +9275,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -9154,6 +9319,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -9203,6 +9371,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -9235,6 +9406,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -9276,6 +9450,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -9317,6 +9494,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -9358,6 +9538,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -9402,6 +9585,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -10402,6 +10588,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -10629,6 +10818,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -10663,6 +10855,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -10701,6 +10896,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -10747,6 +10945,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       },
@@ -10776,6 +10977,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "service_account": []
           }
         ]
       }
@@ -21845,7 +22049,14 @@
       "bearer": {
         "type": "http",
         "scheme": "bearer",
-        "bearerFormat": "JWT"
+        "bearerFormat": "JWT",
+        "description": "An AXIAM access token issued to a user (`aud` = `axiam:user`), from the `axiam_access` cookie or the `Authorization` header."
+      },
+      "service_account": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "An AXIAM access token issued to a service account (`aud` = `axiam:m2m`, `sub_kind` = `service_account`), from client credentials or the mTLS device login. Accepted only by the operations that list this scheme — the management families resources, scopes, permissions, roles, groups, service accounts, certificates and webhooks, and the authorization checks — and authorized there by the roles assigned to the account, exactly as a user is. `X-Axiam-Tenant` is honoured only for an account living in the organization scope, as for a user; a service account never issues under the organization CA. A certificate-bound token (`cnf.x5t#S256`) must be presented over mTLS with that certificate."
       }
     }
   },

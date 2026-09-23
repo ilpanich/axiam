@@ -13,7 +13,10 @@ use actix_web::{App, HttpMessage, HttpResponse, test, web};
 use axiam_audit::middleware::AuditMiddleware;
 use axiam_audit::service::AuditService;
 use axiam_auth::config::AuthConfig;
-use axiam_auth::token::{AUD_USER, CachedUserIdentity, issue_access_token, validate_access_token};
+use axiam_auth::token::{
+    AUD_M2M, AUD_USER, AccessTokenSpec, CachedUserIdentity, SubjectKind, issue_access_token,
+    issue_service_account_token, validate_access_token,
+};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination};
@@ -529,6 +532,132 @@ async fn middleware_reuses_cached_identity() {
     assert_eq!(e.actor_type, ActorType::User);
     assert_eq!(e.actor_id, user_id);
     assert_eq!(e.tenant_id, tenant_id);
+}
+
+/// One secured route behind the audit middleware, and the entry a request to
+/// it with `token` in the `Authorization` header leaves behind.
+async fn audit_one_bearer_request(cfg: AuthConfig, token: &str) -> CreateAuditLogEntry {
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let app = test::init_service(App::new().app_data(web::Data::new(cfg)).wrap(mw).route(
+        "/api/secure",
+        web::post().to(|| async { HttpResponse::Created().finish() }),
+    ))
+    .await;
+    let req = test::TestRequest::post()
+        .uri("/api/secure")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+    wait_for_entries(&repo, 1).await;
+    repo.snapshot().remove(0)
+}
+
+/// S-9: once service accounts can write roles, certificates and webhooks, the
+/// audit record must say a machine did it. Every authenticated entry used to
+/// read `User`, which was true only while no management route admitted one.
+#[actix_web::test]
+async fn a_service_account_write_is_audited_as_a_service_account() {
+    let cfg = test_auth_config();
+    let (account, tenant_id, org_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let token = issue_service_account_token(
+        account,
+        tenant_id,
+        org_id,
+        Uuid::new_v4().to_string(),
+        None,
+        &cfg,
+    )
+    .expect("mint service-account token");
+
+    let e = audit_one_bearer_request(cfg, &token).await;
+    assert_eq!(e.actor_type, ActorType::ServiceAccount);
+    assert_eq!(e.actor_id, account);
+    assert_eq!(e.tenant_id, tenant_id);
+    assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], true);
+}
+
+/// The I4 twin: a user's write through the same route is still a user's.
+#[actix_web::test]
+async fn a_user_write_is_still_audited_as_a_user() {
+    let cfg = test_auth_config();
+    let (user_id, tenant_id, org_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let token = mint_token(user_id, tenant_id, org_id, &cfg);
+
+    let e = audit_one_bearer_request(cfg, &token).await;
+    assert_eq!(e.actor_type, ActorType::User);
+    assert_eq!(e.actor_id, user_id);
+}
+
+/// The kind is read from `sub_kind`, not from `aud`: an RFC 8693 exchange can
+/// narrow a *user's* token to the machine audience, and that is still a person
+/// acting. Recording it as a service account would be the false record this
+/// change exists to prevent, in the other direction.
+#[actix_web::test]
+async fn a_user_token_narrowed_to_the_machine_audience_is_still_a_user() {
+    let cfg = test_auth_config();
+    let (user_id, tenant_id, org_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let token = AccessTokenSpec::exchanged(
+        &user_id.to_string(),
+        SubjectKind::User,
+        tenant_id,
+        org_id,
+        Uuid::new_v4().to_string(),
+        AUD_M2M,
+    )
+    .issue(&cfg)
+    .expect("mint exchanged token");
+
+    let e = audit_one_bearer_request(cfg, &token).await;
+    assert_eq!(e.actor_type, ActorType::User);
+    assert_eq!(e.actor_id, user_id);
+}
+
+/// The cache-hit path reads the kind from the cached claims, so an upstream
+/// that validated a service-account token first cannot turn it into a user.
+#[actix_web::test]
+async fn a_cached_service_account_identity_is_audited_as_a_service_account() {
+    let cfg = test_auth_config();
+    let (account, tenant_id, org_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let token = issue_service_account_token(
+        account,
+        tenant_id,
+        org_id,
+        Uuid::new_v4().to_string(),
+        None,
+        &cfg,
+    )
+    .expect("mint service-account token");
+    let claims = validate_access_token(&token, &cfg).unwrap();
+    let identity = Arc::new(CachedUserIdentity {
+        user_id: account,
+        tenant_id,
+        org_id,
+        claims,
+        token,
+    });
+
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(cfg))
+            .wrap(mw)
+            .wrap_fn(move |req, srv| {
+                req.extensions_mut().insert(identity.clone());
+                srv.call(req)
+            })
+            .route(
+                "/api/secure",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+    )
+    .await;
+    let req = test::TestRequest::get().uri("/api/secure").to_request();
+    let _ = test::call_service(&app, req).await;
+
+    wait_for_entries(&repo, 1).await;
+    assert_eq!(repo.snapshot()[0].actor_type, ActorType::ServiceAccount);
 }
 
 #[actix_web::test]

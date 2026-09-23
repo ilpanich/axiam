@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::AuthenticatedPrincipal;
 use crate::state::AppState;
 
 // -----------------------------------------------------------------------
@@ -93,20 +93,20 @@ pub struct RotateSecretResponse {
     responses(
         (status = 201, description = "Service account created (secret shown once)", body = ServiceAccountCreatedResponse),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn create<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<CreateServiceAccountRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:create", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let input = CreateServiceAccount {
-        tenant_id: user.tenant_id,
+        tenant_id: principal.tenant_id,
         name: req.name,
         description: req.description,
     };
@@ -133,20 +133,20 @@ pub async fn create<C: Connection + Clone>(
     responses(
         (status = 200, description = "List of service accounts", body = inline(PaginatedResult<ServiceAccountResponse>)),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:list", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let result = state
         .service_account_repo
-        .list(user.tenant_id, query.into_inner())
+        .list(principal.tenant_id, query.into_inner())
         .await?;
     let items: Vec<ServiceAccountResponse> = result
         .items
@@ -171,20 +171,20 @@ pub async fn list<C: Connection + Clone>(
         (status = 200, description = "Service account found", body = ServiceAccountResponse),
         (status = 404, description = "Service account not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn get<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let sa = state
         .service_account_repo
-        .get_by_id(user.tenant_id, path.into_inner())
+        .get_by_id(principal.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(ServiceAccountResponse::from(sa)))
 }
@@ -200,21 +200,21 @@ pub async fn get<C: Connection + Clone>(
         (status = 200, description = "Service account updated", body = ServiceAccountResponse),
         (status = 404, description = "Service account not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn update<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
     body: web::Json<UpdateServiceAccount>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:update", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let sa = state
         .service_account_repo
-        .update(user.tenant_id, path.into_inner(), body.into_inner())
+        .update(principal.tenant_id, path.into_inner(), body.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(ServiceAccountResponse::from(sa)))
 }
@@ -229,20 +229,20 @@ pub async fn update<C: Connection + Clone>(
         (status = 204, description = "Service account deleted"),
         (status = 404, description = "Service account not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn delete<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:delete", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     state
         .service_account_repo
-        .delete(user.tenant_id, path.into_inner())
+        .delete(principal.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::NoContent().finish())
 }
@@ -257,20 +257,20 @@ pub async fn delete<C: Connection + Clone>(
         (status = 200, description = "Secret rotated", body = RotateSecretResponse),
         (status = 404, description = "Service account not found"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn rotate_secret<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("service_accounts:rotate_secret", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let raw_secret = state
         .service_account_repo
-        .rotate_secret(user.tenant_id, path.into_inner())
+        .rotate_secret(principal.tenant_id, path.into_inner())
         .await?;
     Ok(HttpResponse::Ok().json(RotateSecretResponse {
         client_secret: raw_secret,

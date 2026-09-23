@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 use uuid::Uuid;
 
-use crate::AuthenticatedUser;
+use crate::AuthenticatedPrincipal;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::state::AppState;
@@ -85,16 +85,16 @@ impl From<Webhook> for WebhookResponse {
         (status = 201, description = "Webhook created",
          body = WebhookResponse),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn create<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<CreateWebhookRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:create", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
 
@@ -116,7 +116,7 @@ pub async fn create<C: Connection + Clone>(
         .events
         .webhook_repo
         .create(CreateWebhook {
-            tenant_id: user.tenant_id,
+            tenant_id: principal.tenant_id,
             url: req.url,
             events: req.events,
             secret: encrypted_secret,
@@ -136,21 +136,21 @@ pub async fn create<C: Connection + Clone>(
         (status = 200, description = "List of webhooks",
          body = inline(PaginatedResult<WebhookResponse>)),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:list", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let result = state
         .events
         .webhook_repo
-        .list(user.tenant_id, pagination.into_inner())
+        .list(principal.tenant_id, pagination.into_inner())
         .await?;
     let response = PaginatedResult {
         items: result
@@ -175,22 +175,22 @@ pub async fn list<C: Connection + Clone>(
         (status = 200, description = "Webhook found",
          body = WebhookResponse),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn get<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     path: web::Path<Uuid>,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
     let webhook = state
         .events
         .webhook_repo
-        .get_by_id(user.tenant_id, id)
+        .get_by_id(principal.tenant_id, id)
         .await?;
     Ok(HttpResponse::Ok().json(WebhookResponse::from(webhook)))
 }
@@ -206,17 +206,17 @@ pub async fn get<C: Connection + Clone>(
         (status = 200, description = "Webhook updated",
          body = WebhookResponse),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn update<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     path: web::Path<Uuid>,
     state: web::Data<AppState<C>>,
     body: web::Json<UpdateWebhookRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:update", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
     let req = body.into_inner();
@@ -242,7 +242,7 @@ pub async fn update<C: Connection + Clone>(
         .events
         .webhook_repo
         .update(
-            user.tenant_id,
+            principal.tenant_id,
             id,
             UpdateWebhook {
                 url: req.url,
@@ -265,19 +265,23 @@ pub async fn update<C: Connection + Clone>(
     responses(
         (status = 204, description = "Webhook deleted"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn delete<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     path: web::Path<Uuid>,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("webhooks:delete", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    state.events.webhook_repo.delete(user.tenant_id, id).await?;
+    state
+        .events
+        .webhook_repo
+        .delete(principal.tenant_id, id)
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 

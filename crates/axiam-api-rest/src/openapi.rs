@@ -803,23 +803,63 @@ fn stamp_spec_digest(mut doc: utoipa::openapi::OpenApi) -> utoipa::openapi::Open
     doc
 }
 
-/// Adds Bearer JWT security scheme to the OpenAPI spec.
+/// Adds the two Bearer JWT security schemes to the OpenAPI spec.
+///
+/// Both are the same HTTP mechanism; they differ in who may hold the token,
+/// which is the `aud` claim. An operation that admits a service account lists
+/// both as alternatives, so the document says which routes a machine may call
+/// rather than leaving it to the prose (S-9, D-5). `bearer` alone means a
+/// person.
 struct SecurityAddon;
 
 impl utoipa::Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+
         let components = openapi.components.get_or_insert_with(Default::default);
         components.add_security_scheme(
             "bearer",
-            utoipa::openapi::security::SecurityScheme::Http(
-                utoipa::openapi::security::HttpBuilder::new()
-                    .scheme(utoipa::openapi::security::HttpAuthScheme::Bearer)
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
                     .bearer_format("JWT")
+                    .description(Some(
+                        "An AXIAM access token issued to a user (`aud` = `axiam:user`), \
+                         from the `axiam_access` cookie or the `Authorization` header.",
+                    ))
+                    .build(),
+            ),
+        );
+        components.add_security_scheme(
+            SERVICE_ACCOUNT_SECURITY_SCHEME,
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("JWT")
+                    .description(Some(
+                        "An AXIAM access token issued to a service account \
+                         (`aud` = `axiam:m2m`, `sub_kind` = `service_account`), from \
+                         client credentials or the mTLS device login. Accepted only \
+                         by the operations that list this scheme — the management \
+                         families resources, scopes, permissions, roles, groups, \
+                         service accounts, certificates and webhooks, and the \
+                         authorization checks — and authorized there by the roles \
+                         assigned to the account, exactly as a user is. \
+                         `X-Axiam-Tenant` is honoured only for an account living in \
+                         the organization scope, as for a user; a service account \
+                         never issues under the organization CA. A certificate-bound token \
+                         (`cnf.x5t#S256`) must be presented over mTLS with that \
+                         certificate.",
+                    ))
                     .build(),
             ),
         );
     }
 }
+
+/// The name of the security scheme an operation lists when it admits a
+/// service-account token.
+pub const SERVICE_ACCOUNT_SECURITY_SCHEME: &str = "service_account";
 
 #[cfg(test)]
 mod spec_digest_tests {

@@ -13,7 +13,7 @@ use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
 
-use crate::AuthenticatedUser;
+use crate::AuthenticatedPrincipal;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::handlers::org_scope::is_organization_principal;
@@ -37,17 +37,18 @@ pub struct CreateCertificateRequest {
 
 /// The issuing scope this caller acts with on both leaf paths.
 ///
-/// [`IssuingScope::Organization`] only for a principal whose own record lives
-/// in the organization's reserved scope; everyone else is
-/// [`IssuingScope::Tenant`] and is confined to the signing CA of the tenant
-/// being acted on. The tenant being acted on is `user.tenant_id`, which is the
-/// caller's own tenant unless it named another through `X-Axiam-Tenant` and was
-/// allowed to.
+/// [`IssuingScope::Organization`] only for a human principal whose own record
+/// lives in the organization's reserved scope; everyone else — every service
+/// account included — is [`IssuingScope::Tenant`] and is confined to the
+/// signing CA of the tenant being acted on. The tenant being acted on is
+/// `principal.tenant_id`, which is the caller's own tenant unless it named
+/// another through `X-Axiam-Tenant` and was allowed to — which only an
+/// organization-level principal, person or machine, can be.
 async fn issuing_scope<C: Connection + Clone>(
-    user: &AuthenticatedUser,
+    principal: &AuthenticatedPrincipal,
     state: &AppState<C>,
 ) -> IssuingScope {
-    if is_organization_principal(user, state).await {
+    if is_organization_principal(principal, state).await {
         IssuingScope::Organization
     } else {
         IssuingScope::Tenant
@@ -68,20 +69,20 @@ async fn issuing_scope<C: Connection + Clone>(
                                       or is the organization CA and the caller is not an \
                                       organization principal"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn generate<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<CreateCertificateRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:generate", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let input = CreateCertificate {
-        tenant_id: user.tenant_id,
+        tenant_id: principal.tenant_id,
         issuer_ca_id: req.issuer_ca_id,
         subject: req.subject,
         cert_type: req.cert_type,
@@ -91,7 +92,7 @@ pub async fn generate<C: Connection + Clone>(
     };
 
     // Read tenant-level max_certificate_validity_days from metadata
-    let tenant = state.tenant_repo.get_by_id(user.tenant_id).await?;
+    let tenant = state.tenant_repo.get_by_id(principal.tenant_id).await?;
     let max_validity = tenant
         .metadata
         .get("max_certificate_validity_days")
@@ -102,12 +103,12 @@ pub async fn generate<C: Connection + Clone>(
     // signing CA always, the organization CA only for a principal that lives in
     // the organization scope. Resolved from the caller's own record, never from
     // the body (DF-017).
-    let scope = issuing_scope(&user, state.get_ref()).await;
+    let scope = issuing_scope(&principal, state.get_ref()).await;
 
     let result = state
         .pki
         .cert_service
-        .generate(user.org_id, scope, input, max_validity)
+        .generate(principal.org_id, scope, input, max_validity)
         .await?;
     Ok(HttpResponse::Created().json(result))
 }
@@ -168,21 +169,21 @@ pub struct SignCertificateCsrRequest {
                                       or is the organization CA and the caller is not an \
                                       organization principal"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn sign_csr<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<SignCertificateCsrRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:generate", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
     let input = SignCertificateCsr {
         // From the authenticated context, never from the body (T-98).
-        tenant_id: user.tenant_id,
+        tenant_id: principal.tenant_id,
         issuer_ca_id: req.issuer_ca_id,
         csr_pem: req.csr_pem,
         cert_type: req.cert_type,
@@ -191,19 +192,19 @@ pub async fn sign_csr<C: Connection + Clone>(
     };
 
     // The same tenant cap `generate` reads, from the same place.
-    let tenant = state.tenant_repo.get_by_id(user.tenant_id).await?;
+    let tenant = state.tenant_repo.get_by_id(principal.tenant_id).await?;
     let max_validity = tenant
         .metadata
         .get("max_certificate_validity_days")
         .and_then(|v| v.as_u64())
         .map(|v| v as u32);
 
-    let scope = issuing_scope(&user, state.get_ref()).await;
+    let scope = issuing_scope(&principal, state.get_ref()).await;
 
     let certificate = state
         .pki
         .cert_service
-        .sign_csr(user.org_id, scope, input, max_validity)
+        .sign_csr(principal.org_id, scope, input, max_validity)
         .await?;
     Ok(HttpResponse::Created().json(certificate))
 }
@@ -254,21 +255,21 @@ impl CertificateWithBinding {
         (status = 200, description = "List of certificates",
          body = inline(PaginatedResult<CertificateWithBinding>)),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn list<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     pagination: web::Query<Pagination>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:list", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let result = state
         .pki
         .cert_service
-        .list(user.tenant_id, pagination.into_inner())
+        .list(principal.tenant_id, pagination.into_inner())
         .await?;
 
     // One extra query for the whole page, not one per row — see
@@ -297,19 +298,19 @@ pub async fn list<C: Connection + Clone>(
     responses(
         (status = 200, description = "Certificate found", body = Certificate),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn get<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     path: web::Path<Uuid>,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:get", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    let result = state.pki.cert_service.get(user.tenant_id, id).await?;
+    let result = state.pki.cert_service.get(principal.tenant_id, id).await?;
     Ok(HttpResponse::Ok().json(result))
 }
 
@@ -322,19 +323,23 @@ pub async fn get<C: Connection + Clone>(
     responses(
         (status = 200, description = "Certificate revoked"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn revoke<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     path: web::Path<Uuid>,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:revoke", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
-    state.pki.cert_service.revoke(user.tenant_id, id).await?;
+    state
+        .pki
+        .cert_service
+        .revoke(principal.tenant_id, id)
+        .await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
 }
 
@@ -348,17 +353,17 @@ pub async fn revoke<C: Connection + Clone>(
     responses(
         (status = 200, description = "Certificate bound to service account"),
     ),
-    security(("bearer" = []))
+    security(("bearer" = []), ("service_account" = []))
 )]
 pub async fn bind<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    principal: AuthenticatedPrincipal,
     authz: AuthzData,
     path: web::Path<Uuid>,
     state: web::Data<AppState<C>>,
     body: web::Json<BindCertificate>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:bind", Uuid::nil())
-        .check(&user, authz.get_ref().as_ref())
+        .check(&principal, authz.get_ref().as_ref())
         .await?;
     let sa_id = path.into_inner();
     let input = body.into_inner();
@@ -367,7 +372,7 @@ pub async fn bind<C: Connection + Clone>(
     let cert = state
         .pki
         .cert_repo
-        .get_by_id(user.tenant_id, input.certificate_id)
+        .get_by_id(principal.tenant_id, input.certificate_id)
         .await?;
 
     // And that it can actually authenticate anything. A revoked or expired
@@ -397,13 +402,13 @@ pub async fn bind<C: Connection + Clone>(
     use axiam_core::repository::ServiceAccountRepository;
     state
         .service_account_repo
-        .get_by_id(user.tenant_id, sa_id)
+        .get_by_id(principal.tenant_id, sa_id)
         .await?;
 
     state
         .pki
         .cert_repo
-        .bind_to_service_account(user.tenant_id, cert.id, sa_id)
+        .bind_to_service_account(principal.tenant_id, cert.id, sa_id)
         .await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({

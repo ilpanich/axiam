@@ -43,6 +43,55 @@ cargo build -p axiam-server --no-default-features
 ./target/debug/axiam-server --dump-openapi > sdks/openapi.json
 ```
 
+## Authentication — who may call which route
+
+Every guarded route takes an AXIAM access token, from the `axiam_access` cookie
+or an `Authorization: Bearer` header. Which **kind** of principal may hold it
+is the `aud` claim, and the OpenAPI document says it per operation:
+
+| Security scheme in the spec | Token | Accepted on |
+|---|---|---|
+| `bearer` | a user's (`aud` = `axiam:user`) | every guarded route |
+| `service_account` | a service account's (`aud` = `axiam:m2m`, `sub_kind` = `service_account`), from client credentials or the mTLS device login | only the operations that list it |
+
+An operation that lists both admits either. Since T22.13 (S-9, after 1.0.0-beta16)
+those are the **management families** — resources, scopes, permissions, roles
+(the assignment routes included), groups, service accounts, certificates
+(generate, sign-csr, bind, list, get, revoke) and webhooks — plus
+`POST /authz/check` and `/authz/check/batch`. Every other route answers a
+service-account token with `401` and
+`audience mismatch — this route requires axiam:user audience`: self-service
+(`/auth/me`, MFA, sessions, password change), users, organizations and tenants,
+settings, CA certificates, PGP keys, SCIM tokens, federation configuration,
+OAuth2 clients and the rest. Each of those keeps a human audience until it is
+argued on its own (decision D-5 in
+[`dogfooding-findings-fix-plan.md`](../../claude_dev/dogfooding-findings-fix-plan.md)).
+
+What a service account may **do** on an admitted route is decided by the roles
+assigned to it (`POST /api/v1/roles/{role_id}/service-accounts`), exactly as for
+a user: an account with no role gets `403` with `"error":
+"authorization_denied"` and the checked `action` in the body. The rest follows
+from the same rules a user is under:
+
+- **Tenant.** An account created in an ordinary tenant acts in that tenant
+  only; `X-Axiam-Tenant` naming another is `403`. One created in the
+  organization's reserved scope may name a tenant of its organization, within
+  the tenants its assignments reach, as an organization administrator can.
+- **Certificates.** A service account issues leaves under the signing CA of
+  the tenant it acts on, **never** directly under the organization CA,
+  wherever it lives.
+- **Certificate-bound tokens.** A device token carries `cnf.x5t#S256` and is
+  refused (`401`) unless presented over mTLS with that certificate.
+- **Audit.** Its requests are recorded with actor type `service_account`.
+- **CSRF.** A request carrying only a bearer header needs no CSRF token; one
+  that also carries a session cookie does, whoever sent it.
+- **Revocation.** A machine token has no session. Disabling the account stops
+  new tokens; one already issued lives out its access-token lifetime.
+
+A machine-audience token whose `sub_kind` is not `service_account` — an OAuth2
+client's, or a user's token narrowed to `axiam:m2m` by token exchange — is
+refused on these routes with `401`.
+
 ## Errors
 
 Every REST error carries the same JSON envelope, whatever endpoint produced

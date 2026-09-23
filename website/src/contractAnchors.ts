@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.48";
+export const CONTRACT_VERSION = "1.51";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -39,6 +39,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "27": "#§27-management-api-m1",
  "28": "#§28-mcp-resource-server-helpers-rfc-9728",
  "1.1": "#§11-grpc-only-operations",
+ "1.1.1": "#§111-validate_token-and-introspect_token-contract-151",
  "3a": "#§3a-resource-server-middleware-csrf-inbound",
  "5.1": "#§51-organization-context-required-for-login-and-refresh",
  "5.2": "#§52-organization-level-principals-contract-131",
@@ -172,12 +173,14 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "27.4": "#§274-semantics-normative-identical-in-all-sdks",
  "27.5": "#§275-sensitivet-applicability",
  "27.6": "#§276-declarative-management--the-manifest",
+ "27.6.1": "#§2761-the-manifest-spec-where-151-makes-it-explicit",
  "27.7": "#§277-per-language-declarative-form",
  "27.8": "#§278-how-an-sdk-builds-this",
  "27.9": "#§279-required-tests",
  "27.10": "#§2710-per-sdk-posture",
  "27.12": "#§2712-tenantsdelete-requires-a-fresh-audit-export-contract-133",
  "27.11": "#§2711-model-additions-contract-131",
+ "27.13": "#§2713-model-and-status-changes-from-the-dogfooding-remediation-contract-151",
  "28.0": "#§280-the-division-of-labour",
  "28.1": "#§281-canonical-operation-set",
  "28.2": "#§282-the-document-and-its-validation-normative",
@@ -188,7 +191,8 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "28.7": "#§287-per-language-naming-map",
  "28.8": "#§288-sensitivet-applicability",
  "28.9": "#§289-required-tests",
- "28.10": "#§2810-per-sdk-posture"
+ "28.10": "#§2810-per-sdk-posture",
+ "28.11": "#§2811-cross-sdk-conformance-review-contract-149"
 };
 
 /**

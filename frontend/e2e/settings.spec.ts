@@ -99,4 +99,35 @@ test.describe("Settings page", () => {
       page.getByRole("button", { name: /Edit Settings/i })
     ).toBeVisible();
   });
+
+  // S-7b. A fresh bootstrap lists no Server names, and the card must say what
+  // that means (I1: every Server request is refused).
+  test("shows the Server certificate names card, empty by default", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await expect(
+      page.getByRole("heading", { name: "Server Certificate Names", exact: true })
+    ).toBeVisible();
+    await expect(
+      page.getByText("Empty — every Server certificate request is refused.")
+    ).toBeVisible();
+  });
+
+  // The live tighten-only refusal, end to end: the tenant adds a name its
+  // organization never listed, and the server's 400 is shown as it comes. A
+  // refused save changes nothing, so this leaves the fixture as it found it.
+  test("a tenant widening the Server name list gets the server's refusal verbatim", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await page.getByRole("button", { name: /Edit Settings/i }).click();
+    const names = page.getByRole("group", { name: "Server certificate names" });
+    await names.getByRole("button", { name: "Add entry" }).click();
+    await names.getByLabel("Allowed name 1", { exact: true }).fill(".example.com");
+    await page.getByRole("button", { name: /Save Settings/i }).click();
+    await expect(page.getByRole("alert")).toContainText(
+      /server_cert_allowed_names: ".example.com" is not within the org baseline/
+    );
+  });
 });

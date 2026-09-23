@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Non-inheritable role assignments in the admin console (T22.11b, S-10b).**
+  Every assign dialog offers *Also applies to the resource's descendants*
+  (`inherit`, checked by default) once a resource is chosen for a role that is
+  not global — never where the server would refuse `inherit: false` — and
+  sends the field only when it is unchecked, so every other body is unchanged.
+  The role's and the group's assignment listings badge a non-inheritable row
+  *This resource only*, and *Stop here* / *Include descendants* changes the
+  flag after a confirmation naming the effect. Because a second assign is a
+  `409` by design, the change is unassign-then-assign; a refused second call
+  re-assigns the old assignment and says so, and a failed restore says the
+  subject no longer holds the role.
+  Saving a role as global while it has non-inheritable assignments now asks
+  first, naming them: a global role ignores where it is assigned, so each would
+  apply everywhere. A confirmation, not a refusal — the server accepts the
+  change, as T-285's residual records; a role with none is saved exactly as
+  before.
+- **Server certificates in the admin console (T22.14b, S-7b).** The
+  certificate dialogs — *Generate Certificate* and *Sign a CSR* — offer the
+  `Server` type with a list of subject alternative names, one row per DNS name
+  or IP address. The list is shown only for `Server` and required there; every
+  other type's request body is unchanged. The console checks shape only (a row
+  is not empty, and is DNS or IP); admission is the server's, and its `400` is
+  shown verbatim, including the refusal of a `Server` CSR under a `vault_pki`
+  CA. The CSR dialog no longer claims that a leaf carries no `keyUsage` or
+  `extendedKeyUsage`, which stopped being true with the T22.14 profile.
+  A **Server Certificate Names** card edits `server_cert_allowed_names` where
+  it is written: the organization's Settings tab (the baseline), a tenant's own
+  Settings page (shown as the effective list the server reads back), and the
+  tenant detail page's Security Overrides panel, where *Override Server
+  certificate names* distinguishes "follow the organization" from "issue none".
+  Each explains the three entry forms, that an empty list refuses every
+  `Server` request, and that a tenant may only narrow; a widening is the
+  server's `400`, shown as it comes.
 - **Server certificates, and the names they may carry (T22.14, DF-001).**
   AXIAM could not issue a certificate a TLS *server* can present: leaves
   carried no subjectAltName, and neither request body had a field to ask for
@@ -103,7 +136,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     widens it.
   - **Visible.** Every assignment listing carries `inherit` beside
     `resource_id`, and the `grant.pre_assign` reactor payload carries it too.
-    The admin console does not offer the flag yet; set it through the API.
+    The admin console offers it since T22.11b (below).
 
   Nothing existing changes meaning: schema v66 adds `has_role.inherit` as
   `option<bool>` with no backfill, and an absent value reads as `true`.
@@ -260,6 +293,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Saving any setting in the console no longer discards a Server-name
+  allow-list (T22.14b).** Between #495 and this change the console knew
+  nothing of `server_cert_allowed_names`, and three of its settings writes
+  lost it silently:
+  - the organization **Settings** tab sends the whole baseline, which the
+    server stores whole, so a save of any other field stored the list as empty
+    and `reconcile_tenant_overrides` narrowed every tenant to nothing. That
+    direction fails closed: no `Server` certificate could be issued until the
+    list was re-entered through the API;
+  - a tenant's own **Settings** page stores only what differs from the
+    baseline, so a save dropped a tenant's narrowing and put the tenant back
+    on the organization's wider list;
+  - the tenant detail page's **Security Overrides** panel replaces the override
+    whole, with the same result.
+
+  Each path now carries the list it loaded. Neither widening could exceed the
+  organization's own list, which is the fence T-288 describes.
 - **The console resolves its backend per request (T22.10, DF-026).** Its nginx
   named the backend literally in `proxy_pass`, and nginx resolves a literal host
   once, when it loads its configuration. A console started before

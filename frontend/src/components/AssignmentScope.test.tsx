@@ -7,6 +7,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import {
   AssignmentScopeBadge,
+  InheritToggle,
   ResourceScopePicker,
   TenantScopeBadge,
   TenantScopePicker,
@@ -486,5 +487,79 @@ describe("TenantScopePicker", () => {
     for (const box of screen.getAllByRole("checkbox")) {
       expect(box).toBeDisabled();
     }
+  });
+});
+
+// ─── S-10b — the inherit flag ─────────────────────────────────────────────────
+
+describe("AssignmentScopeBadge — inherit (S-10b)", () => {
+  const nameFor = (id: string) => (id === "r1" ? "billing-service" : id);
+
+  beforeEach(() => signInAsTenantAdmin());
+
+  it("marks a non-inheritable assignment 'This resource only', and the tooltip stops promising descendants", () => {
+    renderWithProviders(
+      <AssignmentScopeBadge resourceId="r1" nameFor={nameFor} inherit={false} />
+    );
+    expect(screen.getByText("This resource only")).toBeInTheDocument();
+    expect(screen.getByText("billing-service")).toHaveAttribute(
+      "title",
+      'Applies at the resource "billing-service" only — not at its descendants (inherit: false)'
+    );
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["true", true],
+  ] as const)("I4 twin: inherit %s renders exactly today's badge", (_, inherit) => {
+    renderWithProviders(
+      <AssignmentScopeBadge resourceId="r1" nameFor={nameFor} inherit={inherit} />
+    );
+    expect(screen.queryByText("This resource only")).not.toBeInTheDocument();
+    expect(screen.getByText("billing-service")).toHaveAttribute(
+      "title",
+      'Applies only under the resource "billing-service" and its descendants'
+    );
+  });
+
+  it("shows the marker beside a tenant-scoped badge too", async () => {
+    signInAtOrganizationScope();
+    mockLists();
+    renderWithProviders(
+      <AssignmentScopeBadge
+        resourceId="r1"
+        nameFor={nameFor}
+        tenantScope={["t2"]}
+        inherit={false}
+      />
+    );
+    expect(await screen.findByText("Staging")).toBeInTheDocument();
+    expect(screen.getByText("This resource only")).toBeInTheDocument();
+  });
+
+  it("claims nothing for a stray false on an assignment with no resource", () => {
+    renderWithProviders(
+      <AssignmentScopeBadge resourceId={null} nameFor={nameFor} inherit={false} />
+    );
+    expect(screen.queryByText("This resource only")).not.toBeInTheDocument();
+    expect(screen.getByText("Tenant-wide")).toBeInTheDocument();
+  });
+});
+
+describe("InheritToggle", () => {
+  it("is checked by default wording, and says 'here and no further' once unchecked", async () => {
+    const onChange = vi.fn();
+    const { rerender } = renderWithProviders(
+      <InheritToggle id="x" checked onChange={onChange} subject="user" />
+    );
+    const box = screen.getByLabelText(/Also applies to the resource.s descendants/);
+    expect(box).toBeChecked();
+    expect(screen.getByText(/at the resource and everywhere below it/)).toBeInTheDocument();
+    await userEvent.click(box);
+    expect(onChange).toHaveBeenCalledWith(false);
+    rerender(<InheritToggle id="x" checked={false} onChange={onChange} subject="user" />);
+    expect(screen.getByText(/Here and no further/)).toBeInTheDocument();
+    // The direction a deny moves is the one worth saying out loud.
+    expect(screen.getByText(/re-opens the descendants it used to close/)).toBeInTheDocument();
   });
 });

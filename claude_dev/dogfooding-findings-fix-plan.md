@@ -1291,6 +1291,119 @@ working unchanged. CHANGELOG: **Fixed**. Records: none.
 > types are hand-written, so nothing breaks meanwhile: the form simply does
 > not offer `Server` yet.
 
+> **EXECUTED — S-7b, 2026-09-23, PR G2, commits 1 and 2 of 5** (branch
+> `feat/console-leaf-profile`, cut from `f210676`, the merge of #495; the task
+> §3 does not list, taken as the console follow-up this block names).
+>
+> **Commit 1 — the certificate form.**
+>
+> - **Shipped.** `CertificateType` gains `Server`; `SubjectAltName` is typed as
+>   the server deserialises it (`{dns}` | `{ip}`, externally tagged, snake
+>   case). Both dialogs share one `CertificateTypeSelect` and, for `Server`
+>   only, one `SubjectAltNamesField`: one row per name, a DNS/IP select, add and
+>   remove. `subjectAltNamesFromRows` (`services/certificates.ts`) is the whole
+>   client-side rule: at least one row, no blank row, kind `dns` or `ip`,
+>   surrounding whitespace trimmed as the subject already was. Nothing else is
+>   judged in the browser — no suffix match, no wildcard or IDNA or trailing-dot
+>   or IPv4-mapped check — and the tests pin that by sending each of those
+>   through unchanged. The server's `400` reaches the dialog through the
+>   existing `getApiErrorMessage` path, verbatim.
+> - **I4.** A `User`, `Service` or `Device` request carries no
+>   `subject_alt_names` key at all, not an empty one — asserted on the key set,
+>   because `toHaveBeenCalledWith` treats an `undefined` property as absent and
+>   would pass either way. A type switched away from `Server` drops its names.
+> - **The Vault custodian.** A `Server` sign-CSR under a `vault_pki` CA is
+>   refused by design (the S-7 block above). The console does not try to
+>   predict it — `CaCertificateOption` does not even carry `key_custody` — it
+>   says so beside the list and shows the server's message, quoted from
+>   `CertService::sign_csr` in the test.
+> - **One sentence was false since S-7 and is corrected**: the CSR dialog's hint
+>   said the issued certificate carries no `keyUsage` or `extendedKeyUsage`.
+>   Every leaf now carries the profile.
+> - **Tests.** `services/certificates.test.ts` (new, 14): the mapping, the
+>   three shape refusals, six "does not judge" cases, both endpoints' bodies and
+>   the Device twin. `CertificatesPage.test.tsx` (+11): the type offered in both
+>   dialogs with the list only for `Server`, a mixed DNS/IP body in order, the
+>   blank-row and no-row refusals on both paths, fenced names sent as typed with
+>   the `400` verbatim, the Vault refusal verbatim, both I4 twins and a reset on
+>   reopen. `e2e/certificates.spec.ts` gains a live-backend test per dialog that
+>   waits for the page rather than probing it once — the file's two older
+>   dialog tests use a one-shot `isVisible()` and look for labels the page does
+>   not have (`Common Name *`, `Key Type`), so they can pass only through their
+>   `else` branch; they are left as they are and listed in §13.
+> - **Docs.** `docs/pki/README.md` did **not** carry a "the console does not
+>   offer this yet" sentence, as the brief expected: the guide said nothing
+>   about the console for `Server` at all. It gains an "In the admin console"
+>   paragraph instead.
+> - **Records: none, verified.** T-288's mitigation is entirely server-side
+>   (`check_leaf_names` runs before the CA lookup on both leaf paths) and
+>   nothing in Axiam.json or either STRIDE document says anything about the
+>   console for `Server` certificates. The form adds no decision the server
+>   does not make again.
+>
+> **Commit 2 — the settings card.**
+>
+> - **Shipped.** One module, `pages/settings/serverNamesPolicy.tsx`
+>   (`ServerNamesFields`, `ServerNamesSummary`), mounted where the list is
+>   written: the organization Settings tab (baseline, `PUT
+>   /organizations/{id}/settings`), the tenant's own Settings page (`PUT
+>   /api/v1/settings`) and the tenant detail page's Security Overrides panel
+>   (`PUT /tenants/{id}/settings`). All three say the same four things: the
+>   three entry forms, that `.x` means strictly below and not the apex, that
+>   empty refuses every `Server` request, and who may widen. Rows, not a
+>   textarea: the other settings lists re-parse a textarea on every keystroke,
+>   which drops a trailing newline and makes a second line hard to start.
+> - **Read-back, not computed.** The tenant pages render
+>   `certificate.server_cert_allowed_names` from `GET /api/v1/settings` — the
+>   intersection the server computes on every read — and a test changes the
+>   list between load and save to prove the page shows the server's answer, not
+>   the body it sent. The organization tab shows the stored baseline under its
+>   editor for the same reason. No coverage or intersection logic exists in the
+>   console; `cleanAllowedNames` trims and drops blank rows and passes a
+>   malformed CIDR, a wildcard entry, a trailing dot or a URL through to the
+>   server's `400`.
+> - **What the plan did not anticipate: three silent-loss paths on `main`
+>   since #495,** found by reading the three handlers rather than the form.
+>   1. `flattenOrgSettings` omitted the field, the organization `PUT` replaces
+>      the whole row, and `SetOrgSettings` defaults an absent list to `[]` —
+>      so saving any organization setting emptied the baseline, and
+>      `reconcile_tenant_overrides` narrowed every tenant to nothing. Fails
+>      closed, but silently undoes an administrator's decision; it is the
+>      OPAQUE and OIDC round-trip bugs of earlier waves, for a third block.
+>   2. `PUT /api/v1/settings` stores `diff_against_org(effective)`
+>      (`repository/settings.rs`, `store_effective_tenant_settings`). With the
+>      field absent the effective list is the organization's, the diff is
+>      `None`, and a tenant's narrowing was dropped — the tenant went back to
+>      the wider organization list. The page now always sends the effective
+>      list it loaded; the diff makes that a no-op when nothing was edited,
+>      which the "no allow-list" I4 twin states (the body carries the `[]` the
+>      server already stores).
+>   3. `PUT /tenants/{id}/settings` replaces the override whole, so the panel
+>      discarded a narrowing on a save of any other group. The panel gains its
+>      own `serverNames` group, re-checked from a stored override, rather than
+>      riding the "certificate validity" group, because absent ("follow the
+>      organization") and empty ("issue none") are different values.
+>   None of the three could widen beyond the organization's list, so T-288
+>   holds as written; they are recorded under **Fixed** in the CHANGELOG
+>   rather than as a threat.
+> - **Tests.** `settings.test.ts` (+5: read-back fallback, clean, "judges
+>   nothing else", empty), `services.test.ts` (+1 and one assertion: the
+>   flatten carries the list; absent reads as `[]`), `SettingsPage.test.tsx`
+>   (+8), `OrganizationDetailPage.component.test.tsx` (+5),
+>   `SecurityOverridePanel.test.tsx` (+7): each regression above pinned on its
+>   own page, the widening `400` quoted from `validate_tenant_override`, the
+>   explicit-empty override kept distinct from inheriting, and the I4 twins
+>   (no key sent while the panel group is unchecked; `[]` round-tripped where
+>   nothing is listed). `e2e/settings.spec.ts` gains the empty-by-default card
+>   and a live widening refused verbatim, which changes nothing server-side.
+> - **Docs.** `docs/pki/README.md`'s console paragraph gains the three places;
+>   the website's Server-certificate block gains one sentence
+>   (`website/src/docs/operate.ts`; website lint, type-check and build run).
+> - **Records: none, verified**, as for commit 1: the tighten-only interlock,
+>   the org-side validation and the intersection are all in
+>   `axiam_core::models::settings`, and the console only carries values to
+>   them.
+
 
 **Why fix, and why carefully.** The demo's whole PKI constraint — one trust
 anchor, everything anchored in the AXIAM organization root — fails at exactly
@@ -1839,6 +1952,104 @@ reach before — RBAC is default-deny, and the sweep test proves it.
 >     breaks and the new response field is ignored; the dialogs gain no control.
 >     Recorded in the admin guide and the CHANGELOG as API-only for now.
 
+> **EXECUTED — S-10b, 2026-09-23, PR G2, commits 3 and 4 of 5** (the console half of
+> item 11 above; roadmap **T22.11b** — numbered after the task it completes,
+> since this roadmap's T22.10 is the console resolver, S-11).
+>
+> **Commit 3 — the flag in the dialogs and the listings.**
+>
+> - **Shipped.** `services/roles.ts` carries `inherit?` on every assignment
+>   row and a fifth `inherit` argument on the three assign calls, sent only as
+>   `false` (`inheritField`), so an inheritable assignment's body is
+>   byte-for-byte today's. `assignmentInherits` reads absent as `true`, as the
+>   repository does; `canChangeInherit` is the one predicate for "a resource,
+>   and not a global role". `InheritToggle` (in `AssignmentScope.tsx`) is
+>   rendered by all five assign surfaces — the shared `AssignRoleDialog` (user
+>   and group pages) and the role page's user, group and service-account
+>   dialogs — only when that predicate holds for the chosen resource and role,
+>   and a hidden unchecked box falls back to `true` on submit, so switching to
+>   a global role or clearing the resource can never send the 400. The service
+>   account dialog is included although the brief names users and groups: it is
+>   the same rule on the same page, and the server takes the flag on all three
+>   routes.
+> - **Listings.** `AssignmentScopeBadge` gains `inherit`: a *This resource
+>   only* chip, and a resource tooltip that no longer says "and its
+>   descendants" on a row that has none. Shown on the role page's three tabs
+>   and the group page. The user page has no listing (it points to the Roles
+>   page), so there is nothing there to badge.
+> - **Toggling is unassign-then-assign** (`roleService.setAssignmentInherit`,
+>   `components/AssignmentInheritChange.tsx`), never a second assign — that is
+>   a 409 by design. A refused unassign changes nothing and says so. A refused
+>   re-assign assigns the **old** assignment again (same resource, same
+>   `tenant_scope`, old flag) and throws `AssignmentToggleError { restored:
+>   true }`; if that restore fails too, `restored: false` and a message that
+>   begins "The user no longer holds this role at this resource". The dialog
+>   stays open with the outcome, and the listing is re-read after every
+>   attempt, because a half-done change is still a change. Between the two
+>   calls the subject holds nothing, which the confirmation states before the
+>   first click, together with the direction: `false` on a deny re-opens the
+>   subtree.
+> - **One wording collision fixed before commit.** The row action for an
+>   inheritable assignment was first labelled *This resource only* — the badge
+>   text for the opposite state. The I4 test caught it; the action now reads
+>   *Stop here*, the confirmation *Apply here only*.
+> - **Tests.** `services/roles.test.ts` (new, 15): the field on all three
+>   routes, the I4 twins (omitted and `true` send no key), the server's
+>   no-resource refusal passed through, the two predicates, and every branch of
+>   the change — order of the two calls, the scopes and old flag carried into
+>   the restore, restored, not restored, refused unassign.
+>   `AssignRoleDialog.test.tsx` (new, 8), `AssignmentScope.test.tsx` (+6),
+>   `RoleDetailPage.test.tsx` (+12), `GroupDetailPage.test.tsx` (+4). Every
+>   refusal is quoted from `validate_inherit`. `e2e/matrix/assignment-inherit.spec.ts`
+>   (new, 3) is **read-only** against the live fixture — a scoped assignment
+>   made without the field reads as inheritable, the dialog offers the flag
+>   only after a resource is chosen, a global role's rows offer nothing —
+>   because `resource-hierarchy.spec.ts` depends on mx-editor's assignment
+>   cascading, and toggling it there would make that file's answers depend on
+>   run order.
+> - **Records: T-285 amended, no new threat — verified.** Its residual said the
+>   console does not offer the flag; Axiam.json and the STRIDE detail block now
+>   say what it does. Nothing new is decided client-side: both 400s are the
+>   server's (`validate_inherit`), the change is the two calls the S-10 block
+>   already verified invalidate, and the console only chooses not to offer what
+>   would be refused. `gen-threat-model.mjs`: *"threatModel.ts: 9 diagrams, 279
+>   threats (266 mitigated, 13 open)"* — unchanged; generated files reverted.
+>
+> **Commit 4 — asking before a role is made global.**
+>
+> - **Shipped.** `useMakeRoleGlobalGuard` (hook) and `MakeRoleGlobalConfirm`
+>   (dialog), used by both places that edit `is_global`: the role list's and
+>   the role page's *Edit Role*. The guard does nothing — no read, no dialog,
+>   the same `PUT` — unless the save moves `is_global` from false to true. Then
+>   it reads the role's three assignment listings from the server
+>   (`roleService.nonInheritableAssignments`) and asks only if one of them is
+>   resource-scoped with `inherit: false`, or if the read failed ("could not
+>   check" is not "none"). The question names up to three of them with their
+>   resources, counts the rest, and says the effect: each will apply
+>   everywhere, the descendants it stopped short of included, and a deny among
+>   the role's grants would deny everywhere. *Keep it scoped* returns to the
+>   form with its values intact (the form is hidden, not closed); *Make global*
+>   sends exactly the body it would have sent.
+> - **A confirmation, not a refusal**, as the brief and T-285 say: the server
+>   accepts the change by design, so the console must not make it impossible —
+>   only not silent.
+> - **Tests.** `roles.test.ts` (+2: the aggregation across all three kinds,
+>   excluding cascading and tenant-wide rows; the none case),
+>   `RoleDetailPage.test.tsx` (+5) and `RolesPage.test.tsx` (+3): asked and
+>   saved on confirm, *Keep it scoped* saves nothing, the failed-read wording,
+>   and the I4 twins — only cascading assignments save at once, an edit that
+>   leaves the role scoped makes none of the guard's reads before its `PUT`
+>   (counted at the instant the `PUT` is issued), and un-making a role global
+>   never asks.
+> - **Mutations, all four caught, all reverted.** The guard reading on every
+>   save (the no-read twin went red); the guard never asking (four tests red);
+>   `setAssignmentInherit` skipping the restore (five red, commit 3's); the
+>   dialog offering the flag unconditionally (four red, commit 3's).
+> - **Records: T-285 amended again, no new threat — verified.** The residual
+>   stands, since the server behaviour is unchanged; its text now says the
+>   console confirms first. `gen-threat-model.mjs`: *"threatModel.ts: 9
+>   diagrams, 279 threats (266 mitigated, 13 open)"*; generated files reverted.
+
 **The proposal, kept, with two refinements.** The user's DF-021 asks for a
 `non_inheritable` flag on a grant plus a write-time rejection of a
 non-inheritable grant with no resource. Both are right. The refinements:
@@ -2359,6 +2570,37 @@ Rules that bind this session:
 Start by printing the task list for PR <LETTER> with the files each task
 touches, then begin with the first task.
 ```
+
+---
+
+## 13. Open after PR G
+
+Written at the end of PR G2 (S-7b, S-10b), when every server task of this plan
+— S-1 … S-11 — and both console follow-ups have shipped. What remains is
+below, one row per item, each with who takes it and what the next step is.
+None of it is worked in PR G2.
+
+| # | Item | Owner | Next step |
+|---|---|---|---|
+| 1 | **PR H → I₁ … I₁₁ → J**: contract 1.50 (C-0), the eleven SDK ports (C-1 … C-11), the conformance review (C-12) | Executing sessions: Opus 5 for C-0, C-1, C-12; Sonnet 5 for C-2 … C-11 (§2) | Open PR H (`docs/contract-1.50`) from `main` as it stands after G2 — §6 C-0 is the brief — then C-1 (Rust) before the ten ports, per §8. `check-sdk-artifact-drift.py` stays red until the SDKs re-vendor from the C-0 commit; that is expected, not a regression |
+| 2 | **Vault `sign_csr` of a `Server` certificate.** Refused under a `vault_pki` CA today, by design (S-7 EXECUTED, item 1): Vault's `sign-verbatim` takes SANs from the CSR only, and the CSR may not carry them | Maintainer decision, then an Opus 5 session (certificate issuance) | Decide whether to add the config key the plan excluded: a Vault role with `use_csr_sans=false`, so explicit names can reach the certificate. Until then `POST /certificates` (generate) is the path under a Vault CA, and the console says so |
+| 3 | **D-7: X.509 `nameConstraints` in tenant CAs**, so the name fence holds for a relying party that never talks to AXIAM. T-288's residual | Next PKI pass; Opus 5 | A design note first: how a change to `server_cert_allowed_names` re-issues (or does not re-issue) a tenant CA, and what happens to leaves already issued under the old constraints |
+| 4 | **The intermittent `500` from CA-certificate creation during e2e fixture setup**, deferred in S-5 as "a real unknown in CA generation; gets its own change" | Unassigned; its own change | Reproduce first: loop the matrix fixture's CA creation against a local stack and capture the server log for the `500`. No fix before there is a cause |
+| 5 | **`k8s/frontend/deployment.yml`**: `readOnlyRootFilesystem: true` with no volume at `/etc/nginx/conf.d`, so the stock `20-envsubst-on-templates.sh` cannot render and the console most likely serves the base image's `default.conf` — no SPA fallback, no security headers, no proxying. Found in S-11 by reading the entrypoint; **not observed on a cluster** | Maintainer (deployment); a Sonnet 5 session can take the change | Observe it on a cluster (`kubectl exec … cat /etc/nginx/conf.d/default.conf`) before changing anything; if confirmed, mount an `emptyDir` at `/etc/nginx/conf.d` and add a probe that fails on the stock page |
+| 6 | **Threat-model reconciliation**: `Axiam.json` is nine entries behind the STRIDE documents (flagged since PR A) | Maintainer | Write the nine missing entries into the Threat Dragon file from the text `threat-model-stride.md` already holds, then regenerate `website/src/threatModel.ts` and commit it, closing the gap `gen-threat-model.mjs` reports (279 in the JSON against 288 in the documents) |
+| 7 | **D-3: widen the `has_role` key to (subject, role, resource)** | Maintainer decision (§7.1) | A design document of its own, with the data migration: verify no subject holds a role both globally and at a resource, and how "one global assignment" stays unique without a partial index |
+| 8 | **D-4: mirror the management surface on gRPC** | Deferred | When taken: `ReactorAdminService` (`proto/axiam/v1/reactor.proto`) is the precedent; S-8's client-certificate verification is now in place for the listener it would ride on |
+| 9 | **D-5, second round**: whether each excluded route family should accept a service-account token — self-service, organizations/tenants, settings, CA, PGP, SCIM, federation | Maintainer, argued family by family | One decision per family, each with the argument S-9 made for the eight it admitted; the route-map sweep in `m2m_management_test.rs` is where each decision is pinned |
+| 10 | **D-6: a device access-token lifetime setting** | Deferred, only if the fleet cost turns out to be real | Measure first: handshake and token-issuance cost per device over a day, against the default 900 s lifetime |
+| 11 | **§7.2's deliberate exclusions**: `webhooks` in the manifest; certificate-only authentication on gRPC; the `users` / `scopes` manifest tier in PHP, Swift, C and C++ | Deferred; C-0 records the tier gap in §27.10 | Each is taken when a consumer asks for it, not before |
+| 12 | **§10: the feedback rows for the `axiam-domo-demo` findings document** — DF-001, DF-003, DF-004, DF-013, DF-014, DF-024, and the new DF-028 and DF-029 | Maintainer (edits that repository; a session does not) | Apply §10's table to `docs/dogfooding-findings.md` in `axiam-domo-demo` |
+
+**Found during PR G2, not fixed there:**
+
+| # | Item | Owner | Next step |
+|---|---|---|---|
+| 13 | `frontend/e2e/certificates.spec.ts`: the two older Generate-dialog tests probe once with `isVisible()` and look for labels the page does not have (`Common Name *`, `Key Type`), so they can pass only through their `else` branch and assert nothing about the dialog | Sonnet 5, test-only change | Rewrite them with auto-waiting assertions on the real labels (`Subject *`, `Key Algorithm`), as the Server tests next to them do |
+| 14 | The settings lists edited as a textarea (DCR scopes, redirect hosts, audiences; CIMD domains) re-parse on every keystroke through `parseLines`, which drops a trailing newline, so starting a second line is awkward | Sonnet 5, console-only | Keep the raw text in form state and parse on save, or move them to the row editor `serverNamesPolicy.tsx` uses |
 
 **References**
 

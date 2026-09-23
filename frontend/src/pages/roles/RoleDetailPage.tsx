@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useParams } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  canChangeInherit,
   roleService,
   type RoleGroupAssignment,
   type RoleServiceAccountAssignment,
@@ -47,11 +48,19 @@ import { Textarea } from "@/components/ui/textarea";
 import { SectionCard, InfoRow, ActionBadge } from "@/components/shared";
 import {
   AssignmentScopeBadge,
+  InheritToggle,
   ResourceScopePicker,
   TenantScopePicker,
 } from "@/components/AssignmentScope";
+import {
+  InheritChangeButton,
+  InheritChangeDialog,
+  type InheritChangeTarget,
+} from "@/components/AssignmentInheritChange";
 import { useResourceNames } from "@/hooks/useResourceNames";
 import { invalidateEntity } from "@/lib/queryInvalidation";
+import { useMakeRoleGlobalGuard } from "@/hooks/useMakeRoleGlobalGuard";
+import { MakeRoleGlobalConfirm } from "@/components/MakeRoleGlobalConfirm";
 
 // ─── Scope chips ──────────────────────────────────────────────────────────────
 
@@ -439,6 +448,8 @@ interface AssignGroupDialogProps {
   open: boolean;
   onClose: () => void;
   roleId: string;
+  /** A global role takes no `inherit` flag — the server refuses it (S-10). */
+  roleIsGlobal: boolean;
   onAssigned: () => void;
 }
 
@@ -446,6 +457,7 @@ function AssignGroupDialog({
   open,
   onClose,
   roleId,
+  roleIsGlobal,
   onAssigned,
 }: AssignGroupDialogProps) {
   const [selectedGroupId, setSelectedGroupId] = useState("");
@@ -454,6 +466,9 @@ function AssignGroupDialog({
   // Empty reaches every tenant of the organization, which is what this dialog
   // always produced. The picker renders nothing outside an organization scope.
   const [tenantScope, setTenantScope] = useState<string[]>([]);
+  // S-10 — offered only with a resource on a non-global role; `true` otherwise.
+  const [inherit, setInherit] = useState(true);
+  const inheritOffered = Boolean(scopeResourceId) && !roleIsGlobal;
   const [assigning, setAssigning] = useState(false);
   const [error, setError] = useState("");
 
@@ -477,10 +492,12 @@ function AssignGroupDialog({
         selectedGroupId,
         scopeResourceId,
         tenantScope,
+        inheritOffered ? inherit : true,
       );
       onAssigned();
       setSelectedGroupId("");
       setScopeResourceId("");
+      setInherit(true);
       onClose();
     } catch (err) {
       // Surfaced verbatim: the server refuses a second assignment of the same
@@ -495,6 +512,7 @@ function AssignGroupDialog({
   function handleClose() {
     setSelectedGroupId("");
     setScopeResourceId("");
+    setInherit(true);
     setError("");
     onClose();
   }
@@ -546,6 +564,16 @@ function AssignGroupDialog({
           subject="group"
         />
       </div>
+      {inheritOffered && (
+        <div className="mt-4">
+          <InheritToggle
+            id="assign-group-inherit"
+            checked={inherit}
+            onChange={setInherit}
+            subject="group"
+          />
+        </div>
+      )}
       <div className="mt-4">
         <TenantScopePicker
           value={tenantScope}
@@ -561,6 +589,8 @@ interface AssignServiceAccountDialogProps {
   open: boolean;
   onClose: () => void;
   roleId: string;
+  /** A global role takes no `inherit` flag — the server refuses it (S-10). */
+  roleIsGlobal: boolean;
   onAssigned: () => void;
 }
 
@@ -576,12 +606,16 @@ function AssignServiceAccountDialog({
   open,
   onClose,
   roleId,
+  roleIsGlobal,
   onAssigned,
 }: AssignServiceAccountDialogProps) {
   const [selectedId, setSelectedId] = useState("");
   // "" is a global assignment, the same default the user and group dialogs use.
   const [scopeResourceId, setScopeResourceId] = useState("");
   const [tenantScope, setTenantScope] = useState<string[]>([]);
+  // S-10 — as in the group dialog.
+  const [inherit, setInherit] = useState(true);
+  const inheritOffered = Boolean(scopeResourceId) && !roleIsGlobal;
   const [assigning, setAssigning] = useState(false);
   const [error, setError] = useState("");
 
@@ -605,10 +639,12 @@ function AssignServiceAccountDialog({
         selectedId,
         scopeResourceId,
         tenantScope,
+        inheritOffered ? inherit : true,
       );
       onAssigned();
       setSelectedId("");
       setScopeResourceId("");
+      setInherit(true);
       onClose();
     } catch (err) {
       // Verbatim, for the same reason the group dialog is: a 409 means this
@@ -623,6 +659,7 @@ function AssignServiceAccountDialog({
   function handleClose() {
     setSelectedId("");
     setScopeResourceId("");
+    setInherit(true);
     setError("");
     onClose();
   }
@@ -674,6 +711,16 @@ function AssignServiceAccountDialog({
           subject="service account"
         />
       </div>
+      {inheritOffered && (
+        <div className="mt-4">
+          <InheritToggle
+            id="assign-service-account-inherit"
+            checked={inherit}
+            onChange={setInherit}
+            subject="service account"
+          />
+        </div>
+      )}
       <div className="mt-4">
         <TenantScopePicker
           value={tenantScope}
@@ -831,6 +878,10 @@ export function RoleDetailPage() {
     setEditOpen(true);
   }
 
+  // S-10b — making a role global widens its non-inheritable assignments to
+  // everywhere; the guard asks first, and otherwise saves exactly as before.
+  const makeGlobalGuard = useMakeRoleGlobalGuard();
+
   function handleEditSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setEditError("");
@@ -838,14 +889,15 @@ export function RoleDetailPage() {
       setEditError("Name is required.");
       return;
     }
-    editMutation.mutate({
-      id: roleId!,
-      payload: {
-        name: editName.trim(),
-        description: editDescription.trim() || undefined,
-        is_global: editIsGlobal,
-      },
-    });
+    if (!role) return;
+    const payload = {
+      name: editName.trim(),
+      description: editDescription.trim() || undefined,
+      is_global: editIsGlobal,
+    };
+    void makeGlobalGuard.guard(role, editIsGlobal, () =>
+      editMutation.mutate({ id: roleId!, payload })
+    );
   }
 
   // ─── Revoke permission ─────────────────────────────────────────────────────
@@ -961,6 +1013,12 @@ export function RoleDetailPage() {
   const [assignUserTenantScope, setAssignUserTenantScope] = useState<string[]>(
     [],
   );
+  // S-10 — the next user assignment's flag; see `AssignGroupDialog`.
+  const [assignUserInherit, setAssignUserInherit] = useState(true);
+
+  // S-10b — the assignment whose `inherit` flag is being changed, if any.
+  const [inheritTarget, setInheritTarget] =
+    useState<InheritChangeTarget | null>(null);
 
   // ─── Permissions table columns ─────────────────────────────────────────────
   const permissionColumns: Column<Permission>[] = [
@@ -1155,17 +1213,34 @@ export function RoleDetailPage() {
                         resourceId={a.resource_id}
                         nameFor={nameFor}
                         tenantScope={a.tenant_scope}
+                        inherit={a.inherit}
                       />
                     </div>
                     <p className="text-xs text-muted-foreground">{a.user.email}</p>
                   </div>
-                  <button
-                    aria-label={`Unassign ${a.user.username}`}
-                    onClick={() => setUnassignUser(a)}
-                    className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
-                  >
-                    <Unlink size={14} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {canChangeInherit(a, role.is_global) && (
+                      <InheritChangeButton
+                        resourceName={nameFor(a.resource_id)}
+                        onRequest={setInheritTarget}
+                        target={{
+                          kind: "user",
+                          roleId: roleId!,
+                          roleName: role.name,
+                          subjectId: a.user.id,
+                          subjectName: a.user.display_name ?? a.user.username,
+                          assignment: { ...a, resource_id: a.resource_id },
+                        }}
+                      />
+                    )}
+                    <button
+                      aria-label={`Unassign ${a.user.username}`}
+                      onClick={() => setUnassignUser(a)}
+                      className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+                    >
+                      <Unlink size={14} />
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -1194,15 +1269,32 @@ export function RoleDetailPage() {
                       resourceId={a.resource_id}
                       nameFor={nameFor}
                       tenantScope={a.tenant_scope}
+                      inherit={a.inherit}
                     />
                   </div>
-                  <button
-                    aria-label={`Unassign group ${a.group.name}`}
-                    onClick={() => setUnassignGroup(a)}
-                    className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
-                  >
-                    <Unlink size={14} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {canChangeInherit(a, role.is_global) && (
+                      <InheritChangeButton
+                        resourceName={nameFor(a.resource_id)}
+                        onRequest={setInheritTarget}
+                        target={{
+                          kind: "group",
+                          roleId: roleId!,
+                          roleName: role.name,
+                          subjectId: a.group.id,
+                          subjectName: a.group.name,
+                          assignment: { ...a, resource_id: a.resource_id },
+                        }}
+                      />
+                    )}
+                    <button
+                      aria-label={`Unassign group ${a.group.name}`}
+                      onClick={() => setUnassignGroup(a)}
+                      className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+                    >
+                      <Unlink size={14} />
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -1237,19 +1329,36 @@ export function RoleDetailPage() {
                         resourceId={a.resource_id}
                         nameFor={nameFor}
                         tenantScope={a.tenant_scope}
+                        inherit={a.inherit}
                       />
                     </div>
                     <p className="text-xs text-muted-foreground font-mono">
                       {a.service_account.client_id}
                     </p>
                   </div>
-                  <button
-                    aria-label={`Unassign service account ${a.service_account.name}`}
-                    onClick={() => setUnassignServiceAccount(a)}
-                    className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
-                  >
-                    <Unlink size={14} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {canChangeInherit(a, role.is_global) && (
+                      <InheritChangeButton
+                        resourceName={nameFor(a.resource_id)}
+                        onRequest={setInheritTarget}
+                        target={{
+                          kind: "service account",
+                          roleId: roleId!,
+                          roleName: role.name,
+                          subjectId: a.service_account.id,
+                          subjectName: a.service_account.name,
+                          assignment: { ...a, resource_id: a.resource_id },
+                        }}
+                      />
+                    )}
+                    <button
+                      aria-label={`Unassign service account ${a.service_account.name}`}
+                      onClick={() => setUnassignServiceAccount(a)}
+                      className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+                    >
+                      <Unlink size={14} />
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -1259,11 +1368,13 @@ export function RoleDetailPage() {
 
       {/* Edit dialog */}
       <FormDialog
-        open={editOpen}
+        // Hidden, not closed, while the make-global question is open: its
+        // fields are page state, so "Keep it scoped" returns to them intact.
+        open={editOpen && makeGlobalGuard.pending === null}
         onClose={() => setEditOpen(false)}
         title="Edit Role"
         onSubmit={handleEditSubmit}
-        isLoading={editMutation.isPending}
+        isLoading={editMutation.isPending || makeGlobalGuard.checking}
         submitLabel="Save Changes"
         error={editError}
         errorId="role-detail-edit-error"
@@ -1277,6 +1388,12 @@ export function RoleDetailPage() {
           onIsGlobalChange={setEditIsGlobal}
         />
       </FormDialog>
+
+      <MakeRoleGlobalConfirm
+        pending={makeGlobalGuard.pending}
+        onConfirm={makeGlobalGuard.confirm}
+        onCancel={makeGlobalGuard.cancel}
+      />
 
       {/* Revoke permission confirm */}
       <ConfirmDialog
@@ -1306,6 +1423,7 @@ export function RoleDetailPage() {
           setAssignUserOpen(false);
           setAssignUserScope("");
           setAssignUserTenantScope([]);
+          setAssignUserInherit(true);
         }}
         title="Assign User"
         actionLabel="Assign"
@@ -1317,6 +1435,14 @@ export function RoleDetailPage() {
               onChange={setAssignUserScope}
               subject="user"
             />
+            {assignUserScope && !role.is_global && (
+              <InheritToggle
+                id="assign-user-inherit"
+                checked={assignUserInherit}
+                onChange={setAssignUserInherit}
+                subject="user"
+              />
+            )}
             <TenantScopePicker
               value={assignUserTenantScope}
               onChange={setAssignUserTenantScope}
@@ -1331,6 +1457,7 @@ export function RoleDetailPage() {
               user.id,
               assignUserScope,
               assignUserTenantScope,
+              assignUserScope && !role.is_global ? assignUserInherit : true,
             );
             invalidateEntity(queryClient, "role-users");
           } catch (err) {
@@ -1347,6 +1474,7 @@ export function RoleDetailPage() {
         open={assignGroupOpen}
         onClose={() => setAssignGroupOpen(false)}
         roleId={roleId!}
+        roleIsGlobal={role.is_global}
         onAssigned={() => {
           invalidateEntity(queryClient, "role-groups");
           setAssignGroupOpen(false);
@@ -1386,9 +1514,24 @@ export function RoleDetailPage() {
         open={assignServiceAccountOpen}
         onClose={() => setAssignServiceAccountOpen(false)}
         roleId={roleId!}
+        roleIsGlobal={role.is_global}
         onAssigned={() => {
           invalidateEntity(queryClient, "role-service-accounts");
           setAssignServiceAccountOpen(false);
+        }}
+      />
+
+      {/* S-10b — change an assignment's inherit flag (unassign, then assign) */}
+      <InheritChangeDialog
+        target={inheritTarget}
+        resourceName={
+          inheritTarget ? nameFor(inheritTarget.assignment.resource_id) : ""
+        }
+        onClose={() => setInheritTarget(null)}
+        onSettled={() => {
+          invalidateEntity(queryClient, "role-users");
+          invalidateEntity(queryClient, "role-groups");
+          invalidateEntity(queryClient, "role-service-accounts");
         }}
       />
 

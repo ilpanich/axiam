@@ -1048,3 +1048,370 @@ describe("RoleDetailPage — dismissal and refused writes", () => {
     );
   });
 });
+
+// ─── S-10b — the inherit flag ─────────────────────────────────────────────────
+
+describe("RoleDetailPage — inherit (S-10b)", () => {
+  const inheritBox = (scope: HTMLElement) =>
+    within(scope).queryByLabelText(/Also applies to the resource.s descendants/);
+
+  afterEach(() => setToastDispatch(null));
+
+  it("offers the flag in the user dialog only once a resource is chosen, and sends inherit: false", async () => {
+    routeGet(defaultData());
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Assign User/ }));
+    const dialog = screen.getByRole("dialog");
+    expect(inheritBox(dialog)).not.toBeInTheDocument();
+    await userEvent.selectOptions(within(dialog).getByLabelText("Scope"), "res1");
+    await userEvent.click(inheritBox(dialog)!);
+    await userEvent.type(within(dialog).getByLabelText("Search users"), "al");
+    await userEvent.click(await within(dialog).findByRole("button", { name: "Assign" }));
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+    expect(apiMock.post.mock.calls[0]).toEqual([
+      URLS.users,
+      { user_id: "u1", resource_id: "res1", inherit: false },
+    ]);
+  });
+
+  it("I4 twin: a scoped user assignment left checked sends no inherit key", async () => {
+    routeGet(defaultData());
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Assign User/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Scope"), "res1");
+    expect(inheritBox(dialog)).toBeChecked();
+    await userEvent.type(within(dialog).getByLabelText("Search users"), "al");
+    await userEvent.click(await within(dialog).findByRole("button", { name: "Assign" }));
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+    expect(Object.keys(apiMock.post.mock.calls[0][1]).sort()).toEqual(["resource_id", "user_id"]);
+  });
+
+  it("offers it in the group and service-account dialogs, and sends it", async () => {
+    routeGet(defaultData());
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await screen.findByText("Editor");
+
+    await userEvent.click(screen.getByRole("button", { name: "groups" }));
+    await userEvent.click(screen.getByRole("button", { name: /Assign Group/ }));
+    let dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Group"), "g1");
+    expect(inheritBox(dialog)).not.toBeInTheDocument();
+    await userEvent.selectOptions(within(dialog).getByLabelText("Scope"), "res2");
+    await userEvent.click(inheritBox(dialog)!);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(URLS.groups, {
+        group_id: "g1",
+        resource_id: "res2",
+        inherit: false,
+      })
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "service accounts" }));
+    await userEvent.click(screen.getByRole("button", { name: /Assign Service Account/ }));
+    dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(await within(dialog).findByLabelText("Service account"), "sa1");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Scope"), "res1");
+    await userEvent.click(inheritBox(dialog)!);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(URLS.serviceAccounts, {
+        service_account_id: "sa1",
+        resource_id: "res1",
+        inherit: false,
+      })
+    );
+  });
+
+  it("offers no flag on a global role's dialogs, where the server would refuse it", async () => {
+    routeGet(defaultData({ [URLS.role]: { ...role, is_global: true } }));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Assign User/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Scope"), "res1");
+    expect(inheritBox(dialog)).not.toBeInTheDocument();
+  });
+
+  it("marks a non-inheritable row, and offers the change only on scoped rows", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [
+          { user: users[0], resource_id: "res1", inherit: false },
+          { user: { ...users[0], id: "u2", username: "bob", display_name: "Bob B", email: "b@x.io" }, resource_id: null, inherit: true },
+        ],
+      })
+    );
+    renderPage();
+    expect(await screen.findByText("This resource only")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Extend Alice A's Editor assignment to the descendants of Billing" })
+    ).toBeInTheDocument();
+    // Bob's is tenant-wide: nothing to stop at, so nothing to change.
+    expect(screen.queryByRole("button", { name: /Bob B's Editor assignment/ })).not.toBeInTheDocument();
+  });
+
+  it("I4 twin: rows written before the field carry no marker and read as inheritable", async () => {
+    routeGet(defaultData({ [URLS.users]: [{ user: users[0], resource_id: "res1" }] }));
+    renderPage();
+    expect(
+      await screen.findByRole("button", { name: "Stop Alice A's Editor assignment at Billing" })
+    ).toHaveTextContent("Stop here");
+    expect(screen.queryByText("This resource only")).not.toBeInTheDocument();
+  });
+
+  it("offers no change on a global role's rows", async () => {
+    routeGet(
+      defaultData({
+        [URLS.role]: { ...role, is_global: true },
+        [URLS.users]: [{ user: users[0], resource_id: "res1", inherit: true }],
+      })
+    );
+    renderPage();
+    await screen.findByText("Alice A");
+    expect(screen.queryByRole("button", { name: /Editor assignment/ })).not.toBeInTheDocument();
+  });
+
+  it("changes the flag as unassign-then-assign, after a confirmation that names the effect", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1", inherit: true }],
+      })
+    );
+    apiMock.delete.mockResolvedValue(res(undefined));
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Stop Alice A's Editor assignment at Billing" })
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(/between the two calls the user does not hold it/);
+    expect(dialog).toHaveTextContent(/on a deny it re-opens the descendants/);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply here only" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(apiMock.delete).toHaveBeenCalledWith(`${URLS.users}/u1`, {
+      params: { resource_id: "res1" },
+    });
+    expect(apiMock.post).toHaveBeenCalledWith(URLS.users, {
+      user_id: "u1",
+      resource_id: "res1",
+      inherit: false,
+    });
+  });
+
+  it("changes a group's flag back to inheritable with today's body", async () => {
+    routeGet(
+      defaultData({
+        [URLS.groups]: [{ group: groups[0], resource_id: "res2", inherit: false }],
+      })
+    );
+    apiMock.delete.mockResolvedValue(res(undefined));
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await screen.findByText("Editor");
+    await userEvent.click(screen.getByRole("button", { name: "groups" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Extend Admins's Editor assignment to the descendants of Reports" })
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Include descendants" })
+    );
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+    expect(apiMock.delete.mock.calls[0][0]).toBe(`${URLS.groups}/g1`);
+    expect(apiMock.post.mock.calls[0][1]).toEqual({ group_id: "g1", resource_id: "res2" });
+  });
+
+  it("keeps the dialog open and says the assignment was restored when the re-assign is refused", async () => {
+    routeGet(
+      defaultData({
+        [URLS.serviceAccounts]: [
+          { service_account: serviceAccounts[0], resource_id: "res1", inherit: true },
+        ],
+      })
+    );
+    apiMock.delete.mockResolvedValue(res(undefined));
+    apiMock.post
+      .mockRejectedValueOnce({
+        response: { status: 403, data: { message: "grant.pre_assign: the four-eyes rule rejected this assignment" } },
+      })
+      .mockResolvedValueOnce(res(undefined));
+    renderPage();
+    await screen.findByText("Editor");
+    await userEvent.click(screen.getByRole("button", { name: "service accounts" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Stop ingest-worker's Editor assignment at Billing" })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply here only" }));
+    expect(await within(dialog).findByText(/restored as it was/)).toHaveTextContent(
+      /four-eyes rule rejected this assignment/
+    );
+    expect(apiMock.post).toHaveBeenCalledTimes(2);
+    expect(apiMock.post.mock.calls[1][1]).toEqual({
+      service_account_id: "sa1",
+      resource_id: "res1",
+    });
+  });
+
+  it("says the role is gone when neither the change nor the restore succeeds", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1", inherit: true }],
+      })
+    );
+    apiMock.delete.mockResolvedValue(res(undefined));
+    apiMock.post.mockRejectedValue({
+      response: { status: 503, data: { message: "database unavailable" } },
+    });
+    renderPage();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Stop Alice A's Editor assignment at Billing" })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply here only" }));
+    expect(
+      await within(dialog).findByText(/The user no longer holds this role at this resource/)
+    ).toHaveTextContent(/Assign the role again\./);
+    // The listing is re-read: what the subject holds has changed.
+    await waitFor(() =>
+      expect(
+        apiMock.get.mock.calls.filter(([url]) => url === URLS.users).length
+      ).toBeGreaterThan(1)
+    );
+  });
+
+  it("a refused unassign changes nothing, and says so", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1", inherit: true }],
+      })
+    );
+    apiMock.delete.mockRejectedValue({
+      response: { status: 403, data: { message: "missing permission roles:unassign" } },
+    });
+    renderPage();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Stop Alice A's Editor assignment at Billing" })
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply here only" }));
+    expect(
+      await within(dialog).findByText("Nothing was changed: missing permission roles:unassign")
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+});
+
+// ─── S-10b — making a role global ─────────────────────────────────────────────
+
+describe("RoleDetailPage — making a role global (S-10b)", () => {
+  async function toggleGlobalAndSave() {
+    await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByLabelText("Global role"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+  }
+
+  it("asks first when the role has non-inheritable assignments, naming them and the effect", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1", inherit: false }],
+        [URLS.groups]: [{ group: groups[0], resource_id: "res2", inherit: false }],
+      })
+    );
+    apiMock.put.mockResolvedValue(res({ ...role, is_global: true }));
+    renderPage();
+    await toggleGlobalAndSave();
+
+    const question = await screen.findByRole("dialog", { name: "Make this role global?" });
+    expect(question).toHaveTextContent(/"Editor" has 2 assignments made to stop at their resource/);
+    expect(question).toHaveTextContent(/user "Alice A" at "Billing"/);
+    expect(question).toHaveTextContent(/group "Admins" at "Reports"/);
+    expect(question).toHaveTextContent(/including the descendants they were made to stop short of/);
+    expect(apiMock.put).not.toHaveBeenCalled();
+
+    await userEvent.click(within(question).getByRole("button", { name: "Make global" }));
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(URLS.role, {
+        name: "Editor",
+        description: "Can edit things",
+        is_global: true,
+      })
+    );
+  });
+
+  it("'Keep it scoped' saves nothing and returns to the form as it was", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1", inherit: false }],
+      })
+    );
+    renderPage();
+    await toggleGlobalAndSave();
+    const question = await screen.findByRole("dialog", { name: "Make this role global?" });
+    await userEvent.click(within(question).getByRole("button", { name: "Keep it scoped" }));
+    const form = await screen.findByRole("dialog", { name: "Edit Role" });
+    expect(within(form).getByLabelText("Global role")).toBeChecked();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("asks, saying it could not check, when the listings cannot be read", async () => {
+    routeGet(defaultData());
+    renderPage();
+    await screen.findByText("Alice A");
+    // The page has its listings; the guard's own read is what fails.
+    apiMock.get.mockImplementation((url: string) =>
+      url === URLS.users ? Promise.reject(new Error("offline")) : Promise.resolve(res([]))
+    );
+    await toggleGlobalAndSave();
+    expect(
+      await screen.findByRole("dialog", { name: "Make this role global?" })
+    ).toHaveTextContent(/Could not check whether "Editor" has assignments made to stop/);
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("I4 twin: with only cascading assignments, saves at once with no question", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1" }],
+      })
+    );
+    apiMock.put.mockResolvedValue(res({ ...role, is_global: true }));
+    renderPage();
+    await toggleGlobalAndSave();
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog", { name: "Make this role global?" })).not.toBeInTheDocument();
+  });
+
+  it("I4 twin: an edit that leaves the role scoped reads nothing more and asks nothing", async () => {
+    routeGet(
+      defaultData({
+        [URLS.users]: [{ user: users[0], resource_id: "res1", inherit: false }],
+      })
+    );
+    const listingReads = () =>
+      apiMock.get.mock.calls.filter(([url]) =>
+        [URLS.users, URLS.groups, URLS.serviceAccounts].includes(url as string)
+      ).length;
+    // Count the listing reads at the instant the PUT is issued: the guard
+    // would have read all three before it.
+    let readsAtPut = -1;
+    apiMock.put.mockImplementation(() => {
+      readsAtPut = listingReads();
+      return Promise.resolve(res(role));
+    });
+    renderPage();
+    await screen.findByText("Alice A");
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const readsBefore = listingReads();
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Save Changes" })
+    );
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(readsAtPut).toBe(readsBefore);
+    expect(screen.queryByRole("dialog", { name: "Make this role global?" })).not.toBeInTheDocument();
+  });
+});

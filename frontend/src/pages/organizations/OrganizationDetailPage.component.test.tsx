@@ -940,6 +940,113 @@ describe("OrganizationDetailPage — settings tab", () => {
   });
 });
 
+describe("OrganizationDetailPage — S-7b server certificate names", () => {
+  const withNames: SecuritySettings = {
+    ...settings,
+    certificate: {
+      ...settings.certificate,
+      server_cert_allowed_names: [".lakeside.internal", "10.0.0.0/8"],
+    },
+  };
+
+  async function goToSettings() {
+    renderDetail();
+    await screen.findByText("Widgets Inc");
+    await userEvent.click(screen.getByRole("tab", { name: "Settings" }));
+  }
+
+  function card() {
+    return screen
+      .getByRole("heading", { name: "Server Certificate Names" })
+      .closest(".glass-card") as HTMLElement;
+  }
+
+  // The regression this card closes: SetOrgSettings had no such key, this PUT
+  // replaces the whole row, and the server stores an absent list as `[]` — so
+  // a save of any other setting emptied the organization's allow-list and,
+  // through `reconcile_tenant_overrides`, every tenant's.
+  it("carries the stored list through a save that never touches it", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: withNames });
+    apiMock.put.mockResolvedValue(res(withNames));
+    await goToSettings();
+    fireEvent.change(await screen.findByLabelText("Minimum length"), {
+      target: { value: "10" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).toMatchObject({
+      min_length: 10,
+      server_cert_allowed_names: [".lakeside.internal", "10.0.0.0/8"],
+    });
+  });
+
+  it("I4 twin: with no list, the body carries the empty list the server already stores", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    apiMock.put.mockResolvedValue(res(settings));
+    await goToSettings();
+    await screen.findByRole("heading", { name: "Server Certificate Names" });
+    expect(within(card()).getAllByText(/Empty — every Server certificate request is refused/).length).toBeGreaterThan(0);
+    fireEvent.change(screen.getByLabelText("Minimum length"), { target: { value: "10" } });
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1].server_cert_allowed_names).toEqual([]);
+  });
+
+  it("explains the three forms, the empty rule and that tenants may only narrow", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: withNames });
+    await goToSettings();
+    await screen.findByRole("heading", { name: "Server Certificate Names" });
+    const c = card();
+    expect(c).toHaveTextContent(/strictly below/);
+    expect(c).toHaveTextContent(/An empty list refuses every Server certificate request/);
+    expect(c).toHaveTextContent(/may only remove an entry or narrow one/);
+    expect(c).toHaveTextContent(/Stored baseline, as the server reads it back/);
+  });
+
+  it("edits the baseline row by row and marks the form dirty", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: withNames });
+    apiMock.put.mockResolvedValue(res(withNames));
+    await goToSettings();
+    await screen.findByRole("heading", { name: "Server Certificate Names" });
+    const c = card();
+    expect(within(c).getByLabelText("Allowed name 1")).toHaveValue(".lakeside.internal");
+    await userEvent.click(within(c).getByRole("button", { name: "Add entry" }));
+    expect(await screen.findByText("Unsaved changes")).toBeInTheDocument();
+    await userEvent.type(within(c).getByLabelText("Allowed name 3"), "  gateway.lakeside.internal ");
+    await userEvent.click(within(c).getByRole("button", { name: "Add entry" })); // a blank row
+    await userEvent.click(within(c).getByRole("button", { name: "Remove allowed name 2" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1].server_cert_allowed_names).toEqual([
+      ".lakeside.internal",
+      "gateway.lakeside.internal",
+    ]);
+  });
+
+  it("shows the server's refusal of a malformed entry verbatim", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: withNames });
+    const message =
+      'server_cert_allowed_names: "10.0.0.1/8" has host bits set; write 10.0.0.0/8';
+    apiMock.put.mockRejectedValue({
+      message: "Request failed with status code 400",
+      response: { status: 400, data: { error: "validation_error", message } },
+    });
+    await goToSettings();
+    await screen.findByRole("heading", { name: "Server Certificate Names" });
+    const c = card();
+    const second = within(c).getByLabelText("Allowed name 2");
+    await userEvent.clear(second);
+    await userEvent.type(second, "10.0.0.1/8");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    // Sent as typed — no client-side canonicalisation.
+    expect(apiMock.put.mock.calls[0][1].server_cert_allowed_names).toEqual([
+      ".lakeside.internal",
+      "10.0.0.1/8",
+    ]);
+  });
+});
+
 describe("OrganizationDetailPage — small branches", () => {
   it("resets and closes the create-tenant dialog on cancel", async () => {
     routeGet({ [URLS.org]: org, [URLS.tenants]: tenants });

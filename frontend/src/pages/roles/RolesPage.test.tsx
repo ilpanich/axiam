@@ -142,3 +142,67 @@ describe("RolesPage", () => {
     await waitFor(() => expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r2"));
   });
 });
+
+// ─── S-10b — making a role global ─────────────────────────────────────────────
+
+describe("RolesPage — making a role global (S-10b)", () => {
+  function routes(viewerUsers: unknown[]) {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/roles/r2/users") return Promise.resolve(res(viewerUsers));
+      if (url === "/api/v1/roles/r2/groups") return Promise.resolve(res([]));
+      if (url === "/api/v1/roles/r2/service-accounts") return Promise.resolve(res([]));
+      if (url === "/api/v1/resources")
+        return Promise.resolve(res([{ id: "res1", name: "apartment-7", created_at: "t" }]));
+      return Promise.resolve(res(roles));
+    });
+  }
+
+  async function makeViewerGlobal() {
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Viewer" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByLabelText(/Tenant-wide role/));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+  }
+
+  it("asks before widening a non-inheritable assignment, and saves on confirm", async () => {
+    routes([
+      { user: { id: "u1", username: "resident-1" }, resource_id: "res1", inherit: false },
+    ]);
+    apiMock.put.mockResolvedValue(res({ ...roles[1], is_global: true }));
+    renderWithProviders(<RolesPage />);
+    await makeViewerGlobal();
+    const question = await screen.findByRole("dialog", { name: "Make this role global?" });
+    expect(question).toHaveTextContent(/"Viewer" has 1 assignment made to stop at its resource/);
+    expect(question).toHaveTextContent(/user "resident-1" at "apartment-7"/);
+    expect(apiMock.put).not.toHaveBeenCalled();
+    await userEvent.click(within(question).getByRole("button", { name: "Make global" }));
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith("/api/v1/roles/r2", {
+        name: "Viewer",
+        description: "",
+        is_global: true,
+      })
+    );
+  });
+
+  it("I4 twin: a role with no non-inheritable assignment is made global at once", async () => {
+    routes([{ user: { id: "u1", username: "resident-1" }, resource_id: "res1" }]);
+    apiMock.put.mockResolvedValue(res({ ...roles[1], is_global: true }));
+    renderWithProviders(<RolesPage />);
+    await makeViewerGlobal();
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog", { name: "Make this role global?" })).not.toBeInTheDocument();
+  });
+
+  it("I4 twin: un-making a role global never asks", async () => {
+    routes([]);
+    apiMock.put.mockResolvedValue(res({ ...roles[0], is_global: false }));
+    renderWithProviders(<RolesPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Admin" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByLabelText(/Tenant-wide role/));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.get).not.toHaveBeenCalledWith("/api/v1/roles/r1/users", expect.anything());
+  });
+});

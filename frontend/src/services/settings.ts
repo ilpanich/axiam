@@ -47,6 +47,40 @@ export interface EmailVerificationPolicy {
 export interface CertificatePolicy {
   default_cert_validity_days: number;
   max_cert_validity_days: number;
+  /**
+   * S-7 — the names a `Server` certificate may be issued for: exact hosts
+   * (`lakeside.internal`), suffixes strictly below a name
+   * (`.lakeside.internal`) and IP prefixes (`10.0.0.0/8`, `fd00::/8`).
+   * **Empty refuses every `Server` request.** On `GET /api/v1/settings` this is
+   * the tenant's *effective* list — the intersection of its override and the
+   * organization baseline, computed by the server on every read.
+   *
+   * Optional so a server older than the field still types; read it through
+   * `readServerCertAllowedNames`, whose fallback is the server's own default.
+   */
+  server_cert_allowed_names?: string[];
+}
+
+/**
+ * The effective `server_cert_allowed_names`, or `[]` — the server's own
+ * default, which refuses every `Server` certificate — when the response
+ * predates the field.
+ */
+export function readServerCertAllowedNames(s: {
+  certificate: { server_cert_allowed_names?: string[] };
+}): string[] {
+  return s.certificate.server_cert_allowed_names ?? [];
+}
+
+/**
+ * The allow-list as the form will send it: each entry trimmed, blank rows
+ * dropped (the `parseLines` rule the other settings lists use). No entry is
+ * judged here — whether it parses as a host, a suffix or a CIDR, whether it is
+ * canonical, and whether a tenant's entry is covered by its organization's are
+ * all refused by the server with a `400` that names the entry.
+ */
+export function cleanAllowedNames(rows: string[]): string[] {
+  return rows.map((r) => r.trim()).filter((r) => r.length > 0);
 }
 
 export interface NotificationPolicy {
@@ -269,6 +303,17 @@ export interface TenantSettingsOverride {
   // Certificate
   default_cert_validity_days?: number;
   max_cert_validity_days?: number;
+  /**
+   * S-7 — tighten-only: every entry must be covered by an organization entry.
+   * An empty list means this tenant issues no `Server` certificate at all,
+   * which is different from an absent field (inherit the organization's list).
+   *
+   * `PUT /api/v1/settings` stores only what differs from the baseline, so a
+   * write shape that omitted this dropped a tenant's narrowing and put the
+   * tenant back on the organization's wider list. Every write path in the
+   * console therefore sends it.
+   */
+  server_cert_allowed_names?: string[];
   // Notification
   admin_notifications_enabled?: boolean;
   // OPAQUE — tighten-only, like every other field here: the server refuses a

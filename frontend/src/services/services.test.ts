@@ -328,6 +328,49 @@ describe("orgService & tenantService & caCertService & orgSettingsService", () =
     // row, and the three fields default to `disabled` server-side when absent.
     expect(flat.opaque_mode).toBe("required");
     expect(flat.opaque_ksf).toBe("scrypt");
+    // S-7b — absent on this (older-shaped) response, so the server's own
+    // default: an empty list, exactly what omitting it has always stored.
+    expect(flat.server_cert_allowed_names).toEqual([]);
+  });
+
+  it("carries server_cert_allowed_names through the flatten (S-7b)", () => {
+    // The regression: this PUT replaces the whole row and `SetOrgSettings`
+    // defaults an absent list to `[]`, so a flatten that dropped the field
+    // emptied the organization's allow-list — and, through
+    // `reconcile_tenant_overrides`, every tenant's — on a save of any setting.
+    const flat = flattenOrgSettings({
+      id: "s1",
+      scope: "Org",
+      scope_id: "o1",
+      password: {
+        min_length: 10,
+        require_uppercase: true,
+        require_lowercase: false,
+        require_digits: true,
+        require_symbols: false,
+        password_history_count: 3,
+        hibp_check_enabled: true,
+      },
+      mfa: { mfa_enforced: true, mfa_challenge_lifetime_secs: 120 },
+      lockout: {
+        max_failed_login_attempts: 4,
+        lockout_duration_secs: 60,
+        lockout_backoff_multiplier: 2,
+        max_lockout_duration_secs: 600,
+      },
+      token: { access_token_lifetime_secs: 900, refresh_token_lifetime_secs: 1000 },
+      email: { email_verification_required: true, email_verification_grace_period_hours: 12 },
+      certificate: {
+        default_cert_validity_days: 30,
+        max_cert_validity_days: 90,
+        server_cert_allowed_names: [".lakeside.internal", "10.0.0.0/8"],
+      },
+      notification: { admin_notifications_enabled: false },
+      opaque: { opaque_mode: "disabled", opaque_suite: "ristretto255_sha512", opaque_ksf: "argon2id" },
+      created_at: "t",
+      updated_at: "t",
+    });
+    expect(flat.server_cert_allowed_names).toEqual([".lakeside.internal", "10.0.0.0/8"]);
   });
 });
 

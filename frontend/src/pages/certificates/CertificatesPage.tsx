@@ -9,6 +9,9 @@ import {
   type KeyAlgorithm,
   type GenerateCertificatePayload,
   type SignCsrPayload,
+  type SubjectAltNameKind,
+  type SubjectAltNameRow,
+  subjectAltNamesFromRows,
 } from "@/services/certificates";
 import { useAuthStore } from "@/stores/auth";
 import { PageHeader } from "@/components/PageHeader";
@@ -22,7 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ShieldPlus, Upload } from "lucide-react";
+import { Plus, ShieldPlus, Trash2, Upload } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
@@ -58,6 +61,158 @@ function badgeStatus(status: CertificateStatus): "active" | "revoked" | "inactiv
 function isExpiringSoon(notAfter: string): boolean {
   const diff = new Date(notAfter).getTime() - Date.now();
   return diff > 0 && diff < 30 * 24 * 60 * 60 * 1000;
+}
+
+// ─── Certificate type and Server names ────────────────────────────────────────
+
+/** A fresh SAN list: one empty DNS row, which is what a `Server` request needs first. */
+function initialSanRows(): SubjectAltNameRow[] {
+  return [{ kind: "dns", value: "" }];
+}
+
+interface CertificateTypeSelectProps {
+  id: string;
+  value: CertificateType;
+  onChange: (v: CertificateType) => void;
+}
+
+/**
+ * The four certificate types, shared by both dialogs. `Server` is the one that
+ * carries names (and `serverAuth`); the three client types carry none.
+ */
+function CertificateTypeSelect({ id, value, onChange }: CertificateTypeSelectProps) {
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>Certificate Type</Label>
+      <select
+        id={id}
+        value={value}
+        onChange={(e) => onChange(e.target.value as CertificateType)}
+        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40"
+      >
+        <option value="User">User</option>
+        <option value="Service">Service</option>
+        <option value="Device">IoT Device</option>
+        <option value="Server">Server (TLS)</option>
+      </select>
+    </div>
+  );
+}
+
+interface SubjectAltNamesFieldProps {
+  idPrefix: string;
+  rows: SubjectAltNameRow[];
+  onRowsChange: (rows: SubjectAltNameRow[]) => void;
+  /** Where the allow-list is edited; `null` while the organization is unknown. */
+  settingsHref: string | null;
+  /** The Sign-a-CSR dialog adds the Vault note; the common name comes from the CSR there. */
+  forCsr?: boolean;
+}
+
+/**
+ * The names a `Server` certificate is issued for — one row per name, each a
+ * DNS name or an IP address. Rendered only for `Server`: no other type may
+ * carry a `subjectAltName`, and the server refuses the field for them.
+ *
+ * The form checks shape and nothing else (`subjectAltNamesFromRows`). Whether a
+ * name is admitted is the server's question, answered from the tenant's
+ * effective `server_cert_allowed_names`; its 400 names the name and the remedy
+ * and is shown in the dialog as it comes.
+ */
+function SubjectAltNamesField({
+  idPrefix,
+  rows,
+  onRowsChange,
+  settingsHref,
+  forCsr = false,
+}: SubjectAltNamesFieldProps) {
+  const helpId = `${idPrefix}-san-help`;
+
+  function update(index: number, patch: Partial<SubjectAltNameRow>) {
+    onRowsChange(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  }
+
+  return (
+    <fieldset className="space-y-2" aria-describedby={helpId}>
+      <legend className="text-sm font-medium text-foreground">
+        Subject alternative names *
+      </legend>
+      <ul className="space-y-2">
+        {rows.map((row, i) => (
+          <li key={i} className="flex items-center gap-2">
+            <select
+              aria-label={`Name ${i + 1} kind`}
+              value={row.kind}
+              onChange={(e) =>
+                update(i, { kind: e.target.value as SubjectAltNameKind })
+              }
+              className="rounded-md border border-input bg-background px-2 py-2 text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40"
+            >
+              <option value="dns">DNS</option>
+              <option value="ip">IP</option>
+            </select>
+            <Input
+              aria-label={`Name ${i + 1}`}
+              value={row.value}
+              onChange={(e) => update(i, { value: e.target.value })}
+              placeholder={row.kind === "dns" ? "api.lakeside.internal" : "10.0.0.5"}
+              autoComplete="off"
+              spellCheck={false}
+              className="font-mono text-xs"
+            />
+            <button
+              type="button"
+              aria-label={`Remove name ${i + 1}`}
+              onClick={() => onRowsChange(rows.filter((_, j) => j !== i))}
+              className="p-1.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 focus:outline-hidden focus:ring-2 focus:ring-primary/40"
+            >
+              <Trash2 size={14} aria-hidden="true" />
+            </button>
+          </li>
+        ))}
+      </ul>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onRowsChange([...rows, { kind: "dns", value: "" }])}
+      >
+        <Plus size={14} aria-hidden="true" />
+        Add name
+      </Button>
+      <div id={helpId} className="space-y-1 text-xs text-muted-foreground">
+        <p>
+          Every name{forCsr ? ", and the common name in the request," : ", and the subject,"}{" "}
+          must be admitted by this tenant&rsquo;s{" "}
+          <code>server_cert_allowed_names</code>
+          {settingsHref ? (
+            <>
+              {" "}(
+              <Link to={settingsHref} className="underline hover:text-foreground">
+                Settings → Server certificate names
+              </Link>
+              )
+            </>
+          ) : null}
+          . That list is empty until an organization administrator writes one,
+          and an empty list refuses every Server certificate. The server decides;
+          when it refuses a name, its message below says which and why.
+        </p>
+        <p>
+          A wildcard is a whole leftmost label (<code>*.lakeside.internal</code>).
+          Write a Unicode name in its <code>xn--</code> form, without a trailing
+          dot, and an IPv4 address as IPv4.
+        </p>
+        {forCsr && (
+          <p>
+            Under a CA whose key Vault holds, a Server request on this path is
+            refused: Vault takes names only from the request, and a request may
+            not carry any. Use <strong>Generate Certificate</strong> under such a CA.
+          </p>
+        )}
+      </div>
+    </fieldset>
+  );
 }
 
 // ─── Generate form fields ─────────────────────────────────────────────────────
@@ -263,6 +418,9 @@ interface GenerateFieldsProps {
   onIssuerCaIdChange: (v: string) => void;
   /** Where to send an operator who has no CA yet; `null` while the org is unknown. */
   caSetupHref: string | null;
+  sanRows: SubjectAltNameRow[];
+  onSanRowsChange: (rows: SubjectAltNameRow[]) => void;
+  settingsHref: string | null;
 }
 
 function GenerateFields({
@@ -279,6 +437,9 @@ function GenerateFields({
   onValidityDaysChange,
   onIssuerCaIdChange,
   caSetupHref,
+  sanRows,
+  onSanRowsChange,
+  settingsHref,
 }: GenerateFieldsProps) {
   const { selectedCa, caExpiryKnown, maxValidityDays } = useIssuerValidityCap(
     caOptions,
@@ -302,25 +463,22 @@ function GenerateFields({
           id="cert-subject"
           value={subject}
           onChange={(e) => onSubjectChange(e.target.value)}
-          placeholder="device-001"
+          placeholder={certType === "Server" ? "api.lakeside.internal" : "device-001"}
           required
           autoComplete="off"
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="cert-type">Certificate Type</Label>
-        <select
-          id="cert-type"
-          value={certType}
-          onChange={(e) => onCertTypeChange(e.target.value as CertificateType)}
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40"
-        >
-          <option value="User">User</option>
-          <option value="Service">Service</option>
-          <option value="Device">IoT Device</option>
-        </select>
-      </div>
+      <CertificateTypeSelect id="cert-type" value={certType} onChange={onCertTypeChange} />
+
+      {certType === "Server" && (
+        <SubjectAltNamesField
+          idPrefix="cert"
+          rows={sanRows}
+          onRowsChange={onSanRowsChange}
+          settingsHref={settingsHref}
+        />
+      )}
 
       <div className="space-y-2">
         <Label htmlFor="cert-key-algorithm">Key Algorithm</Label>
@@ -364,6 +522,9 @@ interface SignCsrFieldsProps {
   onCsrPemChange: (v: string) => void;
   /** Where to send an operator who has no CA yet; `null` while the org is unknown. */
   caSetupHref: string | null;
+  sanRows: SubjectAltNameRow[];
+  onSanRowsChange: (rows: SubjectAltNameRow[]) => void;
+  settingsHref: string | null;
 }
 
 /**
@@ -385,6 +546,9 @@ function SignCsrFields({
   onIssuerCaIdChange,
   onCsrPemChange,
   caSetupHref,
+  sanRows,
+  onSanRowsChange,
+  settingsHref,
 }: SignCsrFieldsProps) {
   const { selectedCa, caExpiryKnown, maxValidityDays } = useIssuerValidityCap(
     caOptions,
@@ -414,19 +578,21 @@ function SignCsrFields({
         caSetupHref={caSetupHref}
       />
 
-      <div className="space-y-2">
-        <Label htmlFor="csr-cert-type">Certificate Type</Label>
-        <select
-          id="csr-cert-type"
-          value={certType}
-          onChange={(e) => onCertTypeChange(e.target.value as CertificateType)}
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/40"
-        >
-          <option value="User">User</option>
-          <option value="Service">Service</option>
-          <option value="Device">IoT Device</option>
-        </select>
-      </div>
+      <CertificateTypeSelect
+        id="csr-cert-type"
+        value={certType}
+        onChange={onCertTypeChange}
+      />
+
+      {certType === "Server" && (
+        <SubjectAltNamesField
+          idPrefix="csr"
+          rows={sanRows}
+          onRowsChange={onSanRowsChange}
+          settingsHref={settingsHref}
+          forCsr
+        />
+      )}
 
       <ValidityDaysField
         idPrefix="csr"
@@ -467,10 +633,12 @@ function SignCsrFields({
           legacy OpenSSL <code>BEGIN NEW CERTIFICATE REQUEST</code> header is
           not accepted (<code>rcgen</code> does not parse it). There is no key
           algorithm to choose: the key is the caller's, generated wherever the
-          request was made, and AXIAM neither produces nor sees it. The
-          certificate carries no <code>subjectAltName</code>,{" "}
-          <code>keyUsage</code> or <code>extendedKeyUsage</code> — a request
-          asking for any of those is refused rather than silently trimmed.
+          request was made, and AXIAM neither produces nor sees it. A request
+          asking for <code>subjectAltName</code>, <code>keyUsage</code> or{" "}
+          <code>extendedKeyUsage</code> is refused rather than silently
+          trimmed: AXIAM sets the usages from the certificate type, and a
+          Server certificate&rsquo;s names come from the list above, never from
+          the request.
         </p>
       </div>
     </>
@@ -509,6 +677,10 @@ export function CertificatesPage() {
   // Where CAs are issued. The org detail page's CA section is the only place in
   // the UI that generates one, and nothing on this page pointed at it.
   const caSetupHref = orgId ? `/organizations/${orgId}` : null;
+  // Where this tenant's effective Server-name allow-list is shown (and, within
+  // the baseline, narrowed). The organization baseline itself is on the
+  // organization's Settings tab.
+  const settingsHref = "/settings";
 
   // ─── Generate state ────────────────────────────────────────────────────────
   const [generateOpen, setGenerateOpen] = useState(false);
@@ -517,6 +689,7 @@ export function CertificatesPage() {
   const [keyAlgorithm, setKeyAlgorithm] = useState<KeyAlgorithm>("Rsa4096");
   const [validityDays, setValidityDays] = useState(365);
   const [issuerCaId, setIssuerCaId] = useState("");
+  const [sanRows, setSanRows] = useState<SubjectAltNameRow[]>(initialSanRows);
   const [generateError, setGenerateError] = useState("");
 
   // ─── Secret reveal state ───────────────────────────────────────────────────
@@ -559,6 +732,7 @@ export function CertificatesPage() {
     setKeyAlgorithm("Rsa4096");
     setValidityDays(365);
     setIssuerCaId("");
+    setSanRows(initialSanRows());
     setGenerateError("");
   }
 
@@ -587,6 +761,17 @@ export function CertificatesPage() {
       key_algorithm: keyAlgorithm,
       validity_days: validityDays,
     };
+    // Names only for `Server`, and only their shape is checked here; the
+    // server is the one that decides whether a name is admitted. Every other
+    // type sends no `subject_alt_names` key at all — the body it always sent.
+    if (certType === "Server") {
+      const sans = subjectAltNamesFromRows(sanRows);
+      if ("error" in sans) {
+        setGenerateError(sans.error);
+        return;
+      }
+      payload.subject_alt_names = sans.names;
+    }
     generateMutation.mutate(payload);
   }
 
@@ -596,6 +781,7 @@ export function CertificatesPage() {
   const [csrCertType, setCsrCertType] = useState<CertificateType>("User");
   const [csrValidityDays, setCsrValidityDays] = useState(365);
   const [csrPem, setCsrPem] = useState("");
+  const [csrSanRows, setCsrSanRows] = useState<SubjectAltNameRow[]>(initialSanRows);
   const [csrError, setCsrError] = useState("");
 
   const signCsrMutation = useMutation({
@@ -620,6 +806,7 @@ export function CertificatesPage() {
     setCsrCertType("User");
     setCsrValidityDays(365);
     setCsrPem("");
+    setCsrSanRows(initialSanRows());
     setCsrError("");
   }
 
@@ -647,13 +834,23 @@ export function CertificatesPage() {
     // the key it carries, that the key meets AXIAM's policy, that it asks for
     // no extension AXIAM refuses, that the validity fits — is checked
     // server-side and rendered verbatim below. Duplicating those rules here
-    // would give an operator two opinions that can disagree.
-    signCsrMutation.mutate({
+    // would give an operator two opinions that can disagree. The same holds
+    // for a Server certificate's names: shape here, admission there.
+    const payload: SignCsrPayload = {
       issuer_ca_id: csrIssuerCaId,
       csr_pem: pem,
       cert_type: csrCertType,
       validity_days: csrValidityDays,
-    });
+    };
+    if (csrCertType === "Server") {
+      const sans = subjectAltNamesFromRows(csrSanRows);
+      if ("error" in sans) {
+        setCsrError(sans.error);
+        return;
+      }
+      payload.subject_alt_names = sans.names;
+    }
+    signCsrMutation.mutate(payload);
   }
 
   // ─── Revoke state ──────────────────────────────────────────────────────────
@@ -774,7 +971,7 @@ export function CertificatesPage() {
     <div>
       <PageHeader
         title="Certificates"
-        description="Manage X.509 certificates for users, services, and IoT devices."
+        description="Manage X.509 certificates for users, services, IoT devices and TLS servers."
         action={
           <div className="flex shrink-0 gap-2">
             <Button variant="outline" onClick={openCsr}>
@@ -824,6 +1021,9 @@ export function CertificatesPage() {
           onValidityDaysChange={setValidityDays}
           onIssuerCaIdChange={setIssuerCaId}
           caSetupHref={caSetupHref}
+          sanRows={sanRows}
+          onSanRowsChange={setSanRows}
+          settingsHref={settingsHref}
         />
       </FormDialog>
 
@@ -853,6 +1053,9 @@ export function CertificatesPage() {
           onIssuerCaIdChange={setCsrIssuerCaId}
           onCsrPemChange={setCsrPem}
           caSetupHref={caSetupHref}
+          sanRows={csrSanRows}
+          onSanRowsChange={setCsrSanRows}
+          settingsHref={settingsHref}
         />
       </FormDialog>
 

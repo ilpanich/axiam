@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react";
 import { FormDialog } from "@/components/FormDialog";
 import { Label } from "@/components/ui/label";
 import {
+  InheritToggle,
   ResourceScopePicker,
   TenantScopePicker,
 } from "@/components/AssignmentScope";
@@ -47,7 +48,9 @@ export interface AssignRoleDialogProps {
   /**
    * Performs the assignment. Given the role and the two scopes the operator
    * chose — an empty `resourceId` and an empty `tenantScope` are the defaults,
-   * and mean "unscoped" on both axes.
+   * and mean "unscoped" on both axes — and `inherit`, which is `false` only
+   * when a resource is chosen on a non-global role and the operator unchecked
+   * it (S-10); `true` everywhere else.
    *
    * Rejections are caught and rendered in the dialog, so this may throw.
    */
@@ -55,6 +58,7 @@ export interface AssignRoleDialogProps {
     roleId: string,
     resourceId: string,
     tenantScope: string[],
+    inherit: boolean,
   ) => Promise<unknown>;
   /** Called after a successful assignment, to refresh whatever it changed. */
   onAssigned?: () => void;
@@ -73,6 +77,7 @@ export function AssignRoleDialog({
   const [selectedRoleId, setSelectedRoleId] = useState("");
   const [resourceScope, setResourceScope] = useState("");
   const [tenantScope, setTenantScope] = useState<string[]>([]);
+  const [inherit, setInherit] = useState(true);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -84,10 +89,19 @@ export function AssignRoleDialog({
     enabled: open,
   });
 
+  // The flag is offered only where it can apply: a resource to stop at, and a
+  // role that is not global (which the engine applies everywhere regardless).
+  // Anywhere else the server refuses `inherit: false`, so the dialog never
+  // sends it — a hidden, unchecked box is reset to the default on submit.
+  const selectedRole = roles.find((r: Role) => r.id === selectedRoleId);
+  const inheritOffered =
+    Boolean(resourceScope) && selectedRole !== undefined && !selectedRole.is_global;
+
   function reset() {
     setSelectedRoleId("");
     setResourceScope("");
     setTenantScope([]);
+    setInherit(true);
     setError("");
   }
 
@@ -105,7 +119,12 @@ export function AssignRoleDialog({
     }
     setSubmitting(true);
     try {
-      await onAssign(selectedRoleId, resourceScope, tenantScope);
+      await onAssign(
+        selectedRoleId,
+        resourceScope,
+        tenantScope,
+        inheritOffered ? inherit : true,
+      );
       onAssigned?.();
       reset();
       onClose();
@@ -181,6 +200,15 @@ export function AssignRoleDialog({
           subject={subject}
           disabled={submitting}
         />
+        {inheritOffered && (
+          <InheritToggle
+            id="assign-role-inherit"
+            checked={inherit}
+            onChange={setInherit}
+            subject={subject}
+            disabled={submitting}
+          />
+        )}
         <TenantScopePicker
           value={tenantScope}
           onChange={setTenantScope}

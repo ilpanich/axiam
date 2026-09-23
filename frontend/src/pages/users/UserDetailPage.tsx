@@ -535,8 +535,8 @@ export function UserDetailPage() {
         onClose={() => setAssignRoleOpen(false)}
         subject="user"
         errorId="user-assign-role-error"
-        onAssign={(roleId, resourceId, tenantScope) =>
-          roleService.assignToUser(roleId, userId!, resourceId, tenantScope)
+        onAssign={(roleId, resourceId, tenantScope, inherit) =>
+          roleService.assignToUser(roleId, userId!, resourceId, tenantScope, inherit)
         }
         onAssigned={() => invalidateEntity(queryClient, "role-users")}
       />

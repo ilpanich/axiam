@@ -63,6 +63,48 @@ test.describe("Certificates page", () => {
 });
 
 // ---------------------------------------------------------------------------
+// S-7b — the Server type and its SAN list. Needs no CA: the dialog opens and
+// its type select works whatever the organization holds, and the assertions
+// wait for the page rather than probing it once.
+// ---------------------------------------------------------------------------
+
+test.describe("Certificates page — Server certificates", () => {
+  test.beforeEach(async ({ page }) => {
+    await loginAsAdmin(page);
+  });
+
+  for (const dialogButton of [/Generate Certificate/i, /Sign a CSR/i]) {
+    test(`${dialogButton.source}: the SAN list appears for Server and for nothing else`, async ({
+      page,
+    }) => {
+      await page.goto("/certificates");
+      const open = page.getByRole("button", { name: dialogButton });
+      await expect(open).toBeVisible();
+      await open.click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog).toBeVisible();
+      const type = dialog.getByLabel("Certificate Type");
+      const sans = dialog.getByRole("group", { name: /Subject alternative names/ });
+
+      // I4: the three client types are unchanged — no names offered.
+      for (const t of ["User", "Service", "Device"]) {
+        await type.selectOption(t);
+        await expect(sans).toHaveCount(0);
+      }
+
+      await type.selectOption("Server");
+      await expect(sans).toBeVisible();
+      await expect(sans.getByLabel("Name 1", { exact: true })).toHaveValue("");
+      await sans.getByRole("button", { name: "Add name" }).click();
+      await expect(sans.getByLabel("Name 2", { exact: true })).toBeVisible();
+      await sans.getByLabel("Name 2 kind").selectOption("ip");
+      await sans.getByRole("button", { name: "Remove name 2" }).click();
+      await expect(sans.getByLabel("Name 2", { exact: true })).toHaveCount(0);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Webhooks page tests — live backend
 // ---------------------------------------------------------------------------
 

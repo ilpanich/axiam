@@ -710,6 +710,10 @@ export const OPERATE_PAGES: DocPage[] = [
         text: "**The list is empty by default, and empty refuses every `Server` request.** A tenant may remove or narrow entries but never add or widen one; if the organization later shrinks its list, each tenant keeps only the intersection. A `Server` certificate cannot be bound to a service account and cannot log in as a device.",
       },
       {
+        type: "p",
+        text: "In the admin console, the organization's **Settings** tab holds the baseline list, a tenant's own **Settings** page shows its effective list and narrows it, and the certificate dialogs offer `Server` with one row per DNS name or IP address. The console checks only that a row is filled in; whether a name is admitted is the server's answer, shown as it comes.",
+      },
+      {
         type: "table",
         headers: ["Type", "keyUsage", "extendedKeyUsage"],
         rows: [

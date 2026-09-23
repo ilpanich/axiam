@@ -1,4 +1,5 @@
 import api from "@/lib/api";
+import { getApiErrorMessage } from "@/lib/apiError";
 import { fetchAllPages } from "@/services/_pagination";
 import type { PermissionEffect, PermissionGrant } from "@/services/permissions";
 import type { User } from "@/services/users";
@@ -50,6 +51,30 @@ export interface RoleAssignment {
    * included. Only ever present on an assignment made in an organization scope.
    */
   tenant_scope?: string[] | null;
+  /**
+   * S-10 (D-10) — whether the assignment also reaches the descendants of
+   * `resource_id` (`true`, the default and the value of every assignment made
+   * before the field existed) or applies at that resource only (`false`).
+   * Optional so a server older than the field still types; read it through
+   * `assignmentInherits`, which maps absent to `true` exactly as the server's
+   * repository does.
+   */
+  inherit?: boolean;
+}
+
+/** `inherit`, with absent read as `true` — the server's own reading. */
+export function assignmentInherits(a: { inherit?: boolean }): boolean {
+  return a.inherit !== false;
+}
+
+/**
+ * The part of an assignment that identifies it and has to survive a
+ * re-assignment: the scope on both axes, and the flag.
+ */
+export interface AssignmentScopeState {
+  resource_id: string | null;
+  tenant_scope?: string[] | null;
+  inherit?: boolean;
 }
 
 /** A member row of `GET /roles/{id}/users`: the user plus the assignment scope. */
@@ -58,6 +83,8 @@ export interface RoleUserAssignment {
   resource_id: string | null;
   /** The tenants this assignment reaches. See {@link RoleAssignment}. */
   tenant_scope?: string[] | null;
+  /** See {@link RoleAssignment.inherit}. */
+  inherit?: boolean;
 }
 
 /** A member row of `GET /roles/{id}/groups`: the group plus the assignment scope. */
@@ -66,6 +93,8 @@ export interface RoleGroupAssignment {
   resource_id: string | null;
   /** The tenants this assignment reaches. See {@link RoleAssignment}. */
   tenant_scope?: string[] | null;
+  /** See {@link RoleAssignment.inherit}. */
+  inherit?: boolean;
 }
 
 /** A service account holding this role, with the scope of the grant. */
@@ -74,6 +103,61 @@ export interface RoleServiceAccountAssignment {
   resource_id: string | null;
   /** The tenants this assignment reaches. See {@link RoleAssignment}. */
   tenant_scope?: string[] | null;
+  /** See {@link RoleAssignment.inherit}. */
+  inherit?: boolean;
+}
+
+/**
+ * The `inherit` key of an assign body: present only as `false`.
+ *
+ * `true` is the server's default, so omitting it keeps every inheritable
+ * assignment's body byte-for-byte what it was before the field existed. The
+ * server refuses `false` with no `resource_id` and on a global role; the
+ * dialogs offer the flag only where it can apply, and the server remains the
+ * one that says no.
+ */
+function inheritField(inherit: boolean | undefined): { inherit?: false } {
+  return inherit === false ? { inherit: false } : {};
+}
+
+/**
+ * Whether an assignment's flag can be changed at all: it names a resource and
+ * its role is not global. The server refuses `inherit: false` in both other
+ * cases, so offering the change there could only produce a refusal.
+ */
+export function canChangeInherit(
+  assignment: { resource_id: string | null },
+  roleIsGlobal: boolean
+): assignment is { resource_id: string } {
+  return assignment.resource_id !== null && !roleIsGlobal;
+}
+
+/** Which kind of principal an assignment belongs to. */
+export type AssignmentSubjectKind = "user" | "group" | "service account";
+
+/** One non-inheritable assignment of a role, named for a confirmation. */
+export interface NonInheritableAssignment {
+  kind: AssignmentSubjectKind;
+  name: string;
+  resource_id: string;
+}
+
+/**
+ * A flag change that did not complete. `restored` says which of the two
+ * possible states the subject is left in, because the answer is the whole
+ * point: `true` — the new assignment was refused and the old one was put back,
+ * so nothing changed; `false` — the old assignment is gone and could not be
+ * put back, so the subject **no longer holds the role** at this resource.
+ */
+export class AssignmentToggleError extends Error {
+  readonly restored: boolean;
+  readonly cause: unknown;
+  constructor(message: string, restored: boolean, cause: unknown) {
+    super(message);
+    this.name = "AssignmentToggleError";
+    this.restored = restored;
+    this.cause = cause;
+  }
 }
 
 // ─── Roles service ────────────────────────────────────────────────────────────
@@ -153,12 +237,14 @@ export const roleService = {
     roleId: string,
     userId: string,
     resourceId?: string | null,
-    tenantScope?: string[] | null
+    tenantScope?: string[] | null,
+    inherit?: boolean
   ): Promise<void> =>
     api
       .post(`/api/v1/roles/${roleId}/users`, {
         user_id: userId,
         ...(resourceId ? { resource_id: resourceId } : {}),
+        ...inheritField(inherit),
         // Sent only when there is one. The server refuses an empty list (an
         // assignment that reaches nothing is not a restriction), and refuses
         // the field at all outside an organization scope — so omitting it is
@@ -196,12 +282,14 @@ export const roleService = {
     roleId: string,
     groupId: string,
     resourceId?: string | null,
-    tenantScope?: string[] | null
+    tenantScope?: string[] | null,
+    inherit?: boolean
   ): Promise<void> =>
     api
       .post(`/api/v1/roles/${roleId}/groups`, {
         group_id: groupId,
         ...(resourceId ? { resource_id: resourceId } : {}),
+        ...inheritField(inherit),
         // Sent only when there is one. The server refuses an empty list (an
         // assignment that reaches nothing is not a restriction), and refuses
         // the field at all outside an organization scope — so omitting it is
@@ -249,12 +337,14 @@ export const roleService = {
     roleId: string,
     serviceAccountId: string,
     resourceId?: string | null,
-    tenantScope?: string[] | null
+    tenantScope?: string[] | null,
+    inherit?: boolean
   ): Promise<void> =>
     api
       .post(`/api/v1/roles/${roleId}/service-accounts`, {
         service_account_id: serviceAccountId,
         ...(resourceId ? { resource_id: resourceId } : {}),
+        ...inheritField(inherit),
         // Same rule as the user and group paths — see `assignToUser`.
         ...(tenantScope && tenantScope.length > 0
           ? { tenant_scope: tenantScope }
@@ -273,4 +363,121 @@ export const roleService = {
         resourceId ? { params: { resource_id: resourceId } } : {}
       )
       .then(() => undefined),
+
+  /**
+   * The role's non-inheritable assignments, across all three kinds of
+   * principal, read from the server's own listings.
+   *
+   * What making the role global would widen (S-10 item 6, T-285): `is_global`
+   * applies a role everywhere whatever its assignments say, so each of these —
+   * made to stop at its resource — would then reach every resource. The server
+   * does not refuse that change, deliberately; the console asks first.
+   */
+  nonInheritableAssignments: async (
+    roleId: string
+  ): Promise<NonInheritableAssignment[]> => {
+    const [users, groups, serviceAccounts] = await Promise.all([
+      roleService.listUsers(roleId),
+      roleService.listGroups(roleId),
+      roleService.listServiceAccounts(roleId),
+    ]);
+    const stopped = <T extends { resource_id: string | null; inherit?: boolean }>(
+      a: T
+    ): a is T & { resource_id: string } =>
+      a.resource_id !== null && !assignmentInherits(a);
+    return [
+      ...users.filter(stopped).map((a) => ({
+        kind: "user" as const,
+        name: a.user.display_name ?? a.user.username,
+        resource_id: a.resource_id,
+      })),
+      ...groups.filter(stopped).map((a) => ({
+        kind: "group" as const,
+        name: a.group.name,
+        resource_id: a.resource_id,
+      })),
+      ...serviceAccounts.filter(stopped).map((a) => ({
+        kind: "service account" as const,
+        name: a.service_account.name,
+        resource_id: a.resource_id,
+      })),
+    ];
+  },
+
+  // ─── Changing `inherit` on an existing assignment ─────────────────────────
+
+  /**
+   * Change an assignment's `inherit` flag: **unassign, then assign again**.
+   *
+   * There is no update endpoint, and a second assign is refused with 409 by
+   * design — `has_role` is `UNIQUE(in, out)`, so a subject holds a role once —
+   * so the change is two calls, each of which flushes the subject's cached
+   * decisions server-side. Between them the subject does not hold the role at
+   * all; that is the cost of the model, stated in the confirmation that
+   * precedes this call.
+   *
+   * What this never does is leave the subject without the role **silently**:
+   *
+   * - the unassign fails → nothing changed; the server's error is thrown as is;
+   * - the new assign fails → the old assignment (same resource, same tenants,
+   *   old flag) is assigned again, and an {@link AssignmentToggleError} with
+   *   `restored: true` carries the server's refusal;
+   * - that restore fails too → an {@link AssignmentToggleError} with
+   *   `restored: false` says in as many words that the role was removed.
+   */
+  setAssignmentInherit: async (
+    kind: AssignmentSubjectKind,
+    roleId: string,
+    subjectId: string,
+    assignment: AssignmentScopeState,
+    inherit: boolean
+  ): Promise<void> => {
+    const [unassign, assign] =
+      kind === "user"
+        ? [roleService.unassignFromUser, roleService.assignToUser]
+        : kind === "group"
+          ? [roleService.unassignFromGroup, roleService.assignToGroup]
+          : [
+              roleService.unassignFromServiceAccount,
+              roleService.assignToServiceAccount,
+            ];
+    const was = assignmentInherits(assignment);
+
+    await unassign(roleId, subjectId, assignment.resource_id);
+    try {
+      await assign(
+        roleId,
+        subjectId,
+        assignment.resource_id,
+        assignment.tenant_scope,
+        inherit
+      );
+    } catch (err) {
+      const reason = getApiErrorMessage(err, "the assignment was refused");
+      try {
+        await assign(
+          roleId,
+          subjectId,
+          assignment.resource_id,
+          assignment.tenant_scope,
+          was
+        );
+      } catch (restoreErr) {
+        throw new AssignmentToggleError(
+          `The ${kind} no longer holds this role at this resource. It was ` +
+            `unassigned so it could be assigned again with the new setting, ` +
+            `that assignment was refused (${reason}), and putting the old one ` +
+            `back failed too (${getApiErrorMessage(restoreErr, "unknown error")}). ` +
+            `Assign the role again.`,
+          false,
+          err
+        );
+      }
+      throw new AssignmentToggleError(
+        `The change was refused and the assignment was restored as it was: ${reason}`,
+        true,
+        err
+      );
+    }
+  },
 };

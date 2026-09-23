@@ -481,4 +481,230 @@ describe("CertificatesPage", () => {
       ).not.toBeInTheDocument();
     });
   });
+  // ─── S-7b — Server certificates ─────────────────────────────────────────────
+
+  describe("Server certificates (S-7b)", () => {
+    const csrPem =
+      "-----BEGIN CERTIFICATE REQUEST-----\nreq\n-----END CERTIFICATE REQUEST-----";
+
+    async function openGenerate() {
+      await userEvent.click(await screen.findByRole("button", { name: /Generate Certificate/ }));
+      return screen.getByRole("dialog");
+    }
+
+    async function openCsr() {
+      await userEvent.click(await screen.findByRole("button", { name: /Sign a CSR/ }));
+      return screen.getByRole("dialog");
+    }
+
+    it("offers Server in both dialogs, with the SAN list shown only for Server", async () => {
+      mockGetRoutes();
+      renderWithProviders(<CertificatesPage />);
+
+      for (const open of [openGenerate, openCsr]) {
+        const dialog = await open();
+        const type = within(dialog).getByLabelText("Certificate Type");
+        expect(within(type).getByRole("option", { name: /Server/ })).toBeInTheDocument();
+        // I4: every client type opens and stays exactly as before — no names.
+        for (const t of ["User", "Service", "Device"]) {
+          await userEvent.selectOptions(type, t);
+          expect(
+            within(dialog).queryByRole("group", { name: /Subject alternative names/ })
+          ).not.toBeInTheDocument();
+        }
+        await userEvent.selectOptions(type, "Server");
+        const sans = within(dialog).getByRole("group", { name: /Subject alternative names/ });
+        // One empty DNS row to start with, and the three rules the fence rests on.
+        expect(within(sans).getByLabelText("Name 1 kind")).toHaveValue("dns");
+        expect(within(sans).getByLabelText("Name 1")).toHaveValue("");
+        expect(sans).toHaveTextContent(/server_cert_allowed_names/);
+        expect(sans).toHaveTextContent(/empty list refuses every Server certificate/);
+        await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      }
+    });
+
+    it("generates a Server certificate with one row per name, DNS and IP, in order", async () => {
+      mockGetRoutes();
+      apiMock.post.mockResolvedValue(
+        res({ ...certs[0], id: "s1", cert_type: "Server", subject: "api.lakeside.internal", private_key_pem: "PK" })
+      );
+      renderWithProviders(<CertificatesPage />);
+      const dialog = await openGenerate();
+      await userEvent.type(within(dialog).getByLabelText("Subject *"), "api.lakeside.internal");
+      await userEvent.selectOptions(within(dialog).getByLabelText("Certificate Type"), "Server");
+      await userEvent.type(within(dialog).getByLabelText("Name 1"), " api.lakeside.internal ");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Add name" }));
+      await userEvent.selectOptions(within(dialog).getByLabelText("Name 2 kind"), "ip");
+      await userEvent.type(within(dialog).getByLabelText("Name 2"), "10.0.0.5");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Generate" }));
+
+      await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+      expect(apiMock.post.mock.calls[0][0]).toBe("/api/v1/certificates");
+      expect(apiMock.post.mock.calls[0][1]).toEqual({
+        issuer_ca_id: "ca1",
+        subject: "api.lakeside.internal",
+        cert_type: "Server",
+        key_algorithm: "Rsa4096",
+        validity_days: 365,
+        subject_alt_names: [{ dns: "api.lakeside.internal" }, { ip: "10.0.0.5" }],
+      });
+    });
+
+    it("refuses a Server request with a blank name before sending anything", async () => {
+      mockGetRoutes();
+      renderWithProviders(<CertificatesPage />);
+      const dialog = await openGenerate();
+      await userEvent.type(within(dialog).getByLabelText("Subject *"), "api.lakeside.internal");
+      await userEvent.selectOptions(within(dialog).getByLabelText("Certificate Type"), "Server");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Generate" }));
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+        /Subject alternative name 1 is empty/
+      );
+      expect(apiMock.post).not.toHaveBeenCalled();
+    });
+
+    it("refuses a Server request whose every name was removed", async () => {
+      mockGetRoutes();
+      renderWithProviders(<CertificatesPage />);
+      const dialog = await openGenerate();
+      await userEvent.type(within(dialog).getByLabelText("Subject *"), "api.lakeside.internal");
+      await userEvent.selectOptions(within(dialog).getByLabelText("Certificate Type"), "Server");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Remove name 1" }));
+      expect(within(dialog).queryByLabelText("Name 1")).not.toBeInTheDocument();
+      await userEvent.click(within(dialog).getByRole("button", { name: "Generate" }));
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+        /at least one subject alternative name/
+      );
+      expect(apiMock.post).not.toHaveBeenCalled();
+    });
+
+    it("sends a name the fence will refuse as typed, and shows the server's 400 verbatim", async () => {
+      // No client-side matcher: an off-list name, a U-label, a trailing dot, a
+      // partial wildcard and an IPv4-mapped address all reach the server, whose
+      // message names the remedy.
+      mockGetRoutes();
+      // The shape of the server's own text (`server_names.rs`).
+      const message =
+        'subject_alt_names: "bücher.lakeside.internal" is not ASCII; write internationalised labels in their A-label (punycode, xn--…) form';
+      apiMock.post.mockRejectedValue(new Error(message));
+      renderWithProviders(<CertificatesPage />);
+      const dialog = await openGenerate();
+      await userEvent.type(within(dialog).getByLabelText("Subject *"), "api.lakeside.internal");
+      await userEvent.selectOptions(within(dialog).getByLabelText("Certificate Type"), "Server");
+      await userEvent.type(within(dialog).getByLabelText("Name 1"), "bücher.lakeside.internal");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Add name" }));
+      await userEvent.type(within(dialog).getByLabelText("Name 2"), "api.lakeside.internal.");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Add name" }));
+      await userEvent.selectOptions(within(dialog).getByLabelText("Name 3 kind"), "ip");
+      await userEvent.type(within(dialog).getByLabelText("Name 3"), "::ffff:10.0.0.5");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Generate" }));
+
+      await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+      expect(apiMock.post.mock.calls[0][1].subject_alt_names).toEqual([
+        { dns: "bücher.lakeside.internal" },
+        { dns: "api.lakeside.internal." },
+        { ip: "::ffff:10.0.0.5" },
+      ]);
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent(message);
+    });
+
+    it("I4 twin: a type switched away from Server sends no names", async () => {
+      mockGetRoutes();
+      apiMock.post.mockResolvedValue(res({ ...certs[0], id: "d9", private_key_pem: "PK" }));
+      renderWithProviders(<CertificatesPage />);
+      const dialog = await openGenerate();
+      await userEvent.type(within(dialog).getByLabelText("Subject *"), "device-009");
+      const type = within(dialog).getByLabelText("Certificate Type");
+      await userEvent.selectOptions(type, "Server");
+      await userEvent.type(within(dialog).getByLabelText("Name 1"), "api.lakeside.internal");
+      await userEvent.selectOptions(type, "Device");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Generate" }));
+      await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+      const body = apiMock.post.mock.calls[0][1];
+      expect(body.cert_type).toBe("Device");
+      expect(body).not.toHaveProperty("subject_alt_names");
+    });
+
+    it("I4 twin: a User request's body is exactly today's", async () => {
+      mockGetRoutes();
+      apiMock.post.mockResolvedValue(res({ ...certs[1], id: "u9", private_key_pem: "PK" }));
+      renderWithProviders(<CertificatesPage />);
+      const dialog = await openGenerate();
+      await userEvent.type(within(dialog).getByLabelText("Subject *"), "user-9");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Generate" }));
+      await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+      expect(Object.keys(apiMock.post.mock.calls[0][1]).sort()).toEqual([
+        "cert_type",
+        "issuer_ca_id",
+        "key_algorithm",
+        "subject",
+        "validity_days",
+      ]);
+    });
+
+    it("signs a CSR as a Server certificate with its names stated beside the CSR", async () => {
+      mockGetRoutes();
+      apiMock.post.mockResolvedValue(res({ ...certs[0], id: "s2", cert_type: "Server" }));
+      renderWithProviders(<CertificatesPage />);
+      const dialog = await openCsr();
+      await userEvent.selectOptions(within(dialog).getByLabelText("Certificate Type"), "Server");
+      expect(
+        within(dialog).getByRole("group", { name: /Subject alternative names/ })
+      ).toHaveTextContent(/Vault holds/);
+      await userEvent.type(within(dialog).getByLabelText("Name 1"), "api.lakeside.internal");
+      await userEvent.type(within(dialog).getByLabelText(/Certificate signing request/), csrPem);
+      await userEvent.click(within(dialog).getByRole("button", { name: "Sign" }));
+      await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+      expect(apiMock.post.mock.calls[0][0]).toBe("/api/v1/certificates/sign-csr");
+      expect(apiMock.post.mock.calls[0][1]).toEqual({
+        issuer_ca_id: "ca1",
+        csr_pem: csrPem,
+        cert_type: "Server",
+        validity_days: 365,
+        subject_alt_names: [{ dns: "api.lakeside.internal" }],
+      });
+    });
+
+    it("shows the Vault custodian's refusal of a Server CSR as it comes", async () => {
+      mockGetRoutes();
+      // The server's own text (`CertService::sign_csr`, axiam-pki).
+      const message =
+        "a Server certificate cannot be issued from a caller's CSR under a CA whose key is held by a remote signer: the signer copies the CSR's subjectAltName verbatim and ignores any other, and AXIAM refuses a CSR that carries one. Issue it with POST /api/v1/certificates under this CA, or sign the CSR under a CA whose key AXIAM holds";
+      apiMock.post.mockRejectedValue(new Error(message));
+      renderWithProviders(<CertificatesPage />);
+      const dialog = await openCsr();
+      await userEvent.selectOptions(within(dialog).getByLabelText("Certificate Type"), "Server");
+      await userEvent.type(within(dialog).getByLabelText("Name 1"), "api.lakeside.internal");
+      await userEvent.type(within(dialog).getByLabelText(/Certificate signing request/), csrPem);
+      await userEvent.click(within(dialog).getByRole("button", { name: "Sign" }));
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent(message);
+    });
+
+    it("refuses a Server CSR with a blank name before sending anything", async () => {
+      mockGetRoutes();
+      renderWithProviders(<CertificatesPage />);
+      const dialog = await openCsr();
+      await userEvent.selectOptions(within(dialog).getByLabelText("Certificate Type"), "Server");
+      await userEvent.type(within(dialog).getByLabelText(/Certificate signing request/), csrPem);
+      await userEvent.click(within(dialog).getByRole("button", { name: "Sign" }));
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+        /Subject alternative name 1 is empty/
+      );
+      expect(apiMock.post).not.toHaveBeenCalled();
+    });
+
+    it("starts every reopened dialog on one empty name", async () => {
+      mockGetRoutes();
+      renderWithProviders(<CertificatesPage />);
+      let dialog = await openGenerate();
+      await userEvent.selectOptions(within(dialog).getByLabelText("Certificate Type"), "Server");
+      await userEvent.type(within(dialog).getByLabelText("Name 1"), "stale.lakeside.internal");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Add name" }));
+      await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      dialog = await openGenerate();
+      await userEvent.selectOptions(within(dialog).getByLabelText("Certificate Type"), "Server");
+      expect(within(dialog).getByLabelText("Name 1")).toHaveValue("");
+      expect(within(dialog).queryByLabelText("Name 2")).not.toBeInTheDocument();
+    });
+  });
 });

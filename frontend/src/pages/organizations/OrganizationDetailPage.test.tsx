@@ -29,6 +29,7 @@ const baseSettings: SetOrgSettings = {
   email_verification_grace_period_hours: 24,
   default_cert_validity_days: 365,
   max_cert_validity_days: 730,
+  server_cert_allowed_names: [],
   admin_notifications_enabled: true,
   opaque_mode: "optional",
   opaque_suite: "ristretto255_sha512",

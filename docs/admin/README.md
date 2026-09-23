@@ -415,7 +415,10 @@ it.
   assignment has no resource to stop at), and `inherit: false` for a role with
   `is_global: true` (a global role applies everywhere by definition). Making a
   role global *after* assigning it non-inheritably widens that assignment to
-  everywhere, as it widens every other assignment of the role.
+  everywhere, as it widens every other assignment of the role. The server does
+  not refuse that — it is what `is_global` means — but the admin console asks
+  first: saving a role as global while it has non-inheritable assignments
+  opens a confirmation that names them and says they will apply everywhere.
 - **The flag is part of the assignment.** A subject holds a given role at most
   once, so there is no update: to change it, unassign
   (`DELETE .../users/{user_id}?resource_id=<uuid>`) and assign again. Both
@@ -426,8 +429,19 @@ it.
   `GET /api/v1/roles/{role_id}/users|groups|service-accounts`,
   `GET /api/v1/users/{user_id}/roles`, `GET /api/v1/groups/{group_id}/roles`,
   `GET /api/v1/service-accounts/{id}/roles` — carries `inherit` beside
-  `resource_id`. The admin console does not yet offer the flag in its
-  assignment dialogs; set it through the API.
+  `resource_id`.
+- **In the admin console.** Every assign dialog — *Assign User*, *Assign
+  Group* and *Assign Service Account* on a role, and *Assign Role* on a user or
+  a group — offers **Also applies to the resource's descendants**, checked by
+  default, once a resource is chosen for a role that is not global; it is not
+  shown anywhere the server would refuse `inherit: false`. A non-inheritable
+  assignment is badged **This resource only** in the role's and the group's
+  listings. **Stop here** / **Include descendants** beside a resource-scoped
+  row changes the flag after a confirmation that names the effect: it is the
+  same unassign and assign, and between the two the subject does not hold the
+  role. If the second call is refused the console assigns the old one again
+  and says so; if even that fails, it says the subject no longer holds the
+  role rather than leaving it to be discovered.
 
 ### Service accounts hold roles too
 

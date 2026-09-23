@@ -375,3 +375,96 @@ describe("GroupDetailPage", () => {
     );
   });
 });
+
+// ─── S-10b — the inherit flag ─────────────────────────────────────────────────
+
+describe("GroupDetailPage — inherit (S-10b)", () => {
+  const RESOURCES = { "/api/v1/resources": [{ id: "res1", name: "Billing", created_at: "t" }] };
+  const auditRole = { id: "r2", name: "Audit", is_global: true, created_at: "t" };
+
+  it("marks a non-inheritable assignment and offers the change on it", async () => {
+    routeGet(
+      defaults({
+        ...RESOURCES,
+        [URLS.roles]: [{ role: deployRole, resource_id: "res1", inherit: false }],
+      })
+    );
+    renderPage();
+    const row = (await screen.findByText("Deploy")).closest("li")!;
+    expect(within(row).getByText("This resource only")).toBeInTheDocument();
+    expect(
+      within(row).getByRole("button", {
+        name: "Extend Engineering's Deploy assignment to the descendants of Billing",
+      })
+    ).toHaveTextContent("Include descendants");
+  });
+
+  it("I4 twin: an inheritable scoped row carries no marker; a global role's row offers no change", async () => {
+    routeGet(
+      defaults({
+        ...RESOURCES,
+        [URLS.roles]: [
+          { role: deployRole, resource_id: "res1" },
+          { role: auditRole, resource_id: "res1", inherit: true },
+        ],
+      })
+    );
+    renderPage();
+    const deploy = (await screen.findByText("Deploy")).closest("li")!;
+    expect(within(deploy).queryByText("This resource only")).not.toBeInTheDocument();
+    expect(
+      within(deploy).getByRole("button", { name: "Stop Engineering's Deploy assignment at Billing" })
+    ).toBeInTheDocument();
+    const audit = screen.getByText("Audit").closest("li")!;
+    expect(within(audit).queryByRole("button", { name: /assignment/ })).not.toBeInTheDocument();
+  });
+
+  it("changes the flag as unassign-then-assign on the group's own routes", async () => {
+    routeGet(
+      defaults({
+        ...RESOURCES,
+        [URLS.roles]: [{ role: deployRole, resource_id: "res1", inherit: true }],
+      })
+    );
+    apiMock.delete.mockResolvedValue(res(undefined));
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Stop Engineering's Deploy assignment at Billing" })
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(/between the two calls the group does not hold it/);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply here only" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/roles/r1/groups/g1", {
+      params: { resource_id: "res1" },
+    });
+    expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/groups", {
+      group_id: "g1",
+      resource_id: "res1",
+      inherit: false,
+    });
+  });
+
+  it("the page's Assign Role dialog sends inherit: false for a scoped, non-global role", async () => {
+    routeGet(defaults(RESOURCES));
+    apiMock.post.mockResolvedValue(res(undefined));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /Assign Role/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Role"), "r1");
+    await waitFor(() =>
+      expect(within(dialog).getByRole("option", { name: "Billing" })).toBeInTheDocument()
+    );
+    await userEvent.selectOptions(within(dialog).getByLabelText("Scope"), "res1");
+    await userEvent.click(within(dialog).getByLabelText(/Also applies to the resource.s descendants/));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith("/api/v1/roles/r1/groups", {
+        group_id: "g1",
+        resource_id: "res1",
+        inherit: false,
+      })
+    );
+  });
+});

@@ -17,12 +17,21 @@ import { Label } from "@/components/ui/label";
 import { Loader2, Plus, Trash2, Unlink } from "lucide-react";
 import { formatDate } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
-import { roleService, type RoleAssignment } from "@/services/roles";
+import {
+  canChangeInherit,
+  roleService,
+  type RoleAssignment,
+} from "@/services/roles";
 import {
   serviceAccountService,
   type ServiceAccount,
 } from "@/services/serviceAccounts";
 import { AssignmentScopeBadge } from "@/components/AssignmentScope";
+import {
+  InheritChangeButton,
+  InheritChangeDialog,
+  type InheritChangeTarget,
+} from "@/components/AssignmentInheritChange";
 import { AssignRoleDialog } from "@/components/AssignRoleDialog";
 import { useResourceNames } from "@/hooks/useResourceNames";
 import { useToast } from "@/hooks/useToast";
@@ -270,6 +279,9 @@ export function GroupDetailPage() {
   // The target is the assignment, not the role: dropping its scope would ask
   // the server to remove a global grant this group may not even hold.
   const [unassignRole, setUnassignRole] = useState<RoleAssignment | null>(null);
+  // S-10b — the assignment whose `inherit` flag is being changed, if any.
+  const [inheritTarget, setInheritTarget] =
+    useState<InheritChangeTarget | null>(null);
   const { nameFor } = useResourceNames();
 
   const unassignRoleMutation = useMutation({
@@ -435,19 +447,36 @@ export function GroupDetailPage() {
                       resourceId={a.resource_id}
                       nameFor={nameFor}
                       tenantScope={a.tenant_scope}
+                      inherit={a.inherit}
                     />
                   </div>
                   {a.role.description && (
                     <p className="text-xs text-muted-foreground">{a.role.description}</p>
                   )}
                 </div>
-                <button
-                  aria-label={`Unassign role ${a.role.name}`}
-                  onClick={() => setUnassignRole(a)}
-                  className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
-                >
-                  <Unlink size={14} />
-                </button>
+                <div className="flex items-center gap-2">
+                  {canChangeInherit(a, a.role.is_global) && (
+                    <InheritChangeButton
+                      resourceName={nameFor(a.resource_id)}
+                      onRequest={setInheritTarget}
+                      target={{
+                        kind: "group",
+                        roleId: a.role.id,
+                        roleName: a.role.name,
+                        subjectId: groupId!,
+                        subjectName: group.name,
+                        assignment: { ...a, resource_id: a.resource_id },
+                      }}
+                    />
+                  )}
+                  <button
+                    aria-label={`Unassign role ${a.role.name}`}
+                    onClick={() => setUnassignRole(a)}
+                    className="p-1.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <Unlink size={14} />
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
@@ -563,10 +592,20 @@ export function GroupDetailPage() {
         onClose={() => setAssignRoleOpen(false)}
         subject="group"
         errorId="group-assign-role-error"
-        onAssign={(roleId, resourceId, tenantScope) =>
-          roleService.assignToGroup(roleId, groupId!, resourceId, tenantScope)
+        onAssign={(roleId, resourceId, tenantScope, inherit) =>
+          roleService.assignToGroup(roleId, groupId!, resourceId, tenantScope, inherit)
         }
         onAssigned={() => invalidateEntity(queryClient, "role-groups")}
+      />
+
+      {/* S-10b — change an assignment's inherit flag (unassign, then assign) */}
+      <InheritChangeDialog
+        target={inheritTarget}
+        resourceName={
+          inheritTarget ? nameFor(inheritTarget.assignment.resource_id) : ""
+        }
+        onClose={() => setInheritTarget(null)}
+        onSettled={() => invalidateEntity(queryClient, "group-roles")}
       />
 
       {/* Unassign role confirm */}

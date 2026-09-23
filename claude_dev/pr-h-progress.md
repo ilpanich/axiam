@@ -12,8 +12,8 @@ Delete both once the PR is open and green.
 - [x] 2. Citations re-validated against `1cb1371`; S-3/S-4/S-7/S-9/S-10 read in code; drift noted
 - [x] 3. Contract amendments 1–8 of §6 C-0 (incl. §27.5 decision, §27.10 tier gap)
 - [x] 4. Version bump to 1.50 + every gate that moves with it; drift check red only for SDK re-vendor
-- [ ] 5. Records: CHANGELOG, roadmap T22.15, EXECUTED block in §6 C-0, §13 item 1, threat model verified
-- [ ] 6. Gates run (doc links, docs lint, contract/spec checks); signed commits
+- [x] 5. Records: CHANGELOG, roadmap T22.15, EXECUTED block in §6 C-0, §13 item 1, threat model verified
+- [x] 6. Gates run (doc links, docs lint, contract/spec checks); signed commits
 - [ ] 7. PR opened, subscribed, green
 - [ ] 8. Next-session prompt (I₁ = C-1, Rust SDK) printed
 
@@ -79,3 +79,10 @@ Delete both once the PR is open and green.
 - Drift gate: 33 problems = 11 × {CONTRACT.md, openapi.json, registry} STALE;
   proto, OPAQUE vectors, vendored crate OK. openapi/registry were already stale
   on main (SDKs vendor beta16's, `2617eae`).
+
+### Steps 5–6
+
+- Records commit: CHANGELOG, roadmap T22.15, EXECUTED block, §13 row 1 + rows 15–17,
+  T-210 amended (no new threat; gen-threat-model 279/266/13 unchanged, reverted).
+- All 21 script gates of ci.yml/docs-ci.yml exit 0 (remediation-evidence needs an
+  unshallowed clone: `git fetch --unshallow origin`); website lint/tsc/build 0.

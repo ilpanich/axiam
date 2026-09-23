@@ -95,6 +95,16 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "/etc/axiam/grpc/server.key",
           ],
           [
+            "AXIAM__GRPC_TLS_CLIENT_AUTH",
+            "Client-certificate policy on the gRPC listener: `off` (default — nothing is requested, as before), `optional` (verify a certificate when one is presented) or `required` (refuse the handshake without one). A verified certificate is what a certificate-bound device token is matched against, so under `off` such a token is refused on gRPC. Flat spelling, like the two above. Any other value, a verifying mode without `AXIAM__GRPC_TLS_CLIENT_CA_PATH`, or either client-auth variable on a plaintext listener **refuses to boot**.",
+            "required",
+          ],
+          [
+            "AXIAM__GRPC_TLS_CLIENT_CA_PATH",
+            "PEM bundle the gRPC listener verifies client certificates against. Required unless the policy is `off`, and refused when it is. Point it at the REST listener's trust-anchor bundle and flagging a CA reloads both listeners without a restart; an empty or unreadable bundle refuses to boot, and on a reload keeps the previous anchors.",
+            "/etc/axiam/tls/client-ca-bundle.pem",
+          ],
+          [
             "AXIAM__GRPC__STRICT_REVOCATION",
             "Check session revocation on every gRPC request rather than trusting the access token's lifetime (default `false`). With it off, a revoked session keeps passing gRPC until the token expires. Turn it **on** for a listener published through the edge, and pay for the extra lookup with the session-validation cache — pointed at the same repository instance the REST path uses, or the cache the REST invalidation hooks reach is not the one being read.",
             "true",

@@ -110,3 +110,9 @@ rcgen = { workspace = true }
 # rsa 0.9 requires a rand_core 0.6 CryptoRng; the workspace `rand` (0.9) ThreadRng
 # does not satisfy it. Use rand_core 0.6 OsRng for RSA test-key generation.
 rand_core = { version = "0.6", features = ["getrandom"] }
+# S-8: tests/grpc_client_auth.rs drives the real gRPC listener with a real
+# tonic client (the generated stubs exist only under `client`) and probes the
+# handshake itself with tokio-rustls, to see who is asked for a certificate.
+axiam-api-grpc = { workspace = true, features = ["client"] }
+tonic = { workspace = true }
+tokio-rustls = { workspace = true }

@@ -938,6 +938,71 @@ against `AXIAM_BACKEND_SNI`, never against whatever address the lookup returned,
 so a wrong DNS answer fails the handshake rather than reaching a different
 server.
 
+### The gRPC listener: TLS and client certificates
+
+The gRPC listener (`:50051`) terminates TLS itself when both of its certificate
+variables are set, with the same TLS 1.3-only posture and the same reloadable
+leaf as the REST listener. Point them at the REST pair and one `SIGHUP` renews
+both. It can also verify client certificates, **off by default**:
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__GRPC_TLS_CERT_PATH` | PEM certificate chain. Both this and the key, or gRPC serves plaintext. |
+| `AXIAM__GRPC_TLS_KEY_PATH` | Its private key. |
+| `AXIAM__GRPC_TLS_CLIENT_AUTH` | `off` (default), `optional` or `required`. |
+| `AXIAM__GRPC_TLS_CLIENT_CA_PATH` | PEM bundle client certificates are verified against. Required unless `CLIENT_AUTH` is `off`. |
+
+The names are **flat** (single underscore after `AXIAM`), like the two
+certificate variables. The nested spelling is not read.
+
+- **`off`** is the listener as it has always been: no client certificate is
+  requested, and one a client holds is never sent. A certificate-bound token
+  (`cnf.x5t#S256`, which every device token issued over native mTLS carries —
+  see [`docs/pki/README.md`](../pki/README.md)) is
+  therefore **refused** on gRPC under `off`, because there is no certificate to
+  match it against.
+- **`optional`** asks for a certificate and verifies any that is presented. A
+  client that presents none is still served on its token alone.
+- **`required`** refuses the TLS handshake unless the client presents a
+  certificate that chains to the bundle. No RPC runs before that check, so this
+  is a network-level gate on the whole listener, including
+  `ReactorAdminService`.
+
+A verified certificate reaches the auth interceptor. There, a token bound to a
+certificate is accepted only over a connection presenting **that** certificate.
+The certificate is proof of possession and a gate. It is **not** an identity:
+every call still needs a bearer token, and the token decides who the caller is.
+`optional_self_signed` is refused on this listener. It exists for RFC 8705
+self-signed OAuth2 clients, and the token endpoint they use is not served here.
+
+**Boot is refused, not warned about**, when:
+
+- `CLIENT_AUTH` is not one of the three words;
+- `CLIENT_AUTH` is `optional` or `required` but `CLIENT_CA_PATH` is unset;
+- `CLIENT_CA_PATH` is set but `CLIENT_AUTH` is `off`;
+- the bundle is unreadable, unparsable or empty;
+- either client-auth variable is set while the listener is **plaintext**
+  (neither certificate variable set, or only one of them).
+
+The last case is a refusal because the operator's intent is unambiguous. A
+listener with no handshake cannot ask for a certificate, and serving cleartext
+on a port its operator believes is mutually authenticated is the worst outcome
+available. An explicit `CLIENT_AUTH=off` is accepted everywhere, and an empty
+value counts as unset.
+
+**One anchor set, one reload.** Point `AXIAM__GRPC_TLS_CLIENT_CA_PATH` at the
+bundle the REST listener uses: `AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH`, or
+`client-ca-bundle.pem` beside `AXIAM__SERVER__TLS__CERT_PATH`. The two
+listeners then trust the same CAs. Flagging or unflagging a CA as an mTLS trust
+anchor in the admin console rewrites that file and reloads **both** listeners
+without a restart. The gRPC listener has its own verifier, because its policy
+can differ from REST's (for example REST `optional` for browsers and gRPC
+`required` for the mesh). On each reload it re-reads its own bundle, so it never
+trusts a set that its next boot would not read. A reload that finds that file
+unreadable or empty logs an error and **keeps the previous anchors**; it never
+falls back to asking for nothing. If the gRPC bundle is a separate file you
+curate yourself, a reload re-reads it and nothing else changes.
+
 ### Client certificates through a proxy
 
 `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` (default **`false`**) controls whether

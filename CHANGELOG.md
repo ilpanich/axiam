@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The gRPC listener can verify client certificates (T22.12, DF-005).** Its TLS
+  configuration called `with_no_client_auth()`, and no setting could change
+  that. The same listener carries `ReactorAdminService` as well as
+  `CheckAccess`, and by default skips session revocation, so a bearer token
+  was all any caller ever needed. A device token, which is certificate-bound
+  since T22.3, was refused on every gRPC call, because no certificate could
+  arrive to match it.
+
+  Two flat variables, **off by default**:
+
+  | Variable | Values |
+  |---|---|
+  | `AXIAM__GRPC_TLS_CLIENT_AUTH` | `off` (default) \| `optional` \| `required` |
+  | `AXIAM__GRPC_TLS_CLIENT_CA_PATH` | PEM bundle; required unless `off` |
+
+  - **`off` is the handshake that shipped before this change.** No
+    certificate is requested, and one a client holds is never sent. This is
+    asserted by comparing handshakes against the pre-change configuration for
+    four client shapes.
+  - **`optional`** verifies a certificate when one is presented. **`required`**
+    refuses the handshake without one, before any RPC runs.
+  - **A verified certificate reaches the auth interceptor.** A token bound to
+    a certificate (`cnf.x5t#S256`) is accepted over a connection presenting that
+    certificate, and refused with another device's certificate or with none.
+  - **One reload for both listeners.** Point the bundle at the REST listener's
+    trust-anchor bundle, and flagging a CA in the admin console reloads both
+    without a restart. The gRPC listener has its own verifier, because its
+    policy may differ from REST's. On each reload it re-reads its own bundle.
+    A reload that finds the bundle empty or unreadable keeps the previous
+    anchors.
+  - **Refuses to boot, rather than warning**, on an unknown mode, on
+    `optional`/`required` without a bundle, on a bundle under `off`, on an empty
+    or unreadable bundle, and on either variable set while the gRPC listener is
+    plaintext. `optional_self_signed` is refused: it exists for RFC 8705 OAuth2
+    clients, and their endpoint is not on this listener.
+
+  The certificate is proof of possession and a network gate, not an identity:
+  every call still needs a token. Threat **T-286**; T-234 and T-283 amended.
+
 - **A role assignment can stop at its resource: `inherit: false` (T22.11,
   DF-021).** A resource-scoped assignment always applied to its resource and
   every descendant, so "this building, not its apartments" could only be written

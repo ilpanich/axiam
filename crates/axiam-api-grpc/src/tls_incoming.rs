@@ -44,6 +44,19 @@
 //! because if `remote_addr()` came back `None` the extractor would return
 //! `UnableToExtractKey` and the limiter would fail closed for every caller.
 //!
+//! # So do peer certificates, with no code here (S-8)
+//!
+//! The same `connect_info()` fills `TlsConnectInfo::certs` from
+//! `ServerConnection::peer_certificates()` — the chain the configuration's
+//! client verifier accepted — and `tonic::Request::peer_certs()` reads exactly
+//! that extension (`tonic-0.14.6/src/request.rs:260`). So when the composition
+//! root builds the configuration with `AXIAM__GRPC_TLS_CLIENT_AUTH` set to
+//! `optional` or `required`, the auth interceptor's `cnf.x5t#S256` check sees
+//! the verified certificate without this module capturing anything; under `off`
+//! no certificate is requested and `peer_certs()` is `None`, as before. This is
+//! asserted end to end, through this accept loop and the real interceptor, in
+//! `axiam-server`'s `tests/grpc_client_auth.rs`, not assumed.
+//!
 //! # The one new denial-of-service surface, and its bound
 //!
 //! Doing the handshake ourselves means a client that opens TCP and then says

@@ -1225,6 +1225,154 @@ leaf that differs from today's only by the KU/EKU profile.
 
 ### S-8 — client-certificate verification on the gRPC listener (DF-005) — Opus 5
 
+> **EXECUTED — 2026-09-23, PR E, one commit** (branch `feat/grpc-client-auth`, cut
+> from `588172a`).
+>
+> **Shipped.** `AXIAM__GRPC_TLS_CLIENT_AUTH` (`off` default | `optional` |
+> `required`) and `AXIAM__GRPC_TLS_CLIENT_CA_PATH`, parsed by a pure
+> `axiam_server::tls::resolve_grpc_tls` over a variable reader, so every
+> combination is tested from a map and none by mutating the environment.
+> `build_grpc_rustls_server_config_with_client_auth` is the builder;
+> `build_grpc_rustls_server_config` keeps its name and signature and is exactly
+> the `off` call, so the T-234 handshake has one spelling. `grpc_tls_from_env`
+> panics on every refusal, as it already did for an unreadable pair. The
+> deferral comment (`tls.rs:1269-1277` on `588172a`, "What it deliberately does
+> not share") is **rewritten**, not appended to: it now describes the control
+> and why it is a second verifier instance.
+>
+> **(a) One mechanism, two instances, one reload.** The REST listener's
+> `LIVE_VERIFIER` is a set-once slot holding one policy. The gRPC listener gets
+> its **own** `ReloadableClientCertVerifier` for two reasons. The policy is fixed
+> per verifier, and the two listeners may differ (REST `optional` for browsers,
+> gRPC `required` for the mesh). And either listener may be the only one with
+> TLS on. Every verifying gRPC config registers in `GRPC_VERIFIERS` (weak
+> references, pruned on reload). `reload_trust_anchors` reloads REST as before
+> and then every gRPC listener. The gRPC side **re-reads its own
+> `CLIENT_CA_PATH`** rather than taking the PEM it was handed: a listener must
+> never trust a set its next boot would not read, which is the write-then-swap
+> rule `mtls_anchors` already follows. Pointed at the REST bundle (the
+> documented topology), it picks up exactly what `TrustAnchorReload` just wrote.
+> `a_reloaded_anchor_is_honoured_on_the_grpc_listener` drives the whole path:
+> flag CA B in the database, `TrustAnchorReload::reload`, bundle rewritten,
+> gRPC verifier re-reads it. A certificate from B is then admitted on a new
+> connection and satisfies a bound token, where it was refused before.
+>
+> **(b) Config validation.** Seven cases refuse to boot: an unknown mode;
+> `optional_self_signed` (named in its own message); `optional`/`required`
+> without a bundle; a bundle while the mode is `off`; an empty or unreadable
+> bundle; and **either client-auth variable set on a plaintext listener**
+> (neither certificate variable, or only one). The last was the open question.
+> It is a refusal because the operator's intent is unambiguous, and cleartext
+> on a port believed to be mutually authenticated is the worst reading
+> available. Half a certificate pair *alone* stays the silent plaintext it
+> always was (I1). An explicit `CLIENT_AUTH=off` is accepted everywhere, and an
+> empty value counts as unset, so a Compose `${VAR:-}` does not trip anything.
+>
+> **(c) The payoff of S-3, confirmed rather than assumed.** No capture code was
+> needed in `tls_incoming`. tonic 0.14.6's `Connected for TlsStream<T>`
+> (`transport/server/conn.rs:106`) fills `TlsConnectInfo::certs` from
+> `peer_certificates()`, and `Request::peer_certs()` (`request.rs:260`) reads
+> that extension. Both were read in the pinned source, and the path is asserted
+> through the real `start_grpc_server`. The probe is `TokenService/IntrospectToken`
+> on the caller's own token: the interceptor alone decides between
+> `Unauthenticated` and an answer, and the answer echoes `cnf.x5t#S256`. Tests:
+> `a_bound_token_with_its_certificate_is_accepted` (both verifying modes, with
+> the unbound-token twin), and
+> `a_bound_token_presented_with_a_different_certificate_is_refused` (another
+> device's valid certificate from the same anchor, so only the binding can
+> refuse; plus no certificate, which is `Unauthenticated` under `optional` and a
+> handshake refusal under `required`). The module docs of `tls_incoming` now say
+> this, beside the peer-address paragraph that made the same argument for the
+> rate limiter.
+>
+> **(d) I1.** `off` calls `with_no_client_auth()`. That is deliberately not
+> REST's `off`, which installs an empty reloadable verifier that flagging a CA
+> can later arm; gRPC's `off` must stay off. `off_is_byte_for_byte_todays_handshake`
+> reaches `off` through `resolve_grpc_tls` with only the pair set. It probes
+> four client shapes (anonymous, certificate-holding, TLS 1.2-only,
+> `http/1.1`-only ALPN) against both the production `off` config and the
+> pre-S-8 configuration reconstructed from the code it replaced. For each it
+> compares server acceptance, whether a `CertificateRequest` was sent (a client
+> resolver records whether rustls asked it), the peer certificates the server
+> holds, the ALPN and the version. It then asserts one layer up: a client
+> holding a certificate is not asked for it, and its bound token is refused over
+> the real listener.
+>
+> **Tests.** `crates/axiam-server/tests/grpc_client_auth.rs`, six:
+> `off_is_byte_for_byte_todays_handshake`,
+> `required_refuses_a_handshake_without_a_client_certificate` (plus a foreign
+> CA, and the I4 twin: a chained certificate admitted and held),
+> `optional_accepts_both_and_exposes_the_certificate_when_present`, the two
+> bound-token tests, and `a_reloaded_anchor_is_honoured_on_the_grpc_listener`.
+> Ten unit tests in `tls.rs`: the seven refusals and their twins over
+> `resolve_grpc_tls`, the build-time empty-bundle refusal,
+> `a_reload_that_empties_the_grpc_bundle_keeps_the_previous_anchors`, and
+> `only_a_listener_on_the_written_bundle_reports_the_reload_as_applied`.
+> `axiam-server` lib 120, `grpc_client_auth` 6 (five repeat runs),
+> `mtls_anchor_reload` 6, `healthcheck` 9, `grpc_tls_crypto_provider` 1.
+> **Three deliberate mutations** each turned the right tests red: the verifying
+> modes falling back to `with_no_client_auth()` (5 of 6 red, `off` correctly
+> green), the reload skipping gRPC (the reload test red), and `off` sending a
+> `CertificateRequest` (the I1 red on the first shape).
+>
+> **What the plan did not anticipate.**
+>
+> 1. **A reload's "applied" needed defining, and the first definition was
+>    wrong.** The admin handler reports `restart_required` when the reload
+>    returns `None`. A gRPC-only deployment must therefore return a count, or
+>    the operator is told to restart when nothing needs it. I first returned
+>    "the count of the last gRPC listener reloaded". The combined test run
+>    caught that: with several listeners in one process the answer depended on
+>    iteration order. The honest definition is the one shipped:
+>    `reload_trust_anchors(pem, written_to)` counts a gRPC listener as applied
+>    only if its bundle **is** the file just written. A listener on a curated
+>    bundle of its own is still reloaded, but the flagged set did not reach it.
+>    The one caller, `TrustAnchorReload`, passes its bundle path.
+> 2. **An empty bundle on reload keeps the old anchors, unlike REST.** REST's
+>    `replace` of an empty set means "stop asking", correct when the last CA is
+>    unflagged. Under gRPC `required` that is a listener verifying nobody, and
+>    the boot path refuses an empty bundle, so a reload must not reach that state
+>    either. Unreadable or empty: logged, previous anchors kept.
+> 3. **`docs/deployment/README.md` had no gRPC TLS section.** The plan names one;
+>    the only gRPC TLS documentation was the website's two configuration rows and
+>    the Pi runbook §14. A subsection now sits in "TLS termination". The gate also
+>    needed the two rows on `website/src/docs/configuration.ts`, and
+>    `docs/pki/README.md`'s "Over gRPC" paragraph, which said a bound token is
+>    always refused there, now describes the default instead of the only posture.
+> 4. **The threat entry is new, not amended.** No entry in either STRIDE document
+>    or `Axiam.json` described the listener's missing client authentication (the
+>    gRPC element carries only T-12, cross-tenant introspection). Per §9 it is
+>    **T-286**, on `gRPC API (Tonic)` in the system diagram, Spoofing, High,
+>    Mitigated. DF-005's point, that `ReactorAdminService` sits on this listener
+>    and revocation is skipped by default, is in the threat text. **T-234**
+>    gains the closed follow-up; **T-283**'s gRPC paragraph is amended, since
+>    it said "`with_no_client_auth()` today, which S-8 changes". `threatTop`
+>    285 → 286.
+> 5. **`threat-model-stride.md`'s own header table was stale** (280 threats,
+>    258 / 13) against its §7 (285). It now reads 286 / 273 / 13, matching §7.
+>    That is the document agreeing with itself, not the Axiam.json
+>    reconciliation, which remains the maintainer's: `gen-threat-model.mjs`
+>    reports *"threatModel.ts: 9 diagrams, 277 threats (264 mitigated, 13
+>    open)"*, still nine short of the documents; generated files reverted.
+> 6. **Test dependencies.** `axiam-server` gains dev-dependencies on
+>    `axiam-api-grpc` with `client` (the generated stubs), `tonic` and
+>    `tokio-rustls`. `check-crate-layering.py` is content: the production edge
+>    already existed.
+> 7. **Line drift.** Checked against `588172a`. `tls.rs:810`, `:1171` (the
+>    REST load, inside the plan's `:1155-1181`), `:1233-1238`, `:1289`,
+>    `:1345`, `:1361` (`with_no_client_auth()`, inside the plan's `:1355-1364`)
+>    and `tls_incoming.rs:119` all matched. The deferral heading is at `:1269`,
+>    not `:1270`, and `strict_revocation` at `config.rs:106-107`, not `:105-106`.
+>    The same builder lines on `2fc0193` are identical, so the plan's numbers
+>    were the body, not the signature.
+>
+> **Records.** T-286 (Axiam.json, both STRIDE documents, counts: 286 threats,
+> 273 mitigated / 13 open; Spoofing 69, High 133, system diagram 32). T-234 and
+> T-283 amended in all three. Roadmap T22.12. CHANGELOG under **Added**. No
+> OpenAPI or management-registry change: no REST DTO or response line moved.
+> The FAPI 2.0 and Basic OP conformance results of 2026-09-11 stand (§7.2); no
+> run is claimed here, since nothing under `/oauth2/*` changed.
+
 **The fix.** Two flat variables in the namespace the gRPC TLS config already
 uses (`tls.rs:1233-1238`):
 

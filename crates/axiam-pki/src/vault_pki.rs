@@ -51,7 +51,9 @@ use axiam_core::ca_keys::{
     IntermediateCaRequest, IntermediateSigningRequest, LeafSigningRequest, SignedLeaf, StoredCaKey,
 };
 use axiam_core::error::{AxiamError, AxiamResult};
-use axiam_core::models::certificate::KeyAlgorithm;
+use axiam_core::models::certificate::{
+    KeyAlgorithm, LeafExtendedKeyUsage, LeafKeyUsage, LeafProfile,
+};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -640,24 +642,27 @@ impl CaKeyStore for VaultPkiCaKeyStore {
     /// who wants Vault to enforce names as well can point the mount's role at
     /// the same issuer; what they cannot do is have neither.
     ///
-    /// # A caller's CSR is not AXIAM's CSR
+    /// # What AXIAM states, and what `sign-verbatim` takes from the CSR
     ///
-    /// When [`LeafSigningRequest::csr_is_caller_supplied`] is set, the request
-    /// body states `key_usage` and `ext_key_usage` as empty rather than letting
-    /// Vault apply its own defaults (`DigitalSignature`, `KeyAgreement`,
-    /// `KeyEncipherment`). What a certificate says about its key usage should be
-    /// AXIAM's decision, not a default of whichever Vault version answers, and
-    /// empty is what the in-process path produces for the same request.
+    /// Measured against Vault 1.18.3, not taken from the documentation:
     ///
-    /// This is a *second* statement of an intent already enforced upstream, and
-    /// it has to be, because it is not sufficient on its own: `sign-verbatim`
-    /// **discards** these two parameters when the CSR itself carries the
-    /// matching extensions and issues what the CSR asked for. So
-    /// `CertService::sign_csr` refuses a CSR requesting `keyUsage` or
-    /// `extendedKeyUsage` before anything reaches here, and this says what the
-    /// certificate should carry once that is true. Neither half alone would do:
-    /// the refusal without this leaves the shape to a Vault default, and this
-    /// without the refusal is a parameter Vault would throw away.
+    /// * **`key_usage` / `ext_key_usage`** are applied when the CSR requests
+    ///   neither extension, and discarded when it does. So every call states
+    ///   the S-7 profile ([`LeafSigningRequest::profile`]) rather than letting
+    ///   Vault's defaults (`DigitalSignature`, `KeyAgreement`,
+    ///   `KeyEncipherment`, no EKU) apply, and `CertService::sign_csr` refuses a
+    ///   CSR that requests either — neither half alone would do.
+    /// * **SANs come from the CSR and from nowhere else.** `alt_names` and
+    ///   `ip_sans` are ignored outright (`use_csr_sans` is hard-wired on for
+    ///   this endpoint). A generated leaf's SANs therefore travel inside the
+    ///   CSR AXIAM builds; a caller's CSR may carry none, so a caller-CSR
+    ///   `Server` certificate cannot be issued here and `sign_csr` refuses it
+    ///   before this call.
+    /// * **`exclude_cn_from_sans: true`** is stated on every call. 1.18.3 did
+    ///   not copy the common name into the SAN list on this endpoint without
+    ///   it; saying so explicitly keeps a `Device` leaf named
+    ///   `login.example.com` from becoming a server certificate for that name
+    ///   on a Vault version that would.
     fn sign_csr<'a>(
         &'a self,
         key_ref: &'a CaKeyRef,
@@ -669,16 +674,14 @@ impl CaKeyStore for VaultPkiCaKeyStore {
                 &locator.issuing.mount,
                 &format!("issuer/{}/sign-verbatim", locator.issuing.issuer),
             );
-            let mut body = serde_json::json!({
+            let body = serde_json::json!({
                 "csr": request.csr_pem,
                 "ttl": format!("{}s", request.ttl_seconds.max(1)),
                 "format": "pem",
+                "key_usage": vault_key_usage(&request.profile),
+                "ext_key_usage": vault_ext_key_usage(&request.profile),
+                "exclude_cn_from_sans": true,
             });
-            if request.csr_is_caller_supplied {
-                let map = body.as_object_mut().expect("a JSON object was just built");
-                map.insert("key_usage".into(), serde_json::json!([]));
-                map.insert("ext_key_usage".into(), serde_json::json!([]));
-            }
             let data = self.post(&url, body).await?;
 
             let certificate_pem = string_field(&data, "certificate", &url)?;
@@ -817,6 +820,31 @@ impl CaKeyStore for VaultPkiCaKeyStore {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// The S-7 profile's key usages, spelled as Vault spells them (Go's
+/// `x509.KeyUsage` names without the prefix).
+fn vault_key_usage(profile: &LeafProfile) -> Vec<&'static str> {
+    profile
+        .key_usage
+        .iter()
+        .map(|u| match u {
+            LeafKeyUsage::DigitalSignature => "DigitalSignature",
+            LeafKeyUsage::KeyEncipherment => "KeyEncipherment",
+        })
+        .collect()
+}
+
+/// The S-7 profile's extended key usages, spelled as Vault spells them.
+fn vault_ext_key_usage(profile: &LeafProfile) -> Vec<&'static str> {
+    profile
+        .extended_key_usage
+        .iter()
+        .map(|u| match u {
+            LeafExtendedKeyUsage::ClientAuth => "ClientAuth",
+            LeafExtendedKeyUsage::ServerAuth => "ServerAuth",
+        })
+        .collect()
+}
 
 /// Vault's `key_type` and `key_bits` for one of AXIAM's algorithms.
 ///

@@ -98,6 +98,12 @@ struct SettingsRow {
     // the default, which is `enabled: false` (I1).
     #[surreal(default)]
     oidc_cimd_json: Option<String>,
+    // Server certificate names (V67 / T22.14). The organization baseline of
+    // the S-7 fence; absent — a pre-V67 row — reads as the empty list, which
+    // refuses every `Server` request (I1). A tenant row carries the resolved
+    // list here too, but what a tenant *chose* lives in `overrides_json`.
+    #[surreal(default)]
+    cert_server_allowed_names: Option<Vec<String>>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     // JSON-encoded `TenantSettingsOverride`; `None` for org rows.
     overrides_json: Option<String>,
@@ -178,6 +184,12 @@ struct SettingsRowWithId {
     // the default, which is `enabled: false` (I1).
     #[surreal(default)]
     oidc_cimd_json: Option<String>,
+    // Server certificate names (V67 / T22.14). The organization baseline of
+    // the S-7 fence; absent — a pre-V67 row — reads as the empty list, which
+    // refuses every `Server` request (I1). A tenant row carries the resolved
+    // list here too, but what a tenant *chose* lives in `overrides_json`.
+    #[surreal(default)]
+    cert_server_allowed_names: Option<Vec<String>>,
     // Sparse override mask (tenant rows only — V16 / CQ-B03).
     overrides_json: Option<String>,
     // Timestamps
@@ -366,6 +378,7 @@ impl SettingsRowWithId {
             certificate: CertificatePolicy {
                 default_cert_validity_days: self.cert_default_validity,
                 max_cert_validity_days: self.cert_max_validity,
+                server_cert_allowed_names: self.cert_server_allowed_names.unwrap_or_default(),
             },
             notification: NotificationPolicy {
                 admin_notifications_enabled: self.notif_admin_enabled,
@@ -423,6 +436,7 @@ email_verification_required = $email_verification_required, \
 email_grace_period_hours = $email_grace_period_hours, \
 cert_default_validity = $cert_default_validity, \
 cert_max_validity = $cert_max_validity, \
+cert_server_allowed_names = $cert_server_allowed_names, \
 notif_admin_enabled = $notif_admin_enabled, \
 opaque_mode = $opaque_mode, \
 opaque_suite = $opaque_suite, \
@@ -545,6 +559,10 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             (
                 "cert_max_validity",
                 BindValue::U32(settings.certificate.max_cert_validity_days),
+            ),
+            (
+                "cert_server_allowed_names",
+                BindValue::StrList(settings.certificate.server_cert_allowed_names.clone()),
             ),
             (
                 "notif_admin_enabled",
@@ -789,6 +807,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             certificate: CertificatePolicy {
                 default_cert_validity_days: row.cert_default_validity,
                 max_cert_validity_days: row.cert_max_validity,
+                server_cert_allowed_names: row.cert_server_allowed_names.unwrap_or_default(),
             },
             notification: NotificationPolicy {
                 admin_notifications_enabled: row.notif_admin_enabled,

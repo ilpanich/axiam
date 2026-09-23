@@ -1029,3 +1029,81 @@ async fn tenant_scoped_put_refuses_a_longer_deletion_window() {
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// S-7 — server_cert_allowed_names over the wire
+// -----------------------------------------------------------------------
+
+/// The organization writes the list, a tenant inherits it, may narrow it, and
+/// is refused with 400 when it tries to widen it. A malformed organization
+/// entry is refused too. An org body without the field — every client written
+/// before S-7 — is `set_org_settings_returns_200`, and lands on the empty list.
+#[actix_rt::test]
+async fn server_cert_allowed_names_are_set_by_the_org_and_only_narrowed_by_a_tenant() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+    let put = |uri: String, body: serde_json::Value| {
+        test::TestRequest::put()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(body)
+            .to_request()
+    };
+    let org_uri = format!("/api/v1/organizations/{org_id}/settings");
+
+    let mut malformed = org_settings_body(None);
+    malformed["server_cert_allowed_names"] = serde_json::json!(["*.lakeside.internal"]);
+    let resp = test::call_service(&app, put(org_uri.clone(), malformed)).await;
+    assert_eq!(resp.status().as_u16(), 400, "a wildcard entry is refused");
+
+    let mut body = org_settings_body(None);
+    body["server_cert_allowed_names"] = serde_json::json!([".lakeside.internal", "10.0.0.0/8"]);
+    let resp = test::call_service(&app, put(org_uri, body)).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let org: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        org["certificate"]["server_cert_allowed_names"],
+        serde_json::json!([".lakeside.internal", "10.0.0.0/8"])
+    );
+
+    let resp = test::call_service(
+        &app,
+        put(
+            "/api/v1/settings".into(),
+            serde_json::json!({ "server_cert_allowed_names": [".internal"] }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "a tenant cannot widen the list"
+    );
+    let refused: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("server_cert_allowed_names"),
+        "{refused}"
+    );
+
+    let resp = test::call_service(
+        &app,
+        put(
+            "/api/v1/settings".into(),
+            serde_json::json!({ "server_cert_allowed_names": [".plant.lakeside.internal"] }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "a tenant may narrow it");
+    let tenant: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        tenant["certificate"]["server_cert_allowed_names"],
+        serde_json::json!([".plant.lakeside.internal"])
+    );
+}

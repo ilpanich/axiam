@@ -7,7 +7,7 @@
 //! fingerprint but NOT signed by the tenant CA is rejected.
 
 use axiam_core::error::{AxiamError, AxiamResult};
-use axiam_core::models::certificate::{CertificateStatus, DeviceIdentity};
+use axiam_core::models::certificate::{CertificateStatus, CertificateType, DeviceIdentity};
 use axiam_core::repository::{CaCertificateRepository, CertificateRepository};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -69,6 +69,18 @@ impl<CR: CertificateRepository, CCR: CaCertificateRepository> DeviceAuthService<
             .cert_repo
             .get_by_fingerprint_global(&fingerprint)
             .await?;
+
+        // S-7 — a server certificate authenticates nobody. The bind endpoint
+        // refuses to attach one to a service account, so this is the second
+        // statement of the same rule: it holds for a row bound by any other
+        // route, and on the proxy-header path, where no TLS verifier checks the
+        // certificate's `serverAuth`-only usage. Checked before anything that
+        // could answer differently for it, so the refusal names the type.
+        if cert.cert_type == CertificateType::Server {
+            return Err(AxiamError::Certificate(
+                "a Server certificate cannot authenticate a device or a service account".into(),
+            ));
+        }
 
         // Validate status
         if cert.status != CertificateStatus::Active {

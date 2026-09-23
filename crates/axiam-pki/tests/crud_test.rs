@@ -153,8 +153,10 @@ async fn cert_get_by_id_fingerprint_list_revoke() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .unwrap();

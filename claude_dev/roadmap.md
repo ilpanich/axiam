@@ -913,6 +913,26 @@ under the organization CA. The audit log records the actor type from
 `sub_kind`. OpenAPI gains a `service_account` security scheme on the admitted
 operations; spec and management registry regenerated. Threat **T-287**. PR F.
 
+### T22.14 — Server certificates, the name fence and the leaf usage profile — Opus 5 ✓ LANDED
+DF-001. AXIAM could not issue a certificate a TLS server presents: leaves
+carried no SAN, KU or EKU, and neither request body had a field for them.
+`CertificateType::Server` is the only type with SANs, taken from an explicit
+`subject_alt_names` field on `generate` and `sign-csr`. A CSR's own
+`subjectAltName` is still refused. Every SAN and the CN must match the
+effective `server_cert_allowed_names`: DNS suffixes (strictly below, on label
+boundaries), exact hosts and CIDRs. The list is empty by default, which
+refuses every `Server` request. It uses the existing tighten-only interlock:
+widening is a `400`, and a shrinking baseline intersects. Every leaf gets a
+per-type, per-algorithm KU/EKU profile on both paths and both custodians. Under
+`vault_pki` the names go in AXIAM's own CSR, because `sign-verbatim` ignores
+`alt_names` (measured on a real Vault 1.18.3). A caller-CSR `Server` request is
+refused there. `bind` and device login refuse `Server`. Schema **v67**
+(`cert_type` assertion + baseline column). A browser-shaped rustls↔actix
+acceptance test passes. Nine mutations were made to confirm the new tests can
+fail. OpenAPI and the management registry regenerated. Threat **T-288**;
+**T-268** amended. Decision D-7 (`nameConstraints` in tenant CAs) deferred. The
+admin UI is S-7b, next. PR G.
+
 ---
 
 ---
@@ -943,7 +963,7 @@ operations; spec and management registry regenerated. Threat **T-287**. PR F.
 | Phase 19 | 26 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
-| Phase 22 | 4+ | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes) |
+| Phase 22 | 4+ | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates) |
 
 **Total: 112 tasks across 22 complete phases, plus Phase 22 in progress**
 

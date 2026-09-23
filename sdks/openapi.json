@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta16",
-    "x-axiam-spec-digest": "sha256:c6d155c618ec177bc1fe4752dcfc7db300cf3aa3add09445418916aca7f36e69"
+    "x-axiam-spec-digest": "sha256:3d096f0aaff9cdad0bc48e3a47e8ac5149a7b930765e4ad252aba92bce879210"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2351,6 +2351,9 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid request: the subject is not a common name, the validity exceeds a cap, or the names are refused — `subject_alt_names` on a type other than `Server`, a `Server` request with none, or a SAN or common name not admitted by the tenant's `server_cert_allowed_names` (empty by default, which refuses every `Server` request)"
+          },
           "404": {
             "description": "No such issuing CA within this caller's reach: it belongs to another organization, to another tenant, or is the organization CA and the caller is not an organization principal"
           }
@@ -2395,7 +2398,7 @@
             }
           },
           "400": {
-            "description": "The request is not a PEM PKCS#10 CSR, its signature does not verify against the public key it carries, its key is outside AXIAM's policy (Ed25519, or RSA with a modulus of at least 4096 bits), it asks for a `subjectAltName`, `keyUsage` or `extendedKeyUsage` extension, or the validity exceeds the tenant cap, the 825-day hard cap, or the issuer's own expiry"
+            "description": "The request is not a PEM PKCS#10 CSR, its signature does not verify against the public key it carries, its key is outside AXIAM's policy (Ed25519, or RSA with a modulus of at least 4096 bits), it asks for a `subjectAltName`, `keyUsage` or `extendedKeyUsage` extension, the validity exceeds the tenant cap, the 825-day hard cap, or the issuer's own expiry, or the names are refused (see `POST /api/v1/certificates`; a `Server` request is also refused under a `vault_pki` CA)"
           },
           "401": {
             "description": "Unauthorized"
@@ -9445,6 +9448,9 @@
         "responses": {
           "200": {
             "description": "Certificate bound to service account"
+          },
+          "400": {
+            "description": "The certificate cannot authenticate anything: it is not Active, it has expired, or it is a `Server` certificate"
           }
         },
         "security": [
@@ -12873,6 +12879,13 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          },
+          "server_cert_allowed_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names a `Server` certificate may be issued for (S-7, DF-001): DNS\nsuffixes (`.lakeside.internal`, strictly below), exact hosts\n(`lakeside.internal`) and IP prefixes (`10.0.0.0/8`, `fd00::/8`). See\n[`crate::models::server_names`] for the matching rules.\n\n**Empty by default, and empty refuses every `Server` request** (I1).\nA certificate for a name, signed under the organization root, is trusted\nby every relying party that trusts that root, so the list is written\nwhere the root is owned. A tenant override may only remove an entry or\nnarrow one; when the baseline later shrinks, the tenant's effective list\nis the intersection of the two."
           }
         }
       },
@@ -12891,7 +12904,8 @@
         "enum": [
           "User",
           "Service",
-          "Device"
+          "Device",
+          "Server"
         ]
       },
       "CertificationLevel": {
@@ -13314,6 +13328,13 @@
             "type": "string",
             "description": "The certificate's common name, e.g. `device-001`.\n\nA **common name**, not a distinguished name. A single `CN=` prefix is\naccepted and stripped; anything else containing `=` is refused with\n`400`."
           },
+          "subject_alt_names": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubjectAltName"
+            },
+            "description": "The names a `Server` certificate is issued for. Required, and only\naccepted, for `cert_type: Server`; every entry must be admitted by the\ntenant's effective `server_cert_allowed_names`."
+          },
           "tenant_id": {
             "type": "string",
             "format": "uuid"
@@ -13349,6 +13370,16 @@
           "metadata": {},
           "subject": {
             "type": "string"
+          },
+          "subject_alt_names": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SubjectAltName"
+            },
+            "description": "The names a `Server` certificate is issued for, as\n`[{\"dns\": \"api.lakeside.internal\"}, {\"ip\": \"10.0.0.5\"}]`. Required for\n`cert_type: Server` and refused for every other type. Each name, and\nthe common name, must be admitted by the tenant's effective\n`server_cert_allowed_names`, which is empty — refusing every `Server`\nrequest — until an organization administrator lists names."
           },
           "validity_days": {
             "type": "integer",
@@ -19456,6 +19487,13 @@
             "type": "boolean",
             "example": false
           },
+          "server_cert_allowed_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "S-7 — defaulted to empty, so an API client written before the field\nlands on \"no `Server` certificate is issued\" (I1)."
+          },
           "webauthn_user_verification": {
             "type": "string",
             "example": "preferred"
@@ -19545,6 +19583,13 @@
             "description": "The signing CA that issues it. Must be Active, in its validity window,\nand hold a key AXIAM can sign with."
           },
           "metadata": {},
+          "subject_alt_names": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubjectAltName"
+            },
+            "description": "See [`CreateCertificate::subject_alt_names`]. Stated here, never in the\nCSR: a CSR requesting `subjectAltName` is refused."
+          },
           "tenant_id": {
             "type": "string",
             "format": "uuid",
@@ -19580,6 +19625,16 @@
             "format": "uuid"
           },
           "metadata": {},
+          "subject_alt_names": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SubjectAltName"
+            },
+            "description": "See [`CreateCertificateRequest::subject_alt_names`]. Stated here and\nnever in the CSR, which is still refused if it requests a\n`subjectAltName`. Under a CA whose key is held by `vault_pki` a `Server`\nrequest on this path is refused; use `POST /api/v1/certificates`."
+          },
           "validity_days": {
             "type": "integer",
             "format": "int32",
@@ -19833,6 +19888,37 @@
             "type": "string"
           }
         }
+      },
+      "SubjectAltName": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A DNS name, e.g. `api.lakeside.internal` or `*.lakeside.internal`.",
+            "required": [
+              "dns"
+            ],
+            "properties": {
+              "dns": {
+                "type": "string",
+                "description": "A DNS name, e.g. `api.lakeside.internal` or `*.lakeside.internal`."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An IPv4 or IPv6 address, e.g. `10.0.0.5`.",
+            "required": [
+              "ip"
+            ],
+            "properties": {
+              "ip": {
+                "type": "string",
+                "description": "An IPv4 or IPv6 address, e.g. `10.0.0.5`."
+              }
+            }
+          }
+        ],
+        "description": "A name to put in a `Server` certificate's `subjectAltName`.\n\nStated explicitly in the request, never read from a CSR: a CSR asking for a\n`subjectAltName` extension is still refused. URI and e-mail names are not\noffered — nothing in AXIAM consumes them yet."
       },
       "Tenant": {
         "type": "object",
@@ -20139,6 +20225,16 @@
               "boolean",
               "null"
             ]
+          },
+          "server_cert_allowed_names": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "S-7 — tighten-only: every entry must be covered by an organization\nentry. An empty list means this tenant issues no `Server` certificate\nat all, which is different from an absent field (inherit the\norganization's list)."
           },
           "webauthn_user_verification": {
             "type": [

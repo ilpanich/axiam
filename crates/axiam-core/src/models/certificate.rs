@@ -33,6 +33,89 @@ pub enum CertificateType {
     Service,
     /// Certificate for authenticating an IoT device.
     Device,
+    /// Certificate a TLS **server** presents (S-7, DF-001).
+    ///
+    /// The only type that may carry `subjectAltName` entries, and the only one
+    /// whose leaf gets `extendedKeyUsage: serverAuth`. Every name it carries
+    /// must be admitted by the tenant's effective `server_cert_allowed_names`,
+    /// which is empty — and so refuses every `Server` request — until an
+    /// organization administrator lists names.
+    ///
+    /// It authenticates nobody: the bind endpoint refuses it, device login
+    /// refuses it, and its `serverAuth`-only usage fails the `clientAuth` check
+    /// every chain-validating client-certificate verifier makes.
+    Server,
+}
+
+/// A name to put in a `Server` certificate's `subjectAltName`.
+///
+/// Stated explicitly in the request, never read from a CSR: a CSR asking for a
+/// `subjectAltName` extension is still refused. URI and e-mail names are not
+/// offered — nothing in AXIAM consumes them yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectAltName {
+    /// A DNS name, e.g. `api.lakeside.internal` or `*.lakeside.internal`.
+    Dns(String),
+    /// An IPv4 or IPv6 address, e.g. `10.0.0.5`.
+    Ip(String),
+}
+
+/// A `keyUsage` bit AXIAM sets on a leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafKeyUsage {
+    DigitalSignature,
+    /// RSA only: an Ed25519 key cannot encipher anything.
+    KeyEncipherment,
+}
+
+/// An `extendedKeyUsage` purpose AXIAM sets on a leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafExtendedKeyUsage {
+    /// `id-kp-clientAuth`.
+    ClientAuth,
+    /// `id-kp-serverAuth`.
+    ServerAuth,
+}
+
+/// The usages every AXIAM leaf of a given type and key is issued with.
+///
+/// One function, read by both leaf paths and both custodians, so a generated
+/// leaf and a CSR-signed one — local or Vault-signed — cannot differ:
+///
+/// | Type | Key | keyUsage | extendedKeyUsage |
+/// |---|---|---|---|
+/// | `User`, `Service`, `Device` | Ed25519 | digitalSignature | clientAuth |
+/// | `User`, `Service`, `Device` | RSA | digitalSignature, keyEncipherment | clientAuth |
+/// | `Server` | Ed25519 | digitalSignature | serverAuth |
+/// | `Server` | RSA | digitalSignature, keyEncipherment | serverAuth |
+///
+/// Before S-7 a leaf carried neither extension, which RFC 5280 reads as "any
+/// usage". The profile only ever narrows that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeafProfile {
+    pub key_usage: Vec<LeafKeyUsage>,
+    pub extended_key_usage: Vec<LeafExtendedKeyUsage>,
+}
+
+impl LeafProfile {
+    /// The profile for a leaf of `cert_type` over a key of `key_algorithm`.
+    pub fn for_leaf(cert_type: &CertificateType, key_algorithm: &KeyAlgorithm) -> Self {
+        let mut key_usage = vec![LeafKeyUsage::DigitalSignature];
+        if *key_algorithm == KeyAlgorithm::Rsa4096 {
+            key_usage.push(LeafKeyUsage::KeyEncipherment);
+        }
+        let extended_key_usage = vec![match cert_type {
+            CertificateType::Server => LeafExtendedKeyUsage::ServerAuth,
+            CertificateType::User | CertificateType::Service | CertificateType::Device => {
+                LeafExtendedKeyUsage::ClientAuth
+            }
+        }];
+        Self {
+            key_usage,
+            extended_key_usage,
+        }
+    }
 }
 
 /// A CA (Certificate Authority) certificate at the organization level.
@@ -462,6 +545,11 @@ pub struct CreateCertificate {
     /// Validity duration in days.
     pub validity_days: u32,
     pub metadata: Option<serde_json::Value>,
+    /// The names a `Server` certificate is issued for. Required, and only
+    /// accepted, for `cert_type: Server`; every entry must be admitted by the
+    /// tenant's effective `server_cert_allowed_names`.
+    #[serde(default)]
+    pub subject_alt_names: Vec<SubjectAltName>,
 }
 
 /// Sign a certificate signing request for an **end-entity** certificate.
@@ -499,6 +587,10 @@ pub struct SignCertificateCsr {
     /// issuer's own expiry.
     pub validity_days: u32,
     pub metadata: Option<serde_json::Value>,
+    /// See [`CreateCertificate::subject_alt_names`]. Stated here, never in the
+    /// CSR: a CSR requesting `subjectAltName` is refused.
+    #[serde(default)]
+    pub subject_alt_names: Vec<SubjectAltName>,
 }
 
 /// Elided rather than redacted, for the reason [`SignIntermediateCsr`]'s own
@@ -514,6 +606,7 @@ impl std::fmt::Debug for SignCertificateCsr {
             .field("cert_type", &self.cert_type)
             .field("validity_days", &self.validity_days)
             .field("metadata", &self.metadata)
+            .field("subject_alt_names", &self.subject_alt_names)
             .finish()
     }
 }

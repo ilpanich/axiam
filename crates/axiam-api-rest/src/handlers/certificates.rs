@@ -4,7 +4,7 @@ use actix_web::{HttpResponse, web};
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::{
     BindCertificate, Certificate, CertificateStatus, CertificateType, CreateCertificate,
-    GeneratedCertificate, KeyAlgorithm, SignCertificateCsr,
+    GeneratedCertificate, KeyAlgorithm, SignCertificateCsr, SubjectAltName,
 };
 use axiam_core::repository::{
     CertificateRepository, PaginatedResult, Pagination, TenantRepository,
@@ -33,6 +33,36 @@ pub struct CreateCertificateRequest {
     /// Validity duration in days.
     pub validity_days: u32,
     pub metadata: Option<serde_json::Value>,
+    /// The names a `Server` certificate is issued for, as
+    /// `[{"dns": "api.lakeside.internal"}, {"ip": "10.0.0.5"}]`. Required for
+    /// `cert_type: Server` and refused for every other type. Each name, and
+    /// the common name, must be admitted by the tenant's effective
+    /// `server_cert_allowed_names`, which is empty — refusing every `Server`
+    /// request — until an organization administrator lists names.
+    #[serde(default)]
+    pub subject_alt_names: Option<Vec<SubjectAltName>>,
+}
+
+/// The acting tenant's effective `server_cert_allowed_names` — read only for a
+/// `Server` request, so every other request makes exactly the calls it made
+/// before S-7 (I1). A failed read is an error, never an empty list read as
+/// "nothing is allowed" or a missing one read as "anything is": the fence has
+/// to be answered from the stored policy or not at all.
+async fn server_names_for<C: Connection + Clone>(
+    cert_type: &CertificateType,
+    principal: &AuthenticatedPrincipal,
+    state: &AppState<C>,
+) -> Result<Vec<String>, AxiamApiError> {
+    if *cert_type != CertificateType::Server {
+        return Ok(Vec::new());
+    }
+    let settings = axiam_core::repository::SettingsRepository::get_effective_settings(
+        &state.settings_repo,
+        principal.org_id,
+        principal.tenant_id,
+    )
+    .await?;
+    Ok(settings.certificate.server_cert_allowed_names)
 }
 
 /// The issuing scope this caller acts with on both leaf paths.
@@ -64,6 +94,12 @@ async fn issuing_scope<C: Connection + Clone>(
     responses(
         (status = 201, description = "Certificate generated",
          body = GeneratedCertificate),
+        (status = 400, description = "Invalid request: the subject is not a common name, the \
+                                      validity exceeds a cap, or the names are refused — \
+                                      `subject_alt_names` on a type other than `Server`, a \
+                                      `Server` request with none, or a SAN or common name not \
+                                      admitted by the tenant's `server_cert_allowed_names` \
+                                      (empty by default, which refuses every `Server` request)"),
         (status = 404, description = "No such issuing CA within this caller's reach: it \
                                       belongs to another organization, to another tenant, \
                                       or is the organization CA and the caller is not an \
@@ -89,7 +125,9 @@ pub async fn generate<C: Connection + Clone>(
         key_algorithm: req.key_algorithm,
         validity_days: req.validity_days,
         metadata: req.metadata,
+        subject_alt_names: req.subject_alt_names.unwrap_or_default(),
     };
+    let server_names = server_names_for(&input.cert_type, &principal, state.get_ref()).await?;
 
     // Read tenant-level max_certificate_validity_days from metadata
     let tenant = state.tenant_repo.get_by_id(principal.tenant_id).await?;
@@ -108,7 +146,7 @@ pub async fn generate<C: Connection + Clone>(
     let result = state
         .pki
         .cert_service
-        .generate(principal.org_id, scope, input, max_validity)
+        .generate(principal.org_id, scope, input, max_validity, &server_names)
         .await?;
     Ok(HttpResponse::Created().json(result))
 }
@@ -129,6 +167,12 @@ pub struct SignCertificateCsrRequest {
     /// Validity duration in days.
     pub validity_days: u32,
     pub metadata: Option<serde_json::Value>,
+    /// See [`CreateCertificateRequest::subject_alt_names`]. Stated here and
+    /// never in the CSR, which is still refused if it requests a
+    /// `subjectAltName`. Under a CA whose key is held by `vault_pki` a `Server`
+    /// request on this path is refused; use `POST /api/v1/certificates`.
+    #[serde(default)]
+    pub subject_alt_names: Option<Vec<SubjectAltName>>,
 }
 
 /// `POST /api/v1/certificates/sign-csr`
@@ -160,8 +204,10 @@ pub struct SignCertificateCsrRequest {
                                       key is outside AXIAM's policy (Ed25519, or RSA with a \
                                       modulus of at least 4096 bits), it asks for a \
                                       `subjectAltName`, `keyUsage` or `extendedKeyUsage` \
-                                      extension, or the validity exceeds the tenant cap, the \
-                                      825-day hard cap, or the issuer's own expiry"),
+                                      extension, the validity exceeds the tenant cap, the \
+                                      825-day hard cap, or the issuer's own expiry, or the \
+                                      names are refused (see `POST /api/v1/certificates`; a \
+                                      `Server` request is also refused under a `vault_pki` CA)"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Forbidden — `certificates:generate` required"),
         (status = 404, description = "No such issuing CA within this caller's reach: it \
@@ -189,7 +235,9 @@ pub async fn sign_csr<C: Connection + Clone>(
         cert_type: req.cert_type,
         validity_days: req.validity_days,
         metadata: req.metadata,
+        subject_alt_names: req.subject_alt_names.unwrap_or_default(),
     };
+    let server_names = server_names_for(&input.cert_type, &principal, state.get_ref()).await?;
 
     // The same tenant cap `generate` reads, from the same place.
     let tenant = state.tenant_repo.get_by_id(principal.tenant_id).await?;
@@ -204,7 +252,7 @@ pub async fn sign_csr<C: Connection + Clone>(
     let certificate = state
         .pki
         .cert_service
-        .sign_csr(principal.org_id, scope, input, max_validity)
+        .sign_csr(principal.org_id, scope, input, max_validity, &server_names)
         .await?;
     Ok(HttpResponse::Created().json(certificate))
 }
@@ -352,6 +400,8 @@ pub async fn revoke<C: Connection + Clone>(
     params(("sa_id" = Uuid, Path, description = "Service account ID")),
     responses(
         (status = 200, description = "Certificate bound to service account"),
+        (status = 400, description = "The certificate cannot authenticate anything: it is not \
+                                      Active, it has expired, or it is a `Server` certificate"),
     ),
     security(("bearer" = []), ("service_account" = []))
 )]
@@ -374,6 +424,18 @@ pub async fn bind<C: Connection + Clone>(
         .cert_repo
         .get_by_id(principal.tenant_id, input.certificate_id)
         .await?;
+
+    // S-7 — a server certificate authenticates nobody, and binding one would
+    // make a certificate for a *host name* the credential of a principal. The
+    // device-login path refuses it as well; this is the refusal an operator
+    // sees, at the moment the mistake is made.
+    if cert.cert_type == CertificateType::Server {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: "a Server certificate cannot be bound to a service account: it identifies \
+                      a host, carries serverAuth only, and cannot authenticate a client"
+                .into(),
+        }));
+    }
 
     // And that it can actually authenticate anything. A revoked or expired
     // certificate binds happily and then fails every handshake, so the operator

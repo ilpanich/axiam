@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 287 |
-| **Mitigated / Open** | 274 / 13 |
+| **Threats identified** | 288 |
+| **Mitigated / Open** | 275 / 13 |
 | **Owner** | ilpanich |
 
 ---
@@ -1743,7 +1743,7 @@ DF-021 asked for a role assignment that applies at its resource and not below it
 
 Organization and tenant CA lifecycle with per-CA key custody (sealed database row or Vault), tenant signing CAs beneath the organization CA, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification against hot-reloadable trust anchors, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine. 1.0.0-beta13 lets the listener admit RFC 8705 §2.2 self-signed client certificates under an opt-in policy, with the trust level a certificate earned carried to every consumer so that device authentication can refuse it (T-263).
 
-*29 threats — 7 critical, 17 high, 5 medium; 1 open.*
+*30 threats — 7 critical, 18 high, 5 medium; 1 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1776,6 +1776,7 @@ Organization and tenant CA lifecycle with per-CA key custody (sealed database ro
 | T-281 | Certificate issuance (rcgen, policy enforcement) <br/>*Process* | E | A tenant administrator issues a leaf under another tenant's signing CA, or directly under the organization anchor | High | Mitigated |
 | T-282 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | D | The one auth endpoint that performs a client-certificate handshake has no rate limiter | Medium | Mitigated |
 | T-283 | mTLS device auth (fingerprint + chain verify) <br/>*Process* | S | A device's access token is a bearer credential, so stealing it is as good as stealing the key | High | Mitigated |
+| T-288 | Certificate issuance (rcgen, policy enforcement) <br/>*Process* | S | A tenant administrator mints a certificate for a name that is not theirs | High | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1963,6 +1964,8 @@ When every tenant's user, service and device certificates issue straight from th
 > Tests: twenty in `crates/axiam-pki/tests/sign_csr_test.rs`, one per rule; three against the Vault mock in `vault_pki_test.rs`, including one asserting the exact request body AXIAM sends and one proving a `keyUsage`-requesting CSR never reaches Vault at all; four at the HTTP layer in `certificate_test.rs`; and `a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one` in `mtls_test.rs`, which is the property the feature exists for.
 >
 > **Residual.** What Vault does with the body is documented rather than observed: the tests here run against a mock, and a real Vault was not available. The security property does not rest on that — it rests on the refusal, which is enforced before any custodian is chosen — but the cosmetic parity of the key-usage extension under `vault_pki` is the part taken on the documentation's word.
+>
+> **Amended 2026-09-23 (T22.14, S-7).** The residual above is now observed rather than taken on the documentation's word, against a Vault 1.18.3 dev server: `key_usage` and `ext_key_usage` apply when the CSR requests neither extension, and `sign-verbatim` reads SANs from the CSR only — `alt_names` and `ip_sans` are ignored. The body no longer states empty lists: it states the per-type usage profile on both leaf paths, plus `exclude_cn_from_sans`, and a Vault-signed leaf parsed back carries exactly that profile. See T-288.
 
 **T-281 — A tenant administrator issues a leaf under another tenant's signing CA, or directly under the organization anchor**  
 `Certificate issuance (rcgen, policy enforcement)` (Process) · Elevation of privilege · High · Mitigated
@@ -2046,6 +2049,32 @@ A certificate issued under an organization CA that was never flagged as an mTLS 
 A `self_signed_tls_client_auth` client could never open a connection: `ReloadableClientCertVerifier` delegated to webpki, whose job is chain-building, and an RFC 8705 §2.2 certificate is self-signed by design — it chains to nothing, because the method identifies a client by the `x5t#S256` an administrator registered rather than by an issuer — so rustls sent `bad_certificate` before AXIAM saw a request (34 of 37 FAPI modules `INTERRUPTED` with no HTTP status). RFC 8705 puts two trust models under one transport: §2.1 is PKI, the identity a name a CA vouched for; §2.2 has no PKI in it, the certificate *is* the credential, and adding an issuer to the bundle cannot answer it. The hazard is in the fix: once the listener admits an unchained certificate, device and IoT authentication — whose entire model is chaining to a CA an administrator flagged as a trust anchor, the native-listener twin of B-06 — must not accept one, and a `tls_client_auth` DN match without a chain requirement makes `openssl req -subj "/CN=<whatever was registered>"` the entire attack.
 
 > 2d4cb59, four layers, and the third and fourth are where the safety is. (1) `ClientAuth::OptionalSelfSigned`, spelled `optional_self_signed`, a fourth policy: `off`, `optional` and `required` are byte-for-byte unchanged, every new branch is gated on `accepts_self_asserted()`, which only this variant answers true to, and the new behaviour is reachable only through a value no deployment sets today — which is what makes it non-regressive rather than merely tested. (2) The verifier tries webpki and, under the new policy only, accepts on failure, with an explicit `not_before`/`not_after` check on that branch because webpki performs the validity check as part of chain building and the path that skips chain building would silently lose it, for exactly the clients nobody else vouches for; the self-signature is deliberately not verified, since under §2.2 the identity is the SHA-256 of the DER and possession is proven by TLS 1.3's `CertificateVerify`, which rustls checks whether or not a chain was built. (3) `CertTrust::{ChainedToAnchor, SelfAsserted}` travels from the handshake to every consumer, on `VerifiedClientCert` and `PresentedCertificate` — an enum rather than a bool, **required** rather than defaulted, because a default would have handed the privileged value to any future call site that said nothing; it lives in `axiam-core` because the layering gate refuses the outward edge, and it is re-derived in the `on_connect` hook via `tls::peer_certificate_trust` because rustls's `ClientCertVerified` is an opaque token with no payload and the verifier is handed no connection handle to key a side channel on. (4) Only the one method specified to work this way may consume the weaker level: device/IoT certificate auth **refuses** `SelfAsserted` outright — rather than by falling through to the header branch, whose error text would advise setting `TRUST_FORWARDED_CLIENT_CERT`, advice that would widen a different trust boundary while chasing this one; `tls_client_auth` (§2.1) now **requires** `ChainedToAnchor`, a no-op until this commit and a real guard now that the invariant is configurable; `self_signed_tls_client_auth` (§2.2) accepts either, since the thumbprint comparison is the authentication and is no weaker for the certificate having also chained. Net effect: an unchained certificate can do exactly one thing — authenticate as a client whose exact SHA-256 an administrator registered — and every other path treats it as though the handshake had carried no certificate at all. A second listener for §2.2 was rejected: the per-client decision happens at the application layer either way, so an extra port buys only another listener to operate. The tests pin the operator-facing contract: a DN that *matches* is refused unchained with the chained case as a control on the same certificate; the §2.2 acceptance test computes the thumbprint the way an administrator does rather than reading it back off the value under test; the four documented policy strings are hard-coded; a real rustls TLS 1.3 handshake through `build_rustls_server_config` rejects the certificate under `optional` and accepts it under `optional_self_signed`; expired, not-yet-valid and non-certificate bytes are each refused.
+
+**T-288 — A tenant administrator mints a certificate for a name that is not theirs**  
+`Certificate issuance (rcgen, policy enforcement)` (Process) · Spoofing · High · Mitigated
+
+AXIAM could not issue a certificate a TLS server can present (DF-001). Leaves carried no `subjectAltName`, and neither leaf request had a field for one, so every listener in a deployment anchored in the organization root was signed offline. Closing that gap creates this threat. A leaf carrying `subjectAltName: DNS:login.example.com`, signed by a tenant signing CA under the organization root, is trusted by **every** relying party that trusts that root: browsers, gateways, MQTT clients. A tenant administrator holding `certificates:generate` could then mint a server certificate for a name that is not theirs, whether another tenant's host, the organization's own apex or any public name, and impersonate it to every client of the organization. A quieter form of the same reach existed before this change. A leaf carried no `extendedKeyUsage`, which X.509 reads as "any usage". Under `vault_pki` custody, `sign-verbatim` also copied whatever SANs the CSR AXIAM built happened to carry.
+
+> **S-7 (2026-09-23).** A fourth certificate type, `Server`, is the only one that may carry SANs. They come only from an explicit `subject_alt_names` request field. A CSR that requests a `subjectAltName` is still refused (`inspect_csr`), so nothing a caller's CSR says reaches the SAN list.
+>
+> **The fence.** Every SAN and the common name must be admitted by the tenant's effective `server_cert_allowed_names`. Entries are DNS suffixes (strictly below, on label boundaries), exact hosts and IP prefixes, all compared case-insensitively. Trailing dots, Unicode labels, partial wildcards and IPv4-mapped IPv6 are refused, each with a test. The list is written in the organization baseline and is **empty by default, which refuses every `Server` request**. The fence runs before the issuing CA is looked up, on both leaf paths and both custodians.
+>
+> **Tighten-only.** The list uses the settings interlock every other override uses, not a second one. A tenant may remove or narrow an entry, and a widening entry is a `400` at write time. When the baseline later shrinks, the effective list is the **intersection** of the two, computed on every read, so a tenant never keeps a withdrawn name and never gains one it had removed.
+>
+> **Under `vault_pki` custody** the admitted names travel inside the CSR AXIAM builds, because `sign-verbatim` ignores `alt_names` and `ip_sans` (observed on Vault 1.18.3). A caller-CSR `Server` request is refused, because no channel for its names exists.
+>
+> **A `Server` certificate authenticates nobody.** Every leaf now carries a per-type usage profile: `clientAuth` for User, Service and Device, `serverAuth` for Server, and `keyEncipherment` for RSA keys only. A `Server` leaf therefore fails the `clientAuth` check of the REST and gRPC client-certificate verifiers (`InvalidPurposeContext`). `bind` refuses it with `400`, and device login refuses it, which also covers the proxy-header path, where no TLS verifier is involved.
+>
+> **Tests.**
+>
+> - Matcher and interlock unit tests in `axiam-core`, and two repository tests of the stored baseline and of it shrinking.
+> - `generate` and `sign-csr` twins in `cert_test.rs` and `sign_csr_test.rs`, which parse the issued leaves, including the profile table for every type and both key algorithms.
+> - Four Vault twins, plus the bind and wire-level settings tests in `axiam-api-rest`.
+> - A browser-shaped acceptance in `axiam-server`: a rustls client that trusts only the organization root completes a handshake with an actix listener presenting the issued leaf, and fails for a name the leaf does not carry.
+>
+> Nine deliberate mutations of the fence each turned a named test red.
+>
+> **Residual — decision D-7.** The fence is AXIAM's and is not embedded in the tenant CA as X.509 `nameConstraints`, so a relying party trusts the chain for any name AXIAM was made to sign. It therefore does not bound a compromised AXIAM, or a Vault token used outside AXIAM. Embedding it would make every policy change a CA re-issuance, so it is deferred to the next PKI pass.
 
 </details>
 
@@ -2842,7 +2871,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-13 of 287 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
+13 of 288 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
 
 
 | # | Severity | Threat | Element | Why it is open |
@@ -2921,7 +2950,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 | Category | Threats |
 |---|---|
-| Spoofing | 69 |
+| Spoofing | 70 |
 | Tampering | 59 |
 | Repudiation | 6 |
 | Information disclosure | 67 |
@@ -2933,7 +2962,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 32 | 1 |
-| High | 134 | 8 |
+| High | 135 | 8 |
 | Medium | 111 | 6 |
 | Low | 10 | 2 |
 
@@ -2946,7 +2975,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | OAuth2 / OIDC authorization server | 58 | 4 |
 | Federation — SAML SP & OIDC relying party | 31 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 27 | 0 |
-| PKI, certificates & IoT device identity | 29 | 1 |
+| PKI, certificates & IoT device identity | 30 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
 | Deployment & platform (Kubernetes) | 28 | 5 |
 | Client SDKs & admin UI integration surface | 28 | 3 |

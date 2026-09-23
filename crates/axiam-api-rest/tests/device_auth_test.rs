@@ -808,3 +808,164 @@ async fn device_auth_revoked_cert_returns_error() {
     let resp = test::call_service(&app, req).await;
     assert_ne!(resp.status().as_u16(), 200);
 }
+
+// ---------------------------------------------------------------------------
+// S-7 — Server certificates over REST: the fence is read from the settings
+// hierarchy, and a Server certificate authenticates nobody.
+//
+// No assertion here prints an issuance response body: a `201` from
+// `POST /certificates` carries a private key, returned once. Status codes and
+// field names only.
+// ---------------------------------------------------------------------------
+
+async fn set_org_server_names(db: &Surreal<TestDb>, org_id: Uuid, names: &[&str]) {
+    use axiam_core::models::settings::{SetOrgSettings, system_defaults};
+    use axiam_core::repository::SettingsRepository;
+    axiam_db::SurrealSettingsRepository::new(db.clone())
+        .set_org_settings(
+            org_id,
+            SetOrgSettings {
+                server_cert_allowed_names: names.iter().map(|n| n.to_string()).collect(),
+                ..system_defaults()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// `POST /api/v1/certificates` for a `Server` leaf; returns the status and,
+/// on 201, `(id, public_cert_pem)` — never the key.
+async fn issue_server_cert<S, B>(
+    app: &S,
+    token: &str,
+    ca_id: &str,
+    subject: &str,
+    sans: serde_json::Value,
+) -> (u16, Option<(String, String)>)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
+    B: actix_web::body::MessageBody,
+{
+    let req = test::TestRequest::post()
+        .uri("/api/v1/certificates")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "issuer_ca_id": ca_id,
+            "subject": subject,
+            "cert_type": "Server",
+            "key_algorithm": "Ed25519",
+            "validity_days": 90,
+            "subject_alt_names": sans,
+        }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let issued = (status == 201).then(|| {
+        (
+            body["id"].as_str().expect("an id").to_string(),
+            body["public_cert_pem"]
+                .as_str()
+                .expect("a certificate")
+                .to_string(),
+        )
+    });
+    (status, issued)
+}
+
+/// The handler reads the effective allow-list: empty (I1) refuses, a listed
+/// name issues, an unlisted one is refused.
+#[actix_rt::test]
+async fn a_server_certificate_is_issued_over_rest_only_for_allow_listed_names() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+    let anchor_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, anchor_id);
+    let sans = serde_json::json!([{ "dns": "api.lakeside.internal" }, { "ip": "10.0.0.5" }]);
+
+    let (status, _) =
+        issue_server_cert(&app, &token, &ca_id, "api.lakeside.internal", sans.clone()).await;
+    assert_eq!(status, 400, "I1: nothing is listed yet");
+
+    set_org_server_names(&db, org_id, &[".lakeside.internal", "10.0.0.0/8"]).await;
+    let (status, issued) =
+        issue_server_cert(&app, &token, &ca_id, "api.lakeside.internal", sans).await;
+    assert_eq!(status, 201, "an allow-listed Server certificate is issued");
+    assert!(issued.is_some());
+
+    let (status, _) = issue_server_cert(
+        &app,
+        &token,
+        &ca_id,
+        "api.lakeside.internal",
+        serde_json::json!([{ "dns": "login.example.com" }]),
+    )
+    .await;
+    assert_eq!(status, 400, "an unlisted SAN is refused");
+}
+
+/// (c) `bind` refuses a Server certificate with 400; the I4 twin is
+/// `device_auth_full_flow`, whose Device certificate binds with 200 through
+/// the same route — repeated here on the same app so the two differ by type
+/// alone.
+#[actix_rt::test]
+async fn a_server_certificate_cannot_be_bound() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+    let anchor_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, anchor_id);
+    set_org_server_names(&db, org_id, &[".lakeside.internal"]).await;
+
+    let (status, issued) = issue_server_cert(
+        &app,
+        &token,
+        &ca_id,
+        "api.lakeside.internal",
+        serde_json::json!([{ "dns": "api.lakeside.internal" }]),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let (server_id, _) = issued.unwrap();
+    let (device_id, _) = generate_device_cert!(app, ca_id, token);
+    let sa_id = create_service_account!(app, token);
+
+    let bind = |cert_id: String| {
+        test::TestRequest::post()
+            .uri(&format!(
+                "/api/v1/service-accounts/{sa_id}/bind-certificate"
+            ))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .insert_header(("Content-Type", "application/json"))
+            .set_json(serde_json::json!({ "certificate_id": cert_id }))
+            .to_request()
+    };
+    let resp = test::call_service(&app, bind(server_id)).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(status, 400, "a Server certificate must not bind: {body}");
+    assert!(body.to_string().contains("Server certificate"), "{body}");
+
+    let resp = test::call_service(&app, bind(device_id)).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "I4: a Device certificate still binds"
+    );
+}

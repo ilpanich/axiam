@@ -9,7 +9,7 @@
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::{
     CertificateStatus, CertificateType, CreateCaCertificate, CreateCertificate,
-    CreateIntermediateCa, KeyAlgorithm, SignCertificateCsr, StoreCaCertificate,
+    CreateIntermediateCa, KeyAlgorithm, SignCertificateCsr, StoreCaCertificate, SubjectAltName,
 };
 use axiam_core::repository::CaCertificateRepository;
 use axiam_db::repository::{SurrealCaCertificateRepository, SurrealCertificateRepository};
@@ -90,6 +90,7 @@ impl Fixture {
             cert_type: CertificateType::Service,
             validity_days: 30,
             metadata: None,
+            subject_alt_names: vec![],
         }
     }
 }
@@ -136,6 +137,7 @@ async fn a_csr_becomes_a_leaf_certificate_and_no_key_is_produced() {
             IssuingScope::Organization,
             f.request(plain_csr("device-001")),
             None,
+            &[],
         )
         .await
         .expect("a well-formed CSR must be signed");
@@ -179,6 +181,7 @@ async fn a_csr_signed_leaf_is_the_same_shape_as_a_generated_one() {
             IssuingScope::Organization,
             f.request(plain_csr("parity-check")),
             None,
+            &[],
         )
         .await
         .expect("signed");
@@ -195,8 +198,10 @@ async fn a_csr_signed_leaf_is_the_same_shape_as_a_generated_one() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("generated");
@@ -246,6 +251,7 @@ async fn a_malformed_csr_is_a_validation_error_not_an_internal_one() {
                 IssuingScope::Organization,
                 f.request(csr.into()),
                 None,
+                &[],
             )
             .await
             .unwrap_err();
@@ -273,7 +279,13 @@ async fn a_csr_whose_signature_does_not_verify_is_refused() {
 
     let err = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Organization, f.request(csr), None)
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Organization,
+            f.request(csr),
+            None,
+            &[],
+        )
         .await
         .unwrap_err();
     let message = validation_message(&err);
@@ -306,7 +318,13 @@ async fn the_subject_is_the_csr_s_and_comes_from_nowhere_else() {
 
     let cert = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Organization, f.request(csr), None)
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Organization,
+            f.request(csr),
+            None,
+            &[],
+        )
         .await
         .expect("rcgen's placeholder name is still a name");
     assert_eq!(
@@ -356,6 +374,7 @@ async fn an_rsa_2048_csr_is_refused_rather_than_recorded_as_rsa_4096() {
             IssuingScope::Organization,
             f.request(rsa_csr(2048, "too-small")),
             None,
+            &[],
         )
         .await
         .unwrap_err();
@@ -377,6 +396,7 @@ async fn an_rsa_4096_csr_is_signed_and_recorded_as_rsa_4096() {
             IssuingScope::Organization,
             f.request(rsa_csr(4096, "big-enough")),
             None,
+            &[],
         )
         .await
         .expect("an RSA-4096 CSR is within policy");
@@ -402,7 +422,13 @@ async fn an_ecdsa_csr_is_refused_by_name() {
 
     let err = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Organization, f.request(csr), None)
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Organization,
+            f.request(csr),
+            None,
+            &[],
+        )
         .await
         .unwrap_err();
     let message = validation_message(&err);
@@ -438,7 +464,13 @@ async fn a_csr_that_asked_to_be_a_ca_does_not_get_to_be_one() {
 
     let cert = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Organization, f.request(csr), None)
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Organization,
+            f.request(csr),
+            None,
+            &[],
+        )
         .await
         .expect("signed as a leaf");
 
@@ -450,10 +482,17 @@ async fn a_csr_that_asked_to_be_a_ca_does_not_get_to_be_one() {
                 .unwrap_or(false),
             "the request's own extensions must not decide its powers"
         );
-        assert!(
-            c.key_usage().expect("readable").is_none(),
-            "a leaf AXIAM issues carries no key usage extension, on either path"
-        );
+        // S-7 changed what this asserted: before, "no key usage extension on
+        // either path"; now, AXIAM's per-type profile and nothing the request
+        // chose — a Service leaf over Ed25519 is digitalSignature + clientAuth.
+        let ku = c.key_usage().expect("readable").expect("profile KU").value;
+        assert!(ku.digital_signature() && !ku.key_cert_sign() && !ku.key_encipherment());
+        let eku = c
+            .extended_key_usage()
+            .expect("readable")
+            .expect("profile EKU")
+            .value;
+        assert!(eku.client_auth && !eku.server_auth);
     });
 }
 
@@ -480,7 +519,13 @@ async fn a_csr_requesting_a_subject_alt_name_is_refused_and_told_why() {
 
     let err = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Organization, f.request(csr), None)
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Organization,
+            f.request(csr),
+            None,
+            &[],
+        )
         .await
         .unwrap_err();
     let message = validation_message(&err);
@@ -532,7 +577,13 @@ async fn a_csr_requesting_key_usage_is_refused_because_vault_would_honour_it() {
 
         let err = f
             .certs
-            .sign_csr(f.org_id, IssuingScope::Organization, f.request(csr), None)
+            .sign_csr(
+                f.org_id,
+                IssuingScope::Organization,
+                f.request(csr),
+                None,
+                &[],
+            )
             .await
             .unwrap_err();
         let message = validation_message(&err);
@@ -561,7 +612,13 @@ async fn a_csr_requesting_an_extended_key_usage_is_refused() {
 
     let err = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Organization, f.request(csr), None)
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Organization,
+            f.request(csr),
+            None,
+            &[],
+        )
         .await
         .unwrap_err();
     assert!(validation_message(&err).contains("extendedKeyUsage"));
@@ -582,6 +639,7 @@ async fn a_ca_in_another_organization_is_not_found() {
             IssuingScope::Organization,
             f.request(plain_csr("cross-org")),
             None,
+            &[],
         )
         .await
         .unwrap_err();
@@ -604,6 +662,7 @@ async fn a_revoked_ca_cannot_sign() {
             IssuingScope::Organization,
             f.request(plain_csr("after-revocation")),
             None,
+            &[],
         )
         .await
         .unwrap_err();
@@ -645,7 +704,7 @@ async fn an_expired_ca_cannot_sign() {
     request.issuer_ca_id = expired.id;
     let err = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Organization, request, None)
+        .sign_csr(f.org_id, IssuingScope::Organization, request, None, &[])
         .await
         .unwrap_err();
     assert!(
@@ -687,7 +746,7 @@ async fn an_imported_ca_with_no_key_cannot_sign() {
     request.issuer_ca_id = external.id;
     assert!(
         f.certs
-            .sign_csr(f.org_id, IssuingScope::Organization, request, None)
+            .sign_csr(f.org_id, IssuingScope::Organization, request, None, &[])
             .await
             .is_err()
     );
@@ -710,7 +769,13 @@ async fn validity_is_capped_the_same_way_generation_is() {
         request.validity_days = days;
         let err = f
             .certs
-            .sign_csr(f.org_id, IssuingScope::Organization, request, tenant_cap)
+            .sign_csr(
+                f.org_id,
+                IssuingScope::Organization,
+                request,
+                tenant_cap,
+                &[],
+            )
             .await
             .unwrap_err();
         let message = validation_message(&err);
@@ -755,7 +820,7 @@ async fn a_certificate_may_not_outlive_its_issuer_and_is_told_what_it_can_have()
     request.validity_days = 90;
     let err = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Organization, request, None)
+        .sign_csr(f.org_id, IssuingScope::Organization, request, None, &[])
         .await
         .unwrap_err();
     let message = validation_message(&err);
@@ -780,6 +845,7 @@ async fn the_row_and_the_certificate_agree_and_the_certificate_is_retrievable() 
             IssuingScope::Organization,
             f.request(plain_csr("round-trip")),
             None,
+            &[],
         )
         .await
         .expect("signed");
@@ -820,7 +886,7 @@ async fn metadata_is_stored_as_given_and_defaults_to_an_empty_object() {
     request.metadata = Some(serde_json::json!({ "device_serial": "SN-42" }));
     let cert = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Organization, request, None)
+        .sign_csr(f.org_id, IssuingScope::Organization, request, None, &[])
         .await
         .expect("signed");
     assert_eq!(cert.metadata["device_serial"], "SN-42");
@@ -832,6 +898,7 @@ async fn metadata_is_stored_as_given_and_defaults_to_an_empty_object() {
             IssuingScope::Organization,
             f.request(plain_csr("no-metadata")),
             None,
+            &[],
         )
         .await
         .expect("signed");
@@ -870,7 +937,7 @@ async fn a_tenant_signing_ca_of_another_tenant_is_not_found() {
 
     let err = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Tenant, request, None)
+        .sign_csr(f.org_id, IssuingScope::Tenant, request, None, &[])
         .await
         .unwrap_err();
 
@@ -891,7 +958,7 @@ async fn a_tenant_may_sign_under_its_own_signing_ca() {
 
     let cert = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Tenant, request, None)
+        .sign_csr(f.org_id, IssuingScope::Tenant, request, None, &[])
         .await
         .expect("a tenant signs under the CA that signs for it");
 
@@ -912,6 +979,7 @@ async fn an_organization_ca_is_not_usable_by_a_tenant_principal() {
             IssuingScope::Tenant,
             f.request(plain_csr("under-the-anchor")),
             None,
+            &[],
         )
         .await
         .unwrap_err();
@@ -932,6 +1000,7 @@ async fn an_organization_level_principal_may_still_issue_under_the_org_ca() {
             IssuingScope::Organization,
             f.request(plain_csr("organization-issued")),
             None,
+            &[],
         )
         .await
         .expect("an organization principal issues under the organization CA");
@@ -952,7 +1021,7 @@ async fn a_foreign_ca_is_not_found_even_when_it_is_revoked() {
 
     let err = f
         .certs
-        .sign_csr(f.org_id, IssuingScope::Tenant, request, None)
+        .sign_csr(f.org_id, IssuingScope::Tenant, request, None, &[])
         .await
         .unwrap_err();
 
@@ -961,4 +1030,174 @@ async fn a_foreign_ca_is_not_found_even_when_it_is_revoked() {
         "the scope refusal must come first, so that 'not active' never leaks \
          to a caller who may not see the CA at all — got {err:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// S-7 (DF-001) — the sign-csr twins of cert_test.rs's Server tests
+// ---------------------------------------------------------------------------
+
+fn lakeside() -> Vec<String> {
+    vec![".lakeside.internal".into(), "10.0.0.0/8".into()]
+}
+
+impl Fixture {
+    fn server_request(
+        &self,
+        ca: Uuid,
+        csr_pem: String,
+        sans: Vec<SubjectAltName>,
+    ) -> SignCertificateCsr {
+        SignCertificateCsr {
+            issuer_ca_id: ca,
+            cert_type: CertificateType::Server,
+            subject_alt_names: sans,
+            ..self.request(csr_pem)
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_server_leaf_carries_the_requested_sans() {
+    let f = fixture().await;
+    let ca = tenant_signing_ca(&f, f.tenant_id).await;
+    let cert = f
+        .certs
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Tenant,
+            f.server_request(
+                ca,
+                rsa_csr(4096, "api.lakeside.internal"),
+                vec![
+                    SubjectAltName::Dns("api.lakeside.internal".into()),
+                    SubjectAltName::Ip("10.0.0.5".into()),
+                ],
+            ),
+            None,
+            &lakeside(),
+        )
+        .await
+        .expect("an allow-listed Server CSR is signed");
+    assert_eq!(cert.cert_type, CertificateType::Server);
+
+    with_cert(&cert.public_cert_pem, |c| {
+        let san = c.subject_alternative_name().unwrap().expect("SAN").value;
+        let rendered: Vec<String> = san.general_names.iter().map(|n| format!("{n}")).collect();
+        assert_eq!(rendered.len(), 2, "{rendered:?}");
+        assert!(
+            rendered[0].contains("api.lakeside.internal"),
+            "{rendered:?}"
+        );
+        let eku = c.extended_key_usage().unwrap().expect("EKU").value;
+        assert!(eku.server_auth && !eku.client_auth);
+        // RSA: keyEncipherment joins digitalSignature (e).
+        let ku = c.key_usage().unwrap().expect("KU").value;
+        assert!(ku.digital_signature() && ku.key_encipherment());
+    });
+}
+
+#[tokio::test]
+async fn a_san_outside_the_allow_list_is_refused() {
+    let f = fixture().await;
+    let ca = tenant_signing_ca(&f, f.tenant_id).await;
+    for (cn, san) in [
+        (
+            "api.lakeside.internal",
+            SubjectAltName::Dns("login.example.com".into()),
+        ),
+        (
+            "api.lakeside.internal",
+            SubjectAltName::Dns("API.LAKESIDE.INTERNAL.".into()),
+        ),
+        (
+            "api.lakeside.internal",
+            SubjectAltName::Ip("11.0.0.1".into()),
+        ),
+        // The CSR's own common name is fenced too.
+        (
+            "login.example.com",
+            SubjectAltName::Dns("api.lakeside.internal".into()),
+        ),
+    ] {
+        let err = f
+            .certs
+            .sign_csr(
+                f.org_id,
+                IssuingScope::Tenant,
+                f.server_request(ca, plain_csr(cn), vec![san.clone()]),
+                None,
+                &lakeside(),
+            )
+            .await
+            .expect_err("off the list");
+        let _ = validation_message(&err);
+    }
+}
+
+/// The I1 on this path, with its I4 twin.
+#[tokio::test]
+async fn a_server_leaf_is_refused_while_the_allow_list_is_empty() {
+    let f = fixture().await;
+    let ca = tenant_signing_ca(&f, f.tenant_id).await;
+    let err = f
+        .certs
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Tenant,
+            f.server_request(
+                ca,
+                plain_csr("api.lakeside.internal"),
+                vec![SubjectAltName::Dns("api.lakeside.internal".into())],
+            ),
+            None,
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert!(validation_message(&err).contains("server_cert_allowed_names"));
+
+    let mut service = f.request(plain_csr("svc-7"));
+    service.issuer_ca_id = ca;
+    let cert = f
+        .certs
+        .sign_csr(f.org_id, IssuingScope::Tenant, service, None, &[])
+        .await
+        .expect("I1: a pre-S-7 request is unchanged");
+    with_cert(&cert.public_cert_pem, |c| {
+        assert!(c.subject_alternative_name().unwrap().is_none());
+        assert!(c.extended_key_usage().unwrap().unwrap().value.client_auth);
+    });
+}
+
+/// (d): the CSR's own subjectAltName stays refused, even when it asks for
+/// exactly the names the request states and the list admits. Only the
+/// explicit field reaches the leaf.
+#[tokio::test]
+async fn a_csr_carrying_a_san_stays_refused_for_a_server_request() {
+    let f = fixture().await;
+    let ca = tenant_signing_ca(&f, f.tenant_id).await;
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut params =
+        rcgen::CertificateParams::new(vec!["api.lakeside.internal".to_string()]).unwrap();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "api.lakeside.internal");
+    let csr = params.serialize_request(&key).unwrap().pem().unwrap();
+
+    let err = f
+        .certs
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Tenant,
+            f.server_request(
+                ca,
+                csr,
+                vec![SubjectAltName::Dns("api.lakeside.internal".into())],
+            ),
+            None,
+            &lakeside(),
+        )
+        .await
+        .unwrap_err();
+    assert!(validation_message(&err).contains("subjectAltName"));
 }

@@ -700,6 +700,27 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "p",
         text: "Two limits worth knowing before you commission a fleet. A tenant can cap certificate lifetime through its `max_certificate_validity_days` setting, and a request exceeding that cap is rejected rather than silently shortened. And where a device cannot show a browser to enrol a *user*, the [device authorization grant](#/docs/device-flow) covers the human-approval half — that is a different mechanism from this one, and the two are often confused.",
       },
+      { type: "h", id: "server-certificates", text: "Server certificates" },
+      {
+        type: "p",
+        text: "A `Server` certificate is the one leaf a TLS **server** can present — it carries `subject_alt_names` and `extendedKeyUsage: serverAuth` — so a gateway, a broker or an internal web service can be anchored in the same organization root as everything else. Because every relying party that trusts that root trusts the certificate, the names it may carry are fenced by `server_cert_allowed_names` in the organization settings: DNS suffixes (`.lakeside.internal`, strictly below), exact hosts and IP prefixes. The SANs **and** the common name must all be admitted.",
+      },
+      {
+        type: "warn",
+        text: "**The list is empty by default, and empty refuses every `Server` request.** A tenant may remove or narrow entries but never add or widen one; if the organization later shrinks its list, each tenant keeps only the intersection. A `Server` certificate cannot be bound to a service account and cannot log in as a device.",
+      },
+      {
+        type: "table",
+        headers: ["Type", "keyUsage", "extendedKeyUsage"],
+        rows: [
+          ["User, Service, Device", "digitalSignature (+ keyEncipherment for RSA)", "clientAuth"],
+          ["Server", "digitalSignature (+ keyEncipherment for RSA)", "serverAuth"],
+        ],
+      },
+      {
+        type: "note",
+        text: "Since `1.0.0-beta17` every leaf carries this usage profile, on both leaf paths and both custodians. It only narrows what a certificate may be used for; leaves issued earlier carry neither extension and keep working until they are rotated. The matching rules — case, trailing dots, punycode, wildcards, IPv4-mapped addresses — are in the PKI guide.",
+      },
       { type: "h", id: "gnupg", text: "OpenPGP keys" },
       {
         type: "p",
@@ -721,7 +742,7 @@ export const OPERATE_PAGES: DocPage[] = [
           {
             label: "PKI guide — the normative reference",
             href: "https://github.com/ilpanich/axiam/blob/main/docs/pki/README.md",
-            note: "Tenant signing CAs and CSR constraints, key custody and migration, the mTLS trust-anchor walkthrough, and how the anchor set reloads without a restart.",
+            note: "Tenant signing CAs and CSR constraints, Server certificates and the name fence, the usage profile, key custody and migration, the mTLS trust-anchor walkthrough, and how the anchor set reloads without a restart.",
           },
           {
             label: "Vault deployment guide",

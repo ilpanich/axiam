@@ -284,3 +284,113 @@ async fn clamping_clears_the_field_rather_than_pinning_it() {
     assert_eq!(cleared, vec!["min_length"]);
     assert_eq!(overrides.min_length, None, "cleared, not pinned to 16");
 }
+
+// ---------------------------------------------------------------------------
+// S-7 — the server-name allow-list, through the stored rows
+// ---------------------------------------------------------------------------
+
+fn names(v: &[&str]) -> Vec<String> {
+    v.iter().map(|n| n.to_string()).collect()
+}
+
+/// The organization baseline is stored (v67's column) and read back, and a
+/// deployment that never wrote one reads the empty list (I1).
+#[tokio::test]
+async fn the_org_server_name_baseline_round_trips_and_defaults_to_empty() {
+    let (db, org_id, tenant_id) = setup().await;
+    let repo = SurrealSettingsRepository::new(db);
+
+    let before = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
+    assert!(before.certificate.server_cert_allowed_names.is_empty());
+
+    repo.set_org_settings(
+        org_id,
+        SetOrgSettings {
+            server_cert_allowed_names: names(&[".lakeside.internal", "10.0.0.0/8"]),
+            ..system_defaults()
+        },
+    )
+    .await
+    .unwrap();
+    let org = repo.get_org_settings(org_id).await.unwrap();
+    assert_eq!(
+        org.certificate.server_cert_allowed_names,
+        names(&[".lakeside.internal", "10.0.0.0/8"])
+    );
+    let effective = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        effective.certificate.server_cert_allowed_names, org.certificate.server_cert_allowed_names,
+        "a tenant with no override inherits the baseline"
+    );
+}
+
+/// The case (b) names: the organization shrinks under an override the tenant
+/// wrote legally. The effective list narrows to the intersection — it neither
+/// keeps the dropped entry nor falls back to the organization's other entries.
+#[tokio::test]
+async fn a_shrinking_org_server_name_baseline_narrows_the_stored_override() {
+    let (db, org_id, tenant_id) = setup().await;
+    let repo = SurrealSettingsRepository::new(db);
+
+    repo.set_org_settings(
+        org_id,
+        SetOrgSettings {
+            server_cert_allowed_names: names(&[".a.lakeside.internal", ".b.lakeside.internal"]),
+            ..system_defaults()
+        },
+    )
+    .await
+    .unwrap();
+    repo.set_tenant_override(
+        tenant_id,
+        SetTenantOverride {
+            server_cert_allowed_names: Some(names(&["api.a.lakeside.internal"])),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let effective = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        effective.certificate.server_cert_allowed_names,
+        names(&["api.a.lakeside.internal"])
+    );
+
+    // The organization withdraws `.a`.
+    repo.set_org_settings(
+        org_id,
+        SetOrgSettings {
+            server_cert_allowed_names: names(&[".b.lakeside.internal"]),
+            ..system_defaults()
+        },
+    )
+    .await
+    .unwrap();
+    let effective = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
+    assert!(
+        effective.certificate.server_cert_allowed_names.is_empty(),
+        "got {:?}: the tenant must lose api.a and must not gain .b",
+        effective.certificate.server_cert_allowed_names
+    );
+
+    // And the clamp on the stored mask agrees with the resolution.
+    let mut stored = repo.get_tenant_override(tenant_id).await.unwrap().unwrap();
+    let org = repo.get_org_settings(org_id).await.unwrap();
+    assert_eq!(
+        clamp_overrides_to_org(&org, &mut stored),
+        vec!["server_cert_allowed_names"]
+    );
+    assert_eq!(stored.server_cert_allowed_names, Some(vec![]));
+}

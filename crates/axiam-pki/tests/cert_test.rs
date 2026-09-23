@@ -2,7 +2,7 @@
 
 use axiam_core::models::certificate::{
     CertificateStatus, CertificateType, CreateCaCertificate, CreateCertificate,
-    CreateIntermediateCa, KeyAlgorithm, StoreCaCertificate,
+    CreateIntermediateCa, KeyAlgorithm, StoreCaCertificate, SubjectAltName,
 };
 use axiam_core::repository::CaCertificateRepository;
 use axiam_db::repository::{SurrealCaCertificateRepository, SurrealCertificateRepository};
@@ -98,8 +98,10 @@ async fn cert_generate_against_active_ca_succeeds() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("Leaf cert generation must succeed");
@@ -176,8 +178,10 @@ async fn cert_generate_rejects_revoked_ca() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await;
 
@@ -274,8 +278,10 @@ async fn cert_generate_rejects_expired_ca() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await;
 
@@ -380,8 +386,10 @@ async fn cert_generate_issuer_dn_matches_real_ca_subject_not_stored_subject_fiel
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("leaf cert generation must succeed");
@@ -467,8 +475,10 @@ async fn cert_generate_rejects_zero_validity_days() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 0,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await;
 
@@ -532,8 +542,10 @@ async fn cert_generate_rejects_validity_days_above_default_max() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 400,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await;
 
@@ -604,8 +616,10 @@ async fn cert_generate_clamps_tenant_override_to_hard_cap() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 900,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             Some(2000),
+            &[],
         )
         .await;
 
@@ -678,8 +692,10 @@ async fn cert_generate_rejects_ca_with_no_stored_private_key() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await;
 
@@ -767,8 +783,10 @@ async fn cert_generate_rejects_when_encryption_key_not_configured() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await;
 
@@ -889,8 +907,10 @@ async fn cert_service_read_and_revoke_wrappers_work() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 30,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("leaf generation must succeed");
@@ -982,8 +1002,10 @@ async fn cert_generate_refuses_to_outlive_its_issuer() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 365,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect_err("a leaf cannot outlive its issuer");
@@ -1051,8 +1073,10 @@ async fn cert_generate_grants_the_full_window_when_the_issuer_allows_it() {
                 key_algorithm: KeyAlgorithm::Ed25519,
                 validity_days: 365,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("a request inside the CA's window must succeed");
@@ -1122,8 +1146,10 @@ async fn cert_generate_issues_an_rsa4096_leaf() {
                 key_algorithm: KeyAlgorithm::Rsa4096,
                 validity_days: 365,
                 metadata: None,
+                subject_alt_names: vec![],
             },
             None,
+            &[],
         )
         .await
         .expect("RSA-4096 leaf issuance must succeed");
@@ -1201,6 +1227,7 @@ fn leaf(tenant_id: uuid::Uuid, issuer_ca_id: uuid::Uuid, subject: &str) -> Creat
         key_algorithm: KeyAlgorithm::Ed25519,
         validity_days: 30,
         metadata: None,
+        subject_alt_names: vec![],
     }
 }
 
@@ -1228,6 +1255,7 @@ async fn generate_refuses_another_tenants_signing_ca() {
             IssuingScope::Tenant,
             leaf(uuid::Uuid::new_v4(), their_ca, "CN=poaching"),
             None,
+            &[],
         )
         .await
         .unwrap_err();
@@ -1262,6 +1290,7 @@ async fn generate_refuses_the_organization_ca_for_a_tenant_principal() {
             IssuingScope::Tenant,
             leaf(tenant_id, org_ca, "CN=under-the-anchor"),
             None,
+            &[],
         )
         .await
         .unwrap_err();
@@ -1296,6 +1325,7 @@ async fn generate_accepts_the_tenants_own_signing_ca() {
             IssuingScope::Tenant,
             leaf(tenant_id, tenant_ca, "CN=device-001"),
             None,
+            &[],
         )
         .await
         .expect("a tenant issues under the CA that signs for it");
@@ -1330,6 +1360,7 @@ async fn generate_still_accepts_the_organization_ca_for_an_organization_principa
             IssuingScope::Organization,
             leaf(tenant_id, org_ca, "CN=organization-issued"),
             None,
+            &[],
         )
         .await
         .expect("an organization principal issues under the organization CA");
@@ -1381,6 +1412,7 @@ async fn a_cn_prefixed_subject_yields_a_single_cn() {
             IssuingScope::Tenant,
             leaf(tenant_id, tenant_ca, "CN=device-001"),
             None,
+            &[],
         )
         .await
         .expect("leaf");
@@ -1420,6 +1452,7 @@ async fn a_bare_subject_is_unchanged() {
             IssuingScope::Tenant,
             leaf(tenant_id, tenant_ca, "device-001"),
             None,
+            &[],
         )
         .await
         .expect("leaf");
@@ -1454,6 +1487,7 @@ async fn a_multi_rdn_subject_is_refused() {
             IssuingScope::Tenant,
             leaf(tenant_id, tenant_ca, "O=Acme, CN=device-001"),
             None,
+            &[],
         )
         .await
         .expect_err("a distinguished name is not a common name");
@@ -1492,6 +1526,7 @@ async fn a_refused_subject_issues_nothing() {
         IssuingScope::Tenant,
         leaf(tenant_id, tenant_ca, "O=Acme, CN=device-001"),
         None,
+        &[],
     )
     .await
     .expect_err("refused");
@@ -1504,4 +1539,346 @@ async fn a_refused_subject_issues_nothing() {
         listed.items.is_empty(),
         "a refused subject must not leave a certificate behind"
     );
+}
+
+// ---------------------------------------------------------------------------
+// S-7 (DF-001) — Server certificates, the name fence, and the usage profile.
+// Every assertion about a certificate is made by parsing the issued leaf.
+// ---------------------------------------------------------------------------
+
+/// What an issued leaf says about its names and usages.
+#[derive(Debug, Default, PartialEq)]
+struct LeafShape {
+    dns: Vec<String>,
+    ips: Vec<std::net::IpAddr>,
+    digital_signature: bool,
+    key_encipherment: bool,
+    key_cert_sign: bool,
+    client_auth: bool,
+    server_auth: bool,
+    has_ku: bool,
+    has_eku: bool,
+    has_san: bool,
+}
+
+fn leaf_shape(pem: &str) -> LeafShape {
+    use x509_parser::certificate::X509Certificate;
+    use x509_parser::extensions::GeneralName;
+    use x509_parser::prelude::FromDer;
+
+    let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).expect("PEM");
+    let (_, cert) = X509Certificate::from_der(&block.contents).expect("DER");
+    let mut shape = LeafShape::default();
+    if let Some(ku) = cert.key_usage().expect("KU readable") {
+        shape.has_ku = true;
+        shape.digital_signature = ku.value.digital_signature();
+        shape.key_encipherment = ku.value.key_encipherment();
+        shape.key_cert_sign = ku.value.key_cert_sign();
+    }
+    if let Some(eku) = cert.extended_key_usage().expect("EKU readable") {
+        shape.has_eku = true;
+        shape.client_auth = eku.value.client_auth;
+        shape.server_auth = eku.value.server_auth;
+    }
+    if let Some(san) = cert.subject_alternative_name().expect("SAN readable") {
+        shape.has_san = true;
+        for name in &san.value.general_names {
+            match name {
+                GeneralName::DNSName(d) => shape.dns.push(d.to_string()),
+                GeneralName::IPAddress(b) => shape.ips.push(match b.len() {
+                    4 => std::net::IpAddr::from(<[u8; 4]>::try_from(*b).unwrap()),
+                    _ => std::net::IpAddr::from(<[u8; 16]>::try_from(*b).unwrap()),
+                }),
+                other => panic!("unexpected SAN {other:?}"),
+            }
+        }
+    }
+    shape
+}
+
+type Certs =
+    CertService<SurrealCaCertificateRepository<TestDb>, SurrealCertificateRepository<TestDb>>;
+
+/// A cert service and a tenant signing CA (under an organization root) for
+/// `tenant` — the two-tier shape the product deploys.
+async fn s7_fixture() -> (Certs, uuid::Uuid, uuid::Uuid, uuid::Uuid) {
+    let db = setup_db().await;
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let org_id = uuid::Uuid::new_v4();
+    let tenant = uuid::Uuid::new_v4();
+    let (_org_ca, tenant_ca) = org_and_tenant_ca(&ca_repo, org_id, tenant).await;
+    let certs = CertService::new(
+        ca_repo,
+        cert_repo,
+        test_pki_config(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        test_ca_custodians(),
+    );
+    (certs, org_id, tenant, tenant_ca)
+}
+
+fn lakeside() -> Vec<String> {
+    vec![".lakeside.internal".into(), "10.0.0.0/8".into()]
+}
+
+fn server_leaf(
+    tenant: uuid::Uuid,
+    ca: uuid::Uuid,
+    subject: &str,
+    sans: Vec<SubjectAltName>,
+) -> CreateCertificate {
+    CreateCertificate {
+        cert_type: CertificateType::Server,
+        subject_alt_names: sans,
+        ..leaf(tenant, ca, subject)
+    }
+}
+
+#[tokio::test]
+async fn a_server_leaf_carries_the_requested_sans() {
+    let (certs, org, tenant, ca) = s7_fixture().await;
+    let issued = certs
+        .generate(
+            org,
+            IssuingScope::Tenant,
+            server_leaf(
+                tenant,
+                ca,
+                "api.lakeside.internal",
+                vec![
+                    SubjectAltName::Dns("api.lakeside.internal".into()),
+                    SubjectAltName::Dns("*.plant.lakeside.internal".into()),
+                    SubjectAltName::Ip("10.0.0.5".into()),
+                ],
+            ),
+            None,
+            &lakeside(),
+        )
+        .await
+        .expect("an allow-listed Server leaf is issued");
+
+    assert_eq!(issued.certificate.cert_type, CertificateType::Server);
+    let shape = leaf_shape(&issued.certificate.public_cert_pem);
+    assert_eq!(
+        shape.dns,
+        vec!["api.lakeside.internal", "*.plant.lakeside.internal"]
+    );
+    assert_eq!(
+        shape.ips,
+        vec!["10.0.0.5".parse::<std::net::IpAddr>().unwrap()]
+    );
+    assert!(shape.server_auth && !shape.client_auth, "{shape:?}");
+    assert!(shape.digital_signature && !shape.key_encipherment && !shape.key_cert_sign);
+}
+
+#[tokio::test]
+async fn a_san_outside_the_allow_list_is_refused() {
+    let (certs, org, tenant, ca) = s7_fixture().await;
+    for (subject, san) in [
+        (
+            "api.lakeside.internal",
+            SubjectAltName::Dns("login.example.com".into()),
+        ),
+        (
+            "api.lakeside.internal",
+            SubjectAltName::Dns("lakeside.internal".into()),
+        ),
+        (
+            "api.lakeside.internal",
+            SubjectAltName::Dns("xlakeside.internal".into()),
+        ),
+        (
+            "api.lakeside.internal",
+            SubjectAltName::Ip("192.168.1.1".into()),
+        ),
+        (
+            "api.lakeside.internal",
+            SubjectAltName::Ip("::ffff:10.0.0.5".into()),
+        ),
+        // The common name is fenced as well as the SAN list.
+        (
+            "login.example.com",
+            SubjectAltName::Dns("api.lakeside.internal".into()),
+        ),
+    ] {
+        let err = certs
+            .generate(
+                org,
+                IssuingScope::Tenant,
+                server_leaf(tenant, ca, subject, vec![san.clone()]),
+                None,
+                &lakeside(),
+            )
+            .await
+            .expect_err("an off-list name must be refused");
+        assert!(
+            matches!(err, axiam_core::error::AxiamError::Validation { .. }),
+            "{san:?}: {err:?}"
+        );
+    }
+    let listed = certs.list(tenant, Default::default()).await.unwrap();
+    assert_eq!(listed.total, 0, "a refused request issues nothing");
+}
+
+/// The I1: with the allow-list empty no Server certificate can be issued, and
+/// a request shaped as before S-7 still is.
+#[tokio::test]
+async fn a_server_leaf_is_refused_while_the_allow_list_is_empty() {
+    let (certs, org, tenant, ca) = s7_fixture().await;
+    let err = certs
+        .generate(
+            org,
+            IssuingScope::Tenant,
+            server_leaf(
+                tenant,
+                ca,
+                "api.lakeside.internal",
+                vec![SubjectAltName::Dns("api.lakeside.internal".into())],
+            ),
+            None,
+            &[],
+        )
+        .await
+        .expect_err("I1: an empty list refuses every Server request");
+    assert!(
+        err.to_string().contains("server_cert_allowed_names"),
+        "{err}"
+    );
+
+    certs
+        .generate(
+            org,
+            IssuingScope::Tenant,
+            leaf(tenant, ca, "device-001"),
+            None,
+            &[],
+        )
+        .await
+        .expect("I1: an existing request is unaffected by the empty list");
+}
+
+#[tokio::test]
+async fn a_device_leaf_carries_client_auth_and_no_san() {
+    let (certs, org, tenant, ca) = s7_fixture().await;
+    let issued = certs
+        .generate(
+            org,
+            IssuingScope::Tenant,
+            leaf(tenant, ca, "device-001"),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+    let shape = leaf_shape(&issued.certificate.public_cert_pem);
+    assert!(!shape.has_san, "{shape:?}");
+    assert!(shape.client_auth && !shape.server_auth, "{shape:?}");
+    assert!(shape.digital_signature && !shape.key_encipherment);
+
+    // And a SAN on a non-Server type is refused rather than dropped.
+    let mut with_san = leaf(tenant, ca, "device-002");
+    with_san.subject_alt_names = vec![SubjectAltName::Dns("api.lakeside.internal".into())];
+    assert!(
+        certs
+            .generate(org, IssuingScope::Tenant, with_san, None, &lakeside())
+            .await
+            .is_err()
+    );
+}
+
+/// (e) — the whole profile table, read back from issued leaves for every type
+/// and both key algorithms. RSA keygen is slow, so each RSA leaf is one call.
+#[tokio::test]
+async fn the_profile_is_per_type_and_per_key_algorithm() {
+    let (certs, org, tenant, ca) = s7_fixture().await;
+    for key_algorithm in [KeyAlgorithm::Ed25519, KeyAlgorithm::Rsa4096] {
+        for cert_type in [
+            CertificateType::User,
+            CertificateType::Service,
+            CertificateType::Device,
+            CertificateType::Server,
+        ] {
+            let mut req = leaf(tenant, ca, "api.lakeside.internal");
+            req.key_algorithm = key_algorithm.clone();
+            req.cert_type = cert_type.clone();
+            if cert_type == CertificateType::Server {
+                req.subject_alt_names = vec![SubjectAltName::Dns("api.lakeside.internal".into())];
+            }
+            let issued = certs
+                .generate(org, IssuingScope::Tenant, req, None, &lakeside())
+                .await
+                .unwrap();
+            let s = leaf_shape(&issued.certificate.public_cert_pem);
+            let rsa = key_algorithm == KeyAlgorithm::Rsa4096;
+            let server = cert_type == CertificateType::Server;
+            assert!(s.has_ku && s.has_eku, "{cert_type:?}/{key_algorithm:?}");
+            assert!(s.digital_signature && !s.key_cert_sign);
+            assert_eq!(s.key_encipherment, rsa, "{cert_type:?}/{key_algorithm:?}");
+            assert_eq!((s.server_auth, s.client_auth), (server, !server));
+            assert_eq!(s.has_san, server);
+        }
+    }
+}
+
+/// (b), at the point of issuance: the list a widening tenant override would
+/// have produced never reaches the fence, because the effective list is the
+/// intersection with the baseline.
+#[tokio::test]
+async fn a_tenant_override_cannot_widen_the_allow_list() {
+    use axiam_core::models::settings::{
+        TenantSettingsOverride, effective_settings, settings_from_org_input, system_defaults,
+        validate_tenant_override,
+    };
+    let (certs, org_id, tenant, ca) = s7_fixture().await;
+
+    let mut input = system_defaults();
+    input.server_cert_allowed_names = vec![".plant.lakeside.internal".into()];
+    let org = settings_from_org_input(uuid::Uuid::new_v4(), org_id, &input);
+    let widening = TenantSettingsOverride {
+        server_cert_allowed_names: Some(vec![".lakeside.internal".into()]),
+        ..Default::default()
+    };
+    assert!(
+        validate_tenant_override(&org, &widening).is_err(),
+        "refused at write"
+    );
+
+    // Even if such an override were stored, resolution narrows it.
+    let effective = effective_settings(&org, &widening, tenant, uuid::Uuid::new_v4());
+    let names = effective.certificate.server_cert_allowed_names;
+    assert_eq!(names, vec![".plant.lakeside.internal".to_string()]);
+    assert!(
+        certs
+            .generate(
+                org_id,
+                IssuingScope::Tenant,
+                server_leaf(
+                    tenant,
+                    ca,
+                    "api.lakeside.internal",
+                    vec![SubjectAltName::Dns("api.lakeside.internal".into())]
+                ),
+                None,
+                &names,
+            )
+            .await
+            .is_err(),
+        "a name only the widened list admits is refused"
+    );
+    certs
+        .generate(
+            org_id,
+            IssuingScope::Tenant,
+            server_leaf(
+                tenant,
+                ca,
+                "a.plant.lakeside.internal",
+                vec![SubjectAltName::Dns("a.plant.lakeside.internal".into())],
+            ),
+            None,
+            &names,
+        )
+        .await
+        .expect("I4: a name the baseline admits is still issued");
 }

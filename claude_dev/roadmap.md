@@ -958,6 +958,19 @@ follows the organization, empty issues none). Fixes three console paths that
 silently dropped the list on an unrelated save since #495. Records: none,
 verified.
 
+### T22.15 — SDK contract 1.51 — Opus 5 ✓ LANDED
+C-0 (PR H), DF-008 … DF-012. `sdks/CONTRACT.md` describes what T22.1 … T22.14b
+shipped. `authenticate_device`, `validate_token` and `introspect_token` join §1
+(new §1.1.1, §6.1 rules 6–10). The acting-tenant helper becomes SHOULD: REST-only,
+with the UUID checked client-side (§5.2 rule 1). §27.0 lists all five registry
+exclusions, `/admin/bootstrap` with its outcomes and no helper. The manifest gains
+`metadata`, resource-scoped bindings with `inherit`, and `service_accounts`, with the
+one-time secret returned as `create` returns it (§27.5 rule 5, §27.6.1). §27.10 records
+the two manifest tiers and three SDK defects. New §27.13 covers the DTO notes, and §27's
+figures are re-rendered at 162 operations. Numbered **1.51**, since 1.50 was already
+taken (`d5a6811`), so C-12 becomes 1.52. Threat **T-210** amended, no new entry. The
+eleven SDK ports (C-1 … C-11) follow, one PR per SDK repository, Rust first.
+
 ---
 
 ---

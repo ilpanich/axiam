@@ -257,6 +257,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **SDK contract 1.51 — what the Phase 22 server wave means for the eleven SDKs
+  (T22.15, C-0; DF-008 … DF-012).** `sdks/CONTRACT.md` now describes what shipped.
+  - **Device login.** `authenticate_device()` joins §1's locked vocabulary and is
+    specified in §6.1. It returns `{access_token, token_type, expires_in}`, is reachable
+    only with a client certificate, answers `401` for every refusal, and its token is
+    certificate-bound (`cnf.x5t#S256`).
+  - **Token RPCs.** `validate_token` / `introspect_token` wrap the gRPC `TokenService`
+    (new §1.1.1). Until now §10.3 required an SDK to read `cnf` there, while §1 allowed no
+    method that could return it.
+  - **Acting tenant.** The helper moves from MAY to SHOULD, with a fixed shape (§5.2
+    rule 1). It is REST-only, and the value is checked client-side as a UUID, because the
+    server silently ignores a malformed one.
+  - **`/admin/bootstrap`.** §27.0 lists it with its four outcomes, and no helper.
+  - **Manifest.** Resource `metadata`, a resource-scoped role binding with `inherit`, and
+    `service_accounts` (§27.6.1). `apply` returns a new account's `client_secret` exactly
+    as `create` does, even when a later action fails (§27.5 rule 5).
+  - **Per-SDK manifest table.** §27.10 records the two tiers as they are, and three
+    defects found reading the code. The PHP manifest never reconciles role grants or
+    group bindings. The PHP, Swift, C and C++ manifests never send a resource's parent.
+    Swift, C and C++ default a resource type to `"folder"`.
+  - **Model notes.** A new §27.13 records S-4, S-7, S-9 and S-10. Every new request field
+    is optional. The one thing an existing SDK must tolerate is `"Server"` in
+    `certificates.list` responses.
+  - **Counts.** §27's figures are re-rendered from the registry: 162 operations, not 147.
+
+  Numbered 1.51 because 1.50 was already taken by the `initial_access_token` fix.
+  `openapi.json`, `management-registry.json` and `proto/` are unchanged. All eleven SDKs
+  must re-vendor, and `scripts/check-sdk-artifact-drift.py` reports them stale until they
+  do. Threat **T-210** is amended: its claim that the SDKs already sent `X-Axiam-Tenant`
+  was not true of their code.
+
 - **Device certificates require the bind, and the guide said the opposite
   (T22.9, DF-002).** `docs/pki/README.md` and the website's IoT walkthrough both
   stated that a `Device`-type certificate needs no bind to a service account and

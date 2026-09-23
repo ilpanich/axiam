@@ -755,7 +755,9 @@ async fn a_service_account_with_a_role_can_provision_the_management_families() {
         ),
     )
     .await;
-    assert_eq!(s, 201, "{account}");
+    // The body carries the one-time `client_secret`; a failure must not print
+    // it into the CI log, so only the status is reported.
+    assert_eq!(s, 201, "creating the service account failed");
     let (s, body) = call(
         &app,
         post(

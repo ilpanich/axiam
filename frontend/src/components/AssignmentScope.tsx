@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Globe, Layers, Target } from "lucide-react";
+import { Globe, Layers, Target, CornerDownRight } from "lucide-react";
 import { useCanActOnOrganization, useIsOrganizationScope } from "@/lib/grantReach";
 import { useResourceNames } from "@/hooks/useResourceNames";
 import { useAuthStore } from "@/stores/auth";
@@ -29,6 +29,36 @@ export interface AssignmentScopeBadgeProps {
    * single label that tried to say both would say neither clearly.
    */
   tenantScope?: string[] | null;
+  /**
+   * S-10 — `false` when the assignment applies at its resource and stops
+   * there. Absent reads as `true`, the server's own reading of a row written
+   * before the field existed.
+   */
+  inherit?: boolean;
+}
+
+/** The resource badge's tooltip, which must not promise descendants it does not reach. */
+function resourceTitle(name: string, inherit: boolean): string {
+  return inherit
+    ? `Applies only under the resource "${name}" and its descendants`
+    : `Applies at the resource "${name}" only — not at its descendants (inherit: false)`;
+}
+
+/**
+ * The "here and no further" marker. A separate chip rather than different
+ * wording on the resource badge, because it is the one fact about the row a
+ * reviewer skimming a list must not miss.
+ */
+function HereOnlyBadge() {
+  return (
+    <span
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wide bg-violet-500/10 text-violet-300 border border-violet-500/25"
+      title="Not inherited: the assignment applies at this resource and at none of its descendants"
+    >
+      <CornerDownRight size={9} aria-hidden="true" />
+      This resource only
+    </span>
+  );
 }
 
 /** Says whether an assignment is global or scoped, and to what. */
@@ -36,9 +66,13 @@ export function AssignmentScopeBadge({
   resourceId,
   nameFor,
   tenantScope,
+  inherit = true,
 }: AssignmentScopeBadgeProps) {
   const organizationScope = useIsOrganizationScope();
   const restricted = Array.isArray(tenantScope) && tenantScope.length > 0;
+  // The flag only means something on a resource-scoped row; the server refuses
+  // it anywhere else, so a stray `false` elsewhere is not rendered as a claim.
+  const hereOnly = Boolean(resourceId) && inherit === false;
   if (restricted) {
     // The reach badge replaces "Organization-wide" outright when the
     // assignment is confined, because that label would be exactly wrong: the
@@ -50,12 +84,13 @@ export function AssignmentScopeBadge({
         {resourceId && (
           <span
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wide bg-cyan-500/10 text-cyan-400 border border-cyan-500/25"
-            title={`Applies only under the resource "${nameFor(resourceId)}" and its descendants`}
+            title={resourceTitle(nameFor(resourceId), !hereOnly)}
           >
             <Target size={9} aria-hidden="true" />
             {nameFor(resourceId)}
           </span>
         )}
+        {hereOnly && <HereOnlyBadge />}
       </span>
     );
   }
@@ -76,13 +111,66 @@ export function AssignmentScopeBadge({
   }
   const name = nameFor(resourceId);
   return (
-    <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wide bg-cyan-500/10 text-cyan-400 border border-cyan-500/25"
-      title={`Applies only under the resource "${name}" and its descendants`}
-    >
-      <Target size={9} aria-hidden="true" />
-      {name}
+    <span className="inline-flex items-center gap-1">
+      <span
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wide bg-cyan-500/10 text-cyan-400 border border-cyan-500/25"
+        title={resourceTitle(name, !hereOnly)}
+      >
+        <Target size={9} aria-hidden="true" />
+        {name}
+      </span>
+      {hereOnly && <HereOnlyBadge />}
     </span>
+  );
+}
+
+export interface InheritToggleProps {
+  id: string;
+  /** `true` — the default — reaches the resource's descendants too. */
+  checked: boolean;
+  onChange: (inherit: boolean) => void;
+  subject: "user" | "group" | "service account";
+  disabled?: boolean;
+}
+
+/**
+ * S-10 — whether a resource-scoped assignment also reaches the resource's
+ * descendants (`inherit`, D-10).
+ *
+ * Rendered by the dialogs **only** where the flag can mean something: a
+ * resource is chosen, and the role is not global. The server refuses
+ * `inherit: false` in both other cases with 400, because there it would be
+ * stored and ignored; a control that can only produce a refusal is not
+ * offered. Checked is the default and the body every client has always sent.
+ */
+export function InheritToggle({
+  id,
+  checked,
+  onChange,
+  subject,
+  disabled,
+}: InheritToggleProps) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="flex items-start gap-2 text-sm cursor-pointer">
+        <input
+          id={id}
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.checked)}
+          className="focus-ring mt-0.5"
+        />
+        <span>Also applies to the resource&rsquo;s descendants</span>
+      </label>
+      <p className="text-xs text-muted-foreground">
+        {checked
+          ? `The ${subject} gets this role at the resource and everywhere below it.`
+          : `Here and no further: the ${subject} gets this role at the resource itself and at none of its descendants.`}{" "}
+        Unchecking narrows an allow — and narrows a <em>deny</em> too, which
+        re-opens the descendants it used to close.
+      </p>
+    </div>
   );
 }
 

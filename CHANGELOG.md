@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Non-inheritable role assignments in the admin console (T22.11b, S-10b).**
+  Every assign dialog offers *Also applies to the resource's descendants*
+  (`inherit`, checked by default) once a resource is chosen for a role that is
+  not global — never where the server would refuse `inherit: false` — and
+  sends the field only when it is unchecked, so every other body is unchanged.
+  The role's and the group's assignment listings badge a non-inheritable row
+  *This resource only*, and *Stop here* / *Include descendants* changes the
+  flag after a confirmation naming the effect. Because a second assign is a
+  `409` by design, the change is unassign-then-assign; a refused second call
+  re-assigns the old assignment and says so, and a failed restore says the
+  subject no longer holds the role.
 - **Server certificates in the admin console (T22.14b, S-7b).** The
   certificate dialogs — *Generate Certificate* and *Sign a CSR* — offer the
   `Server` type with a list of subject alternative names, one row per DNS name
@@ -120,7 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     widens it.
   - **Visible.** Every assignment listing carries `inherit` beside
     `resource_id`, and the `grant.pre_assign` reactor payload carries it too.
-    The admin console does not offer the flag yet; set it through the API.
+    The admin console offers it since T22.11b (below).
 
   Nothing existing changes meaning: schema v66 adds `has_role.inherit` as
   `option<bool>` with no backfill, and an absent value reads as `true`.

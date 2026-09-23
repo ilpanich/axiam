@@ -1735,7 +1735,9 @@ DF-021 asked for a role assignment that applies at its resource and not below it
 >
 > Property tests over every rule set of a three-node chain: adding a deny never widens access whatever its flag; `false` on an allow never widens; `false` on a deny can, with row 10 as the asserted witness. Rows 9–11 are proved end to end through both `evaluate` and `evaluate_batch`, for a group-inherited assignment, and over gRPC `CheckAccess` and `BatchCheckAccess`. The clause was broken on purpose — the `inherit` guard alone, then the whole ancestor term — and the new tests went red both times.
 >
-> Residual, documented in `docs/admin/README.md`: making a role global *after* assigning it non-inheritably widens that assignment to everywhere, as it widens every assignment of the role; and the admin console does not yet offer the flag, so it is set through the API.
+> Residual, documented in `docs/admin/README.md`: making a role global *after* assigning it non-inheritably widens that assignment to everywhere, as it widens every assignment of the role.
+>
+> **Amended 2026-09-23 (T22.11b, S-10b).** The admin console now offers the flag, only where the server would store and apply it — a resource chosen, a role that is not global — and changes it as the same unassign then assign. If the second call is refused the old assignment is assigned again, and if that fails too the operator is told the subject no longer holds the role; nothing is left silently. The console decides nothing the three assign routes do not decide again, so the mitigation above is unchanged.
 
 </details>
 

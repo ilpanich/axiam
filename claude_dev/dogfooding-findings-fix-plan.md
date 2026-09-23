@@ -1951,6 +1951,69 @@ reach before — RBAC is default-deny, and the sweep test proves it.
 >     breaks and the new response field is ignored; the dialogs gain no control.
 >     Recorded in the admin guide and the CHANGELOG as API-only for now.
 
+> **EXECUTED — S-10b, 2026-09-23, PR G2, commit 3 of 4** (the console half of
+> item 11 above; roadmap **T22.11b** — numbered after the task it completes,
+> since this roadmap's T22.10 is the console resolver, S-11).
+>
+> **Commit 3 — the flag in the dialogs and the listings.**
+>
+> - **Shipped.** `services/roles.ts` carries `inherit?` on every assignment
+>   row and a fifth `inherit` argument on the three assign calls, sent only as
+>   `false` (`inheritField`), so an inheritable assignment's body is
+>   byte-for-byte today's. `assignmentInherits` reads absent as `true`, as the
+>   repository does; `canChangeInherit` is the one predicate for "a resource,
+>   and not a global role". `InheritToggle` (in `AssignmentScope.tsx`) is
+>   rendered by all five assign surfaces — the shared `AssignRoleDialog` (user
+>   and group pages) and the role page's user, group and service-account
+>   dialogs — only when that predicate holds for the chosen resource and role,
+>   and a hidden unchecked box falls back to `true` on submit, so switching to
+>   a global role or clearing the resource can never send the 400. The service
+>   account dialog is included although the brief names users and groups: it is
+>   the same rule on the same page, and the server takes the flag on all three
+>   routes.
+> - **Listings.** `AssignmentScopeBadge` gains `inherit`: a *This resource
+>   only* chip, and a resource tooltip that no longer says "and its
+>   descendants" on a row that has none. Shown on the role page's three tabs
+>   and the group page. The user page has no listing (it points to the Roles
+>   page), so there is nothing there to badge.
+> - **Toggling is unassign-then-assign** (`roleService.setAssignmentInherit`,
+>   `components/AssignmentInheritChange.tsx`), never a second assign — that is
+>   a 409 by design. A refused unassign changes nothing and says so. A refused
+>   re-assign assigns the **old** assignment again (same resource, same
+>   `tenant_scope`, old flag) and throws `AssignmentToggleError { restored:
+>   true }`; if that restore fails too, `restored: false` and a message that
+>   begins "The user no longer holds this role at this resource". The dialog
+>   stays open with the outcome, and the listing is re-read after every
+>   attempt, because a half-done change is still a change. Between the two
+>   calls the subject holds nothing, which the confirmation states before the
+>   first click, together with the direction: `false` on a deny re-opens the
+>   subtree.
+> - **One wording collision fixed before commit.** The row action for an
+>   inheritable assignment was first labelled *This resource only* — the badge
+>   text for the opposite state. The I4 test caught it; the action now reads
+>   *Stop here*, the confirmation *Apply here only*.
+> - **Tests.** `services/roles.test.ts` (new, 15): the field on all three
+>   routes, the I4 twins (omitted and `true` send no key), the server's
+>   no-resource refusal passed through, the two predicates, and every branch of
+>   the change — order of the two calls, the scopes and old flag carried into
+>   the restore, restored, not restored, refused unassign.
+>   `AssignRoleDialog.test.tsx` (new, 8), `AssignmentScope.test.tsx` (+6),
+>   `RoleDetailPage.test.tsx` (+12), `GroupDetailPage.test.tsx` (+4). Every
+>   refusal is quoted from `validate_inherit`. `e2e/matrix/assignment-inherit.spec.ts`
+>   (new, 3) is **read-only** against the live fixture — a scoped assignment
+>   made without the field reads as inheritable, the dialog offers the flag
+>   only after a resource is chosen, a global role's rows offer nothing —
+>   because `resource-hierarchy.spec.ts` depends on mx-editor's assignment
+>   cascading, and toggling it there would make that file's answers depend on
+>   run order.
+> - **Records: T-285 amended, no new threat — verified.** Its residual said the
+>   console does not offer the flag; Axiam.json and the STRIDE detail block now
+>   say what it does. Nothing new is decided client-side: both 400s are the
+>   server's (`validate_inherit`), the change is the two calls the S-10 block
+>   already verified invalidate, and the console only chooses not to offer what
+>   would be refused. `gen-threat-model.mjs`: *"threatModel.ts: 9 diagrams, 279
+>   threats (266 mitigated, 13 open)"* — unchanged; generated files reverted.
+
 **The proposal, kept, with two refinements.** The user's DF-021 asks for a
 `non_inheritable` flag on a grant plus a write-time rejection of a
 non-inheritable grant with no resource. Both are right. The refinements:

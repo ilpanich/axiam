@@ -336,6 +336,10 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
         text: `Unless the assignment says otherwise. A resource-scoped assignment made with **\`inherit: false\`** applies at the resource it names and at no descendant — *here and no further*. The flag belongs to the assignment, not to the role's grants, so it stops allows and denies alike, and it changes only which assignments reach a resource, never how deny-override weighs the ones that do. Omitting it, or sending \`true\`, is the cascading assignment every client has always made. It is refused with 400 on an assignment that names no resource, and on a role with \`is_global\`, because there it would be stored and ignored. To change it, unassign and assign again — and note which way that moves access: \`false\` on an allow narrows it, \`false\` on a deny widens it. See [the precedence table](#/docs/deny#table) and the [administrator guide](${GH_BLOB}/docs/admin/README.md#stopping-an-assignment-at-its-resource-inherit-false).`,
       },
       {
+        type: "p",
+        text: "In the admin console every assign dialog offers **Also applies to the resource's descendants** once a resource is chosen for a role that is not global — nowhere else, since the server would refuse it there. A non-inheritable row is badged **This resource only**, and **Stop here** / **Include descendants** beside a resource-scoped row changes the flag after a confirmation that says which way access moves.",
+      },
+      {
         type: "note",
         text: "Tenant-wide is not organization-wide. An unscoped assignment made in an organization's own reserved scope reaches that scope, not the organization's member tenants — see [Organization-level principals](#/docs/organization-scope).",
       },
